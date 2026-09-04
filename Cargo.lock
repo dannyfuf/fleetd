@@ -1611,6 +1611,8 @@ dependencies = [
  "fleet-ui-kit",
  "gpui",
  "gpui_platform",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
