@@ -1,13 +1,24 @@
 //! Unix socket binding and connection acceptance.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use fleet_core::paths::FleetHome;
-use fleet_proto::event::Event;
-use tokio::net::UnixListener;
+use fleet_core::{
+    ids::TerminalId,
+    paths::FleetHome,
+    sessions::{Session, TerminalStatus},
+};
+use fleet_proto::{
+    event::{Event, ToastLevel},
+    job::JobStatus,
+};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -40,27 +51,34 @@ impl Listener {
         tokio::fs::create_dir_all(layout.root())
             .await
             .map_err(|error| DaemonError::fs(layout.root(), error))?;
-        if tokio::fs::try_exists(&socket_path)
+        let socket_exists = tokio::fs::try_exists(&socket_path)
             .await
-            .map_err(|error| DaemonError::fs(&socket_path, error))?
-        {
-            let live = read_pid(&pid_path).await.is_some_and(pid_is_alive);
-            if live {
-                return Err(DaemonError::Conflict(format!(
-                    "daemon already running at {}",
-                    socket_path.display()
-                )));
-            }
+            .map_err(|error| DaemonError::fs(&socket_path, error))?;
+        if read_pid(&pid_path).await.is_some_and(pid_is_alive) {
+            return Err(DaemonError::Conflict(format!(
+                "daemon already running at {}",
+                socket_path.display()
+            )));
+        }
+        if socket_exists && UnixStream::connect(&socket_path).await.is_ok() {
+            return Err(DaemonError::Conflict(format!(
+                "daemon already running at {}",
+                socket_path.display()
+            )));
+        }
+        if socket_exists {
             tokio::fs::remove_file(&socket_path)
                 .await
                 .map_err(|error| DaemonError::fs(&socket_path, error))?;
-            let _ignored = tokio::fs::remove_file(&pid_path).await;
         }
+        let _ignored = tokio::fs::remove_file(&pid_path).await;
         let listener = UnixListener::bind(&socket_path)
             .map_err(|error| DaemonError::fs(&socket_path, error))?;
-        tokio::fs::write(&pid_path, format!("{}\n", std::process::id()))
-            .await
-            .map_err(|error| DaemonError::fs(&pid_path, error))?;
+        if let Err(error) = write_pid(&pid_path).await {
+            let _ignored = tokio::fs::remove_file(&socket_path).await;
+            let _ignored = tokio::fs::remove_file(&pid_path).await;
+            return Err(error);
+        }
         Ok(Self {
             listener,
             socket_path,
@@ -76,42 +94,145 @@ impl Listener {
         let mut job_updates = self.services.jobs.subscribe();
         let job_events = self.events.clone();
         let job_shutdown = self.shutdown.clone();
+        let forwarder_services = Arc::clone(&self.services);
         let forwarder = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     () = job_shutdown.cancelled() => break,
                     update = job_updates.recv() => match update {
-                        Ok(job) => { job_events.publish(Event::JobUpdated(job)); }
+                        Ok(job) => {
+                            let failure = match &job.status {
+                                JobStatus::Failed { error } => Some(error.clone()),
+                                _ => None,
+                            };
+                            let terminal = matches!(
+                                job.status,
+                                JobStatus::Succeeded | JobStatus::Failed { .. } | JobStatus::Cancelled
+                            );
+                            job_events.publish(Event::JobUpdated(job));
+                            if let Some(message) = failure {
+                                job_events.publish(Event::Toast {
+                                    level: ToastLevel::Error,
+                                    message,
+                                });
+                            }
+                            if terminal {
+                                job_events.request_snapshot(Arc::clone(&forwarder_services));
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
         });
-        loop {
+        let session_forwarder = spawn_session_forwarder(
+            Arc::clone(&self.services),
+            self.events.clone(),
+            self.shutdown.clone(),
+        );
+        let mut connections = JoinSet::new();
+        let result = loop {
             tokio::select! {
-                () = self.shutdown.cancelled() => break,
+                () = self.shutdown.cancelled() => break Ok(()),
                 accepted = self.listener.accept() => {
-                    let (stream, _address) = accepted.map_err(|error| DaemonError::fs(&self.socket_path, error))?;
+                    let (stream, _address) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => break Err(DaemonError::fs(&self.socket_path, error)),
+                    };
                     let connection = Connection::new(stream, Arc::clone(&self.services), self.events.clone(), self.shutdown.clone());
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         if let Err(error) = connection.run().await {
                             tracing::warn!(%error, "client connection ended with an error");
                         }
                     });
                 }
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = joined {
+                        tracing::warn!(%error, "client connection task panicked");
+                    }
+                }
             }
-        }
+        };
         self.events.publish(Event::DaemonShuttingDown);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(joined) = connections.join_next().await {
+                if let Err(error) = joined {
+                    tracing::warn!(%error, "client connection task panicked during shutdown");
+                }
+            }
+        })
+        .await;
+        connections.abort_all();
         forwarder.abort();
+        session_forwarder.abort();
+        let _ignored = forwarder.await;
+        let _ignored = session_forwarder.await;
         remove_owned(&self.pid_path, &self.socket_path).await;
-        Ok(())
+        result
     }
 
     /// Returns the bound socket path.
     #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+}
+
+fn spawn_session_forwarder(
+    services: Arc<Services>,
+    events: BroadcastBus,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut previous = services.sessions.snapshot();
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    let current = services.sessions.snapshot();
+                    publish_session_differences(&previous, &current, &events);
+                    if current != previous {
+                        events.request_snapshot(Arc::clone(&services));
+                    }
+                    previous = current;
+                }
+            }
+        }
+    })
+}
+
+fn publish_session_differences(previous: &[Session], current: &[Session], events: &BroadcastBus) {
+    let previous_terminals = previous
+        .iter()
+        .flat_map(|session| &session.terminals)
+        .map(|terminal| (terminal.id, terminal))
+        .collect::<BTreeMap<TerminalId, _>>();
+
+    for session in current {
+        for terminal in &session.terminals {
+            let Some(old) = previous_terminals.get(&terminal.id) else {
+                continue;
+            };
+            if old.title != terminal.title
+                && let Some(title) = &terminal.title
+            {
+                events.publish(Event::TerminalTitle {
+                    terminal: terminal.id,
+                    title: title.clone(),
+                });
+            }
+            if !matches!(old.status, TerminalStatus::Exited { .. })
+                && let TerminalStatus::Exited { code } = &terminal.status
+            {
+                events.publish(Event::TerminalExited {
+                    terminal: terminal.id,
+                    code: *code,
+                });
+            }
+        }
     }
 }
 
@@ -122,6 +243,23 @@ async fn read_pid(path: &Path) -> Option<u32> {
         .trim()
         .parse()
         .ok()
+}
+
+async fn write_pid(path: &Path) -> DaemonResult<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(|error| DaemonError::fs(path, error))?;
+    file.write_all(format!("{}\n", std::process::id()).as_bytes())
+        .await
+        .map_err(|error| DaemonError::fs(path, error))?;
+    file.sync_all()
+        .await
+        .map_err(|error| DaemonError::fs(path, error))
 }
 
 fn pid_is_alive(pid: u32) -> bool {

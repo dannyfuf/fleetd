@@ -1,12 +1,27 @@
-//! Fan-out of daemon events to subscribed clients.
+//! Fan-out of daemon events to subscribed clients, including coalesced snapshots.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use fleet_proto::event::Event;
 use tokio::sync::broadcast;
 
+use crate::services::Services;
+
+const SNAPSHOT_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
+
+struct BroadcastInner {
+    sender: broadcast::Sender<Event>,
+    snapshot_pending: AtomicBool,
+    snapshot_revision: AtomicU64,
+}
+
 /// Cloneable daemon-wide event fan-out bus.
 #[derive(Clone)]
 pub struct BroadcastBus {
-    sender: broadcast::Sender<Event>,
+    inner: Arc<BroadcastInner>,
 }
 
 impl BroadcastBus {
@@ -14,17 +29,54 @@ impl BroadcastBus {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         let (sender, _receiver) = broadcast::channel(capacity);
-        Self { sender }
+        Self {
+            inner: Arc::new(BroadcastInner {
+                sender,
+                snapshot_pending: AtomicBool::new(false),
+                snapshot_revision: AtomicU64::new(0),
+            }),
+        }
     }
 
     /// Publishes an event and returns the number of active receivers.
     pub fn publish(&self, event: Event) -> usize {
-        self.sender.send(event).unwrap_or(0)
+        self.inner.sender.send(event).unwrap_or(0)
     }
 
     /// Creates an independent event receiver.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.sender.subscribe()
+        self.inner.sender.subscribe()
+    }
+
+    /// Requests an authoritative snapshot event, batching bursts into 50 ms windows.
+    pub fn request_snapshot(&self, services: Arc<Services>) {
+        self.inner.snapshot_revision.fetch_add(1, Ordering::AcqRel);
+        if self
+            .inner
+            .snapshot_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let events = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SNAPSHOT_COALESCE_WINDOW).await;
+            let assembled_revision = events.inner.snapshot_revision.load(Ordering::Acquire);
+            match services.snapshot().await {
+                Ok(snapshot) => {
+                    events.publish(Event::SnapshotChanged(snapshot));
+                }
+                Err(error) => tracing::warn!(%error, "failed to assemble snapshot event"),
+            }
+            events
+                .inner
+                .snapshot_pending
+                .store(false, Ordering::Release);
+            if events.inner.snapshot_revision.load(Ordering::Acquire) != assembled_revision {
+                events.request_snapshot(services);
+            }
+        });
     }
 }
 

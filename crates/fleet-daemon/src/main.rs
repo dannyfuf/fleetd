@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Debug, Parser)]
-#[command(name = "fleetd", about = "Fleet background daemon")]
+#[command(name = "fleetd", about = "Fleet background daemon", version)]
 struct Args {
     /// Fleet's configuration and data directory.
     #[arg(long, env = "FLEET_HOME")]
@@ -67,8 +67,17 @@ async fn main() -> anyhow::Result<()> {
     let adapters = Adapters::system(files);
     let services = Arc::new(Services::new(&home, config, state, jobs, adapters));
     let shutdown = CancellationToken::new();
-    let listener =
-        Listener::bind(&home, services, BroadcastBus::default(), shutdown.clone()).await?;
+    let events = BroadcastBus::default();
+    let listener = Listener::bind(
+        &home,
+        Arc::clone(&services),
+        events.clone(),
+        shutdown.clone(),
+    )
+    .await?;
+    let periodic = services
+        .start_periodic_tasks(events, shutdown.clone())
+        .await?;
 
     tracing::info!(home = %home.display(), socket = %listener.socket_path().display(), "fleetd started");
     let signal_shutdown = shutdown.clone();
@@ -78,7 +87,10 @@ async fn main() -> anyhow::Result<()> {
         }
         signal_shutdown.cancel();
     });
-    listener.run().await?;
+    let result = listener.run().await;
+    shutdown.cancel();
+    periodic.join().await;
+    result?;
     tracing::info!("fleetd stopped");
     Ok(())
 }

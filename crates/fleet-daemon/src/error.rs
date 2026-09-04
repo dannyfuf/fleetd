@@ -92,9 +92,28 @@ impl From<DaemonError> for ProtoError {
             | DaemonError::Protocol(_)
             | DaemonError::Join(_) => ErrorKind::Unknown,
         };
+        let message = match error {
+            DaemonError::Unsupported(message) => message,
+            other => other.to_string(),
+        };
         Self {
             kind,
-            message: error.to_string().replace(['\n', '\r'], " "),
+            message: message.replace(['\n', '\r'], " "),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_protocol_errors_preserve_the_requested_message() {
+        let error = ProtoError::from(DaemonError::Unsupported(
+            "remote hosts are not supported yet".to_owned(),
+        ));
+
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert_eq!(error.message, "remote hosts are not supported yet");
     }
 }
