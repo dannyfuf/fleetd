@@ -4,21 +4,40 @@
 //! user gets it exactly when they hesitate. That is 0 px and 0 frames of permanent cost, which
 //! is why the delay is part of the contract and not a preference.
 //!
-//! **Minimal render.** The 400 ms delay is the caller's timer (`cx.spawn` + a
-//! `Timer::after(theme.motion.prefix_hint_delay)`); this component renders when told to.
+//! **The delay is the caller's timer.** A component cannot own a one-shot timer without owning
+//! state, and Prefix mode already lives in the app's mode machine; the caller spawns
+//! `Timer::after(theme.motion.prefix_hint_delay)` and flips `visible`.
 
-use gpui::{App, SharedString, Window, div, prelude::*, px};
+use gpui::{App, SharedString, Window, div, prelude::*};
 
 use crate::{
-    components::KeyHintRow, text::Text, theme::ActiveTheme, tone::Tone,
+    components::KeyHintRow,
+    icons::{Icon, IconSize},
+    text::Text,
+    theme::ActiveTheme,
+    tone::Tone,
 };
+
+/// The six keys §3.6 puts on the strip, in the order the spec lists them.
+///
+/// They are the six that move you somewhere: everything else on the prefix is either rare
+/// (`,` rename, `!` errors) or destructive (`x` close), and a cheat strip that lists a
+/// destructive key next to a navigation key trains the wrong muscle.
+const DEFAULT_HINTS: [(&str, &str); 6] = [
+    ("s", "hub"),
+    ("1-9", "tab"),
+    ("c", "new"),
+    ("x", "close"),
+    ("[", "scroll"),
+    ("w", "last session"),
+];
 
 /// The prefix cheat strip.
 #[derive(IntoElement)]
 pub struct PrefixHint {
     visible: bool,
     prefix: SharedString,
-    hints: KeyHintRow,
+    hints: Option<KeyHintRow>,
 }
 
 impl PrefixHint {
@@ -27,7 +46,7 @@ impl PrefixHint {
         Self {
             visible,
             prefix: SharedString::new_static("^S"),
-            hints: KeyHintRow::new(),
+            hints: None,
         }
     }
 
@@ -37,10 +56,16 @@ impl PrefixHint {
         self
     }
 
-    /// The six most-used prefix keys.
+    /// The six most-used prefix keys. Defaults to §3.6's
+    /// `s hub · 1-9 tab · c new · x close · [ scroll · w last session`.
     pub fn hints(mut self, hints: KeyHintRow) -> Self {
-        self.hints = hints;
+        self.hints = Some(hints);
         self
+    }
+
+    /// Whether the strip draws anything.
+    pub fn is_visible(&self) -> bool {
+        self.visible
     }
 }
 
@@ -50,27 +75,68 @@ impl RenderOnce for PrefixHint {
             return div().into_any_element();
         }
         let theme = cx.theme();
+        let hints = self.hints.unwrap_or_else(|| {
+            DEFAULT_HINTS
+                .iter()
+                .fold(KeyHintRow::new(), |row, (key, label)| row.key(*key, *label))
+        });
         div()
+            // Bottom-left inside the terminal area, 12 px inset: the prompt lives at the
+            // bottom-left too, but the strip only exists while the prefix is pending and the
+            // user is by definition not typing into the shell.
             .absolute()
-            .left(px(12.0))
-            .bottom(px(12.0))
+            .left(theme.space.md)
+            .bottom(theme.space.md)
             .flex()
             .items_center()
             .gap(theme.space.sm)
+            .h(theme.metrics.chip_h)
             .px(theme.space.sm)
-            .py(gpui::px(2.0))
             .rounded(theme.radii.md)
-            .bg(theme.colors.surface)
+            // The floating layer plus a shadow: the strip is drawn over live terminal output
+            // and has to be readable on top of any color the shell just painted.
+            .bg(theme.colors.elevated)
+            .shadow(theme.sheet_shadow())
             .border_1()
-            .border_color(theme.colors.border)
+            .border_color(theme.colors.border_strong)
             .child(
                 div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme.space.xxs)
                     .px(theme.space.xs)
                     .rounded(theme.radii.sm)
+                    // Amber, like the mode word: Prefix is the one mode that expires on its
+                    // own, and the pill has to read as "this is temporary".
                     .bg(Tone::Warning.fill(theme))
+                    .child(
+                        Icon::Command
+                            .el()
+                            .size(IconSize::Small)
+                            .color(theme.colors.warning),
+                    )
                     .child(Text::hint(self.prefix).tone(Tone::Warning)),
             )
-            .child(self.hints)
+            .child(hints)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_strip_costs_nothing_until_the_timer_fires() {
+        assert!(!PrefixHint::new(false).is_visible());
+        assert!(PrefixHint::new(true).is_visible());
+    }
+
+    #[test]
+    fn the_default_strip_is_the_six_keys_the_spec_lists() {
+        assert_eq!(DEFAULT_HINTS.len(), 6);
+        assert_eq!(DEFAULT_HINTS[0], ("s", "hub"));
+        assert_eq!(DEFAULT_HINTS[5], ("w", "last session"));
     }
 }

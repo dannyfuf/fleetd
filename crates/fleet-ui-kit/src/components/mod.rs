@@ -102,7 +102,7 @@ pub use list_view::{
     SCROLLOFF, SKELETON_ROWS, list_key_bindings,
 };
 pub use list_view::{ListCursor, ListView};
-pub use log_view::{LOG_TAIL_LINES, LogView};
+pub use log_view::{LOG_TAIL_LINES, LogCommand, LogView};
 pub use mode_word::{Mode, ModeWord};
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};
@@ -128,8 +128,8 @@ pub use status_dot::{DOT_SIZE, DOT_SIZE_SMALL};
 pub use status_glyph::{StatusGlyph, StatusKind};
 pub use sticky_error_slot::StickyErrorSlot;
 pub use terminal_grid::{
-    CellWidth, CursorShape, GridCell, GridCursor, GridRow, GridSelection, TerminalGrid,
-    UnderlineStyle,
+    CellMetrics, CellWidth, CursorShape, GridCell, GridCursor, GridRow, GridSelection,
+    TerminalGrid, UnderlineStyle,
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalTab, TerminalTabStrip};
