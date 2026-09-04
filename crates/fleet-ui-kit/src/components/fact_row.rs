@@ -4,7 +4,7 @@
 //! verbatim warning that explains it rides underneath as a `Warning` variant. That rule is the
 //! whole reason this component exists instead of two divs.
 
-use gpui::{App, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Pixels, SharedString, Window, div, prelude::*};
 
 use crate::{
     icons::{Icon, IconSize},
@@ -14,12 +14,6 @@ use crate::{
 };
 
 /// The label column of the 340 px detail panel (§3.4), in pixels.
-pub const LABEL_WIDTH: f32 = 96.0;
-
-/// The opacity a value keeps while a re-inspection is in flight (§3.4: old values dim but stay
-/// readable — **never** blanked).
-pub const REFRESHING_OPACITY: f32 = 0.6;
-
 /// The three things a fact's value can be.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FactValue {
@@ -56,7 +50,7 @@ impl FactValue {
 pub struct FactRow {
     label: Option<SharedString>,
     value: FactValue,
-    label_width: Pixels,
+    label_width: Option<Pixels>,
     mono: bool,
     refreshing: bool,
 }
@@ -67,7 +61,7 @@ impl FactRow {
         Self {
             label: Some(label.into()),
             value,
-            label_width: px(LABEL_WIDTH),
+            label_width: None,
             mono: false,
             refreshing: false,
         }
@@ -78,7 +72,7 @@ impl FactRow {
         Self {
             label: None,
             value: FactValue::warning(message),
-            label_width: px(LABEL_WIDTH),
+            label_width: None,
             mono: false,
             refreshing: false,
         }
@@ -86,7 +80,7 @@ impl FactRow {
 
     /// Width of the label column. 96 px in the 340 px detail panel.
     pub fn label_width(mut self, width: Pixels) -> Self {
-        self.label_width = width;
+        self.label_width = Some(width);
         self
     }
 
@@ -109,6 +103,7 @@ impl FactRow {
 impl RenderOnce for FactRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
+        let label_width = self.label_width.unwrap_or(theme.metrics.fact_label_w);
         let value: gpui::AnyElement = match self.value {
             FactValue::Known(value) => {
                 if self.mono {
@@ -139,13 +134,15 @@ impl RenderOnce for FactRow {
             .gap(theme.space.sm)
             .children(
                 self.label
-                    .map(|label| Text::ui(label).muted().w(self.label_width)),
+                    .map(|label| Text::ui(label).muted().w(label_width)),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .when(self.refreshing, |el| el.opacity(REFRESHING_OPACITY))
+                    .when(self.refreshing, |el| {
+                        el.opacity(theme.metrics.refreshing_opacity)
+                    })
                     .child(value),
             )
     }

@@ -1,6 +1,6 @@
 //! Safe stale-worktree pruning workflow.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fleet_core::{
@@ -112,6 +112,7 @@ impl Prune {
         let service = self.clone();
         let target = format!("prune-{}", uuid::Uuid::new_v4());
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         self.jobs.submit(
             JobKind::Prune,
             target,
@@ -126,7 +127,13 @@ impl Prune {
                     .as_ref()
                     .map(|_| ())
                     .map_err(|error| DaemonError::Git(error.to_string()));
-                let _ignored = sender.send(result);
+                if let Some(sender) = sender
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ignored = sender.send(result);
+                }
                 outcome
             },
         );

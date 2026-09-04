@@ -199,6 +199,11 @@ nothing decays on a timer the user did not set.
 `banner_h 28` · `strip_h 22` · `chip_h 22` · `rail_w 240` · `detail_w 340` · `sheet_w 440` ·
 `sheet_expanded_w 640` · `toast_w 320` · `palette_w 640` · `palette_top 120` ·
 `mode_word_w 84` · `scroll_thumb_w 3` · `focus_ring_w 2` · `cell_w 7.5` · `cell_h 18`.
+The smaller component metrics live here too: `hairline 1` · `dot_size 8` ·
+`dot_size_small 6` · `fact_label_w 96` · `doctor_check_w 120` · `doctor_status_w 64` ·
+`text_field_h 36` · `field_status_h 18` · `palette_input_h 44` · `number_field_w 96`.
+The same token set owns the opacity ladder: `veil 0.55` · `dimmed 0.40` ·
+`refreshing 0.60` · `stale 0.55` · `skeleton 0.30` · `no_session 0.30`.
 
 ---
 
@@ -277,12 +282,12 @@ if let Some(bytes) = fleet_ui_kit::kit_asset(path) { return Ok(Some(Cow::Borrowe
 An absent asset must return `Ok(None)`, never `Err`: `svg()` logs nothing, so an erroring source
 turns an invisible icon into an invisible crash.
 
-### 5.1 The closed icon set (62 glyphs)
+### 5.1 The closed icon set (68 glyphs)
 
 | Purpose | Icons |
 | --- | --- |
 | Session state | `circle-dot` `circle` `moon` `dot` `circle-question-mark` |
-| Jobs | `loader-circle` `clock` `circle-stop` `circle-slash` `circle-check` `circle-x` |
+| Jobs | `loader-circle` `clock` `circle-stop` `circle-slash` `circle-check` `circle-x` `activity` `copy-plus` `refresh-cw` `search-check` `import` `trash-2` |
 | Warnings | `triangle-alert` `message-square-warning` `info` |
 | Git / PR | `git-branch` `git-branch-plus` `git-merge` `git-fork` `git-pull-request` `git-pull-request-draft` `git-commit-horizontal` `file-diff` `file-pen` `folder-git-2` `eye` |
 | Remote | `cloud` `cloud-off` `cloud-upload` `cloud-download` `globe` `lock` `unplug` `server` |
@@ -292,8 +297,8 @@ turns an invisible icon into an invisible crash.
 | Chrome | `flag` `circle-arrow-up` `circle-arrow-down` `search` `clipboard-check` `delete` `ellipsis` `check` `minus` `chevron-left` `chevron-right` `sailboat` |
 
 Two Lucide renames the UX spec predates: `circle-help` is now **`circle-question-mark`**, and
-`arrow-up-circle` is now **`circle-arrow-up`**. `trash-2` is now **`trash`**. The kit uses the
-current names; the spec's wording is unchanged.
+`arrow-up-circle` is now **`circle-arrow-up`**. The kit keeps both `trash` and `trash-2`, since
+the former labels destructive dialogs while the latter distinguishes permanent job cleanup.
 
 ### 5.2 Status glyph vocabulary (`StatusKind`)
 
@@ -352,7 +357,7 @@ nothing. Use `Spinner` rather than `.spinning(true)` when the glyph *is* the spi
 **Purpose.** A run of text in one of the seven type roles.
 **API.** `Text::{ui, ui_strong, title, data, data_small, label, hint}(impl Into<SharedString>)`,
 then `.tone(Tone) .muted() .faint() .color(Hsla) .opacity(f32) .weight(FontWeight)
-.truncate_at(usize, Truncate) .ellipsize() .w(Pixels) .w_ch(f32)`. `Text::resolved_text()`
+.truncate_at(usize, Truncate) .ellipsize() .w(Pixels) .w_ch(f32) .flex_none()`. `Text::resolved_text()`
 returns the string after the `ch` budget, for tests.
 **Usage rule.** `truncate_at` when the spec names a `ch` budget; `ellipsize` when the column is
 flex. `label` uppercases for you — do not pre-uppercase the string.
@@ -379,11 +384,20 @@ resolved from the terminal palette.
 #### `AppFrame`
 **Purpose.** Context bar (36) + optional banner (28) + flexible body + status bar (26), plus the
 overlay layer.
-**API.** `AppFrame::new().context_bar(..).banner(..).body(..).status_bar(..).overlay(..)`.
+**API.** `AppFrame::new().context_bar(..).banner(..).body(..).body_overlay(..).status_bar(..)
+.overlay(..)`.
 **Variants.** Hub (body = panes) · Workspace (body = terminal) · first run (body = one card).
-**Usage rule.** Overlays are children of the frame, never of the body, so opening one never
-reflows what the user was looking at. The Workspace keeps both bars at the same pixel positions
-as the Hub — same chrome, same saccade.
+**Usage rule.** `overlay` is the window-wide layer for dialogs and the palette; `body_overlay`
+is the band between the bars for `Sheet` and `ToastStack`. Putting a sheet or toast in `overlay`
+covers the status bar. Floating children never reflow what the user was looking at. The
+Workspace keeps both bars at the same pixel positions as the Hub — same chrome, same saccade.
+
+#### `OverlayLayer`
+**Purpose.** The shared deferred-paint ordering for floating surfaces.
+**API.** `OverlayLayer::{Sheet, Anchored, Dialog, Toast}.priority()` resolves to
+`Sheet(100) → Anchored(200) → Dialog(300) → Toast(400)`.
+**Usage rule.** Never pass a literal deferred priority. This order encodes the Jobs sheet,
+anchored palette, blocking dialogs, and transient acknowledgements.
 
 #### `SplitLayout`
 **Purpose.** A fixed region, a hairline, and a flexible region.
@@ -405,11 +419,12 @@ detail panel" a property of the layout instead of a convention.
 the screen does).
 **Usage rule.** Pass every chip, including zero-valued ones — `Chip` suppresses itself. The
 84 px inset clears the macOS traffic lights; use 12 px on a platform without them.
+The default is exported as `TRAFFIC_LIGHT_INSET`.
 
 #### `StatusBar`
 **Purpose.** Breadcrumb · mode word · job ticker · sticky error slot.
-**API.** `StatusBar::new().breadcrumb(..).mode(Mode).mode_element(..).ticker(..).error(..)
-.trailing(..)`.
+**API.** `StatusBar::new().breadcrumb(..).breadcrumb_ch(usize).mode(Mode).mode_element(..)
+.ticker(..).error(..).trailing(..)`.
 **Variants.** With ticker · with error (the error **replaces** the ticker) · Workspace (breadcrumb
 is the session name).
 **Usage rule.** `mode` is not optional in practice: §2.8 requires the word on every screen.
@@ -433,7 +448,8 @@ the header, or the row shifts by a pixel and the illusion of "the list did not m
 
 #### `Sheet`
 **Purpose.** A right-docked, non-blocking panel (the Jobs panel).
-**API.** `Sheet::new(open: bool).expanded(bool).width(Pixels).header(..).body(..).footer(..)`.
+**API.** `Sheet::new(open: bool).expanded(bool).width(Pixels).header(..).body(..).footer(..)`;
+`.is_open()`, `.resolved_width()`.
 **Variants.** 440 px · 640 px expanded for an inline log.
 **Usage rule.** Use a `Sheet`, not a `Dialog`, whenever the content is *about* the rows behind
 it. A centered modal would hide exactly what the jobs refer to.
@@ -443,7 +459,7 @@ it. A centered modal would hide exactly what the jobs refer to.
 **Anatomy.** header = icon + title + subtitle, no close button; footer = key hints on the left,
 the primary action **label** on the right.
 **API.** `Dialog::new(title).icon(Icon).subtitle(..).width(Pixels).height(Pixels).tone(Tone)
-.body(..).hints(..).primary("⏎ Create").error(..)`.
+.body(..).hints(..).primary("⏎ Create").error(..)`; `Dialog::DEFAULT_WIDTH`.
 **Widths.** 460 context/assign · 480 compact confirm · 520 quit · 560 create/clone/expanded
 confirm · 720 settings/prune · 880 help.
 **States.** default · error (red footer line, dialog stays open).
@@ -460,14 +476,16 @@ anything destructive so the `y`/`Y` escalation is computed, not typed.
 
 #### `Toast` / `ToastStack`
 **Purpose.** Bottom-right transient acknowledgements, max 3.
-**API.** `Toast::new(text).icon(Icon).tone(Tone).short()`;
+**API.** `Toast::new(text).icon(Icon).tone(Tone).short().raised_at(ms)`;
 `ToastStack::new(toasts).max(usize).bottom_inset(Pixels)`;
-`ToastStack::push(&mut Vec<Toast>, Toast, max)` applies the coalescing law.
+`ToastStack::{MAX, is_visible, resolved_text}`, `COALESCE_WINDOW_MS`, and
+`ToastStack::{push, push_at}` apply the coalescing law.
 **Variants.** 1.6 s short · 3.2 s normal · coalesced (`×n`).
 **Usage rule — the toast law.** *A toast is allowed only when there is no row and no pill that
 already shows the outcome.* Never toast: job started, job succeeded with its row on screen,
 worktree created, PR refreshed, context switched, session opened, settings saved, update
-available, **and any error** — errors are sticky.
+available, **and any error** — errors are sticky. `Toast::tone` refuses `Tone::Danger` to enforce
+that rule.
 
 ### 6.3 Data display
 
@@ -477,12 +495,16 @@ available, **and any error** — errors are sticky.
 ```rust
 ListView::new(id, item_count, |ix, is_cursor, window, cx| -> AnyElement { .. })
     .cursor(usize).row_height(Pixels).track_scroll(&UniformListScrollHandle).empty(..)
+    .loading(bool).skeleton_rows(usize)
 ListView::reveal(&handle, &cursor, moving_down);           // call from the action, not render
 
 ListCursor::new(len).scrolloff(2).page(10)
     .down() .up() .first() .last() .page_down() .page_up() .set(ix) .set_len(len)
+    .motion(ListMotion) .set_page_from_visible(usize)
     .retain(new_len, |previous| Option<usize>)             // keep the cursor on its item
     .scroll_target(moving_down) -> usize
+ListCursor::{scrolloff_rows, page_rows}; list_key_bindings(Option<&str>)
+ListMotion::{Down, Up, First, Last, PageDown, PageUp}
 ```
 **States.** default · empty (`EmptyState`) · loading (`SkeletonRows` in the body instead).
 **Keyboard.** `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u` — the view binds them and calls `ListCursor`.
@@ -496,7 +518,8 @@ per item, which is far too much overhead per terminal row.
 **Purpose.** One list row: leading glyph slot, flex content, trailing columns.
 **API.** `Row::{new, with_id}().leading(..).column(RowColumn).columns(..).second_line(..)
 .height(Pixels).selected(bool).cursor(bool).dimmed(bool).disabled(bool).hoverable(bool)`;
-`RowColumn::{fixed(Pixels, ..), flex(..), auto(..)}.align(ColumnAlign)`.
+`RowColumn::{fixed(Pixels, ..), fixed_ch(f32, ..), flex(..), auto(..), resolved(..)}
+.align(ColumnAlign).min_width(Pixels).min_width_ch(f32)`.
 **Variants.** 30 px one-line · 44 px two-line (`second_line`) · 34 px palette row.
 **States.** the table in §3.
 **Usage rule.** A row that changes state changes its **glyph** in place; it does not change its
@@ -506,9 +529,11 @@ that is the blank cell of §2.5.
 #### `ColumnLadder`
 **Purpose.** Resolve a `ch`-based responsive column set for the current pane width.
 **API.** `ColumnLadder::{new, worktrees, pull_requests}()`, `.column(ColumnSpec)`,
-`.resolve(pane_ch) -> Vec<ResolvedColumn>`, `.shows(key, pane_ch) -> bool`;
+`.resolve(pane_ch) -> Vec<ResolvedColumn>`, `.shows(key, pane_ch) -> bool`,
+`.width_ch(key, pane_ch)`, `.specs()`, `ColumnLadder::pane_ch(width, cx)`,
+`ColumnLadder::{worktrees_in_scope, pull_requests_for}`;
 `ColumnSpec::{fixed(key, ch), flex(key, min_ch), ladder(key, &[(pane_ch, ch)])}
-.align(..).shown_from(pane_ch)`.
+.align(..).shown_from(pane_ch).forced(bool)`.
 **Usage rule.** Measure the **pane**, not the window. `ColumnLadder::worktrees()` and
 `::pull_requests()` are the §2.9 ladders verbatim, including the two-step author breakpoint
 (12 ch at 70 ch, 16 ch at 130 ch).
@@ -516,7 +541,7 @@ that is the blank cell of §2.5.
 #### `StatusGlyph`
 **Purpose.** The §2.5 vocabulary, in one place. See §5.2 for the table.
 **API.** `StatusGlyph::new(StatusKind).size(IconSize).id(ElementId)`;
-`StatusKind::{icon, tone, opacity, spins, detail_word}`.
+`StatusKind::{icon, tone, opacity, spins, frozen, detail_word, detail_sentence}`.
 **Usage rule.** Never assemble a session glyph from an `Icon` and a color: a second call site is
 how `unknown` starts rendering like `none`, which is the exact live defect §1.3 exists to close.
 Spinning kinds need `.id(..)`.
@@ -545,8 +570,9 @@ word that must survive on a selected row.
 #### `KeepAliveChips`
 **Purpose.** `⚡ claude, :3000` — why `sleep` will refuse to close windows, and what `K` kills.
 **API.** `KeepAliveChips::new([KeepAliveLabel::with_icon("claude", Icon::Bot), ..])
-.max_visible(3).width_ch(f32).show_bolt(bool)`; `KeepAliveChips::from_pane_ch(pane_ch) -> f32`
-resolves the 18 / 14 / 10 / 0 ch ladder; `.resolved_text()` for tests.
+.max_visible(3).width_ch(f32).show_bolt(bool).show_kind_icons(bool)`;
+`KeepAliveChips::from_pane_ch(pane_ch) -> f32` resolves the 18 / 14 / 10 / 0 ch ladder;
+`.is_visible()`, `.resolved_text()` for tests.
 **Usage rule.** `DegradedChip` **outranks** this in the same row slot.
 
 #### `DegradedChip`
@@ -566,14 +592,15 @@ is the §2.6 rendering for a mark derived from a fact older than 10 minutes.
 
 #### `AgeLabel`
 **Purpose.** A relative time in exactly one unit.
-**API.** `AgeLabel::{from_secs(i64), none(), text(..)}().tone(Tone)`; `format_age(i64) -> String`.
+**API.** `AgeLabel::{from_secs(i64), none(), text(..)}().tone(Tone).mono(bool)`;
+`format_age(i64) -> String`.
 **Usage rule.** `AgeLabel::none()` renders `–`; a nullable *fact* uses `FactValue::Null` (`—`).
 Never two units, never an absolute timestamp in a row.
 
 #### `FreshnessStamp`
 **Purpose.** `checked 14s ago · I re-check`, with the §2.6 contrast ladder.
-**API.** `FreshnessStamp::new(verb, age_secs).action(key, label).error(message)`;
-`Freshness::{from_secs, tone, derived_opacity}`.
+**API.** `FreshnessStamp::new(verb, age_secs).action(key, label).error(message).refreshing(bool)`;
+`Freshness::{from_secs, tone, derived_opacity, draws_derived_mark}`.
 **Variants.** ≤ 60 s normal · ≤ 10 min secondary · > 10 min amber (derived marks drop to 55 %) ·
 errored red with the message verbatim.
 **Usage rule.** Mandatory on every facts confirm and on the detail panel's SAFETY header. A fact
@@ -581,10 +608,11 @@ without an age is not a fact.
 
 #### `FactRow` / `FactValue` / `KeyValueList`
 **Purpose.** `label  value` with the null rule, and the block that holds them.
-**API.** `FactRow::{new(label, FactValue), warning(message)}().label_width(Pixels).mono(bool)`;
+**API.** `FactRow::{new(label, FactValue), warning(message)}().label_width(Pixels).mono(bool)
+.refreshing(bool)`;
 `FactValue::{known, warning, from_option, Null}`;
 `KeyValueList::{new, titled(title)}().trailing(..).row(label, value).mono_row(label, value)
-.label_width(Pixels)`.
+.label_width(Pixels).refreshing(bool)`.
 **Usage rule.** Use `FactValue::from_option` for every nullable inspection fact. Warnings are
 rendered **verbatim** — swarm's soft-warning strings are greppable diagnostics and must never be
 paraphrased.
@@ -593,7 +621,8 @@ paraphrased.
 **Purpose.** Risks first, safe facts after, and the decision of which confirm to show.
 **API.** `Fact::{safe, risk, unknown}(text)`;
 `FactList::{new, from_facts}().fact(Fact).loading(bool)`,
-`.ordered()`, `.is_compact()`, `.confirm_key() -> ConfirmKey`.
+`.ordered()`, `.is_compact()`, `.risk_count()`, `.unknown_count()`,
+`.confirm_key() -> ConfirmKey`.
 **Usage rule.** Never hand-write the `y` vs `Y` decision: `confirm_key()` returns `Upper` when
 any decisive fact is unknown or the facts are still loading, and `ConfirmKey::accepts_enter()`
 says whether `Enter` also confirms.
@@ -617,13 +646,13 @@ renders from `state.json` immediately; a skeleton where cached truth exists is a
 #### `KeyHint` / `KeyHintRow`
 **Purpose.** The most repeated component in the app.
 **API.** `KeyHint::{new(keys), labeled(keys, label)}().label(..).tone(Tone).key_tone(Tone)`;
-`KeyHintRow::new().hint(KeyHint).key(keys, label)`.
+`KeyHintRow::new().hint(KeyHint).key(keys, label).merge(other)`.
 **Usage rule.** See §4 — prefix every Workspace hint.
 
 #### `DoctorTable`
 **Purpose.** `CHECK STATUS DETAIL`, red on fail.
 **API.** `DoctorTable::new([DoctorRow::new(check, DoctorStatus::{Ok, Warn, Fail}, detail)])
-.check_width(Pixels).status_width(Pixels)`.
+.check_width(Pixels).status_width(Pixels)`; `DoctorStatus::icon()`.
 **Usage rule.** `ok` renders in the **secondary** tone, not green: zero-suppression at the color
 level. Good news does not get a hue.
 
@@ -650,7 +679,9 @@ theirs.
 below that holds **either** the derived preview **or** the validation message — never both, and
 the slot is always present.
 **API.** `TextField::new(value).label(..).placeholder(..).caret(usize).focused(bool).icon(Icon)
-.preview(..).invalid(message).mono(bool)`; `.is_invalid()`.
+.preview(..).invalid(message).mono(bool).height(Pixels).hide_status_line(bool)`; `.is_invalid()`.
+`TextFieldState` is the editing model. `TextInput` is its live, IME-safe entity and emits
+`TextInputEvent` under `TEXT_FIELD_KEY_CONTEXT`.
 **States.** default · focused (accent border + caret) · placeholder (muted) · invalid (red
 border, red message) · disabled (not modelled: Fleet has no disabled inputs — a field that
 cannot be edited is rendered as a read-only `FactRow` with no box).
@@ -658,12 +689,17 @@ cannot be edited is rendered as a read-only `FactRow` with no box).
 `ctrl-e` · `←`/`→`.
 **Usage rule.** The validation line replaces the preview so a failing branch name causes **zero
 layout shift**. Fail before a job starts, with the exact failing rule.
+An entity that installs the platform input handler must call `handle_edit_keystroke`, not
+`handle_keystroke`, or every printable character is inserted twice. Dialog-level bare-letter
+bindings must also be shadowed with `gpui::NoAction` in `TEXT_FIELD_KEY_CONTEXT`, or the outer
+action must be removed while the field owns the keyboard.
 
 #### `FuzzyList` / `FuzzyItem`
 **Purpose.** A capped list of already-ranked results.
-**API.** `FuzzyItem::new(primary).secondary(..).trailing(..).leading(..).disabled(bool)`;
-`FuzzyList::new(items).cursor(usize).cap(usize).under_text_field(bool).empty(..)`;
-`.binds_jk() -> bool`.
+**API.** `FuzzyItem::new(primary).secondary(..).trailing(..).leading(..).disabled(bool).key(..)
+.matches(..).destructive(bool)`;
+`FuzzyList::new(items).cursor(usize).cap(usize).under_text_field(bool).empty(..).row_height(Pixels)`;
+`.binds_jk()`, `.shown()`, `FuzzyList::{next_cursor, prev_cursor}`.
 **Variants.** one-line (no `secondary`) · two-line. An item with an empty description collapses
 to one line — zero-suppression.
 **Caps.** 8 (Clone results) · 6 (Create base list) · 10 (palette).
@@ -674,7 +710,8 @@ than completeness, and the footer says `9 of 63`.
 
 #### `FilterBar`
 **Purpose.** Narrow a list without moving it.
-**API.** `FilterBar::new(query, shown, total).focused(bool)`; `.is_empty_result()`.
+**API.** `FilterBar::new(query, shown, total).focused(bool).caret(usize).placeholder(..)`;
+`.is_empty_result()`, `.count_tone()`.
 **States.** typing (caret, `esc` hint) · exited but retained (rendered by
 `PaneHeader::filter_chip`) · no match (`shown/total` turns amber).
 **Keyboard.** printable · `Backspace` · `ctrl-w` · `ctrl-u` · `ctrl-n`/`↓` and `ctrl-p`/`↑` move
@@ -686,7 +723,8 @@ retained chip afterwards.
 
 #### `Cycler`
 **Purpose.** `◂ value ▸` for a two-to-five option set.
-**API.** `Cycler::{new(value), labeled(label, value)}().has_prev(bool).has_next(bool).focused(bool)`.
+**API.** `Cycler::{new(value), labeled(label, value)}().has_prev(bool).has_next(bool).focused(bool)
+.disabled(bool).label_width(Pixels).off_grid(bool)`; `.is_visible()`.
 **Keyboard.** `←`/`→`.
 **Usage rule.** A cycler, not a dropdown, when the set is short: a dropdown costs a second key.
 Zero-suppress the whole control when the set has one member (the host cycler is hidden when no
@@ -694,7 +732,8 @@ hosts are configured).
 
 #### `Toggle`
 **Purpose.** `[x]` / `[ ]`.
-**API.** `Toggle::{new(checked), labeled(label, checked)}().detail(..).focused(bool).disabled(bool)`.
+**API.** `Toggle::{new(checked), labeled(label, checked)}().detail(..).focused(bool).disabled(bool)
+.label_width(Pixels)`; `.box_text()`, `.box_tone()`.
 **Keyboard.** `Space`.
 **Usage rule.** Brackets, not a switch: the whole Settings dialog is a keyboard list, and a
 switch implies a pointer.
@@ -702,7 +741,8 @@ switch implies a pointer.
 #### `NumberField`
 **Purpose.** An integer with a unit suffix and a clamp.
 **API.** `NumberField::{new(value), labeled(label, value)}().unit(..).range(min, max).min(i64)
-.focused(bool).invalid(message)`; `.clamp(i64)`, `.is_valid()`.
+.focused(bool).invalid(message).label_width(Pixels)`; `.clamp(i64)`, `.is_valid()`,
+`.range_message()`, `.message()`.
 **States.** default · focused · invalid (out of range, red border).
 **Usage rule.** The clamp is part of the contract: §3.8.6 states minimums, and an out-of-range
 value must be refused at the field, not at save time.
@@ -710,7 +750,8 @@ value must be refused at the field, not at save time.
 #### `SegmentedTabs` (alias `TabBar`)
 **Purpose.** Underlined tabs with counts.
 **API.** `SegmentedTabs::new([SegmentedTab::new("mine", 7), SegmentedTab::bare("help")
-.loading(bool)]).active(usize)`.
+.loading(bool)]).active(usize)`; `SegmentedTab::count_text()`, `SegmentedTabs::{len, is_empty,
+next_index, prev_index}`.
 **Keyboard.** `Tab`/`S-Tab`/`h`/`l`.
 **Usage rule.** A tab is **not** a chip: `Some(0)` renders `0`, because an empty tab must still
 say it is empty. `loading(true)` shows `…` while a refresh is in flight and keeps the cached
@@ -718,7 +759,8 @@ rows at full opacity.
 
 #### `Select`
 **Purpose.** A closed-list chooser that opens a `FuzzyList`.
-**API.** `Select::new(value).label(..).placeholder(..).open(bool).focused(bool).options(..)`.
+**API.** `Select::new(value).label(..).placeholder(..).open(bool).focused(bool).options(..)
+.disabled(bool).invalid(..).hint(..)`; `.is_invalid()`.
 **Usage rule.** `Cycler` for 2–5 options, `Select` for a closed list, `FuzzyList` under a
 `TextField` for a searchable set.
 
@@ -728,7 +770,8 @@ rows at full opacity.
 consequence) · expanded 560 px (`⚠` title tone, target on its own line, one line per fact,
 stamp, consequence).
 **API.** `ConfirmDialog::new(title, FactList).target(..).consequence(..).stamp(FreshnessStamp)
-.icon(Icon).hints(KeyHintRow).action_label(..).width(Pixels)`; `.is_compact()`, `.confirm_key()`.
+.icon(Icon).hints(KeyHintRow).action_label(..).width(Pixels).body(..).error(..)
+.force_confirm_key(ConfirmKey)`; `.is_compact()`, `.confirm_key()`, `.resolved_width()`.
 **Keyboard.** `y`/`Y`/`Enter` confirm · `n`/`Esc`/`q` cancel · `I` re-check (delete) · `s` toggle
 the KEEP list (prune). Nothing else is bound, so muscle memory cannot misfire.
 **Usage rule.** No "don't ask again" checkbox, no second confirmation step, no countdown, no
@@ -741,8 +784,9 @@ and name the irreversibility.
 **Anatomy.** 640 px card at y = 120 · 44 px input · sections `GO` → `DO` → `CONTEXT` · ≤ 10 rows
 of 34 px · footer `9 of 63 · ⏎ run · esc cancel`.
 **API.** `Palette::new(query).section(PaletteSection::new(PaletteSectionKind::Go, rows))
-.cursor(usize).cap(usize).total(usize).empty(..)`; `.shown()`;
-`PaletteRow::new(label).icon(Icon).leading(..).detail(..).key(..).destructive(bool)`.
+.cursor(usize).caret(usize).cap(usize).total(usize).empty(..)`; `.shown()`, `.flat_len()`;
+`PaletteSection::{len, is_empty}`;
+`PaletteRow::new(label).icon(Icon).leading(..).detail(..).key(..).destructive(bool).matches(..)`.
 **Usage rule.** `GO` (objects) always first — that is what makes a session reachable from inside
 another session. Every `DO` row shows its bound key, right-aligned, so the palette trains itself
 out of the loop. A command that is invalid here is **not listed**, never greyed. Destructive
@@ -768,27 +812,34 @@ anywhere in the app. Failed jobs are **never** auto-dismissed.
 
 #### `JobTicker`
 **Purpose.** The newest running job as one status-bar line.
-**API.** `JobTicker::new(kind, target).percent(u8).extra(usize)`.
+**API.** `JobTicker::new(kind, target).id(ElementId).percent(u8).elapsed(..).extra(usize)`.
 **Usage rule.** `extra` is zero-suppressed. The ticker is hidden while a `StickyErrorSlot` is
 present.
 
 #### `StickyErrorSlot`
 **Purpose.** Red, addressable with `!`, persists until dismissed.
-**API.** `StickyErrorSlot::new(text).key(..)`.
+**API.** `StickyErrorSlot::new(text).id(ElementId).key(..).count(usize).on_activate(Fn(..))`.
 **Usage rule.** Errors go here, **never** into a toast. It owns the last failed job and holds
 the red jobs chip until the Jobs panel has been opened.
 
 #### `LogView`
 **Purpose.** The tail of `logs/jobs/<id>.log`.
-**API.** `LogView::new(id, lines).following(bool).track_scroll(&handle)`; `LOG_TAIL_LINES = 200`.
+**API.** `LogView::new(id, lines).following(bool).track_scroll(&handle).top(usize)
+.focus(&FocusHandle).on_command(Fn(LogCommand, ..)).empty(..).show_badge(bool)`;
+`.line_count()`, `LOG_TAIL_LINES = 200`, and
+`LogCommand::{ToggleFollow, Follow, ScrollTo(usize)}`.
 **Keyboard.** `f` toggles follow · `j`/`k` scroll · `G` re-enables follow · `Esc` collapses the
 sheet back to 440 px.
 **Usage rule.** Tail the file and batch at 16 ms in the caller; hand the component the lines.
 
 #### `TerminalGrid`
 **Purpose.** Paint the mirror cell grid.
-**API.** `TerminalGrid::new(rows).cursor(GridCursor).selection(GridSelection).focused(bool)
-.padding(Pixels).scrollback(offset, len)`; `.row_count()`.
+**API.** `TerminalGrid::new(rows).id(ElementId).cursor(GridCursor).selection(GridSelection)
+.focused(bool).padding(Pixels).scrollback(offset, len).scroll_pill(ScrollPill)
+.modes([TerminalMode]).frame_size(cols, rows).dimmed(bool)
+.on_resize(Fn(cols, rows, &mut Window, &mut App))`; `.row_count()`, `.column_count()`.
+`CellMetrics { width, height }` with `CellMetrics::measure(&Theme, &Window, &App)` and
+`.fit(Size<Pixels>) -> (cols, rows)`.
 `GridRow::new(cells)` with `.columns()`; `GridCell::new(text, &theme)` and the builders
 `.fg .bg .bold .dim .italic .underline(UnderlineStyle) .underline_color(Hsla) .strikethrough
 .inverse .blink .invisible .width(CellWidth)`, plus `.resolve(&theme) -> (fg, Option<bg>)` and
@@ -837,7 +888,8 @@ printing" bug reports are born. Zero-suppressed at `offset == 0` and in alt-scre
 #### `TerminalTabStrip`
 **Purpose.** Numbered tabs, 84–200 px, with activity, keep-alive and exit marks.
 **API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").activity(bool).starting(bool)
-.keep_alive(Icon).exited(impl Into<Option<i32>>)]).active(usize).show_plus(bool)`.
+.keep_alive(Icon).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
+.on_select(Fn(position, ..)).on_new(Fn(..))`.
 **States.** active (accent underline + `ui_strong`) · inactive · activity (6 px amber dot) ·
 starting (per-tab `loader-circle`) · exited (faint label + `circle-x` + code, or `—` when the
 process was killed by a signal and has no code).
@@ -858,7 +910,8 @@ because during scroll the eyes are on content and the top right never covers the
 
 #### `PrefixHint`
 **Purpose.** The `^S` pill and its six keys.
-**API.** `PrefixHint::new(visible).prefix(..).hints(KeyHintRow)`.
+**API.** `PrefixHint::new(visible).prefix(..).hints(KeyHintRow)`; `.is_visible()`. The hints
+default to the six §3.6 prefix keys rather than an empty row.
 **Usage rule.** The 400 ms delay is the caller's timer (`theme.motion.prefix_hint_delay`). The
 expert types the second key in under 200 ms and never sees this; the returning user gets it
 exactly when they hesitate — 0 px and 0 frames of permanent cost.
@@ -873,13 +926,15 @@ signal-killed process has no exit code and the strip must not invent `128 + sign
 #### `ModeWord`
 **Purpose.** The fixed 84 px word in the center of the status bar.
 **API.** `ModeWord::{new(Mode), word(text)}().tone(Tone)`;
-`Mode::{Normal, Terminal, Prefix, Scroll, Filter, Palette, Dialog, Jobs}` with `.word() .tone()`.
+`Mode::{Normal, Terminal, Prefix, Scroll, Filter, Palette, Dialog, Jobs}` with
+`.word() .tone() .keys_reach_pty()` and `Mode::ALL`.
 **Usage rule.** Present on **every** screen, including the Workspace and including zoom. Only
 `Prefix` is amber, because it is the one mode that expires on its own.
 
 #### `Banner`
 **Purpose.** A 28 px full-width strip with a countdown and recovery keys.
-**API.** `Banner::{warning, danger}(text).icon(Icon).countdown(..).hints(KeyHintRow)`.
+**API.** `Banner::{warning, danger}(text).icon(Icon).countdown(..).hints(KeyHintRow)`;
+`.resolved_tone()`.
 **Usage rule.** After a daemon reconnect the banner must say, verbatim, *"fleetd restarted.
 Terminal sessions did not survive; worktrees, jobs and state are intact."* A warm "reconnected"
 banner that implies the agents came back is the single most damaging false reassurance in the
@@ -897,13 +952,15 @@ the D-8 prefix rule applies over a terminal grid, and there is no terminal on th
 
 #### `DaemonDot`
 **Purpose.** 8 px liveness dot that grows a word when degraded.
-**API.** `DaemonDot::new(DaemonState::{Healthy, Degraded, Lost}).label(..)`.
+**API.** `DaemonDot::new(DaemonState::{Healthy, Degraded, Lost}).label(..)`;
+`.resolved_label()`. `DaemonState::{ALL, word, is_labelled}`.
 **Usage rule.** Healthy is a dot and nothing else — good news must not cost pixels. Degraded and
 lost grow a labelled pill, because bad news must be readable.
 
 #### `Veil`
 **Purpose.** A 55 % scrim over **terminal grids only**, while the daemon is gone.
-**API.** `Veil::new(active).opacity(f32).child(..)`; `.drops_keys()`.
+**API.** `Veil::new(active).opacity(f32).child(..)`; `.drops_keys()`. Its default opacity comes
+from `Theme::metrics.veil_opacity`.
 **Usage rule.** Lists stay at 100 % and stay navigable — they are true, just frozen; only a live
 surface is veiled. Keys typed into a veiled grid are **dropped, not buffered**; the component
 renders the scrim and `drops_keys()` states the contract the caller must honour.
@@ -929,7 +986,9 @@ renders the scrim and `drops_keys()` states the contract the caller must honour.
    `stroke-width` to 1.5, adding the variant to the `lucide_icons!` list in `src/icons.rs`, and
    adding it to §5.1 here.
 3. A new component gets its own module under `src/components/`, a `pub use` in
-   `components/mod.rs`, an entry in §6 here, and a panel in `examples/kit_gallery.rs` showing
-   **every** state. If a state is not in the gallery, it is not implemented.
+   `components/mod.rs`, an entry in §6 here, and a panel in the matching per-group gallery
+   (`gallery_structure`, `gallery_data`, `gallery_input`, or `gallery_terminal`) showing
+   **every** state. `kit_gallery` remains the combined overview. If a state is not in a gallery,
+   it is not implemented.
 4. `cargo check -p fleet-ui-kit --examples` and
    `cargo run -p fleet-ui-kit --example kit_gallery` are the acceptance gate.

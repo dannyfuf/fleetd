@@ -16,17 +16,10 @@ use crate::{
     state::{AppState, Screen},
 };
 
-/// The wire protocol this build speaks.
-///
-/// INTEGRATION REQUEST: `fleet-client`'s `PROTOCOL_VERSION` is private and `fleet-proto`
-/// exports no constant, so the footer restates it here. Replace this with the shared constant
-/// once one exists.
-const PROTOCOL: u32 = 1;
-
 /// The wire protocol this build speaks, for the Settings About section.
 #[must_use]
 pub const fn protocol() -> u32 {
-    PROTOCOL
+    fleet_proto::PROTOCOL_VERSION
 }
 
 /// The width of the key column (§3.8.7: 68 px mono).
@@ -64,6 +57,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "Filter",
             "Palette",
             "Jobs",
+            "Jobs > Log",
             "Dialog",
             "Dialog > Create",
             "Dialog > Confirm",
@@ -217,7 +211,8 @@ pub(crate) fn render(
                 .body(body)
                 .hint_row(KeyHintRow::new().key("?", "close").key("esc", "close"))
                 .primary(format!(
-                    "Fleet {version} \u{00b7} protocol {PROTOCOL} \u{00b7} fleetd up {uptime}"
+                    "Fleet {version} \u{00b7} protocol {} \u{00b7} fleetd up {uptime}",
+                    protocol()
                 )),
         )
         .into_any_element()

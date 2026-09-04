@@ -485,10 +485,10 @@ fn time_section(cx: &mut App) -> AnyElement {
         &t,
         vec![
             PrBadge::new(412, PrBadgeState::Approved)
-                .stale(Freshness::Fresh.derived_opacity() < 1.0)
+                .stale(Freshness::Fresh.derived_opacity(t.metrics.stale_opacity) < 1.0)
                 .into_any_element(),
             PrBadge::new(408, PrBadgeState::Approved)
-                .stale(Freshness::Stale.derived_opacity() < 1.0)
+                .stale(Freshness::Stale.derived_opacity(t.metrics.stale_opacity) < 1.0)
                 .into_any_element(),
             Text::hint("fresh · stale (55 %)")
                 .faint()

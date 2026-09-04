@@ -2,7 +2,10 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use fleet_proto::{job::JobRecord, response::DoctorCheck};
+use fleet_proto::{
+    job::JobRecord,
+    response::{DoctorCheck, DoctorStatus},
+};
 
 use crate::{
     DaemonError, DaemonResult,
@@ -77,12 +80,16 @@ impl Doctor {
             copy,
             DoctorCheck {
                 check: "runtime".to_owned(),
-                ok: true,
+                status: DoctorStatus::Ok,
                 detail: "Zig is required only at build time".to_owned(),
             },
             DoctorCheck {
                 check: "daemon socket".to_owned(),
-                ok: self.files.exists(&home.join("fleetd.sock")),
+                status: if self.files.exists(&home.join("fleetd.sock")) {
+                    DoctorStatus::Ok
+                } else {
+                    DoctorStatus::Warn
+                },
                 detail: if self.files.exists(&home.join("fleetd.sock")) {
                     home.join("fleetd.sock").display().to_string()
                 } else {
@@ -93,7 +100,7 @@ impl Doctor {
         ];
         checks.extend(config.hosts.keys().map(|host| DoctorCheck {
             check: format!("host {host}"),
-            ok: false,
+            status: DoctorStatus::Warn,
             detail: REMOTE_UNSUPPORTED.to_owned(),
         }));
         Ok(checks)
@@ -119,12 +126,12 @@ async fn check_git(shell: Arc<dyn Shell>) -> DoctorCheck {
     match shell.run(command).await {
         Ok(result) if result.success() => DoctorCheck {
             check: "git".to_owned(),
-            ok: true,
+            status: DoctorStatus::Ok,
             detail: result.stdout.trim().to_owned(),
         },
         Ok(result) => DoctorCheck {
             check: "git".to_owned(),
-            ok: false,
+            status: DoctorStatus::Fail,
             detail: command_failure(result.status, &result.stderr, &result.stdout),
         },
         Err(error) => failed_check("git", error),
@@ -135,13 +142,13 @@ async fn check_github(github: Arc<dyn Github>) -> DoctorCheck {
     match tokio::time::timeout(CHECK_TIMEOUT, github.auth_status()).await {
         Ok(Ok(())) => DoctorCheck {
             check: "gh auth".to_owned(),
-            ok: true,
+            status: DoctorStatus::Ok,
             detail: "authenticated".to_owned(),
         },
         Ok(Err(error)) => failed_check("gh auth", error),
         Err(_) => DoctorCheck {
             check: "gh auth".to_owned(),
-            ok: false,
+            status: DoctorStatus::Fail,
             detail: "timed out after 5 seconds".to_owned(),
         },
     }
@@ -170,7 +177,7 @@ async fn check_copy(files: Arc<dyn Files>, worktrees_dir: PathBuf) -> DoctorChec
         match result {
             Ok(()) => DoctorCheck {
                 check: "copy-on-write".to_owned(),
-                ok: true,
+                status: DoctorStatus::Ok,
                 detail: copy_detail().to_owned(),
             },
             Err(error) => failed_check("copy-on-write", error),
@@ -179,7 +186,7 @@ async fn check_copy(files: Arc<dyn Files>, worktrees_dir: PathBuf) -> DoctorChec
     .await
     .unwrap_or_else(|error| DoctorCheck {
         check: "copy-on-write".to_owned(),
-        ok: false,
+        status: DoctorStatus::Fail,
         detail: format!("background check failed: {error}"),
     })
 }
@@ -195,7 +202,7 @@ async fn check_writable(files: Arc<dyn Files>, home: PathBuf) -> DoctorCheck {
         match result {
             Ok(()) => DoctorCheck {
                 check: "FLEET_HOME writable".to_owned(),
-                ok: true,
+                status: DoctorStatus::Ok,
                 detail: home.display().to_string(),
             },
             Err(error) => failed_check("FLEET_HOME writable", error),
@@ -204,7 +211,7 @@ async fn check_writable(files: Arc<dyn Files>, home: PathBuf) -> DoctorCheck {
     .await
     .unwrap_or_else(|error| DoctorCheck {
         check: "FLEET_HOME writable".to_owned(),
-        ok: false,
+        status: DoctorStatus::Fail,
         detail: format!("background check failed: {error}"),
     })
 }
@@ -221,7 +228,7 @@ fn command_failure(status: i32, stderr: &str, stdout: &str) -> String {
 fn failed_check(check: &str, error: DaemonError) -> DoctorCheck {
     DoctorCheck {
         check: check.to_owned(),
-        ok: false,
+        status: DoctorStatus::Fail,
         detail: error.to_string(),
     }
 }

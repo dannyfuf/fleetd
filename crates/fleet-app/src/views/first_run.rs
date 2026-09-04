@@ -155,14 +155,13 @@ pub fn footer_line(version: Option<&str>, home: &Path) -> String {
 
 /// The single centered card of §3.13.
 #[must_use]
-pub fn card(
-    home: &Path,
-    daemon_version: Option<&str>,
-    has_swarm: bool,
-    cx: &App,
-) -> AnyElement {
+pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let glyph = if has_swarm { Icon::Sailboat } else { Icon::Boxes };
+    let glyph = if has_swarm {
+        Icon::Sailboat
+    } else {
+        Icon::Boxes
+    };
 
     let import_block = has_swarm.then(|| {
         div()
@@ -171,7 +170,10 @@ pub fn card(
             .items_center()
             .gap(theme.space.xs)
             .child(Text::ui(FOUND_SWARM))
-            .child(KeyHint::labeled("i", "import contexts, repos and worktrees"))
+            .child(KeyHint::labeled(
+                "i",
+                "import contexts, repos and worktrees",
+            ))
             .child(Text::hint(IMPORT_IS_SAFE).faint())
     });
 
@@ -198,11 +200,7 @@ pub fn card(
         .child(Text::ui(TAGLINE).muted())
         .children(import_block)
         .child(hints)
-        .child(Text::hint(SharedString::from(footer_line(
-            daemon_version,
-            home,
-        )))
-        .tone(Tone::Muted))
+        .child(Text::hint(SharedString::from(footer_line(daemon_version, home))).tone(Tone::Muted))
         .into_any_element()
 }
 

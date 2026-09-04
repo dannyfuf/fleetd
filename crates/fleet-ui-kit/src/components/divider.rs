@@ -1,11 +1,8 @@
 //! `Divider` — a 1 px hairline. The only separator in the system.
 
-use gpui::{App, Window, div, prelude::*, px};
+use gpui::{App, Window, div, prelude::*};
 
 use crate::theme::ActiveTheme;
-
-/// The one hairline width of the system (§2.1: `border` is 1 px, everywhere).
-pub const HAIRLINE: f32 = 1.0;
 
 /// Which way the hairline runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -55,11 +52,11 @@ impl RenderOnce for Divider {
         let base = div().bg(theme.colors.border).flex_none();
         match self.axis {
             DividerAxis::Horizontal => base
-                .h(px(HAIRLINE))
+                .h(theme.metrics.hairline)
                 .w_full()
                 .when(self.inset, |el| el.mx(pad)),
             DividerAxis::Vertical => base
-                .w(px(HAIRLINE))
+                .w(theme.metrics.hairline)
                 .h_full()
                 .when(self.inset, |el| el.my(pad)),
         }

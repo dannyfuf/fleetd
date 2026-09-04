@@ -19,12 +19,9 @@
 //! * **`X` confirms inside the panel.** §3.7 asks for a confirm; routing it through
 //!   `Dialogs::Confirm` would replace the `Jobs` overlay and close the panel underneath the
 //!   question. The first `X` arms an amber strip, the second one cancels; `Esc` disarms.
-//! * **`D` dismisses locally.** `fleet-proto` has no "dismiss job" request yet, so the panel
-//!   keeps the dismissed ids itself. The row comes back if the daemon re-broadcasts it as a
-//!   *new* job, which is the correct behaviour either way. See INTEGRATION REQUESTS.
-//! * **`J` collapses an expanded log before it closes the panel.** `KEYMAP.md` gives `Esc` that
-//!   two-step and both keys dispatch the same `jobs::Close` action, which one context cannot
-//!   tell apart. See INTEGRATION REQUESTS.
+//! * **`D` dismisses through fleetd.** Finished records and their persisted logs are removed by
+//!   the daemon, so they stay gone after reconnecting.
+//! * **`Esc` collapses an expanded log before closing the panel.** `J` always closes outright.
 
 use std::{collections::HashSet, time::Duration};
 
@@ -35,9 +32,7 @@ use fleet_proto::{
     request::RequestBody,
     response::ResponseBody,
 };
-use fleet_ui_kit::{
-    ActiveTheme, Icon, LOG_TAIL_LINES, ListView, LogView, Sheet, Tone, prelude::*,
-};
+use fleet_ui_kit::{ActiveTheme, Icon, LOG_TAIL_LINES, ListView, LogView, Sheet, Tone, prelude::*};
 use gpui::{
     AnyElement, App, ClipboardItem, Entity, FocusHandle, ScrollStrategy, SharedString, Task,
     UniformListScrollHandle, Window, div,
@@ -77,8 +72,6 @@ pub struct PanelState {
     pub following: bool,
     /// The first log line the view is scrolled to, when not following.
     pub log_offset: usize,
-    /// Jobs `D` has dismissed. Local until the daemon grows a dismiss request.
-    pub dismissed: HashSet<JobId>,
     /// Whether `X` is armed and waiting for its second press.
     pub confirming_cancel_all: bool,
     /// Whether the panel was already open on the previous render, so the cursor is seeded
@@ -92,7 +85,7 @@ impl PanelState {
     /// The ids the panel is currently drawing, in order.
     #[must_use]
     pub fn visible_ids(&self, jobs: &[JobRecord]) -> Vec<JobId> {
-        visible_jobs(jobs, self.filter, &self.dismissed)
+        visible_jobs(jobs, self.filter, &HashSet::new())
             .into_iter()
             .map(|job| job.id.clone())
             .collect()
@@ -101,7 +94,7 @@ impl PanelState {
     /// The job under the cursor.
     #[must_use]
     pub fn selected<'a>(&self, jobs: &'a [JobRecord]) -> Option<&'a JobRecord> {
-        visible_jobs(jobs, self.filter, &self.dismissed)
+        visible_jobs(jobs, self.filter, &HashSet::new())
             .into_iter()
             .nth(self.cursor)
     }
@@ -176,7 +169,7 @@ impl JobsPanel {
             .unwrap_or_default();
         let daemon_lost = state.read(cx).daemon.is_lost();
         let stale_age = state.read(cx).snapshot_age(std::time::Instant::now());
-        let sticky = state.read(cx).sticky_error.clone();
+        let focus_job = state.read(cx).jobs_focus.clone();
 
         // Seed the cursor once per opening: `!` promises the panel opens on the failure the
         // sticky slot names, and `J` is unharmed by landing on the same row.
@@ -185,8 +178,8 @@ impl JobsPanel {
             panel.clamp(len);
             if !panel.opened {
                 panel.opened = true;
-                if let Some(job) = sticky.as_ref().and_then(|error| error.job.clone()) {
-                    panel.focus_job(&jobs, &job);
+                if let Some(job) = focus_job.as_ref() {
+                    panel.focus_job(&jobs, job);
                 }
             }
         });
@@ -203,8 +196,7 @@ impl JobsPanel {
                 )
             });
 
-        let dismissed = self.state.read_with(cx, |panel, _| panel.dismissed.clone());
-        let visible: Vec<JobRecord> = visible_jobs(&jobs, filter, &dismissed)
+        let visible: Vec<JobRecord> = visible_jobs(&jobs, filter, &HashSet::new())
             .into_iter()
             .cloned()
             .collect();
@@ -232,12 +224,16 @@ impl JobsPanel {
                 .into_any_element()
         } else {
             let rows: Vec<JobRecord> = visible.clone();
-            ListView::new("jobs-panel-list", rows.len(), move |index, is_cursor, _, _| {
-                rows.get(index).map_or_else(
-                    || div().into_any_element(),
-                    |job| jobs_panel::job_row(job, is_cursor, now),
-                )
-            })
+            ListView::new(
+                "jobs-panel-list",
+                rows.len(),
+                move |index, is_cursor, _, _| {
+                    rows.get(index).map_or_else(
+                        || div().into_any_element(),
+                        |job| jobs_panel::job_row(job, is_cursor, now),
+                    )
+                },
+            )
             .cursor(cursor)
             .track_scroll(&self.list_scroll)
             .into_any_element()
@@ -257,12 +253,9 @@ impl JobsPanel {
             .child(jobs_panel::log_path_row(log_path, cx))
             // §3.7 "States": daemon down → an amber strip at the top, rows still readable.
             .children(
-                daemon_lost
-                    .then(|| jobs_panel::daemon_down_strip(stale_age.unwrap_or(0), cx)),
+                daemon_lost.then(|| jobs_panel::daemon_down_strip(stale_age.unwrap_or(0), cx)),
             )
-            .children(
-                confirming.then(|| jobs_panel::cancel_all_confirm(cancellable, cx)),
-            );
+            .children(confirming.then(|| jobs_panel::cancel_all_confirm(cancellable, cx)));
 
         div()
             .track_focus(focus)
@@ -280,9 +273,11 @@ impl JobsPanel {
             .on_action(self.on_cancel_all(state, bridge, cx))
             .on_action(self.on_retry(state, bridge, cx))
             .on_action(self.on_copy_log_path(state, cx))
-            .on_action(self.on_dismiss(state, cx))
+            .on_action(self.on_dismiss(state, bridge, cx))
             .on_action(self.on_cycle_filter(state, cx))
+            .on_action(self.on_collapse_log(state, cx))
             .on_action(self.on_close(state, cx))
+            .when(expanded.is_some(), |el| el.key_context("Log"))
             .child(
                 Sheet::new(true)
                     .expanded(expanded.is_some())
@@ -302,10 +297,7 @@ impl JobsPanel {
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(
-                    fleet_ui_kit::Text::ui("The log is empty so far.")
-                        .tone(Tone::Muted),
-                )
+                .child(fleet_ui_kit::Text::ui("The log is empty so far.").tone(Tone::Muted))
                 .p(theme.space.lg)
                 .into_any_element();
         }
@@ -454,8 +446,7 @@ impl JobsPanel {
                     panel.confirming_cancel_all = false;
                     return true;
                 }
-                // `Esc` collapses the sheet back to 440 px; a second one closes the panel.
-                panel.collapse()
+                false
             });
             if consumed {
                 cx.stop_propagation();
@@ -468,6 +459,22 @@ impl JobsPanel {
                 panel.opened = false;
                 panel.confirming_cancel_all = false;
             });
+        }
+    }
+
+    fn on_collapse_log(
+        &self,
+        state: &Entity<AppState>,
+        _cx: &App,
+    ) -> impl Fn(&jobs_actions::CollapseLog, &mut Window, &mut App) + 'static {
+        let panel = self.state.clone();
+        let state = state.clone();
+        move |_, _, cx| {
+            panel.update(cx, |panel, _| {
+                panel.collapse();
+            });
+            cx.stop_propagation();
+            notify(&state, cx);
         }
     }
 
@@ -627,10 +634,12 @@ impl JobsPanel {
     fn on_dismiss(
         &self,
         state: &Entity<AppState>,
+        bridge: &Bridge,
         _cx: &App,
     ) -> impl Fn(&jobs_actions::DismissFinished, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
+        let bridge = bridge.clone();
         move |_, _, cx| {
             let jobs = snapshot_jobs(&state, cx);
             let gone: Vec<JobId> = jobs
@@ -649,21 +658,16 @@ impl JobsPanel {
                 {
                     panel.collapse();
                 }
-                panel.dismissed.extend(gone.iter().cloned());
-                let len = panel.visible_ids(&jobs).len();
+                let len = jobs.len().saturating_sub(gone.len());
                 panel.clamp(len);
             });
-            // §1.8: the sticky slot points at a failed job. Dismissing that job must free the
-            // slot, or the status bar keeps naming a row that no longer exists.
+            bridge.send(RequestBody::DismissJobs { jobs: gone.clone() });
             state.update(cx, |state, cx| {
-                let stale = state
-                    .sticky_error
-                    .as_ref()
-                    .and_then(|error| error.job.clone())
-                    .is_some_and(|job| gone.contains(&job));
-                if stale {
-                    state.sticky_error = None;
+                if let Some(snapshot) = state.snapshot.as_mut() {
+                    snapshot.jobs.retain(|job| !gone.contains(&job.id));
                 }
+                state.seen_failed.extend(gone.iter().cloned());
+                state.sticky_error = None;
                 cx.notify();
             });
         }
@@ -716,9 +720,8 @@ fn spawn_tail(
             match reply.recv().await {
                 Ok(Ok(ResponseBody::JobLog(lines))) => {
                     let applied = cx.update(|cx| {
-                        let still_open = panel.read_with(cx, |panel, _| {
-                            panel.expanded.as_ref() == Some(&job)
-                        });
+                        let still_open =
+                            panel.read_with(cx, |panel, _| panel.expanded.as_ref() == Some(&job));
                         if !still_open {
                             return false;
                         }
@@ -726,8 +729,7 @@ fn spawn_tail(
                             panel.log = lines.into_iter().map(SharedString::from).collect();
                             if panel.following {
                                 panel.log_offset = panel.log.len().saturating_sub(1);
-                                log_scroll
-                                    .scroll_to_item(panel.log_offset, ScrollStrategy::Bottom);
+                                log_scroll.scroll_to_item(panel.log_offset, ScrollStrategy::Bottom);
                             }
                         });
                         notify(&state, cx);
@@ -757,7 +759,11 @@ async fn report_tail_error(
     error: &ProtoError,
     cx: &mut gpui::AsyncApp,
 ) {
-    let message = format!("could not read the log of {}: {}", job.as_str(), error.message);
+    let message = format!(
+        "could not read the log of {}: {}",
+        job.as_str(),
+        error.message
+    );
     cx.update(|cx| {
         panel.update(cx, |panel, _| {
             panel.collapse();
@@ -884,15 +890,13 @@ mod tests {
     }
 
     #[test]
-    fn dismissing_hides_only_finished_rows() {
-        let jobs = vec![
+    fn only_finished_rows_are_dismissable() {
+        let jobs = [
             job("job-a", JobStatus::Running, true, false),
             job("job-b", JobStatus::Succeeded, false, false),
         ];
-        let mut panel = panel(JobFilter::All);
-        panel.dismissed.insert(jobs[1].id.clone());
-        assert_eq!(panel.visible_ids(&jobs), vec![jobs[0].id.clone()]);
         assert!(!is_dismissable(&jobs[0].status));
+        assert!(is_dismissable(&jobs[1].status));
     }
 
     #[test]
@@ -912,7 +916,12 @@ mod tests {
     fn cancel_and_retry_are_offered_only_when_they_can_work() {
         assert!(can_cancel(&job("job-a", JobStatus::Running, true, false)));
         assert!(!can_cancel(&job("job-b", JobStatus::Running, false, false)));
-        assert!(!can_cancel(&job("job-c", JobStatus::Succeeded, true, false)));
+        assert!(!can_cancel(&job(
+            "job-c",
+            JobStatus::Succeeded,
+            true,
+            false
+        )));
 
         assert!(can_retry(&job(
             "job-d",

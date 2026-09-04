@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use fleet_ui_kit::{Banner, DaemonSplash, DaemonState, Icon, KeyHintRow, Tone};
-use gpui::{AnyElement, IntoElement, SharedString};
+use gpui::{AnyElement, App, IntoElement, SharedString};
 
 use crate::state::{
     AppState, DaemonLink, RECONNECT_BANNER_DWELL, RESTART_BANNER_DWELL, SPLASH_DETAIL_DELAY,
@@ -127,7 +127,7 @@ pub fn banner(daemon: &DaemonLink, now: Instant) -> Option<AnyElement> {
 
 /// The full-window daemon surface of §3.12 A and B, or `None` when the daemon is reachable.
 #[must_use]
-pub fn splash(state: &AppState, now: Instant) -> Option<AnyElement> {
+pub fn splash(state: &AppState, now: Instant, cx: &App) -> Option<AnyElement> {
     match &state.daemon {
         DaemonLink::Starting => {
             let mut splash = DaemonSplash::starting("Starting fleetd…");
@@ -144,26 +144,15 @@ pub fn splash(state: &AppState, now: Instant) -> Option<AnyElement> {
             message,
             log_tail,
             stale_socket,
-        } => {
-            let mut splash = DaemonSplash::failed("fleetd could not start.")
-                .log_lines(log_tail.iter().map(|line| SharedString::from(line.clone())))
-                .hints(
-                    KeyHintRow::new()
-                        .key("r", "retry")
-                        .key("L", "open log")
-                        .key("D", "run doctor")
-                        .key("ctrl-q", "quit"),
-                );
-            splash = splash.detail(if *stale_socket {
-                SharedString::from(format!(
-                    "The socket {} is stale.",
-                    fleet_proto::paths::socket_path(&state.home).display()
-                ))
-            } else {
-                SharedString::from(message.clone())
-            });
-            Some(splash.into_any_element())
-        }
+        } => Some(crate::views::doctor_view::failure_view(
+            crate::views::doctor_view::DaemonFailure::classify(message, *stale_socket),
+            message,
+            &fleet_proto::paths::socket_path(&state.home)
+                .display()
+                .to_string(),
+            log_tail,
+            cx,
+        )),
         DaemonLink::Connected | DaemonLink::Lost { .. } | DaemonLink::Reconnected { .. } => None,
     }
 }

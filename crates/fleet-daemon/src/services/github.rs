@@ -2,8 +2,6 @@
 
 use std::{
     collections::HashMap,
-    fs::OpenOptions,
-    io::Write,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -23,7 +21,7 @@ use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::github::Github as GithubAdapter,
+    adapters::{files::Files, github::Github as GithubAdapter},
     jobs::JobManager,
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -35,6 +33,7 @@ pub struct Github {
     state: Arc<StateStore>,
     jobs: Arc<JobManager>,
     github: Arc<dyn GithubAdapter>,
+    files: Arc<dyn Files>,
     in_flight: Arc<Mutex<HashMap<String, JobId>>>,
 }
 
@@ -46,12 +45,14 @@ impl Github {
         state: Arc<StateStore>,
         jobs: Arc<JobManager>,
         github: Arc<dyn GithubAdapter>,
+        files: Arc<dyn Files>,
     ) -> Self {
         Self {
             config,
             state,
             jobs,
             github,
+            files,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -66,6 +67,7 @@ impl Github {
         let github = Arc::clone(&self.github);
         let semaphore = self.jobs.github_semaphore();
         let (sender, receiver) = oneshot::channel::<Result<String, String>>();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         self.jobs.submit(
             JobKind::PrFetch,
             format!("viewer:{}", Uuid::new_v4()),
@@ -88,12 +90,24 @@ impl Github {
                     }
                 }) {
                     Ok(login) => {
-                        let _ignored = sender.send(Ok(login));
+                        if let Some(sender) = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ignored = sender.send(Ok(login));
+                        }
                         Ok(())
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        let _ignored = sender.send(Err(message));
+                        if let Some(sender) = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ignored = sender.send(Err(message));
+                        }
                         Err(error)
                     }
                 }
@@ -220,7 +234,7 @@ impl Github {
         force: bool,
     ) -> RepoTabOutcome {
         let path = home.pr_cache_path(&repo, tab);
-        let cached = read_cache(&path);
+        let cached = read_cache(self.files.as_ref(), &path);
         if !force
             && cached
                 .as_ref()
@@ -246,7 +260,9 @@ impl Github {
         let semaphore = self.jobs.github_semaphore();
         let repo_for_job = repo.clone();
         let path_for_job = path.clone();
+        let files = Arc::clone(&self.files);
         let (sender, receiver) = oneshot::channel::<Result<PrCache, String>>();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         let id = self.jobs.submit(
             JobKind::PrFetch,
             format!("{key}:{}", Uuid::new_v4()),
@@ -271,18 +287,30 @@ impl Github {
                         fetched_at: Utc::now().to_rfc3339(),
                         prs,
                     };
-                    write_cache(&path_for_job, &cache)?;
+                    write_cache(files.as_ref(), &path_for_job, &cache)?;
                     Ok(cache)
                 }
                 .await;
                 match result {
                     Ok(cache) => {
-                        let _ignored = sender.send(Ok(cache));
+                        if let Some(sender) = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ignored = sender.send(Ok(cache));
+                        }
                         Ok(())
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        let _ignored = sender.send(Err(message));
+                        if let Some(sender) = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ignored = sender.send(Err(message));
+                        }
                         Err(error)
                     }
                 }
@@ -338,44 +366,17 @@ fn cache_is_fresh(fetched_at: &str, ttl_seconds: i64) -> bool {
         .is_some_and(|age| age.num_milliseconds() >= 0 && age.num_seconds() < ttl_seconds)
 }
 
-fn read_cache(path: &Path) -> Option<PrCache> {
-    std::fs::read_to_string(path)
+fn read_cache(files: &dyn Files, path: &Path) -> Option<PrCache> {
+    files
+        .read_text(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
-fn write_cache(path: &Path, cache: &PrCache) -> DaemonResult<()> {
-    let parent = path.parent().ok_or_else(|| {
-        DaemonError::Validation(format!("cache path has no parent: {}", path.display()))
-    })?;
-    std::fs::create_dir_all(parent).map_err(|error| DaemonError::fs(parent, error))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("prs");
-    let temporary = parent.join(format!(
-        ".{name}.tmp-{}-{}",
-        std::process::id(),
-        Uuid::new_v4()
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| DaemonError::fs(&temporary, error))?;
-        let mut text = serde_json::to_string(cache)?;
-        text.push('\n');
-        file.write_all(text.as_bytes())
-            .map_err(|error| DaemonError::fs(&temporary, error))?;
-        file.sync_all()
-            .map_err(|error| DaemonError::fs(&temporary, error))?;
-        std::fs::rename(&temporary, path).map_err(|error| DaemonError::fs(path, error))
-    })();
-    if result.is_err() {
-        let _ignored = std::fs::remove_file(&temporary);
-    }
-    result
+fn write_cache(files: &dyn Files, path: &Path, cache: &PrCache) -> DaemonResult<()> {
+    let mut text = serde_json::to_string(cache)?;
+    text.push('\n');
+    files.atomic_write_text(path, &text)
 }
 
 fn fleet_home(state: &StateStore) -> DaemonResult<FleetHome> {

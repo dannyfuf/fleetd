@@ -54,7 +54,13 @@ if /usr/bin/grep -q 'arm64e-macos' "$sdk_path/usr/lib/libSystem.tbd"; then
             /usr/bin/sed \
                 -e 's/arm64e-macos/arm64-macos/g' \
                 -e 's/arm64e-maccatalyst/arm64-maccatalyst/g' \
-                "$source" > "$destination"
+            "$source" > "$destination"
+        done
+        /usr/bin/find "$sdk_path/usr/lib" -type l -name '*.tbd' | while IFS= read -r source; do
+            relative=${source#"$sdk_path/"}
+            destination="$overlay_tmp/$relative"
+            /bin/mkdir -p "$(dirname "$destination")"
+            /bin/ln -s "$(/usr/bin/readlink "$source")" "$destination"
         done
         /bin/ln -s "$sdk_path/usr/include" "$overlay_tmp/usr/include"
         /bin/rm -rf "$sdk_overlay"

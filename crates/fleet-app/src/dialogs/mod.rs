@@ -31,10 +31,12 @@ pub mod clone_repo;
 pub mod confirm;
 pub mod context;
 pub mod create_worktree;
+pub mod edit_hooks;
 pub mod filter;
 pub mod help;
 pub mod palette;
 pub mod quit;
+pub mod rename_terminal;
 pub mod settings;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,8 +70,12 @@ pub enum Dialogs {
     EditContext,
     /// §3.8.5 Assign repo to context (`m`).
     AssignRepo,
+    /// Edit a repository's prepare and post-create hooks (`e`).
+    EditHooks,
     /// §3.8.6 Settings (`,`).
     Settings,
+    /// Rename the Workspace's active terminal (`ctrl-s ,`).
+    RenameTerminal,
     /// §3.8.7 Help (`?`).
     Help,
     /// §3.8.8 Quit (`ctrl-q`) with work still running.
@@ -91,7 +97,9 @@ impl Dialogs {
             Self::Confirm => "Confirm",
             Self::NewContext | Self::EditContext => "Context",
             Self::AssignRepo => "Assign",
+            Self::EditHooks => "Hooks",
             Self::Settings => "Settings",
+            Self::RenameTerminal => "Rename",
             Self::Help => "Help",
             Self::Quit => "Quit",
             Self::QuitDaemon => "QuitDaemon",
@@ -108,7 +116,9 @@ impl Dialogs {
             Self::NewContext => "New context",
             Self::EditContext => "Edit context",
             Self::AssignRepo => "Move repo to context",
+            Self::EditHooks => "Repository hooks",
             Self::Settings => "Settings",
+            Self::RenameTerminal => "Rename terminal",
             Self::Help => "Keymap",
             Self::Quit => "Quit Fleet?",
             Self::QuitDaemon => "Stop fleetd and quit?",
@@ -124,7 +134,9 @@ impl Dialogs {
             Self::Confirm => Icon::TriangleAlert,
             Self::NewContext | Self::EditContext => Icon::Boxes,
             Self::AssignRepo => Icon::ArrowRightLeft,
+            Self::EditHooks => Icon::FilePen,
             Self::Settings => Icon::Settings2,
+            Self::RenameTerminal => Icon::FilePen,
             Self::Help | Self::Quit => Icon::CircleQuestionMark,
             Self::QuitDaemon => Icon::Power,
         }
@@ -136,8 +148,9 @@ impl Dialogs {
         match self {
             Self::CreateWorktree | Self::CloneRepo | Self::QuitDaemon => px(560.0),
             Self::Confirm => px(480.0),
-            Self::NewContext | Self::EditContext => px(460.0),
+            Self::NewContext | Self::EditContext | Self::RenameTerminal => px(460.0),
             Self::AssignRepo => px(460.0),
+            Self::EditHooks => px(560.0),
             Self::Settings => px(720.0),
             Self::Help => px(880.0),
             Self::Quit => px(520.0),
@@ -168,7 +181,9 @@ impl Dialogs {
                 context::render(self, state, bridge, focus, window, cx)
             }
             Self::AssignRepo => assign_repo::render(state, bridge, focus, window, cx),
+            Self::EditHooks => edit_hooks::render(state, bridge, focus, window, cx),
             Self::Settings => settings::render(state, bridge, focus, window, cx),
+            Self::RenameTerminal => rename_terminal::render(state, bridge, focus, window, cx),
             Self::Help => help::render(state, focus, window, cx),
             Self::Quit => quit::render_quit(state, focus, window, cx),
             Self::QuitDaemon => quit::render_quit_daemon(state, focus, window, cx),
@@ -195,12 +210,18 @@ pub struct DialogHost {
     pub context: context::ContextState,
     /// §3.8.5.
     pub assign: assign_repo::AssignState,
+    /// Repository hook editor.
+    pub edit_hooks: edit_hooks::EditHooksState,
     /// §3.8.6.
     pub settings: settings::SettingsState,
+    /// Rename-terminal draft.
+    pub rename_terminal: rename_terminal::RenameState,
     /// §3.9.
     pub palette: palette::PaletteState,
     /// What the next Confirm dialog asks about, published by whoever opens it.
     pub pending_confirm: Option<ConfirmRequest>,
+    /// Repository the next hook editor should load.
+    pub pending_hooks_repo: Option<RepoId>,
 }
 
 impl Global for DialogHost {}
@@ -237,6 +258,14 @@ pub fn request_confirm(cx: &mut App, request: ConfirmRequest) {
     });
 }
 
+/// Publishes the repository the next hook editor will modify.
+pub fn request_edit_hooks(cx: &mut App, repo: RepoId) {
+    with_host(cx, |host| {
+        host.pending_hooks_repo = Some(repo);
+        host.open = None;
+    });
+}
+
 /// Subscribes to the `AppState` entity once, so a closing overlay invalidates its draft.
 fn watch(state: &Entity<AppState>, cx: &mut App) {
     if cx.default_global::<DialogWatch>().subscription.is_some() {
@@ -268,7 +297,9 @@ fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
         Dialogs::NewContext => context::seed(state, cx, false),
         Dialogs::EditContext => context::seed(state, cx, true),
         Dialogs::AssignRepo => assign_repo::seed(state, cx),
+        Dialogs::EditHooks => edit_hooks::seed(state, cx),
         Dialogs::Settings => settings::seed(state, bridge, cx),
+        Dialogs::RenameTerminal => rename_terminal::seed(state, cx),
         Dialogs::Help | Dialogs::Quit | Dialogs::QuitDaemon => {}
     }
 }

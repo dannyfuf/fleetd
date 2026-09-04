@@ -69,6 +69,7 @@ pub struct Text {
     flex_ellipsis: bool,
     width: Option<Pixels>,
     ch_width: Option<f32>,
+    flex_none: bool,
 }
 
 impl Text {
@@ -85,6 +86,7 @@ impl Text {
             flex_ellipsis: false,
             width: None,
             ch_width: None,
+            flex_none: false,
         }
     }
 
@@ -182,6 +184,12 @@ impl Text {
         self
     }
 
+    /// Keep this run from shrinking in a flex row.
+    pub fn flex_none(mut self) -> Self {
+        self.flex_none = true;
+        self
+    }
+
     /// The string this run will render, after the `ch` budget is applied.
     pub fn resolved_text(&self) -> SharedString {
         match self.budget {
@@ -230,6 +238,9 @@ impl RenderOnce for Text {
         }
         if self.flex_ellipsis {
             el = el.overflow_hidden().whitespace_nowrap().text_ellipsis();
+        }
+        if self.flex_none {
+            el = el.flex_none();
         }
         el.child(text)
     }

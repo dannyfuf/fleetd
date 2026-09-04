@@ -4,15 +4,14 @@
 //! ticker shows, what the breadcrumb reads — are separate, testable functions; the rest is
 //! kit composition with no styling of its own.
 
-use fleet_proto::job::{JobKind, JobRecord};
-use fleet_ui_kit::{
-    Chip, ContextBar, ContextTab, Icon, JobTicker, StatusBar, StickyErrorSlot, Tone,
-};
+use fleet_proto::job::JobKind;
+use fleet_ui_kit::{Chip, ContextBar, ContextTab, Icon, StatusBar, Tone};
 use gpui::{AnyElement, App, IntoElement, SharedString, px};
 
 use crate::{
     shell::daemon::{dot_label, dot_state},
-    state::{AppState, RepoScope, breadcrumb, chip_counts, parse_percent, running_jobs},
+    state::{AppState, RepoScope, breadcrumb, chip_counts},
+    views::{job_ticker, sticky_error},
 };
 
 /// The left inset that clears the macOS traffic lights (§2.2).
@@ -31,6 +30,7 @@ pub fn job_kind_label(kind: &JobKind) -> &str {
         JobKind::PoolRefresh => "refresh",
         JobKind::CreateWorktree => "create",
         JobKind::DeleteWorktree => "delete",
+        JobKind::DeleteRepo => "delete repo",
         JobKind::Prune => "prune",
         JobKind::Inspect => "inspect",
         JobKind::PostCreateHooks => "hooks",
@@ -41,21 +41,6 @@ pub fn job_kind_label(kind: &JobKind) -> &str {
         JobKind::Import => "import",
         JobKind::Custom(name) => name,
     }
-}
-
-/// What the job ticker shows: the newest running job, its percent and how many others run.
-#[must_use]
-pub fn ticker_parts(jobs: &[JobRecord]) -> Option<(String, String, Option<u8>, usize)> {
-    let running = running_jobs(jobs);
-    let newest = running
-        .iter()
-        .max_by(|left, right| left.started_at.cmp(&right.started_at))?;
-    Some((
-        job_kind_label(&newest.kind).to_owned(),
-        newest.target.clone(),
-        newest.progress.as_deref().and_then(parse_percent),
-        running.len() - 1,
-    ))
 }
 
 /// The 36 px context bar (§2.1, §2.3, §3.1).
@@ -172,84 +157,21 @@ pub fn status_bar(state: &AppState, _cx: &App) -> AnyElement {
         .as_ref()
         .map(|snapshot| snapshot.jobs.as_slice())
         .unwrap_or_default();
-    if let Some((kind, target, percent, extra)) = ticker_parts(jobs) {
-        let mut ticker = JobTicker::new(kind, target).extra(extra);
-        if let Some(percent) = percent {
-            ticker = ticker.percent(percent);
+    match job_ticker::status_slot(jobs, state.sticky_error.as_ref()) {
+        job_ticker::StatusSlot::Error(error) => {
+            bar = bar.error(sticky_error::render(&error, &state.screen));
         }
-        bar = bar.ticker(ticker);
-    }
-    if let Some(error) = &state.sticky_error {
-        bar = bar.error(StickyErrorSlot::new(error.text.clone()));
+        job_ticker::StatusSlot::Ticker(content) => {
+            bar = bar.ticker(job_ticker::render(&content));
+        }
+        job_ticker::StatusSlot::Idle => {}
     }
     bar.into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use fleet_proto::job::JobStatus;
-
     use super::*;
-
-    fn job(
-        id: &str,
-        kind: JobKind,
-        status: JobStatus,
-        started: &str,
-        progress: Option<&str>,
-    ) -> JobRecord {
-        JobRecord {
-            id: id.parse().unwrap_or_else(|error| panic!("{error}")),
-            kind,
-            target: "nixos".to_owned(),
-            title: "job".to_owned(),
-            status,
-            progress: progress.map(str::to_owned),
-            log_path: "/tmp/j.log".to_owned(),
-            started_at: started.to_owned(),
-            finished_at: None,
-            cancellable: true,
-            retryable: true,
-        }
-    }
-
-    #[test]
-    fn the_ticker_shows_the_newest_running_job_and_counts_the_rest() {
-        let jobs = vec![
-            job(
-                "j-1",
-                JobKind::Clone,
-                JobStatus::Running,
-                "2026-09-04T12:00:00Z",
-                Some("Receiving objects: 40% (81/202)"),
-            ),
-            job(
-                "j-2",
-                JobKind::PostCreateHooks,
-                JobStatus::Running,
-                "2026-09-04T12:01:00Z",
-                Some("pnpm install (2/3)"),
-            ),
-            job(
-                "j-3",
-                JobKind::Prune,
-                JobStatus::Succeeded,
-                "2026-09-04T12:02:00Z",
-                None,
-            ),
-        ];
-        let (kind, target, percent, extra) =
-            ticker_parts(&jobs).unwrap_or_else(|| panic!("expected a ticker"));
-        assert_eq!(kind, "hooks");
-        assert_eq!(target, "nixos");
-        assert_eq!(percent, None);
-        assert_eq!(extra, 1);
-    }
-
-    #[test]
-    fn an_idle_daemon_has_no_ticker() {
-        assert_eq!(ticker_parts(&[]), None);
-    }
 
     #[test]
     fn job_kind_labels_are_single_words() {

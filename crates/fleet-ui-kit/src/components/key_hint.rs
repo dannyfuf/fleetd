@@ -87,6 +87,12 @@ impl KeyHintRow {
     pub fn key(self, keys: impl Into<SharedString>, label: impl Into<SharedString>) -> Self {
         self.hint(KeyHint::labeled(keys, label))
     }
+
+    /// Append every hint in `other`, preserving both rows' order.
+    pub fn merge(mut self, other: KeyHintRow) -> Self {
+        self.hints.extend(other.hints);
+        self
+    }
 }
 
 impl Default for KeyHintRow {

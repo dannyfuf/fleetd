@@ -145,6 +145,8 @@ pub enum RowKind {
         has_prev: bool,
         /// Whether a next value exists.
         has_next: bool,
+        /// Whether the persisted value is outside the configured steps.
+        off_grid: bool,
     },
     /// An integer: digits type into it.
     Number {
@@ -493,6 +495,7 @@ fn choice(value: &str, options: &[&str], current: &str) -> RowKind {
         value: value.to_owned(),
         has_prev: index.is_some_and(|index| index > 0),
         has_next: index.is_some_and(|index| index + 1 < options.len()),
+        off_grid: index.is_none(),
     }
 }
 
@@ -502,6 +505,7 @@ fn duration_choice(value: u64) -> RowKind {
         value: format_duration(value),
         has_prev: index.is_some_and(|index| index > 0),
         has_next: index.is_some_and(|index| index + 1 < DURATIONS.len()),
+        off_grid: index.is_none(),
     }
 }
 
@@ -511,6 +515,7 @@ fn pool_choice(value: u64) -> RowKind {
         value: value.to_string(),
         has_prev: index.is_some_and(|index| index > 0),
         has_next: index.is_some_and(|index| index + 1 < POOL_SIZES.len()),
+        off_grid: index.is_none(),
     }
 }
 
@@ -896,9 +901,11 @@ fn row_element(row: &SettingRow, focused: bool, editing: Option<&TextInput>) -> 
             value,
             has_prev,
             has_next,
+            off_grid,
         } => Cycler::labeled(row.label.clone(), value.clone())
             .has_prev(*has_prev)
             .has_next(*has_next)
+            .off_grid(*off_grid)
             .focused(focused)
             .into_any_element(),
         RowKind::Number { value, min, unit } => {
@@ -1116,7 +1123,7 @@ fn run_doctor(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         };
         let failed = checks
             .iter()
-            .find(|check| !check.ok)
+            .find(|check| check.status == fleet_proto::response::DoctorStatus::Fail)
             .map(|check| format!("{}: {}", check.check, check.detail));
         cx.update(|cx| {
             with_host(cx, |host| host.settings.error = failed.clone());

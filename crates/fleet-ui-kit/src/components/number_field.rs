@@ -9,16 +9,9 @@
 //! itself ([`NumberField::range_message`]), because §3.8's law is that a failure names the
 //! exact rule it failed.
 
-use gpui::{App, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Pixels, SharedString, Window, div, prelude::*};
 
 use crate::{components::FocusRing, text::Text, theme::ActiveTheme, tone::Tone};
-
-/// The minimum width of the value box: wide enough for `100000 ms` without reflowing as the
-/// user types.
-///
-/// TODO(INTEGRATION `metrics.number_field_w`): a `Metrics` entry would be the right home; the
-/// token set has no pixel constant for an input box yet.
-const VALUE_BOX_W: Pixels = px(96.0);
 
 /// An integer input.
 #[derive(IntoElement)]
@@ -166,7 +159,7 @@ impl RenderOnce for NumberField {
                     .items_center()
                     .justify_between()
                     .gap(theme.space.sm)
-                    .min_w(VALUE_BOX_W)
+                    .min_w(theme.metrics.number_field_w)
                     .px(theme.space.sm)
                     .rounded(theme.radii.sm)
                     .bg(theme.colors.bg)

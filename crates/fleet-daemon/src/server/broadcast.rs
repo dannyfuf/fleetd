@@ -1,7 +1,7 @@
 //! Fan-out of daemon events to subscribed clients, including coalesced snapshots.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -16,6 +16,7 @@ struct BroadcastInner {
     sender: broadcast::Sender<Event>,
     snapshot_pending: AtomicBool,
     snapshot_revision: AtomicU64,
+    services: Mutex<Weak<Services>>,
 }
 
 /// Cloneable daemon-wide event fan-out bus.
@@ -34,6 +35,7 @@ impl BroadcastBus {
                 sender,
                 snapshot_pending: AtomicBool::new(false),
                 snapshot_revision: AtomicU64::new(0),
+                services: Mutex::new(Weak::new()),
             }),
         }
     }
@@ -46,6 +48,28 @@ impl BroadcastBus {
     /// Creates an independent event receiver.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.inner.sender.subscribe()
+    }
+
+    /// Connects the bus to the authoritative snapshot assembler.
+    pub fn attach_services(&self, services: Weak<Services>) {
+        *self
+            .inner
+            .services
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = services;
+    }
+
+    /// Requests a snapshot from the attached daemon facade, when available.
+    pub fn request_snapshot_current(&self) {
+        let services = self
+            .inner
+            .services
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade();
+        if let Some(services) = services {
+            self.request_snapshot(services);
+        }
     }
 
     /// Requests an authoritative snapshot event, batching bursts into 50 ms windows.

@@ -96,9 +96,9 @@ impl RenderOnce for StickyErrorSlot {
             )
             .child(Text::ui(self.text).tone(Tone::Danger).ellipsize())
             .children((count > 1).then(|| {
-                div()
+                Text::hint(format!("x{count}"))
+                    .tone(Tone::Danger)
                     .flex_none()
-                    .child(Text::hint(format!("x{count}")).tone(Tone::Danger))
             }))
             .child(div().flex_none().child(KeyHint::new(self.key)));
 

@@ -538,18 +538,32 @@ fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyElement {
             ..
         } => kill_facts(*terminals, running, *unsaved),
         ConfirmRequest::CloseTerminal { running, .. } => close_terminal_facts(running.as_deref()),
+        ConfirmRequest::DeleteRepo { worktrees, .. } => Facts {
+            list: FactList::new()
+                .fact(Fact::risk(format!(
+                    "{worktrees} worktrees are deleted with it"
+                )))
+                .fact(Fact::risk("the pristine clone is moved to trash")),
+            risky: true,
+            age_secs: None,
+        },
+        ConfirmRequest::DeleteContext {
+            repos,
+            worktrees,
+            sessions,
+            ..
+        } => Facts {
+            list: FactList::new()
+                .fact(Fact::risk(format!("{repos} repositories")))
+                .fact(Fact::risk(format!("{worktrees} worktrees")))
+                .fact(Fact::risk(format!("{sessions} running sessions"))),
+            risky: true,
+            age_secs: None,
+        },
         _ => Facts::default(),
     };
     if let Some(error) = draft.error.as_ref() {
         facts.list = facts.list.fact(Fact::unknown(error.clone()));
-    }
-    if request.always_strong() {
-        // [D-10]: a cascade nobody inspected is exactly an unknown decisive fact, which is what
-        // makes `Y` the only key and the dialog its expanded form.
-        facts.list = facts
-            .list
-            .fact(Fact::unknown("the cascade below is not inspected"));
-        facts.risky = true;
     }
     let compact = facts.list.is_compact();
 
@@ -563,6 +577,9 @@ fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyElement {
         .icon(request.icon(compact))
         .hints(hints)
         .action_label(request.action_label(0));
+    if request.always_strong() {
+        card = card.force_confirm_key(ConfirmKey::Upper);
+    }
     if let Some(age) = facts.age_secs {
         card = card.stamp(FreshnessStamp::new("checked", age).action("I", "re-check"));
     }
@@ -725,7 +742,21 @@ fn commit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     }
     match request {
         ConfirmRequest::DeleteWorktree { id } => {
-            bridge.send(RequestBody::DeleteWorktrees { ids: vec![id] });
+            let reply = bridge.request(RequestBody::DeleteWorktrees { ids: vec![id] });
+            let state = state.clone();
+            cx.spawn(async move |cx| {
+                let Ok(Ok(ResponseBody::WorktreesDeleted(results))) = reply.recv().await else {
+                    return;
+                };
+                let trash_entry = results.into_iter().find_map(|result| result.trash_entry);
+                if let Some(trash_entry) = trash_entry {
+                    state.update(cx, |app, cx| {
+                        app.last_trash_entry = Some(trash_entry);
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
         }
         ConfirmRequest::DeleteRepo { repo, .. } => {
             bridge.send(RequestBody::DeleteRepo { repo });

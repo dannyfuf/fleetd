@@ -105,6 +105,7 @@ async fn repos_clone_reconciles_then_moves_updates_hooks_and_deletes() {
                 .to_string_lossy()
                 .into_owned(),
             first.id.clone(),
+            None,
         )
         .await
         .unwrap();
@@ -131,6 +132,7 @@ async fn repos_clone_reconciles_then_moves_updates_hooks_and_deletes() {
             "api".to_owned(),
             source.to_string_lossy().into_owned(),
             first.id,
+            None,
         )
         .await
         .unwrap();

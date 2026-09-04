@@ -276,6 +276,7 @@ key_table! {
     "y",            "Jobs" => jobs::CopyLogPath;
     "D",            "Jobs" => jobs::DismissFinished;
     "f",            "Jobs" => jobs::CycleFilter;
+    "escape",       "Jobs > Log" => jobs::CollapseLog;
 
     // ---------------------------------------------------------------- Dialogs, shared frame
     "enter",        "Dialog" => dialog::Confirm;
@@ -347,6 +348,9 @@ key_table! {
     "r",            "Daemon > Down" => daemon::Retry;
     "L",            "Daemon > Down" => daemon::OpenLog;
     "D",            "Daemon > Down" => daemon::RunDoctor;
+    "D",            "Daemon > Doctor" => daemon::RunDoctor;
+    "L",            "Daemon > Doctor" => daemon::OpenLog;
+    "escape",       "Daemon > Doctor" => daemon::DismissBanner;
 
     // ---------------------------------------------------------------- Daemon › Banner (§3.12 C)
     "r",            "Daemon > Banner" => daemon::Reconnect;

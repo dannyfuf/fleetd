@@ -22,8 +22,8 @@ this file; where the two disagree, this file wins.
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
 | Palette | `Palette` | `:` | `Esc`, `Enter` |
 | Dialog | `Dialog > <name>` | action | `Esc`, `Enter` |
-| Jobs | `Jobs` (overlay) | `J` anywhere in Normal, `ctrl-s J` in a terminal | `Esc`, `J` |
-| Daemon | `Daemon > Down` / `Daemon > Banner` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C) | daemon comes back, `Esc` (banner only), `ctrl-q` |
+| Jobs | `Jobs` / `Jobs > Log` (overlay) | `J` anywhere in Normal, `ctrl-s J` in a terminal | `Esc`, `J`, `q` |
+| Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
 
 The context stack is ordered: `Dialog` / `Palette` / `Jobs` / `Filter` shadow `Hub` and
@@ -161,7 +161,8 @@ Scroll mode is suppressed while an alt-screen app is running: `ctrl-s [` then sh
 
 | Key | Action |
 | --- | --- |
-| `J`, `Esc` | close, restoring the exact prior focus (pane, row, terminal and mode) |
+| `J`, `q` | close, restoring the exact prior focus (pane, row, terminal and mode) |
+| `Esc` | collapse an expanded log; otherwise close and restore the prior focus |
 | `j` / `k`, `gg` / `G` | move the job cursor |
 | `Enter` | expand / collapse the log for the selected job (sheet 440 ↔ 640 px) |
 | `c` | cancel the selected job (only when it is cancellable) [A19] |
@@ -169,7 +170,7 @@ Scroll mode is suppressed while an alt-screen app is running: `ctrl-s [` then sh
 | `R` | retry a failed job with identical parameters [A19] |
 | `y` | copy the log path of the selected job [A19] |
 | `D` | dismiss finished and failed jobs [A19] |
-| `f` | cycle the filter all → running → failed [A19] |
+| `f` | cycle the filter all → running → failed; inside an expanded log, toggle follow [A19] |
 
 Inside an **expanded log**: `f` toggles follow, `j` / `k` scroll, `G` re-enables follow, `Esc`
 collapses the sheet back to 440 px (a second `Esc` closes the panel).
@@ -212,7 +213,7 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 | printable, `Backspace`, `ctrl-w`, `ctrl-u` | edit the query |
 | `ctrl-n` / `↓`, `ctrl-p` / `↑` | move between `GO` / `DO` / `CONTEXT` rows |
 | `Enter` | run the highlighted row (destructive commands still route through their confirm) |
-| `Esc`, `q` | close |
+| `Esc` | close (`q` remains a printable query character) |
 
 ## Daemon-down surfaces (§3.12)
 

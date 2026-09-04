@@ -64,12 +64,13 @@ async fn doctor_reports_local_runtime_and_unsupported_remote_hosts() {
             .unwrap_or_else(|| panic!("missing doctor check {name}"))
     };
     assert_eq!(find("git").detail, "git version 2.51.0");
-    assert!(find("gh auth").ok);
-    assert!(find("copy-on-write").ok);
-    assert!(find("runtime").ok);
-    assert!(find("daemon socket").ok);
-    assert!(find("FLEET_HOME writable").ok);
-    assert!(!find("host devbox").ok);
+    use fleet_proto::response::DoctorStatus;
+    assert_eq!(find("gh auth").status, DoctorStatus::Ok);
+    assert_eq!(find("copy-on-write").status, DoctorStatus::Ok);
+    assert_eq!(find("runtime").status, DoctorStatus::Ok);
+    assert_eq!(find("daemon socket").status, DoctorStatus::Ok);
+    assert_eq!(find("FLEET_HOME writable").status, DoctorStatus::Ok);
+    assert_eq!(find("host devbox").status, DoctorStatus::Warn);
     assert_eq!(
         find("host devbox").detail,
         "remote hosts are not supported yet"

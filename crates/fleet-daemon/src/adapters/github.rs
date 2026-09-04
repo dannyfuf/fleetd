@@ -32,6 +32,20 @@ pub trait Github: Send + Sync {
         repo: &RepoId,
         branch: &str,
     ) -> DaemonResult<Option<PullRequest>>;
+    /// Returns one pull request by number, including fork and head metadata.
+    async fn pull_request(&self, repo: &RepoId, number: u64) -> DaemonResult<Option<PullRequest>> {
+        for tab in [PrTab::Mine, PrTab::Review] {
+            if let Some(pull) = self
+                .list_pull_requests(repo, tab)
+                .await?
+                .into_iter()
+                .find(|pull| pull.number == number)
+            {
+                return Ok(Some(pull));
+            }
+        }
+        Ok(None)
+    }
     /// Returns the newest open, merged, or closed inspection PR for a branch.
     async fn latest_inspection_pull_request(
         &self,
@@ -130,6 +144,23 @@ impl Github for GhCli {
             ])
             .await?;
         parse_pull_requests(repo, &output).map(|mut pulls| pulls.pop())
+    }
+
+    async fn pull_request(&self, repo: &RepoId, number: u64) -> DaemonResult<Option<PullRequest>> {
+        let output = self
+            .run([
+                "pr".to_owned(),
+                "view".to_owned(),
+                number.to_string(),
+                "--repo".to_owned(),
+                repo.to_string(),
+                "--json".to_owned(),
+                PR_FIELDS.to_owned(),
+            ])
+            .await?;
+        let pull: GhPull = serde_json::from_str(&output)
+            .map_err(|error| DaemonError::Github(format!("invalid pull-request JSON: {error}")))?;
+        convert_pull(repo.clone(), pull).map(Some)
     }
 
     async fn latest_inspection_pull_request(

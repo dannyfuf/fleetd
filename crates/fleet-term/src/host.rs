@@ -114,6 +114,7 @@ pub enum HostError {
 /// Handle used by daemon services to control and observe one terminal thread.
 pub struct TerminalHost {
     terminal: TerminalId,
+    child_pid: Option<u32>,
     commands: Sender<HostCommand>,
     events: Receiver<HostEvent>,
     join: Option<thread::JoinHandle<()>>,
@@ -125,6 +126,7 @@ impl TerminalHost {
         let cols = options.pty.cols;
         let rows = options.pty.rows;
         let pty = Pty::spawn(options.pty)?;
+        let child_pid = pty.child_pid();
         let engine = GhosttyEngine::new(cols, rows, options.scrollback_lines)?;
         let (command_sender, command_receiver) = async_channel::unbounded();
         let (event_sender, event_receiver) = async_channel::unbounded();
@@ -144,6 +146,7 @@ impl TerminalHost {
             })?;
         Ok(Self {
             terminal,
+            child_pid,
             commands: command_sender,
             events: event_receiver,
             join: Some(join),
@@ -154,6 +157,12 @@ impl TerminalHost {
     #[must_use]
     pub fn terminal_id(&self) -> TerminalId {
         self.terminal
+    }
+
+    /// Returns the hosted PTY child process identifier when the platform exposes it.
+    #[must_use]
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
     }
 
     /// Returns a cloneable sender for low-level command dispatch.

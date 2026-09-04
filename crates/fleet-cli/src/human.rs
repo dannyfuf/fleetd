@@ -4,7 +4,9 @@ use fleet_core::{
     inspection::WorktreeInspection,
     sessions::{SessionState, WorktreeStatus},
 };
-use fleet_proto::response::{DoctorCheck, PruneResult, SleepResult, WorktreeDeleteResult};
+use fleet_proto::response::{
+    DoctorCheck, DoctorStatus, PruneResult, SleepResult, WorktreeDeleteResult,
+};
 
 /// Formats the compact list summary.
 #[must_use]
@@ -127,7 +129,11 @@ pub fn doctor(checks: &[DoctorCheck]) -> String {
         format!(
             "{} {} {}",
             check.check,
-            if check.ok { "ok" } else { "fail" },
+            match check.status {
+                DoctorStatus::Ok => "ok",
+                DoctorStatus::Warn => "warn",
+                DoctorStatus::Fail => "fail",
+            },
             check.detail
         )
     }));

@@ -18,6 +18,8 @@ pub enum JobKind {
     CreateWorktree,
     /// Delete a worktree.
     DeleteWorktree,
+    /// Delete a repository and its descendants.
+    DeleteRepo,
     /// Inspect and prune worktrees.
     Prune,
     /// Inspect worktrees.

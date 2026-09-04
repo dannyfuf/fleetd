@@ -50,8 +50,8 @@ use fleet_proto::{
     terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
 };
 use fleet_ui_kit::{
-    ActiveTheme, ExitStrip, Icon, IconSize, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill,
-    StatusKind, TerminalGrid, TerminalTabStrip, Text, Tone,
+    ActiveTheme, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill, StatusKind,
+    TerminalGrid, TerminalTabStrip, Text,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, Pixels,
@@ -61,10 +61,11 @@ use gpui::{
 use crate::{
     actions::{fleet, prefix, scroll},
     bridge::Bridge,
+    dialogs::{self, Dialogs},
     state::{AppState, Overlay, Screen, TerminalMode},
     terminal_element::{
-        GRID_PADDING, cell_size, grid_cursor, grid_rows, grid_size, line_selection, measure,
-        selection_text, zoom_bar,
+        GRID_PADDING, cell_size, grid_cursor, grid_rows, grid_size, line_selection, selection_text,
+        zoom_bar,
     },
     views::{workspace_header::WorkspaceHeader, workspace_tabs},
 };
@@ -74,9 +75,6 @@ use crate::{
 /// The first measured frame replaces it, so this is only ever the argument of the very first
 /// `AttachTerminal`; 80 × 24 is the size every program already copes with.
 const FALLBACK_GRID: (u16, u16) = (80, 24);
-
-/// How long a `ctrl-s x` on a keep-alive terminal stays armed before it forgets the request.
-const CLOSE_CONFIRM_DWELL: Duration = Duration::from_secs(6);
 
 /// The six prefix keys the delayed hint strip lists (§3.6).
 fn prefix_hints() -> KeyHintRow {
@@ -107,16 +105,10 @@ struct Local {
     anchor: Option<u16>,
     /// The scroll-mode caret row, which `j` / `k` move and a selection extends to.
     caret: u16,
-    /// The in-progress `ctrl-s ,` rename, and the terminal it renames.
-    rename: Option<(TerminalId, String)>,
-    /// A `ctrl-s x` waiting for its confirmation, and when it was armed.
-    close_armed: Option<(TerminalId, Instant)>,
     /// Whether the 400 ms prefix-hint timer is already running for this prefix.
     hint_armed: bool,
     /// Whether that timer has fired.
     hint_visible: bool,
-    /// The pull request of a branch, once looked up. A `None` value means "no pull request".
-    prs: HashMap<String, Option<(u64, PrBadgeState)>>,
     /// Repositories whose pull requests have already been asked for.
     pr_requested: Vec<RepoId>,
 }
@@ -168,10 +160,18 @@ impl WorkspaceScreen {
         self.lookup_pr(&model, bridge, state, cx);
 
         let focused = focus.is_focused(window);
-        let header = (!model.zoomed).then(|| self.header(&model, cx));
+        let pr = model.repo.as_ref().and_then(|repo| {
+            model.branch_key.as_ref().and_then(|branch| {
+                state
+                    .read(cx)
+                    .pr_badges
+                    .get(&(repo.clone(), branch.clone()))
+                    .copied()
+            })
+        });
+        let header = (!model.zoomed).then(|| self.header(&model, pr, cx));
         let tabs = (!model.zoomed).then(|| self.tab_strip(&model, &session, cx));
-        let body = self.terminal_area(&model, bridge, cell, state, focused, cx);
-        let confirm = self.close_confirm_strip(&model, cx);
+        let body = self.terminal_area(&model, bridge, state, focused, cx);
         let theme = cx.theme().clone();
 
         let mut root = div()
@@ -187,8 +187,7 @@ impl WorkspaceScreen {
             .children(header)
             .children(tabs)
             .child(body)
-            .children(model.exit_code.map(ExitStrip::new))
-            .children(confirm);
+            .children(model.exit_code.map(ExitStrip::new));
 
         self.with_keys(root, bridge, state).into_any_element()
     }
@@ -218,8 +217,6 @@ impl WorkspaceScreen {
             }
             local.pending.clear();
             local.anchor = None;
-            local.rename = None;
-            local.close_armed = None;
             if let Some(terminal) = model.terminal {
                 let (cols, rows) = local.size_for(terminal, cell);
                 local.sizes.insert(terminal, (cols, rows));
@@ -230,14 +227,6 @@ impl WorkspaceScreen {
                 });
             }
             local.attached = model.terminal;
-        }
-
-        // A `ctrl-s x` that was never confirmed forgets itself rather than staying armed behind
-        // the user's back.
-        if let Some((_, armed_at)) = local.close_armed
-            && Instant::now().saturating_duration_since(armed_at) >= CLOSE_CONFIRM_DWELL
-        {
-            local.close_armed = None;
         }
 
         // §3.6 "Attaching": keys typed before the first frame are flushed in order once the
@@ -290,17 +279,19 @@ impl WorkspaceScreen {
         .detach();
     }
 
-    /// Asks the daemon once per repository which pull request the open branch belongs to.
-    ///
-    /// TODO(integration): the snapshot carries no branch → pull-request association, so the
-    /// header would otherwise have no badge at all. See the integration request in the report.
+    /// Fills the shared branch → pull-request cache once per repository when Hub has not.
     fn lookup_pr(&self, model: &Model, bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
         let (Some(repo), Some(branch)) = (model.repo.clone(), model.branch_key.clone()) else {
             return;
         };
         {
             let local = self.local.borrow();
-            if local.prs.contains_key(&branch) || local.pr_requested.contains(&repo) {
+            if state
+                .read(cx)
+                .pr_badges
+                .contains_key(&(repo.clone(), branch.clone()))
+                || local.pr_requested.contains(&repo)
+            {
                 return;
             }
         }
@@ -311,37 +302,32 @@ impl WorkspaceScreen {
             tab: PrTab::Mine,
             force: false,
         });
-        let local = Rc::clone(&self.local);
         let state = state.clone();
         cx.spawn(async move |cx| {
             let Ok(Ok(ResponseBody::PullRequests(slices))) = reply.recv().await else {
                 return;
             };
-            {
-                let mut local = local.borrow_mut();
+            state.update(cx, |app, cx| {
                 for slice in &slices {
                     for pr in &slice.prs {
-                        let badge = badge_state(pr.is_draft, pr.checks, pr.review_decision);
-                        local
-                            .prs
-                            .insert(pr.head_ref_name.clone(), Some((pr.number, badge)));
+                        app.pr_badges.insert(
+                            (pr.repo_id.clone(), pr.head_ref_name.clone()),
+                            (
+                                pr.number,
+                                badge_state(pr.is_draft, pr.checks, pr.review_decision),
+                            ),
+                        );
                     }
                 }
-                local.prs.entry(branch).or_insert(None);
-            }
-            state.update(cx, |_, cx| cx.notify());
+                cx.notify();
+            });
         })
         .detach();
     }
 
     // ------------------------------------------------------------------ pieces
 
-    fn header(&self, model: &Model, cx: &mut App) -> AnyElement {
-        let pr = model
-            .branch_key
-            .as_ref()
-            .and_then(|branch| self.local.borrow().prs.get(branch).copied())
-            .flatten();
+    fn header(&self, model: &Model, pr: Option<(u64, PrBadgeState)>, cx: &mut App) -> AnyElement {
         let mut header = WorkspaceHeader::new(model.title.clone())
             .status(model.status)
             .keep_alive(model.keep_alive.iter().cloned())
@@ -361,16 +347,7 @@ impl WorkspaceScreen {
     }
 
     fn tab_strip(&self, model: &Model, session: &Session, cx: &mut App) -> AnyElement {
-        let renaming = self.local.borrow().rename.clone();
-        let mut tabs = workspace_tabs::tabs(session, model.terminal);
-        if let Some((terminal, draft)) = &renaming
-            && let Some(position) = workspace_tabs::position_of(session, *terminal)
-            && let Some(tab) = tabs.get_mut(position)
-        {
-            // The caret block is the only affordance a rename needs: the strip already says
-            // which tab it is and `Esc` / `Enter` are the only two keys that end it.
-            tab.name = SharedString::from(format!("{draft}\u{2588}"));
-        }
+        let tabs = workspace_tabs::tabs(session, model.terminal);
         let active = model
             .terminal
             .and_then(|terminal| workspace_tabs::position_of(session, terminal))
@@ -386,7 +363,6 @@ impl WorkspaceScreen {
         &self,
         model: &Model,
         bridge: &Bridge,
-        cell: Size<Pixels>,
         state: &Entity<AppState>,
         focused: bool,
         cx: &App,
@@ -404,11 +380,32 @@ impl WorkspaceScreen {
 
         let grid: AnyElement = match mirror.filter(|grid| grid.primed) {
             Some(grid) => {
+                let resize_local = Rc::clone(&self.local);
+                let resize_bridge = bridge.clone();
+                let resize_terminal = model.terminal;
                 let mut painted = TerminalGrid::new(grid_rows(grid, theme))
+                    .id("workspace-terminal-grid")
                     .cursor(grid_cursor(grid, focused))
                     .focused(focused)
                     .padding(px(GRID_PADDING))
-                    .scrollback(grid.viewport.offset, grid.viewport.scrollback_len);
+                    .scrollback(grid.viewport.offset, grid.viewport.scrollback_len)
+                    .frame_size(usize::from(grid.cols), usize::from(grid.rows))
+                    .on_resize(move |cols, rows, _window, _cx| {
+                        let Some(terminal) = resize_terminal else {
+                            return;
+                        };
+                        let cols = u16::try_from(cols).unwrap_or(u16::MAX);
+                        let rows = u16::try_from(rows).unwrap_or(u16::MAX);
+                        let mut local = resize_local.borrow_mut();
+                        if local.sizes.get(&terminal) != Some(&(cols, rows)) {
+                            local.sizes.insert(terminal, (cols, rows));
+                            resize_bridge.send(RequestBody::ResizeTerminal {
+                                terminal,
+                                cols,
+                                rows,
+                            });
+                        }
+                    });
                 if let Some(selection) = selection {
                     painted = painted.selection(selection);
                 }
@@ -425,26 +422,6 @@ impl WorkspaceScreen {
                 .into_any_element(),
         };
 
-        let local = Rc::clone(&self.local);
-        let bridge = bridge.clone();
-        let terminal = model.terminal;
-        let measurer = measure(move |size| {
-            let mut local = local.borrow_mut();
-            local.area = size;
-            let Some(terminal) = terminal else {
-                return;
-            };
-            let (cols, rows) = grid_size(size, cell);
-            if local.sizes.get(&terminal) != Some(&(cols, rows)) {
-                local.sizes.insert(terminal, (cols, rows));
-                bridge.send(RequestBody::ResizeTerminal {
-                    terminal,
-                    cols,
-                    rows,
-                });
-            }
-        });
-
         div()
             .relative()
             .flex_1()
@@ -460,55 +437,7 @@ impl WorkspaceScreen {
                 PrefixHint::new(model.mode == TerminalMode::Prefix && hint_visible)
                     .hints(prefix_hints()),
             )
-            .child(measurer)
             .into_any_element()
-    }
-
-    /// The inline confirmation `ctrl-s x` raises over a terminal that keeps the session awake.
-    ///
-    /// TODO(integration): §3.8.3 wants this in the shared Confirm dialog, but `Dialogs::Confirm`
-    /// carries no payload and its outcome is not routed back to the requester. Until that lands
-    /// the Workspace confirms in its own key contract, with `^s`-prefixed affordances per [D-8].
-    fn close_confirm_strip(&self, model: &Model, cx: &mut App) -> Option<AnyElement> {
-        let armed = self.local.borrow().close_armed?;
-        if Some(armed.0) != model.terminal {
-            return None;
-        }
-        let theme = cx.theme();
-        let labels: Vec<String> = model
-            .keep_alive
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect();
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap(theme.space.sm)
-                .h(theme.metrics.strip_h)
-                .w_full()
-                .flex_none()
-                .px(theme.space.md)
-                .bg(Tone::Danger.fill(theme))
-                .border_t(px(1.0))
-                .border_color(theme.colors.border)
-                .child(
-                    Icon::TriangleAlert
-                        .el()
-                        .size(IconSize::Small)
-                        .color(theme.colors.danger),
-                )
-                .child(
-                    Text::ui(format!("{} keeps this session awake", labels.join(", ")))
-                        .tone(Tone::Danger),
-                )
-                .child(
-                    KeyHintRow::new()
-                        .key("^s x", "close anyway")
-                        .key("Esc", "cancel"),
-                )
-                .into_any_element(),
-        )
     }
 
     // ------------------------------------------------------------------ keys and actions
@@ -546,16 +475,6 @@ impl WorkspaceScreen {
             // observer is what makes the prefix one-shot, so swallowing the event would leave
             // an unbound `ctrl-s d` stuck in Prefix mode forever.
             if mode != TerminalMode::Terminal {
-                return;
-            }
-            if rename_key(&local, &bridge, &state, event, cx) {
-                cx.stop_propagation();
-                return;
-            }
-            if event.keystroke.key == "escape" && local.borrow().close_armed.is_some() {
-                local.borrow_mut().close_armed = None;
-                state.update(cx, |_, cx| cx.notify());
-                cx.stop_propagation();
                 return;
             }
             let Some(terminal) = terminal else {
@@ -636,21 +555,41 @@ impl WorkspaceScreen {
             })
         };
         let root = {
-            let (local, bridge, state) = self.handles(bridge, state);
+            let (_, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::CloseTerminal, _window, cx| {
                 let Some(terminal) = active_terminal_record(&state, cx) else {
                     return;
                 };
-                let armed = local.borrow().close_armed.map(|(id, _)| id);
-                if terminal.keep_alive.is_empty() || armed == Some(terminal.id) {
-                    local.borrow_mut().close_armed = None;
+                if terminal.keep_alive.is_empty() {
                     bridge.send(RequestBody::CloseTerminal {
                         terminal: terminal.id,
                     });
                 } else {
-                    local.borrow_mut().close_armed = Some((terminal.id, Instant::now()));
+                    let index = state
+                        .read(cx)
+                        .active_session()
+                        .and_then(|session| {
+                            session
+                                .terminals
+                                .iter()
+                                .position(|candidate| candidate.id == terminal.id)
+                        })
+                        .map_or(1, |index| index + 1);
+                    dialogs::request_confirm(
+                        cx,
+                        dialogs::ConfirmRequest::CloseTerminal {
+                            terminal: terminal.id,
+                            index,
+                            name: terminal.name,
+                            running: terminal.foreground_command,
+                        },
+                    );
+                    state.update(cx, |app, cx| {
+                        app.leave_prefix();
+                        app.open_overlay(Overlay::Dialog(Dialogs::Confirm));
+                        cx.notify();
+                    });
                 }
-                state.update(cx, |_, cx| cx.notify());
             })
         };
         let root = {
@@ -662,12 +601,13 @@ impl WorkspaceScreen {
             })
         };
         let root = {
-            let (local, _, state) = self.handles(bridge, state);
+            let (_, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::RenameTerminal, _window, cx| {
-                if let Some(terminal) = active_terminal_record(&state, cx) {
-                    local.borrow_mut().rename = Some((terminal.id, terminal.name.clone()));
-                    state.update(cx, |_, cx| cx.notify());
-                }
+                state.update(cx, |app, cx| {
+                    app.leave_prefix();
+                    app.open_overlay(Overlay::Dialog(Dialogs::RenameTerminal));
+                    cx.notify();
+                });
             })
         };
         let root = {
@@ -725,10 +665,9 @@ impl WorkspaceScreen {
         let root = {
             let (_, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::SessionSwitcher, _window, cx| {
-                // TODO(integration): the palette has no seed field, so `ctrl-s W` opens it
-                // unfiltered instead of pre-filtered to `GO`/sessions (KEYMAP A4).
                 state.update(cx, |app, cx| {
                     app.leave_prefix();
+                    app.palette_seed = Some("sessions".to_owned());
                     app.open_overlay(Overlay::Palette);
                     cx.notify();
                 });
@@ -1116,53 +1055,6 @@ fn open_agent(
         cx.update(|cx| open_session(&state, session.id, cx));
     })
     .detach();
-}
-
-/// Handles one key of the inline `ctrl-s ,` rename, returning whether it was consumed.
-///
-/// The rename lives in the Workspace's own key contract rather than in a dialog: `Enter` commits,
-/// `Esc` abandons and every other printable key edits the draft the tab strip is showing. `ctrl-s`
-/// still opens the prefix while a rename is in flight — it is the Workspace's one escape key and
-/// stays reachable — so a prefix key typed mid-rename acts and the draft is abandoned by `Esc`.
-///
-/// TODO(integration): a `Dialogs::RenameTerminal` variant would let this reuse the shared dialog
-/// frame of §3.8; the enum is frozen, so the request is filed instead.
-fn rename_key(
-    local: &Rc<RefCell<Local>>,
-    bridge: &Bridge,
-    state: &Entity<AppState>,
-    event: &KeyDownEvent,
-    cx: &mut App,
-) -> bool {
-    let Some((terminal, mut draft)) = local.borrow().rename.clone() else {
-        return false;
-    };
-    match event.keystroke.key.as_str() {
-        "escape" => local.borrow_mut().rename = None,
-        "enter" => {
-            local.borrow_mut().rename = None;
-            let name = draft.trim().to_owned();
-            if !name.is_empty() {
-                bridge.send(RequestBody::RenameTerminal { terminal, name });
-            }
-        }
-        "backspace" => {
-            draft.pop();
-            local.borrow_mut().rename = Some((terminal, draft));
-        }
-        _ => {
-            let Some(text) = event.keystroke.key_char.as_deref() else {
-                return true;
-            };
-            if text.chars().any(char::is_control) {
-                return true;
-            }
-            draft.push_str(text);
-            local.borrow_mut().rename = Some((terminal, draft));
-        }
-    }
-    state.update(cx, |_, cx| cx.notify());
-    true
 }
 
 /// Turns a gpui keystroke into the daemon's semantic key event.

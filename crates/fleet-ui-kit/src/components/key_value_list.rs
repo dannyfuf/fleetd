@@ -3,10 +3,10 @@
 //! This is the shape of every detail-panel block (§3.4) and of the PR detail table (§3.5).
 //! It exists so a view never has to remember the label column width twice.
 
-use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*};
 
 use crate::{
-    components::{FactRow, FactValue, SectionHeader, fact_row::LABEL_WIDTH},
+    components::{FactRow, FactValue, SectionHeader},
     theme::ActiveTheme,
 };
 
@@ -16,7 +16,7 @@ pub struct KeyValueList {
     title: Option<SharedString>,
     trailing: Option<AnyElement>,
     rows: Vec<(SharedString, FactValue, bool)>,
-    label_width: Pixels,
+    label_width: Option<Pixels>,
     refreshing: bool,
 }
 
@@ -27,7 +27,7 @@ impl KeyValueList {
             title: None,
             trailing: None,
             rows: Vec::new(),
-            label_width: px(LABEL_WIDTH),
+            label_width: None,
             refreshing: false,
         }
     }
@@ -64,7 +64,7 @@ impl KeyValueList {
 
     /// Width of the label column.
     pub fn label_width(mut self, width: Pixels) -> Self {
-        self.label_width = width;
+        self.label_width = Some(width);
         self
     }
 
@@ -84,7 +84,7 @@ impl Default for KeyValueList {
 impl RenderOnce for KeyValueList {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let label_width = self.label_width;
+        let label_width = self.label_width.unwrap_or(theme.metrics.fact_label_w);
         let refreshing = self.refreshing;
         let title = self.title;
         let trailing = self.trailing;

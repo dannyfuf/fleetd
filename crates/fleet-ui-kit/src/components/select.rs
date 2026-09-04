@@ -12,7 +12,7 @@
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use crate::{
-    components::{FocusRing, KeyHint, text_field::FIELD_STATUS_H},
+    components::{FocusRing, KeyHint},
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -196,7 +196,7 @@ impl RenderOnce for Select {
                 div()
                     .flex()
                     .items_center()
-                    .h(FIELD_STATUS_H)
+                    .h(theme.metrics.field_status_h)
                     .child(Text::hint(message).tone(Tone::Danger).ellipsize())
             }))
     }

@@ -8,9 +8,6 @@ use gpui::{App, Pixels, Window, div, prelude::*, relative};
 
 use crate::theme::ActiveTheme;
 
-/// The opacity every placeholder bar renders at (§6.3).
-pub const SKELETON_OPACITY: f32 = 0.3;
-
 /// The four widths the bars cycle through, as a fraction of the row, so a block of them reads
 /// as a list of rows rather than as a progress bar.
 const BAR_WIDTHS: [f32; 4] = [0.55, 0.65, 0.75, 0.85];
@@ -58,7 +55,7 @@ impl RenderOnce for SkeletonRows {
                             .w(relative(width))
                             .rounded(radius)
                             .bg(color)
-                            .opacity(SKELETON_OPACITY),
+                            .opacity(theme.metrics.skeleton_opacity),
                     )
                 })
                 .collect::<Vec<_>>(),

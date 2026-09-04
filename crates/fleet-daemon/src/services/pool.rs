@@ -22,7 +22,11 @@ use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::{files::Files, git::Git},
+    adapters::{
+        files::Files,
+        git::Git,
+        shell::{Shell, ShellCommand, ShellResult},
+    },
     jobs::{JobCtx, JobManager},
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -37,6 +41,7 @@ pub struct Pool {
     jobs: Arc<JobManager>,
     git: Arc<dyn Git>,
     files: Arc<dyn Files>,
+    shell: Option<Arc<dyn Shell>>,
 }
 
 impl Pool {
@@ -67,7 +72,15 @@ impl Pool {
             jobs,
             git,
             files,
+            shell: None,
         }
+    }
+
+    /// Uses the daemon's shared command adapter for prepare hooks.
+    #[must_use]
+    pub fn with_shell(mut self, shell: Arc<dyn Shell>) -> Self {
+        self.shell = Some(shell);
+        self
     }
 
     /// Ensures configured slots exist. `force` refreshes every existing slot first.
@@ -173,6 +186,7 @@ impl Pool {
         force: bool,
         completion: Option<oneshot::Sender<DaemonResult<()>>>,
     ) {
+        let completion = completion.map(|sender| Arc::new(Mutex::new(Some(sender))));
         let service = self.clone();
         let target = format!("{}:{}", repo, Uuid::new_v4());
         let title = if force {
@@ -192,12 +206,17 @@ impl Pool {
             true,
             move |context| async move {
                 let result = service.prepare_job(&repo, force, &context).await;
-                if let Some(completion) = completion {
+                if let Some(completion) = &completion
+                    && let Some(sender) = completion
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                {
                     let copied = match &result {
                         Ok(()) => Ok(()),
                         Err(error) => Err(clone_daemon_error(error)),
                     };
-                    let _ignored = completion.send(copied);
+                    let _ignored = sender.send(copied);
                 }
                 result
             },
@@ -441,15 +460,15 @@ impl Pool {
         for command in &hooks.prepare {
             check_cancelled(context)?;
             context.progress(format!("prepare: {command}"))?;
-            match run_shell_hook(cwd, command, context).await {
-                Ok(output) if output.status.success() => {
+            match run_shell_hook(self.shell.as_deref(), cwd, command, context).await {
+                Ok(output) if output.success() => {
                     record_hook_output(context, &output)?;
                 }
                 Ok(output) => {
                     record_hook_output(context, &output)?;
                     context.progress(format!(
                         "warning: prepare hook exited {}: {command}",
-                        output.status.code().unwrap_or(-1)
+                        output.status
                     ))?;
                 }
                 Err(DaemonError::Cancelled) => return Err(DaemonError::Cancelled),
@@ -701,10 +720,19 @@ fn check_cancelled(context: &JobCtx) -> DaemonResult<()> {
 }
 
 async fn run_shell_hook(
+    shell: Option<&dyn Shell>,
     cwd: &Path,
     command: &str,
     context: &JobCtx,
-) -> DaemonResult<std::process::Output> {
+) -> DaemonResult<ShellResult> {
+    if let Some(shell) = shell {
+        check_cancelled(context)?;
+        let output = shell
+            .run(ShellCommand::new("sh").args(["-c", command]).cwd(cwd))
+            .await?;
+        check_cancelled(context)?;
+        return Ok(output);
+    }
     let mut process = tokio::process::Command::new("sh");
     process
         .arg("-c")
@@ -716,15 +744,21 @@ async fn run_shell_hook(
     let output = process.output();
     tokio::select! {
         () = context.cancel.cancelled() => Err(DaemonError::Cancelled),
-        output = output => output.map_err(|error| DaemonError::Shell(format!("sh -c `{command}`: {error}"))),
+        output = output => output
+            .map(|output| ShellResult {
+                status: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
+            .map_err(|error| DaemonError::Shell(format!("sh -c `{command}`: {error}"))),
     }
 }
 
-fn record_hook_output(context: &JobCtx, output: &std::process::Output) -> DaemonResult<()> {
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+fn record_hook_output(context: &JobCtx, output: &ShellResult) -> DaemonResult<()> {
+    for line in output.stdout.lines() {
         context.progress(line)?;
     }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
+    for line in output.stderr.lines() {
         context.progress(line)?;
     }
     Ok(())

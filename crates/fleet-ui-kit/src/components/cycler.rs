@@ -26,6 +26,7 @@ pub struct Cycler {
     has_next: bool,
     focused: bool,
     disabled: bool,
+    off_grid: bool,
     label_width: Option<gpui::Pixels>,
 }
 
@@ -39,6 +40,7 @@ impl Cycler {
             has_next: true,
             focused: false,
             disabled: false,
+            off_grid: false,
             label_width: None,
         }
     }
@@ -84,9 +86,17 @@ impl Cycler {
         self
     }
 
+    /// Mark a persisted value that is outside the configured steps.
+    ///
+    /// Both arrows remain available so the next move returns to a known step.
+    pub fn off_grid(mut self, off_grid: bool) -> Self {
+        self.off_grid = off_grid;
+        self
+    }
+
     /// Whether the control has anything to cycle. A set with one member renders nothing.
     pub fn is_visible(&self) -> bool {
-        self.has_prev || self.has_next
+        self.off_grid || self.has_prev || self.has_next
     }
 }
 
@@ -136,9 +146,9 @@ impl RenderOnce for Cycler {
                     .flex()
                     .items_center()
                     .gap(theme.space.sm)
-                    .child(arrow(self.has_prev, Icon::ChevronLeft))
+                    .child(arrow(self.off_grid || self.has_prev, Icon::ChevronLeft))
                     .child(Text::ui(self.value).tone(value_tone))
-                    .child(arrow(self.has_next, Icon::ChevronRight)),
+                    .child(arrow(self.off_grid || self.has_next, Icon::ChevronRight)),
             );
 
         div()

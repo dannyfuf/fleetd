@@ -127,7 +127,12 @@ mod tests {
 
     #[test]
     fn an_acknowledged_failure_releases_the_slot() {
-        let jobs = vec![failed("job-a", "gh: HTTP 502", "2026-09-04T12:00:00Z", true)];
+        let jobs = vec![failed(
+            "job-a",
+            "gh: HTTP 502",
+            "2026-09-04T12:00:00Z",
+            true,
+        )];
         let seen = vec![jobs[0].id.clone()];
         assert_eq!(sticky_error_for(&jobs, &seen), None);
     }

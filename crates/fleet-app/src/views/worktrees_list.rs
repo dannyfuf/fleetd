@@ -308,6 +308,8 @@ pub fn matches(row: &WorktreeRow, query: &str) -> bool {
 
 /// Everything the list needs to draw itself.
 pub struct ListProps {
+    /// A live filter editor that replaces the ordinary pane header.
+    pub header_override: Option<AnyElement>,
     /// The rows, already sorted and filtered.
     pub rows: Vec<WorktreeRow>,
     /// Cursor index into `rows`.
@@ -337,6 +339,7 @@ pub struct ListProps {
 pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement {
     let ListProps {
         rows,
+        header_override,
         cursor,
         focused,
         pane_ch,
@@ -368,16 +371,14 @@ pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement 
     }
 
     let empty = if loading {
-        EmptyState::new("Loading\u{2026}").action("j / k  browse")
+        EmptyState::new("Loading\u{2026}")
+            .action("j / k  browse")
+            .into_any_element()
     } else {
         match (filter.clone(), scope_is_all) {
-            (Some(query), _) => {
-                EmptyState::new(format!("Nothing matches \"{query}\".")).action("esc  clear")
-            }
-            (None, true) => EmptyState::new("No worktrees yet.").action("n  create one"),
-            (None, false) => {
-                EmptyState::new(format!("No worktrees for {scope} yet.")).action("n  create one")
-            }
+            (Some(query), _) => crate::views::first_run::empty_state("filter", Some(&query)),
+            (None, true) => crate::views::first_run::empty_state("worktrees", None),
+            (None, false) => crate::views::first_run::empty_state("worktrees-repo", Some(&scope)),
         }
     };
 
@@ -397,6 +398,7 @@ pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement 
     .track_scroll(scroll)
     .empty(empty);
 
+    let header = header_override.unwrap_or_else(|| header.into_any_element());
     Pane::new()
         .border(PaneBorder::None)
         .focused(focused)

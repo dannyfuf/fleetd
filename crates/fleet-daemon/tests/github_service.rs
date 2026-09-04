@@ -30,7 +30,11 @@ async fn service(
         [home.join("repos"), home.join("worktrees")],
     ));
     let config = Arc::new(ConfigStore::new(&home, Arc::clone(&files)));
-    let state = Arc::new(StateStore::new(&home, files, Arc::new(SystemClock)));
+    let state = Arc::new(StateStore::new(
+        &home,
+        Arc::clone(&files),
+        Arc::new(SystemClock),
+    ));
     let context = ContextId::try_from("platform").unwrap();
     let repo = RepoId::try_from("acme/api").unwrap();
     let context_for_state = context.clone();
@@ -66,7 +70,7 @@ async fn service(
     let jobs = Arc::new(JobManager::new(&home));
     let adapter: Arc<dyn GithubAdapter> = Arc::new(FakeGithub::new(shell));
     (
-        Github::new(config, Arc::clone(&state), jobs, adapter),
+        Github::new(config, Arc::clone(&state), jobs, adapter, files),
         state,
         repo,
         context,

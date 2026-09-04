@@ -63,6 +63,7 @@ macro_rules! lucide_icons {
 }
 
 lucide_icons! {
+    Activity => "activity",
     ArrowRightLeft => "arrow-right-left",
     Bot => "bot",
     Boxes => "boxes",
@@ -80,6 +81,7 @@ lucide_icons! {
     CircleX => "circle-x",
     Circle => "circle",
     ClipboardCheck => "clipboard-check",
+    CopyPlus => "copy-plus",
     Clock => "clock",
     CloudDownload => "cloud-download",
     CloudOff => "cloud-off",
@@ -104,6 +106,7 @@ lucide_icons! {
     Globe => "globe",
     Hourglass => "hourglass",
     Info => "info",
+    Import => "import",
     LoaderCircle => "loader-circle",
     Lock => "lock",
     Maximize2 => "maximize-2",
@@ -112,15 +115,18 @@ lucide_icons! {
     Moon => "moon",
     Plus => "plus",
     Power => "power",
+    RefreshCw => "refresh-cw",
     Sailboat => "sailboat",
     Scissors => "scissors",
     Search => "search",
+    SearchCheck => "search-check",
     Server => "server",
     Settings2 => "settings-2",
     Sparkles => "sparkles",
     SquareTerminal => "square-terminal",
     Terminal => "terminal",
     Trash => "trash",
+    Trash2 => "trash-2",
     TriangleAlert => "triangle-alert",
     Unplug => "unplug",
     X => "x",
@@ -243,11 +249,9 @@ impl RenderOnce for IconElement {
                 .id
                 .unwrap_or_else(|| ElementId::from(SharedString::new_static("kit-spinner")));
             let duration = Duration::from_millis(theme.motion.spinner);
-            base.with_animation(
-                id,
-                gpui::Animation::new(duration).repeat(),
-                |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
-            )
+            base.with_animation(id, gpui::Animation::new(duration).repeat(), |svg, delta| {
+                svg.with_transformation(Transformation::rotate(percentage(delta)))
+            })
             .into_any_element()
         } else {
             base.into_any_element()

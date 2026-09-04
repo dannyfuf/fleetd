@@ -17,14 +17,11 @@ use gpui::{AnyElement, App, Window, div, prelude::*};
 
 use crate::theme::ActiveTheme;
 
-/// The §3.12 dim factor for a veiled live surface.
-pub const VEIL_OPACITY: f32 = 0.55;
-
 /// A scrim over a live surface.
 #[derive(IntoElement)]
 pub struct Veil {
     active: bool,
-    opacity: f32,
+    opacity: Option<f32>,
     child: Option<AnyElement>,
 }
 
@@ -33,14 +30,14 @@ impl Veil {
     pub fn new(active: bool) -> Self {
         Self {
             active,
-            opacity: VEIL_OPACITY,
+            opacity: None,
             child: None,
         }
     }
 
     /// Override the dim factor.
     pub fn opacity(mut self, opacity: f32) -> Self {
-        self.opacity = opacity.clamp(0.0, 1.0);
+        self.opacity = Some(opacity.clamp(0.0, 1.0));
         self
     }
 
@@ -59,7 +56,9 @@ impl Veil {
 
 impl RenderOnce for Veil {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let ground = cx.theme().colors.bg;
+        let theme = cx.theme();
+        let ground = theme.colors.bg;
+        let opacity = self.opacity.unwrap_or(theme.metrics.veil_opacity);
         div()
             .relative()
             .size_full()
@@ -73,7 +72,7 @@ impl RenderOnce for Veil {
                     div()
                         .absolute()
                         .inset_0()
-                        .bg(ground.opacity(self.opacity))
+                        .bg(ground.opacity(opacity))
                         .occlude(),
                 )
             })

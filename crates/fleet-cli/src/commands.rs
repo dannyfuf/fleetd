@@ -218,7 +218,13 @@ async fn ensure_repo(
     };
 
     let _job = client
-        .clone_repo(repo_id.owner(), repo_id.name(), url, context)
+        .clone_repo(
+            repo_id.owner(),
+            repo_id.name(),
+            url,
+            context,
+            arguments.default_branch.clone(),
+        )
         .await?;
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -393,6 +399,9 @@ async fn resolve_and_sleep(
             .map_err(|_| validation("FLEET_SESSION is not valid UTF-8"))?;
         return client.sleep_session(parse_id::<SessionId>(&session)?).await;
     }
+    if let Some(session) = client.current_session().await? {
+        return client.sleep_session(session).await;
+    }
     let sessions = client.list_sessions().await?;
     match sessions.as_slice() {
         [session] => client.sleep_session(session.id.clone()).await,
@@ -424,7 +433,9 @@ async fn agent(
 
 async fn doctor(client: &Client) -> Result<CommandOutput, ProtoError> {
     let checks = client.doctor().await?;
-    let ok = checks.iter().all(|check| check.ok);
+    let ok = checks
+        .iter()
+        .all(|check| check.status != fleet_proto::response::DoctorStatus::Fail);
     Ok(CommandOutput::with_exit_code(
         human::doctor(&checks),
         if ok { 0 } else { FAILURE },

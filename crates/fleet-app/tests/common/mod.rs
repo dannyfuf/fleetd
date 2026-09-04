@@ -101,8 +101,7 @@ impl Daemon {
             assert!(
                 std::time::Instant::now() < deadline,
                 "fleetd did not become ready within {READY_TIMEOUT:?}; log: {}",
-                fs::read_to_string(self.home.join("logs").join("fleetd.out"))
-                    .unwrap_or_default()
+                fs::read_to_string(self.home.join("logs").join("fleetd.out")).unwrap_or_default()
             );
             tokio::time::sleep(PROBE).await;
         }

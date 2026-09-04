@@ -40,12 +40,14 @@ pub mod worktrees;
 use contexts::Contexts;
 use doctor::Doctor;
 use github::Github;
+use import::{Import, ImportNotifier};
 use inspect::Inspect;
 use pool::Pool;
 use prune::Prune;
 use repos::Repos;
 use sessions::Sessions;
 use sleep::Sleep;
+use update::Update;
 use worktrees::Worktrees;
 
 /// Fully wired facade used by socket connection actors.
@@ -79,10 +81,28 @@ pub struct Services {
     pub prune: Prune,
     /// Environment diagnostics and updater service.
     pub doctor: Doctor,
+    /// Compatible swarm-state import service.
+    pub import: Import,
+    /// Fleet source-checkout update service.
+    pub update: Update,
     home: PathBuf,
     started_at: String,
     statuses: Arc<RwLock<Option<Vec<WorktreeStatus>>>>,
     pool_refreshed_at: Arc<RwLock<BTreeMap<RepoId, String>>>,
+    /// Daemon-wide event bus shared by every service integration.
+    pub events: BroadcastBus,
+}
+
+struct BusImportNotifier {
+    events: BroadcastBus,
+}
+
+#[async_trait::async_trait]
+impl ImportNotifier for BusImportNotifier {
+    async fn snapshot_changed(&self) -> DaemonResult<()> {
+        self.events.request_snapshot_current();
+        Ok(())
+    }
 }
 
 /// Owned periodic daemon tasks, joined during graceful shutdown.
@@ -122,6 +142,46 @@ impl Services {
         jobs: Arc<JobManager>,
         adapters: Adapters,
     ) -> Self {
+        Self::build(
+            home.into(),
+            config,
+            state,
+            jobs,
+            adapters,
+            BroadcastBus::default(),
+        )
+    }
+
+    /// Composes services around the daemon-wide event bus and attaches snapshot assembly.
+    #[must_use]
+    pub fn new_with_events(
+        home: impl Into<PathBuf>,
+        config: Arc<ConfigStore>,
+        state: Arc<StateStore>,
+        jobs: Arc<JobManager>,
+        adapters: Adapters,
+        events: BroadcastBus,
+    ) -> Arc<Self> {
+        let services = Arc::new(Self::build(
+            home.into(),
+            config,
+            state,
+            jobs,
+            adapters,
+            events.clone(),
+        ));
+        events.attach_services(Arc::downgrade(&services));
+        services
+    }
+
+    fn build(
+        home: PathBuf,
+        config: Arc<ConfigStore>,
+        state: Arc<StateStore>,
+        jobs: Arc<JobManager>,
+        adapters: Adapters,
+        events: BroadcastBus,
+    ) -> Self {
         let repos = Repos::new(
             Arc::clone(&config),
             Arc::clone(&state),
@@ -129,28 +189,34 @@ impl Services {
             Arc::clone(&adapters.git),
             Arc::clone(&adapters.github),
             Arc::clone(&adapters.files),
-        );
+        )
+        .with_process(Arc::clone(&adapters.process));
+        let sessions =
+            Sessions::new(Arc::clone(&config), Arc::clone(&state)).with_events(events.clone());
         let worktrees = Worktrees::new(
             Arc::clone(&config),
             Arc::clone(&state),
             Arc::clone(&jobs),
             Arc::clone(&adapters.files),
             Arc::clone(&adapters.git),
-        );
+        )
+        .with_integrations(sessions.clone(), Arc::clone(&adapters.github))
+        .with_shell(Arc::clone(&adapters.shell));
         let pool = Pool::new(
             Arc::clone(&config),
             Arc::clone(&state),
             Arc::clone(&jobs),
             Arc::clone(&adapters.git),
             Arc::clone(&adapters.files),
-        );
+        )
+        .with_shell(Arc::clone(&adapters.shell));
         let github = Github::new(
             Arc::clone(&config),
             Arc::clone(&state),
             Arc::clone(&jobs),
             Arc::clone(&adapters.github),
+            Arc::clone(&adapters.files),
         );
-        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
         let sleep = Sleep::new(
             Arc::clone(&config),
             Arc::clone(&state),
@@ -162,8 +228,13 @@ impl Services {
             Arc::clone(&jobs),
             Arc::clone(&adapters.git),
             Arc::clone(&adapters.github),
+        )
+        .with_sessions(sessions.clone());
+        let prune = Prune::with_deleter(
+            Arc::clone(&jobs),
+            inspect.clone(),
+            Arc::new(worktrees.clone()),
         );
-        let prune = Prune::new(Arc::clone(&state), Arc::clone(&jobs), inspect.clone());
         let doctor = Doctor::new(
             Arc::clone(&jobs),
             Arc::clone(&config),
@@ -172,8 +243,32 @@ impl Services {
             Arc::clone(&adapters.github),
             Arc::clone(&adapters.files),
         );
+        let swarm_home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .join(".swarm");
+        let import = Import::new(
+            home.clone(),
+            swarm_home,
+            Arc::clone(&config),
+            Arc::clone(&state),
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.files),
+        )
+        .with_notifier(Arc::new(BusImportNotifier {
+            events: events.clone(),
+        }));
+        let update = Update::new(
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.git),
+            Arc::clone(&adapters.shell),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR"))),
+        );
         Self {
-            home: home.into(),
+            home,
             started_at: chrono::Utc::now().to_rfc3339(),
             contexts: Contexts::new(Arc::clone(&state)),
             repos,
@@ -185,12 +280,15 @@ impl Services {
             inspect,
             prune,
             doctor,
+            import,
+            update,
             config,
             state,
             jobs,
             adapters,
             statuses: Arc::new(RwLock::new(None)),
             pool_refreshed_at: Arc::new(RwLock::new(BTreeMap::new())),
+            events,
         }
     }
 
@@ -273,6 +371,18 @@ impl Services {
                 self.contexts.update(id, name, owners).await?,
             )),
             RequestBody::DeleteContext { id } => {
+                let repo_ids = self
+                    .state
+                    .load()
+                    .await?
+                    .repos
+                    .into_iter()
+                    .filter(|repo| repo.context_id == id)
+                    .map(|repo| repo.id)
+                    .collect::<Vec<_>>();
+                for repo in repo_ids {
+                    self.delete_repo_cascade(repo).await?;
+                }
                 self.contexts.delete(id).await?;
                 Ok(ResponseBody::Ack)
             }
@@ -285,11 +395,14 @@ impl Services {
                 name,
                 url,
                 context,
+                default_branch,
             } => Ok(ResponseBody::CloneStarted(
-                self.repos.clone_repo(owner, name, url, context).await?,
+                self.repos
+                    .clone_repo(owner, name, url, context, default_branch)
+                    .await?,
             )),
             RequestBody::DeleteRepo { repo } => {
-                self.repos.delete(repo).await?;
+                self.delete_repo_cascade(repo).await?;
                 Ok(ResponseBody::Ack)
             }
             RequestBody::MoveRepoToContext { repo, context } => Ok(ResponseBody::Repo(
@@ -374,7 +487,7 @@ impl Services {
             }
             RequestBody::RefreshStatuses { repo } => {
                 let refreshes_all = repo.is_none();
-                let statuses = self.inspect.refresh_statuses(repo).await?;
+                let statuses = self.sessions.refresh_statuses(repo).await?;
                 if refreshes_all {
                     *self.statuses.write().await = Some(statuses.clone());
                 } else {
@@ -407,6 +520,9 @@ impl Services {
                     .await?,
             )),
             RequestBody::ListSessions => Ok(ResponseBody::Sessions(self.sessions.list().await?)),
+            RequestBody::CurrentSession => {
+                Ok(ResponseBody::CurrentSession(self.sessions.current()))
+            }
             RequestBody::KillSession { session } => {
                 self.sessions.kill(session).await?;
                 Ok(ResponseBody::Ack)
@@ -490,6 +606,10 @@ impl Services {
             RequestBody::TailJob { job, lines } => {
                 Ok(ResponseBody::JobLog(self.jobs.tail(&job, lines).await?))
             }
+            RequestBody::DismissJobs { jobs } => {
+                self.jobs.dismiss(&jobs)?;
+                Ok(ResponseBody::Ack)
+            }
             RequestBody::GetConfig => Ok(ResponseBody::Config(self.config.load().await?)),
             RequestBody::SetConfig { patch } => {
                 Ok(ResponseBody::Config(self.config.update(patch).await?))
@@ -497,15 +617,13 @@ impl Services {
             RequestBody::MatchKeepAliveRules => Ok(ResponseBody::KeepAliveRuleMatches(
                 self.sleep.match_keep_alive_rules().await?,
             )),
-            RequestBody::ImportFromSwarm => {
-                Ok(ResponseBody::Job(self.repos.import_from_swarm().await?))
-            }
+            RequestBody::ImportFromSwarm => Ok(ResponseBody::Job(self.import.start().await?)),
             RequestBody::Doctor => Ok(ResponseBody::Doctor(self.doctor.check().await?)),
-            RequestBody::Update => Ok(ResponseBody::Job(self.doctor.update().await?)),
+            RequestBody::Update => Ok(ResponseBody::Job(self.update.start().await?)),
             RequestBody::DaemonPing => Ok(ResponseBody::Pong),
             RequestBody::DaemonVersion => Ok(ResponseBody::Version {
                 version: Self::version(),
-                protocol: 1,
+                protocol: fleet_proto::PROTOCOL_VERSION,
             }),
             RequestBody::DaemonShutdown { .. } => Ok(ResponseBody::ShuttingDown),
         }
@@ -517,12 +635,41 @@ impl Services {
         format!("fleetd {}", env!("CARGO_PKG_VERSION"))
     }
 
+    async fn delete_repo_cascade(&self, repo: RepoId) -> DaemonResult<()> {
+        let ids = self
+            .state
+            .load()
+            .await?
+            .worktrees
+            .into_iter()
+            .filter(|worktree| worktree.repo_id == repo)
+            .map(|worktree| worktree.id)
+            .collect::<Vec<_>>();
+        let failures = self
+            .worktrees
+            .delete(ids)
+            .await?
+            .into_iter()
+            .filter(|result| !result.ok)
+            .map(|result| {
+                result
+                    .reason
+                    .unwrap_or_else(|| format!("could not delete {}", result.worktree_id))
+            })
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            return Err(DaemonError::Conflict(failures.join("; ")));
+        }
+        self.repos.delete(repo).await
+    }
+
     /// Starts status, prepared-pool, and PR-cache maintenance loops.
     pub async fn start_periodic_tasks(
         self: &Arc<Self>,
         events: BroadcastBus,
         shutdown: CancellationToken,
     ) -> DaemonResult<PeriodicTasks> {
+        self.repos.reconcile_startup().await?;
         let config = self.config.load().await?;
         self.jobs
             .set_retention(Duration::from_millis(config.jobs.keep_finished_for));
@@ -689,7 +836,7 @@ async fn run_status_refresh(
         tokio::select! {
             () = shutdown.cancelled() => break,
             _ = interval.tick() => {
-                match services.inspect.refresh_statuses(None).await {
+                match services.sessions.refresh_statuses(None).await {
                     Ok(statuses) => {
                         *services.statuses.write().await = Some(statuses);
                         events.request_snapshot(Arc::clone(&services));

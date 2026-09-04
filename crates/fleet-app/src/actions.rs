@@ -380,6 +380,8 @@ pub mod jobs {
         [
             /// `J` / `Esc` — close the panel, restoring the exact prior focus.
             Close,
+            /// `Esc` with an expanded log — collapse it without closing Jobs.
+            CollapseLog,
             /// `j` — move the job cursor down, or scroll an expanded log.
             MoveDown,
             /// `k` — move the job cursor up, or scroll an expanded log.

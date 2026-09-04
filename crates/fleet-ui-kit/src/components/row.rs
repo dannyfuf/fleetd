@@ -21,8 +21,6 @@ use crate::{
 pub const GLYPH_COLUMN_CH: f32 = 2.0;
 
 /// The opacity a dimmed or disabled row renders at (§3 row states).
-pub const DIMMED_OPACITY: f32 = 0.4;
-
 /// How a column's content sits in its box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ColumnAlign {
@@ -307,7 +305,7 @@ impl RenderOnce for Row {
             .h(height)
             .when(selected, |el| el.bg(theme.colors.row_selected))
             .when(self.dimmed || self.disabled, |el| {
-                el.opacity(DIMMED_OPACITY)
+                el.opacity(theme.metrics.dimmed_opacity)
             });
         let ring = FocusRing::cursor_row(self.cursor).child(body);
 

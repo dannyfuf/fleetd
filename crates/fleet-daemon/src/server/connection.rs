@@ -48,13 +48,16 @@ impl Connection {
         };
         let first = first.map_err(|error| DaemonError::Protocol(error.to_string()))?;
         match first.body {
-            RequestBody::Hello { protocol: 1, .. } => {
+            RequestBody::Hello {
+                protocol: fleet_proto::PROTOCOL_VERSION,
+                ..
+            } => {
                 send_response(
                     &mut framed,
                     Response {
                         id: first.id,
                         result: Ok(ResponseBody::Hello {
-                            protocol: 1,
+                            protocol: fleet_proto::PROTOCOL_VERSION,
                             server: Services::version(),
                         }),
                     },
@@ -67,7 +70,8 @@ impl Connection {
                     Response {
                         id: first.id,
                         result: Err(DaemonError::Unsupported(format!(
-                            "unsupported protocol {protocol}; expected 1"
+                            "unsupported protocol {protocol}; expected {}",
+                            fleet_proto::PROTOCOL_VERSION
                         ))
                         .into()),
                     },
@@ -239,6 +243,7 @@ impl RequestEffects {
                 | RequestBody::SelectTerminal { .. }
                 | RequestBody::AttachTerminal { .. }
                 | RequestBody::DetachTerminal { .. }
+                | RequestBody::DismissJobs { .. }
                 | RequestBody::SetConfig { .. }
                 | RequestBody::ImportFromSwarm
                 | RequestBody::Update

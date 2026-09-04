@@ -81,6 +81,9 @@ pub enum RequestBody {
         url: String,
         /// Destination context.
         context: ContextId,
+        /// Default branch reported by discovery, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_branch: Option<String>,
     },
     /// Delete a repository and all of its worktrees.
     DeleteRepo {
@@ -229,6 +232,8 @@ pub enum RequestBody {
     },
     /// List every daemon-owned session.
     ListSessions,
+    /// Return the daemon's currently active worktree session, when any.
+    CurrentSession,
     /// Hard-kill a session.
     KillSession {
         /// Session to kill.
@@ -357,6 +362,11 @@ pub enum RequestBody {
         job: JobId,
         /// Maximum trailing line count.
         lines: usize,
+    },
+    /// Remove acknowledged finished jobs from daemon retention.
+    DismissJobs {
+        /// Finished jobs to remove.
+        jobs: Vec<JobId>,
     },
 
     /// Fetch the effective configuration.

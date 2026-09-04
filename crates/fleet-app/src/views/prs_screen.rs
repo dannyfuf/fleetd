@@ -17,9 +17,9 @@ use fleet_core::{
 };
 use fleet_proto::response::PrSlice;
 use fleet_ui_kit::{
-    ActiveTheme, ColumnLadder, EmptyState, Icon, IconSize, ListView, Pane, PaneBorder, PrBadge,
-    PrBadgeState, ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows,
-    StatusGlyph, StatusKind, Text, Tone, Truncate, format_age, truncate,
+    ActiveTheme, ColumnLadder, Icon, IconSize, ListView, Pane, PaneBorder, PrBadge, PrBadgeState,
+    ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows, StatusGlyph,
+    StatusKind, Text, Tone, Truncate, format_age, truncate,
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
@@ -187,6 +187,8 @@ pub fn matches(row: &PrRow, query: &str) -> bool {
 
 /// Everything the screen needs to draw itself.
 pub struct PrProps {
+    /// A live filter editor that replaces the tab header.
+    pub header_override: Option<AnyElement>,
     /// The rows of the active tab, already filtered.
     pub rows: Vec<PrRow>,
     /// Cursor index into `rows`.
@@ -225,6 +227,7 @@ pub fn render(props: PrProps, scroll: &UniformListScrollHandle, cx: &App) -> Any
     let theme = cx.theme();
     let PrProps {
         rows,
+        header_override,
         cursor,
         focused,
         tab,
@@ -273,16 +276,9 @@ pub fn render(props: PrProps, scroll: &UniformListScrollHandle, cx: &App) -> Any
         .child(stamp);
 
     let empty = match (filter.clone(), tab) {
-        (Some(query), _) => {
-            EmptyState::new(format!("Nothing matches \"{query}\".")).action("esc  clear")
-        }
-        (None, PrTab::Mine) => {
-            EmptyState::new(format!("No open PRs authored by you in {scope}.")).action("r  refresh")
-        }
-        (None, PrTab::Review) => {
-            EmptyState::new(format!("No PRs waiting for your review in {scope}."))
-                .action("r  refresh")
-        }
+        (Some(query), _) => crate::views::first_run::empty_state("filter", Some(&query)),
+        (None, PrTab::Mine) => crate::views::first_run::empty_state("prs-mine", Some(&scope)),
+        (None, PrTab::Review) => crate::views::first_run::empty_state("prs-review", Some(&scope)),
     };
 
     let ladder = ColumnLadder::pull_requests();
@@ -319,6 +315,7 @@ pub fn render(props: PrProps, scroll: &UniformListScrollHandle, cx: &App) -> Any
                 .child(Text::ui(format!("+{hidden} more \u{2014} select a repo to narrow")).faint())
         }));
 
+    let header = header_override.unwrap_or_else(|| header.into_any_element());
     Pane::new()
         .border(PaneBorder::None)
         .focused(focused)

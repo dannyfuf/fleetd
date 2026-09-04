@@ -14,8 +14,8 @@ use fleet_core::{
 };
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{
-    ColumnAlign, EmptyState, ListView, Pane, PaneBorder, PaneHeader, Row, RowColumn, StatusGlyph,
-    StatusKind, Text, Truncate, truncate,
+    ColumnAlign, ListView, Pane, PaneBorder, PaneHeader, Row, RowColumn, StatusGlyph, StatusKind,
+    Text, Truncate, truncate,
 };
 use gpui::{AnyElement, IntoElement, SharedString, UniformListScrollHandle, px};
 
@@ -222,6 +222,8 @@ pub fn filter_rows(rows: &[RailRow], query: &str) -> Vec<RailRow> {
 
 /// Everything the rail needs to draw itself.
 pub struct RailProps {
+    /// A live filter editor that replaces the ordinary pane header.
+    pub header_override: Option<AnyElement>,
     /// The rows, already filtered.
     pub rows: Vec<RailRow>,
     /// The cursor index into `rows`.
@@ -243,6 +245,7 @@ pub struct RailProps {
 pub fn render(props: RailProps, scroll: &UniformListScrollHandle) -> AnyElement {
     let RailProps {
         rows,
+        header_override,
         cursor,
         focused,
         collapsed,
@@ -261,10 +264,8 @@ pub fn render(props: RailProps, scroll: &UniformListScrollHandle) -> AnyElement 
     }
 
     let empty = match filter.clone() {
-        Some(query) => {
-            EmptyState::new(format!("Nothing matches \"{query}\".")).action("esc  clear")
-        }
-        None => EmptyState::new(format!("No repos in {context_name}.")).action("n  clone one"),
+        Some(query) => crate::views::first_run::empty_state("filter", Some(&query)),
+        None => crate::views::first_run::empty_state("repos", Some(&context_name)),
     };
 
     // Only the `All` row survived the filter: the rail has nothing to offer.
@@ -288,7 +289,7 @@ pub fn render(props: RailProps, scroll: &UniformListScrollHandle) -> AnyElement 
         .focused(focused)
         .body(list);
     if !collapsed {
-        pane = pane.header(header);
+        pane = pane.header(header_override.unwrap_or_else(|| header.into_any_element()));
     }
     pane.into_any_element()
 }

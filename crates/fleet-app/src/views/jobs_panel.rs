@@ -161,8 +161,8 @@ pub fn parse_timestamp(text: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let mut seconds = days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60
-        + second;
+    let mut seconds =
+        days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second;
     seconds -= offset_seconds(text.get(19..).unwrap_or(""));
     Some(seconds)
 }
@@ -222,7 +222,8 @@ pub fn elapsed_label(job: &JobRecord, now: i64) -> Option<String> {
         JobStatus::Cancelled => Some("\u{2013}".to_owned()),
         status if is_active(status) => {
             let seconds = elapsed_seconds(job, now)?;
-            (seconds >= ELAPSED_AFTER_SECONDS).then(|| format!("{}:{:02}", seconds / 60, seconds % 60))
+            (seconds >= ELAPSED_AFTER_SECONDS)
+                .then(|| format!("{}:{:02}", seconds / 60, seconds % 60))
         }
         _ => elapsed_seconds(job, now).map(format_age),
     }
@@ -612,7 +613,11 @@ mod tests {
         assert_eq!(percent(&running), Some(40));
 
         let done = job("job-b", JobStatus::Succeeded);
-        assert_eq!(sub_line(&done), None, "a finished job collapses to one line");
+        assert_eq!(
+            sub_line(&done),
+            None,
+            "a finished job collapses to one line"
+        );
         assert_eq!(percent(&done), None);
 
         let failed = job(

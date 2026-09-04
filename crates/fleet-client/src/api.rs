@@ -151,6 +151,7 @@ impl Client {
         name: impl Into<String>,
         url: impl Into<String>,
         context: ContextId,
+        default_branch: Option<String>,
     ) -> Result<JobRecord> {
         match self
             .request(RequestBody::CloneRepo {
@@ -158,6 +159,7 @@ impl Client {
                 name: name.into(),
                 url: url.into(),
                 context,
+                default_branch,
             })
             .await?
         {
@@ -438,6 +440,14 @@ impl Client {
         }
     }
 
+    /// Returns the daemon's active worktree session, when one is selected.
+    pub async fn current_session(&self) -> Result<Option<SessionId>> {
+        match self.request(RequestBody::CurrentSession).await? {
+            ResponseBody::CurrentSession(session) => Ok(session),
+            response => Err(unexpected("current_session", response)),
+        }
+    }
+
     /// Hard-kills a session.
     pub async fn kill_session(&self, session: SessionId) -> Result<()> {
         expect_ack(
@@ -655,6 +665,14 @@ impl Client {
             ResponseBody::JobLog(lines) => Ok(lines),
             response => Err(unexpected("tail_job", response)),
         }
+    }
+
+    /// Removes acknowledged finished jobs from daemon retention.
+    pub async fn dismiss_jobs(&self, jobs: Vec<JobId>) -> Result<()> {
+        expect_ack(
+            "dismiss_jobs",
+            self.request(RequestBody::DismissJobs { jobs }).await?,
+        )
     }
 
     /// Fetches the effective configuration.

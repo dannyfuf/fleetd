@@ -69,12 +69,19 @@ async fn a_fresh_daemon_answers_with_a_snapshot_the_panel_can_render() {
 
     // §3.7 empty state: a brand new home has nothing running, and the panel says exactly that.
     let counts = jobs_panel::job_counts(&snapshot.jobs);
-    assert!(counts.is_empty());
+    assert!(
+        counts.is_empty(),
+        "a fresh snapshot unexpectedly retained jobs: {:?}",
+        snapshot.jobs
+    );
     assert!(jobs_panel::visible_jobs(&snapshot.jobs, JobFilter::All, &HashSet::new()).is_empty());
     assert_eq!(jobs_panel::EMPTY_FACT, "Nothing running.");
 
     // §2.2: an idle daemon leaves the shared status-bar slot empty rather than filling it.
-    assert_eq!(job_ticker::status_slot(&snapshot.jobs, None), StatusSlot::Idle);
+    assert_eq!(
+        job_ticker::status_slot(&snapshot.jobs, None),
+        StatusSlot::Idle
+    );
 
     // §3.13: a first run is the empty snapshot, and it is a migration decision, not onboarding.
     assert!(snapshot.contexts.is_empty());
@@ -105,7 +112,7 @@ async fn the_job_list_round_trips_and_the_event_stream_is_live() {
         .list_jobs()
         .await
         .unwrap_or_else(|error| panic!("list_jobs failed: {error}"));
-    assert!(jobs.is_empty(), "a fresh home has no retained jobs");
+    assert!(jobs.is_empty(), "a fresh home retained jobs: {jobs:?}");
 
     let mut events = client.events();
 
@@ -160,7 +167,9 @@ async fn tailing_and_cancelling_an_unknown_job_fail_cleanly() {
     // The panel expands a log with `Enter` and polls `TailJob` while following. A job that is
     // gone must produce an error, not a hang: the panel turns it into a sticky error (§1.8).
     let tail = client.tail_job(ghost, fleet_ui_kit::LOG_TAIL_LINES).await;
-    let error = tail.err().unwrap_or_else(|| panic!("expected a tail error"));
+    let error = tail
+        .err()
+        .unwrap_or_else(|| panic!("expected a tail error"));
     assert!(!error.message.is_empty());
 
     let ghost = "job-does-not-exist"
@@ -200,11 +209,18 @@ async fn doctor_and_the_version_handshake_answer_the_daemon_state_surfaces() {
     match client.request(RequestBody::Doctor).await {
         Ok(ResponseBody::Doctor(checks)) => {
             let rows = doctor_view::doctor_rows(&checks);
-            assert_eq!(rows.len(), checks.len(), "the daemon's order is the diagnosis");
+            assert_eq!(
+                rows.len(),
+                checks.len(),
+                "the daemon's order is the diagnosis"
+            );
             // The fake `gh` on PATH answers every probe, so a `gh` check must not report a
             // missing binary; the harness would otherwise be testing the developer's machine.
             for check in &checks {
-                assert!(!check.detail.is_empty(), "every check states what it observed");
+                assert!(
+                    !check.detail.is_empty(),
+                    "every check states what it observed"
+                );
             }
             let _summary = doctor_view::summary(&checks);
         }

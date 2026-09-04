@@ -16,6 +16,6 @@ pub mod jobs_panel;
 pub mod prs_screen;
 pub mod repos_rail;
 pub mod sticky_error;
-pub mod worktrees_list;
 pub mod workspace_header;
 pub mod workspace_tabs;
+pub mod worktrees_list;

@@ -1,6 +1,10 @@
 //! Worktree activity, process, and port inspection orchestration.
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use fleet_core::{
     github::{InspectionPrState, InspectionPullRequest},
@@ -23,6 +27,7 @@ use crate::{
     DaemonError, DaemonResult,
     adapters::{git::Git, github::Github},
     jobs::{JobCtx, JobManager},
+    services::sessions::Sessions,
     stores::{config::ConfigStore, state::StateStore},
 };
 
@@ -36,6 +41,7 @@ pub struct Inspect {
     jobs: Arc<JobManager>,
     git: Arc<dyn Git>,
     github: Arc<dyn Github>,
+    sessions: Option<Sessions>,
 }
 
 impl Inspect {
@@ -54,7 +60,15 @@ impl Inspect {
             jobs,
             git,
             github,
+            sessions: None,
         }
+    }
+
+    /// Adds live daemon session observations to inspection results.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: Sessions) -> Self {
+        self.sessions = Some(sessions);
+        self
     }
 
     /// Inspects selected worktrees, preserving fail-closed warning semantics.
@@ -67,6 +81,7 @@ impl Inspect {
         let service = self.clone();
         let target = format!("inspect-{}", uuid::Uuid::new_v4());
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         self.jobs.submit(
             JobKind::Inspect,
             target,
@@ -79,7 +94,13 @@ impl Inspect {
                     .as_ref()
                     .map(|_| ())
                     .map_err(|error| DaemonError::Git(error.to_string()));
-                let _ignored = sender.send(result);
+                if let Some(sender) = sender
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ignored = sender.send(result);
+                }
                 outcome
             },
         );
@@ -137,7 +158,10 @@ impl Inspect {
             return Err(DaemonError::Cancelled);
         }
 
-        let statuses = status_snapshot(&selected);
+        let statuses = match &self.sessions {
+            Some(sessions) => sessions.refresh_statuses(repo_filter.clone()).await?,
+            None => status_snapshot(&selected),
+        };
         let status_by_id = statuses
             .into_iter()
             .map(|status| (status.worktree_id.clone(), status))
@@ -428,12 +452,13 @@ impl Inspect {
 
     /// Refreshes runtime worktree statuses for one repository or all repositories.
     ///
-    /// Session ownership is not yet exposed to this service by the frozen facade, so local
-    /// worktrees conservatively report no observed session and remote mirrors report unknown.
     pub async fn refresh_statuses(
         &self,
         repo: Option<RepoId>,
     ) -> DaemonResult<Vec<WorktreeStatus>> {
+        if let Some(sessions) = &self.sessions {
+            return sessions.refresh_statuses(repo).await;
+        }
         let state = self.state.load().await?;
         let worktrees = state
             .worktrees

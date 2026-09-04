@@ -41,7 +41,7 @@ use fleet_proto::{
     snapshot::Snapshot,
 };
 use fleet_ui_kit::{
-    ActiveTheme, ConfirmKey, Fact, FactList, Icon, SplitLayout, StatusKind, Toast, ToastDuration,
+    ActiveTheme, Fact, FactList, Icon, SplitLayout, StatusKind, Toast, ToastDuration,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, SharedString,
@@ -51,7 +51,7 @@ use gpui::{
 use crate::{
     actions::{fleet, hub, prs, repos, worktrees},
     bridge::Bridge,
-    dialogs::Dialogs,
+    dialogs::{self, Dialogs},
     state::{AppState, HubPane, HubTab, Overlay, RepoScope, Screen, dwell_for, move_cursor},
     views::{
         detail_panel::{self, PrProps, RepoProps, WorktreeProps},
@@ -278,44 +278,6 @@ impl PrCache {
     }
 }
 
-/// What a destructive key is about to do once its confirm is accepted (§3.8.3).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PendingAction {
-    /// `d` in the worktrees list.
-    DeleteWorktree(WorktreeId),
-    /// `d` in the repos rail; always the `Y` key (§A12).
-    DeleteRepo(RepoId),
-    /// `x` in the worktrees list, after the dry run listed what it would delete.
-    Prune {
-        /// The repository scope of the prune, `None` for every repo in the context.
-        repo: Option<RepoId>,
-        /// What the dry run said it would delete.
-        deleted: Vec<WorktreeId>,
-    },
-    /// `K` in the worktrees list.
-    KillSession(WorktreeId),
-    /// `D` on a context; always the `Y` key.
-    DeleteContext(ContextId),
-}
-
-/// A confirm the Hub has prepared but not yet shown.
-///
-/// **Integration request (see the final report).** `Dialogs::Confirm` is a unit variant and the
-/// dialog element is a sibling of this screen in the shell's tree, so the Hub can prepare the
-/// facts but cannot render them or observe `confirm::Accept`. The request is stored here so
-/// that wiring it up is a one-line change once `AppState` carries the pending confirm.
-#[derive(Debug, Clone)]
-pub struct ConfirmRequest {
-    /// The sentence at the top of the dialog.
-    pub title: SharedString,
-    /// The facts, stated and stamped (§1.7).
-    pub facts: FactList,
-    /// `y` or the escalated `Y` (§A12).
-    pub key: ConfirmKey,
-    /// What happens on accept.
-    pub action: PendingAction,
-}
-
 /// The Hub's own mutable state, held as an entity so `on_action` listeners can write it.
 #[derive(Debug, Default)]
 pub struct HubState {
@@ -327,10 +289,6 @@ pub struct HubState {
     pub inspect_generation: u64,
     /// Pull requests whose worktree is being created, so their glyph spins in place (§3.5).
     pub creating: Vec<(RepoId, u64)>,
-    /// The confirm the last destructive key prepared.
-    pub pending_confirm: Option<ConfirmRequest>,
-    /// The trash entry `u` would restore (§A6).
-    pub last_trash_entry: Option<String>,
 }
 
 // ---------------------------------------------------------------------------- the model
@@ -732,6 +690,8 @@ impl HubScreen {
 
         let rail = repos_rail::render(
             RailProps {
+                header_override: (state.filter.editing && state.hub_pane == HubPane::Repos)
+                    .then(|| dialogs::filter::bar(state).into_any_element()),
                 rows: model.rail.clone(),
                 cursor: state.cursors.repos,
                 focused: state.hub_pane == HubPane::Repos,
@@ -754,6 +714,8 @@ impl HubScreen {
                 tab: HubTab::Worktrees,
             } => worktrees_list::render(
                 ListProps {
+                    header_override: (state.filter.editing && state.hub_pane == HubPane::List)
+                        .then(|| dialogs::filter::bar(state).into_any_element()),
                     rows: model.worktrees.clone(),
                     cursor: state.cursors.worktrees,
                     focused: state.hub_pane == HubPane::List,
@@ -772,6 +734,8 @@ impl HubScreen {
                 let slice = hub.prs.slice(state.pr_tab);
                 prs_screen::render(
                     PrScreenProps {
+                        header_override: (state.filter.editing && state.hub_pane == HubPane::List)
+                            .then(|| dialogs::filter::bar(state).into_any_element()),
                         rows: model.prs.clone(),
                         cursor: self.pr_cursor(state),
                         focused: state.hub_pane == HubPane::List,
@@ -1206,15 +1170,43 @@ impl HubCtx {
         let Some(id) = self.state.read(cx).active_context().cloned() else {
             return;
         };
-        let facts = FactList::from_facts([Fact::risk(
-            "deleting a context deletes its repos and worktrees",
-        )]);
+        let Some(snapshot) = self.state.read(cx).snapshot.as_ref() else {
+            return;
+        };
+        let name = snapshot
+            .contexts
+            .iter()
+            .find(|context| context.id == id)
+            .map_or_else(|| id.to_string(), |context| context.name.clone());
+        let repos: Vec<_> = snapshot
+            .repos
+            .iter()
+            .filter(|repo| repo.context_id == id)
+            .map(|repo| repo.id.clone())
+            .collect();
+        let worktrees: Vec<_> = snapshot
+            .worktrees
+            .iter()
+            .filter(|worktree| repos.contains(&worktree.repo_id))
+            .map(|worktree| worktree.id.clone())
+            .collect();
+        let sessions = snapshot
+            .sessions
+            .iter()
+            .filter(|session| {
+                matches!(
+                    &session.kind,
+                    fleet_core::sessions::SessionKind::Worktree(id) if worktrees.contains(id)
+                )
+            })
+            .count();
         self.prepare_confirm(
-            ConfirmRequest {
-                title: SharedString::from(format!("Delete context {id}?")),
-                facts,
-                key: ConfirmKey::Upper,
-                action: PendingAction::DeleteContext(id),
+            dialogs::ConfirmRequest::DeleteContext {
+                context: id,
+                name,
+                repos: repos.len(),
+                worktrees: worktrees.len(),
+                sessions,
             },
             cx,
         );
@@ -1305,19 +1297,7 @@ impl HubCtx {
                     .count()
             })
             .unwrap_or_default();
-        let facts = FactList::from_facts([
-            Fact::risk(format!("{worktrees} worktrees are deleted with it")),
-            Fact::risk("the pristine clone is moved to trash"),
-        ]);
-        self.prepare_confirm(
-            ConfirmRequest {
-                title: SharedString::from(format!("Delete {repo}?")),
-                facts,
-                key: ConfirmKey::Upper,
-                action: PendingAction::DeleteRepo(repo),
-            },
-            cx,
-        );
+        self.prepare_confirm(dialogs::ConfirmRequest::DeleteRepo { repo, worktrees }, cx);
     }
 
     /// `x` is bound only on a clone-failed row; on every other row it is a no-op (KEYMAP §Repos).
@@ -1335,21 +1315,12 @@ impl HubCtx {
         self.bridge.send(RequestBody::DismissClone { repo });
     }
 
-    /// `e` — edit the selected repository's hooks (KEYMAP A16).
-    ///
-    /// **Integration request.** `Dialogs` has no `EditHooks` variant, so the Hub cannot open the
-    /// editor; the daemon side (`RequestBody::SetRepoHooks`) is ready. Until the variant exists
-    /// this states the refusal and its reason, which is the §2.7 "action refused" toast rather
-    /// than a silent no-op.
     fn edit_hooks(&self, cx: &mut App) {
-        if self
-            .selected_rail_row(cx)
-            .and_then(|row| row.repo)
-            .is_none()
-        {
+        let Some(repo) = self.selected_rail_row(cx).and_then(|row| row.repo) else {
             return;
-        }
-        self.toast("Hook editing needs the repo dialog", Icon::Info, false, cx);
+        };
+        dialogs::request_edit_hooks(cx, repo);
+        self.open_dialog(Dialogs::EditHooks, cx);
     }
 
     // ------------------------------------------------------------------ worktrees
@@ -1408,23 +1379,11 @@ impl HubCtx {
         let Some(row) = self.selected_worktree(cx) else {
             return;
         };
-        let facts = delete_facts(self.hub.read(cx).inspections.get(&row.id));
-        let key = facts.confirm_key();
-        self.prepare_confirm(
-            ConfirmRequest {
-                title: SharedString::from(format!("Delete {}?", row.branch)),
-                facts,
-                key,
-                action: PendingAction::DeleteWorktree(row.id.clone()),
-            },
-            cx,
-        );
-        // §3.8.3: the confirm quotes the freshest facts it can get, so re-inspect behind it.
-        self.inspect(row.id, false, cx);
+        self.prepare_confirm(dialogs::ConfirmRequest::DeleteWorktree { id: row.id }, cx);
     }
 
     fn undo_delete(&self, cx: &mut App) {
-        let entry = self.hub.read(cx).last_trash_entry.clone();
+        let entry = self.state.read(cx).last_trash_entry.clone();
         let Some(entry) = entry else {
             self.toast("Nothing to undo", Icon::Info, true, cx);
             return;
@@ -1433,7 +1392,8 @@ impl HubCtx {
             return;
         }
         self.bridge.send(RequestBody::RestoreTrash { entry });
-        self.hub.update(cx, |hub, _| hub.last_trash_entry = None);
+        self.state
+            .update(cx, |state, _| state.last_trash_entry = None);
     }
 
     /// `x` — the dry run first, then either a refusal toast or the confirm (§3.8.3).
@@ -1441,61 +1401,9 @@ impl HubCtx {
         if self.refuses(cx) {
             return;
         }
-        let repo = self.scoped_repo(cx);
-        self.ask(
-            RequestBody::PruneWorktrees {
-                dry_run: true,
-                fetch: false,
-                kill_sessions: false,
-                repo: repo.clone(),
-            },
-            cx,
-            move |result, ctx, cx| match result {
-                Ok(ResponseBody::Pruned(preview)) => ctx.show_prune(repo, preview, cx),
-                Ok(_) => {}
-                Err(error) => ctx.report(error, cx),
-            },
-        );
-    }
-
-    fn show_prune(&self, repo: Option<RepoId>, preview: PruneResult, cx: &mut gpui::AsyncApp) {
-        if preview.deleted.is_empty() {
-            let scope = repo
-                .as_ref()
-                .map_or_else(|| "this context".to_owned(), |repo| repo.name().to_owned());
-            let skipped = preview.skipped.len();
-            let now = Instant::now();
-            self.state.update(cx, |state, cx| {
-                state.toast(
-                    Toast::new(format!(
-                        "Nothing to prune in {scope} \u{2014} {skipped} skipped · J for reasons"
-                    ))
-                    .icon(Icon::Info),
-                    now,
-                    dwell_for(ToastDuration::Normal),
-                );
-                cx.notify();
-            });
-            return;
+        if let Some(repo) = self.scoped_repo(cx) {
+            self.prepare_confirm(dialogs::ConfirmRequest::Prune { repo }, cx);
         }
-        let facts = prune_facts(&preview);
-        let key = facts.confirm_key();
-        let request = ConfirmRequest {
-            title: SharedString::from(format!("Prune {} worktrees?", preview.deleted.len())),
-            facts,
-            key,
-            action: PendingAction::Prune {
-                repo,
-                deleted: preview.deleted,
-            },
-        };
-        self.hub.update(cx, |hub, _| {
-            hub.pending_confirm = Some(request);
-        });
-        self.state.update(cx, |state, cx| {
-            state.open_overlay(Overlay::Dialog(Dialogs::Confirm));
-            cx.notify();
-        });
     }
 
     fn sleep(&self, cx: &mut App) {
@@ -1536,19 +1444,22 @@ impl HubCtx {
         let Some(row) = self.selected_worktree(cx) else {
             return;
         };
-        let labels = if row.keep_alive.is_empty() {
-            Fact::safe("no keep-alive processes")
-        } else {
-            Fact::risk(format!("kills {}", row.keep_alive.join(", ")))
+        let Some(session) = self.state.read(cx).snapshot.as_ref().and_then(|snapshot| {
+            snapshot.sessions.iter().find(|session| {
+                matches!(
+                    &session.kind,
+                    fleet_core::sessions::SessionKind::Worktree(id) if id == &row.id
+                )
+            })
+        }) else {
+            return;
         };
-        let facts = FactList::from_facts([labels, Fact::risk("terminals are killed, not slept")]);
-        let key = facts.confirm_key();
         self.prepare_confirm(
-            ConfirmRequest {
-                title: SharedString::from(format!("Kill the session of {}?", row.branch)),
-                facts,
-                key,
-                action: PendingAction::KillSession(row.id),
+            dialogs::ConfirmRequest::KillSession {
+                session: session.id.clone(),
+                terminals: session.terminals.len(),
+                running: row.keep_alive.iter().map(ToString::to_string).collect(),
+                unsaved: false,
             },
             cx,
         );
@@ -1687,7 +1598,7 @@ impl HubCtx {
         result: Result<ResponseBody, ProtoError>,
         cx: &mut gpui::AsyncApp,
     ) {
-        let review = self.hub.update(cx, |hub, _| {
+        let (review, badges) = self.hub.update(cx, |hub, _| {
             match result {
                 Ok(ResponseBody::PullRequests(slices)) => {
                     for slice in slices {
@@ -1705,10 +1616,34 @@ impl HubCtx {
                 hub.prs.started_at = None;
                 hub.prs.fetched_at = Some(Instant::now());
             }
-            hub.prs.review.as_ref().map_or(0, |slice| slice.prs.len())
+            let badges = hub
+                .prs
+                .mine
+                .iter()
+                .chain(hub.prs.review.iter())
+                .flat_map(|slice| slice.prs.iter())
+                .map(|pr| {
+                    (
+                        (pr.repo_id.clone(), pr.head_ref_name.clone()),
+                        (
+                            pr.number,
+                            prs_screen::pr_badge_state(fleet_core::github::derive_pr_state(
+                                pr.is_draft,
+                                pr.checks,
+                                pr.review_decision,
+                            )),
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (
+                hub.prs.review.as_ref().map_or(0, |slice| slice.prs.len()),
+                badges,
+            )
         });
         self.state.update(cx, |state, cx| {
             state.review_pr_count = review;
+            state.pr_badges.extend(badges);
             cx.notify();
         });
     }
@@ -1858,13 +1793,11 @@ impl HubCtx {
     }
 
     /// Stores a prepared confirm and opens the shared §3.8 dialog frame.
-    fn prepare_confirm(&self, request: ConfirmRequest, cx: &mut App) {
+    fn prepare_confirm(&self, request: dialogs::ConfirmRequest, cx: &mut App) {
         if self.refuses(cx) {
             return;
         }
-        self.hub.update(cx, |hub, _| {
-            hub.pending_confirm = Some(request);
-        });
+        dialogs::request_confirm(cx, request);
         self.state.update(cx, |state, cx| {
             state.open_overlay(Overlay::Dialog(Dialogs::Confirm));
             cx.notify();
@@ -1952,6 +1885,7 @@ fn visible_rows(window_height: f32, cx: &App) -> usize {
 #[cfg(test)]
 mod tests {
     use fleet_core::{ids::RepoId, sessions::SessionState};
+    use fleet_ui_kit::ConfirmKey;
 
     use super::*;
 

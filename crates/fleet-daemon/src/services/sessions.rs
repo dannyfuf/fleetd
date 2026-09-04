@@ -2,11 +2,9 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::OsString,
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock, Weak},
     thread,
-    time::Duration,
 };
 
 use fleet_core::{
@@ -17,13 +15,17 @@ use fleet_core::{
         WorktreeWindowStatus, agent_session_id, default_terminals,
     },
 };
-use fleet_proto::terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand};
+use fleet_proto::{
+    event::Event,
+    terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand},
+};
 use fleet_term::{HostEvent, PtyOptions, TerminalHost, TerminalHostOptions};
 use tokio::sync::broadcast;
 
 use crate::{
     DaemonError, DaemonResult,
     adapters::process::Process,
+    server::BroadcastBus,
     stores::{config::ConfigStore, state::StateStore},
 };
 
@@ -46,6 +48,7 @@ pub(crate) struct SessionRuntime {
     registry: Mutex<Registry>,
     frames: broadcast::Sender<FrameUpdate>,
     process: Mutex<Option<Arc<dyn Process>>>,
+    events: Mutex<Option<BroadcastBus>>,
 }
 
 impl SessionRuntime {
@@ -57,6 +60,66 @@ impl SessionRuntime {
             }),
             frames,
             process: Mutex::new(None),
+            events: Mutex::new(None),
+        }
+    }
+
+    fn register_events(&self, events: BroadcastBus) {
+        *self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(events);
+    }
+
+    fn notify_session(&self, id: &SessionId) {
+        let session = self.session(id);
+        let events = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(events) = events {
+            if let Some(session) = session {
+                events.publish(Event::SessionChanged(session));
+            }
+            events.request_snapshot_current();
+        }
+    }
+
+    fn notify_snapshot(&self) {
+        if let Some(events) = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            events.request_snapshot_current();
+        }
+    }
+
+    fn notify_terminal(&self, terminal: TerminalId) {
+        let session = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal_sessions
+            .get(&terminal)
+            .cloned();
+        if let Some(session) = session {
+            self.notify_session(&session);
+        } else {
+            self.notify_snapshot();
+        }
+    }
+
+    fn publish(&self, event: Event) {
+        if let Some(events) = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            events.publish(event);
         }
     }
 
@@ -126,6 +189,8 @@ impl SessionRuntime {
             entry.foreground_command = foreground_command;
             entry.keep_alive = keep_alive;
         }
+        drop(registry);
+        self.notify_session(&session_id);
     }
 
     pub(crate) fn record_sleep(
@@ -141,6 +206,8 @@ impl SessionRuntime {
             entry.slept_at = Some(chrono::Utc::now().to_rfc3339());
             entry.kept_terminals = kept;
         }
+        drop(registry);
+        self.notify_session(session);
     }
 
     pub(crate) fn close_terminal_if_present(&self, terminal: TerminalId) -> Option<String> {
@@ -172,6 +239,7 @@ impl SessionRuntime {
         if let Some(host) = host {
             let _ = host.kill();
         }
+        self.notify_snapshot();
         Some(name)
     }
 
@@ -200,6 +268,7 @@ impl SessionRuntime {
         for host in hosts {
             let _ = host.kill();
         }
+        self.notify_snapshot();
         true
     }
 }
@@ -241,6 +310,13 @@ impl Sessions {
             state,
             runtime,
         }
+    }
+
+    /// Connects session mutations and PTY metadata changes to the daemon event bus.
+    #[must_use]
+    pub fn with_events(self, events: BroadcastBus) -> Self {
+        self.runtime.register_events(events);
+        self
     }
 
     /// Ensures a worktree or agent session and repairs configured terminals missing by name.
@@ -398,9 +474,12 @@ impl Sessions {
             tracing::warn!(%error, %previous, "failed to sleep previous session");
         }
 
-        self.runtime
+        let session = self
+            .runtime
             .session(&session_id)
-            .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))
+            .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))?;
+        self.runtime.notify_session(&session_id);
+        Ok(session)
     }
 
     /// Lists daemon-owned runtime sessions in stable identity order.
@@ -465,9 +544,12 @@ impl Sessions {
                 .ok_or_else(|| DaemonError::NotFound(session.to_string()))?;
             parent.terminals.push(terminal.clone());
             parent.active_terminal.get_or_insert(terminal_id);
-            registry.terminal_sessions.insert(terminal_id, session);
+            registry
+                .terminal_sessions
+                .insert(terminal_id, session.clone());
             registry.hosts.insert(terminal_id, host);
         }
+        self.runtime.notify_session(&session);
         Ok(terminal)
     }
 
@@ -526,6 +608,7 @@ impl Sessions {
             *entry = replacement.clone();
             registry.hosts.insert(terminal, Arc::new(host));
         }
+        self.runtime.notify_session(&session_id);
         Ok(replacement)
     }
 
@@ -569,7 +652,10 @@ impl Sessions {
             .find(|entry| entry.id == terminal)
             .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
         entry.name = name;
-        Ok(entry.clone())
+        let terminal = entry.clone();
+        drop(registry);
+        self.runtime.notify_session(&session_id);
+        Ok(terminal)
     }
 
     /// Selects the active terminal and clears its unseen-output flag.
@@ -594,7 +680,10 @@ impl Sessions {
             .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
         entry.has_unseen_output = false;
         parent.active_terminal = Some(terminal);
-        Ok(parent.clone())
+        let parent = parent.clone();
+        drop(registry);
+        self.runtime.notify_session(&session);
+        Ok(parent)
     }
 
     /// Attaches a client, makes its size authoritative, and emits a full frame.
@@ -610,6 +699,8 @@ impl Sessions {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *registry.attachments.entry(terminal).or_default() += 1;
+        drop(registry);
+        self.runtime.notify_terminal(terminal);
         Ok(())
     }
 
@@ -627,6 +718,8 @@ impl Sessions {
                 registry.attachments.remove(&terminal);
             }
         }
+        drop(registry);
+        self.runtime.notify_terminal(terminal);
         Ok(())
     }
 
@@ -755,6 +848,17 @@ impl Sessions {
         self.runtime.frames.subscribe()
     }
 
+    /// Returns the worktree session most recently made active.
+    #[must_use]
+    pub fn current(&self) -> Option<SessionId> {
+        self.runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_worktree
+            .clone()
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<Session> {
         self.runtime
             .registry
@@ -811,8 +915,7 @@ fn spawn_terminal(
     command: String,
     cwd: String,
 ) -> DaemonResult<(Terminal, TerminalHost)> {
-    let pid_path = terminal_pid_path(terminal);
-    let mut pty = PtyOptions::login_shell(
+    let pty = PtyOptions::login_shell(
         PathBuf::from(&cwd),
         session.as_str(),
         &name,
@@ -820,31 +923,14 @@ fn spawn_terminal(
         INITIAL_COLS,
         INITIAL_ROWS,
     );
-    let login_shell = pty.program.clone();
-    pty.program = OsString::from("/bin/sh");
-    pty.args = vec![
-        OsString::from("-c"),
-        OsString::from(
-            "printf '%s\\n' \"$$\" > \"$FLEET_PID_FILE\"; exec \"$FLEET_LOGIN_SHELL\" -l",
-        ),
-    ];
-    pty.env
-        .push((OsString::from("FLEET_LOGIN_SHELL"), login_shell));
-    pty.env.push((
-        OsString::from("FLEET_PID_FILE"),
-        pid_path.as_os_str().to_owned(),
-    ));
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal,
         pty,
         scrollback_lines: SCROLLBACK_LINES,
-        initial_command: None,
+        initial_command: Some(command.clone()),
     })
     .map_err(|error| terminal_error(terminal, error))?;
-    host.type_command(command.clone())
-        .map_err(|error| terminal_error(terminal, error))?;
-    let shell_pid = read_shell_pid(&pid_path);
-    let _ = std::fs::remove_file(&pid_path);
+    let shell_pid = host.child_pid();
     let Some(shell_pid) = shell_pid else {
         let _ = host.kill();
         return Err(DaemonError::Process(format!(
@@ -866,26 +952,6 @@ fn spawn_terminal(
         },
         host,
     ))
-}
-
-fn terminal_pid_path(terminal: TerminalId) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "fleetd-{}-terminal-{terminal}-{}.pid",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ))
-}
-
-fn read_shell_pid(path: &std::path::Path) -> Option<u32> {
-    for _ in 0..250 {
-        if let Ok(value) = std::fs::read_to_string(path)
-            && let Ok(pid) = value.trim().parse()
-        {
-            return Some(pid);
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-    None
 }
 
 fn forward_host_events(
@@ -917,13 +983,19 @@ fn forward_host_events(
                         drop(registry);
                         let _ = runtime.frames.send(frame);
                     }
-                    HostEvent::Exited(code) => update_terminal(&runtime, terminal, |entry| {
-                        entry.status = TerminalStatus::Exited { code };
-                        entry.foreground_command = None;
-                    }),
-                    HostEvent::Title(title) => update_terminal(&runtime, terminal, |entry| {
-                        entry.title = Some(title);
-                    }),
+                    HostEvent::Exited(code) => {
+                        update_terminal(&runtime, terminal, |entry| {
+                            entry.status = TerminalStatus::Exited { code };
+                            entry.foreground_command = None;
+                        });
+                        runtime.publish(Event::TerminalExited { terminal, code });
+                    }
+                    HostEvent::Title(title) => {
+                        update_terminal(&runtime, terminal, |entry| {
+                            entry.title = Some(title.clone());
+                        });
+                        runtime.publish(Event::TerminalTitle { terminal, title });
+                    }
                     HostEvent::Bell | HostEvent::Cwd(_) | HostEvent::ClipboardWrite { .. } => {}
                 }
             }
@@ -953,6 +1025,8 @@ fn update_terminal(
         return;
     };
     update(entry);
+    drop(registry);
+    runtime.notify_session(&session_id);
 }
 
 fn terminal_error(terminal: TerminalId, error: impl std::fmt::Display) -> DaemonError {

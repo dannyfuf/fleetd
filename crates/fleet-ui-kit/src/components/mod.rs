@@ -78,17 +78,14 @@ pub use daemon_dot::{DaemonDot, DaemonState};
 pub use daemon_splash::{DaemonSplash, DaemonSplashKind};
 pub use degraded_chip::DegradedChip;
 pub use dialog::Dialog;
-pub use divider::HAIRLINE;
 pub use divider::{Divider, DividerAxis};
-pub use doctor_table::{CHECK_WIDTH, STATUS_WIDTH};
 pub use doctor_table::{DoctorRow, DoctorStatus, DoctorTable};
 pub use empty_state::EmptyState;
 pub use exit_strip::ExitStrip;
 pub use fact_list::{ConfirmKey, Fact, FactList};
 pub use fact_row::{FactRow, FactValue};
-pub use fact_row::{LABEL_WIDTH, REFRESHING_OPACITY};
 pub use filter_bar::FilterBar;
-pub use freshness_stamp::{AGING_SECS, FRESH_SECS, STALE_OPACITY};
+pub use freshness_stamp::{AGING_SECS, FRESH_SECS};
 pub use freshness_stamp::{Freshness, FreshnessStamp};
 pub use fuzzy_list::{FuzzyItem, FuzzyList};
 pub use job_row::{JobRow, JobStatus};
@@ -111,20 +108,18 @@ pub use pane::{Pane, PaneBorder};
 pub use pane_header::PaneHeader;
 pub use pr_badge::{PrBadge, PrBadgeState};
 pub use prefix_hint::PrefixHint;
+pub use row::GLYPH_COLUMN_CH;
 pub use row::{ColumnAlign, Row, RowColumn};
-pub use row::{DIMMED_OPACITY, GLYPH_COLUMN_CH};
 pub use scroll_pill::{ScrollPill, ScrollbackBadge};
 pub use section_header::SectionHeader;
 pub use segmented_tabs::{SegmentedTab, SegmentedTabs};
 pub use select::Select;
 pub use sheet::Sheet;
-pub use skeleton_rows::SKELETON_OPACITY;
 pub use skeleton_rows::SkeletonRows;
 pub use spinner::{Spinner, SpinnerWithLabel};
 pub use split_layout::{SplitAxis, SplitLayout};
 pub use status_bar::StatusBar;
 pub use status_dot::StatusDot;
-pub use status_dot::{DOT_SIZE, DOT_SIZE_SMALL};
 pub use status_glyph::{StatusGlyph, StatusKind};
 pub use sticky_error_slot::StickyErrorSlot;
 pub use terminal_grid::{
@@ -138,7 +133,7 @@ pub use text_field::{
 };
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
-pub use veil::{VEIL_OPACITY, Veil};
+pub use veil::Veil;
 
 /// `Modal` is the same surface as [`Dialog`]: scrim + card + 44 px header + 44 px footer.
 /// The alias exists so a view that thinks in "modal" finds the right type.

@@ -16,7 +16,7 @@
 //! Doctor itself renders `fleet doctor` as the compact table of §3.12: failures in red, `ok` in
 //! the secondary tone — zero-suppression of good news at the color level.
 
-use fleet_proto::response::DoctorCheck;
+use fleet_proto::response::{DoctorCheck, DoctorStatus as WireDoctorStatus};
 use fleet_ui_kit::{
     ActiveTheme, DoctorRow, DoctorStatus, DoctorTable, Icon, IconSize, KeyHintRow, Text, Tone,
     prelude::*,
@@ -25,7 +25,7 @@ use gpui::{AnyElement, App, SharedString, div};
 
 /// The wire protocol this build of the app speaks. A daemon that answers with anything else is
 /// a version mismatch, not a crash.
-pub const APP_PROTOCOL: u32 = 1;
+pub const APP_PROTOCOL: u32 = fleet_proto::PROTOCOL_VERSION;
 
 /// The heading of the doctor surface.
 pub const TITLE: &str = "Doctor";
@@ -34,16 +34,14 @@ pub const TITLE: &str = "Doctor";
 
 /// Maps one wire check onto a kit row.
 ///
-/// The wire only carries `ok: bool`, so this never invents a `warn`; a check that wants the
-/// amber middle state has to say so on the wire first (see INTEGRATION REQUESTS).
 #[must_use]
 pub fn doctor_row(check: &DoctorCheck) -> DoctorRow {
     DoctorRow::new(
         check.check.clone(),
-        if check.ok {
-            DoctorStatus::Ok
-        } else {
-            DoctorStatus::Fail
+        match check.status {
+            WireDoctorStatus::Ok => DoctorStatus::Ok,
+            WireDoctorStatus::Warn => DoctorStatus::Warn,
+            WireDoctorStatus::Fail => DoctorStatus::Fail,
         },
         check.detail.clone(),
     )
@@ -60,7 +58,7 @@ pub fn doctor_rows(checks: &[DoctorCheck]) -> Vec<DoctorRow> {
 pub fn failures(checks: &[DoctorCheck]) -> Vec<String> {
     checks
         .iter()
-        .filter(|check| !check.ok)
+        .filter(|check| check.status == WireDoctorStatus::Fail)
         .map(|check| format!("{}: {}", check.check, check.detail))
         .collect()
 }
@@ -68,7 +66,9 @@ pub fn failures(checks: &[DoctorCheck]) -> Vec<String> {
 /// Whether every check passed.
 #[must_use]
 pub fn is_healthy(checks: &[DoctorCheck]) -> bool {
-    checks.iter().all(|check| check.ok)
+    checks
+        .iter()
+        .all(|check| check.status != WireDoctorStatus::Fail)
 }
 
 /// The one-line summary of a doctor run: the first failure, or the all-clear.
@@ -126,11 +126,7 @@ impl DaemonFailure {
     #[must_use]
     pub const fn hints(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            Self::VersionMismatch => &[
-                ("D", "run doctor"),
-                ("L", "open log"),
-                ("ctrl-q", "quit"),
-            ],
+            Self::VersionMismatch => &[("D", "run doctor"), ("L", "open log"), ("ctrl-q", "quit")],
             Self::StaleSocket | Self::WontStart => &[
                 ("r", "retry"),
                 ("L", "open log"),
@@ -268,10 +264,7 @@ pub fn failure_view(
                 .color(theme.colors.danger),
         )
         .child(Text::ui_strong(failure_headline(failure)).tone(Tone::Danger))
-        .child(
-            Text::ui(SharedString::from(failure_detail(failure, message, socket)))
-                .muted(),
-        )
+        .child(Text::ui(SharedString::from(failure_detail(failure, message, socket))).muted())
         .child(
             div()
                 .flex()
@@ -294,7 +287,11 @@ mod tests {
     fn check(name: &str, ok: bool, detail: &str) -> DoctorCheck {
         DoctorCheck {
             check: name.to_owned(),
-            ok,
+            status: if ok {
+                WireDoctorStatus::Ok
+            } else {
+                WireDoctorStatus::Fail
+            },
             detail: detail.to_owned(),
         }
     }
@@ -370,7 +367,8 @@ mod tests {
 
     #[test]
     fn anything_else_is_a_plain_failure_that_quotes_the_daemon() {
-        let wont_start = DaemonFailure::classify("Fleet daemon exited before becoming ready", false);
+        let wont_start =
+            DaemonFailure::classify("Fleet daemon exited before becoming ready", false);
         assert_eq!(wont_start, DaemonFailure::WontStart);
         assert!(wont_start.is_retryable());
         assert_eq!(

@@ -3,7 +3,7 @@
 //! §3.12: `ok` renders in the secondary tone, not green. Zero-suppression at the color level:
 //! good news does not get a hue.
 
-use gpui::{App, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Pixels, SharedString, Window, div, prelude::*};
 
 use crate::{
     icons::{Icon, IconSize},
@@ -13,11 +13,6 @@ use crate::{
 };
 
 /// Width of the `CHECK` column, in pixels.
-pub const CHECK_WIDTH: f32 = 120.0;
-
-/// Width of the `STATUS` column, in pixels.
-pub const STATUS_WIDTH: f32 = 64.0;
-
 /// The outcome of one doctor check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DoctorStatus {
@@ -92,8 +87,8 @@ impl DoctorRow {
 #[derive(IntoElement)]
 pub struct DoctorTable {
     rows: Vec<DoctorRow>,
-    check_width: Pixels,
-    status_width: Pixels,
+    check_width: Option<Pixels>,
+    status_width: Option<Pixels>,
 }
 
 impl DoctorTable {
@@ -101,20 +96,20 @@ impl DoctorTable {
     pub fn new(rows: impl IntoIterator<Item = DoctorRow>) -> Self {
         Self {
             rows: rows.into_iter().collect(),
-            check_width: px(CHECK_WIDTH),
-            status_width: px(STATUS_WIDTH),
+            check_width: None,
+            status_width: None,
         }
     }
 
     /// Width of the `CHECK` column.
     pub fn check_width(mut self, width: Pixels) -> Self {
-        self.check_width = width;
+        self.check_width = Some(width);
         self
     }
 
     /// Width of the `STATUS` column.
     pub fn status_width(mut self, width: Pixels) -> Self {
-        self.status_width = width;
+        self.status_width = Some(width);
         self
     }
 }
@@ -122,8 +117,8 @@ impl DoctorTable {
 impl RenderOnce for DoctorTable {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let check_w = self.check_width;
-        let status_w = self.status_width;
+        let check_w = self.check_width.unwrap_or(theme.metrics.doctor_check_w);
+        let status_w = self.status_width.unwrap_or(theme.metrics.doctor_status_w);
         let header = div()
             .flex()
             .items_center()

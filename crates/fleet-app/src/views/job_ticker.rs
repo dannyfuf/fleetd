@@ -155,7 +155,10 @@ mod tests {
         ];
         let content = ticker_content(&jobs).unwrap_or_else(|| panic!("expected a ticker"));
         assert_eq!(content.kind, "clone");
-        assert_eq!(content.extra, 1, "the other running job is counted, not shown");
+        assert_eq!(
+            content.extra, 1,
+            "the other running job is counted, not shown"
+        );
         assert_eq!(content.percent, None);
     }
 

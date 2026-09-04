@@ -379,6 +379,45 @@ impl JobManager {
             .ok_or_else(|| DaemonError::NotFound(format!("job {new_id}")))
     }
 
+    /// Removes acknowledged completed jobs and their retained logs.
+    pub fn dismiss(&self, ids: &[JobId]) -> DaemonResult<()> {
+        let log_paths = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut paths = Vec::new();
+            for id in ids {
+                let job = state
+                    .jobs
+                    .get(id)
+                    .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))?;
+                if matches!(
+                    job.record.status,
+                    JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling
+                ) {
+                    return Err(DaemonError::Conflict(format!("job {id} is still active")));
+                }
+            }
+            for id in ids {
+                if let Some(job) = state.jobs.remove(id) {
+                    paths.push(PathBuf::from(job.record.log_path));
+                }
+                state.order.retain(|entry| entry != id);
+            }
+            paths
+        };
+        for path in log_paths {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(DaemonError::fs(path, error)),
+            }
+        }
+        Ok(())
+    }
+
     /// Configures how long completed records stay visible to clients.
     pub fn set_retention(&self, keep_finished_for: StdDuration) {
         let keep_finished_for = Duration::from_std(keep_finished_for).unwrap_or(Duration::MAX);

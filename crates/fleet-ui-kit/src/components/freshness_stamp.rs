@@ -29,9 +29,6 @@ pub const FRESH_SECS: i64 = 60;
 /// The upper bound of [`Freshness::Aging`], in seconds.
 pub const AGING_SECS: i64 = 600;
 
-/// The opacity a mark derived from a stale fact drops to (§2.6).
-pub const STALE_OPACITY: f32 = 0.55;
-
 /// The four rungs of the freshness ladder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Freshness {
@@ -70,9 +67,9 @@ impl Freshness {
     /// Pass it to [`super::PrBadge::stale`] or to `Text::opacity` for the `✎` dirty mark: the
     /// mark fades, the stamp turns amber, and the two together say "this was true ten minutes
     /// ago" without spending a word on it.
-    pub fn derived_opacity(self) -> f32 {
+    pub fn derived_opacity(self, stale_opacity: f32) -> f32 {
         match self {
-            Freshness::Stale => STALE_OPACITY,
+            Freshness::Stale => stale_opacity,
             _ => 1.0,
         }
     }
@@ -176,9 +173,9 @@ mod tests {
 
     #[test]
     fn only_stale_fades_derived_marks() {
-        assert_eq!(Freshness::Fresh.derived_opacity(), 1.0);
-        assert_eq!(Freshness::Aging.derived_opacity(), 1.0);
-        assert_eq!(Freshness::Stale.derived_opacity(), STALE_OPACITY);
+        assert_eq!(Freshness::Fresh.derived_opacity(0.55), 1.0);
+        assert_eq!(Freshness::Aging.derived_opacity(0.55), 1.0);
+        assert_eq!(Freshness::Stale.derived_opacity(0.55), 0.55);
         assert!(Freshness::Stale.draws_derived_mark());
         assert!(!Freshness::Errored.draws_derived_mark());
     }

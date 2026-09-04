@@ -19,8 +19,10 @@ make clippy      # lint all targets and features with warnings denied
 ```
 
 Direct Cargo equivalents work as usual. Build artifacts use Cargo's default target directory,
-`target/` inside this repository. Do not set a shared external `CARGO_TARGET_DIR`; keeping each
-worktree's artifacts local avoids collisions between parallel agents.
+`target/` inside this repository. Sharing that repository-local directory between commands in
+the same worktree is supported. Do not point multiple worktrees at one external
+`CARGO_TARGET_DIR`: Cargo's relative dep-info paths can make one worktree accept another's stale
+artifacts. Give parallel worktrees separate target directories when an override is necessary.
 
 ## Zig
 
@@ -59,4 +61,6 @@ Xcode SDK is not modified.
 
 Only edit files in your assigned module. Never edit `lib.rs` or `mod.rs` except to add `pub use`
 re-exports of public items from your own module. The complete module tree is predeclared so agents
-can implement separate files without creating shared-file conflicts.
+can implement separate files without creating shared-file conflicts. Because `cargo fmt -p` still
+formats an entire crate, parallel work should run `rustfmt` on owned files and leave the workspace
+wide `cargo fmt --all` pass to integration.

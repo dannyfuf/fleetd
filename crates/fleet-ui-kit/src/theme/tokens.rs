@@ -404,6 +404,12 @@ impl Default for Motion {
 /// Fixed pixel geometry that the UX spec pins down. Components must not hard-code these.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
+    /// 1 px separator hairline.
+    pub hairline: Pixels,
+    /// 8 px daemon status dot.
+    pub dot_size: Pixels,
+    /// 6 px terminal activity dot.
+    pub dot_size_small: Pixels,
     /// 36 px unified titlebar / context bar.
     pub context_bar_h: Pixels,
     /// 26 px status bar.
@@ -452,11 +458,40 @@ pub struct Metrics {
     pub cell_w: Pixels,
     /// Terminal cell height.
     pub cell_h: Pixels,
+    /// 96 px fact-label column.
+    pub fact_label_w: Pixels,
+    /// 120 px doctor check column.
+    pub doctor_check_w: Pixels,
+    /// 64 px doctor status column.
+    pub doctor_status_w: Pixels,
+    /// 36 px text-input box.
+    pub text_field_h: Pixels,
+    /// 18 px validation/preview slot beneath a field.
+    pub field_status_h: Pixels,
+    /// 44 px command-palette input.
+    pub palette_input_h: Pixels,
+    /// 96 px minimum number-field value box.
+    pub number_field_w: Pixels,
+    /// Terminal-unavailable scrim opacity.
+    pub veil_opacity: f32,
+    /// Disabled and dimmed row opacity.
+    pub dimmed_opacity: f32,
+    /// Cached value opacity during refresh.
+    pub refreshing_opacity: f32,
+    /// Derived-mark opacity for stale facts.
+    pub stale_opacity: f32,
+    /// Cold-load skeleton opacity.
+    pub skeleton_opacity: f32,
+    /// No-session status glyph opacity.
+    pub no_session_opacity: f32,
 }
 
 impl Default for Metrics {
     fn default() -> Self {
         Self {
+            hairline: px(1.0),
+            dot_size: px(8.0),
+            dot_size_small: px(6.0),
             context_bar_h: px(36.0),
             status_bar_h: px(26.0),
             pane_header_h: px(30.0),
@@ -481,6 +516,19 @@ impl Default for Metrics {
             focus_ring_w: px(2.0),
             cell_w: px(CH),
             cell_h: px(18.0),
+            fact_label_w: px(96.0),
+            doctor_check_w: px(120.0),
+            doctor_status_w: px(64.0),
+            text_field_h: px(36.0),
+            field_status_h: px(18.0),
+            palette_input_h: px(44.0),
+            number_field_w: px(96.0),
+            veil_opacity: 0.55,
+            dimmed_opacity: 0.40,
+            refreshing_opacity: 0.60,
+            stale_opacity: 0.55,
+            skeleton_opacity: 0.30,
+            no_session_opacity: 0.30,
         }
     }
 }

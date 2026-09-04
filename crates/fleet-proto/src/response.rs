@@ -34,6 +34,9 @@ pub struct WorktreeDeleteResult {
     /// Failure reason when deletion failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Recoverable trash entry name for undo after a successful deletion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trash_entry: Option<String>,
 }
 
 /// A worktree skipped by safe prune.
@@ -88,14 +91,26 @@ pub struct SleepResult {
     pub session_killed: bool,
 }
 
+/// Severity of one environment diagnostic result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorStatus {
+    /// Check passed.
+    Ok,
+    /// Check is usable but deserves attention.
+    Warn,
+    /// Check failed.
+    Fail,
+}
+
 /// One environment diagnostic result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DoctorCheck {
     /// Stable check name.
     pub check: String,
-    /// Whether the check passed.
-    pub ok: bool,
+    /// Three-state diagnostic outcome.
+    pub status: DoctorStatus,
     /// Human-readable observed detail.
     pub detail: String,
 }
@@ -194,6 +209,8 @@ pub enum ResponseBody {
     Session(Session),
     /// Current daemon-owned sessions.
     Sessions(Vec<Session>),
+    /// Currently active worktree session, when any.
+    CurrentSession(Option<fleet_core::ids::SessionId>),
     /// Created or changed terminal.
     Terminal(Terminal),
     /// Current and recently completed jobs.

@@ -16,7 +16,7 @@
 //! [`Palette::flat_len`] give it the two numbers it needs to move that cursor with
 //! [`FuzzyList::next_cursor`] / [`FuzzyList::prev_cursor`] on `ctrl-n` / `ctrl-p`.
 
-use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
 
 use crate::{
     components::{FuzzyItem, FuzzyList, KeyHintRow, TextField},
@@ -25,12 +25,6 @@ use crate::{
     theme::ActiveTheme,
     tone::Tone,
 };
-
-/// The 44 px query line of §3.9.
-///
-/// TODO(INTEGRATION `metrics.palette_input_h`): `Metrics` has `palette_w`, `palette_top` and
-/// `palette_row_h` but no entry for the input line.
-const PALETTE_INPUT_H: Pixels = px(44.0);
 
 /// The three sections, in their fixed order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -333,7 +327,7 @@ impl RenderOnce for Palette {
                             .placeholder("go to, or do")
                             .icon(Icon::Command)
                             .focused(true)
-                            .height(PALETTE_INPUT_H)
+                            .height(theme.metrics.palette_input_h)
                             .hide_status_line(true)
                             .when_some(self.caret, TextField::caret),
                     ),

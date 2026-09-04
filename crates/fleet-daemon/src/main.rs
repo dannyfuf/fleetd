@@ -65,9 +65,9 @@ async fn main() -> anyhow::Result<()> {
     ));
     let jobs = Arc::new(JobManager::new(&home));
     let adapters = Adapters::system(files);
-    let services = Arc::new(Services::new(&home, config, state, jobs, adapters));
     let shutdown = CancellationToken::new();
     let events = BroadcastBus::default();
+    let services = Services::new_with_events(&home, config, state, jobs, adapters, events.clone());
     let listener = Listener::bind(
         &home,
         Arc::clone(&services),

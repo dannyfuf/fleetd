@@ -4,20 +4,15 @@
 //! dot (§3.6). Everything else that expresses state is a [`crate::components::StatusGlyph`],
 //! because a shape carries more information than a color.
 
-use gpui::{App, Hsla, Pixels, Window, div, prelude::*, px};
+use gpui::{App, Hsla, Pixels, Window, div, prelude::*};
 
 use crate::{theme::ActiveTheme, tone::Tone};
-
-/// The daemon liveness dot (§2.2), in pixels.
-pub const DOT_SIZE: f32 = 8.0;
-
-/// The terminal-tab activity dot (§3.6), in pixels.
-pub const DOT_SIZE_SMALL: f32 = 6.0;
 
 /// A filled circle.
 #[derive(IntoElement)]
 pub struct StatusDot {
-    size: Pixels,
+    size: Option<Pixels>,
+    small: bool,
     tone: Tone,
     color: Option<Hsla>,
     opacity: Option<f32>,
@@ -27,7 +22,8 @@ impl StatusDot {
     /// An 8 px dot: the daemon dot.
     pub fn new(tone: Tone) -> Self {
         Self {
-            size: px(DOT_SIZE),
+            size: None,
+            small: false,
             tone,
             color: None,
             opacity: None,
@@ -36,12 +32,15 @@ impl StatusDot {
 
     /// A 6 px dot: the terminal-tab activity dot.
     pub fn small(tone: Tone) -> Self {
-        Self::new(tone).size(px(DOT_SIZE_SMALL))
+        Self {
+            small: true,
+            ..Self::new(tone)
+        }
     }
 
     /// Set the diameter.
     pub fn size(mut self, size: Pixels) -> Self {
-        self.size = size;
+        self.size = Some(size);
         self
     }
 
@@ -61,13 +60,18 @@ impl StatusDot {
 impl RenderOnce for StatusDot {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
+        let size = self.size.unwrap_or(if self.small {
+            theme.metrics.dot_size_small
+        } else {
+            theme.metrics.dot_size
+        });
         let mut color = self.color.unwrap_or_else(|| self.tone.color(theme));
         if let Some(opacity) = self.opacity {
             color = color.opacity(opacity);
         }
         div()
             .flex_none()
-            .size(self.size)
+            .size(size)
             .rounded(theme.radii.full)
             .bg(color)
     }

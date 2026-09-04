@@ -37,6 +37,7 @@ pub fn kind_word(job: &JobRecord) -> String {
         JobKind::PoolBuild | JobKind::PoolRefresh => "pool".to_owned(),
         JobKind::CreateWorktree => "create".to_owned(),
         JobKind::DeleteWorktree => "delete".to_owned(),
+        JobKind::DeleteRepo => "delete repo".to_owned(),
         JobKind::Prune => "prune".to_owned(),
         JobKind::Inspect => "inspect".to_owned(),
         JobKind::PostCreateHooks => "hooks".to_owned(),

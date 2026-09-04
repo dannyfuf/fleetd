@@ -59,11 +59,6 @@ impl JobTicker {
     }
 }
 
-/// Wrap a run that must never be the one that shrinks.
-fn fixed(child: impl IntoElement) -> gpui::Div {
-    div().flex_none().child(child)
-}
-
 impl RenderOnce for JobTicker {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
@@ -74,19 +69,24 @@ impl RenderOnce for JobTicker {
             .min_w_0()
             .child(Spinner::new(self.id).size(IconSize::Small))
             // The kind keeps its contrast: it is the word that says *what* is happening.
-            .child(fixed(Text::ui(self.kind)))
+            .child(Text::ui(self.kind).flex_none())
             // The target is the one run allowed to lose its tail — the kind and the percent
             // are what the status bar is for, and a long worktree id must not push them off
             // the end of the line.
             .child(Text::ui(self.target).muted().ellipsize())
-            .children(self.elapsed.map(|elapsed| fixed(Text::ui(elapsed).faint())))
             .children(
-                self.percent
-                    .map(|percent| fixed(Text::ui(format!("{}%", percent.min(100))).muted())),
+                self.elapsed
+                    .map(|elapsed| Text::ui(elapsed).faint().flex_none()),
             )
-            .children(
-                (self.extra > 0)
-                    .then(|| fixed(Text::ui(format!("+{}", self.extra)).tone(Tone::Muted))),
-            )
+            .children(self.percent.map(|percent| {
+                Text::ui(format!("{}%", percent.min(100)))
+                    .muted()
+                    .flex_none()
+            }))
+            .children((self.extra > 0).then(|| {
+                Text::ui(format!("+{}", self.extra))
+                    .tone(Tone::Muted)
+                    .flex_none()
+            }))
     }
 }

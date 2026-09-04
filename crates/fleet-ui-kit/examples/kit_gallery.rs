@@ -8,8 +8,8 @@
 //! cargo run -p fleet-ui-kit --example kit_gallery
 //! ```
 
-use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::KitAssets;
+use fleet_ui_kit::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Menu, MenuItem,
     SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
@@ -177,7 +177,8 @@ fn colors_section(cx: &mut App) -> AnyElement {
         labeled(
             "terminal default",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     swatch("fg", t.terminal.foreground),
                     swatch("bg", t.terminal.background),
@@ -192,21 +193,40 @@ fn colors_section(cx: &mut App) -> AnyElement {
 fn type_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let children = vec![
-        labeled("ui 13/18", &t, Text::ui("feat/payroll-fix — the branch you think in")),
-        labeled("ui_strong 13/18", &t, Text::ui_strong("Fix RUT validation on payroll import")),
+        labeled(
+            "ui 13/18",
+            &t,
+            Text::ui("feat/payroll-fix — the branch you think in"),
+        ),
+        labeled(
+            "ui_strong 13/18",
+            &t,
+            Text::ui_strong("Fix RUT validation on payroll import"),
+        ),
         labeled("title 15/20", &t, Text::title("New worktree")),
-        labeled("data 12.5/18", &t, Text::data("~/.fleet/worktrees/buk/payroll/feat-payroll-fix")),
-        labeled("data_small 11.5/16", &t, Text::data_small("Receiving objects: 40% (81/202)")),
+        labeled(
+            "data 12.5/18",
+            &t,
+            Text::data("~/.fleet/worktrees/buk/payroll/feat-payroll-fix"),
+        ),
+        labeled(
+            "data_small 11.5/16",
+            &t,
+            Text::data_small("Receiving objects: 40% (81/202)"),
+        ),
         labeled("label 11/14", &t, Text::label("worktrees")),
         labeled("hint mono 11/14", &t, Text::hint("⏎ open · esc cancel")),
         labeled(
             "truncate head/middle/tail",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     Text::data(truncate("dannyfuf/fleetd", 10, Truncate::Head)).into_any_element(),
-                    Text::data(truncate("feat/payroll-fix", 10, Truncate::Middle)).into_any_element(),
-                    Text::data(truncate("Fix RUT validation", 10, Truncate::Tail)).into_any_element(),
+                    Text::data(truncate("feat/payroll-fix", 10, Truncate::Middle))
+                        .into_any_element(),
+                    Text::data(truncate("Fix RUT validation", 10, Truncate::Tail))
+                        .into_any_element(),
                 ],
             ),
         ),
@@ -230,7 +250,8 @@ fn icons_section(cx: &mut App) -> AnyElement {
                 .into_any_element()
         })
         .collect();
-    let sizes = strip(&t,
+    let sizes = strip(
+        &t,
         vec![
             Icon::Moon.el().size(IconSize::Small).into_any_element(),
             Icon::Moon.el().size(IconSize::Medium).into_any_element(),
@@ -299,19 +320,30 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         labeled(
             "chips",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     Chip::counter(Icon::LoaderCircle, 2)
                         .tone(Tone::Warning)
                         .spinning(true)
                         .id("chip-jobs")
                         .into_any_element(),
-                    Chip::counter(Icon::CircleDot, 3).tone(Tone::Success).into_any_element(),
-                    Chip::counter(Icon::Moon, 5).tone(Tone::Secondary).into_any_element(),
-                    Chip::counter(Icon::CircleQuestionMark, 1).tone(Tone::Warning).into_any_element(),
-                    Chip::counter(Icon::Flag, 4).tone(Tone::Secondary).into_any_element(),
+                    Chip::counter(Icon::CircleDot, 3)
+                        .tone(Tone::Success)
+                        .into_any_element(),
+                    Chip::counter(Icon::Moon, 5)
+                        .tone(Tone::Secondary)
+                        .into_any_element(),
+                    Chip::counter(Icon::CircleQuestionMark, 1)
+                        .tone(Tone::Warning)
+                        .into_any_element(),
+                    Chip::counter(Icon::Flag, 4)
+                        .tone(Tone::Secondary)
+                        .into_any_element(),
                     Chip::counter(Icon::CircleArrowUp, 0).into_any_element(),
-                    Chip::labeled(Icon::Cloud, "devbox").filled(true).into_any_element(),
+                    Chip::labeled(Icon::Cloud, "devbox")
+                        .filled(true)
+                        .into_any_element(),
                     Chip::labeled(Icon::TriangleAlert, "1 failed")
                         .tone(Tone::Danger)
                         .filled(true)
@@ -322,19 +354,29 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         labeled(
             "badges",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     Badge::new("default").into_any_element(),
-                    Badge::new("current").style(BadgeStyle::Outlined).into_any_element(),
-                    Badge::new("ready").tone(Tone::Success).style(BadgeStyle::Filled).into_any_element(),
-                    Badge::new("danger").tone(Tone::Danger).style(BadgeStyle::Filled).into_any_element(),
+                    Badge::new("current")
+                        .style(BadgeStyle::Outlined)
+                        .into_any_element(),
+                    Badge::new("ready")
+                        .tone(Tone::Success)
+                        .style(BadgeStyle::Filled)
+                        .into_any_element(),
+                    Badge::new("danger")
+                        .tone(Tone::Danger)
+                        .style(BadgeStyle::Filled)
+                        .into_any_element(),
                 ],
             ),
         ),
         labeled(
             "status dots",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     StatusDot::new(Tone::Success).into_any_element(),
                     StatusDot::new(Tone::Warning).into_any_element(),
@@ -346,7 +388,8 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         labeled(
             "daemon dot",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     DaemonDot::new(DaemonState::Healthy).into_any_element(),
                     DaemonDot::new(DaemonState::Degraded)
@@ -361,7 +404,8 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         labeled(
             "keep-alive / degraded",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     KeepAliveChips::new([
                         KeepAliveLabel::with_icon("claude", Icon::Bot),
@@ -371,14 +415,17 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                     ])
                     .width_ch(18.0)
                     .into_any_element(),
-                    DegradedChip::hooks_failed().hint("J", "for log").into_any_element(),
+                    DegradedChip::hooks_failed()
+                        .hint("J", "for log")
+                        .into_any_element(),
                 ],
             ),
         ),
         labeled(
             "age labels",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     AgeLabel::from_secs(42).into_any_element(),
                     AgeLabel::from_secs(7_200).into_any_element(),
@@ -390,7 +437,8 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         labeled(
             "freshness ladder",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     FreshnessStamp::new("checked", 8).into_any_element(),
                     FreshnessStamp::new("checked", 240).into_any_element(),
@@ -406,7 +454,8 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         labeled(
             "mode words",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
                     ModeWord::new(Mode::Normal).into_any_element(),
                     ModeWord::new(Mode::Terminal).into_any_element(),
@@ -456,7 +505,10 @@ fn facts_section(cx: &mut App) -> AnyElement {
                 .row("ahead / behind", FactValue::known("⇡3 ⇣0"))
                 .row("unique commits", FactValue::Null)
                 .row("published", FactValue::known("no"))
-                .mono_row("path", FactValue::known("~/.fleet/worktrees/buk/payroll/feat"))
+                .mono_row(
+                    "path",
+                    FactValue::known("~/.fleet/worktrees/buk/payroll/feat"),
+                )
                 .row("warning", FactValue::warning("gh unavailable")),
         ),
         labeled("fact list · compact (y)", &t, compact),
@@ -466,13 +518,33 @@ fn facts_section(cx: &mut App) -> AnyElement {
             &t,
             DoctorTable::new([
                 DoctorRow::new("git", DoctorStatus::Ok, "git version 2.49.0"),
-                DoctorRow::new("gh auth", DoctorStatus::Fail, "gh: not logged in to github.com"),
+                DoctorRow::new(
+                    "gh auth",
+                    DoctorStatus::Fail,
+                    "gh: not logged in to github.com",
+                ),
                 DoctorRow::new("copy-on-write", DoctorStatus::Ok, "cp -c (APFS clonefile)"),
-                DoctorRow::new("host devbox", DoctorStatus::Warn, "ssh: slow handshake (2.1s)"),
+                DoctorRow::new(
+                    "host devbox",
+                    DoctorStatus::Warn,
+                    "ssh: slow handshake (2.1s)",
+                ),
             ]),
         ),
-        labeled("empty state", &t, box_of(&t, px(72.0), EmptyState::new("No worktrees yet.").action("n  create one"))),
-        labeled("skeleton rows", &t, box_of(&t, px(120.0), SkeletonRows::new(4))),
+        labeled(
+            "empty state",
+            &t,
+            box_of(
+                &t,
+                px(72.0),
+                EmptyState::new("No worktrees yet.").action("n  create one"),
+            ),
+        ),
+        labeled(
+            "skeleton rows",
+            &t,
+            box_of(&t, px(120.0), SkeletonRows::new(4)),
+        ),
     ];
     section("facts and tables", &t, children)
 }
@@ -497,7 +569,8 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
             )
     };
 
-    let states = box_of(&t,
+    let states = box_of(
+        &t,
         px(160.0),
         div()
             .flex()
@@ -520,17 +593,23 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
             ),
     );
 
-    let list = box_of(&t,
+    let list = box_of(
+        &t,
         px(180.0),
         ListView::new("gallery-list", 24, move |ix, is_cursor, _window, _cx| {
             Row::with_id(("list-row", ix))
                 .selected(is_cursor)
                 .cursor(is_cursor)
                 .leading(StatusGlyph::new(StatusKind::DetachedAwake).id(("list-glyph", ix)))
-                .column(RowColumn::flex(Text::ui(format!("row {ix} — j/k moves the cursor"))))
+                .column(RowColumn::flex(Text::ui(format!(
+                    "row {ix} — j/k moves the cursor"
+                ))))
                 .column(
-                    RowColumn::fixed(fleet_ui_kit::theme::ch(7.0), AgeLabel::from_secs(60 * ix as i64 + 30))
-                        .align(ColumnAlign::Right),
+                    RowColumn::fixed(
+                        fleet_ui_kit::theme::ch(7.0),
+                        AgeLabel::from_secs(60 * ix as i64 + 30),
+                    )
+                    .align(ColumnAlign::Right),
                 )
                 .into_any_element()
         })
@@ -539,7 +618,8 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
         .empty(EmptyState::new("Nothing matches.").action("esc  clear")),
     );
 
-    let jobs = box_of(&t,
+    let jobs = box_of(
+        &t,
         px(320.0),
         div()
             .flex()
@@ -566,7 +646,11 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
                     .elapsed("1m")
                     .trailing_key("R"),
             )
-            .child(JobRow::new(JobStatus::Done, "prune", "buk/www").id("job-3").elapsed("12s"))
+            .child(
+                JobRow::new(JobStatus::Done, "prune", "buk/www")
+                    .id("job-3")
+                    .elapsed("12s"),
+            )
             .child(JobRow::new(JobStatus::Cancelled, "fetch", "dannyfuf/fleetd").id("job-4"))
             .child(JobRow::new(JobStatus::Queued, "pool", "buk/payroll").id("job-5"))
             .child(
@@ -596,9 +680,13 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
         labeled(
             "ticker / sticky error",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 vec![
-                    JobTicker::new("clone", "nixos").percent(40).extra(1).into_any_element(),
+                    JobTicker::new("clone", "nixos")
+                        .percent(40)
+                        .extra(1)
+                        .into_any_element(),
                     StickyErrorSlot::new("gh: HTTP 502 upstream connect error").into_any_element(),
                 ],
             ),
@@ -606,7 +694,8 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
         labeled(
             "column ladder (worktrees @ 138 / 93 / 60 ch)",
             &t,
-            strip(&t,
+            strip(
+                &t,
                 [138.0f32, 93.0, 60.0]
                     .iter()
                     .map(|w| {
@@ -616,7 +705,9 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
                             .map(|c| c.key.to_string())
                             .collect::<Vec<_>>()
                             .join(" ");
-                        Text::hint(format!("{w:.0}ch: {keys}")).faint().into_any_element()
+                        Text::hint(format!("{w:.0}ch: {keys}"))
+                            .faint()
+                            .into_any_element()
                     })
                     .collect(),
             ),
@@ -627,7 +718,8 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
 
 fn structure_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    let pane = box_of(&t,
+    let pane = box_of(
+        &t,
         px(150.0),
         SplitLayout::horizontal()
             .leading_size(px(200.0))
@@ -678,11 +770,13 @@ fn structure_section(cx: &mut App) -> AnyElement {
             ),
     );
 
-    let filtered = box_of(&t,
+    let filtered = box_of(
+        &t,
         t.metrics.pane_header_h,
         PaneHeader::new("worktrees").filter(FilterBar::new("rut", 2, 12)),
     );
-    let retained = box_of(&t,
+    let retained = box_of(
+        &t,
         t.metrics.pane_header_h,
         PaneHeader::new("worktrees")
             .scope("payroll")
@@ -691,12 +785,17 @@ fn structure_section(cx: &mut App) -> AnyElement {
             .total(12)
             .range(1, 2),
     );
-    let stale = box_of(&t,
+    let stale = box_of(
+        &t,
         t.metrics.pane_header_h,
-        PaneHeader::new("worktrees").scope("payroll").total(12).stale("2m"),
+        PaneHeader::new("worktrees")
+            .scope("payroll")
+            .total(12)
+            .stale("2m"),
     );
 
-    let bars = box_of(&t,
+    let bars = box_of(
+        &t,
         t.metrics.context_bar_h,
         ContextBar::new([
             ContextTab::new("buk", 1),
@@ -705,7 +804,12 @@ fn structure_section(cx: &mut App) -> AnyElement {
         ])
         .active(0)
         .overflow(3)
-        .chip(Chip::counter(Icon::LoaderCircle, 2).tone(Tone::Warning).spinning(true).id("cb-jobs"))
+        .chip(
+            Chip::counter(Icon::LoaderCircle, 2)
+                .tone(Tone::Warning)
+                .spinning(true)
+                .id("cb-jobs"),
+        )
         .chip(Chip::counter(Icon::CircleDot, 3).tone(Tone::Success))
         .chip(Chip::counter(Icon::Moon, 5).tone(Tone::Secondary))
         .chip(Chip::counter(Icon::CircleQuestionMark, 1).tone(Tone::Warning))
@@ -713,14 +817,16 @@ fn structure_section(cx: &mut App) -> AnyElement {
         .daemon(DaemonState::Healthy),
     );
 
-    let status = box_of(&t,
+    let status = box_of(
+        &t,
         t.metrics.status_bar_h,
         StatusBar::new()
             .breadcrumb("buk › payroll › feat/payroll-fix")
             .mode(Mode::Normal)
             .ticker(JobTicker::new("clone", "nixos").percent(40).extra(1)),
     );
-    let status_error = box_of(&t,
+    let status_error = box_of(
+        &t,
         t.metrics.status_bar_h,
         StatusBar::new()
             .breadcrumb("buk › payroll › feat/payroll-fix")
@@ -740,7 +846,8 @@ fn structure_section(cx: &mut App) -> AnyElement {
         labeled(
             "banner",
             &t,
-            box_of(&t,
+            box_of(
+                &t,
                 t.metrics.banner_h,
                 Banner::danger("fleetd stopped")
                     .countdown("reconnecting in 3s")
@@ -791,7 +898,8 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     );
 
     // Every cell attribute, so a regression in the proto -> kit conversion is visible here.
-    let attr_cell = |text: &str, f: fn(GridCell) -> GridCell| f(GridCell::new(text.to_string(), &t));
+    let attr_cell =
+        |text: &str, f: fn(GridCell) -> GridCell| f(GridCell::new(text.to_string(), &t));
     let attrs_row = GridRow::new([
         attr_cell("bold ", |c| c.bold(true)),
         attr_cell("dim ", |c| c.dim(true)),
@@ -816,11 +924,7 @@ fn terminal_section(cx: &mut App) -> AnyElement {
         GridCell::new("", &t).width(CellWidth::Spacer),
         GridCell::new(" wide + spacer", &t),
     ]);
-    let attrs = box_of(
-        &t,
-        px(56.0),
-        TerminalGrid::new([attrs_row, attrs_row_2]),
-    );
+    let attrs = box_of(&t, px(56.0), TerminalGrid::new([attrs_row, attrs_row_2]));
 
     let unfocused = box_of(
         &t,
@@ -842,25 +946,21 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     let cursor_shapes = box_of(
         &t,
         px(38.0),
-        div()
-            .flex()
-            .size_full()
-            .bg(t.terminal.background)
-            .children([CursorShape::Block, CursorShape::Bar, CursorShape::Underline].map(
-                |shape| {
-                    div().w(px(120.0)).h_full().child(
-                        TerminalGrid::new([GridRow::new(
-                            "  shape".chars().map(|c| GridCell::new(c.to_string(), &t)),
-                        )])
-                        .cursor(GridCursor {
-                            row: 0,
-                            col: 0,
-                            visible: true,
-                            shape,
-                        }),
-                    )
-                },
-            )),
+        div().flex().size_full().bg(t.terminal.background).children(
+            [CursorShape::Block, CursorShape::Bar, CursorShape::Underline].map(|shape| {
+                div().w(px(120.0)).h_full().child(
+                    TerminalGrid::new([GridRow::new(
+                        "  shape".chars().map(|c| GridCell::new(c.to_string(), &t)),
+                    )])
+                    .cursor(GridCursor {
+                        row: 0,
+                        col: 0,
+                        visible: true,
+                        shape,
+                    }),
+                )
+            }),
+        ),
     );
 
     let strip_el = box_of(
@@ -868,7 +968,9 @@ fn terminal_section(cx: &mut App) -> AnyElement {
         t.metrics.pane_header_h,
         TerminalTabStrip::new([
             TerminalTab::new(1, "nvim").keep_alive(Icon::FilePen),
-            TerminalTab::new(2, "cc").keep_alive(Icon::Bot).activity(true),
+            TerminalTab::new(2, "cc")
+                .keep_alive(Icon::Bot)
+                .activity(true),
             TerminalTab::new(3, "lg"),
             TerminalTab::new(4, "test").exited(1),
             TerminalTab::new(5, "server").exited(None),
@@ -963,7 +1065,9 @@ fn terminal_section(cx: &mut App) -> AnyElement {
                 px(96.0),
                 LogView::new(
                     "gallery-log",
-                    (0..40).map(|i| SharedString::from(format!("[{i:03}] remote: Counting objects\u{2026}"))),
+                    (0..40).map(|i| {
+                        SharedString::from(format!("[{i:03}] remote: Counting objects\u{2026}"))
+                    }),
                 ),
             ),
         ),
@@ -1008,31 +1112,36 @@ fn input_section(cx: &mut App) -> AnyElement {
         labeled(
             "text field",
             &t,
-            div()
-                .flex()
-                .flex_col()
-                .w(px(360.0))
-                .child(TextField::new("feat/rut-validator").label("branch").focused(true).preview("→ buk/payroll#feat-rut-validator")),
+            div().flex().flex_col().w(px(360.0)).child(
+                TextField::new("feat/rut-validator")
+                    .label("branch")
+                    .focused(true)
+                    .preview("→ buk/payroll#feat-rut-validator"),
+            ),
         ),
         labeled(
             "text field · invalid",
             &t,
-            div()
-                .flex()
-                .flex_col()
-                .w(px(360.0))
-                .child(TextField::new("feat/../rut").label("branch").invalid("branch cannot contain \"..\"")),
+            div().flex().flex_col().w(px(360.0)).child(
+                TextField::new("feat/../rut")
+                    .label("branch")
+                    .invalid("branch cannot contain \"..\""),
+            ),
         ),
         labeled(
             "text field · placeholder",
             &t,
-            div()
-                .flex()
-                .flex_col()
-                .w(px(360.0))
-                .child(TextField::new("").placeholder("Type to search GitHub repos in buk's owners.").icon(Icon::Search)),
+            div().flex().flex_col().w(px(360.0)).child(
+                TextField::new("")
+                    .placeholder("Type to search GitHub repos in buk's owners.")
+                    .icon(Icon::Search),
+            ),
         ),
-        labeled("cycler", &t, Cycler::labeled("host", "local").has_prev(false)),
+        labeled(
+            "cycler",
+            &t,
+            Cycler::labeled("host", "local").has_prev(false),
+        ),
         labeled(
             "toggles",
             &t,
@@ -1042,7 +1151,11 @@ fn input_section(cx: &mut App) -> AnyElement {
                 .w(px(360.0))
                 .child(Toggle::labeled("Sleep on switch", true).focused(true))
                 .child(Toggle::labeled("Warn before quitting", false))
-                .child(Toggle::labeled("Claude keep-alive", true).detail("matching 2 processes now").disabled(true)),
+                .child(
+                    Toggle::labeled("Claude keep-alive", true)
+                        .detail("matching 2 processes now")
+                        .disabled(true),
+                ),
         ),
         labeled(
             "number fields",
@@ -1051,10 +1164,27 @@ fn input_section(cx: &mut App) -> AnyElement {
                 .flex()
                 .flex_col()
                 .w(px(360.0))
-                .child(NumberField::labeled("grace", 2000).unit("ms").min(0).focused(true))
-                .child(NumberField::labeled("local status refresh", 200).unit("ms").min(500)),
+                .child(
+                    NumberField::labeled("grace", 2000)
+                        .unit("ms")
+                        .min(0)
+                        .focused(true),
+                )
+                .child(
+                    NumberField::labeled("local status refresh", 200)
+                        .unit("ms")
+                        .min(500),
+                ),
         ),
-        labeled("segmented tabs", &t, SegmentedTabs::new([SegmentedTab::new("mine", 7), SegmentedTab::new("review", 4).loading(true)]).active(0)),
+        labeled(
+            "segmented tabs",
+            &t,
+            SegmentedTabs::new([
+                SegmentedTab::new("mine", 7),
+                SegmentedTab::new("review", 4).loading(true),
+            ])
+            .active(0),
+        ),
         labeled(
             "select + fuzzy list",
             &t,
@@ -1096,7 +1226,8 @@ fn input_section(cx: &mut App) -> AnyElement {
 
 fn overlays_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    let dialog = box_of(&t,
+    let dialog = box_of(
+        &t,
         px(300.0),
         Dialog::new("New worktree")
             .subtitle("· buk/payroll")
@@ -1107,14 +1238,20 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(TextField::new("feat/rut-validator").label("branch").focused(true).preview("→ buk/payroll#feat-rut-validator"))
+                    .child(
+                        TextField::new("feat/rut-validator")
+                            .label("branch")
+                            .focused(true)
+                            .preview("→ buk/payroll#feat-rut-validator"),
+                    )
                     .child(Text::hint("⚡ prepared copy ready — create takes ~2 s").faint()),
             )
             .hints(KeyHintRow::new().key("⇥", "field").key("esc", "cancel"))
             .primary("⏎ Create"),
     );
 
-    let confirm_compact = box_of(&t,
+    let confirm_compact = box_of(
+        &t,
         px(220.0),
         ConfirmDialog::new(
             "Delete buk/payroll#fix-rut-validator?",
@@ -1145,7 +1282,8 @@ fn overlays_section(cx: &mut App) -> AnyElement {
         .hints(KeyHintRow::new().key("I", "re-check")),
     );
 
-    let palette = box_of(&t,
+    let palette = box_of(
+        &t,
         px(320.0),
         Overlay::new().top(px(12.0)).width(px(560.0)).child(
             Palette::new("pay fix")
@@ -1168,7 +1306,9 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                             .icon(Icon::Scissors)
                             .key("x")
                             .destructive(true),
-                        PaletteRow::new("Clone repo").icon(Icon::CloudDownload).key("n"),
+                        PaletteRow::new("Clone repo")
+                            .icon(Icon::CloudDownload)
+                            .key("n"),
                     ],
                 ))
                 .section(PaletteSection::new(
@@ -1178,7 +1318,8 @@ fn overlays_section(cx: &mut App) -> AnyElement {
         ),
     );
 
-    let sheet = box_of(&t,
+    let sheet = box_of(
+        &t,
         px(260.0),
         Sheet::new(true)
             .header(
@@ -1186,7 +1327,10 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                     .flex()
                     .flex_col()
                     .p(px(12.0))
-                    .child(SectionHeader::new("jobs").trailing(Text::hint("⟳2 running · ✕1 failed").faint()))
+                    .child(
+                        SectionHeader::new("jobs")
+                            .trailing(Text::hint("⟳2 running · ✕1 failed").faint()),
+                    )
                     .child(Text::data_small("~/.fleet/logs/jobs/j-8f3c.log").faint()),
             )
             .body(
@@ -1202,7 +1346,11 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                             .selected(true)
                             .cursor(true),
                     )
-                    .child(JobRow::new(JobStatus::Failed, "prs", "review").id("sheet-job-1").trailing_key("R")),
+                    .child(
+                        JobRow::new(JobStatus::Failed, "prs", "review")
+                            .id("sheet-job-1")
+                            .trailing_key("R"),
+                    ),
             )
             .footer(
                 div().p(px(12.0)).child(
@@ -1215,7 +1363,8 @@ fn overlays_section(cx: &mut App) -> AnyElement {
             ),
     );
 
-    let toasts = box_of(&t,
+    let toasts = box_of(
+        &t,
         px(160.0),
         ToastStack::new([
             Toast::new("Path copied").icon(Icon::ClipboardCheck).short(),
@@ -1263,7 +1412,11 @@ impl Render for Gallery {
                 ContextBar::new([ContextTab::new("fleet-ui-kit gallery", 1)])
                     .leading_inset(px(84.0))
                     .chip(Chip::labeled(
-                        if mode.is_dark() { Icon::Moon } else { Icon::CircleArrowUp },
+                        if mode.is_dark() {
+                            Icon::Moon
+                        } else {
+                            Icon::CircleArrowUp
+                        },
                         if mode.is_dark() { "dark" } else { "light" },
                     ))
                     .daemon(DaemonState::Healthy),
@@ -1286,11 +1439,7 @@ impl Render for Gallery {
                 StatusBar::new()
                     .breadcrumb("fleet-ui-kit · every component, every state")
                     .mode(Mode::Normal)
-                    .ticker(
-                        KeyHintRow::new()
-                            .key("t", "toggle theme")
-                            .key("q", "quit"),
-                    ),
+                    .ticker(KeyHintRow::new().key("t", "toggle theme").key("q", "quit")),
             )
     }
 }

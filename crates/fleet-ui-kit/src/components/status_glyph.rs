@@ -75,10 +75,10 @@ impl StatusKind {
         }
     }
 
-    /// The opacity multiplier. Only `NoSession` lowers it (30 %).
-    pub fn opacity(self) -> f32 {
+    /// The opacity multiplier. Only `NoSession` lowers it.
+    pub fn opacity(self, no_session_opacity: f32) -> f32 {
         match self {
-            StatusKind::NoSession => 0.30,
+            StatusKind::NoSession => no_session_opacity,
             _ => 1.0,
         }
     }
@@ -164,13 +164,14 @@ impl StatusGlyph {
 
 impl RenderOnce for StatusGlyph {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let color = self.kind.tone().color(cx.theme());
+        let theme = cx.theme();
+        let color = self.kind.tone().color(theme);
         self.kind
             .icon()
             .el()
             .size(self.size)
             .color(color)
-            .opacity(self.kind.opacity())
+            .opacity(self.kind.opacity(theme.metrics.no_session_opacity))
             .spinning(self.kind.spins())
             // A spinning glyph needs a stable id; falling back to the glyph's own name keeps
             // two different kinds under one parent from sharing an animation.

@@ -16,6 +16,7 @@ use fleet_core::{
     ids::{HostId, JobId, RepoId, SessionId, WorktreeId},
     model::{Degraded, Repo, RepoHooks, Worktree},
     paths::{CreatingMarker, creating_marker_path, hot_marker_path, uuid_attempt_path},
+    slug::slugify,
     validate::{validate_branch, validate_slug},
 };
 use fleet_proto::{job::JobKind, response::WorktreeDeleteResult};
@@ -25,12 +26,20 @@ use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::{files::Files, git::Git},
+    adapters::{
+        files::Files,
+        git::Git,
+        github::Github,
+        shell::{Shell, ShellCommand, ShellResult},
+    },
     jobs::{JobCtx, JobManager},
     stores::{config::ConfigStore, state::StateStore},
 };
 
-use super::pool::{CancellableCopy, Pool};
+use super::{
+    pool::{CancellableCopy, Pool},
+    sessions::Sessions,
+};
 
 const TRASH_MARKER_FILE: &str = "fleet-trash.json";
 
@@ -42,6 +51,9 @@ pub struct Worktrees {
     jobs: Arc<JobManager>,
     files: Arc<dyn Files>,
     git: Arc<dyn Git>,
+    shell: Option<Arc<dyn Shell>>,
+    github: Option<Arc<dyn Github>>,
+    sessions: Option<Sessions>,
     pool: Pool,
     trash_jobs: Arc<Mutex<HashMap<String, JobId>>>,
     startup_ready: Arc<AtomicBool>,
@@ -71,12 +83,31 @@ impl Worktrees {
             jobs,
             files,
             git,
+            shell: None,
+            github: None,
+            sessions: None,
             trash_jobs: Arc::new(Mutex::new(HashMap::new())),
             startup_ready: Arc::new(AtomicBool::new(false)),
             startup_notify: Arc::new(tokio::sync::Notify::new()),
         };
         service.schedule_startup_recovery();
         service
+    }
+
+    /// Adds the daemon's live session and GitHub integrations.
+    #[must_use]
+    pub fn with_integrations(mut self, sessions: Sessions, github: Arc<dyn Github>) -> Self {
+        self.sessions = Some(sessions);
+        self.github = Some(github);
+        self
+    }
+
+    /// Uses the shared command adapter for hook execution.
+    #[must_use]
+    pub fn with_shell(mut self, shell: Arc<dyn Shell>) -> Self {
+        self.pool = self.pool.with_shell(Arc::clone(&shell));
+        self.shell = Some(shell);
+        self
     }
 
     /// Claims or copies a prepared slot and atomically publishes a worktree.
@@ -110,6 +141,7 @@ impl Worktrees {
         let target = format!("{}#{}:{}", repo, slug, Uuid::new_v4());
         let title = format!("Create {repo}#{slug}");
         let (sender, receiver) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         self.jobs.submit(
             JobKind::CreateWorktree,
             target,
@@ -124,7 +156,13 @@ impl Worktrees {
                     .as_ref()
                     .map(Clone::clone)
                     .map_err(clone_daemon_error);
-                let _ignored = sender.send(copied);
+                if let Some(sender) = sender
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ignored = sender.send(copied);
+                }
                 result.map(drop)
             },
         );
@@ -138,13 +176,27 @@ impl Worktrees {
         number: u64,
     ) -> DaemonResult<(bool, Worktree)> {
         self.await_startup_recovery().await;
-        let slug = format!("pr-{number}");
+        let pull = match &self.github {
+            Some(github) => github.pull_request(&repo, number).await?,
+            None => None,
+        };
+        let slug = pull
+            .as_ref()
+            .filter(|pull| !pull.is_cross_repository)
+            .map(|pull| slugify(&pull.head_ref_name))
+            .filter(|slug| !slug.is_empty())
+            .unwrap_or_else(|| format!("pr-{number}"));
+        let branch = pull
+            .filter(|pull| !pull.is_cross_repository)
+            .map(|pull| pull.head_ref_name)
+            .unwrap_or_else(|| format!("pr/{number}"));
         if let Some(existing) = self.existing_create_result(&repo, &slug, None).await? {
             return Ok((false, existing));
         }
         let service = self.clone();
         let target = format!("{}#{}:{}", repo, slug, Uuid::new_v4());
         let (sender, receiver) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         self.jobs.submit(
             JobKind::CreateWorktree,
             target,
@@ -152,12 +204,20 @@ impl Worktrees {
             true,
             true,
             move |context| async move {
-                let result = service.create_pr_local(repo, slug, number, &context).await;
+                let result = service
+                    .create_pr_local(repo, slug, branch, number, &context)
+                    .await;
                 let copied = result
                     .as_ref()
                     .map(Clone::clone)
                     .map_err(clone_daemon_error);
-                let _ignored = sender.send(copied);
+                if let Some(sender) = sender
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ignored = sender.send(copied);
+                }
                 result.map(drop)
             },
         );
@@ -172,6 +232,7 @@ impl Worktrees {
             results.push(WorktreeDeleteResult {
                 worktree_id: id,
                 ok: result.is_ok(),
+                trash_entry: result.as_ref().ok().cloned(),
                 reason: result.err().map(|error| error.to_string()),
             });
         }
@@ -189,8 +250,14 @@ impl Worktrees {
         if worktree.host.is_some() {
             return Err(remote_unsupported());
         }
-        // Session ownership is intentionally outside this service. Killing an absent local
-        // daemon session is idempotent; the shared facade must wire Sessions for a live kill.
+        if let Some(sessions) = &self.sessions {
+            let session = SessionId::try_from(worktree.session.as_str())
+                .map_err(|error| DaemonError::Validation(error.to_string()))?;
+            match sessions.kill(session).await {
+                Ok(()) | Err(DaemonError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 
@@ -406,6 +473,7 @@ impl Worktrees {
         &self,
         repo_id: RepoId,
         slug: String,
+        branch: String,
         number: u64,
         context: &JobCtx,
     ) -> DaemonResult<(bool, Worktree)> {
@@ -414,7 +482,6 @@ impl Worktrees {
         let root = repo_worktrees_dir(&config, &repo_id);
         self.files.create_dir_all(&root)?;
         self.reclaim_publish_intent(&id, &root.join(&slug)).await?;
-        let branch = format!("pr/{number}");
         self.assert_create_conflicts(&id, &repo, &slug, &branch, &root)
             .await?;
         let attempt = uuid_attempt_path(&root, &slug, Uuid::new_v4());
@@ -544,16 +611,13 @@ impl Worktrees {
         for command in &hooks.prepare {
             check_cancelled(context)?;
             context.progress(format!("prepare: {command}"))?;
-            match run_hook(cwd, command, Some(context)).await {
-                Ok(output) if output.status.success() => {
+            match run_hook(self.shell.as_deref(), cwd, command, Some(context)).await {
+                Ok(output) if output.success() => {
                     record_output(context, &output)?;
                 }
                 Ok(output) => {
                     record_output(context, &output)?;
-                    context.progress(format!(
-                        "warning: prepare hook exited {}",
-                        output.status.code().unwrap_or(-1)
-                    ))?;
+                    context.progress(format!("warning: prepare hook exited {}", output.status))?;
                 }
                 Err(DaemonError::Cancelled) => return Err(DaemonError::Cancelled),
                 Err(error) => context.progress(format!("warning: prepare hook failed: {error}"))?,
@@ -781,9 +845,10 @@ impl Worktrees {
         self.files.remove_detached(&trashed)
     }
 
-    async fn delete_one_job(&self, id: WorktreeId) -> DaemonResult<()> {
+    async fn delete_one_job(&self, id: WorktreeId) -> DaemonResult<String> {
         let service = self.clone();
         let (sender, receiver) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         self.jobs.submit(
             JobKind::DeleteWorktree,
             format!("{}:{}", id, Uuid::new_v4()),
@@ -793,17 +858,23 @@ impl Worktrees {
             move |context| async move {
                 let result = service.delete_one(id, &context).await;
                 let copied = match &result {
-                    Ok(()) => Ok(()),
+                    Ok(entry) => Ok(entry.clone()),
                     Err(error) => Err(clone_daemon_error(error)),
                 };
-                let _ignored = sender.send(copied);
-                result
+                if let Some(sender) = sender
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ignored = sender.send(copied);
+                }
+                result.map(drop)
             },
         );
         receiver.await.map_err(|_| DaemonError::Cancelled)?
     }
 
-    async fn delete_one(&self, id: WorktreeId, context: &JobCtx) -> DaemonResult<()> {
+    async fn delete_one(&self, id: WorktreeId, context: &JobCtx) -> DaemonResult<String> {
         let config = self.config.load().await?;
         let state = self.state.load().await?;
         let worktree = state
@@ -814,6 +885,14 @@ impl Worktrees {
             .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
         if worktree.host.is_some() {
             return Err(remote_unsupported());
+        }
+        if let Some(sessions) = &self.sessions {
+            let session = SessionId::try_from(worktree.session.as_str())
+                .map_err(|error| DaemonError::Validation(error.to_string()))?;
+            match sessions.kill(session).await {
+                Ok(()) | Err(DaemonError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         let canonical = repo_worktrees_dir(&config, &worktree.repo_id).join(&worktree.slug);
         if Path::new(&worktree.path) != canonical {
@@ -883,8 +962,13 @@ impl Worktrees {
                 path: canonical,
                 source: std::io::Error::other("trash rename did not return a destination"),
             })?;
+        let entry = trash
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| DaemonError::Validation("trash entry is not valid UTF-8".to_owned()))?
+            .to_owned();
         self.schedule_trash_cleanup(trash, config.trash.retention_ms);
-        Ok(())
+        Ok(entry)
     }
 
     fn schedule_trash_cleanup(&self, trash: PathBuf, retention_ms: u64) {
@@ -937,13 +1021,20 @@ impl Worktrees {
                 let mut first_failure = None;
                 for (index, command) in hooks.iter().enumerate() {
                     context.progress(format!("post-create: {command}"))?;
-                    match run_hook(Path::new(&worktree.path), command, None).await {
+                    match run_hook(
+                        service.shell.as_deref(),
+                        Path::new(&worktree.path),
+                        command,
+                        None,
+                    )
+                    .await
+                    {
                         Ok(output) => {
                             record_output(&context, &output)?;
-                            if !output.status.success() && first_failure.is_none() {
+                            if !output.success() && first_failure.is_none() {
                                 first_failure = Some((
                                     format!("hook {}: {command}", index + 1),
-                                    output.status.code(),
+                                    Some(output.status),
                                 ));
                             }
                         }
@@ -997,22 +1088,13 @@ impl Worktrees {
             return;
         }
         let service = self.clone();
-        self.jobs.submit(
-            JobKind::Custom("worktree_recovery".to_owned()),
-            "startup",
-            "Recover interrupted worktree publication",
-            false,
-            false,
-            move |context| async move {
-                let result = match context.progress("scanning worktree publish intents") {
-                    Ok(()) => service.recover_startup().await,
-                    Err(error) => Err(error),
-                };
-                service.startup_ready.store(true, Ordering::Release);
-                service.startup_notify.notify_waiters();
-                result
-            },
-        );
+        tokio::spawn(async move {
+            if let Err(error) = service.recover_startup().await {
+                tracing::warn!(%error, "startup worktree recovery failed");
+            }
+            service.startup_ready.store(true, Ordering::Release);
+            service.startup_notify.notify_waiters();
+        });
     }
 
     async fn await_startup_recovery(&self) {
@@ -1278,10 +1360,23 @@ fn check_cancelled(context: &JobCtx) -> DaemonResult<()> {
 }
 
 async fn run_hook(
+    shell: Option<&dyn Shell>,
     cwd: &Path,
     command: &str,
     context: Option<&JobCtx>,
-) -> DaemonResult<std::process::Output> {
+) -> DaemonResult<ShellResult> {
+    if let Some(shell) = shell {
+        if context.is_some_and(|context| context.cancel.is_cancelled()) {
+            return Err(DaemonError::Cancelled);
+        }
+        let output = shell
+            .run(ShellCommand::new("sh").args(["-c", command]).cwd(cwd))
+            .await?;
+        if context.is_some_and(|context| context.cancel.is_cancelled()) {
+            return Err(DaemonError::Cancelled);
+        }
+        return Ok(output);
+    }
     let mut process = tokio::process::Command::new("sh");
     process
         .arg("-c")
@@ -1294,20 +1389,31 @@ async fn run_hook(
     if let Some(context) = context {
         tokio::select! {
             () = context.cancel.cancelled() => Err(DaemonError::Cancelled),
-            output = output => output.map_err(|error| DaemonError::Shell(format!("sh -c `{command}`: {error}"))),
+            output = output => output
+                .map(|output| ShellResult {
+                    status: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+                .map_err(|error| DaemonError::Shell(format!("sh -c `{command}`: {error}"))),
         }
     } else {
         output
             .await
+            .map(|output| ShellResult {
+                status: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            })
             .map_err(|error| DaemonError::Shell(format!("sh -c `{command}`: {error}")))
     }
 }
 
-fn record_output(context: &JobCtx, output: &std::process::Output) -> DaemonResult<()> {
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+fn record_output(context: &JobCtx, output: &ShellResult) -> DaemonResult<()> {
+    for line in output.stdout.lines() {
         context.progress(line)?;
     }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
+    for line in output.stderr.lines() {
         context.progress(line)?;
     }
     Ok(())

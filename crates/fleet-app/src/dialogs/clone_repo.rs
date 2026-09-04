@@ -408,6 +408,7 @@ fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         name: repo.name,
         url: repo.ssh_url,
         context,
+        default_branch: Some(repo.default_branch),
     });
     state.update(cx, |app, cx| {
         app.close_overlay();

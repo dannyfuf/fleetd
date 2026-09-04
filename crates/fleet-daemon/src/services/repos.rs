@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::{files::Files, git::Git, github::Github},
+    adapters::{files::Files, git::Git, github::Github, process::Process},
     jobs::{JobCtx, JobManager},
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -36,6 +36,7 @@ pub struct Repos {
     git: Arc<dyn Git>,
     github: Arc<dyn Github>,
     files: Arc<dyn Files>,
+    process: Option<Arc<dyn Process>>,
 }
 
 impl Repos {
@@ -56,7 +57,67 @@ impl Repos {
             git,
             github,
             files,
+            process: None,
         }
+    }
+
+    /// Adds process liveness for daemon-startup clone reconciliation.
+    #[must_use]
+    pub fn with_process(mut self, process: Arc<dyn Process>) -> Self {
+        self.process = Some(process);
+        self
+    }
+
+    /// Resumes reconciliation for detached clones recorded before a daemon restart.
+    pub async fn reconcile_startup(&self) -> DaemonResult<()> {
+        let clones = self
+            .state
+            .load()
+            .await?
+            .clones
+            .into_iter()
+            .filter(|clone| clone.status != CloneStatus::Failed)
+            .collect::<Vec<_>>();
+        for clone in clones {
+            let Some(pid) = clone.pid else {
+                let repo = clone.id.clone();
+                self.state
+                    .transaction(move |state| {
+                        if let Some(clone) = state.clones.iter_mut().find(|item| item.id == repo) {
+                            clone.status = CloneStatus::Failed;
+                            clone.error =
+                                Some("clone was interrupted before its process started".to_owned());
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                continue;
+            };
+            let state = Arc::clone(&self.state);
+            let git = Arc::clone(&self.git);
+            let files = Arc::clone(&self.files);
+            let process = self.process.clone();
+            self.jobs.submit(
+                JobKind::Clone,
+                format!("{}:startup-reconcile", clone.id),
+                format!("Reconcile clone {}", clone.id),
+                true,
+                false,
+                move |context| async move {
+                    while process
+                        .as_ref()
+                        .map_or_else(|| process_is_alive(pid), |process| process.is_alive(pid))
+                    {
+                        tokio::select! {
+                            () = context.cancel.cancelled() => return Err(DaemonError::Cancelled),
+                            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        }
+                    }
+                    reconcile_clone(context, clone, state, git, files).await
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Starts detached `git clone --progress` and reconciliation (inventory sections 2, 6, and 7).
@@ -66,6 +127,7 @@ impl Repos {
         name: String,
         url: String,
         context: ContextId,
+        default_branch: Option<String>,
     ) -> DaemonResult<JobRecord> {
         let id = RepoId::try_from(format!("{owner}/{name}"))
             .map_err(|error| DaemonError::Validation(error.to_string()))?;
@@ -81,16 +143,19 @@ impl Repos {
             .join(&owner)
             .join(format!("{name}.staging-{}-{attempt}", std::process::id()));
         let home = fleet_home(&self.state)?;
-        let default_branch =
-            read_cache::<RepoCache>(self.files.as_ref(), &home.github_owner_cache_path(&owner))
-                .and_then(|cache| {
-                    cache
-                        .repos
-                        .into_iter()
-                        .find(|repo| repo.full_name == id.as_str())
-                        .map(|repo| repo.default_branch)
-                })
-                .unwrap_or_else(|| "main".to_owned());
+        let default_branch = default_branch
+            .filter(|branch| !branch.trim().is_empty())
+            .or_else(|| {
+                read_cache::<RepoCache>(self.files.as_ref(), &home.github_owner_cache_path(&owner))
+                    .and_then(|cache| {
+                        cache
+                            .repos
+                            .into_iter()
+                            .find(|repo| repo.full_name == id.as_str())
+                            .map(|repo| repo.default_branch)
+                    })
+            })
+            .unwrap_or_else(|| "main".to_owned());
         let log_path = home
             .logs_dir()
             .join(format!("clone-{owner}-{name}-{attempt}.log"));
@@ -172,8 +237,9 @@ impl Repos {
         }
 
         for job in self.jobs.list() {
-            if job.kind == JobKind::Clone
-                && job.target == repo.as_str()
+            if (job.target == repo.as_str()
+                || job.target.starts_with(&format!("{repo}:"))
+                || job.target.starts_with(&format!("{repo}#")))
                 && matches!(job.status, JobStatus::Queued | JobStatus::Running)
             {
                 let _ignored = self.jobs.cancel(&job.id);
@@ -300,6 +366,7 @@ impl Repos {
         let owner_for_job = owner.clone();
         let target = format!("{owner}:{}", Uuid::new_v4());
         let (sender, receiver) = oneshot::channel::<Result<RepoCache, String>>();
+        let sender = Arc::new(Mutex::new(Some(sender)));
         self.jobs.submit(
             JobKind::RepoDiscovery,
             target,
@@ -324,12 +391,24 @@ impl Repos {
                 .await;
                 match result {
                     Ok(cache) => {
-                        let _ignored = sender.send(Ok(cache));
+                        if let Some(sender) = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ignored = sender.send(Ok(cache));
+                        }
                         Ok(())
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        let _ignored = sender.send(Err(message));
+                        if let Some(sender) = sender
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ignored = sender.send(Err(message));
+                        }
                         Err(error)
                     }
                 }
@@ -359,6 +438,7 @@ impl Repos {
             let git = Arc::clone(&self.git);
             let path_for_job = path.clone();
             let (sender, receiver) = oneshot::channel::<Result<(), String>>();
+            let sender = Arc::new(Mutex::new(Some(sender)));
             self.jobs.submit(
                 JobKind::RepoFetch,
                 format!("{repo}:{}", Uuid::new_v4()),
@@ -370,12 +450,24 @@ impl Repos {
                     let result = git.fetch(&path_for_job, true).await;
                     match result {
                         Ok(()) => {
-                            let _ignored = sender.send(Ok(()));
+                            if let Some(sender) = sender
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take()
+                            {
+                                let _ignored = sender.send(Ok(()));
+                            }
                             Ok(())
                         }
                         Err(error) => {
                             let message = error.to_string();
-                            let _ignored = sender.send(Err(message));
+                            if let Some(sender) = sender
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take()
+                            {
+                                let _ignored = sender.send(Err(message));
+                            }
                             Err(error)
                         }
                     }
@@ -453,7 +545,6 @@ async fn clone_operation(
 ) -> DaemonResult<()> {
     context.progress("starting detached clone")?;
     let staging = PathBuf::from(&clone.staging_path);
-    let final_path = PathBuf::from(&clone.path);
     let log = PathBuf::from(&clone.log_path);
     if let Some(parent) = staging.parent()
         && let Err(error) = files.create_dir_all(parent)
@@ -485,6 +576,18 @@ async fn clone_operation(
             () = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
+    reconcile_clone(context, clone, state, git, files).await
+}
+
+async fn reconcile_clone(
+    context: JobCtx,
+    clone: CloneJob,
+    state: Arc<StateStore>,
+    git: Arc<dyn Git>,
+    files: Arc<dyn Files>,
+) -> DaemonResult<()> {
+    let staging = PathBuf::from(&clone.staging_path);
+    let final_path = PathBuf::from(&clone.path);
     if let Err(error) = git.revision(&staging, "HEAD").await {
         return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
     }

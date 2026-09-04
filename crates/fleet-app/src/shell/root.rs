@@ -6,14 +6,11 @@ use std::{
 };
 
 use fleet_proto::{request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::{
-    ActiveTheme, AppFrame, EmptyState, Icon, KeyHintRow, KitAssets, Text, Theme, ThemeMode,
-    ToastStack, Veil,
-};
+use fleet_ui_kit::{ActiveTheme, AppFrame, Icon, KitAssets, Theme, ThemeMode, ToastStack, Veil};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Menu, MenuItem,
-    Render, SharedString, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, size,
+    Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, size,
 };
 
 use crate::{
@@ -51,6 +48,7 @@ pub struct Shell {
     hub: HubScreen,
     workspace: WorkspaceScreen,
     jobs: JobsPanel,
+    doctor: Option<Vec<fleet_proto::response::DoctorCheck>>,
     _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
@@ -86,6 +84,7 @@ impl Shell {
             hub: HubScreen::new(cx),
             workspace: WorkspaceScreen::new(cx),
             jobs: JobsPanel::new(cx),
+            doctor: None,
             _subscriptions: subscriptions,
             _tasks: tasks,
         }
@@ -428,6 +427,10 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.doctor.take().is_some() {
+            cx.notify();
+            return;
+        }
         self.state.update(cx, |state, cx| {
             if let DaemonLink::Lost { attempt, .. } = state.daemon {
                 state.daemon = DaemonLink::Lost {
@@ -450,28 +453,9 @@ impl Shell {
             let Ok(Ok(ResponseBody::Doctor(checks))) = reply.recv().await else {
                 return;
             };
-            let failed: Vec<String> = checks
-                .iter()
-                .filter(|check| !check.ok)
-                .map(|check| format!("{}: {}", check.check, check.detail))
-                .collect();
             let _ignored = shell.update(cx, |shell, cx| {
-                shell.state.update(cx, |state, cx| {
-                    if let Some(first) = failed.first() {
-                        state.sticky_error = Some(crate::state::StickyError {
-                            text: first.clone(),
-                            job: None,
-                            retryable: false,
-                        });
-                    } else {
-                        state.toast_short(
-                            "doctor: all checks ok",
-                            Icon::CircleCheck,
-                            Instant::now(),
-                        );
-                    }
-                    cx.notify();
-                });
+                shell.doctor = Some(checks);
+                cx.notify();
             });
         })
         .detach();
@@ -597,35 +581,22 @@ impl Shell {
     }
 
     /// The §3.13 first-run card: a migration, not an onboarding.
-    fn first_run_card(&self, state: &AppState, focus: &FocusHandle) -> AnyElement {
-        let has_swarm = dirs_home()
-            .map(|home| home.join(".swarm").join("state.json"))
-            .is_some_and(|path| path.exists());
-        let mut hints = KeyHintRow::new();
-        if has_swarm {
-            hints = hints.key("i", "import contexts, repos and worktrees");
-        }
-        hints = hints
-            .key("N", "create your first context")
-            .key("n", "clone a repository")
-            .key("?", "keymap")
-            .key(",", "settings");
+    fn first_run_card(&self, state: &AppState, focus: &FocusHandle, cx: &App) -> AnyElement {
+        let has_swarm = crate::views::first_run::has_swarm_state(
+            crate::views::first_run::user_home().as_deref(),
+        );
         div()
             .track_focus(focus)
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
             .size_full()
-            .gap(px(16.0))
-            .child(EmptyState::new("Fleet").action(
-                "Copies, sessions and PRs — all owned by fleetd, so they survive this window.",
+            .child(crate::views::first_run::card(
+                &state.home,
+                state
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.daemon.version.as_str()),
+                has_swarm,
+                cx,
             ))
-            .child(hints)
-            .child(Text::hint(SharedString::from(format!(
-                "\u{25CD} fleetd \u{00B7} {}",
-                state.home.display()
-            ))))
             .into_any_element()
     }
 }
@@ -644,18 +615,23 @@ impl Render for Shell {
 
         // Everything below reads the state immutably; the borrow ends before the screens are
         // rendered, which is the only place that needs `&mut App`.
-        let (chain, overlay, screen, splash, banner, veil, first_run) = {
+        let doctor = self.doctor.clone();
+        let (mut chain, overlay, screen, mut splash, banner, veil, first_run) = {
             let state = state_handle.read(cx);
             (
                 state.context_chain(),
                 state.overlay.clone(),
                 state.screen.clone(),
-                daemon::splash(state, now),
+                daemon::splash(state, now, cx),
                 daemon::banner(&state.daemon, now),
                 state.drops_terminal_keys(),
                 state.is_first_run(),
             )
         };
+        if doctor.is_some() {
+            chain = vec!["Daemon", "Doctor"];
+            splash = None;
+        }
         let context_bar = chrome::context_bar(state_handle.read(cx), cx);
         let status_bar = chrome::status_bar(state_handle.read(cx), cx);
         let toasts = ToastStack::new(
@@ -692,8 +668,22 @@ impl Render for Shell {
 
         let focus = self.body_focus.clone();
         let overlay_focus = self.overlay_focus.clone();
-        let body: AnyElement = if first_run {
-            self.first_run_card(state_handle.read(cx), &focus)
+        let body: AnyElement = if let Some(checks) = doctor.as_ref() {
+            div()
+                .track_focus(&focus)
+                .size_full()
+                .child(crate::views::doctor_view::view(
+                    checks,
+                    state_handle
+                        .read(cx)
+                        .snapshot
+                        .as_ref()
+                        .map(|_| fleet_proto::PROTOCOL_VERSION),
+                    cx,
+                ))
+                .into_any_element()
+        } else if first_run {
+            self.first_run_card(state_handle.read(cx), &focus, cx)
         } else {
             match &screen {
                 Screen::Hub { .. } => self.hub.render(&state_handle, &bridge, &focus, window, cx),
@@ -716,9 +706,21 @@ impl Render for Shell {
             Some(Overlay::Dialog(dialog)) => {
                 Some(dialog.render(&state_handle, &bridge, &overlay_focus, window, cx))
             }
-            // The palette and the filter bar are drawn by their own agents' screens; until
-            // they land the overlay layer stays empty and only the mode word changes.
-            Some(Overlay::Palette | Overlay::Filter) | None => None,
+            Some(Overlay::Palette) => Some(crate::dialogs::palette::render(
+                &state_handle,
+                &bridge,
+                &overlay_focus,
+                window,
+                cx,
+            )),
+            Some(Overlay::Filter) => Some(crate::dialogs::filter::render(
+                &state_handle,
+                &bridge,
+                &overlay_focus,
+                window,
+                cx,
+            )),
+            None => None,
         };
 
         // The focused element carries the key-context chain: the overlay when one is open,

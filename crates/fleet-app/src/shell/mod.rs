@@ -14,7 +14,7 @@ mod daemon;
 mod quit;
 mod root;
 
-pub use chrome::{job_kind_label, ticker_parts};
+pub use chrome::job_kind_label;
 pub use daemon::{BannerSpec, RESTART_SENTENCE, banner_spec, countdown_label};
 pub use quit::{QuitDecision, StopDecision, quit_decision, stop_decision};
 pub use root::{Shell, run};

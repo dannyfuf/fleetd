@@ -38,16 +38,6 @@ use crate::{
 // Shared chrome
 // ---------------------------------------------------------------------------------------
 
-/// The 36 px input box of §3.8.1.
-///
-/// TODO(INTEGRATION `metrics.text_field_h`): `Metrics` owns every pixel constant the UX spec
-/// pins down, but it has no entry for the input box or its status line yet. These two live here
-/// until `crates/fleet-ui-kit/src/theme/tokens.rs` gains `text_field_h` / `field_status_h`.
-const TEXT_FIELD_H: Pixels = px(36.0);
-
-/// The 18 px slot that holds either the preview or the validation message, never both.
-pub(crate) const FIELD_STATUS_H: Pixels = px(18.0);
-
 /// Everything both the presentational [`TextField`] and the live [`TextInput`] draw around the
 /// value: the label, the box, the leading glyph and the 18 px status slot.
 struct FieldChrome {
@@ -85,7 +75,7 @@ impl FieldChrome {
     /// Wrap `value` — the caret-bearing content — in the label / box / status-line frame.
     fn wrap(self, theme: &Theme, value: impl IntoElement) -> gpui::Div {
         let role = self.role();
-        let box_h = self.height.unwrap_or(TEXT_FIELD_H);
+        let box_h = self.height.unwrap_or(theme.metrics.text_field_h);
         let border = self.border(theme);
         let icon_color = if self.focused {
             theme.colors.text_secondary
@@ -135,7 +125,7 @@ impl FieldChrome {
                         .flex()
                         .flex_none()
                         .items_center()
-                        .h(FIELD_STATUS_H)
+                        .h(theme.metrics.field_status_h)
                         .w_full()
                         .overflow_hidden()
                         .child(match self.invalid {

@@ -316,7 +316,9 @@ pub fn matches(label: &str, query: &str) -> bool {
 #[must_use]
 pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
     let mut rows = Vec::new();
-    let idle = query.trim().is_empty();
+    let sessions_only = query.trim() == "sessions";
+    let effective_query = if sessions_only { "" } else { query };
+    let idle = effective_query.trim().is_empty();
     if let Some(snapshot) = state.snapshot.as_ref() {
         // GO: sessions first, because reaching one from inside another is the point (§3.9).
         let mut go: Vec<Entry> = Vec::new();
@@ -375,7 +377,8 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 run: Run::SelectRepo(repo.id.clone()),
             });
         }
-        go.retain(|entry| matches(&entry.label, query));
+        go.retain(|entry| matches!(&entry.run, Run::OpenSession(_)) || !sessions_only);
+        go.retain(|entry| matches(&entry.label, effective_query));
         if idle {
             go.truncate(IDLE_ROWS);
         }
@@ -424,7 +427,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 run: Run::Command(Command::JobsPanel),
             });
         }
-        commands.retain(|entry| matches(&entry.label, query));
+        commands.retain(|entry| !sessions_only && matches(&entry.label, effective_query));
         if idle {
             commands.truncate(IDLE_ROWS);
         }
@@ -446,7 +449,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 run: Run::SwitchContext(context.id.clone()),
             })
             .collect();
-        contexts.retain(|entry| matches(&entry.label, query));
+        contexts.retain(|entry| !sessions_only && matches(&entry.label, effective_query));
         rows.extend(contexts);
     }
     rows
@@ -465,7 +468,7 @@ pub fn render(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    seed(cx);
+    seed(state, cx);
     let (query, cursor) = with_host(cx, |host| (host.palette.query.clone(), host.palette.cursor));
     let app = state.read(cx);
     let rows = candidates(app, query.value());
@@ -587,10 +590,14 @@ pub fn render(
 }
 
 /// Resets the draft the first time the open palette is rendered.
-fn seed(cx: &mut App) {
+fn seed(state: &Entity<AppState>, cx: &mut App) {
+    let seed = state.update(cx, |app, _| app.palette_seed.take());
     with_host(cx, |host| {
         if !host.palette_open {
             host.palette = PaletteState::default();
+            if let Some(seed) = seed {
+                host.palette.query = TextInput::new(seed);
+            }
             host.palette_open = true;
         }
     });

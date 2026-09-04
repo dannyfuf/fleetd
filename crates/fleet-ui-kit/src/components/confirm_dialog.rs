@@ -42,6 +42,7 @@ pub struct ConfirmDialog {
     stamp: Option<FreshnessStamp>,
     icon: Option<Icon>,
     extra_hints: Option<KeyHintRow>,
+    confirm_key_override: Option<ConfirmKey>,
     action_label: SharedString,
     width_override: Option<Pixels>,
     body_override: Option<AnyElement>,
@@ -59,6 +60,7 @@ impl ConfirmDialog {
             stamp: None,
             icon: None,
             extra_hints: None,
+            confirm_key_override: None,
             action_label: SharedString::new_static("Delete"),
             width_override: None,
             body_override: None,
@@ -97,6 +99,12 @@ impl ConfirmDialog {
         self
     }
 
+    /// Force the confirmation strength independently of the facts.
+    pub fn force_confirm_key(mut self, key: ConfirmKey) -> Self {
+        self.confirm_key_override = Some(key);
+        self
+    }
+
     /// The verb on the primary action, e.g. `Delete`, `Prune 3`, `Stop and quit`.
     pub fn action_label(mut self, label: impl Into<SharedString>) -> Self {
         self.action_label = label.into();
@@ -129,7 +137,8 @@ impl ConfirmDialog {
 
     /// The key this confirm binds.
     pub fn confirm_key(&self) -> ConfirmKey {
-        self.facts.confirm_key()
+        self.confirm_key_override
+            .unwrap_or_else(|| self.facts.confirm_key())
     }
 
     /// The width this confirm will render at.
@@ -189,18 +198,9 @@ impl RenderOnce for ConfirmDialog {
         }
         standard = standard.hint(KeyHint::labeled("n / esc", "cancel"));
 
-        // TODO(INTEGRATION `KeyHintRow::merge`): `key_hint.rs` keeps its hints private, so the
-        // caller's extra keys are joined here with the same `·` the row uses internally.
-        let hints: AnyElement = match self.extra_hints {
-            Some(extra) => div()
-                .flex()
-                .items_center()
-                .gap(theme.space.sm)
-                .child(extra)
-                .child(Text::hint("\u{b7}").faint())
-                .child(standard)
-                .into_any_element(),
-            None => standard.into_any_element(),
+        let hints = match self.extra_hints {
+            Some(extra) => extra.merge(standard),
+            None => standard,
         };
 
         let facts_block: AnyElement = match self.body_override {

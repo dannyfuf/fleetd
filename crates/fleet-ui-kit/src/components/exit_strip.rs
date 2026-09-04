@@ -91,7 +91,7 @@ impl RenderOnce for ExitStrip {
                         .color(tone.color(theme)),
                 ),
             )
-            .child(div().flex_none().child(Text::ui(message).tone(tone)))
+            .child(Text::ui(message).tone(tone).flex_none())
             // The keys are the point of the strip; if anything has to be clipped on a narrow
             // window it is the sentence, not the way out of it.
             .child(div().flex_1().min_w_0())

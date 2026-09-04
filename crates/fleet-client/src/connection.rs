@@ -12,6 +12,7 @@ use std::{
 
 use fleet_core::ids::TerminalId;
 use fleet_proto::{
+    PROTOCOL_VERSION,
     codec::FleetCodec,
     error::{ErrorKind, ProtoError},
     event::{Event, EventKind},
@@ -30,7 +31,6 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-const PROTOCOL_VERSION: u32 = 1;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(50);

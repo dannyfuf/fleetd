@@ -29,7 +29,7 @@ use fleet_proto::{
         Cell, CellWidth, Color, CursorShape, CursorState, FrameUpdate, TerminalModes, ViewportInfo,
     },
 };
-use fleet_ui_kit::{Icon, Mode as ModeWord, Toast, ToastDuration, Tone};
+use fleet_ui_kit::{Icon, Mode as ModeWord, PrBadgeState, Toast, ToastDuration, Tone};
 
 use crate::{bridge::BridgeEvent, dialogs::Dialogs};
 
@@ -693,6 +693,16 @@ pub struct AppState {
     pub toasts: Vec<LiveToast>,
     /// The sticky error slot.
     pub sticky_error: Option<StickyError>,
+    /// Failed jobs whose sticky slot was acknowledged by opening Jobs.
+    pub seen_failed: Vec<JobId>,
+    /// Failed job the next Jobs opening should focus, even after acknowledging its sticky slot.
+    pub jobs_focus: Option<JobId>,
+    /// Initial palette query consumed when the palette next opens.
+    pub palette_seed: Option<String>,
+    /// Last worktree trash entry returned by fleetd, for `u`.
+    pub last_trash_entry: Option<String>,
+    /// Pull-request badges shared by Hub and Workspace, keyed by repository and head branch.
+    pub pr_badges: HashMap<(RepoId, String), (u64, PrBadgeState)>,
     /// `config.jobs.warnBeforeQuit`, mirrored so `ctrl-q` can decide without a round trip.
     pub warn_before_quit: bool,
     /// How many PRs the `review` tab holds. The PR screen owns the fetch, the context bar
@@ -732,6 +742,11 @@ impl AppState {
             terminal_mru: HashMap::new(),
             toasts: Vec::new(),
             sticky_error: None,
+            seen_failed: Vec::new(),
+            jobs_focus: None,
+            palette_seed: None,
+            last_trash_entry: None,
+            pr_badges: HashMap::new(),
             warn_before_quit: true,
             review_pr_count: 0,
             update_version: None,
@@ -866,6 +881,21 @@ impl AppState {
 
     /// Opens an overlay, replacing whatever was open.
     pub fn open_overlay(&mut self, overlay: Overlay) {
+        if matches!(overlay, Overlay::Jobs) {
+            self.jobs_focus = self
+                .sticky_error
+                .as_ref()
+                .and_then(|error| error.job.clone());
+            if let Some(job) = self.jobs_focus.clone()
+                && !self.seen_failed.contains(&job)
+            {
+                self.seen_failed.push(job);
+            }
+            if let Some(snapshot) = self.snapshot.as_ref() {
+                self.sticky_error =
+                    crate::views::sticky_error::sticky_error_for(&snapshot.jobs, &self.seen_failed);
+            }
+        }
         self.overlay = Some(overlay);
     }
 
@@ -931,14 +961,8 @@ impl AppState {
 
     /// Replaces the snapshot mirror and re-derives everything that hangs off it.
     pub fn apply_snapshot(&mut self, snapshot: Snapshot, now: Instant) {
-        self.sticky_error = latest_failed_job(&snapshot.jobs).map(|job| StickyError {
-            text: match &job.status {
-                JobStatus::Failed { error } => error.clone(),
-                _ => job.title.clone(),
-            },
-            job: Some(job.id.clone()),
-            retryable: job.retryable,
-        });
+        self.sticky_error =
+            crate::views::sticky_error::sticky_error_for(&snapshot.jobs, &self.seen_failed);
         self.cursors.repos = clamp_cursor(self.cursors.repos, snapshot.repos.len() + 1);
         self.cursors.worktrees = clamp_cursor(self.cursors.worktrees, snapshot.worktrees.len());
         self.cursors.jobs = clamp_cursor(self.cursors.jobs, snapshot.jobs.len());
@@ -1107,7 +1131,7 @@ impl AppState {
     pub fn apply_daemon_event(&mut self, event: Event, now: Instant) {
         match event {
             Event::SnapshotChanged(snapshot) => self.apply_snapshot(snapshot, now),
-            Event::JobUpdated(job) => self.apply_job(job),
+            Event::JobUpdated(job) => self.apply_job(job, now),
             Event::SessionChanged(session) => self.apply_session(session),
             Event::TerminalFrame(frame) => {
                 self.apply_frame(&frame);
@@ -1126,7 +1150,11 @@ impl AppState {
     }
 
     /// Patches one job into the snapshot mirror and re-derives the sticky error slot.
-    pub fn apply_job(&mut self, job: JobRecord) {
+    pub fn apply_job(&mut self, job: JobRecord, now: Instant) {
+        let outcome = crate::views::job_ticker::job_outcome_toast(
+            &job,
+            matches!(self.overlay, Some(Overlay::Jobs)),
+        );
         let Some(snapshot) = self.snapshot.as_mut() else {
             return;
         };
@@ -1138,15 +1166,15 @@ impl AppState {
             Some(existing) => *existing = job,
             None => snapshot.jobs.push(job),
         }
-        let failed = latest_failed_job(&snapshot.jobs).map(|job| StickyError {
-            text: match &job.status {
-                JobStatus::Failed { error } => error.clone(),
-                _ => job.title.clone(),
-            },
-            job: Some(job.id.clone()),
-            retryable: job.retryable,
-        });
-        self.sticky_error = failed;
+        self.sticky_error =
+            crate::views::sticky_error::sticky_error_for(&snapshot.jobs, &self.seen_failed);
+        if let Some(text) = outcome {
+            self.toast(
+                Toast::new(text).icon(Icon::CircleCheck),
+                now,
+                dwell_for(ToastDuration::Normal),
+            );
+        }
     }
 
     /// Patches one session into the snapshot mirror.
@@ -1352,6 +1380,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a toast is never Tone::Danger")]
     fn toasts_are_never_errors() {
         let now = Instant::now();
         let mut toasts = Vec::new();
@@ -1361,7 +1390,6 @@ mod tests {
             now,
             Duration::from_secs(1),
         );
-        assert_eq!(toasts[0].toast.tone, Tone::Warning);
     }
 
     #[test]
