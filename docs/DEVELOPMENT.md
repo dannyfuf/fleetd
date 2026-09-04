@@ -26,9 +26,21 @@ worktree's artifacts local avoids collisions between parallel agents.
 
 Building `fleet-term` with its default `ghostty` feature requires Zig **0.15.2**. The pinned
 `libghostty-vt 0.2.1` dependency builds its vendored Ghostty commit with that exact minimum
-version. Install the matching Zig release and ensure its `zig` executable is on `PATH` before
-running Cargo. On macOS 26 with the Xcode 26 SDK, Zig 0.15.2 may also require an SDK overlay that
-maps the SDK's `arm64e-macos` text-based stubs to the `arm64-macos` target expected by Zig.
+version. On Apple Silicon macOS, install and verify the official release with:
+
+```sh
+scripts/bootstrap-zig.sh
+```
+
+The idempotent bootstrap verifies the published SHA-256 checksum, installs the official binary at
+`~/.local/zig-0.15.2/zig`, and exposes it as `~/.cargo/bin/zig`. The published
+`libghostty-vt-sys 0.2.1` build script invokes `zig` by name and does not honor a `ZIG` executable
+variable, so `~/.cargo/bin` must be on `PATH` (the bootstrap prints the required export).
+
+The repository config directs Zig's global cache to `~/.cache/zig`. On macOS 26 with the Xcode 26
+SDK, the bootstrap also creates a private SDK overlay below the Zig installation that maps the
+SDK's `arm64e-macos` text-based stubs to the `arm64-macos` target expected by Zig 0.15.2. The real
+Xcode SDK is not modified.
 
 ## Crate map
 

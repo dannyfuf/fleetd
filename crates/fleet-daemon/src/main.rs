@@ -6,12 +6,9 @@ use clap::Parser;
 use fleet_core::paths::FleetHome;
 use fleet_daemon::{
     adapters::{
+        Adapters,
         clock::SystemClock,
         files::{Files, RealFiles},
-        git::ShellGit,
-        github::GhCli,
-        process::RealProcess,
-        shell::{RealShell, Shell},
     },
     jobs::JobManager,
     server::{BroadcastBus, Listener},
@@ -61,17 +58,14 @@ async fn main() -> anyhow::Result<()> {
         ],
     ));
     let config = Arc::new(ConfigStore::new(&home, Arc::clone(&files)));
-    let state = Arc::new(StateStore::new(&home, files, Arc::new(SystemClock)));
+    let state = Arc::new(StateStore::new(
+        &home,
+        Arc::clone(&files),
+        Arc::new(SystemClock),
+    ));
     let jobs = Arc::new(JobManager::new(&home));
-
-    // Construct every real command boundary now; service implementation agents can inject these
-    // handles into their service structs without changing command semantics.
-    let shell: Arc<dyn Shell> = Arc::new(RealShell);
-    let _git = ShellGit::new(Arc::clone(&shell));
-    let _github = GhCli::new(Arc::clone(&shell));
-    let _process = RealProcess::new(shell);
-
-    let services = Arc::new(Services::new(&home, config, state, jobs));
+    let adapters = Adapters::system(files);
+    let services = Arc::new(Services::new(&home, config, state, jobs, adapters));
     let shutdown = CancellationToken::new();
     let listener =
         Listener::bind(&home, services, BroadcastBus::default(), shutdown.clone()).await?;

@@ -16,14 +16,19 @@ use crate::{
 /// The 22 px strip under a terminal whose command exited.
 #[derive(IntoElement)]
 pub struct ExitStrip {
-    code: i32,
+    code: Option<i32>,
     hints: Option<KeyHintRow>,
 }
 
 impl ExitStrip {
-    /// A strip for an exit code.
-    pub fn new(code: i32) -> Self {
-        Self { code, hints: None }
+    /// A strip for an exit code. Takes `1` or `None`: a process killed by a signal (`^s x`
+    /// sends `SIGKILL`) has **no** exit code, and the strip says `killed` rather than
+    /// inventing `128 + signo`.
+    pub fn new(code: impl Into<Option<i32>>) -> Self {
+        Self {
+            code: code.into(),
+            hints: None,
+        }
     }
 
     /// The recovery keys. Defaults to `^s r restart · ^s x close · ^s c new`.
@@ -59,7 +64,11 @@ impl RenderOnce for ExitStrip {
                     .color(theme.colors.warning),
             )
             .child(
-                Text::ui(format!("process exited ({})", self.code)).tone(Tone::Warning),
+                Text::ui(match self.code {
+                    Some(code) => format!("process exited ({code})"),
+                    None => "process exited (killed)".to_string(),
+                })
+                .tone(Tone::Warning),
             )
             .child(hints)
     }

@@ -13,14 +13,25 @@ use tokio::{
 
 use crate::{api::Result, connection::Client};
 
-const FRAME_CAPACITY: usize = 128;
+const UPDATE_CAPACITY: usize = 128;
+
+/// One terminal-specific update forwarded by an attachment handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalUpdate {
+    /// A complete or dirty-row rendered frame.
+    Frame(FrameUpdate),
+    /// The PTY exited, optionally with a process exit code.
+    Exited(Option<i32>),
+    /// The PTY reported a new title.
+    Title(String),
+}
 
 /// An attached terminal with a filtered stream of rendered frame updates.
 #[derive(Debug)]
 pub struct TerminalHandle {
     client: Client,
     terminal_id: TerminalId,
-    frames: mpsc::Receiver<FrameUpdate>,
+    updates: mpsc::Receiver<TerminalUpdate>,
     router: JoinHandle<()>,
     detached: bool,
 }
@@ -34,9 +45,9 @@ impl Client {
         rows: u16,
     ) -> Result<TerminalHandle> {
         let events = self.events();
-        let (frame_tx, frames) = mpsc::channel(FRAME_CAPACITY);
+        let (update_tx, updates) = mpsc::channel(UPDATE_CAPACITY);
         let route_client = self.clone();
-        let router = tokio::spawn(route_frames(route_client, terminal_id, events, frame_tx));
+        let router = tokio::spawn(route_updates(route_client, terminal_id, events, update_tx));
 
         if let Err(error) = self.attach_terminal(terminal_id, cols, rows).await {
             router.abort();
@@ -46,7 +57,7 @@ impl Client {
         Ok(TerminalHandle {
             client: self.clone(),
             terminal_id,
-            frames,
+            updates,
             router,
             detached: false,
         })
@@ -60,14 +71,14 @@ impl TerminalHandle {
         self.terminal_id
     }
 
-    /// Returns the terminal's frame channel.
-    pub fn frames(&mut self) -> &mut mpsc::Receiver<FrameUpdate> {
-        &mut self.frames
+    /// Returns the terminal's frame, exit, and title update channel.
+    pub fn updates(&mut self) -> &mut mpsc::Receiver<TerminalUpdate> {
+        &mut self.updates
     }
 
-    /// Waits for the next terminal frame update.
-    pub async fn next_frame(&mut self) -> Option<FrameUpdate> {
-        self.frames.recv().await
+    /// Waits for the next terminal-specific update.
+    pub async fn next_update(&mut self) -> Option<TerminalUpdate> {
+        self.updates.recv().await
     }
 
     /// Sends a semantic key event to the attached terminal.
@@ -114,7 +125,7 @@ impl TerminalHandle {
     /// Explicitly detaches this handle and waits for daemon acknowledgement.
     pub async fn detach(mut self) -> Result<()> {
         self.router.abort();
-        self.frames.close();
+        self.updates.close();
         self.detached = true;
         self.client.detach_terminal(self.terminal_id).await
     }
@@ -131,11 +142,11 @@ impl Drop for TerminalHandle {
     }
 }
 
-async fn route_frames(
+async fn route_updates(
     client: Client,
     terminal_id: TerminalId,
     mut events: broadcast::Receiver<Event>,
-    frames: mpsc::Sender<FrameUpdate>,
+    updates: mpsc::Sender<TerminalUpdate>,
 ) {
     let mut received_full = false;
     loop {
@@ -145,11 +156,19 @@ async fn route_frames(
                     continue;
                 }
                 received_full = true;
-                if frames.send(frame).await.is_err() {
+                if updates.send(TerminalUpdate::Frame(frame)).await.is_err() {
                     return;
                 }
             }
-            Ok(Event::TerminalExited { terminal, .. }) if terminal == terminal_id => return,
+            Ok(Event::TerminalExited { terminal, code }) if terminal == terminal_id => {
+                let _result = updates.send(TerminalUpdate::Exited(code)).await;
+                return;
+            }
+            Ok(Event::TerminalTitle { terminal, title }) if terminal == terminal_id => {
+                if updates.send(TerminalUpdate::Title(title)).await.is_err() {
+                    return;
+                }
+            }
             Ok(Event::DaemonShuttingDown) | Err(broadcast::error::RecvError::Closed) => return,
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 received_full = false;

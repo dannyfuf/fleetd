@@ -21,6 +21,9 @@ use std::rc::Rc;
 
 use crate::theme::ActiveTheme;
 
+/// Row renderer: `(index, is_cursor, window, cx) -> element`.
+pub type RenderRow = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement>;
+
 /// A list cursor with `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` semantics and scrolloff.
 ///
 /// Pure logic: no gpui types, fully unit-testable, and owned by the view's entity rather than
@@ -146,7 +149,7 @@ pub struct ListView {
     row_height: Option<Pixels>,
     cursor: Option<usize>,
     scroll: Option<UniformListScrollHandle>,
-    render_row: Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement>,
+    render_row: RenderRow,
     empty: Option<AnyElement>,
 }
 

@@ -103,6 +103,41 @@ pub struct UiConfig {
     pub remote_status_refresh_ms: i64,
 }
 
+/// Recoverable-deletion settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashConfig {
+    /// Time in milliseconds that deleted entries remain available for restoration.
+    pub retention_ms: u64,
+}
+
+impl Default for TrashConfig {
+    fn default() -> Self {
+        Self {
+            retention_ms: 600_000,
+        }
+    }
+}
+
+/// Background-job retention and quit-warning settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobsConfig {
+    /// Whether quitting the app should warn while daemon jobs are active.
+    pub warn_before_quit: bool,
+    /// Time in milliseconds to retain completed jobs in the client-visible registry.
+    pub keep_finished_for: u64,
+}
+
+impl Default for JobsConfig {
+    fn default() -> Self {
+        Self {
+            warn_before_quit: true,
+            keep_finished_for: 600_000,
+        }
+    }
+}
+
 /// Fleet's complete version-one configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,6 +170,12 @@ pub struct Config {
     pub github: GithubConfig,
     /// UI polling settings.
     pub ui: UiConfig,
+    /// Recoverable-deletion settings.
+    #[serde(default)]
+    pub trash: TrashConfig,
+    /// Background-job retention and warning settings.
+    #[serde(default)]
+    pub jobs: JobsConfig,
 }
 
 /// A malformed partial or complete Fleet configuration.
@@ -194,6 +235,8 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
             status_refresh_ms: 2_000,
             remote_status_refresh_ms: 10_000,
         },
+        trash: TrashConfig::default(),
+        jobs: JobsConfig::default(),
     }
 }
 
@@ -383,7 +426,9 @@ mod tests {
                 "graceMs": 2000
             },
             "github": {"cacheTtlSeconds":3600,"prTtlSeconds":90,"cloneProtocol":"ssh"},
-            "ui": {"statusRefreshMs":2000,"remoteStatusRefreshMs":10000}
+            "ui": {"statusRefreshMs":2000,"remoteStatusRefreshMs":10000},
+            "trash": {"retentionMs":600000},
+            "jobs": {"warnBeforeQuit":true,"keepFinishedFor":600000}
         });
         assert_eq!(actual, expected);
     }

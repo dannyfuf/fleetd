@@ -302,6 +302,7 @@ fn convert_pull(repo_id: RepoId, pull: GhPull) -> DaemonResult<PullRequest> {
     } else {
         None
     };
+    let (checks_passed, checks_total) = check_counts(&pull.status_check_rollup);
     Ok(PullRequest {
         repo_id,
         number: pull.number,
@@ -317,11 +318,25 @@ fn convert_pull(repo_id: RepoId, pull: GhPull) -> DaemonResult<PullRequest> {
         head_repo,
         review_decision: parse_review(pull.review_decision.as_deref()),
         checks: parse_checks(&pull.status_check_rollup),
+        checks_passed,
+        checks_total,
         additions: pull.additions,
         deletions: pull.deletions,
         labels: pull.labels.into_iter().map(|label| label.name).collect(),
         updated_at: pull.updated_at,
     })
+}
+
+fn check_counts(checks: &[GhCheck]) -> (Option<u32>, Option<u32>) {
+    if checks.is_empty() {
+        return (None, None);
+    }
+    let total = u32::try_from(checks.len()).unwrap_or(u32::MAX);
+    let passed = checks
+        .iter()
+        .filter(|check| check.conclusion.as_deref() == Some("SUCCESS"))
+        .count();
+    (Some(u32::try_from(passed).unwrap_or(u32::MAX)), Some(total))
 }
 
 fn parse_review(value: Option<&str>) -> PrReviewDecision {

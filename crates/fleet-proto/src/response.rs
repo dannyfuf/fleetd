@@ -1,12 +1,13 @@
 //! Daemon-to-client request responses.
 
 use fleet_core::{
+    cache::RepoCache,
     config::Config,
-    github::{PullRequest, RemoteRepo},
+    github::{PrTab, PullRequest},
     ids::{JobId, WorktreeId},
     inspection::WorktreeInspection,
     model::{Context, Repo, Worktree},
-    sessions::{Session, Terminal},
+    sessions::{Session, Terminal, WorktreeStatus},
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +100,50 @@ pub struct DoctorCheck {
     pub detail: String,
 }
 
+/// Pull requests and fetch state for one authored/review tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrSlice {
+    /// Tab represented by this slice.
+    pub tab: PrTab,
+    /// ISO-8601 time of the most recent successful fetch.
+    pub fetched_at: String,
+    /// Whether a replacement fetch is currently running.
+    pub loading: bool,
+    /// Most recent refresh error, while stale data remains usable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Total result count before the client-visible cap.
+    pub total: usize,
+    /// Client-visible pull requests, capped by the service.
+    pub prs: Vec<PullRequest>,
+}
+
+/// Candidate base refs and their refresh state for the Create dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaseRefs {
+    /// Ordered `origin/*` ref candidates.
+    pub refs: Vec<String>,
+    /// Whether a fetch is currently updating the candidates.
+    pub fetching: bool,
+    /// ISO-8601 time at which candidates were last refreshed.
+    pub fetched_at: String,
+}
+
+/// Current process-match count or validation error for one keep-alive rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepAliveRuleMatch {
+    /// Stable keep-alive rule identifier.
+    pub rule_id: String,
+    /// Number of live processes matching the rule.
+    pub count: u64,
+    /// Pattern or process-observation error for a skipped rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Every successful daemon result payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -121,7 +166,9 @@ pub enum ResponseBody {
     /// Repository clone was accepted as a background job.
     CloneStarted(JobRecord),
     /// GitHub repository discovery results.
-    RemoteRepos(Vec<RemoteRepo>),
+    RemoteRepos(RepoCache),
+    /// Candidate base refs for worktree creation.
+    BaseRefs(BaseRefs),
     /// Created or idempotently returned worktree.
     Worktree {
         /// Whether this request created the worktree.
@@ -140,7 +187,9 @@ pub enum ResponseBody {
     /// Resolved local worktree path.
     Path(String),
     /// Pull-request query results.
-    PullRequests(Vec<PullRequest>),
+    PullRequests(Vec<PrSlice>),
+    /// Refreshed runtime worktree statuses.
+    Statuses(Vec<WorktreeStatus>),
     /// Created or changed session.
     Session(Session),
     /// Current daemon-owned sessions.
@@ -157,6 +206,8 @@ pub enum ResponseBody {
     JobLog(Vec<String>),
     /// Effective merged configuration.
     Config(Config),
+    /// Live match counts for configured sleep rules.
+    KeepAliveRuleMatches(Vec<KeepAliveRuleMatch>),
     /// Environment diagnostic results.
     Doctor(Vec<DoctorCheck>),
     /// Daemon liveness response.
@@ -201,5 +252,40 @@ mod tests {
         let decoded: Response =
             serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn new_response_types_round_trip() {
+        let responses = vec![
+            ResponseBody::RemoteRepos(RepoCache {
+                fetched_at: "2026-09-04T12:00:00Z".to_owned(),
+                repos: Vec::new(),
+            }),
+            ResponseBody::BaseRefs(BaseRefs {
+                refs: vec!["origin/main".to_owned()],
+                fetching: false,
+                fetched_at: "2026-09-04T12:00:00Z".to_owned(),
+            }),
+            ResponseBody::PullRequests(vec![PrSlice {
+                tab: PrTab::Review,
+                fetched_at: "2026-09-04T12:00:00Z".to_owned(),
+                loading: true,
+                error: Some("temporary failure".to_owned()),
+                total: 101,
+                prs: Vec::new(),
+            }]),
+            ResponseBody::Statuses(Vec::new()),
+            ResponseBody::KeepAliveRuleMatches(vec![KeepAliveRuleMatch {
+                rule_id: "claude".to_owned(),
+                count: 2,
+                error: None,
+            }]),
+        ];
+        for response in responses {
+            let json = serde_json::to_string(&response).unwrap_or_else(|error| panic!("{error}"));
+            let decoded: ResponseBody =
+                serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(decoded, response);
+        }
     }
 }

@@ -98,6 +98,12 @@ pub struct PullRequest {
     pub review_decision: PrReviewDecision,
     /// Aggregate check status.
     pub checks: PrChecks,
+    /// Number of completed successful checks when check details were available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_passed: Option<u32>,
+    /// Total number of checks when check details were available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_total: Option<u32>,
     /// Added line count.
     pub additions: u64,
     /// Deleted line count.

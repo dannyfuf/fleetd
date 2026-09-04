@@ -9,7 +9,7 @@ merged in). Where the proposals disagreed, this document decides; the decisions 
 
 It obeys `docs/ARCHITECTURE.md` and `docs/KEYMAP.md`, and preserves every behavior in
 `docs/SWARM-INVENTORY.md` (cited as §1 domain model, §3 operations, §4 sessions/sleep, §5 TUI,
-§6 jobs, §9 gaps). It **proposes** keymap changes in §7 and **does not edit** `docs/KEYMAP.md`.
+§6 jobs, §9 gaps). Every key it uses is defined in `docs/KEYMAP.md`, which is authoritative (§7).
 Contract changes this spec requires before `fleet-proto` is frozen are in §6.
 
 ## 0. Measurement conventions
@@ -324,7 +324,7 @@ tab row is replaced by faint `no contexts` and `N create your first context`. *d
 `arrow-up-circle`, `circle` (daemon dot is a filled 8 px dot, not an icon).
 
 **Keyboard:** `1`–`9` jump · `gt` / `gT` cycle · `N` new context · `E` edit active context
-(delete lives inside it, §7 A4) · `:` palette for contexts past 9.
+(delete lives inside it, KEYMAP A15) · `:` palette for contexts past 9.
 
 ---
 
@@ -355,7 +355,7 @@ Row internals: `[12 pad][glyph 16][8][name flex, truncate-middle][8][count 3 ch 
 | Repo name | `Repo.name`; `owner/name` **only** on collision | flex | you think in repo names | §5 "disambiguated owner/name" |
 | Worktree count | integer, right, `fg.muted` | right | sizes the jump you are about to make | §5 "worktree count" |
 | Clone row | `loader-circle` + name; the count slot shows `40%` when parseable | sort position | a repo being born must be visible where it will live | §1 `CloneJob`, §6 |
-| Clone failed row | `circle-x` red + name + faint `failed` | same | failure must not disappear silently; `Enter` opens the Jobs panel focused on that job, `d` dismisses | `CloneJob.status`, `.error` |
+| Clone failed row | `circle-x` red + name + faint `failed` | same | failure must not disappear silently; `Enter` opens the Jobs panel focused on that job, `x` dismisses (KEYMAP arbitrates `d` = delete repo, `x` = dismiss a failed clone) | `CloneJob.status`, `.error` |
 | Deleting row | dims to 40 %, `⟳ deleting`, non-selectable | in place | the rename-to-trash happens inside a state transaction | §3 delete |
 
 **Intentionally omitted:** `url`, `path`, `defaultBranch`, `clonedAt`, hook lists, prepared-pool
@@ -370,8 +370,8 @@ instantly, no skeleton; the reconcile shows only as the jobs chip.
 `folder-git-2` (detail header only), `zap` (prepared copies, detail only).
 
 **Keyboard:** `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u` · `Enter`/`o`/`l` → focus worktrees · `n` clone
-· `d` delete (confirm, cascades) · `m` move to context · `i` detail · `ga` jump to `All` (§7 A7)
-· `H` collapse/expand the rail.
+· `d` delete (confirm, cascades) · `x` dismiss a failed clone · `e` edit hooks (KEYMAP A16) · `m` move
+to context · `i` detail · `ga` jump to `All` (KEYMAP A7) · `H` collapse/expand the rail.
 
 ---
 
@@ -435,7 +435,7 @@ confirm — i.e. exactly where it changes a decision.
 
 **Keyboard:** `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` · `Enter`/`o` open (sleeps previous) · `O` open
 keeping previous · `n` create · `d` delete · `x` prune repo · `s` sleep · `K` kill · `I` inspect ·
-`i` detail · `y` copy path · `Y` copy branch · `b` browser · `u` undo last delete (§7 A6) ·
+`i` detail · `y` copy path · `Y` copy branch · `b` browser · `u` undo last delete (KEYMAP A6) ·
 `/` filter · `p` PRs · `J` jobs.
 
 ---
@@ -507,7 +507,7 @@ dim to 60 % but stay readable — **never blanked**. *inspect errored* → red `
 (unique commits), `cloud-upload` (published), `git-merge` (merged), `triangle-alert`, `circle-x`,
 `zap`.
 
-**Keyboard:** `i` toggles. The panel is **never in the focus cycle** (§7 A1); `j`/`k` always move
+**Keyboard:** `i` toggles. The panel is **never in the focus cycle** (KEYMAP A1); `j`/`k` always move
 the list cursor and the panel always mirrors it. `y` copies the path from anywhere in the Hub.
 
 ---
@@ -611,7 +611,7 @@ badge), `url` (`y` / `b`), reviewer avatars, a merged/closed section, a third "A
 **Icons:** the badge table above, plus `git-fork`, and the §2.5 session glyphs for presence.
 
 **Keyboard:** `Tab`/`S-Tab`/`h`/`l` tabs · `j`/`k`/`gg`/`G` · `Enter`/`o` open-or-create (sleeps
-previous) · `O` keep previous awake · `c` create without opening (§7 A9) · `b` browser · `y` copy
+previous) · `O` keep previous awake · `c` create without opening (KEYMAP A9) · `b` browser · `y` copy
 URL · `r` force refresh both tabs · `I` inspect the matching local worktree · `i` detail ·
 `/` filter · `p`/`q` back.
 
@@ -689,11 +689,12 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 `chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
 
 **Keyboard:** all keys → PTY; `ctrl-s` then `ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
-`h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (§7 A2) · `w` last session (§7 A3) ·
-`W` session switcher (§7 A4) · `S` sleep this session and return to Hub (§7 A5) · `c` new tab ·
+`h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
+`W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
-`a`/`A` agent session · `r` restart the exited command (§7 A10) · `y` copy worktree path (§7 A11)
-· `z` zoom · `J` jobs · `?` help · `Esc` cancel prefix.
+`a`/`A` agent session · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
+· `z` zoom · `!` sticky error slot (prefixed: `^s !`, KEYMAP A18) · `J` jobs · `?` help · `Esc` cancel
+prefix.
 
 ---
 
@@ -859,7 +860,7 @@ conflict message in red in the footer, dialog stays open. *closed while a base f
 **Icons:** `git-branch-plus`, `loader-circle`, `zap`, `hourglass`, `server` (host), `terminal` (hooks).
 
 **Keyboard:** `Tab`/`S-Tab` fields · `ctrl-n`/`ctrl-p` or `↓`/`↑` base list · `←`/`→` host ·
-`Enter` create & open · `⌥Enter` create without opening (§7 A8) · `Esc` cancel (jobs keep running).
+`Enter` create & open · `⌥Enter` create without opening (KEYMAP A8) · `Esc` cancel (jobs keep running).
 
 ---
 
@@ -1040,7 +1041,7 @@ prior cursor is restored.
 its one-line explainer is the **only** teaching copy in the app, because `owners` is the single
 field whose purpose is not guessable.
 
-**Edit variant** (`E`, §7 A4): title `⬚ Edit context "buk"`, the id shown read-only and faint
+**Edit variant** (`E`, KEYMAP A15): title `⬚ Edit context "buk"`, the id shown read-only and faint
 (read-only outright once repos exist), and **context delete lives here** as `ctrl-d` → the
 expanded confirm. **[D-11]** `D` therefore keeps its KEYMAP-defined meaning as *delete active
 context* but is **routed through the same expanded confirm with `Y`**; `E` + `ctrl-d` is the
@@ -1267,7 +1268,7 @@ The filter **replaces the pane header in place** — 30 px, same row, no overlay
 the list cursor **while still typing** · `Enter` opens the selected row (so `/rut⏎` is a complete
 open in 5 keys) · first `Esc` leaves the input keeping the filter · second `Esc` clears it.
 **[D-15]** `Esc` in the Hub **never quits the app** — swarm's "clear filter, else quit" is
-retired (§7 A13).
+retired (KEYMAP A13).
 
 **States:** no match → the list area shows `Nothing matches "<filter>".` + faint `esc clear` and
 `Enter` is inert; the header keeps `0/12`. A filter survives a refresh; it does **not** survive a
@@ -1436,7 +1437,7 @@ implementation, so these are **blocking decisions**, not UI details.
 | C1 | `Session { slept_at: Option<Timestamp>, kept_terminals: Vec<KeptTerminal { name: String, reason: String }> }` | §2.5 renders `moon` for *slept* distinctly from `circle` for *detached and awake*. `SessionState` stays `none \| detached \| attached \| unknown` (§1) — **sleeping is derived**, not a fifth variant, so the wire enum is unchanged. `kept_terminals[].reason` carries §4 step 6 strings verbatim (`unsaved changes`, `claude`, `:3000`, `sleep disabled`) for the sleep toast and the detail panel. |
 | C2 | `Worktree { degraded: Option<Degraded { kind: HooksFailed, step: String, exit_code: i32, at: Timestamp, log_path: PathBuf }> }`, persisted in `state.json` | The `⚠ hooks failed` chip (§3.3). Closes §9 "Hook failures warn only; no persisted degraded fact despite ready". Requires a `state.json` schema bump or an additive optional field. |
 | C3 | `Job { retryable: bool }` and a `RetryJob { id }` request | `R` in the Jobs panel (§3.7). Closes §9 "no retry path". |
-| C4 | `config.trash.retentionMs` (default **600000**) and a `RestoreTrash { entry }` request; the daemon delays the detached `rm -rf` by that long | `u` undo-last-delete (§7 A6). The delete algorithm already renames to `trash/<epochms>-<slug>` first, so the safety net is nearly free. |
+| C4 | `config.trash.retentionMs` (default **600000**) and a `RestoreTrash { entry }` request; the daemon delays the detached `rm -rf` by that long | `u` undo-last-delete (KEYMAP A6). The delete algorithm already renames to `trash/<epochms>-<slug>` first, so the safety net is nearly free. |
 | C5 | `config.jobs.warnBeforeQuit` (default **true**) and `config.jobs.keepFinishedFor` (default **600000**) | KEYMAP's `ctrl-q` clause is unimplementable without the first (§3.8.8); §3.7 retention needs the second. |
 | C6 | `Terminal { has_unseen_output: bool }`, cleared on attach/activate per client | The tab activity dot (§3.6). If the daemon cannot hold a per-client watermark, the client derives it from `FrameUpdate.seq` per terminal and this field is dropped. |
 | C7 | `Snapshot { generated_at: Timestamp }` | The `stale · <age>` header stamp (§1.3, §3.12). |
@@ -1444,47 +1445,11 @@ implementation, so these are **blocking decisions**, not UI details.
 
 ---
 
-## 7. Keymap amendments (proposed; `docs/KEYMAP.md` is not edited here)
+## 7. Keymap
 
-Collisions between the source proposals are arbitrated explicitly rather than inherited.
-
-| # | Key | Context | Action | Rationale |
-| --- | --- | --- | --- | --- |
-| A1 | `h` / `l` / `Tab` / `S-Tab` | Hub | Cycle **repos ⇄ list only**; remove the detail panel from the focus cycle | KEYMAP currently says "repos ⇄ worktrees ⇄ detail". The panel is read, never operated; keeping it in the cycle wastes one keypress on every second pane switch, forever. `i` toggles it, and it always mirrors the cursor row (§3.4). |
-| A2 | `ctrl-s Tab` | Workspace prefix | Last **terminal tab** (MRU within the session) | Arbitration: `proposal-flow-speed` A4 and `proposal-background-safety` A2 both claimed this key for different actions. Tab-to-tab ping-pong is the higher-frequency, lower-stakes move and `Tab` reads as "within this thing". |
-| A3 | `ctrl-s w` | Workspace prefix | Last **session** (MRU alternate, vim `ctrl-^`) | Replaces `proposal-glanceability`'s `^s o`, which its own open question 10 flagged as fighting tmux's "other pane" and which collides with `o` = open in the Hub and on the PR screen. |
-| A4 | `ctrl-s W` | Workspace prefix | Session switcher: the palette pre-filtered to `GO`/sessions | The three-or-more-sessions case, without a Hub round trip. Uppercase = the broader variant of `w`. |
-| A5 | `ctrl-s S` | Workspace prefix | Sleep this session **and** return to the Hub | Beats `proposal-background-safety` A9 (`ctrl-s w`) for the same action: uppercase `S` mirrors the Hub's `s` = sleep under KEYMAP's uppercase-is-stronger rule, and it leaves `w` free for A3. |
-| A6 | `u` | Hub › Worktrees | Undo the last delete while its `trash/<epochms>-<slug>` entry still exists | The delete algorithm already renames to trash before a detached `rm -rf`; C4 turns that into a real safety net. Vim's `u`. |
-| A7 | `gr` / `gw` / `gp` / `gj` / `ga` | Hub | Go to Repos pane / Worktrees list / PR screen / Jobs panel / the `All` pseudo-repo | Consistent with KEYMAP's existing `gg` / `gt` / `gT` and with §5's untimed one-key `g` prefix. `ga` is also the correct home for "jump to All": `0` would break the digit vocabulary, since `1`–`9` mean *context* everywhere. |
-| A8 | `⌥Enter` | Create dialog | Create **without** opening | Batch capture; the created row appears pending in the list and the cursor does not move. |
-| A9 | `c` | Hub › PR screen | Create the PR worktree without opening it | Same reason, from the review queue: three PRs in four keys instead of three round trips. |
-| A10 | `ctrl-s r` | Workspace prefix | Restart the exited command in the current terminal | Pairs with the exit strip (§3.6); today a crashed dev server means retyping. Prefixed, per D-8. |
-| A11 | `ctrl-s y` | Workspace prefix | Copy the worktree path of the current session | `y` means copy everywhere else; there is currently no way to get the path from inside a terminal. |
-| A12 | `Y` | Confirm dialogs | Required instead of `y` when any decisive safety fact is unknown or the inspection errored | KEYMAP's own "uppercase = stronger variant", applied to §1.3. Also the confirm key for repo/context delete. |
-| A13 | `Esc` | Hub | Clear the retained filter, else close the topmost overlay, else **no-op — never quits** | KEYMAP already implies this; make it explicit *against* swarm's hazardous "Esc clears retained filter, else quit" (§5). |
-| A14 | `q` | Hub | Close the topmost overlay only; **unbound** when nothing is open | swarm's `q`-quits is dangerous muscle memory next to `q` in Scroll mode. The PR screen's `p`/`q` back already behaves this way. |
-| A15 | `E` | Hub | Edit the active context (name, owners; `ctrl-d` deletes from inside) | Closes §9 "Context update/edit dialog exists but no normal binding opens edit". `D` keeps its KEYMAP meaning (D-11) and routes to the same `Y` confirm. |
-| A16 | `e` | Hub › Repos | Edit the selected repo's `prepare` / `postCreate` hooks | Hooks are otherwise JSON-only and are the source of the `⚠ hooks failed` chip. |
-| A17 | `Y` | Hub › Worktrees | Copy the **branch name** (`y` keeps copying the path) | Pasting a branch into a PR description or a CI URL is a daily action; today it is retyped. Does not collide with A12 — A12 is Dialog mode. |
-| A18 | `!` | Normal + Workspace | Focus the sticky error slot: show the last failed job and offer `R retry` | Errors must be re-reachable after the status-bar slot is dismissed. |
-| A19 | `c` / `X` / `R` / `y` / `D` / `f` | Jobs panel | cancel / cancel all cancellable (confirm) / retry / copy log path / dismiss finished / cycle filter | The panel currently binds only `Esc`. Cancel is the one job affordance the architecture explicitly promises; retry and copy-log-path are the two paths that make a failure survivable. |
-| A20 | `I` | Hub › PR screen | Inspect the local worktree matching the selected PR | Makes "is my copy of this PR safe to delete?" answerable where the question arises. |
-| A21 | `a` / `A` | Hub (Normal) | Open the Claude / OpenCode agent session | Today reachable only as `ctrl-s a`, i.e. unreachable from a cold start. |
-| A22 | `H` | Hub | Collapse / expand the repos rail (240 ↔ 44 px icon rail) | Reclaims 196 px for the list on a laptop screen without losing the aggregate glyphs. |
-| A23 | `W` | Quit dialog | Never warn again (writes `jobs.warnBeforeQuit=false`) and quit | Makes KEYMAP's "the user asked to be warned" clause reversible without opening Settings (§3.8.8). |
-| A24 | `Enter` in Filter mode | Filter | Opens the highlighted row directly from inside the input | Already swarm behavior; make it authoritative, because it is the fastest open path. |
-
-**Explicitly rejected** (recorded so they are not re-proposed): `^s o` for the MRU session (tmux
-"other pane" collision, and `o` = open elsewhere); `0` for the `All` pseudo-repo (breaks the digit
-vocabulary — use `ga`); `Space` hold-to-peek the detail panel (hold semantics exist nowhere else
-in KEYMAP and it duplicates `i`); unbinding `D` (KEYMAP is authoritative; the risk is handled by
-`Y` + facts + `u`, not by hiding a documented key).
-
-**Conflicts noticed and deliberately kept:** `Tab` means "next pane" in the Hub but "next PR tab"
-on the PR screen (KEYMAP is explicit); `i` is "toggle detail" in the Hub and "leave Scroll mode"
-in the Workspace (different modes, no real collision); `r` is "refresh" in Normal and "restart"
-after `ctrl-s` (different modes).
+**`docs/KEYMAP.md` is authoritative for every key in this document.** The 24 amendments this
+spec proposed (A1–A24), the arbitrations they needed and the bindings the screens above use are
+all applied there; cite `docs/KEYMAP.md` rather than restating a binding here.
 
 ---
 
@@ -1518,8 +1483,10 @@ after `ctrl-s` (different modes).
 
 ## 9. Component inventory (feeds `fleet-ui-kit`)
 
-Views in `fleet-app` compose **only** these; no ad-hoc styling. Names are the intended Rust type
-names in `fleet-ui-kit`.
+Views in `fleet-app` compose **only** these; no ad-hoc styling. Names are the Rust type names in
+`fleet-ui-kit`, and this table is kept in sync with §6 of `docs/DESIGN-SYSTEM.md`, which carries
+each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias of
+`SegmentedTabs`.
 
 ### 9.1 Foundation
 
@@ -1530,6 +1497,7 @@ names in `fleet-ui-kit`.
 | `Text` | The four type roles (ui, data/mono, label, hint) with fixed line heights | everywhere |
 | `Truncate` | Head / tail / middle ellipsis at a fixed ch or px budget | branch, path, title, repo, target columns |
 | `FocusRing` | 2 px inset blue on a focused pane; 2 px left bar on a cursor row | panes, lists |
+| `Tone` | The semantic color roles (`Default`/`Secondary`/`Muted`/`Accent`/`Success`/`Warning`/`Danger`/`Info`/`Inverse`) and their fills | every component that takes a color |
 
 ### 9.2 Structure
 
@@ -1544,6 +1512,8 @@ names in `fleet-ui-kit`.
 | `Dialog` | The shared frame: scrim + card + 44 px header + 44 px footer, `Esc` close, no button pair | all of §3.8 |
 | `Overlay` | Centered top-anchored layer at y = 120 | Palette (§3.9) |
 | `ToastStack` | Bottom-right stack, max 3, 3.2 / 1.6 s, 1 s identical-text coalescing into `×n` | §2.7 |
+| `SplitLayout` | Two panes with a fixed side and a flex side, on either axis | Hub body, Workspace body |
+| `Divider` | 1 px rule, horizontal or vertical | dialogs, panels |
 
 ### 9.3 Data display
 
@@ -1566,6 +1536,10 @@ names in `fleet-ui-kit`.
 | `SkeletonRows` | 30 % opacity placeholder rows, cold-load only | PR list cold fetch |
 | `KeyHint` | Mono 11 px `fg.faint` key + label; right-aligns in palette rows | dialog footers, empty states, hint rows |
 | `DoctorTable` | Fixed `CHECK STATUS DETAIL` table, red on fail | §3.12, Settings › About |
+| `Badge` | Small count / label pill, distinct from the 22 px tinted `Chip` | PR tabs, headers |
+| `StatusDot` | The bare 6–8 px dot behind `Chip`, `DaemonDot` and the tab activity mark | tab strip, chips |
+| `KeyValueList` | A stack of `FactRow`s under one label column width | detail panel, Settings › About |
+| `Spinner` / `SpinnerWithLabel` | `loader-circle` turning once per second — the only looping animation in Fleet | cold start, per-tab waking, jobs |
 
 ### 9.4 Input
 
@@ -1580,21 +1554,25 @@ names in `fleet-ui-kit`.
 | `SegmentedTabs` | Underlined tabs with counts, `Tab`/`S-Tab`/`h`/`l` | PR Mine/Review, Help columns |
 | `ConfirmDialog` | Compact/expanded switch driven by `FactList`; binds only `y`/`Y`/`Enter`/`n`/`Esc`/`q` (+ `I`, + `s` for prune) | §3.8.3, §3.8.8, §3.8.9 |
 | `Palette` | Sectioned `GO`/`DO`/`CONTEXT` result list with right-aligned key hints, cap 10 | §3.9 |
+| `Select` | A closed choice rendered as a row with its current value, for a set too long for `Cycler` | Settings, Create dialog |
 
 ### 9.5 Jobs and terminal
 
 | Component | Responsibility | Used by |
 | --- | --- | --- |
-| `JobRow` | Two-line job item: glyph · kind (7 ch) · target · elapsed · percent, plus the progress sub-line | Jobs panel, quit dialogs |
+| `JobRow` | Two-line job item: glyph · kind (7 ch) · target · elapsed · percent · optional `(restartable)` / `(not restartable)`, plus the progress sub-line | Jobs panel, quit dialogs |
 | `JobTicker` | Newest running job as one status-bar line with a `+n` suffix | status bar |
 | `StickyErrorSlot` | Red, addressable (`!`), persists until dismissed; owns the last failed job | status bar |
 | `LogView` | Tail of `logs/jobs/<id>.log`, last 200 lines, 16 ms batching, follow toggle, `G` re-follow | Jobs panel |
-| `TerminalGrid` | Paints the mirror cell grid from `FrameUpdate`; cursor shapes, selection, mouse modes, alt-screen awareness | Workspace |
-| `TerminalTabStrip` | Numbered tabs 84–200 px with an activity dot, keep-alive icon, exited mark and a `+` tab | Workspace |
+| `TerminalGrid` | Paints the mirror cell grid from `FrameUpdate`: the full VT attribute set (bold, dim, italic, single/double/curly underline with its own color, strikethrough, inverse, blink, invisible), narrow/wide/spacer cells, the four cursor shapes, the selection overlay and the scrollback badge | Workspace |
+| `TerminalModes` | Zero-suppressed badges for `alt` / `mouse` / `paste` / `appcur` — why the keymap appears to lie | Workspace header |
+| `ScrollbackBadge` | `↥ <offset>/<len>` in the grid corner whenever the viewport is scrolled back, in or out of Scroll mode | Workspace |
+| `TerminalTabStrip` | Numbered tabs 84–200 px with an activity dot, a per-tab waking spinner, keep-alive icon, exited mark (code or `—`) and a `+` tab | Workspace |
 | `ScrollPill` | `SCROLL <offset>/<len>` overlay with a selection hint line; **suppressed in alt-screen** | Workspace Scroll mode |
 | `PrefixHint` | `^S` pill + 6 keys, 400 ms delayed, bottom-left inside the terminal area | Workspace Prefix mode |
 | `ExitStrip` | `⚠ process exited (<code>)` + prefixed recovery keys | Workspace |
 | `ModeWord` | The §2.8 mode word, fixed 84 px | status bar |
-| `Banner` | 28 px full-width amber/red strip with a countdown and prefixed keys | daemon states (§3.12) |
+| `Banner` | 28 px full-width amber/red strip with a countdown and prefixed keys | daemon state C (§3.12) |
+| `DaemonSplash` | The full-window cold-start and will-not-start surfaces: title, spinner, socket path, `fleetd.log` tail, bare recovery keys | daemon states A and B (§3.12) |
 | `DaemonDot` | 8 px liveness dot that expands into a labelled pill when degraded | context bar |
 | `Veil` | 55 % scrim over terminal grids only, with key-dropping | daemon disconnect |

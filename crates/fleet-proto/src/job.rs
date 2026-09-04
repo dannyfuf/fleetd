@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub use fleet_core::ids::JobId;
 
 /// Kind of durable daemon background work.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     /// Clone a pristine repository.
@@ -32,6 +32,8 @@ pub enum JobKind {
     RepoDiscovery,
     /// Update Fleet itself.
     Update,
+    /// Import compatible configuration and state from swarm.
+    Import,
     /// Extension point for daemon-specific jobs.
     Custom(String),
 }
@@ -44,6 +46,8 @@ pub enum JobStatus {
     Queued,
     /// Currently executing.
     Running,
+    /// Cancellation was requested and shutdown is still in progress.
+    Cancelling,
     /// Completed successfully.
     Succeeded,
     /// Completed unsuccessfully.
@@ -79,6 +83,9 @@ pub struct JobRecord {
     pub finished_at: Option<String>,
     /// Whether explicit cancellation is currently supported.
     pub cancellable: bool,
+    /// Whether a failed or cancelled job may be started again.
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 #[cfg(test)]
@@ -87,7 +94,11 @@ mod tests {
 
     #[test]
     fn job_enums_round_trip() {
-        for kind in [JobKind::Clone, JobKind::Custom("other".to_owned())] {
+        for kind in [
+            JobKind::Clone,
+            JobKind::Import,
+            JobKind::Custom("other".to_owned()),
+        ] {
             let json = serde_json::to_string(&kind).unwrap_or_else(|error| panic!("{error}"));
             let decoded: JobKind =
                 serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
@@ -100,5 +111,32 @@ mod tests {
         let decoded: JobStatus =
             serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, status);
+
+        let status = JobStatus::Cancelling;
+        let json = serde_json::to_string(&status).unwrap_or_else(|error| panic!("{error}"));
+        let decoded: JobStatus =
+            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(decoded, status);
+    }
+
+    #[test]
+    fn job_record_round_trips_retryability() {
+        let record = JobRecord {
+            id: JobId::try_from("job-round-trip").unwrap_or_else(|error| panic!("{error}")),
+            kind: JobKind::Import,
+            target: "~/.swarm".to_owned(),
+            title: "Import from swarm".to_owned(),
+            status: JobStatus::Queued,
+            progress: None,
+            log_path: "/tmp/import.log".to_owned(),
+            started_at: "2026-09-04T12:00:00Z".to_owned(),
+            finished_at: None,
+            cancellable: true,
+            retryable: true,
+        };
+        let json = serde_json::to_string(&record).unwrap_or_else(|error| panic!("{error}"));
+        let decoded: JobRecord =
+            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(decoded, record);
     }
 }

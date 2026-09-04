@@ -141,7 +141,7 @@ impl RenderOnce for Dialog {
                 self.footer_error
                     .map(|e| Text::ui(e).tone(Tone::Danger).ellipsize()),
             )
-            .children(self.primary.map(|p| Text::ui_strong(p)));
+            .children(self.primary.map(Text::ui_strong));
 
         deferred(
             div()

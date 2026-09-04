@@ -61,6 +61,9 @@ pub struct WorktreeInspection {
     pub upstream_gone: bool,
     /// Whether tracked or untracked changes exist.
     pub dirty: bool,
+    /// Count of dirty porcelain entries when status collection succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_files: Option<u64>,
     /// Whether HEAD is already an ancestor of the target branch.
     pub merged_into_target: bool,
     /// Commits unique relative to the target.

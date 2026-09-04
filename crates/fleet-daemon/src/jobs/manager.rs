@@ -33,6 +33,7 @@ struct ManagedJob {
 struct JobState {
     jobs: BTreeMap<JobId, ManagedJob>,
     order: VecDeque<JobId>,
+    in_flight_targets: HashMap<(JobKind, String), JobId>,
 }
 
 struct JobManagerInner {
@@ -70,6 +71,7 @@ impl JobManager {
                 state: Mutex::new(JobState {
                     jobs: BTreeMap::new(),
                     order: VecDeque::new(),
+                    in_flight_targets: HashMap::new(),
                 }),
                 updates,
                 repo_locks: Mutex::new(HashMap::new()),
@@ -86,12 +88,26 @@ impl JobManager {
         target: impl Into<String>,
         title: impl Into<String>,
         cancellable: bool,
+        retryable: bool,
         operation: F,
     ) -> JobId
     where
         F: FnOnce(JobCtx) -> Fut + Send + 'static,
         Fut: Future<Output = DaemonResult<()>> + Send + 'static,
     {
+        let target = target.into();
+        let title = title.into();
+        let target_key = (kind.clone(), target.clone());
+        {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(id) = state.in_flight_targets.get(&target_key) {
+                return id.clone();
+            }
+        }
         let id = loop {
             if let Ok(id) = JobId::try_from(format!("job-{}", Uuid::new_v4())) {
                 break id;
@@ -99,24 +115,18 @@ impl JobManager {
         };
         let cancel = CancellationToken::new();
         let log_path = self.log_path(&id);
-        let _ignored = std::fs::create_dir_all(&self.inner.logs_dir).and_then(|()| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .map(drop)
-        });
         let record = JobRecord {
             id: id.clone(),
             kind,
-            target: target.into(),
-            title: title.into(),
+            target,
+            title,
             status: JobStatus::Queued,
             progress: None,
             log_path: log_path.to_string_lossy().into_owned(),
             started_at: self.inner.clock.now().to_rfc3339(),
             finished_at: None,
             cancellable,
+            retryable,
         };
         {
             let mut state = self
@@ -124,7 +134,11 @@ impl JobManager {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = state.in_flight_targets.get(&target_key) {
+                return existing.clone();
+            }
             state.order.push_back(id.clone());
+            state.in_flight_targets.insert(target_key, id.clone());
             state.jobs.insert(
                 id.clone(),
                 ManagedJob {
@@ -133,6 +147,13 @@ impl JobManager {
                 },
             );
         }
+        let _ignored = std::fs::create_dir_all(&self.inner.logs_dir).and_then(|()| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .map(drop)
+        });
         let _receivers = self.inner.updates.send(record);
         let manager = self.clone();
         let task_id = id.clone();
@@ -173,24 +194,39 @@ impl JobManager {
 
     /// Requests cancellation of a running cancellable job and returns its current record.
     pub fn cancel(&self, id: &JobId) -> DaemonResult<JobRecord> {
-        let state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let job = state
-            .jobs
-            .get(id)
-            .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))?;
-        if !job.record.cancellable {
-            return Err(DaemonError::Conflict(format!(
-                "job {id} is not cancellable"
-            )));
+        let (record, cancel) = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let job = state
+                .jobs
+                .get_mut(id)
+                .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))?;
+            if !job.record.cancellable {
+                return Err(DaemonError::Conflict(format!(
+                    "job {id} is not cancellable"
+                )));
+            }
+            let cancel = if matches!(job.record.status, JobStatus::Queued | JobStatus::Running) {
+                job.record.status = JobStatus::Cancelling;
+                Some(job.cancel.clone())
+            } else {
+                None
+            };
+            (job.record.clone(), cancel)
+        };
+        if let Some(cancel) = cancel {
+            cancel.cancel();
+            let _receivers = self.inner.updates.send(record.clone());
         }
-        if matches!(job.record.status, JobStatus::Queued | JobStatus::Running) {
-            job.cancel.cancel();
-        }
-        Ok(job.record.clone())
+        Ok(record)
+    }
+
+    /// Restarts a retained job when its original operation can be reconstructed.
+    pub fn retry(&self, _id: &JobId) -> DaemonResult<JobRecord> {
+        Err(DaemonError::Unimplemented("jobs::retry"))
     }
 
     /// Reads at most the last `lines` lines from a job's persistent log.
@@ -301,6 +337,22 @@ impl JobManager {
             record.finished_at = Some(finished.to_rfc3339());
             record.cancellable = false;
         });
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = state
+                .jobs
+                .get(id)
+                .map(|job| (job.record.kind.clone(), job.record.target.clone()));
+            if let Some(key) = key
+                && state.in_flight_targets.get(&key) == Some(id)
+            {
+                state.in_flight_targets.remove(&key);
+            }
+        }
         self.prune(finished);
     }
 
@@ -332,7 +384,10 @@ impl JobManager {
             .iter()
             .filter(|id| {
                 state.jobs.get(*id).is_some_and(|job| {
-                    !matches!(job.record.status, JobStatus::Queued | JobStatus::Running)
+                    !matches!(
+                        job.record.status,
+                        JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling
+                    )
                 })
             })
             .cloned()
@@ -372,7 +427,10 @@ mod tests {
     async fn wait_finished(manager: &JobManager, id: &JobId) -> JobRecord {
         for _ in 0..100 {
             if let Some(record) = manager.list().into_iter().find(|record| &record.id == id)
-                && !matches!(record.status, JobStatus::Queued | JobStatus::Running)
+                && !matches!(
+                    record.status,
+                    JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling
+                )
             {
                 return record;
             }
@@ -389,6 +447,7 @@ mod tests {
             JobKind::Inspect,
             "all",
             "Inspect",
+            true,
             true,
             |context| async move {
                 context.progress("first")?;
@@ -414,6 +473,7 @@ mod tests {
             "x",
             "Wait",
             true,
+            false,
             |_context| async move {
                 std::future::pending::<()>().await;
                 Ok(())
@@ -425,5 +485,36 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         let record = wait_finished(&manager, &id).await;
         assert_eq!(record.status, JobStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn suppresses_duplicate_active_kind_and_target() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let manager = JobManager::new(temp.path());
+        let first = manager.submit(
+            JobKind::RepoFetch,
+            "acme/api",
+            "Fetch",
+            true,
+            true,
+            |_context| async move {
+                std::future::pending::<()>().await;
+                Ok(())
+            },
+        );
+        let second = manager.submit(
+            JobKind::RepoFetch,
+            "acme/api",
+            "Fetch again",
+            true,
+            true,
+            |_context| async move { Ok(()) },
+        );
+        assert_eq!(second, first);
+        assert_eq!(manager.list().len(), 1);
+        manager
+            .cancel(&first)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let _record = wait_finished(&manager, &first).await;
     }
 }

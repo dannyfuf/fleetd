@@ -753,9 +753,13 @@ commands are prefixed with `triangle-alert` and still routed through their confi
 #### `JobRow`
 **Purpose.** glyph · kind (7 ch) · target · elapsed · percent, plus a progress sub-line.
 **API.** `JobRow::new(JobStatus, kind, target).id(..).elapsed(..).percent(u8).progress(..)
-.trailing_key(..).selected(bool).cursor(bool)`;
+.retryable(bool).trailing_key(..).selected(bool).cursor(bool)`;
 `JobStatus::{Queued, Running, Cancelling, Cancelled, Done, Failed}` with `.icon() .tone()
 .has_progress()`.
+**Usage rule (`retryable`).** Renders §3.8.9's `(restartable)` / `(not restartable)` label in
+the quit-and-stop confirm. Leave it **unset** when retryability is unknown: a job that claims
+either is worse than one that says nothing. `JobStatus::Cancelling` has no `fleet-proto`
+counterpart yet — the proto enum must gain it or the kit state must go (P1 #7).
 **Variants.** 30 px one-line (finished) · 44 px two-line (running, with the last stdout line).
 **Usage rule.** `kind` is a fixed 7-character slug (`clone`, `pool`, `hooks`, `prune`, `create`,
 `delete`, `fetch`, `prs`, `inspect`, `update`, `import`) so the column scans as a shape.
@@ -784,19 +788,64 @@ sheet back to 440 px.
 #### `TerminalGrid`
 **Purpose.** Paint the mirror cell grid.
 **API.** `TerminalGrid::new(rows).cursor(GridCursor).selection(GridSelection).focused(bool)
-.padding(Pixels)`; `GridRow::new(cells)`, `GridCell::new(text, &theme)` with
-`fg/bg/bold/italic/underline/width`, `CursorShape::{Block, Bar, Underline, Hollow}`.
+.padding(Pixels).scrollback(offset, len)`; `.row_count()`.
+`GridRow::new(cells)` with `.columns()`; `GridCell::new(text, &theme)` and the builders
+`.fg .bg .bold .dim .italic .underline(UnderlineStyle) .underline_color(Hsla) .strikethrough
+.inverse .blink .invisible .width(CellWidth)`, plus `.resolve(&theme) -> (fg, Option<bg>)` and
+`.same_style(&other)`.
+`CursorShape::{Block, Bar, Underline, Hollow}`,
+`UnderlineStyle::{None, Single, Double, Curly}` with `.is_some()`,
+`CellWidth::{Narrow, Wide, Spacer}` with `.columns() -> 1 | 2 | 0`,
+`GridSelection::new(r, c, r, c)` with `.normalized()` and `.span_in_row(row, row_columns)`.
+**The attribute set is complete on purpose.** The cell model carries all ten VT flags plus the
+underline style and color, because `INVERSE` and `DIM` are **not** cosmetic: lazygit, nvim
+status lines and `fzf` draw their selection with reverse video and dim, so a reduced cell model
+visibly corrupts exactly the apps the default `nvim | cc | lg` layout runs. `dim` is 55 %
+foreground opacity, `blink` is 70 % (the kit runs no frame timer for it), `invisible` drops the
+glyph and keeps the background, and `inverse` swaps fg/bg — all inside `GridCell::resolve`, so
+`fleet-app` never resolves reverse video itself.
+**Mappings that must not be re-guessed.** `proto::CellWidth::Spacer → CellWidth::Spacer →
+**0** columns` (the continuation cell after a wide grapheme). `CursorShape::Hollow` exists
+**only** in the kit — the client derives it from focus, and it must never be added to the wire
+enum.
 **Usage rule.** The kit defines its **own** cell model rather than depending on `fleet-proto`;
 the app converts `proto::Cell` on the way in, resolving `Palette(u8)` through
 `TerminalPalette::color` and `Default` through the palette's `foreground`/`background`.
-An unfocused terminal draws a hollow cursor.
+An unfocused terminal draws a hollow cursor. The selection is painted as a
+`terminal.selection` quad per row span, behind the text. `.scrollback(offset, len)` paints a
+`ScrollbackBadge` in the top-right corner when `offset > 0`.
+
+#### `TerminalModes`
+**Purpose.** Zero-suppressed badges for the VT modes a `FrameUpdate` reports.
+**API.** `TerminalModes::new([TerminalMode]).glyphs_only()`; `.is_visible() .is_alt_screen()`;
+`TerminalMode::{AltScreen, MouseReporting, BracketedPaste, ApplicationCursor}` with
+`.label() .icon() .tone()`.
+**Usage rule.** These modes are the only explanation for the keymap appearing to lie: in
+alt-screen there is no scrollback (`ctrl-s [` refuses), with mouse reporting on the app owns
+drag-select, and without bracketed paste `ctrl-s ]` is unsafe in an editor. A plain shell shows
+no badge, so the row costs nothing in the common case. `alt` is the only amber one, because it
+is the only one that changes what a documented key does.
+
+#### `ScrollbackBadge`
+**Purpose.** `↥ <offset>/<len>` in the grid's top-right corner.
+**API.** `ScrollbackBadge::new(offset, len).alt_screen(bool)`; `.is_visible()`.
+**Usage rule.** `ScrollPill` is the *mode* affordance and exists only while Scroll mode is
+active; this badge is the *state* affordance. A viewport scrolled up with the wheel is not in
+Scroll mode and would otherwise look exactly like a live one — which is how "my agent stopped
+printing" bug reports are born. Zero-suppressed at `offset == 0` and in alt-screen.
 
 #### `TerminalTabStrip`
 **Purpose.** Numbered tabs, 84–200 px, with activity, keep-alive and exit marks.
-**API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").activity(bool)
-.keep_alive(Icon).exited(i32)]).active(usize).show_plus(bool)`.
+**API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").activity(bool).starting(bool)
+.keep_alive(Icon).exited(impl Into<Option<i32>>)]).active(usize).show_plus(bool)`.
 **States.** active (accent underline + `ui_strong`) · inactive · activity (6 px amber dot) ·
-exited (faint label + `circle-x` + code).
+starting (per-tab `loader-circle`) · exited (faint label + `circle-x` + code, or `—` when the
+process was killed by a signal and has no code).
+**Usage rule (`starting`).** §3.6's "Waking a slept session" rebuilds the strip and spawns one
+PTY per tab; without a per-tab spinner the strip claims six live terminals that do not exist
+yet. **Usage rule (`exited`).** `.exited(1)` and `.exited(None)` both compile: exit codes are
+`Option<i32>` end-to-end (`fleet-core::TerminalStatus`, `Event::TerminalExited`), because a
+`SIGKILL` from `^s x` produces none.
 **Usage rule.** The index is the argument to `ctrl-s 1`–`9`, so the strip is the legend for that
 binding. The activity dot is the only background-activity signal in the app.
 
@@ -816,9 +865,10 @@ exactly when they hesitate — 0 px and 0 frames of permanent cost.
 
 #### `ExitStrip`
 **Purpose.** `⚠ process exited (<code>)` and the prefixed recovery keys.
-**API.** `ExitStrip::new(code).hints(KeyHintRow)`.
+**API.** `ExitStrip::new(impl Into<Option<i32>>).hints(KeyHintRow)`.
 **Usage rule.** Defaults to `^s r restart · ^s x close · ^s c new`. Fleet must not silently
-swallow a crashed dev server.
+swallow a crashed dev server. `ExitStrip::new(None)` reads `process exited (killed)`: a
+signal-killed process has no exit code and the strip must not invent `128 + signo`.
 
 #### `ModeWord`
 **Purpose.** The fixed 84 px word in the center of the status bar.
@@ -834,6 +884,16 @@ swallow a crashed dev server.
 Terminal sessions did not survive; worktrees, jobs and state are intact."* A warm "reconnected"
 banner that implies the agents came back is the single most damaging false reassurance in the
 app.
+
+#### `DaemonSplash`
+**Purpose.** The two **full-window** daemon surfaces of §3.12, cases A and B.
+**API.** `DaemonSplash::{starting, failed}(title).detail(..).log_lines(..).hints(KeyHintRow)`;
+`DaemonSplashKind::{Starting, Failed}`.
+**Usage rule.** `Banner` covers case C only, because that one is a 28 px strip under the
+context bar. Cases A and B are chrome-less full-window surfaces and neither fits `EmptyState`,
+which is two lines and pane-scoped: A needs a spinner plus the socket path after 3 s, B needs a
+mono tail of `~/.fleet/logs/fleetd.log`. The keys here are **bare** (`r`, `L`, `D`, `ctrl-q`) —
+the D-8 prefix rule applies over a terminal grid, and there is no terminal on this screen.
 
 #### `DaemonDot`
 **Purpose.** 8 px liveness dot that grows a word when degraded.

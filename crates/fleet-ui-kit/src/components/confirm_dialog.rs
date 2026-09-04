@@ -131,7 +131,7 @@ impl RenderOnce for ConfirmDialog {
             .children(
                 self.target
                     .filter(|_| !compact)
-                    .map(|target| Text::data(target)),
+                    .map(Text::data),
             )
             .child(self.facts)
             .children(self.stamp)

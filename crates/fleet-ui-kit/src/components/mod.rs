@@ -15,6 +15,7 @@ pub mod confirm_dialog;
 pub mod context_bar;
 pub mod cycler;
 pub mod daemon_dot;
+pub mod daemon_splash;
 pub mod degraded_chip;
 pub mod dialog;
 pub mod divider;
@@ -55,6 +56,7 @@ pub mod status_dot;
 pub mod status_glyph;
 pub mod sticky_error_slot;
 pub mod terminal_grid;
+pub mod terminal_modes;
 pub mod terminal_tab_strip;
 pub mod text_field;
 pub mod toast_stack;
@@ -73,6 +75,7 @@ pub use confirm_dialog::ConfirmDialog;
 pub use context_bar::{ContextBar, ContextTab};
 pub use cycler::Cycler;
 pub use daemon_dot::{DaemonDot, DaemonState};
+pub use daemon_splash::{DaemonSplash, DaemonSplashKind};
 pub use degraded_chip::DegradedChip;
 pub use dialog::Dialog;
 pub use divider::{Divider, DividerAxis};
@@ -100,7 +103,7 @@ pub use pane_header::PaneHeader;
 pub use pr_badge::{PrBadge, PrBadgeState};
 pub use prefix_hint::PrefixHint;
 pub use row::{ColumnAlign, Row, RowColumn};
-pub use scroll_pill::ScrollPill;
+pub use scroll_pill::{ScrollPill, ScrollbackBadge};
 pub use section_header::SectionHeader;
 pub use segmented_tabs::{SegmentedTab, SegmentedTabs};
 pub use select::Select;
@@ -113,8 +116,10 @@ pub use status_dot::StatusDot;
 pub use status_glyph::{StatusGlyph, StatusKind};
 pub use sticky_error_slot::StickyErrorSlot;
 pub use terminal_grid::{
-    CursorShape, GridCell, GridCursor, GridRow, GridSelection, TerminalGrid,
+    CellWidth, CursorShape, GridCell, GridCursor, GridRow, GridSelection, TerminalGrid,
+    UnderlineStyle,
 };
+pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalTab, TerminalTabStrip};
 pub use text_field::TextField;
 pub use toast_stack::{Toast, ToastDuration, ToastStack};

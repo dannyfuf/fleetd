@@ -17,6 +17,16 @@ pub enum SessionKind {
     Agent(Agent),
 }
 
+/// A terminal retained by the most recent sleep operation and its reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptTerminal {
+    /// Session-local terminal name.
+    pub name: String,
+    /// Human-readable keep-alive reason.
+    pub reason: String,
+}
+
 /// A daemon-owned collection of terminals sharing a working context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +42,12 @@ pub struct Session {
     /// Selected terminal, when the session has any terminals.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_terminal: Option<TerminalId>,
+    /// ISO-8601 time of the most recent successful sleep operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slept_at: Option<String>,
+    /// Terminals retained by the most recent sleep operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_terminals: Vec<KeptTerminal>,
 }
 
 /// Lifecycle state of a terminal's foreground process.
@@ -75,6 +91,9 @@ pub struct Terminal {
     /// Labels that currently prevent sleep.
     #[serde(default)]
     pub keep_alive: Vec<String>,
+    /// Whether output arrived since the owning client last selected this terminal.
+    #[serde(default)]
+    pub has_unseen_output: bool,
 }
 
 /// Observed attachment state for a worktree session.

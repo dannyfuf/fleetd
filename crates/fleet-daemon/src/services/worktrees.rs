@@ -10,6 +10,7 @@ use fleet_proto::response::WorktreeDeleteResult;
 
 use crate::{
     DaemonError, DaemonResult,
+    adapters::{files::Files, git::Git},
     jobs::JobManager,
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -20,16 +21,26 @@ pub struct Worktrees {
     _config: Arc<ConfigStore>,
     _state: Arc<StateStore>,
     _jobs: Arc<JobManager>,
+    _files: Arc<dyn Files>,
+    _git: Arc<dyn Git>,
 }
 
 impl Worktrees {
     /// Creates the worktree service.
     #[must_use]
-    pub fn new(config: Arc<ConfigStore>, state: Arc<StateStore>, jobs: Arc<JobManager>) -> Self {
+    pub fn new(
+        config: Arc<ConfigStore>,
+        state: Arc<StateStore>,
+        jobs: Arc<JobManager>,
+        files: Arc<dyn Files>,
+        git: Arc<dyn Git>,
+    ) -> Self {
         Self {
             _config: config,
             _state: state,
             _jobs: jobs,
+            _files: files,
+            _git: git,
         }
     }
 
@@ -74,5 +85,10 @@ impl Worktrees {
     /// Resolves the absolute path of a local worktree and rejects remote mirrors (inventory sections 1 and 2).
     pub async fn path(&self, _id: WorktreeId) -> DaemonResult<String> {
         Err(DaemonError::Unimplemented("worktrees::path"))
+    }
+
+    /// Restores one validated entry from Fleet's recoverable trash directory.
+    pub async fn restore_trash(&self, _entry: String) -> DaemonResult<()> {
+        Err(DaemonError::Unimplemented("worktrees::restore_trash"))
     }
 }

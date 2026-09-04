@@ -540,7 +540,7 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
     );
 
     let jobs = box_of(&t,
-        px(230.0),
+        px(320.0),
         div()
             .flex()
             .flex_col()
@@ -568,7 +568,25 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
             )
             .child(JobRow::new(JobStatus::Done, "prune", "buk/www").id("job-3").elapsed("12s"))
             .child(JobRow::new(JobStatus::Cancelled, "fetch", "dannyfuf/fleetd").id("job-4"))
-            .child(JobRow::new(JobStatus::Queued, "pool", "buk/payroll").id("job-5")),
+            .child(JobRow::new(JobStatus::Queued, "pool", "buk/payroll").id("job-5"))
+            .child(
+                JobRow::new(JobStatus::Cancelling, "delete", "buk/www#chore-deps")
+                    .id("job-6")
+                    .elapsed("0:03")
+                    .progress("waiting for the worker to stop"),
+            )
+            // The quit-and-stop confirm (§3.8.9) labels every cancellable job.
+            .child(
+                JobRow::new(JobStatus::Running, "clone", "nixos")
+                    .id("job-7")
+                    .percent(40)
+                    .retryable(true),
+            )
+            .child(
+                JobRow::new(JobStatus::Running, "hooks", "payroll#feat-rut")
+                    .id("job-8")
+                    .retryable(false),
+            ),
     );
 
     let children = vec![
@@ -737,9 +755,9 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let mut rows = Vec::new();
     for (ix, line) in [
-        "❯ claude",
-        "⏺ Reading src/payroll/rounding.rb…",
-        "  · 128 lines · 3 matches",
+        "\u{276f} claude",
+        "\u{23fa} Reading src/payroll/rounding.rb\u{2026}",
+        "  \u{b7} 128 lines \u{b7} 3 matches",
     ]
     .iter()
     .enumerate()
@@ -758,28 +776,109 @@ fn terminal_section(cx: &mut App) -> AnyElement {
         rows.push(GridRow::new(cells));
     }
 
-    let grid = box_of(&t,
+    let grid = box_of(
+        &t,
         px(96.0),
-        TerminalGrid::new(rows).cursor(GridCursor {
-            row: 1,
-            col: 34,
+        TerminalGrid::new(rows)
+            .cursor(GridCursor {
+                row: 1,
+                col: 34,
+                visible: true,
+                shape: CursorShape::Block,
+            })
+            .selection(GridSelection::new(2, 2, 2, 18))
+            .scrollback(412, 2000),
+    );
+
+    // Every cell attribute, so a regression in the proto -> kit conversion is visible here.
+    let attr_cell = |text: &str, f: fn(GridCell) -> GridCell| f(GridCell::new(text.to_string(), &t));
+    let attrs_row = GridRow::new([
+        attr_cell("bold ", |c| c.bold(true)),
+        attr_cell("dim ", |c| c.dim(true)),
+        attr_cell("italic ", |c| c.italic(true)),
+        attr_cell("under ", |c| c.underline(UnderlineStyle::Single)),
+        attr_cell("double ", |c| c.underline(UnderlineStyle::Double)),
+        attr_cell("curly ", |c| c.underline(UnderlineStyle::Curly)),
+        attr_cell("strike ", |c| c.strikethrough(true)),
+        attr_cell("blink ", |c| c.blink(true)),
+        attr_cell("hidden ", |c| c.invisible(true)),
+    ]);
+    let attrs_row_2 = GridRow::new([
+        attr_cell("inverse", |c| c.inverse(true)),
+        GridCell::new(" ", &t),
+        GridCell::new("err", &t)
+            .underline(UnderlineStyle::Curly)
+            .underline_color(t.colors.danger),
+        GridCell::new(" ", &t),
+        GridCell::new("\u{5e83}", &t).width(CellWidth::Wide),
+        GridCell::new("", &t).width(CellWidth::Spacer),
+        GridCell::new("\u{3044}", &t).width(CellWidth::Wide),
+        GridCell::new("", &t).width(CellWidth::Spacer),
+        GridCell::new(" wide + spacer", &t),
+    ]);
+    let attrs = box_of(
+        &t,
+        px(56.0),
+        TerminalGrid::new([attrs_row, attrs_row_2]),
+    );
+
+    let unfocused = box_of(
+        &t,
+        px(38.0),
+        TerminalGrid::new([GridRow::new(
+            "hollow cursor \u{2014} terminal not focused"
+                .chars()
+                .map(|c| GridCell::new(c.to_string(), &t)),
+        )])
+        .focused(false)
+        .cursor(GridCursor {
+            row: 0,
+            col: 14,
             visible: true,
             shape: CursorShape::Block,
         }),
     );
 
-    let strip_el = box_of(&t,
+    let cursor_shapes = box_of(
+        &t,
+        px(38.0),
+        div()
+            .flex()
+            .size_full()
+            .bg(t.terminal.background)
+            .children([CursorShape::Block, CursorShape::Bar, CursorShape::Underline].map(
+                |shape| {
+                    div().w(px(120.0)).h_full().child(
+                        TerminalGrid::new([GridRow::new(
+                            "  shape".chars().map(|c| GridCell::new(c.to_string(), &t)),
+                        )])
+                        .cursor(GridCursor {
+                            row: 0,
+                            col: 0,
+                            visible: true,
+                            shape,
+                        }),
+                    )
+                },
+            )),
+    );
+
+    let strip_el = box_of(
+        &t,
         t.metrics.pane_header_h,
         TerminalTabStrip::new([
             TerminalTab::new(1, "nvim").keep_alive(Icon::FilePen),
             TerminalTab::new(2, "cc").keep_alive(Icon::Bot).activity(true),
             TerminalTab::new(3, "lg"),
             TerminalTab::new(4, "test").exited(1),
+            TerminalTab::new(5, "server").exited(None),
+            TerminalTab::new(6, "waking").starting(true),
         ])
         .active(1),
     );
 
-    let overlays = box_of(&t,
+    let overlays = box_of(
+        &t,
         px(120.0),
         div()
             .relative()
@@ -797,7 +896,18 @@ fn terminal_section(cx: &mut App) -> AnyElement {
             ),
     );
 
-    let veiled = box_of(&t,
+    let badge = box_of(
+        &t,
+        px(46.0),
+        div()
+            .relative()
+            .size_full()
+            .bg(t.terminal.background)
+            .child(ScrollbackBadge::new(412, 2000)),
+    );
+
+    let veiled = box_of(
+        &t,
         px(72.0),
         Veil::new(true).child(
             div()
@@ -810,19 +920,82 @@ fn terminal_section(cx: &mut App) -> AnyElement {
 
     let children = vec![
         labeled("terminal grid", &t, grid),
+        labeled("cell attributes", &t, attrs),
+        labeled("cursor shapes", &t, cursor_shapes),
+        labeled("unfocused cursor", &t, unfocused),
         labeled("tab strip", &t, strip_el),
         labeled("scroll pill + prefix hint", &t, overlays),
-        labeled("exit strip", &t, box_of(&t, t.metrics.strip_h, ExitStrip::new(1))),
+        labeled("scrollback badge", &t, badge),
+        labeled(
+            "vt modes",
+            &t,
+            strip(
+                &t,
+                vec![
+                    TerminalModes::new([
+                        TerminalMode::AltScreen,
+                        TerminalMode::MouseReporting,
+                        TerminalMode::BracketedPaste,
+                    ])
+                    .into_any_element(),
+                    TerminalModes::new([TerminalMode::ApplicationCursor])
+                        .glyphs_only()
+                        .into_any_element(),
+                ],
+            ),
+        ),
+        labeled(
+            "exit strip",
+            &t,
+            box_of(&t, t.metrics.strip_h, ExitStrip::new(1)),
+        ),
+        labeled(
+            "exit strip (signal, no code)",
+            &t,
+            box_of(&t, t.metrics.strip_h, ExitStrip::new(None)),
+        ),
         labeled("veil (daemon lost)", &t, veiled),
         labeled(
             "log view",
             &t,
-            box_of(&t,
+            box_of(
+                &t,
                 px(96.0),
                 LogView::new(
                     "gallery-log",
-                    (0..40).map(|i| SharedString::from(format!("[{i:03}] remote: Counting objects…"))),
+                    (0..40).map(|i| SharedString::from(format!("[{i:03}] remote: Counting objects\u{2026}"))),
                 ),
+            ),
+        ),
+        labeled(
+            "daemon splash (cold start)",
+            &t,
+            box_of(
+                &t,
+                px(120.0),
+                DaemonSplash::starting("Starting fleetd\u{2026}").detail("~/.fleet/fleetd.sock"),
+            ),
+        ),
+        labeled(
+            "daemon splash (will not start)",
+            &t,
+            box_of(
+                &t,
+                px(200.0),
+                DaemonSplash::failed("fleetd could not start.")
+                    .detail("The socket ~/.fleet/fleetd.sock is stale.")
+                    .log_lines([
+                        SharedString::from("ERROR listen: address already in use"),
+                        SharedString::from("ERROR socket owner pid 4211 is gone"),
+                        SharedString::from("ERROR giving up after 3 attempts"),
+                    ])
+                    .hints(
+                        KeyHintRow::new()
+                            .key("r", "retry")
+                            .key("L", "open log")
+                            .key("D", "doctor")
+                            .key("ctrl-q", "quit"),
+                    ),
             ),
         ),
     ];

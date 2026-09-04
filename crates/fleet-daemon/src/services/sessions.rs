@@ -1,6 +1,9 @@
 //! Persistent daemon-owned session and terminal lifecycle orchestration contracts.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use fleet_core::{
     config::Agent,
@@ -8,6 +11,7 @@ use fleet_core::{
     sessions::{Session, Terminal},
 };
 use fleet_proto::terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand};
+use fleet_term::TerminalHost;
 use tokio::sync::broadcast;
 
 use crate::{
@@ -20,6 +24,7 @@ use crate::{
 pub struct Sessions {
     _config: Arc<ConfigStore>,
     _state: Arc<StateStore>,
+    _hosts: Arc<Mutex<HashMap<TerminalId, TerminalHost>>>,
     frames: broadcast::Sender<FrameUpdate>,
 }
 
@@ -31,6 +36,7 @@ impl Sessions {
         Self {
             _config: config,
             _state: state,
+            _hosts: Arc::new(Mutex::new(HashMap::new())),
             frames,
         }
     }
@@ -69,6 +75,11 @@ impl Sessions {
     /// Closes one terminal without affecting siblings (inventory section 4).
     pub async fn close_terminal(&self, _terminal: TerminalId) -> DaemonResult<()> {
         Err(DaemonError::Unimplemented("sessions::close_terminal"))
+    }
+
+    /// Recreates an exited terminal from its retained command and working directory.
+    pub async fn restart_terminal(&self, _terminal: TerminalId) -> DaemonResult<Terminal> {
+        Err(DaemonError::Unimplemented("sessions::restart_terminal"))
     }
 
     /// Renames one terminal while preserving its process (inventory section 4).

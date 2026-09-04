@@ -71,6 +71,7 @@ pub struct JobRow {
     percent: Option<u8>,
     progress: Option<SharedString>,
     trailing_key: Option<SharedString>,
+    retryable: Option<bool>,
     selected: bool,
     cursor: bool,
 }
@@ -92,6 +93,7 @@ impl JobRow {
             percent: None,
             progress: None,
             trailing_key: None,
+            retryable: None,
             selected: false,
             cursor: false,
         }
@@ -125,6 +127,15 @@ impl JobRow {
     /// A right-aligned key (`R` on a failed job).
     pub fn trailing_key(mut self, key: impl Into<SharedString>) -> Self {
         self.trailing_key = Some(key.into());
+        self
+    }
+
+    /// Whether a retry (`R`) would work on this job. Renders the §3.8.9 `(restartable)` /
+    /// `(not restartable)` label, which is the difference between "this will come back" and
+    /// "you will have to start it again by hand" in the quit-and-stop confirm. Unset renders
+    /// nothing: a job whose retryability is unknown must not claim either.
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = Some(retryable);
         self
     }
 
@@ -183,6 +194,17 @@ impl RenderOnce for JobRow {
         if let Some(percent) = self.percent {
             row = row.column(
                 RowColumn::fixed(ch(5.0), Text::data(format!("{percent}%")).muted())
+                    .align(ColumnAlign::Right),
+            );
+        }
+        if let Some(retryable) = self.retryable {
+            let (label, tone) = if retryable {
+                ("(restartable)", Tone::Muted)
+            } else {
+                ("(not restartable)", Tone::Warning)
+            };
+            row = row.column(
+                RowColumn::fixed(ch(18.0), Text::data_small(label).tone(tone))
                     .align(ColumnAlign::Right),
             );
         }

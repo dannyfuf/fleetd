@@ -10,4 +10,4 @@ pub use api::{CreateWorktreeResult, DaemonVersion, HelloResult, Result};
 pub use connection::{Client, ConnectError};
 pub use events::{EventReceiverExt, jobs, snapshots};
 pub use spawn::{SpawnError, ensure_daemon, resolve_daemon_path};
-pub use terminal::TerminalHandle;
+pub use terminal::{TerminalHandle, TerminalUpdate};

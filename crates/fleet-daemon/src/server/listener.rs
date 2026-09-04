@@ -154,7 +154,7 @@ mod tests {
     use tokio_util::codec::Framed;
 
     use crate::{
-        adapters::{clock::SystemClock, files::RealFiles},
+        adapters::{Adapters, clock::SystemClock, files::RealFiles},
         jobs::JobManager,
         stores::{config::ConfigStore, state::StateStore},
     };
@@ -170,9 +170,15 @@ mod tests {
             [home.join("repos"), home.join("worktrees")],
         ));
         let config = Arc::new(ConfigStore::new(&home, files.clone()));
-        let state = Arc::new(StateStore::new(&home, files, Arc::new(SystemClock)));
+        let state = Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock)));
         let jobs = Arc::new(JobManager::new(&home));
-        let services = Arc::new(Services::new(&home, config, state, jobs));
+        let services = Arc::new(Services::new(
+            &home,
+            config,
+            state,
+            jobs,
+            Adapters::system(files),
+        ));
         let shutdown = CancellationToken::new();
         let listener = Listener::bind(&home, services, BroadcastBus::default(), shutdown.clone())
             .await

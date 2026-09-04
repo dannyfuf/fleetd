@@ -74,8 +74,8 @@ pub enum HostCommand {
 pub enum HostEvent {
     /// A complete or dirty-row terminal frame.
     Frame(FrameUpdate),
-    /// The PTY child exited with this status code.
-    Exited(i32),
+    /// The PTY child exited, optionally with a process status code.
+    Exited(Option<i32>),
     /// The terminal title changed.
     Title(String),
     /// The terminal emitted a bell.
@@ -320,13 +320,13 @@ fn run_host(
         if exit.is_none() {
             match pty.try_wait() {
                 Ok(Some(code)) => {
-                    exit = Some(code);
+                    exit = Some(Some(code));
                     exit_observed_at = Some(now);
                 }
                 Ok(None) => {}
                 Err(error) => {
                     warn!(%error, %terminal, "failed to poll terminal child");
-                    exit = Some(1);
+                    exit = Some(None);
                     exit_observed_at = Some(now);
                 }
             }
@@ -516,7 +516,7 @@ mod tests {
                     });
                 }
                 Ok(HostEvent::Exited(code)) => {
-                    assert_eq!(code, 0);
+                    assert_eq!(code, Some(0));
                     saw_exit = true;
                 }
                 Ok(_) | Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),

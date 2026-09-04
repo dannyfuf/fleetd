@@ -5,11 +5,12 @@ use std::{path::PathBuf, sync::Arc};
 use fleet_proto::{
     request::RequestBody,
     response::ResponseBody,
-    snapshot::{DaemonInfo, Snapshot},
+    snapshot::{DaemonInfo, HostStatus, Snapshot},
 };
 
 use crate::{
     DaemonError, DaemonResult,
+    adapters::Adapters,
     jobs::JobManager,
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -45,6 +46,8 @@ pub struct Services {
     pub state: Arc<StateStore>,
     /// Detached background job manager.
     pub jobs: Arc<JobManager>,
+    /// External-system dependency bundle shared by services.
+    pub adapters: Adapters,
     /// Context domain service.
     pub contexts: Contexts,
     /// Repository domain service.
@@ -77,38 +80,108 @@ impl Services {
         config: Arc<ConfigStore>,
         state: Arc<StateStore>,
         jobs: Arc<JobManager>,
+        adapters: Adapters,
     ) -> Self {
+        let repos = Repos::new(
+            Arc::clone(&config),
+            Arc::clone(&state),
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.git),
+            Arc::clone(&adapters.github),
+            Arc::clone(&adapters.files),
+        );
+        let worktrees = Worktrees::new(
+            Arc::clone(&config),
+            Arc::clone(&state),
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.files),
+            Arc::clone(&adapters.git),
+        );
+        let pool = Pool::new(
+            Arc::clone(&config),
+            Arc::clone(&state),
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.git),
+            Arc::clone(&adapters.files),
+        );
+        let github = Github::new(
+            Arc::clone(&config),
+            Arc::clone(&state),
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.github),
+        );
+        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+        let sleep = Sleep::new(
+            Arc::clone(&config),
+            Arc::clone(&state),
+            Arc::clone(&adapters.process),
+        );
+        let inspect = Inspect::new(
+            Arc::clone(&config),
+            Arc::clone(&state),
+            Arc::clone(&jobs),
+            Arc::clone(&adapters.git),
+            Arc::clone(&adapters.github),
+        );
+        let prune = Prune::new(Arc::clone(&state), Arc::clone(&jobs), inspect.clone());
+        let doctor = Doctor::new(
+            Arc::clone(&jobs),
+            Arc::clone(&config),
+            Arc::clone(&adapters.shell),
+            Arc::clone(&adapters.git),
+            Arc::clone(&adapters.github),
+            Arc::clone(&adapters.files),
+        );
         Self {
             home: home.into(),
             started_at: chrono::Utc::now().to_rfc3339(),
             contexts: Contexts::new(Arc::clone(&state)),
-            repos: Repos::new(Arc::clone(&config), Arc::clone(&state), Arc::clone(&jobs)),
-            worktrees: Worktrees::new(Arc::clone(&config), Arc::clone(&state), Arc::clone(&jobs)),
-            pool: Pool::new(Arc::clone(&config), Arc::clone(&state), Arc::clone(&jobs)),
-            github: Github::new(Arc::clone(&config), Arc::clone(&state), Arc::clone(&jobs)),
-            sessions: Sessions::new(Arc::clone(&config), Arc::clone(&state)),
-            sleep: Sleep::new(Arc::clone(&config)),
-            inspect: Inspect::new(Arc::clone(&config), Arc::clone(&state), Arc::clone(&jobs)),
-            prune: Prune::new(Arc::clone(&state), Arc::clone(&jobs)),
-            doctor: Doctor::new(Arc::clone(&jobs)),
+            repos,
+            worktrees,
+            pool,
+            github,
+            sessions,
+            sleep,
+            inspect,
+            prune,
+            doctor,
             config,
             state,
             jobs,
+            adapters,
         }
     }
 
     /// Assembles an authoritative snapshot from real persisted state and jobs with runtime sessions.
     pub async fn snapshot(&self) -> DaemonResult<Snapshot> {
         let state = self.state.load().await?;
+        let config = self.config.load().await?;
         let sessions = self.sessions.snapshot();
+        let generated_at = chrono::Utc::now().to_rfc3339();
+        let statuses = Inspect::unknown_statuses(&state.worktrees);
+        let pools = Pool::snapshot_statuses(&state.repos, config.hot_pool_size);
+        let hosts = config
+            .hosts
+            .keys()
+            .cloned()
+            .map(|id| HostStatus {
+                id,
+                reachable: false,
+                checked_at: generated_at.clone(),
+                error: Some("host status has not been observed yet".to_owned()),
+            })
+            .collect();
         Ok(Snapshot {
+            generated_at,
             contexts: state.contexts,
             repos: state.repos,
             clones: state.clones,
             worktrees: state.worktrees,
             active_context: state.active_context_id,
             sessions,
-            statuses: Vec::new(),
+            statuses,
+            pools,
+            hosts,
             jobs: self.jobs.list(),
             daemon: DaemonInfo {
                 version: Self::version(),
@@ -163,6 +236,16 @@ impl Services {
             RequestBody::ListRemoteRepos { owner, force } => Ok(ResponseBody::RemoteRepos(
                 self.repos.list_remote(owner, force).await?,
             )),
+            RequestBody::ListBaseRefs { repo, force } => Ok(ResponseBody::BaseRefs(
+                self.repos.list_base_refs(repo, force).await?,
+            )),
+            RequestBody::SetRepoHooks { repo, hooks } => {
+                Ok(ResponseBody::Repo(self.repos.set_hooks(repo, hooks).await?))
+            }
+            RequestBody::DismissClone { repo } => {
+                self.repos.dismiss_clone(repo).await?;
+                Ok(ResponseBody::Ack)
+            }
             RequestBody::CreateWorktree {
                 repo,
                 slug,
@@ -207,6 +290,13 @@ impl Services {
             RequestBody::WorktreePath { id } => {
                 Ok(ResponseBody::Path(self.worktrees.path(id).await?))
             }
+            RequestBody::RestoreTrash { entry } => {
+                self.worktrees.restore_trash(entry).await?;
+                Ok(ResponseBody::Ack)
+            }
+            RequestBody::RefreshStatuses { repo } => Ok(ResponseBody::Statuses(
+                self.inspect.refresh_statuses(repo).await?,
+            )),
             RequestBody::ListPullRequests {
                 repo,
                 context,
@@ -252,6 +342,9 @@ impl Services {
                 self.sessions.close_terminal(terminal).await?;
                 Ok(ResponseBody::Ack)
             }
+            RequestBody::RestartTerminal { terminal } => Ok(ResponseBody::Terminal(
+                self.sessions.restart_terminal(terminal).await?,
+            )),
             RequestBody::RenameTerminal { terminal, name } => Ok(ResponseBody::Terminal(
                 self.sessions.rename_terminal(terminal, name).await?,
             )),
@@ -307,12 +400,19 @@ impl Services {
                 self.jobs.cancel(&job)?;
                 Ok(ResponseBody::JobCancelled(job))
             }
+            RequestBody::RetryJob { job } => Ok(ResponseBody::Job(self.jobs.retry(&job)?)),
             RequestBody::TailJob { job, lines } => {
                 Ok(ResponseBody::JobLog(self.jobs.tail(&job, lines).await?))
             }
             RequestBody::GetConfig => Ok(ResponseBody::Config(self.config.load().await?)),
             RequestBody::SetConfig { patch } => {
                 Ok(ResponseBody::Config(self.config.update(patch).await?))
+            }
+            RequestBody::MatchKeepAliveRules => Ok(ResponseBody::KeepAliveRuleMatches(
+                self.sleep.match_keep_alive_rules().await?,
+            )),
+            RequestBody::ImportFromSwarm => {
+                Ok(ResponseBody::Job(self.repos.import_from_swarm().await?))
             }
             RequestBody::Doctor => Ok(ResponseBody::Doctor(self.doctor.check().await?)),
             RequestBody::Update => Ok(ResponseBody::Job(self.doctor.update().await?)),

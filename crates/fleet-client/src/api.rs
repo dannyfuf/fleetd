@@ -1,19 +1,23 @@
 //! Typed high-level request and response operations.
 
 use fleet_core::{
+    cache::RepoCache,
     config::{Agent, Config},
-    github::{PrTab, PullRequest, RemoteRepo},
+    github::PrTab,
     ids::{ContextId, HostId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
     inspection::WorktreeInspection,
     model::{Context, Repo, RepoHooks, Worktree},
-    sessions::{Session, Terminal},
+    sessions::{Session, Terminal, WorktreeStatus},
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     event::EventKind,
     job::JobRecord,
     request::RequestBody,
-    response::{DoctorCheck, PruneResult, ResponseBody, SleepResult, WorktreeDeleteResult},
+    response::{
+        BaseRefs, DoctorCheck, KeepAliveRuleMatch, PrSlice, PruneResult, ResponseBody, SleepResult,
+        WorktreeDeleteResult,
+    },
     snapshot::Snapshot,
     terminal::{KeyEvent, MouseEvent, ScrollCommand},
 };
@@ -186,7 +190,7 @@ impl Client {
         &self,
         owner: impl Into<String>,
         query: impl Into<String>,
-    ) -> Result<Vec<RemoteRepo>> {
+    ) -> Result<RepoCache> {
         match self
             .request(RequestBody::SearchRemoteRepos {
                 owner: owner.into(),
@@ -204,7 +208,7 @@ impl Client {
         &self,
         owner: impl Into<String>,
         force: bool,
-    ) -> Result<Vec<RemoteRepo>> {
+    ) -> Result<RepoCache> {
         match self
             .request(RequestBody::ListRemoteRepos {
                 owner: owner.into(),
@@ -215,6 +219,36 @@ impl Client {
             ResponseBody::RemoteRepos(repos) => Ok(repos),
             response => Err(unexpected("list_remote_repos", response)),
         }
+    }
+
+    /// Lists cached or freshly fetched base refs for worktree creation.
+    pub async fn list_base_refs(&self, repo: RepoId, force: bool) -> Result<BaseRefs> {
+        match self
+            .request(RequestBody::ListBaseRefs { repo, force })
+            .await?
+        {
+            ResponseBody::BaseRefs(refs) => Ok(refs),
+            response => Err(unexpected("list_base_refs", response)),
+        }
+    }
+
+    /// Replaces a repository's prepare and post-create hooks.
+    pub async fn set_repo_hooks(&self, repo: RepoId, hooks: RepoHooks) -> Result<Repo> {
+        match self
+            .request(RequestBody::SetRepoHooks { repo, hooks })
+            .await?
+        {
+            ResponseBody::Repo(repo) => Ok(repo),
+            response => Err(unexpected("set_repo_hooks", response)),
+        }
+    }
+
+    /// Dismisses a retained failed clone row.
+    pub async fn dismiss_clone(&self, repo: RepoId) -> Result<()> {
+        expect_ack(
+            "dismiss_clone",
+            self.request(RequestBody::DismissClone { repo }).await?,
+        )
     }
 
     /// Creates or idempotently returns a worktree.
@@ -323,6 +357,25 @@ impl Client {
         }
     }
 
+    /// Restores one recoverable trash entry.
+    pub async fn restore_trash(&self, entry: impl Into<String>) -> Result<()> {
+        expect_ack(
+            "restore_trash",
+            self.request(RequestBody::RestoreTrash {
+                entry: entry.into(),
+            })
+            .await?,
+        )
+    }
+
+    /// Refreshes runtime status for one repository or the complete fleet.
+    pub async fn refresh_statuses(&self, repo: Option<RepoId>) -> Result<Vec<WorktreeStatus>> {
+        match self.request(RequestBody::RefreshStatuses { repo }).await? {
+            ResponseBody::Statuses(statuses) => Ok(statuses),
+            response => Err(unexpected("refresh_statuses", response)),
+        }
+    }
+
     /// Lists pull requests for a repository or context.
     pub async fn list_pull_requests(
         &self,
@@ -330,7 +383,7 @@ impl Client {
         context: Option<ContextId>,
         tab: PrTab,
         force: bool,
-    ) -> Result<Vec<PullRequest>> {
+    ) -> Result<Vec<PrSlice>> {
         match self
             .request(RequestBody::ListPullRequests {
                 repo,
@@ -430,6 +483,17 @@ impl Client {
             self.request(RequestBody::CloseTerminal { terminal })
                 .await?,
         )
+    }
+
+    /// Restarts an exited terminal and returns its updated metadata.
+    pub async fn restart_terminal(&self, terminal: TerminalId) -> Result<Terminal> {
+        match self
+            .request(RequestBody::RestartTerminal { terminal })
+            .await?
+        {
+            ResponseBody::Terminal(terminal) => Ok(terminal),
+            response => Err(unexpected("restart_terminal", response)),
+        }
     }
 
     /// Renames a terminal and returns its updated metadata.
@@ -577,6 +641,14 @@ impl Client {
         }
     }
 
+    /// Retries a retained restartable job.
+    pub async fn retry_job(&self, job: JobId) -> Result<JobRecord> {
+        match self.request(RequestBody::RetryJob { job }).await? {
+            ResponseBody::Job(job) => Ok(job),
+            response => Err(unexpected("retry_job", response)),
+        }
+    }
+
     /// Reads trailing lines from a job log.
     pub async fn tail_job(&self, job: JobId, lines: usize) -> Result<Vec<String>> {
         match self.request(RequestBody::TailJob { job, lines }).await? {
@@ -598,6 +670,22 @@ impl Client {
         match self.request(RequestBody::SetConfig { patch }).await? {
             ResponseBody::Config(config) => Ok(config),
             response => Err(unexpected("set_config", response)),
+        }
+    }
+
+    /// Counts current process matches for configured keep-alive rules.
+    pub async fn match_keep_alive_rules(&self) -> Result<Vec<KeepAliveRuleMatch>> {
+        match self.request(RequestBody::MatchKeepAliveRules).await? {
+            ResponseBody::KeepAliveRuleMatches(matches) => Ok(matches),
+            response => Err(unexpected("match_keep_alive_rules", response)),
+        }
+    }
+
+    /// Starts a non-destructive import from the default swarm home.
+    pub async fn import_from_swarm(&self) -> Result<JobRecord> {
+        match self.request(RequestBody::ImportFromSwarm).await? {
+            ResponseBody::Job(job) => Ok(job),
+            response => Err(unexpected("import_from_swarm", response)),
         }
     }
 

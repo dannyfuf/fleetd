@@ -1,6 +1,6 @@
 use std::{path::Path, time::Duration};
 
-use fleet_client::{Client, ensure_daemon};
+use fleet_client::{Client, TerminalUpdate, ensure_daemon};
 use fleet_core::ids::TerminalId;
 use fleet_proto::{
     codec::FleetCodec,
@@ -73,6 +73,22 @@ async fn negotiates_correlates_events_and_streams_terminal_frames() {
             } if bytes == b"ls\n"
         ));
         send_response(&mut transport, input.id, ResponseBody::Ack).await;
+        send_event(
+            &mut transport,
+            Event::TerminalTitle {
+                terminal: TerminalId(7),
+                title: "editor".to_owned(),
+            },
+        )
+        .await;
+        send_event(
+            &mut transport,
+            Event::TerminalExited {
+                terminal: TerminalId(7),
+                code: None,
+            },
+        )
+        .await;
 
         let detach = timeout(Duration::from_secs(2), transport.next())
             .await
@@ -104,10 +120,20 @@ async fn negotiates_correlates_events_and_streams_terminal_frames() {
     );
 
     let mut terminal = client.attach(TerminalId(7), 100, 30).await.unwrap();
-    let first_frame = terminal.next_frame().await.unwrap();
+    let Some(TerminalUpdate::Frame(first_frame)) = terminal.next_update().await else {
+        panic!("expected terminal frame");
+    };
     assert!(first_frame.full);
     assert_eq!(first_frame.seq, 2);
     terminal.send_input(b"ls\n".to_vec()).await.unwrap();
+    assert_eq!(
+        terminal.next_update().await,
+        Some(TerminalUpdate::Title("editor".to_owned()))
+    );
+    assert_eq!(
+        terminal.next_update().await,
+        Some(TerminalUpdate::Exited(None))
+    );
     drop(terminal);
 
     server.await.unwrap();
@@ -173,15 +199,20 @@ async fn reconnects_and_restores_event_subscription() {
         .await
         .unwrap();
     let mut terminal = client.attach(TerminalId(11), 80, 24).await.unwrap();
-    assert_eq!(terminal.next_frame().await.unwrap().seq, 1);
+    let Some(TerminalUpdate::Frame(frame)) = terminal.next_update().await else {
+        panic!("expected terminal frame");
+    };
+    assert_eq!(frame.seq, 1);
     disconnected_rx.await.unwrap();
     assert_eq!(
-        timeout(Duration::from_secs(2), terminal.next_frame())
+        timeout(Duration::from_secs(2), terminal.next_update())
             .await
             .unwrap()
-            .unwrap()
-            .seq,
-        2
+            .and_then(|update| match update {
+                TerminalUpdate::Frame(frame) => Some(frame.seq),
+                TerminalUpdate::Exited(_) | TerminalUpdate::Title(_) => None,
+            }),
+        Some(2)
     );
     client.daemon_ping().await.unwrap();
 

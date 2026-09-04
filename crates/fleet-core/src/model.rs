@@ -103,6 +103,23 @@ pub struct CloneJob {
     pub error: Option<String>,
 }
 
+/// Persisted failure metadata for a worktree that completed with degraded setup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Degraded {
+    /// Stable failure category, such as `post_create_hooks`.
+    pub kind: String,
+    /// Human-readable or command-index step that failed.
+    pub step: String,
+    /// Child exit code when one was available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// ISO-8601 failure time.
+    pub at: String,
+    /// Absolute path to the detailed operation log.
+    pub log_path: String,
+}
+
 /// A published independent repository copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +146,9 @@ pub struct Worktree {
     /// Most recent ISO-8601 open time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<String>,
+    /// Setup failure retained after the worktree was otherwise published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<Degraded>,
 }
 
 /// Remote-host connection settings.

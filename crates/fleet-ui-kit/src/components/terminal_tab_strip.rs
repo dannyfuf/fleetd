@@ -6,7 +6,7 @@
 use gpui::{App, SharedString, Window, div, prelude::*, px};
 
 use crate::{
-    components::StatusDot,
+    components::{Spinner, StatusDot},
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -22,10 +22,14 @@ pub struct TerminalTab {
     pub name: SharedString,
     /// Output happened since this tab was last visited.
     pub activity: bool,
+    /// The PTY is still spawning: §3.6 "Waking a slept session" rebuilds the strip and each
+    /// tab shows a `loader-circle` until its process is up.
+    pub starting: bool,
     /// The keep-alive kind glyph: `bot`, `server`, `file-pen`.
     pub keep_alive: Option<Icon>,
-    /// The command exited with this code. The label drops to the faintest tone.
-    pub exited: Option<i32>,
+    /// The command exited. `Some(None)` is a signal-killed process, which has **no** exit
+    /// code; the strip renders `—` rather than inventing one.
+    pub exited: Option<Option<i32>>,
 }
 
 impl TerminalTab {
@@ -35,6 +39,7 @@ impl TerminalTab {
             index,
             name: name.into(),
             activity: false,
+            starting: false,
             keep_alive: None,
             exited: None,
         }
@@ -46,15 +51,21 @@ impl TerminalTab {
         self
     }
 
+    /// Mark the PTY as still spawning.
+    pub fn starting(mut self, starting: bool) -> Self {
+        self.starting = starting;
+        self
+    }
+
     /// Mark a keep-alive process.
     pub fn keep_alive(mut self, icon: Icon) -> Self {
         self.keep_alive = Some(icon);
         self
     }
 
-    /// Mark the command as exited.
-    pub fn exited(mut self, code: i32) -> Self {
-        self.exited = Some(code);
+    /// Mark the command as exited. Takes `1` or `None`: a signal-killed process has no code.
+    pub fn exited(mut self, code: impl Into<Option<i32>>) -> Self {
+        self.exited = Some(code.into());
         self
     }
 }
@@ -105,6 +116,8 @@ impl RenderOnce for TerminalTabStrip {
             .children(self.tabs.into_iter().enumerate().map(|(pos, tab)| {
                 let is_active = pos == active;
                 let exited = tab.exited;
+                let starting = tab.starting;
+                let tab_index = tab.index;
                 div()
                     .flex()
                     .flex_col()
@@ -128,6 +141,10 @@ impl RenderOnce for TerminalTabStrip {
                             } else {
                                 Text::ui(tab.name).muted()
                             })
+                            .children(starting.then(|| {
+                                Spinner::new(("terminal-tab-starting", tab_index as u64))
+                                    .size(IconSize::Small)
+                            }))
                             .children(
                                 tab.keep_alive.map(|icon| {
                                     icon.el()
@@ -146,7 +163,13 @@ impl RenderOnce for TerminalTabStrip {
                                             .size(IconSize::Small)
                                             .color(theme.colors.text_muted),
                                     )
-                                    .child(Text::hint(code.to_string()).faint())
+                                    .child(
+                                        Text::hint(match code {
+                                            Some(code) => code.to_string(),
+                                            None => "\u{2014}".to_string(),
+                                        })
+                                        .faint(),
+                                    )
                             }))
                             .children(
                                 (tab.activity && !is_active)

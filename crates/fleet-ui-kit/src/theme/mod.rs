@@ -1,6 +1,7 @@
 //! Tokens and the `Theme` global.
 
 mod palette;
+#[allow(clippy::module_inception)]
 mod theme;
 mod tokens;
 

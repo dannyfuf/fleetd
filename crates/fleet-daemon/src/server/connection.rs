@@ -139,7 +139,12 @@ impl Connection {
                 }
                 frame = frames.recv() => {
                     match frame {
-                        Ok(frame) if attached.contains(&frame.terminal) => send_event(&mut framed, Event::TerminalFrame(frame)).await?,
+                        Ok(frame)
+                            if attached.contains(&frame.terminal)
+                                && subscriptions.contains(&EventKind::TerminalFrame) =>
+                        {
+                            send_event(&mut framed, Event::TerminalFrame(frame)).await?;
+                        }
                         Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }

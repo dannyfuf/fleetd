@@ -108,6 +108,25 @@ pub enum RequestBody {
         /// Bypass a fresh cache entry.
         force: bool,
     },
+    /// List remote-tracking refs suitable as worktree bases.
+    ListBaseRefs {
+        /// Repository whose `origin/*` refs should be listed.
+        repo: RepoId,
+        /// Fetch origin before listing even when cached data is fresh.
+        force: bool,
+    },
+    /// Replace one repository's prepare and post-create hooks.
+    SetRepoHooks {
+        /// Repository to update.
+        repo: RepoId,
+        /// Replacement hook configuration.
+        hooks: RepoHooks,
+    },
+    /// Remove a failed clone row after the user has acknowledged it.
+    DismissClone {
+        /// Failed repository clone to remove.
+        repo: RepoId,
+    },
 
     /// Create or idempotently return a worktree.
     CreateWorktree {
@@ -169,6 +188,16 @@ pub enum RequestBody {
         /// Worktree to resolve.
         id: WorktreeId,
     },
+    /// Restore a recoverable repository or worktree trash entry.
+    RestoreTrash {
+        /// Trash directory entry name, never an arbitrary path.
+        entry: String,
+    },
+    /// Refresh runtime worktree statuses immediately.
+    RefreshStatuses {
+        /// Optional repository scope; none refreshes every repository.
+        repo: Option<RepoId>,
+    },
 
     /// List pull requests scoped to a repository or context.
     ListPullRequests {
@@ -224,6 +253,11 @@ pub enum RequestBody {
     /// Close a terminal.
     CloseTerminal {
         /// Terminal to close.
+        terminal: TerminalId,
+    },
+    /// Recreate an exited terminal using its recorded command and working directory.
+    RestartTerminal {
+        /// Exited terminal to restart.
         terminal: TerminalId,
     },
     /// Rename a terminal.
@@ -312,6 +346,11 @@ pub enum RequestBody {
         /// Job to cancel.
         job: JobId,
     },
+    /// Restart a retained failed or cancelled job.
+    RetryJob {
+        /// Retained job to restart.
+        job: JobId,
+    },
     /// Read the trailing lines of a job log.
     TailJob {
         /// Job whose log should be read.
@@ -327,6 +366,10 @@ pub enum RequestBody {
         /// Arbitrary partial configuration object.
         patch: serde_json::Value,
     },
+    /// Count live process matches for every configured keep-alive rule.
+    MatchKeepAliveRules,
+    /// Import compatible configuration and state from the default swarm home.
+    ImportFromSwarm,
     /// Run dependency and environment diagnostics.
     Doctor,
     /// Start a Fleet self-update job.
@@ -365,5 +408,40 @@ mod tests {
         let decoded: RequestBody =
             serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn new_contract_variants_round_trip() {
+        let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
+        let job = JobId::try_from("job-1").unwrap_or_else(|error| panic!("{error}"));
+        let bodies = vec![
+            RequestBody::ListBaseRefs {
+                repo: repo.clone(),
+                force: true,
+            },
+            RequestBody::SetRepoHooks {
+                repo: repo.clone(),
+                hooks: RepoHooks::default(),
+            },
+            RequestBody::DismissClone { repo: repo.clone() },
+            RequestBody::RestoreTrash {
+                entry: "123-api".to_owned(),
+            },
+            RequestBody::RefreshStatuses {
+                repo: Some(repo.clone()),
+            },
+            RequestBody::RestartTerminal {
+                terminal: TerminalId(8),
+            },
+            RequestBody::RetryJob { job },
+            RequestBody::MatchKeepAliveRules,
+            RequestBody::ImportFromSwarm,
+        ];
+        for body in bodies {
+            let json = serde_json::to_string(&body).unwrap_or_else(|error| panic!("{error}"));
+            let decoded: RequestBody =
+                serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(decoded, body);
+        }
     }
 }
