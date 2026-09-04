@@ -1,0 +1,229 @@
+use std::sync::Arc;
+
+use fleet_core::{
+    config::WindowConfig,
+    ids::{ContextId, RepoId, SessionId, WorktreeId},
+    model::{Context, Repo, RepoHooks, Worktree},
+    state::default_state,
+};
+use fleet_daemon::{
+    adapters::{
+        clock::SystemClock,
+        files::RealFiles,
+        process::{ListeningPort, Process, ProcessInfo},
+    },
+    services::{sessions::Sessions, sleep::Sleep},
+    stores::{config::ConfigStore, state::StateStore},
+    testing::fakes::FakeProcess,
+};
+
+async fn stores(
+    windows: Vec<WindowConfig>,
+) -> (
+    tempfile::TempDir,
+    Arc<ConfigStore>,
+    Arc<StateStore>,
+    WorktreeId,
+) {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let home = temp.path().join("fleet");
+    let repos = home.join("repos");
+    let worktree_path = home.join("worktrees/repo/feature");
+    std::fs::create_dir_all(&repos).unwrap_or_else(|error| panic!("{error}"));
+    std::fs::create_dir_all(&worktree_path).unwrap_or_else(|error| panic!("{error}"));
+    let files = Arc::new(RealFiles::new(
+        home.join("trash"),
+        [repos.clone(), home.join("worktrees")],
+    ));
+    let config = Arc::new(ConfigStore::new(&home, files.clone()));
+    let mut effective = config
+        .load()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    effective.windows = windows;
+    effective.sleep.grace_ms = 0;
+    config
+        .save(effective)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let state = Arc::new(StateStore::new(&home, files, Arc::new(SystemClock)));
+    let context = ContextId::try_from("team").unwrap_or_else(|error| panic!("{error}"));
+    let repo = RepoId::try_from("owner/repo").unwrap_or_else(|error| panic!("{error}"));
+    let worktree =
+        WorktreeId::try_from("owner/repo#feature").unwrap_or_else(|error| panic!("{error}"));
+    let mut persisted = default_state();
+    persisted.contexts.push(Context {
+        id: context.clone(),
+        name: "Team".to_owned(),
+        owners: Vec::new(),
+        created_at: "2026-09-04T00:00:00Z".to_owned(),
+    });
+    persisted.repos.push(Repo {
+        id: repo.clone(),
+        owner: "owner".to_owned(),
+        name: "repo".to_owned(),
+        url: "https://example.invalid/owner/repo".to_owned(),
+        context_id: context,
+        default_branch: "main".to_owned(),
+        path: repos.join("owner/repo").to_string_lossy().into_owned(),
+        cloned_at: "2026-09-04T00:00:00Z".to_owned(),
+        hooks: RepoHooks::default(),
+    });
+    persisted.worktrees.push(Worktree {
+        id: worktree.clone(),
+        repo_id: repo,
+        slug: "feature".to_owned(),
+        branch: "feature".to_owned(),
+        base_ref: "main".to_owned(),
+        path: worktree_path.to_string_lossy().into_owned(),
+        session: "repo/feature".to_owned(),
+        host: None,
+        created_at: "2026-09-04T00:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    });
+    state
+        .save(persisted)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    (temp, config, state, worktree)
+}
+
+#[tokio::test]
+async fn keeps_matching_process_and_closes_idle_terminal() {
+    let (_temp, config, state, worktree) = stores(vec![
+        WindowConfig {
+            name: "worker".to_owned(),
+            command: "/bin/sh -c 'sleep 30'".to_owned(),
+        },
+        WindowConfig {
+            name: "idle".to_owned(),
+            command: "/bin/sh -c 'sleep 30'".to_owned(),
+        },
+    ])
+    .await;
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let session = sessions
+        .ensure(Some(worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let worker_shell = session.terminals[0]
+        .shell_pid
+        .unwrap_or_else(|| panic!("shell pid"));
+    let fake = Arc::new(FakeProcess::default());
+    fake.set_snapshot(vec![ProcessInfo {
+        pid: 50_001,
+        parent_pid: worker_shell,
+        command: "/usr/local/bin/claude --resume".to_owned(),
+    }]);
+    let process: Arc<dyn Process> = fake.clone();
+    let sleep = Sleep::new(config, state, process);
+    let result = sleep
+        .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(result.kept.len(), 1);
+    assert_eq!(result.kept[0].window, "worker");
+    assert_eq!(result.kept[0].reason, "claude");
+    assert_eq!(result.closed, vec!["idle"]);
+    assert!(!result.session_killed);
+    assert_eq!(
+        sessions
+            .list()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))[0]
+            .terminals
+            .len(),
+        1
+    );
+    sessions
+        .kill(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[tokio::test]
+async fn listening_port_keeps_terminal_and_missing_session_is_empty() {
+    let (_temp, config, state, worktree) = stores(vec![WindowConfig {
+        name: "server".to_owned(),
+        command: "/bin/sh -c 'sleep 30'".to_owned(),
+    }])
+    .await;
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let session = sessions
+        .ensure(Some(worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let shell = session.terminals[0]
+        .shell_pid
+        .unwrap_or_else(|| panic!("shell pid"));
+    let fake = Arc::new(FakeProcess::default());
+    fake.set_snapshot(vec![ProcessInfo {
+        pid: 50_002,
+        parent_pid: shell,
+        command: "/bin/sh -c server".to_owned(),
+    }]);
+    fake.set_ports(vec![ListeningPort {
+        pid: 50_002,
+        port: 4_321,
+    }]);
+    let process: Arc<dyn Process> = fake;
+    let sleep = Sleep::new(config, state, process);
+    let result = sleep
+        .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(result.kept[0].reason, ":4321");
+    let matches = sleep
+        .match_keep_alive_rules()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        matches
+            .iter()
+            .find(|entry| entry.rule_id == "servers")
+            .map(|entry| entry.count),
+        Some(1)
+    );
+    let missing = sleep
+        .session(SessionId::try_from("repo/missing").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(missing.kept.is_empty());
+    assert!(missing.closed.is_empty());
+    assert!(!missing.session_killed);
+    sessions
+        .kill(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[tokio::test]
+async fn no_matches_kills_session_once() {
+    let (_temp, config, state, worktree) = stores(vec![WindowConfig {
+        name: "idle".to_owned(),
+        command: "/bin/sh -c 'sleep 30'".to_owned(),
+    }])
+    .await;
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    sessions
+        .ensure(Some(worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let fake = Arc::new(FakeProcess::default());
+    let process: Arc<dyn Process> = fake;
+    let sleep = Sleep::new(config, state, process);
+    let result = sleep
+        .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(result.closed, vec!["idle"]);
+    assert!(result.session_killed);
+    assert!(
+        sessions
+            .list()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .is_empty()
+    );
+}
