@@ -12,3 +12,5 @@ pub mod hub_context_bar;
 pub mod prs_screen;
 pub mod repos_rail;
 pub mod worktrees_list;
+pub mod workspace_header;
+pub mod workspace_tabs;
