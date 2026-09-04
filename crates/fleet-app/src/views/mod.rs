@@ -6,3 +6,6 @@
 //! styling, never a raw color (`docs/DESIGN-SYSTEM.md`).
 //!
 //! Add one module per view and re-export it here.
+
+pub mod workspace_header;
+pub mod workspace_tabs;
