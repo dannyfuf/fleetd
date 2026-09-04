@@ -1,156 +1,960 @@
-//! Persistent daemon-owned session and terminal lifecycle orchestration contracts.
+//! Daemon-owned session and terminal lifecycle orchestration.
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap},
+    ffi::OsString,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock, Weak},
+    thread,
+    time::Duration,
 };
 
 use fleet_core::{
     config::Agent,
-    ids::{SessionId, TerminalId, WorktreeId},
-    sessions::{Session, Terminal},
+    ids::{RepoId, SessionId, TerminalId, WorktreeId},
+    sessions::{
+        Session, SessionKind, SessionState, Terminal, TerminalStatus, WorktreeStatus,
+        WorktreeWindowStatus, agent_session_id, default_terminals,
+    },
 };
 use fleet_proto::terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand};
-use fleet_term::TerminalHost;
+use fleet_term::{HostEvent, PtyOptions, TerminalHost, TerminalHostOptions};
 use tokio::sync::broadcast;
 
 use crate::{
     DaemonError, DaemonResult,
+    adapters::process::Process,
     stores::{config::ConfigStore, state::StateStore},
 };
+
+const INITIAL_COLS: u16 = 120;
+const INITIAL_ROWS: u16 = 36;
+const SCROLLBACK_LINES: usize = 10_000;
+
+#[derive(Default)]
+struct Registry {
+    sessions: BTreeMap<SessionId, Session>,
+    terminal_sessions: HashMap<TerminalId, SessionId>,
+    hosts: HashMap<TerminalId, Arc<TerminalHost>>,
+    attachments: HashMap<TerminalId, usize>,
+    next_terminal: u64,
+    active_worktree: Option<SessionId>,
+}
+
+/// Runtime seam shared by the session and sleep services without persisting PTYs.
+pub(crate) struct SessionRuntime {
+    registry: Mutex<Registry>,
+    frames: broadcast::Sender<FrameUpdate>,
+    process: Mutex<Option<Arc<dyn Process>>>,
+}
+
+impl SessionRuntime {
+    fn new(frames: broadcast::Sender<FrameUpdate>) -> Self {
+        Self {
+            registry: Mutex::new(Registry {
+                next_terminal: 1,
+                ..Registry::default()
+            }),
+            frames,
+            process: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn register_process(&self, process: Arc<dyn Process>) {
+        *self
+            .process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(process);
+    }
+
+    pub(crate) fn process(&self) -> Option<Arc<dyn Process>> {
+        self.process
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn session(&self, id: &SessionId) -> Option<Session> {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .get(id)
+            .cloned()
+    }
+
+    pub(crate) fn sessions(&self) -> Vec<Session> {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn host(&self, terminal: TerminalId) -> Option<Arc<TerminalHost>> {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hosts
+            .get(&terminal)
+            .cloned()
+    }
+
+    pub(crate) fn update_observation(
+        &self,
+        terminal: TerminalId,
+        foreground_command: Option<String>,
+        keep_alive: Vec<String>,
+    ) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(session_id) = registry.terminal_sessions.get(&terminal).cloned() else {
+            return;
+        };
+        let Some(session) = registry.sessions.get_mut(&session_id) else {
+            return;
+        };
+        if let Some(entry) = session
+            .terminals
+            .iter_mut()
+            .find(|entry| entry.id == terminal)
+        {
+            entry.foreground_command = foreground_command;
+            entry.keep_alive = keep_alive;
+        }
+    }
+
+    pub(crate) fn record_sleep(
+        &self,
+        session: &SessionId,
+        kept: Vec<fleet_core::sessions::KeptTerminal>,
+    ) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = registry.sessions.get_mut(session) {
+            entry.slept_at = Some(chrono::Utc::now().to_rfc3339());
+            entry.kept_terminals = kept;
+        }
+    }
+
+    pub(crate) fn close_terminal_if_present(&self, terminal: TerminalId) -> Option<String> {
+        let (name, host) = {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session_id = registry.terminal_sessions.remove(&terminal)?;
+            registry.attachments.remove(&terminal);
+            let host = registry.hosts.remove(&terminal);
+            let session = registry.sessions.get_mut(&session_id)?;
+            let position = session
+                .terminals
+                .iter()
+                .position(|entry| entry.id == terminal)?;
+            let name = session.terminals.remove(position).name;
+            if session.active_terminal == Some(terminal) {
+                session.active_terminal = session.terminals.first().map(|entry| entry.id);
+            }
+            if session.terminals.is_empty() {
+                registry.sessions.remove(&session_id);
+                if registry.active_worktree.as_ref() == Some(&session_id) {
+                    registry.active_worktree = None;
+                }
+            }
+            (name, host)
+        };
+        if let Some(host) = host {
+            let _ = host.kill();
+        }
+        Some(name)
+    }
+
+    pub(crate) fn kill_if_present(&self, session: &SessionId) -> bool {
+        let hosts = {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(removed) = registry.sessions.remove(session) else {
+                return false;
+            };
+            if registry.active_worktree.as_ref() == Some(session) {
+                registry.active_worktree = None;
+            }
+            removed
+                .terminals
+                .into_iter()
+                .filter_map(|terminal| {
+                    registry.terminal_sessions.remove(&terminal.id);
+                    registry.attachments.remove(&terminal.id);
+                    registry.hosts.remove(&terminal.id)
+                })
+                .collect::<Vec<_>>()
+        };
+        for host in hosts {
+            let _ = host.kill();
+        }
+        true
+    }
+}
+
+fn runtimes() -> &'static Mutex<HashMap<usize, Weak<SessionRuntime>>> {
+    static RUNTIMES: OnceLock<Mutex<HashMap<usize, Weak<SessionRuntime>>>> = OnceLock::new();
+    RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn shared_runtime(state: &Arc<StateStore>) -> Arc<SessionRuntime> {
+    let key = Arc::as_ptr(state) as usize;
+    let mut entries = runtimes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(runtime) = entries.get(&key).and_then(Weak::upgrade) {
+        return runtime;
+    }
+    let (frames, _receiver) = broadcast::channel(256);
+    let runtime = Arc::new(SessionRuntime::new(frames));
+    entries.insert(key, Arc::downgrade(&runtime));
+    runtime
+}
 
 /// Daemon-owned PTY session service and terminal-frame source.
 #[derive(Clone)]
 pub struct Sessions {
-    _config: Arc<ConfigStore>,
-    _state: Arc<StateStore>,
-    _hosts: Arc<Mutex<HashMap<TerminalId, TerminalHost>>>,
-    frames: broadcast::Sender<FrameUpdate>,
+    config: Arc<ConfigStore>,
+    state: Arc<StateStore>,
+    runtime: Arc<SessionRuntime>,
 }
 
 impl Sessions {
     /// Creates an empty runtime session registry.
     #[must_use]
     pub fn new(config: Arc<ConfigStore>, state: Arc<StateStore>) -> Self {
-        let (frames, _receiver) = broadcast::channel(256);
+        let runtime = shared_runtime(&state);
         Self {
-            _config: config,
-            _state: state,
-            _hosts: Arc::new(Mutex::new(HashMap::new())),
-            frames,
+            config,
+            state,
+            runtime,
         }
     }
 
-    /// Ensures a worktree or agent session with the fixed configured layout (inventory section 4).
+    /// Ensures a worktree or agent session and repairs configured terminals missing by name.
     pub async fn ensure(
         &self,
-        _worktree: Option<WorktreeId>,
-        _agent: Option<Agent>,
-        _sleep_previous: bool,
+        worktree: Option<WorktreeId>,
+        agent: Option<Agent>,
+        sleep_previous: bool,
     ) -> DaemonResult<Session> {
-        Err(DaemonError::Unimplemented("sessions::ensure"))
+        let config = self.config.load().await?;
+        let (session_id, kind, cwd, specs) = match (worktree, agent) {
+            (Some(worktree_id), None) => {
+                let state = self.state.load().await?;
+                let worktree = state
+                    .worktrees
+                    .iter()
+                    .find(|entry| entry.id == worktree_id)
+                    .ok_or_else(|| DaemonError::NotFound(worktree_id.to_string()))?;
+                if worktree.host.is_some() {
+                    return Err(DaemonError::Unsupported(
+                        "remote hosts are not supported yet".to_owned(),
+                    ));
+                }
+                let session_id = SessionId::try_from(worktree.session.as_str())
+                    .map_err(|error| DaemonError::Validation(error.to_string()))?;
+                (
+                    session_id,
+                    SessionKind::Worktree(worktree_id),
+                    worktree.path.clone(),
+                    default_terminals(&config, config.agent),
+                )
+            }
+            (None, Some(agent)) => {
+                let session_id = agent_session_id(agent)
+                    .map_err(|error| DaemonError::Validation(error.to_string()))?;
+                std::fs::create_dir_all(&config.repos_dir)
+                    .map_err(|error| DaemonError::fs(&config.repos_dir, error))?;
+                let name = match agent {
+                    Agent::Claude => "claude",
+                    Agent::Opencode => "opencode",
+                };
+                (
+                    session_id,
+                    SessionKind::Agent(agent),
+                    config.repos_dir.clone(),
+                    vec![fleet_core::sessions::TerminalSpec {
+                        name: name.to_owned(),
+                        command: config.agent_commands.command(agent).to_owned(),
+                    }],
+                )
+            }
+            _ => {
+                return Err(DaemonError::Validation(
+                    "exactly one of worktree or agent is required".to_owned(),
+                ));
+            }
+        };
+        if specs.is_empty() {
+            return Err(DaemonError::Validation(
+                "a session requires at least one configured terminal".to_owned(),
+            ));
+        }
+        let configured_order = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (spec.name.clone(), index))
+            .collect::<HashMap<_, _>>();
+
+        let created = {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = registry.sessions.get(&session_id) {
+                if existing.kind != kind {
+                    return Err(DaemonError::Conflict(format!(
+                        "session `{session_id}` belongs to a different workload"
+                    )));
+                }
+                false
+            } else {
+                registry.sessions.insert(
+                    session_id.clone(),
+                    Session {
+                        id: session_id.clone(),
+                        kind: kind.clone(),
+                        cwd: cwd.clone(),
+                        terminals: Vec::new(),
+                        active_terminal: None,
+                        slept_at: None,
+                        kept_terminals: Vec::new(),
+                    },
+                );
+                true
+            }
+        };
+
+        for spec in specs {
+            let missing = self.runtime.session(&session_id).is_some_and(|session| {
+                !session
+                    .terminals
+                    .iter()
+                    .any(|entry| entry.name == spec.name)
+            });
+            if missing
+                && let Err(error) = self
+                    .new_terminal(session_id.clone(), spec.name, spec.command, cwd.clone())
+                    .await
+            {
+                if created {
+                    self.runtime.kill_if_present(&session_id);
+                }
+                return Err(error);
+            }
+        }
+        {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(session) = registry.sessions.get_mut(&session_id) {
+                session.terminals.sort_by_key(|terminal| {
+                    configured_order
+                        .get(&terminal.name)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+            }
+        }
+
+        let previous = if matches!(kind, SessionKind::Worktree(_)) {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = registry.active_worktree.replace(session_id.clone());
+            previous.filter(|previous| previous != &session_id)
+        } else {
+            None
+        };
+        if sleep_previous
+            && let Some(previous) = previous
+            && let Some(process) = self.runtime.process()
+            && let Err(error) = crate::services::sleep::apply_session(
+                &self.runtime,
+                &self.config,
+                process.as_ref(),
+                &previous,
+            )
+            .await
+        {
+            tracing::warn!(%error, %previous, "failed to sleep previous session");
+        }
+
+        self.runtime
+            .session(&session_id)
+            .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))
     }
 
-    /// Lists daemon-owned runtime sessions using swarm-compatible identities (inventory sections 1 and 4).
+    /// Lists daemon-owned runtime sessions in stable identity order.
     pub async fn list(&self) -> DaemonResult<Vec<Session>> {
-        Err(DaemonError::Unimplemented("sessions::list"))
+        Ok(self.snapshot())
     }
 
-    /// Hard-kills a runtime session and all of its terminals (inventory section 4).
-    pub async fn kill(&self, _session: SessionId) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::kill"))
+    /// Hard-kills a runtime session and all of its terminals.
+    pub async fn kill(&self, session: SessionId) -> DaemonResult<()> {
+        if self.runtime.kill_if_present(&session) {
+            Ok(())
+        } else if self.is_remote_session(&session).await? {
+            Err(DaemonError::Unsupported(
+                "remote hosts are not supported yet".to_owned(),
+            ))
+        } else {
+            Err(DaemonError::NotFound(session.to_string()))
+        }
     }
 
-    /// Adds a login-shell terminal and types its configured command (inventory section 4).
+    /// Adds a login-shell terminal and types its configured command.
     pub async fn new_terminal(
         &self,
-        _session: SessionId,
-        _name: String,
-        _command: String,
-        _cwd: String,
+        session: SessionId,
+        name: String,
+        command: String,
+        cwd: String,
     ) -> DaemonResult<Terminal> {
-        Err(DaemonError::Unimplemented("sessions::new_terminal"))
+        validate_terminal_input(&name, &command)?;
+        let terminal_id = {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let parent = registry
+                .sessions
+                .get(&session)
+                .ok_or_else(|| DaemonError::NotFound(session.to_string()))?;
+            if parent.terminals.iter().any(|entry| entry.name == name) {
+                return Err(DaemonError::Conflict(format!(
+                    "terminal name `{name}` already exists in session `{session}`"
+                )));
+            }
+            let id = TerminalId(registry.next_terminal);
+            registry.next_terminal = registry.next_terminal.saturating_add(1);
+            id
+        };
+
+        let (terminal, host) = spawn_terminal(terminal_id, &session, name, command, cwd)?;
+        forward_host_events(Arc::clone(&self.runtime), terminal_id, &host)?;
+        let host = Arc::new(host);
+        {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let parent = registry
+                .sessions
+                .get_mut(&session)
+                .ok_or_else(|| DaemonError::NotFound(session.to_string()))?;
+            parent.terminals.push(terminal.clone());
+            parent.active_terminal.get_or_insert(terminal_id);
+            registry.terminal_sessions.insert(terminal_id, session);
+            registry.hosts.insert(terminal_id, host);
+        }
+        Ok(terminal)
     }
 
-    /// Closes one terminal without affecting siblings (inventory section 4).
-    pub async fn close_terminal(&self, _terminal: TerminalId) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::close_terminal"))
+    /// Closes one terminal without affecting siblings; closing the last removes the session.
+    pub async fn close_terminal(&self, terminal: TerminalId) -> DaemonResult<()> {
+        self.runtime
+            .close_terminal_if_present(terminal)
+            .map(|_| ())
+            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))
     }
 
     /// Recreates an exited terminal from its retained command and working directory.
-    pub async fn restart_terminal(&self, _terminal: TerminalId) -> DaemonResult<Terminal> {
-        Err(DaemonError::Unimplemented("sessions::restart_terminal"))
+    pub async fn restart_terminal(&self, terminal: TerminalId) -> DaemonResult<Terminal> {
+        let (session_id, old) = {
+            let registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session_id = registry
+                .terminal_sessions
+                .get(&terminal)
+                .cloned()
+                .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+            let entry = registry
+                .sessions
+                .get(&session_id)
+                .and_then(|session| session.terminals.iter().find(|entry| entry.id == terminal))
+                .cloned()
+                .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+            if !matches!(entry.status, TerminalStatus::Exited { .. }) {
+                return Err(DaemonError::Conflict(format!(
+                    "terminal `{terminal}` is still running"
+                )));
+            }
+            (session_id, entry)
+        };
+        let (replacement, host) =
+            spawn_terminal(terminal, &session_id, old.name, old.command, old.cwd)?;
+        forward_host_events(Arc::clone(&self.runtime), terminal, &host)?;
+        {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session = registry
+                .sessions
+                .get_mut(&session_id)
+                .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))?;
+            let entry = session
+                .terminals
+                .iter_mut()
+                .find(|entry| entry.id == terminal)
+                .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+            *entry = replacement.clone();
+            registry.hosts.insert(terminal, Arc::new(host));
+        }
+        Ok(replacement)
     }
 
-    /// Renames one terminal while preserving its process (inventory section 4).
+    /// Renames one terminal while preserving its process.
     pub async fn rename_terminal(
         &self,
-        _terminal: TerminalId,
-        _name: String,
+        terminal: TerminalId,
+        name: String,
     ) -> DaemonResult<Terminal> {
-        Err(DaemonError::Unimplemented("sessions::rename_terminal"))
+        if name.trim().is_empty() {
+            return Err(DaemonError::Validation(
+                "terminal name must not be empty".to_owned(),
+            ));
+        }
+        let mut registry = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session_id = registry
+            .terminal_sessions
+            .get(&terminal)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+        let session = registry
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))?;
+        if session
+            .terminals
+            .iter()
+            .any(|entry| entry.id != terminal && entry.name == name)
+        {
+            return Err(DaemonError::Conflict(format!(
+                "terminal name `{name}` already exists in session `{session_id}`"
+            )));
+        }
+        let entry = session
+            .terminals
+            .iter_mut()
+            .find(|entry| entry.id == terminal)
+            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+        entry.name = name;
+        Ok(entry.clone())
     }
 
-    /// Selects the active terminal using swarm window ordering (inventory section 4).
+    /// Selects the active terminal and clears its unseen-output flag.
     pub async fn select_terminal(
         &self,
-        _session: SessionId,
-        _terminal: TerminalId,
+        session: SessionId,
+        terminal: TerminalId,
     ) -> DaemonResult<Session> {
-        Err(DaemonError::Unimplemented("sessions::select_terminal"))
+        let mut registry = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let parent = registry
+            .sessions
+            .get_mut(&session)
+            .ok_or_else(|| DaemonError::NotFound(session.to_string()))?;
+        let entry = parent
+            .terminals
+            .iter_mut()
+            .find(|entry| entry.id == terminal)
+            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+        entry.has_unseen_output = false;
+        parent.active_terminal = Some(terminal);
+        Ok(parent.clone())
     }
 
-    /// Attaches a client and resizes the PTY while preserving detached lifetime (inventory sections 4 and 6).
-    pub async fn attach(&self, _terminal: TerminalId, _cols: u16, _rows: u16) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::attach"))
+    /// Attaches a client, makes its size authoritative, and emits a full frame.
+    pub async fn attach(&self, terminal: TerminalId, cols: u16, rows: u16) -> DaemonResult<()> {
+        let host = self.host_or_not_found(terminal)?;
+        let frame = host
+            .attach(cols, rows)
+            .map_err(|error| terminal_error(terminal, error))?;
+        let _ = self.runtime.frames.send(frame);
+        let mut registry = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *registry.attachments.entry(terminal).or_default() += 1;
+        Ok(())
     }
 
-    /// Removes a client attachment without stopping the terminal (inventory sections 4 and 6).
-    pub async fn detach(&self, _terminal: TerminalId) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::detach"))
+    /// Removes one client attachment without stopping the terminal.
+    pub async fn detach(&self, terminal: TerminalId) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?;
+        let mut registry = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = registry.attachments.get_mut(&terminal) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                registry.attachments.remove(&terminal);
+            }
+        }
+        Ok(())
     }
 
-    /// Writes already encoded bytes to the terminal process (inventory section 4).
-    pub async fn input(&self, _terminal: TerminalId, _bytes: Vec<u8>) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::input"))
+    /// Writes already encoded bytes to the terminal process.
+    pub async fn input(&self, terminal: TerminalId, bytes: Vec<u8>) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .write(bytes)
+            .map_err(|error| terminal_error(terminal, error))
     }
 
-    /// Encodes a semantic key using current terminal modes (inventory section 4).
-    pub async fn key(&self, _terminal: TerminalId, _key: KeyEvent) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::key"))
+    /// Encodes a semantic key using current terminal modes.
+    pub async fn key(&self, terminal: TerminalId, key: KeyEvent) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .key(key)
+            .map_err(|error| terminal_error(terminal, error))
     }
 
-    /// Encodes mouse reporting only when the terminal requests it (inventory section 4).
-    pub async fn mouse(&self, _terminal: TerminalId, _mouse: MouseEvent) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::mouse"))
+    /// Encodes mouse reporting only when the terminal requests it.
+    pub async fn mouse(&self, terminal: TerminalId, mouse: MouseEvent) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .mouse(mouse)
+            .map_err(|error| terminal_error(terminal, error))
     }
 
-    /// Resizes a PTY, with the most recent client dimensions winning (inventory section 4).
-    pub async fn resize(&self, _terminal: TerminalId, _cols: u16, _rows: u16) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::resize"))
+    /// Resizes a PTY, with the most recent client dimensions winning.
+    pub async fn resize(&self, terminal: TerminalId, cols: u16, rows: u16) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .resize(cols, rows)
+            .map_err(|error| terminal_error(terminal, error))
     }
 
-    /// Moves the server-side scrollback viewport without affecting the process (inventory section 4).
-    pub async fn scroll(&self, _terminal: TerminalId, _scroll: ScrollCommand) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::scroll"))
+    /// Moves the server-side scrollback viewport without affecting the process.
+    pub async fn scroll(&self, terminal: TerminalId, scroll: ScrollCommand) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .scroll(scroll)
+            .map_err(|error| terminal_error(terminal, error))
     }
 
-    /// Emits a complete replacement frame after attach or sequence loss (inventory section 4).
-    pub async fn request_full_frame(&self, _terminal: TerminalId) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::request_full_frame"))
+    /// Emits a complete replacement frame after attach or sequence loss.
+    pub async fn request_full_frame(&self, terminal: TerminalId) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .request_full()
+            .map_err(|error| terminal_error(terminal, error))
     }
 
-    /// Pastes text with bracketed-paste encoding when enabled (inventory section 4).
-    pub async fn paste(&self, _terminal: TerminalId, _text: String) -> DaemonResult<()> {
-        Err(DaemonError::Unimplemented("sessions::paste"))
+    /// Pastes text with bracketed-paste encoding when enabled.
+    pub async fn paste(&self, terminal: TerminalId, text: String) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .paste(text)
+            .map_err(|error| terminal_error(terminal, error))
+    }
+
+    /// Computes local worktree status from the runtime registry.
+    pub async fn refresh_statuses(
+        &self,
+        repo: Option<RepoId>,
+    ) -> DaemonResult<Vec<WorktreeStatus>> {
+        let state = self.state.load().await?;
+        let registry = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(state
+            .worktrees
+            .iter()
+            .filter(|worktree| repo.as_ref().is_none_or(|repo| &worktree.repo_id == repo))
+            .map(|worktree| {
+                if worktree.host.is_some() {
+                    return unknown_status(worktree.id.clone());
+                }
+                let Ok(session_id) = SessionId::try_from(worktree.session.as_str()) else {
+                    return unknown_status(worktree.id.clone());
+                };
+                let Some(session) = registry.sessions.get(&session_id) else {
+                    return WorktreeStatus {
+                        worktree_id: worktree.id.clone(),
+                        session: SessionState::None,
+                        windows: Vec::new(),
+                        running: Vec::new(),
+                    };
+                };
+                let attached = session.terminals.iter().any(|terminal| {
+                    registry.attachments.get(&terminal.id).copied().unwrap_or(0) > 0
+                });
+                let windows = session
+                    .terminals
+                    .iter()
+                    .enumerate()
+                    .map(|(index, terminal)| WorktreeWindowStatus {
+                        index: u32::try_from(index).unwrap_or(u32::MAX),
+                        name: terminal.name.clone(),
+                        command: terminal
+                            .foreground_command
+                            .clone()
+                            .unwrap_or_else(|| terminal.command.clone()),
+                        keep_alive: terminal.keep_alive.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut running = Vec::new();
+                for label in session
+                    .terminals
+                    .iter()
+                    .flat_map(|terminal| terminal.keep_alive.iter())
+                {
+                    if !running.contains(label) {
+                        running.push(label.clone());
+                    }
+                }
+                WorktreeStatus {
+                    worktree_id: worktree.id.clone(),
+                    session: if attached {
+                        SessionState::Attached
+                    } else {
+                        SessionState::Detached
+                    },
+                    windows,
+                    running,
+                }
+            })
+            .collect())
     }
 
     /// Subscribes a connection actor to all terminal frames for attachment filtering.
     pub fn subscribe_frames(&self) -> broadcast::Receiver<FrameUpdate> {
-        self.frames.subscribe()
+        self.runtime.frames.subscribe()
     }
 
     pub(crate) fn snapshot(&self) -> Vec<Session> {
-        Vec::new()
+        self.runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .values()
+            .cloned()
+            .collect()
     }
+
+    fn host_or_not_found(&self, terminal: TerminalId) -> DaemonResult<Arc<TerminalHost>> {
+        self.runtime
+            .host(terminal)
+            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))
+    }
+
+    async fn is_remote_session(&self, session: &SessionId) -> DaemonResult<bool> {
+        let config = self.config.load().await?;
+        Ok(config
+            .hosts
+            .keys()
+            .any(|host| session.as_str().starts_with(&format!("{host}/"))))
+    }
+}
+
+fn unknown_status(worktree_id: WorktreeId) -> WorktreeStatus {
+    WorktreeStatus {
+        worktree_id,
+        session: SessionState::Unknown,
+        windows: Vec::new(),
+        running: Vec::new(),
+    }
+}
+
+fn validate_terminal_input(name: &str, command: &str) -> DaemonResult<()> {
+    if name.trim().is_empty() {
+        return Err(DaemonError::Validation(
+            "terminal name must not be empty".to_owned(),
+        ));
+    }
+    if command.trim().is_empty() {
+        return Err(DaemonError::Validation(
+            "terminal command must not be empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn spawn_terminal(
+    terminal: TerminalId,
+    session: &SessionId,
+    name: String,
+    command: String,
+    cwd: String,
+) -> DaemonResult<(Terminal, TerminalHost)> {
+    let pid_path = terminal_pid_path(terminal);
+    let mut pty = PtyOptions::login_shell(
+        PathBuf::from(&cwd),
+        session.as_str(),
+        &name,
+        true,
+        INITIAL_COLS,
+        INITIAL_ROWS,
+    );
+    let login_shell = pty.program.clone();
+    pty.program = OsString::from("/bin/sh");
+    pty.args = vec![
+        OsString::from("-c"),
+        OsString::from(
+            "printf '%s\\n' \"$$\" > \"$FLEET_PID_FILE\"; exec \"$FLEET_LOGIN_SHELL\" -l",
+        ),
+    ];
+    pty.env
+        .push((OsString::from("FLEET_LOGIN_SHELL"), login_shell));
+    pty.env.push((
+        OsString::from("FLEET_PID_FILE"),
+        pid_path.as_os_str().to_owned(),
+    ));
+    let host = TerminalHost::spawn(TerminalHostOptions {
+        terminal,
+        pty,
+        scrollback_lines: SCROLLBACK_LINES,
+        initial_command: None,
+    })
+    .map_err(|error| terminal_error(terminal, error))?;
+    host.type_command(command.clone())
+        .map_err(|error| terminal_error(terminal, error))?;
+    let shell_pid = read_shell_pid(&pid_path);
+    let _ = std::fs::remove_file(&pid_path);
+    let Some(shell_pid) = shell_pid else {
+        let _ = host.kill();
+        return Err(DaemonError::Process(format!(
+            "terminal `{terminal}` did not report its login-shell pid"
+        )));
+    };
+    Ok((
+        Terminal {
+            id: terminal,
+            name,
+            command,
+            cwd,
+            shell_pid: Some(shell_pid),
+            foreground_command: None,
+            status: TerminalStatus::Running,
+            title: None,
+            keep_alive: Vec::new(),
+            has_unseen_output: false,
+        },
+        host,
+    ))
+}
+
+fn terminal_pid_path(terminal: TerminalId) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "fleetd-{}-terminal-{terminal}-{}.pid",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
+
+fn read_shell_pid(path: &std::path::Path) -> Option<u32> {
+    for _ in 0..250 {
+        if let Ok(value) = std::fs::read_to_string(path)
+            && let Ok(pid) = value.trim().parse()
+        {
+            return Some(pid);
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    None
+}
+
+fn forward_host_events(
+    runtime: Arc<SessionRuntime>,
+    terminal: TerminalId,
+    host: &TerminalHost,
+) -> DaemonResult<()> {
+    let receiver = host.event_receiver();
+    thread::Builder::new()
+        .name(format!("fleet-terminal-events-{terminal}"))
+        .spawn(move || {
+            while let Ok(event) = receiver.recv_blocking() {
+                match event {
+                    HostEvent::Frame(frame) => {
+                        let mut registry = runtime
+                            .registry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(session_id) = registry.terminal_sessions.get(&terminal).cloned()
+                            && let Some(session) = registry.sessions.get_mut(&session_id)
+                            && session.active_terminal != Some(terminal)
+                            && let Some(entry) = session
+                                .terminals
+                                .iter_mut()
+                                .find(|entry| entry.id == terminal)
+                        {
+                            entry.has_unseen_output = true;
+                        }
+                        drop(registry);
+                        let _ = runtime.frames.send(frame);
+                    }
+                    HostEvent::Exited(code) => update_terminal(&runtime, terminal, |entry| {
+                        entry.status = TerminalStatus::Exited { code };
+                        entry.foreground_command = None;
+                    }),
+                    HostEvent::Title(title) => update_terminal(&runtime, terminal, |entry| {
+                        entry.title = Some(title);
+                    }),
+                    HostEvent::Bell | HostEvent::Cwd(_) | HostEvent::ClipboardWrite { .. } => {}
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| DaemonError::Process(format!("terminal event thread: {error}")))
+}
+
+fn update_terminal(
+    runtime: &SessionRuntime,
+    terminal: TerminalId,
+    update: impl FnOnce(&mut Terminal),
+) {
+    let mut registry = runtime
+        .registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(session_id) = registry.terminal_sessions.get(&terminal).cloned() else {
+        return;
+    };
+    let Some(entry) = registry.sessions.get_mut(&session_id).and_then(|session| {
+        session
+            .terminals
+            .iter_mut()
+            .find(|entry| entry.id == terminal)
+    }) else {
+        return;
+    };
+    update(entry);
+}
+
+fn terminal_error(terminal: TerminalId, error: impl std::fmt::Display) -> DaemonError {
+    DaemonError::Process(format!("terminal `{terminal}`: {error}"))
 }
