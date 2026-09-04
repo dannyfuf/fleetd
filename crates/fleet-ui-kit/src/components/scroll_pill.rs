@@ -5,6 +5,12 @@
 //! during scroll the eyes are on content and the top right never covers the prompt. When an
 //! alt-screen app is running the pill is suppressed entirely and `ctrl-s [` shows the 1.6 s
 //! toast `no scrollback in alt-screen` instead.
+//!
+//! The two components here are not variants of each other. The **pill** is a *mode*
+//! affordance: it exists while Scroll mode is active and it lists the keys that mode adds. The
+//! **badge** is a *state* affordance: a viewport scrolled up with the wheel is not in Scroll
+//! mode and would otherwise look exactly like a live one — which is how "my agent stopped
+//! printing" bug reports are born.
 
 use gpui::{App, Window, div, prelude::*, px};
 
@@ -15,6 +21,12 @@ use crate::{
     theme::ActiveTheme,
     tone::Tone,
 };
+
+/// The pill's fixed width (§3.6). Fixed, so the number changing does not resize the overlay
+/// under the reader's eye.
+const PILL_W: f32 = 176.0;
+/// The amber left bar that marks the pill as a mode.
+const MODE_BAR_W: f32 = 2.0;
 
 /// The scroll-mode overlay.
 #[derive(IntoElement)]
@@ -61,22 +73,41 @@ impl RenderOnce for ScrollPill {
         }
         let theme = cx.theme();
         div()
+            // Top-right, 12 px inside the terminal area: during scroll the eyes are on
+            // content, and this corner never covers the prompt.
             .absolute()
-            .top(px(12.0))
-            .right(px(12.0))
+            .top(theme.space.md)
+            .right(theme.space.md)
             .flex()
             .flex_col()
-            .w(px(176.0))
+            .justify_center()
+            .gap(theme.space.xxs)
+            .w(px(PILL_W))
             .min_h(theme.metrics.strip_h)
             .px(theme.space.sm)
-            .py(gpui::px(2.0))
+            .py(theme.space.xxs)
             .rounded(theme.radii.md)
-            .bg(theme.colors.surface)
-            .border_l(gpui::px(2.0))
+            // The floating layer, not the pane layer: the pill sits over the cell grid and has
+            // to stay legible on top of whatever the shell just painted.
+            .bg(theme.colors.elevated)
+            .shadow(theme.sheet_shadow())
+            .border_l(px(MODE_BAR_W))
             .border_color(theme.colors.warning)
             .child(
-                Text::label(format!("SCROLL {}/{}", self.offset, self.scrollback_len))
-                    .tone(Tone::Secondary),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.xs)
+                    .child(
+                        Icon::ChevronsUp
+                            .el()
+                            .size(IconSize::Small)
+                            .color(theme.colors.warning),
+                    )
+                    .child(
+                        Text::label(format!("SCROLL {}/{}", self.offset, self.scrollback_len))
+                            .tone(Tone::Secondary),
+                    ),
             )
             .children(self.selecting.then(|| {
                 KeyHintRow::new()
@@ -90,10 +121,7 @@ impl RenderOnce for ScrollPill {
 
 /// `↥ <offset>/<len>` — the scrollback-offset badge.
 ///
-/// The pill above is a *mode* affordance and only exists while Scroll mode is active. This
-/// badge is the *state* affordance: a viewport scrolled up by a mouse wheel is not in Scroll
-/// mode and would otherwise look exactly like a live one, which is how "my agent stopped
-/// printing" bug reports are born. It is zero-suppressed at `offset == 0` and
+/// Zero-suppressed at `offset == 0` and in alt-screen, and
 /// [`TerminalGrid::scrollback`](crate::components::TerminalGrid::scrollback) paints it for
 /// free.
 #[derive(IntoElement)]
@@ -133,15 +161,16 @@ impl RenderOnce for ScrollbackBadge {
         let theme = cx.theme();
         div()
             .absolute()
-            .top(px(12.0))
-            .right(px(12.0))
+            .top(theme.space.md)
+            .right(theme.space.md)
             .flex()
             .items_center()
             .gap(theme.space.xxs)
             .h(theme.metrics.chip_h)
             .px(theme.space.xs)
             .rounded(theme.radii.full)
-            .bg(theme.colors.surface)
+            .bg(theme.colors.elevated)
+            .shadow(theme.sheet_shadow())
             .child(
                 Icon::ChevronsUp
                     .el()
@@ -153,5 +182,34 @@ impl RenderOnce for ScrollbackBadge {
                     .tone(Tone::Secondary),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alt_screen_suppresses_both_overlays() {
+        assert!(ScrollPill::new(412, 2000).is_visible());
+        assert!(!ScrollPill::new(412, 2000).alt_screen(true).is_visible());
+        assert!(ScrollbackBadge::new(412, 2000).is_visible());
+        assert!(
+            !ScrollbackBadge::new(412, 2000)
+                .alt_screen(true)
+                .is_visible()
+        );
+    }
+
+    #[test]
+    fn a_live_viewport_shows_no_badge() {
+        assert!(!ScrollbackBadge::new(0, 2000).is_visible());
+    }
+
+    #[test]
+    fn the_pill_stays_visible_at_offset_zero() {
+        // Scroll mode is entered at the bottom of the scrollback; a pill that only appeared
+        // after the first `k` would make the mode look like it failed to engage.
+        assert!(ScrollPill::new(0, 2000).is_visible());
     }
 }
