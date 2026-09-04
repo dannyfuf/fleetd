@@ -8,9 +8,14 @@
 //! Add one module per view and re-export it here.
 
 pub mod detail_panel;
+pub mod doctor_view;
+pub mod first_run;
 pub mod hub_context_bar;
+pub mod job_ticker;
+pub mod jobs_panel;
 pub mod prs_screen;
 pub mod repos_rail;
+pub mod sticky_error;
 pub mod worktrees_list;
 pub mod workspace_header;
 pub mod workspace_tabs;
