@@ -1624,8 +1624,12 @@ dependencies = [
  "fleet-client",
  "fleet-core",
  "fleet-proto",
+ "futures-util",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
