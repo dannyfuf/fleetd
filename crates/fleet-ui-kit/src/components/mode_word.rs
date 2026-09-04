@@ -1,17 +1,28 @@
 //! `ModeWord` — the fixed 84 px word in the center of the status bar.
 //!
-//! §1.9 and §2.8: the app is modal, and a visible word prevents the single most expensive
-//! mistake in a modal app — typing a command into a PTY, or a PTY key into a list. It is
-//! present on every screen, including the Workspace and including zoom.
+//! §1.9 and §2.8: Fleet is modal, and a visible word prevents the single most expensive
+//! mistake a modal app can produce — typing a command into a PTY, or a PTY key into a list.
+//! The word is present on **every** screen, including the Workspace and including zoom
+//! (`ctrl-s z`).
+//!
+//! The 84 px is fixed rather than intrinsic on purpose: `NORMAL` and `TERMINAL` differ by four
+//! characters, and a mode word that resizes moves the job ticker next to it every time the
+//! user enters a terminal. A fixed slot means the eye can park there.
+//!
+//! ## States
+//!
+//! One per [`Mode`]. Only `Prefix` is amber, because it is the one mode that expires on its
+//! own — everything else is amber-free by §1.4, since a mode is not a health signal.
 
 use gpui::{App, SharedString, Window, div, prelude::*};
 
 use crate::{text::Text, theme::ActiveTheme, tone::Tone};
 
 /// The eight modes of the app, and their words.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Mode {
     /// Lists. `NORMAL`.
+    #[default]
     Normal,
     /// Keys go to the PTY. `TERMINAL`.
     Terminal,
@@ -30,8 +41,20 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Every mode, in the order §2.8 lists them. Used by the gallery.
+    pub const ALL: &'static [Mode] = &[
+        Mode::Normal,
+        Mode::Terminal,
+        Mode::Prefix,
+        Mode::Scroll,
+        Mode::Filter,
+        Mode::Palette,
+        Mode::Dialog,
+        Mode::Jobs,
+    ];
+
     /// The word rendered in the status bar.
-    pub fn word(self) -> &'static str {
+    pub const fn word(self) -> &'static str {
         match self {
             Mode::Normal => "NORMAL",
             Mode::Terminal => "TERMINAL",
@@ -45,11 +68,17 @@ impl Mode {
     }
 
     /// The tone. Only `Prefix` is amber, because it is the one mode that expires on its own.
-    pub fn tone(self) -> Tone {
+    pub const fn tone(self) -> Tone {
         match self {
             Mode::Prefix => Tone::Warning,
             _ => Tone::Secondary,
         }
+    }
+
+    /// Whether keys typed on this screen reach a PTY instead of the app. A view uses it to
+    /// decide whether its own hints need the `^s` prefix (§3.6 [D-8]).
+    pub const fn keys_reach_pty(self) -> bool {
+        matches!(self, Mode::Terminal)
     }
 }
 
@@ -93,6 +122,7 @@ impl RenderOnce for ModeWord {
             .items_center()
             .justify_center()
             .w(theme.metrics.mode_word_w)
+            .overflow_hidden()
             .child(Text::label(self.word).tone(self.tone))
     }
 }
