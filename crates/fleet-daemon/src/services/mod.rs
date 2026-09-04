@@ -18,12 +18,14 @@ use crate::{
 pub mod contexts;
 pub mod doctor;
 pub mod github;
+pub mod import;
 pub mod inspect;
 pub mod pool;
 pub mod prune;
 pub mod repos;
 pub mod sessions;
 pub mod sleep;
+pub mod update;
 pub mod worktrees;
 
 use contexts::Contexts;
