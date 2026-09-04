@@ -3,6 +3,7 @@
 pub mod actions;
 pub mod bridge;
 pub mod dialogs;
+pub mod drive;
 pub mod keymap;
 pub mod screens;
 pub mod shell;

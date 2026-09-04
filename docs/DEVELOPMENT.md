@@ -44,6 +44,53 @@ SDK, the bootstrap also creates a private SDK overlay below the Zig installation
 SDK's `arm64e-macos` text-based stubs to the `arm64-macos` target expected by Zig 0.15.2. The real
 Xcode SDK is not modified.
 
+## Driving the app from a script
+
+`fleet` ships a developer-only scripted-input driver so an automated reviewer can exercise the
+real GUI on a machine where `osascript` keystrokes are blocked by the macOS Accessibility
+permission. It is off unless `FLEET_DRIVE` names a file:
+
+```sh
+: > /tmp/fleet-drive/script.txt
+FLEET_HOME=/tmp/fleet-drive FLEET_DRIVE=/tmp/fleet-drive/script.txt ./target/debug/fleet &
+```
+
+With `FLEET_DRIVE` set, the app spawns one foreground task on the window that polls the file
+every 100 ms and executes the lines appended since the previous poll, so a script can be written
+incrementally while the app runs:
+
+```sh
+printf 'wait 500\nkey ?\nshot /tmp/fleet-drive/help.png\nkey escape\nquit\n' \
+  >> /tmp/fleet-drive/script.txt
+```
+
+| Line | Effect |
+| --- | --- |
+| `key <keystroke>...` | Dispatches each gpui keystroke to the window (`ctrl-s`, `shift-tab`, `?`, `enter`, `escape`, `j`). Several per line: `key ctrl-s ?`. |
+| `type <text>` | Dispatches every character as a keystroke (`shift-` for uppercase), so text inputs and the terminal receive it. Inner spaces are kept. |
+| `wait <ms>` | Pauses the script before the next line. |
+| `shot <path.png>` | Raises the window, runs `/usr/sbin/screencapture -x <path>` and waits for it, then logs `done shot <path>`. With more than one display it passes one path per display, so the others land beside it as `<name>-2.png`, `<name>-3.png`, all logged. |
+| `quit` | Quits the app. |
+
+Blank lines and lines starting with `#` are ignored. Every executed line, every parse error and
+every finished screenshot is appended to `$FLEET_DRIVE.log` with a timestamp, so a script runner
+can wait on `done shot <path>` instead of sleeping. Keystrokes go through
+`Window::dispatch_keystroke`, so they take the same path as real input: bindings resolve against
+the focus chain of `docs/KEYMAP.md`.
+
+The driver lives in `crates/fleet-app/src/drive.rs` and is wired from `shell::run` right after the
+window opens. When `FLEET_DRIVE` is unset no task is spawned and the app is unaffected.
+
+## Logs
+
+`fleet` installs a `tracing` subscriber at startup that writes to stderr and honours `$RUST_LOG`
+(default `info`), so redirecting the process's stderr captures app-side errors and the driver's
+actions:
+
+```sh
+RUST_LOG=fleet_app=debug ./target/debug/fleet > /tmp/fleet-gui/app.log 2>&1
+```
+
 ## Crate map
 
 | Crate | Responsibility |

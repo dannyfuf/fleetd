@@ -20,6 +20,7 @@ use crate::{
     },
     bridge::Bridge,
     dialogs::Dialogs,
+    drive,
     keymap::{self, ROOT_CONTEXT},
     screens::{hub::HubScreen, jobs::JobsPanel, workspace::WorkspaceScreen},
     shell::{
@@ -823,9 +824,24 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Installs the process-wide `tracing` subscriber: `$RUST_LOG` (default `info`), to stderr.
+///
+/// Called once from [`run`], so an app-side error is visible in whatever the launcher redirected
+/// stderr into. Errors are swallowed: a subscriber already installed by an embedder is fine.
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ignored = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 /// Opens the window and runs the app. Returns when the last window closes.
 pub fn run() -> anyhow::Result<()> {
+    init_tracing();
     let home = fleet_home();
+    tracing::info!(home = %home.display(), "fleet: starting");
     gpui_platform::application()
         .with_assets(KitAssets)
         .run(move |cx: &mut App| {
@@ -858,8 +874,15 @@ pub fn run() -> anyhow::Result<()> {
                 Ok(window) => {
                     let _ignored = window.update(cx, |_, window, _| window.activate_window());
                     cx.activate(true);
+                    // Developer-only: drive the GUI from a script file (docs/DEVELOPMENT.md).
+                    if let Some(script) = drive::script_path() {
+                        let _ignored = window.update(cx, |_, window, cx| {
+                            drive::spawn(script, window, cx).detach();
+                        });
+                    }
                 }
                 Err(error) => {
+                    tracing::error!(%error, "fleet: could not open the window");
                     eprintln!("fleet: could not open the window: {error}");
                     cx.quit();
                 }
