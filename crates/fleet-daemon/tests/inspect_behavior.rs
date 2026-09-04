@@ -36,8 +36,23 @@ async fn inspect_reports_dirty_file_count_and_conservative_merge() {
     run(&base, &["push", "-u", "origin", "main"]);
     run(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
     run(temp.path(), &["clone", path(&origin), path(&worktree_path)]);
+    run(
+        &worktree_path,
+        &["config", "user.email", "fleet@example.com"],
+    );
+    run(&worktree_path, &["config", "user.name", "Fleet Test"]);
     run(&worktree_path, &["checkout", "-b", "feature"]);
+    std::fs::write(worktree_path.join("feature.txt"), "feature\n")
+        .unwrap_or_else(|error| panic!("{error}"));
+    run(&worktree_path, &["add", "feature.txt"]);
+    run(&worktree_path, &["commit", "-m", "feature"]);
     run(&worktree_path, &["push", "-u", "origin", "feature"]);
+    run(&base, &["fetch", "origin", "feature"]);
+    run(
+        &base,
+        &["merge", "--no-ff", "origin/feature", "-m", "merge feature"],
+    );
+    run(&base, &["push", "origin", "main"]);
     std::fs::write(worktree_path.join("one.txt"), "one\n")
         .unwrap_or_else(|error| panic!("{error}"));
     std::fs::write(worktree_path.join("two.txt"), "two\n")

@@ -1089,8 +1089,10 @@ impl Worktrees {
         }
         let service = self.clone();
         tokio::spawn(async move {
-            if let Err(error) = service.recover_startup().await {
-                tracing::warn!(%error, "startup worktree recovery failed");
+            tracing::info!("publish-intent recovery scan started");
+            match service.recover_startup().await {
+                Ok(()) => tracing::info!("publish-intent recovery scan completed"),
+                Err(error) => tracing::warn!(%error, "publish-intent recovery scan failed"),
             }
             service.startup_ready.store(true, Ordering::Release);
             service.startup_notify.notify_waiters();

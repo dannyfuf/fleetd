@@ -150,7 +150,7 @@ impl Inspect {
             .collect::<HashMap<_, _>>();
         let fetch_failures = if fetch {
             context.progress("fetching repository remotes")?;
-            self.fetch_repositories(&selected, &repos, context).await?
+            self.fetch_worktrees(&selected, context).await?
         } else {
             HashMap::new()
         };
@@ -175,7 +175,7 @@ impl Inspect {
                 .get(&worktree.id)
                 .cloned()
                 .unwrap_or_else(|| unknown_status(&worktree));
-            let fetch_failed = fetch_failures.contains_key(&worktree.repo_id);
+            let fetch_failed = fetch_failures.contains_key(&worktree.id);
             let service = self.clone();
             let cancel = context.cancel.clone();
             pending.push(async move {
@@ -204,37 +204,30 @@ impl Inspect {
         Ok(inspections)
     }
 
-    async fn fetch_repositories(
+    async fn fetch_worktrees(
         &self,
         worktrees: &[Worktree],
-        repos: &HashMap<RepoId, Repo>,
         context: &JobCtx,
-    ) -> DaemonResult<HashMap<RepoId, String>> {
-        let mut distinct = HashMap::<RepoId, Repo>::new();
-        for worktree in worktrees.iter().filter(|worktree| worktree.host.is_none()) {
-            if let Some(repo) = repos.get(&worktree.repo_id) {
-                distinct
-                    .entry(repo.id.clone())
-                    .or_insert_with(|| repo.clone());
-            }
-        }
+    ) -> DaemonResult<HashMap<WorktreeId, String>> {
         let mut pending = FuturesUnordered::new();
-        for repo in distinct.into_values() {
+        for worktree in worktrees.iter().filter(|worktree| worktree.host.is_none()) {
             let git = Arc::clone(&self.git);
             let cancel = context.cancel.clone();
+            let id = worktree.id.clone();
+            let path = worktree.path.clone();
             pending.push(async move {
                 if cancel.is_cancelled() {
                     return Err(DaemonError::Cancelled);
                 }
-                let result = git.fetch(Path::new(&repo.path), true).await;
-                Ok((repo.id, result.err().map(|error| error.to_string())))
+                let result = git.fetch(Path::new(&path), true).await;
+                Ok((id, result.err().map(|error| error.to_string())))
             });
         }
         let mut failures = HashMap::new();
         while let Some(result) = pending.next().await {
-            let (repo, failure) = result?;
+            let (worktree, failure) = result?;
             if let Some(failure) = failure {
-                failures.insert(repo, failure);
+                failures.insert(worktree, failure);
             }
         }
         Ok(failures)

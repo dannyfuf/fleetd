@@ -141,16 +141,23 @@ impl Process for RealProcess {
 }
 
 fn parse_process(line: &str) -> DaemonResult<ProcessInfo> {
-    let mut fields = line.trim_start().splitn(3, char::is_whitespace);
-    let pid = fields
-        .next()
-        .and_then(|value| value.parse().ok())
+    let line = line.trim_start();
+    let pid_end = line.find(char::is_whitespace).unwrap_or(line.len());
+    let (pid, remaining) = line.split_at(pid_end);
+    let remaining = remaining.trim_start();
+    let parent_end = remaining
+        .find(char::is_whitespace)
+        .unwrap_or(remaining.len());
+    let (parent_pid, command) = remaining.split_at(parent_end);
+    let pid = pid
+        .parse()
+        .ok()
         .ok_or_else(|| DaemonError::Process(format!("invalid ps row: {line}")))?;
-    let parent_pid = fields
-        .next()
-        .and_then(|value| value.trim_start().parse().ok())
+    let parent_pid = parent_pid
+        .parse()
+        .ok()
         .ok_or_else(|| DaemonError::Process(format!("invalid ps row: {line}")))?;
-    let command = fields.next().unwrap_or_default().trim_start().to_owned();
+    let command = command.trim_start().to_owned();
     Ok(ProcessInfo {
         pid,
         parent_pid,
@@ -189,7 +196,8 @@ mod tests {
             |command| command.program == "ps",
             ShellResult {
                 status: 0,
-                stdout: "10 1 shell\n11 10 node server.js\n12 11 worker\n20 1 other\n".to_owned(),
+                stdout: "   10     1 shell\n11 10 node server.js\n12 11 worker\n20 1 other\n"
+                    .to_owned(),
                 stderr: String::new(),
             },
         );

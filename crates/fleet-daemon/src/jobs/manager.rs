@@ -505,16 +505,7 @@ impl JobManager {
     }
 
     pub(crate) fn record_progress(&self, id: &JobId, line: String) -> DaemonResult<()> {
-        let path = self.log_path(id);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| DaemonError::fs(parent, error))?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|error| DaemonError::fs(&path, error))?;
-        writeln!(file, "{line}").map_err(|error| DaemonError::fs(&path, error))?;
+        self.append_log_line(id, &line)?;
         let changed = {
             let mut state = self
                 .inner
@@ -532,6 +523,20 @@ impl JobManager {
         Ok(())
     }
 
+    fn append_log_line(&self, id: &JobId, line: &str) -> DaemonResult<()> {
+        let path = self.log_path(id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| DaemonError::fs(parent, error))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| DaemonError::fs(&path, error))?;
+        writeln!(file, "{line}").map_err(|error| DaemonError::fs(&path, error))?;
+        Ok(())
+    }
+
     fn set_running(&self, id: &JobId) {
         self.update_record(id, |record| {
             if matches!(record.status, JobStatus::Queued) {
@@ -542,6 +547,14 @@ impl JobManager {
 
     fn finish(&self, id: &JobId, result: DaemonResult<()>) {
         let finished = self.inner.clock.now();
+        let outcome = match &result {
+            Ok(()) => "success".to_owned(),
+            Err(DaemonError::Cancelled) => "cancelled".to_owned(),
+            Err(error) => format!("failed: {error}"),
+        };
+        if let Err(error) = self.append_log_line(id, &outcome) {
+            tracing::warn!(%error, job = %id, "failed to append terminal job status");
+        }
         let changed = {
             let mut state = self
                 .inner
@@ -693,7 +706,7 @@ mod tests {
         assert_eq!(record.progress.as_deref(), Some("second"));
         assert_eq!(
             manager.tail(&id, 1).await.ok(),
-            Some(vec!["second".to_owned()])
+            Some(vec!["success".to_owned()])
         );
     }
 
