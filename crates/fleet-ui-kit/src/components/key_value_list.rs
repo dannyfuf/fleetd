@@ -6,7 +6,7 @@
 use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*, px};
 
 use crate::{
-    components::{FactRow, FactValue, SectionHeader},
+    components::{FactRow, FactValue, SectionHeader, fact_row::LABEL_WIDTH},
     theme::ActiveTheme,
 };
 
@@ -17,6 +17,7 @@ pub struct KeyValueList {
     trailing: Option<AnyElement>,
     rows: Vec<(SharedString, FactValue, bool)>,
     label_width: Pixels,
+    refreshing: bool,
 }
 
 impl KeyValueList {
@@ -26,7 +27,8 @@ impl KeyValueList {
             title: None,
             trailing: None,
             rows: Vec::new(),
-            label_width: px(96.0),
+            label_width: px(LABEL_WIDTH),
+            refreshing: false,
         }
     }
 
@@ -65,6 +67,12 @@ impl KeyValueList {
         self.label_width = width;
         self
     }
+
+    /// A re-inspection is in flight: every value dims to 60 % and stays readable (§3.4).
+    pub fn refreshing(mut self, refreshing: bool) -> Self {
+        self.refreshing = refreshing;
+        self
+    }
 }
 
 impl Default for KeyValueList {
@@ -77,6 +85,7 @@ impl RenderOnce for KeyValueList {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let label_width = self.label_width;
+        let refreshing = self.refreshing;
         let title = self.title;
         let trailing = self.trailing;
         div()
@@ -95,6 +104,7 @@ impl RenderOnce for KeyValueList {
                 FactRow::new(label, value)
                     .label_width(label_width)
                     .mono(mono)
+                    .refreshing(refreshing)
             }))
     }
 }

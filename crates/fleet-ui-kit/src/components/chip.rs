@@ -107,7 +107,14 @@ impl Chip {
     }
 
     /// Whether this chip will draw anything.
+    ///
+    /// Two ways to draw nothing, both §1.2: a chip with a suppressed `0` count and no word, and
+    /// a chip with nothing in it at all. A view therefore passes **every** chip, including the
+    /// zero-valued ones, and the chip decides.
     pub fn is_visible(&self) -> bool {
+        if self.icon.is_none() && self.text.is_none() && self.count.is_none() {
+            return false;
+        }
         !(self.zero_suppress && self.count == Some(0) && self.text.is_none())
     }
 }
@@ -131,12 +138,12 @@ impl RenderOnce for Chip {
             .flex()
             .flex_none()
             .items_center()
-            .gap(theme.space.xs)
+            .gap(theme.space.xxs)
             .h(theme.metrics.chip_h)
+            // Flat in the chrome (§3.1: the context bar is a row of bare glyph + count pairs);
+            // the pill only appears when a chip has to survive on a tinted ground.
             .when(self.filled, |el| {
-                el.px(theme.space.sm)
-                    .rounded(theme.radii.full)
-                    .bg(fill)
+                el.px(theme.space.sm).rounded(theme.radii.full).bg(fill)
             })
             .children(self.icon.map(|icon| {
                 icon.el()
@@ -144,13 +151,15 @@ impl RenderOnce for Chip {
                     .color(color)
                     .spinning(self.spinning)
                     .id(gpui::ElementId::from(
-                        id.unwrap_or(SharedString::new_static("chip")),
+                        id.unwrap_or_else(|| SharedString::new_static("chip")),
                     ))
             }))
             .children(self.text.map(|text| Text::ui(text).color(color)))
+            // Counts are the `label` role (§2.3), which is the same 11 px the context bar and
+            // the pane headers use for every other number on screen.
             .children(
                 self.count
-                    .map(|count| Text::ui(count.to_string()).color(color)),
+                    .map(|count| Text::label(count.to_string()).color(color)),
             )
             .into_any_element()
     }

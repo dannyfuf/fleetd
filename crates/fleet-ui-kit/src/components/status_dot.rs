@@ -8,6 +8,12 @@ use gpui::{App, Hsla, Pixels, Window, div, prelude::*, px};
 
 use crate::{theme::ActiveTheme, tone::Tone};
 
+/// The daemon liveness dot (§2.2), in pixels.
+pub const DOT_SIZE: f32 = 8.0;
+
+/// The terminal-tab activity dot (§3.6), in pixels.
+pub const DOT_SIZE_SMALL: f32 = 6.0;
+
 /// A filled circle.
 #[derive(IntoElement)]
 pub struct StatusDot {
@@ -21,7 +27,7 @@ impl StatusDot {
     /// An 8 px dot: the daemon dot.
     pub fn new(tone: Tone) -> Self {
         Self {
-            size: px(8.0),
+            size: px(DOT_SIZE),
             tone,
             color: None,
             opacity: None,
@@ -30,7 +36,7 @@ impl StatusDot {
 
     /// A 6 px dot: the terminal-tab activity dot.
     pub fn small(tone: Tone) -> Self {
-        Self::new(tone).size(px(6.0))
+        Self::new(tone).size(px(DOT_SIZE_SMALL))
     }
 
     /// Set the diameter.

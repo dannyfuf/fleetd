@@ -88,6 +88,13 @@ impl StatusKind {
         matches!(self, StatusKind::JobRunning | StatusKind::Cloning)
     }
 
+    /// The state a pane whose data is frozen forces every session glyph to (§2.6, last row of
+    /// the freshness ladder): the daemon is gone, so *nothing* is known any more, and unknown
+    /// is amber — never the dim dot of `NoSession`.
+    pub fn frozen() -> Self {
+        StatusKind::Unknown
+    }
+
     /// The detail-panel wording for this state, without any interpolated reason.
     pub fn detail_word(self) -> &'static str {
         match self {
@@ -101,6 +108,20 @@ impl StatusKind {
             StatusKind::Cloning => "cloning\u{2026}",
             StatusKind::CloneFailed => "clone failed",
             StatusKind::HostUnreachable => "host unreachable",
+        }
+    }
+
+    /// The detail-panel sentence, with the daemon's reason appended verbatim when there is one:
+    /// `unknown — host devbox offline`, `sleeping — kept cc (claude)`.
+    ///
+    /// The reason is never paraphrased: swarm's warning strings are greppable diagnostics
+    /// (§6.3, `FactRow`), and this is the same rule one level up.
+    pub fn detail_sentence(self, reason: Option<&str>) -> SharedString {
+        match reason {
+            Some(reason) if !reason.is_empty() => {
+                SharedString::from(format!("{} \u{2014} {reason}", self.detail_word()))
+            }
+            _ => SharedString::new_static(self.detail_word()),
         }
     }
 }
@@ -151,8 +172,10 @@ impl RenderOnce for StatusGlyph {
             .color(color)
             .opacity(self.kind.opacity())
             .spinning(self.kind.spins())
-            .id(self
-                .id
-                .unwrap_or_else(|| ElementId::from(SharedString::new_static("status-glyph"))))
+            // A spinning glyph needs a stable id; falling back to the glyph's own name keeps
+            // two different kinds under one parent from sharing an animation.
+            .id(self.id.unwrap_or_else(|| {
+                ElementId::from(SharedString::new_static(self.kind.icon().name()))
+            }))
     }
 }
