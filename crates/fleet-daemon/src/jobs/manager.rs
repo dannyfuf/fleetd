@@ -3,9 +3,12 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     fs::OpenOptions,
+    future::Future,
     io::Write,
     path::PathBuf,
+    pin::Pin,
     sync::{Arc, Mutex, Weak},
+    time::Duration as StdDuration,
 };
 
 use chrono::{DateTime, Duration, Utc};
@@ -28,6 +31,34 @@ use crate::{
 struct ManagedJob {
     record: JobRecord,
     cancel: CancellationToken,
+    retry: Option<RetrySpec>,
+}
+
+type JobFuture = Pin<Box<dyn Future<Output = DaemonResult<()>> + Send>>;
+type RetryOperation = Arc<dyn Fn(JobCtx) -> JobFuture + Send + Sync>;
+type InitialOperation = Box<dyn FnOnce(JobCtx) -> JobFuture + Send>;
+
+#[derive(Clone)]
+struct RetrySpec {
+    kind: JobKind,
+    target: String,
+    title: String,
+    cancellable: bool,
+    operation: RetryOperation,
+}
+
+struct SubmissionSpec {
+    kind: JobKind,
+    target: String,
+    title: String,
+    cancellable: bool,
+    retryable: bool,
+    retry: Option<RetrySpec>,
+}
+
+struct RetentionPolicy {
+    keep_finished_for: Duration,
+    max_finished: usize,
 }
 
 struct JobState {
@@ -44,6 +75,7 @@ struct JobManagerInner {
     repo_locks: Mutex<HashMap<RepoId, Weak<AsyncMutex<()>>>>,
     pool: Arc<Semaphore>,
     github: Arc<Semaphore>,
+    retention: Mutex<RetentionPolicy>,
 }
 
 /// Detached background-job registry, scheduler resources, and progress log owner.
@@ -77,6 +109,10 @@ impl JobManager {
                 repo_locks: Mutex::new(HashMap::new()),
                 pool: Arc::new(Semaphore::new(2)),
                 github: Arc::new(Semaphore::new(4)),
+                retention: Mutex::new(RetentionPolicy {
+                    keep_finished_for: Duration::minutes(10),
+                    max_finished: 200,
+                }),
             }),
         }
     }
@@ -92,11 +128,86 @@ impl JobManager {
         operation: F,
     ) -> JobId
     where
-        F: FnOnce(JobCtx) -> Fut + Send + 'static,
+        F: FnOnce(JobCtx) -> Fut + Clone + Send + 'static,
         Fut: Future<Output = DaemonResult<()>> + Send + 'static,
     {
         let target = target.into();
         let title = title.into();
+        let retry = retryable.then(|| {
+            let template = Arc::new(Mutex::new(operation.clone()));
+            let retry_operation: RetryOperation = Arc::new(move |context| {
+                let operation = template
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                Box::pin(operation(context))
+            });
+            RetrySpec {
+                kind: kind.clone(),
+                target: target.clone(),
+                title: title.clone(),
+                cancellable,
+                operation: retry_operation,
+            }
+        });
+        self.submit_boxed(
+            SubmissionSpec {
+                kind,
+                target,
+                title,
+                cancellable,
+                retryable,
+                retry,
+            },
+            Box::new(move |context| Box::pin(operation(context))),
+        )
+    }
+
+    /// Submits work whose operation factory is retained for explicit failed-job retries.
+    pub fn submit_retryable<F, Fut>(
+        &self,
+        kind: JobKind,
+        target: impl Into<String>,
+        title: impl Into<String>,
+        cancellable: bool,
+        operation: F,
+    ) -> JobId
+    where
+        F: Fn(JobCtx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = DaemonResult<()>> + Send + 'static,
+    {
+        let target = target.into();
+        let title = title.into();
+        let operation: RetryOperation = Arc::new(move |context| Box::pin(operation(context)));
+        let retry = RetrySpec {
+            kind: kind.clone(),
+            target: target.clone(),
+            title: title.clone(),
+            cancellable,
+            operation: Arc::clone(&operation),
+        };
+        self.submit_boxed(
+            SubmissionSpec {
+                kind,
+                target,
+                title,
+                cancellable,
+                retryable: true,
+                retry: Some(retry),
+            },
+            Box::new(move |context| operation(context)),
+        )
+    }
+
+    fn submit_boxed(&self, spec: SubmissionSpec, operation: InitialOperation) -> JobId {
+        let SubmissionSpec {
+            kind,
+            target,
+            title,
+            cancellable,
+            retryable,
+            retry,
+        } = spec;
         let target_key = (kind.clone(), target.clone());
         {
             let state = self
@@ -144,6 +255,7 @@ impl JobManager {
                 ManagedJob {
                     record: record.clone(),
                     cancel: cancel.clone(),
+                    retry,
                 },
             );
         }
@@ -180,6 +292,7 @@ impl JobManager {
     /// Lists active jobs followed by retained finished jobs in submission order.
     #[must_use]
     pub fn list(&self) -> Vec<JobRecord> {
+        self.prune(self.inner.clock.now());
         let state = self
             .inner
             .state
@@ -204,17 +317,16 @@ impl JobManager {
                 .jobs
                 .get_mut(id)
                 .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))?;
+            if !matches!(job.record.status, JobStatus::Queued | JobStatus::Running) {
+                return Err(DaemonError::Conflict(format!("job {id} is not active")));
+            }
             if !job.record.cancellable {
                 return Err(DaemonError::Conflict(format!(
                     "job {id} is not cancellable"
                 )));
             }
-            let cancel = if matches!(job.record.status, JobStatus::Queued | JobStatus::Running) {
-                job.record.status = JobStatus::Cancelling;
-                Some(job.cancel.clone())
-            } else {
-                None
-            };
+            job.record.status = JobStatus::Cancelling;
+            let cancel = Some(job.cancel.clone());
             (job.record.clone(), cancel)
         };
         if let Some(cancel) = cancel {
@@ -225,8 +337,69 @@ impl JobManager {
     }
 
     /// Restarts a retained job when its original operation can be reconstructed.
-    pub fn retry(&self, _id: &JobId) -> DaemonResult<JobRecord> {
-        Err(DaemonError::Unimplemented("jobs::retry"))
+    pub fn retry(&self, id: &JobId) -> DaemonResult<JobRecord> {
+        let retry = {
+            let state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let job = state
+                .jobs
+                .get(id)
+                .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))?;
+            if !matches!(
+                job.record.status,
+                JobStatus::Failed { .. } | JobStatus::Cancelled
+            ) {
+                return Err(DaemonError::Conflict(format!(
+                    "job {id} has not failed or been cancelled"
+                )));
+            }
+            if !job.record.retryable {
+                return Err(DaemonError::Conflict(format!("job {id} is not retryable")));
+            }
+            job.retry.clone().ok_or_else(|| {
+                DaemonError::Unsupported(format!("job {id} has no retained retry operation"))
+            })?
+        };
+        let operation = Arc::clone(&retry.operation);
+        let new_id = self.submit_boxed(
+            SubmissionSpec {
+                kind: retry.kind.clone(),
+                target: retry.target.clone(),
+                title: retry.title.clone(),
+                cancellable: retry.cancellable,
+                retryable: true,
+                retry: Some(retry),
+            },
+            Box::new(move |context| operation(context)),
+        );
+        self.record(&new_id)
+            .ok_or_else(|| DaemonError::NotFound(format!("job {new_id}")))
+    }
+
+    /// Configures how long completed records stay visible to clients.
+    pub fn set_retention(&self, keep_finished_for: StdDuration) {
+        let keep_finished_for = Duration::from_std(keep_finished_for).unwrap_or(Duration::MAX);
+        self.inner
+            .retention
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keep_finished_for = keep_finished_for;
+        self.prune(self.inner.clock.now());
+    }
+
+    /// Returns one retained job record.
+    #[must_use]
+    pub fn record(&self, id: &JobId) -> Option<JobRecord> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .jobs
+            .get(id)
+            .map(|job| job.record.clone())
     }
 
     /// Reads at most the last `lines` lines from a job's persistent log.
@@ -321,38 +494,45 @@ impl JobManager {
     }
 
     fn set_running(&self, id: &JobId) {
-        self.update_record(id, |record| record.status = JobStatus::Running);
+        self.update_record(id, |record| {
+            if matches!(record.status, JobStatus::Queued) {
+                record.status = JobStatus::Running;
+            }
+        });
     }
 
     fn finish(&self, id: &JobId, result: DaemonResult<()>) {
         let finished = self.inner.clock.now();
-        self.update_record(id, |record| {
-            record.status = match result {
-                Ok(()) => JobStatus::Succeeded,
-                Err(DaemonError::Cancelled) => JobStatus::Cancelled,
-                Err(error) => JobStatus::Failed {
-                    error: error.to_string(),
-                },
-            };
-            record.finished_at = Some(finished.to_rfc3339());
-            record.cancellable = false;
-        });
-        {
+        let changed = {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let key = state
-                .jobs
-                .get(id)
-                .map(|job| (job.record.kind.clone(), job.record.target.clone()));
-            if let Some(key) = key
-                && state.in_flight_targets.get(&key) == Some(id)
-            {
+            let (key, changed) = {
+                let Some(job) = state.jobs.get_mut(id) else {
+                    return;
+                };
+                job.record.status = match result {
+                    Ok(()) => JobStatus::Succeeded,
+                    Err(DaemonError::Cancelled) => JobStatus::Cancelled,
+                    Err(error) => JobStatus::Failed {
+                        error: error.to_string(),
+                    },
+                };
+                job.record.finished_at = Some(finished.to_rfc3339());
+                job.record.cancellable = false;
+                (
+                    (job.record.kind.clone(), job.record.target.clone()),
+                    job.record.clone(),
+                )
+            };
+            if state.in_flight_targets.get(&key) == Some(id) {
                 state.in_flight_targets.remove(&key);
             }
-        }
+            changed
+        };
+        let _receivers = self.inner.updates.send(changed);
         self.prune(finished);
     }
 
@@ -373,12 +553,20 @@ impl JobManager {
     }
 
     fn prune(&self, now: DateTime<Utc>) {
+        let (keep_finished_for, max_finished) = {
+            let retention = self
+                .inner
+                .retention
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (retention.keep_finished_for, retention.max_finished)
+        };
         let mut state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cutoff = now - Duration::hours(24);
+        let cutoff = now - keep_finished_for;
         let mut finished = state
             .order
             .iter()
@@ -397,7 +585,7 @@ impl JobManager {
             .filter(|id| finished_before(&state.jobs[id].record, cutoff))
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
-        let excess = finished.len().saturating_sub(200);
+        let excess = finished.len().saturating_sub(max_finished);
         finished.truncate(excess);
         let remove = expired
             .into_iter()
@@ -418,9 +606,15 @@ fn finished_before(record: &JobRecord, cutoff: DateTime<Utc>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration as StdDuration;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration as StdDuration,
+    };
 
+    use chrono::{TimeZone, Utc};
     use fleet_proto::job::JobKind;
+
+    use crate::testing::fakes::FixedClock;
 
     use super::*;
 
@@ -516,5 +710,68 @@ mod tests {
             .cancel(&first)
             .unwrap_or_else(|error| panic!("{error}"));
         let _record = wait_finished(&manager, &first).await;
+    }
+
+    #[tokio::test]
+    async fn retry_starts_a_new_attempt_from_the_retained_factory() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let manager = JobManager::new(temp.path());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempt_counter = Arc::clone(&attempts);
+        let first = manager.submit(
+            JobKind::RepoFetch,
+            "acme/api",
+            "Fetch",
+            true,
+            true,
+            move |_context| {
+                let attempts = Arc::clone(&attempt_counter);
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(DaemonError::Git("temporary failure".to_owned()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        );
+        assert!(matches!(
+            wait_finished(&manager, &first).await.status,
+            JobStatus::Failed { .. }
+        ));
+
+        let retried = manager
+            .retry(&first)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_ne!(retried.id, first);
+        assert_eq!(
+            wait_finished(&manager, &retried.id).await.status,
+            JobStatus::Succeeded
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn finished_jobs_expire_at_the_configured_retention() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let initial = Utc
+            .with_ymd_and_hms(2026, 9, 4, 12, 0, 0)
+            .single()
+            .unwrap_or_else(|| panic!("valid timestamp"));
+        let clock = Arc::new(FixedClock::new(initial));
+        let manager = JobManager::with_clock(temp.path(), clock.clone());
+        manager.set_retention(StdDuration::from_secs(1));
+        let id = manager.submit(
+            JobKind::Inspect,
+            "all",
+            "Inspect",
+            true,
+            false,
+            |_context| async { Ok(()) },
+        );
+        let _record = wait_finished(&manager, &id).await;
+        clock.set(initial + Duration::seconds(2));
+
+        assert!(manager.list().is_empty());
     }
 }
