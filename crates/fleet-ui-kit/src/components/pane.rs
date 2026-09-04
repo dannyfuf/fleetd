@@ -1,10 +1,25 @@
-//! `Pane` — a bordered region with a header slot, a body slot and a scroll thumb.
+//! `Pane` — a bordered region with a header slot, a body slot, a footer slot, a scroll thumb
+//! and the focus ring.
 //!
-//! The pane owns the focus ring (§2.2) so that no list, header or row ever draws blue itself.
+//! §3 of the design system allows exactly two blue affordances, and neither of them is drawn
+//! by the component that needs it: the pane wraps itself in [`crate::focus::FocusRing`], and a
+//! row wraps itself in the cursor-bar variant. That is why no list, header or row anywhere in
+//! Fleet ever reaches for `colors.accent` itself.
+//!
+//! The ring is a **2 px inset border that is always present** and merely changes color, so
+//! focusing a pane costs zero pixels of layout: the rows behind it do not shift, which is the
+//! whole point of a ring rather than an outline.
+//!
+//! ## States
+//!
+//! default · focused (2 px ring) · scrolled (3 px thumb) · raised (`surface` instead of the
+//! app ground). A pane has no disabled, loading or error state: loading is
+//! [`super::SkeletonRows`] in the body, empty is [`super::EmptyState`] in the body, and an
+//! error is a glyph on the row it belongs to — never a tint on the container.
 
-use gpui::{AnyElement, App, Pixels, Window, div, prelude::*};
+use gpui::{AnyElement, App, Pixels, Window, div, prelude::*, px};
 
-use crate::theme::ActiveTheme;
+use crate::{focus::FocusRing, theme::ActiveTheme};
 
 /// Which edges carry a hairline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -35,7 +50,7 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// A flexible pane.
+    /// A flexible pane: the list, which must absorb every width change.
     pub fn new() -> Self {
         Self {
             header: None,
@@ -73,7 +88,7 @@ impl Pane {
         self
     }
 
-    /// Draw the 2 px focus ring.
+    /// Draw the 2 px focus ring. Only one pane per screen may be focused.
     pub fn focused(mut self, focused: bool) -> Self {
         self.focused = focused;
         self
@@ -98,7 +113,11 @@ impl Pane {
         self
     }
 
-    /// Draw the 3 px scroll thumb: `(offset_fraction, visible_fraction)`, both 0..=1.
+    /// Draw the 3 px scroll thumb: `(offset_fraction, visible_fraction)`, both `0..=1`.
+    ///
+    /// The thumb is zero-suppressed when the content fits (`visible >= 1`), because §2.10
+    /// only asks for it "whenever the content overflows" — a permanent thumb would say the
+    /// list is scrollable when it is not.
     pub fn scroll_thumb(mut self, offset: f32, visible: f32) -> Self {
         self.scroll_fraction = Some((offset.clamp(0.0, 1.0), visible.clamp(0.0, 1.0)));
         self
@@ -115,59 +134,73 @@ impl RenderOnce for Pane {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let border = theme.colors.border;
-        let ring = theme.metrics.focus_ring_w;
-        div()
-            .relative()
+        let header_h = theme.metrics.pane_header_h;
+
+        let content = div()
             .flex()
             .flex_col()
-            .h_full()
+            .size_full()
             .min_w_0()
-            .when(self.flex, |el| el.flex_1())
-            .when_some(self.width, |el, width| el.w(width).flex_none())
-            .when(self.raised, |el| el.bg(theme.colors.surface))
-            .map(|el| match self.border {
-                PaneBorder::None => el,
-                PaneBorder::Left => el.border_l(gpui::px(1.0)).border_color(border),
-                PaneBorder::Right => el.border_r(gpui::px(1.0)).border_color(border),
-                PaneBorder::Horizontal => el
-                    .border_l(gpui::px(1.0))
-                    .border_r(gpui::px(1.0))
-                    .border_color(border),
-            })
+            .min_h_0()
             .children(self.header.map(|header| {
                 div()
+                    .flex()
                     .flex_none()
-                    .h(theme.metrics.pane_header_h)
+                    .h(header_h)
                     .w_full()
+                    .overflow_hidden()
                     .child(header)
             }))
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .overflow_hidden()
                     .children(self.body),
             )
-            .children(self.footer)
+            .children(
+                self.footer
+                    .map(|footer| div().flex().flex_col().flex_none().w_full().child(footer)),
+            );
+
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .h_full()
+            .min_w_0()
+            .overflow_hidden()
+            .when(self.flex, |el| el.flex_1())
+            .when_some(self.width, |el, width| el.w(width).flex_none())
+            .when(self.raised, |el| el.bg(theme.colors.surface))
+            .map(|el| match self.border {
+                PaneBorder::None => el,
+                PaneBorder::Left => el.border_l(px(1.0)).border_color(border),
+                PaneBorder::Right => el.border_r(px(1.0)).border_color(border),
+                PaneBorder::Horizontal => {
+                    el.border_l(px(1.0)).border_r(px(1.0)).border_color(border)
+                }
+            })
+            .child(FocusRing::pane(self.focused).child(content))
             .when_some(self.scroll_fraction, |el, (offset, visible)| {
+                if visible >= 1.0 {
+                    return el;
+                }
+                // A thumb shorter than 4 % of the track stops being a thumb and becomes a
+                // dot, so the visible fraction is floored rather than allowed to vanish.
+                let height = visible.max(0.04);
+                let top = offset.min(1.0 - height);
                 el.child(
                     div()
                         .absolute()
                         .right_0()
-                        .top(gpui::relative(offset))
-                        .h(gpui::relative(visible.max(0.04)))
+                        .top(gpui::relative(top))
+                        .h(gpui::relative(height))
                         .w(theme.metrics.scroll_thumb_w)
                         .bg(theme.colors.scroll_thumb),
-                )
-            })
-            .when(self.focused, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .border(ring)
-                        .border_color(theme.colors.focus_ring),
                 )
             })
     }

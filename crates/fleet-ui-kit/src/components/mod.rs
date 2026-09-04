@@ -72,7 +72,7 @@ pub use banner::Banner;
 pub use chip::Chip;
 pub use column_ladder::{ColumnLadder, ColumnSpec, ColumnWidth, ResolvedColumn};
 pub use confirm_dialog::ConfirmDialog;
-pub use context_bar::{ContextBar, ContextTab};
+pub use context_bar::{ContextBar, ContextTab, TRAFFIC_LIGHT_INSET};
 pub use cycler::Cycler;
 pub use daemon_dot::{DaemonDot, DaemonState};
 pub use daemon_splash::{DaemonSplash, DaemonSplashKind};
@@ -96,7 +96,7 @@ pub use list_view::{ListCursor, ListView};
 pub use log_view::{LOG_TAIL_LINES, LogView};
 pub use mode_word::{Mode, ModeWord};
 pub use number_field::NumberField;
-pub use overlay::Overlay;
+pub use overlay::{Overlay, OverlayLayer};
 pub use palette::{Palette, PaletteRow, PaletteSection, PaletteSectionKind};
 pub use pane::{Pane, PaneBorder};
 pub use pane_header::PaneHeader;
@@ -122,9 +122,9 @@ pub use terminal_grid::{
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalTab, TerminalTabStrip};
 pub use text_field::TextField;
-pub use toast_stack::{Toast, ToastDuration, ToastStack};
+pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
-pub use veil::Veil;
+pub use veil::{VEIL_OPACITY, Veil};
 
 /// `Modal` is the same surface as [`Dialog`]: scrim + card + 44 px header + 44 px footer.
 /// The alias exists so a view that thinks in "modal" finds the right type.

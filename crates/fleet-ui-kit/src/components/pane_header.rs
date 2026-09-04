@@ -1,9 +1,29 @@
-//! `PaneHeader` — label · scope · shown/total · visible range · stale stamp.
+//! `PaneHeader` — label · scope · `shown/total` · visible range · stale stamp.
 //!
-//! §2.10. The filter bar replaces this header **in place**, in the same 30 px row, with zero
-//! layout shift (§3.10); pass it through [`PaneHeader::filter`] instead of swapping elements.
+//! §2.10:
+//!
+//! ```text
+//!  WORKTREES · payroll                              8/12          1–8/12
+//!  └ label ──┘ └ scope ┘                       └ shown/total ┘ └ visible range ┘
+//! ```
+//!
+//! The visible range is the scroll-position indicator the inventory requires and no proposal
+//! supplied; it is what tells the user that `G` has somewhere to go.
+//!
+//! ## The filter must pass *through* the header
+//!
+//! §3.10 replaces the left side with the filter bar **in place**, in the same 30 px row, with
+//! zero layout shift. Pass a [`super::FilterBar`] to [`PaneHeader::filter`] rather than
+//! swapping the header element for one, or the row shifts by a pixel and the illusion that
+//! "the list did not move" — the whole point of filtering in the header — breaks.
+//!
+//! ## States
+//!
+//! normal · filtering (`filter`) · filter retained (`filter_chip`, accent) · stale
+//! (`· stale · 2m`, amber, §1.3 / §3.12). There is no focused, disabled or error state: the
+//! header describes a pane, and the pane owns the focus ring.
 
-use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
 
 use crate::{
     icons::{Icon, IconSize},
@@ -27,7 +47,8 @@ pub struct PaneHeader {
 }
 
 impl PaneHeader {
-    /// A header with a label, e.g. `WORKTREES`.
+    /// A header with a label, e.g. `WORKTREES`. `Text::label` uppercases it — pass it as
+    /// written.
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
             label: label.into(),
@@ -54,7 +75,8 @@ impl PaneHeader {
         self
     }
 
-    /// The filtered count. Renders as `shown/total`.
+    /// The filtered count. Renders as `shown/total`, and turns amber at `0` — a filter that
+    /// matches nothing is the classic "where did my rows go" moment (§3.10).
     pub fn shown(mut self, shown: usize) -> Self {
         self.shown = Some(shown);
         self
@@ -94,6 +116,7 @@ impl PaneHeader {
 impl RenderOnce for PaneHeader {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
+        let no_match = self.shown == Some(0) && self.total.is_some_and(|total| total > 0);
         let counts = match (self.shown, self.total) {
             (Some(shown), Some(total)) => Some(SharedString::from(format!("{shown}/{total}"))),
             (None, Some(total)) => Some(SharedString::from(total.to_string())),
@@ -104,26 +127,34 @@ impl RenderOnce for PaneHeader {
         });
 
         let left: AnyElement = match self.filter {
-            Some(filter) => filter,
+            Some(filter) => div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .child(filter)
+                .into_any_element(),
             None => div()
                 .flex()
                 .items_center()
                 .gap(theme.space.sm)
                 .min_w_0()
+                .overflow_hidden()
                 .child(Text::label(self.label))
                 .children(
                     self.scope
-                        .map(|scope| Text::label(format!("\u{b7} {scope}")).faint()),
+                        .map(|scope| Text::label(format!("\u{b7} {scope}")).faint().ellipsize()),
                 )
                 .children(self.filter_chip.map(|query| {
                     div()
                         .flex()
+                        .flex_none()
                         .items_center()
                         .gap(theme.space.xxs)
                         .child(
                             Icon::Search
                                 .el()
-                                .size(IconSize::Small)
+                                .size(IconSize::Medium)
                                 .color(theme.colors.accent),
                         )
                         .child(Text::hint(query).tone(Tone::Accent))
@@ -141,7 +172,7 @@ impl RenderOnce for PaneHeader {
             .size_full()
             .px(theme.space.lg)
             .gap(theme.space.md)
-            .border_b(gpui::px(1.0))
+            .border_b(px(1.0))
             .border_color(theme.colors.border)
             .child(left)
             .child(
@@ -150,7 +181,9 @@ impl RenderOnce for PaneHeader {
                     .flex_none()
                     .items_center()
                     .gap(theme.space.md)
-                    .children(counts.map(|counts| Text::label(counts).faint()))
+                    .children(counts.map(|counts| {
+                        Text::label(counts).tone(if no_match { Tone::Warning } else { Tone::Muted })
+                    }))
                     .children(range.map(|range| Text::label(range).faint()))
                     .children(self.trailing),
             )
