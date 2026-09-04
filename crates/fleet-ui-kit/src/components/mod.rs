@@ -133,7 +133,9 @@ pub use terminal_grid::{
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalTab, TerminalTabStrip};
-pub use text_field::TextField;
+pub use text_field::{
+    TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
+};
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
 pub use veil::{VEIL_OPACITY, Veil};
