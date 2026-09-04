@@ -18,3 +18,5 @@ fleet-proto = { path = "../fleet-proto" }
 fleet-ui-kit = { path = "../fleet-ui-kit" }
 gpui.workspace = true
 gpui_platform.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

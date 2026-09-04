@@ -5,6 +5,9 @@ pub mod bridge;
 pub mod dialogs;
 pub mod keymap;
 pub mod screens;
+pub mod shell;
 pub mod state;
 pub mod terminal_element;
 pub mod views;
+
+pub use shell::{Shell, run};
