@@ -1,12 +1,25 @@
-//! Pull-request querying, caching, and assignment workflow contracts.
+//! Pull-request querying, caching, and assignment workflow orchestration.
 
-use std::sync::Arc;
-
-use fleet_core::{
-    github::PrTab,
-    ids::{ContextId, RepoId},
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    io::Write,
+    path::Path,
+    sync::{Arc, Mutex},
 };
-use fleet_proto::response::PrSlice;
+
+use chrono::{DateTime, Utc};
+use fleet_core::{
+    cache::PrCache,
+    github::{PrTab, PullRequest, worktree_matches_pr},
+    ids::{ContextId, JobId, RepoId},
+    model::Worktree,
+    paths::FleetHome,
+};
+use fleet_proto::{job::JobKind, response::PrSlice};
+use futures_util::future::join_all;
+use tokio::sync::oneshot;
+use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
@@ -18,10 +31,11 @@ use crate::{
 /// Pull-request service with cache and global GitHub concurrency handles.
 #[derive(Clone)]
 pub struct Github {
-    _config: Arc<ConfigStore>,
-    _state: Arc<StateStore>,
-    _jobs: Arc<JobManager>,
-    _github: Arc<dyn GithubAdapter>,
+    config: Arc<ConfigStore>,
+    state: Arc<StateStore>,
+    jobs: Arc<JobManager>,
+    github: Arc<dyn GithubAdapter>,
+    in_flight: Arc<Mutex<HashMap<String, JobId>>>,
 }
 
 impl Github {
@@ -34,21 +48,331 @@ impl Github {
         github: Arc<dyn GithubAdapter>,
     ) -> Self {
         Self {
-            _config: config,
-            _state: state,
-            _jobs: jobs,
-            _github: github,
+            config,
+            state,
+            jobs,
+            github,
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Loads cached PR slices and refreshes them with global concurrency four (inventory sections 2, 6, and 7).
+    /// Returns the authenticated GitHub viewer while respecting the global GitHub limit.
+    pub async fn viewer_login(&self) -> DaemonResult<String> {
+        let github = Arc::clone(&self.github);
+        let semaphore = self.jobs.github_semaphore();
+        let (sender, receiver) = oneshot::channel::<Result<String, String>>();
+        self.jobs.submit(
+            JobKind::PrFetch,
+            format!("viewer:{}", Uuid::new_v4()),
+            "Read GitHub viewer",
+            true,
+            true,
+            move |context| async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|error| DaemonError::Join(error.to_string()))?;
+                context.progress("reading GitHub viewer")?;
+                match github.viewer_login().await {
+                    Ok(login) => {
+                        let _ignored = sender.send(Ok(login));
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ignored = sender.send(Err(message));
+                        Err(error)
+                    }
+                }
+            },
+        );
+        match receiver.await {
+            Ok(Ok(login)) => Ok(login),
+            Ok(Err(error)) => Err(DaemonError::Github(error)),
+            Err(_) => Err(DaemonError::Cancelled),
+        }
+    }
+
+    /// Loads cached PR slices and refreshes them with global concurrency four.
     pub async fn list_pull_requests(
         &self,
-        _repo: Option<RepoId>,
-        _context: Option<ContextId>,
-        _tab: PrTab,
-        _force: bool,
+        repo: Option<RepoId>,
+        context: Option<ContextId>,
+        tab: PrTab,
+        force: bool,
     ) -> DaemonResult<Vec<PrSlice>> {
-        Err(DaemonError::Unimplemented("github::list_pull_requests"))
+        if repo.is_some() && context.is_some() {
+            return Err(DaemonError::Validation(
+                "repository and context PR scopes are mutually exclusive".to_owned(),
+            ));
+        }
+        let config = self.config.load().await?;
+        let state = self.state.load().await?;
+        let selected = if let Some(repo) = repo {
+            vec![
+                state
+                    .repos
+                    .iter()
+                    .find(|item| item.id == repo)
+                    .cloned()
+                    .ok_or_else(|| DaemonError::NotFound(format!("repository {repo}")))?,
+            ]
+        } else {
+            let context = context.or_else(|| state.active_context_id.clone());
+            if let Some(context) = &context
+                && !state.contexts.iter().any(|item| &item.id == context)
+            {
+                return Err(DaemonError::NotFound(format!("context {context}")));
+            }
+            state
+                .repos
+                .iter()
+                .filter(|item| context.as_ref().is_none_or(|id| &item.context_id == id))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if selected.is_empty() {
+            return Ok(vec![PrSlice {
+                tab,
+                fetched_at: String::new(),
+                loading: false,
+                error: None,
+                total: 0,
+                prs: Vec::new(),
+            }]);
+        }
+
+        let home = fleet_home(&self.state)?;
+        let ttl = config.github.pr_ttl_seconds;
+        let outcomes = join_all(
+            selected
+                .iter()
+                .map(|item| self.fetch_repo_tab(home.clone(), item.id.clone(), tab, ttl, force)),
+        )
+        .await;
+        let mut prs = Vec::new();
+        let mut fetched_at = Vec::new();
+        let mut errors = Vec::new();
+        for outcome in outcomes {
+            if !outcome.cache.fetched_at.is_empty() {
+                fetched_at.push(outcome.cache.fetched_at.clone());
+            }
+            prs.extend(outcome.cache.prs);
+            if let Some(error) = outcome.error {
+                errors.push(error);
+            }
+        }
+        prs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        let total = prs.len();
+        if selected.len() > 1 {
+            prs.truncate(100);
+        }
+        fetched_at.sort();
+        errors.sort();
+        errors.dedup();
+        Ok(vec![PrSlice {
+            tab,
+            fetched_at: fetched_at.into_iter().next().unwrap_or_default(),
+            loading: false,
+            error: if errors.is_empty() {
+                None
+            } else {
+                Some(concise(&errors.join(" · "), 120))
+            },
+            total,
+            prs,
+        }])
     }
+
+    /// Finds the registered worktree represented by a pull request using core matching rules.
+    pub async fn matching_worktree(
+        &self,
+        pull_request: &PullRequest,
+    ) -> DaemonResult<Option<Worktree>> {
+        Ok(self
+            .state
+            .load()
+            .await?
+            .worktrees
+            .into_iter()
+            .find(|worktree| worktree_matches_pr(worktree, pull_request)))
+    }
+
+    async fn fetch_repo_tab(
+        &self,
+        home: FleetHome,
+        repo: RepoId,
+        tab: PrTab,
+        ttl_seconds: i64,
+        force: bool,
+    ) -> RepoTabOutcome {
+        let path = home.pr_cache_path(&repo, tab);
+        let cached = read_cache(&path);
+        if !force
+            && cached
+                .as_ref()
+                .is_some_and(|cache| cache_is_fresh(&cache.fetched_at, ttl_seconds))
+        {
+            return RepoTabOutcome {
+                cache: cached.unwrap_or_else(empty_cache),
+                error: None,
+            };
+        }
+
+        let key = format!("{repo}:{tab}");
+        if let Some(previous) = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned()
+        {
+            let _ignored = self.jobs.cancel(&previous);
+        }
+        let github = Arc::clone(&self.github);
+        let semaphore = self.jobs.github_semaphore();
+        let repo_for_job = repo.clone();
+        let path_for_job = path.clone();
+        let (sender, receiver) = oneshot::channel::<Result<PrCache, String>>();
+        let id = self.jobs.submit(
+            JobKind::PrFetch,
+            format!("{key}:{}", Uuid::new_v4()),
+            format!("Fetch {tab} pull requests for {repo}"),
+            true,
+            true,
+            move |context| async move {
+                let result: DaemonResult<PrCache> = async {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|error| DaemonError::Join(error.to_string()))?;
+                    context.progress(format!("fetching {tab} pull requests"))?;
+                    let mut prs = github.list_pull_requests(&repo_for_job, tab).await?;
+                    if prs.iter().any(|pull| !pull.has_valid_url()) {
+                        return Err(DaemonError::Github(format!(
+                            "invalid pull-request URL returned for {repo_for_job}"
+                        )));
+                    }
+                    prs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+                    let cache = PrCache {
+                        fetched_at: Utc::now().to_rfc3339(),
+                        prs,
+                    };
+                    write_cache(&path_for_job, &cache)?;
+                    Ok(cache)
+                }
+                .await;
+                match result {
+                    Ok(cache) => {
+                        let _ignored = sender.send(Ok(cache));
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        let _ignored = sender.send(Err(message));
+                        Err(error)
+                    }
+                }
+            },
+        );
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), id.clone());
+        let result = receiver.await;
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if in_flight.get(&key) == Some(&id) {
+            in_flight.remove(&key);
+        }
+        drop(in_flight);
+
+        match result {
+            Ok(Ok(cache)) => RepoTabOutcome { cache, error: None },
+            Ok(Err(error)) => RepoTabOutcome {
+                cache: cached.unwrap_or_else(empty_cache),
+                error: Some(concise(&error, 120)),
+            },
+            Err(_) => RepoTabOutcome {
+                cache: cached.unwrap_or_else(empty_cache),
+                error: Some("operation cancelled".to_owned()),
+            },
+        }
+    }
+}
+
+struct RepoTabOutcome {
+    cache: PrCache,
+    error: Option<String>,
+}
+
+fn empty_cache() -> PrCache {
+    PrCache {
+        fetched_at: String::new(),
+        prs: Vec::new(),
+    }
+}
+
+fn cache_is_fresh(fetched_at: &str, ttl_seconds: i64) -> bool {
+    if ttl_seconds < 0 {
+        return false;
+    }
+    DateTime::parse_from_rfc3339(fetched_at)
+        .ok()
+        .map(|fetched| Utc::now().signed_duration_since(fetched.with_timezone(&Utc)))
+        .is_some_and(|age| age.num_milliseconds() >= 0 && age.num_seconds() < ttl_seconds)
+}
+
+fn read_cache(path: &Path) -> Option<PrCache> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+fn write_cache(path: &Path, cache: &PrCache) -> DaemonResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        DaemonError::Validation(format!("cache path has no parent: {}", path.display()))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| DaemonError::fs(parent, error))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("prs");
+    let temporary = parent.join(format!(
+        ".{name}.tmp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| DaemonError::fs(&temporary, error))?;
+        let mut text = serde_json::to_string(cache)?;
+        text.push('\n');
+        file.write_all(text.as_bytes())
+            .map_err(|error| DaemonError::fs(&temporary, error))?;
+        file.sync_all()
+            .map_err(|error| DaemonError::fs(&temporary, error))?;
+        std::fs::rename(&temporary, path).map_err(|error| DaemonError::fs(path, error))
+    })();
+    if result.is_err() {
+        let _ignored = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn fleet_home(state: &StateStore) -> DaemonResult<FleetHome> {
+    state
+        .path()
+        .parent()
+        .map(|path| FleetHome::new(path.to_path_buf()))
+        .ok_or_else(|| DaemonError::Validation("state path has no parent".to_owned()))
+}
+
+fn concise(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect::<String>()
 }
