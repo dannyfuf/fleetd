@@ -57,6 +57,11 @@ impl Github {
     }
 
     /// Returns the authenticated GitHub viewer while respecting the global GitHub limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a GitHub error when the CLI lookup fails or yields an empty login, and a
+    /// cancellation error when the detached job is cancelled before delivering its result.
     pub async fn viewer_login(&self) -> DaemonResult<String> {
         let github = Arc::clone(&self.github);
         let semaphore = self.jobs.github_semaphore();
@@ -73,7 +78,15 @@ impl Github {
                     .await
                     .map_err(|error| DaemonError::Join(error.to_string()))?;
                 context.progress("reading GitHub viewer")?;
-                match github.viewer_login().await {
+                match github.viewer_login().await.and_then(|login| {
+                    if login.is_empty() {
+                        Err(DaemonError::Github(
+                            "GitHub viewer login was empty".to_owned(),
+                        ))
+                    } else {
+                        Ok(login)
+                    }
+                }) {
                     Ok(login) => {
                         let _ignored = sender.send(Ok(login));
                         Ok(())
