@@ -5,3 +5,9 @@ pub mod connection;
 pub mod events;
 pub mod spawn;
 pub mod terminal;
+
+pub use api::{CreateWorktreeResult, DaemonVersion, HelloResult, Result};
+pub use connection::{Client, ConnectError};
+pub use events::{EventReceiverExt, jobs, snapshots};
+pub use spawn::{SpawnError, ensure_daemon, resolve_daemon_path};
+pub use terminal::TerminalHandle;

@@ -5,10 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-async-channel.workspace = true
 fleet-core = { path = "../fleet-core" }
 fleet-proto = { path = "../fleet-proto" }
+futures-util = { version = "0.3", features = ["sink"] }
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+smol_str.workspace = true
+tempfile = "3"

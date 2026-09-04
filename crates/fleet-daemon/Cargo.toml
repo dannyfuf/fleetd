@@ -10,11 +10,23 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-trait = "0.1"
 chrono.workspace = true
 clap.workspace = true
 fleet-core = { path = "../fleet-core" }
 fleet-proto = { path = "../fleet-proto" }
 fleet-term = { path = "../fleet-term" }
+futures-util = { version = "0.3", features = ["sink"] }
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["codec", "rt"] }
 tracing.workspace = true
+tracing-appender = "0.2"
 tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

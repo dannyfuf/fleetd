@@ -6,14 +6,13 @@ rust-version.workspace = true
 
 [features]
 default = ["ghostty"]
-ghostty = []
+ghostty = ["dep:libghostty-vt"]
 
 [dependencies]
 async-channel.workspace = true
 fleet-core = { path = "../fleet-core" }
 fleet-proto = { path = "../fleet-proto" }
+libghostty-vt = { workspace = true, optional = true }
 portable-pty.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-
-# libghostty-vt will be added after the separate integration spike is validated.

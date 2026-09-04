@@ -1,0 +1,314 @@
+use std::{path::Path, time::Duration};
+
+use fleet_client::{Client, ensure_daemon};
+use fleet_core::ids::TerminalId;
+use fleet_proto::{
+    codec::FleetCodec,
+    event::{Event, EventKind, ToastLevel},
+    request::{Request, RequestBody},
+    response::{Response, ResponseBody},
+    terminal::{
+        Cell, CellAttrs, CellWidth, Color, CursorShape, CursorState, FrameUpdate, RowUpdate,
+        TerminalModes, ViewportInfo,
+    },
+};
+use futures_util::{SinkExt, StreamExt};
+use smol_str::SmolStr;
+use tempfile::TempDir;
+use tokio::{net::UnixListener, sync::oneshot, time::timeout};
+use tokio_util::codec::Framed;
+
+type ServerTransport = Framed<tokio::net::UnixStream, FleetCodec<serde_json::Value, Request>>;
+
+#[tokio::test]
+async fn negotiates_correlates_events_and_streams_terminal_frames() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport, None).await;
+
+        let first = transport.next().await.unwrap().unwrap();
+        let second = transport.next().await.unwrap().unwrap();
+        for request in [&second, &first] {
+            let body = match request.body {
+                RequestBody::DaemonPing => ResponseBody::Pong,
+                RequestBody::DaemonVersion => ResponseBody::Version {
+                    version: "test-daemon".to_owned(),
+                    protocol: 1,
+                },
+                ref other => panic!("unexpected correlated request: {other:?}"),
+            };
+            send_response(&mut transport, request.id, body).await;
+        }
+        send_event(
+            &mut transport,
+            Event::Toast {
+                level: ToastLevel::Info,
+                message: "ready".to_owned(),
+            },
+        )
+        .await;
+
+        let attach = transport.next().await.unwrap().unwrap();
+        assert!(matches!(
+            attach.body,
+            RequestBody::AttachTerminal {
+                terminal: TerminalId(7),
+                cols: 100,
+                rows: 30
+            }
+        ));
+        send_event(&mut transport, Event::TerminalFrame(frame(7, 1, false))).await;
+        send_event(&mut transport, Event::TerminalFrame(frame(7, 2, true))).await;
+        send_response(&mut transport, attach.id, ResponseBody::Ack).await;
+
+        let input = transport.next().await.unwrap().unwrap();
+        assert!(matches!(
+            input.body,
+            RequestBody::TerminalInput {
+                terminal: TerminalId(7),
+                ref bytes
+            } if bytes == b"ls\n"
+        ));
+        send_response(&mut transport, input.id, ResponseBody::Ack).await;
+
+        let detach = timeout(Duration::from_secs(2), transport.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            detach.body,
+            RequestBody::DetachTerminal {
+                terminal: TerminalId(7)
+            }
+        ));
+        send_response(&mut transport, detach.id, ResponseBody::Ack).await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let mut events = client.events();
+    let (ping, version) = tokio::join!(client.daemon_ping(), client.daemon_version());
+    ping.unwrap();
+    let version = version.unwrap();
+    assert_eq!(version.version, "test-daemon");
+    assert_eq!(version.protocol, 1);
+    assert_eq!(
+        events.recv().await.unwrap(),
+        Event::Toast {
+            level: ToastLevel::Info,
+            message: "ready".to_owned()
+        }
+    );
+
+    let mut terminal = client.attach(TerminalId(7), 100, 30).await.unwrap();
+    let first_frame = terminal.next_frame().await.unwrap();
+    assert!(first_frame.full);
+    assert_eq!(first_frame.seq, 2);
+    terminal.send_input(b"ls\n".to_vec()).await.unwrap();
+    drop(terminal);
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnects_and_restores_event_subscription() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let (disconnected_tx, disconnected_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (first_socket, _) = listener.accept().await.unwrap();
+        let mut first = Framed::new(first_socket, FleetCodec::new());
+        authenticate(&mut first, None).await;
+        let subscribe = first.next().await.unwrap().unwrap();
+        assert_eq!(
+            subscribe.body,
+            RequestBody::Subscribe {
+                events: vec![EventKind::Toast, EventKind::TerminalFrame]
+            }
+        );
+        send_response(&mut first, subscribe.id, ResponseBody::Ack).await;
+        let attach = first.next().await.unwrap().unwrap();
+        assert!(matches!(
+            attach.body,
+            RequestBody::AttachTerminal {
+                terminal: TerminalId(11),
+                cols: 80,
+                rows: 24
+            }
+        ));
+        send_event(&mut first, Event::TerminalFrame(frame(11, 1, true))).await;
+        send_response(&mut first, attach.id, ResponseBody::Ack).await;
+        drop(first);
+        disconnected_tx.send(()).unwrap();
+
+        let (second_socket, _) = listener.accept().await.unwrap();
+        let mut second = Framed::new(second_socket, FleetCodec::new());
+        authenticate(
+            &mut second,
+            Some(vec![EventKind::Toast, EventKind::TerminalFrame]),
+        )
+        .await;
+        let reattach = second.next().await.unwrap().unwrap();
+        assert!(matches!(
+            reattach.body,
+            RequestBody::AttachTerminal {
+                terminal: TerminalId(11),
+                cols: 80,
+                rows: 24
+            }
+        ));
+        send_event(&mut second, Event::TerminalFrame(frame(11, 2, true))).await;
+        send_response(&mut second, reattach.id, ResponseBody::Ack).await;
+        let ping = second.next().await.unwrap().unwrap();
+        assert!(matches!(ping.body, RequestBody::DaemonPing));
+        send_response(&mut second, ping.id, ResponseBody::Pong).await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    client
+        .subscribe(vec![EventKind::Toast, EventKind::TerminalFrame])
+        .await
+        .unwrap();
+    let mut terminal = client.attach(TerminalId(11), 80, 24).await.unwrap();
+    assert_eq!(terminal.next_frame().await.unwrap().seq, 1);
+    disconnected_rx.await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), terminal.next_frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .seq,
+        2
+    );
+    client.daemon_ping().await.unwrap();
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn daemon_shutdown_event_stops_reconnection_and_fails_pending_requests() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport, None).await;
+        let ping = transport.next().await.unwrap().unwrap();
+        assert!(matches!(ping.body, RequestBody::DaemonPing));
+        send_event(&mut transport, Event::DaemonShuttingDown).await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let mut events = client.events();
+    let error = client.daemon_ping().await.unwrap_err();
+    assert!(error.message.contains("shutting down"));
+    assert_eq!(events.recv().await.unwrap(), Event::DaemonShuttingDown);
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ensure_daemon_reuses_a_healthy_daemon() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport, None).await;
+        let ping = transport.next().await.unwrap().unwrap();
+        assert!(matches!(ping.body, RequestBody::DaemonPing));
+        send_response(&mut transport, ping.id, ResponseBody::Pong).await;
+    });
+
+    let client = ensure_daemon(home.path(), None).await.unwrap();
+    drop(client);
+    server.await.unwrap();
+}
+
+async fn bind(home: &Path) -> UnixListener {
+    UnixListener::bind(home.join("fleetd.sock")).unwrap()
+}
+
+async fn authenticate(
+    transport: &mut ServerTransport,
+    expected_subscription: Option<Vec<EventKind>>,
+) {
+    let hello = transport.next().await.unwrap().unwrap();
+    assert!(matches!(hello.body, RequestBody::Hello { protocol: 1, .. }));
+    send_response(
+        transport,
+        hello.id,
+        ResponseBody::Hello {
+            protocol: 1,
+            server: "test-daemon".to_owned(),
+        },
+    )
+    .await;
+
+    let subscribe = transport.next().await.unwrap().unwrap();
+    let RequestBody::Subscribe { events } = subscribe.body else {
+        panic!("expected initial subscription");
+    };
+    if let Some(expected) = expected_subscription {
+        assert_eq!(events, expected);
+    } else {
+        assert_eq!(events.len(), 8);
+    }
+    send_response(transport, subscribe.id, ResponseBody::Ack).await;
+}
+
+async fn send_response(transport: &mut ServerTransport, id: u64, body: ResponseBody) {
+    transport
+        .send(
+            serde_json::to_value(Response {
+                id,
+                result: Ok(body),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
+async fn send_event(transport: &mut ServerTransport, event: Event) {
+    transport
+        .send(serde_json::to_value(event).unwrap())
+        .await
+        .unwrap();
+}
+
+fn frame(terminal: u64, seq: u64, full: bool) -> FrameUpdate {
+    FrameUpdate {
+        terminal: TerminalId(terminal),
+        seq,
+        cols: 100,
+        rows: 30,
+        full,
+        rows_changed: vec![RowUpdate {
+            index: 0,
+            cells: vec![Cell {
+                text: SmolStr::new("$"),
+                fg: Color::Default,
+                bg: Color::Default,
+                underline_color: None,
+                attrs: CellAttrs::empty(),
+                width: CellWidth::Narrow,
+            }],
+        }],
+        cursor: CursorState {
+            row: 0,
+            col: 1,
+            visible: true,
+            shape: CursorShape::Block,
+        },
+        viewport: ViewportInfo {
+            scrollback_len: 0,
+            offset: 0,
+        },
+        modes: TerminalModes::default(),
+        title: None,
+    }
+}

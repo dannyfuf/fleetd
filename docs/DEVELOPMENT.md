@@ -22,6 +22,14 @@ Direct Cargo equivalents work as usual. Build artifacts use Cargo's default targ
 `target/` inside this repository. Do not set a shared external `CARGO_TARGET_DIR`; keeping each
 worktree's artifacts local avoids collisions between parallel agents.
 
+## Zig
+
+Building `fleet-term` with its default `ghostty` feature requires Zig **0.15.2**. The pinned
+`libghostty-vt 0.2.1` dependency builds its vendored Ghostty commit with that exact minimum
+version. Install the matching Zig release and ensure its `zig` executable is on `PATH` before
+running Cargo. On macOS 26 with the Xcode 26 SDK, Zig 0.15.2 may also require an SDK overlay that
+maps the SDK's `arm64e-macos` text-based stubs to the `arm64-macos` target expected by Zig.
+
 ## Crate map
 
 | Crate | Responsibility |

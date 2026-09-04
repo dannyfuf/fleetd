@@ -1,4 +1,12 @@
-//! Theme composition and shared access to visual foundations.
+//! Tokens and the `Theme` global.
 
-pub mod palette;
-pub mod tokens;
+mod palette;
+mod theme;
+mod tokens;
+
+pub use palette::TerminalPalette;
+pub use theme::{ActiveTheme, Theme, ThemeMode};
+pub use tokens::{
+    BASE_UNIT, CH, ColorTokens, Elevation, FontRole, Metrics, Motion, Radii, ShadowToken, Spacing,
+    TypeScale, TypeStyle, c, ca, ch,
+};
