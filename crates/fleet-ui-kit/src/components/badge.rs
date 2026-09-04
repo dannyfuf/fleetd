@@ -69,8 +69,10 @@ impl RenderOnce for Badge {
             .flex_none()
             .items_center()
             .rounded(theme.radii.sm)
+            // A box costs 22 px of row height, so only a badge that has to survive on a tinted
+            // ground pays for one (§6.3: `Bare` by default).
             .when(self.style != BadgeStyle::Bare, |el| {
-                el.px(theme.space.xs).py(gpui::px(1.0))
+                el.h(theme.metrics.chip_h).px(theme.space.xs)
             })
             .when(self.style == BadgeStyle::Filled, |el| el.bg(fill))
             .when(self.style == BadgeStyle::Outlined, |el| {

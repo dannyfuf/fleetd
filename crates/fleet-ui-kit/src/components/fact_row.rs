@@ -13,6 +13,13 @@ use crate::{
     tone::Tone,
 };
 
+/// The label column of the 340 px detail panel (§3.4), in pixels.
+pub const LABEL_WIDTH: f32 = 96.0;
+
+/// The opacity a value keeps while a re-inspection is in flight (§3.4: old values dim but stay
+/// readable — **never** blanked).
+pub const REFRESHING_OPACITY: f32 = 0.6;
+
 /// The three things a fact's value can be.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FactValue {
@@ -51,6 +58,7 @@ pub struct FactRow {
     value: FactValue,
     label_width: Pixels,
     mono: bool,
+    refreshing: bool,
 }
 
 impl FactRow {
@@ -59,8 +67,9 @@ impl FactRow {
         Self {
             label: Some(label.into()),
             value,
-            label_width: px(96.0),
+            label_width: px(LABEL_WIDTH),
             mono: false,
+            refreshing: false,
         }
     }
 
@@ -69,8 +78,9 @@ impl FactRow {
         Self {
             label: None,
             value: FactValue::warning(message),
-            label_width: px(96.0),
+            label_width: px(LABEL_WIDTH),
             mono: false,
+            refreshing: false,
         }
     }
 
@@ -83,6 +93,15 @@ impl FactRow {
     /// Render the value in the data face (paths, shas, urls).
     pub fn mono(mut self, mono: bool) -> Self {
         self.mono = mono;
+        self
+    }
+
+    /// A re-inspection is in flight: the previous value dims to 60 % and stays readable.
+    ///
+    /// It is never blanked and never replaced by a spinner (§3.4): the old value is still the
+    /// best answer available, and blanking it is how a user ends up deciding on nothing.
+    pub fn refreshing(mut self, refreshing: bool) -> Self {
+        self.refreshing = refreshing;
         self
     }
 }
@@ -122,6 +141,12 @@ impl RenderOnce for FactRow {
                 self.label
                     .map(|label| Text::ui(label).muted().w(self.label_width)),
             )
-            .child(div().flex_1().min_w_0().child(value))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .when(self.refreshing, |el| el.opacity(REFRESHING_OPACITY))
+                    .child(value),
+            )
     }
 }

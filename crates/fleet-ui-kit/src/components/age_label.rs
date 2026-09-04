@@ -28,6 +28,7 @@ pub fn format_age(seconds: i64) -> String {
 pub struct AgeLabel {
     text: SharedString,
     tone: Tone,
+    mono: bool,
 }
 
 impl AgeLabel {
@@ -36,14 +37,19 @@ impl AgeLabel {
         Self {
             text: SharedString::from(format_age(seconds)),
             tone: Tone::Secondary,
+            mono: false,
         }
     }
 
     /// The "no age" rendering: an en dash, never `0`.
+    ///
+    /// A nullable *fact* is a different thing and uses [`super::FactValue::Null`], which draws
+    /// an em dash — the two are distinguishable on purpose.
     pub fn none() -> Self {
         Self {
             text: SharedString::new_static("\u{2013}"),
             tone: Tone::Muted,
+            mono: false,
         }
     }
 
@@ -52,19 +58,30 @@ impl AgeLabel {
         Self {
             text: text.into(),
             tone: Tone::Secondary,
+            mono: false,
         }
     }
 
-    /// Set the tone.
+    /// Set the tone. Lower it to [`Tone::Muted`] for an age derived from a stale fact (§2.6).
     pub fn tone(mut self, tone: Tone) -> Self {
         self.tone = tone;
+        self
+    }
+
+    /// Render in the data face, so a column of ages lines up digit for digit.
+    pub fn mono(mut self, mono: bool) -> Self {
+        self.mono = mono;
         self
     }
 }
 
 impl RenderOnce for AgeLabel {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        Text::ui(self.text).tone(self.tone)
+        if self.mono {
+            Text::data(self.text).tone(self.tone)
+        } else {
+            Text::ui(self.text).tone(self.tone)
+        }
     }
 }
 

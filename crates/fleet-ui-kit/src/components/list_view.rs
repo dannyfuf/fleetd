@@ -1,28 +1,119 @@
 //! `ListView` — a virtualized list of fixed-height rows with a cursor.
 //!
 //! Built on `gpui::uniform_list`, which is the right primitive for "one element per item at a
-//! known height". (It is **not** right for a terminal grid; see
-//! [`super::TerminalGrid`].)
+//! known height". (It is **not** right for a terminal grid; see [`super::TerminalGrid`].)
 //!
-//! Two invariants of §3.3 live here:
+//! Three invariants of §3.3 live here:
 //!
 //! * **Cursor stability.** Background events never re-sort, re-scroll or re-focus the list.
-//!   [`ListCursor`] therefore only ever moves on an explicit call, and
-//!   [`ListCursor::retain`] is how a view keeps the cursor on the same item across a data
-//!   refresh.
-//! * **Scrolloff 2.** The cursor never sits in the first or last two visible rows while there
-//!   is more list to show; [`ListCursor::scroll_target`] computes the index to scroll to.
+//!   [`ListCursor`] therefore only ever moves on an explicit call, and [`ListCursor::retain`]
+//!   is how a view keeps the cursor on the same item across a data refresh.
+//! * **Scrolloff 2.** The cursor never sits in the last two visible rows while there is more
+//!   list below it, nor in the first two while there is more above.
+//!   [`ListCursor::scroll_target`] computes the index to reveal and [`ListView::reveal`]
+//!   reveals it with [`gpui::ScrollStrategy::Nearest`], so the list scrolls by the minimum
+//!   amount instead of jumping the cursor to an edge.
+//! * **The parent owns the keys.** `j` / `k` / `gg` / `G` / `ctrl-d` / `ctrl-u` are gpui
+//!   actions ([`ListDown`] and friends) that the view binds and dispatches; the element never
+//!   listens for a key itself, because the same six motions drive lists that live in a pane,
+//!   in a dialog and in the palette.
+//!
+//! ```ignore
+//! // in the view's action handler, never in `render`:
+//! fn page_down(&mut self, _: &ListPageDown, _window: &mut Window, cx: &mut Context<Self>) {
+//!     let moving_down = self.cursor.motion(ListMotion::PageDown);
+//!     ListView::reveal(&self.scroll, &self.cursor, moving_down);
+//!     cx.notify();
+//! }
+//! ```
 
 use gpui::{
-    AnyElement, App, ElementId, Pixels, ScrollStrategy, UniformListScrollHandle, Window, div,
-    prelude::*, uniform_list,
+    AnyElement, App, ElementId, KeyBinding, Pixels, ScrollStrategy, UniformListScrollHandle,
+    Window, div, prelude::*, uniform_list,
 };
 use std::rc::Rc;
 
-use crate::theme::ActiveTheme;
+use crate::{components::SkeletonRows, theme::ActiveTheme};
+
+gpui::actions!(
+    fleet_list,
+    [
+        /// `j` / `↓`: move the cursor one row down.
+        ListDown,
+        /// `k` / `↑`: move the cursor one row up.
+        ListUp,
+        /// `gg`: move the cursor to the first row.
+        ListFirst,
+        /// `G`: move the cursor to the last row.
+        ListLast,
+        /// `ctrl-d`: move the cursor half a viewport down.
+        ListPageDown,
+        /// `ctrl-u`: move the cursor half a viewport up.
+        ListPageUp,
+    ]
+);
+
+/// The six motions a list cursor understands, one per action.
+///
+/// The enum exists so a view can route all six actions through one call site and get back the
+/// direction [`ListView::reveal`] needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListMotion {
+    /// `j`.
+    Down,
+    /// `k`.
+    Up,
+    /// `gg`.
+    First,
+    /// `G`.
+    Last,
+    /// `ctrl-d`.
+    PageDown,
+    /// `ctrl-u`.
+    PageUp,
+}
+
+impl ListMotion {
+    /// Whether this motion moves toward the end of the list, which decides on which side of the
+    /// cursor the scrolloff margin is kept.
+    pub fn moves_down(self) -> bool {
+        matches!(
+            self,
+            ListMotion::Down | ListMotion::Last | ListMotion::PageDown
+        )
+    }
+}
+
+/// The default bindings for the six list actions, in the given gpui key context.
+///
+/// `context` is a key-context predicate such as `Some("Hub > Worktrees")`; `None` binds them
+/// globally, which is only ever right in an example or a test bench. A list that lives **under
+/// a text field** must not use these: §4 of the design system requires `ctrl-n` / `ctrl-p`
+/// there, and [`super::FuzzyList::binds_jk`] states which case a list is in.
+pub fn list_key_bindings(context: Option<&str>) -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("j", ListDown, context),
+        KeyBinding::new("down", ListDown, context),
+        KeyBinding::new("k", ListUp, context),
+        KeyBinding::new("up", ListUp, context),
+        KeyBinding::new("g g", ListFirst, context),
+        KeyBinding::new("shift-g", ListLast, context),
+        KeyBinding::new("ctrl-d", ListPageDown, context),
+        KeyBinding::new("ctrl-u", ListPageUp, context),
+    ]
+}
 
 /// Row renderer: `(index, is_cursor, window, cx) -> element`.
 pub type RenderRow = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement>;
+
+/// The scrolloff every Fleet list uses (§3.3).
+pub const SCROLLOFF: usize = 2;
+
+/// How far `ctrl-d` / `ctrl-u` jump before the view has measured its viewport.
+pub const DEFAULT_PAGE: usize = 10;
+
+/// How many placeholder rows a cold load draws (§3.5: the PR list's cold fetch).
+pub const SKELETON_ROWS: usize = 6;
 
 /// A list cursor with `j`/`k`/`gg`/`G`/`ctrl-d`/`ctrl-u` semantics and scrolloff.
 ///
@@ -42,8 +133,8 @@ impl ListCursor {
         Self {
             index: 0,
             len,
-            scrolloff: 2,
-            page: 10,
+            scrolloff: SCROLLOFF,
+            page: DEFAULT_PAGE,
         }
     }
 
@@ -59,6 +150,12 @@ impl ListCursor {
         self
     }
 
+    /// Set the page from the number of rows the pane can show: `ctrl-d` is a **half** page, so
+    /// a 24-row viewport pages by 12. Call it when the pane is measured or resized.
+    pub fn set_page_from_visible(&mut self, visible_rows: usize) {
+        self.page = (visible_rows / 2).max(1);
+    }
+
     /// The current index. Always `< len`, or 0 when the list is empty.
     pub fn index(&self) -> usize {
         self.index
@@ -72,6 +169,16 @@ impl ListCursor {
     /// Whether the list is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// The scrolloff in effect.
+    pub fn scrolloff_rows(&self) -> usize {
+        self.scrolloff
+    }
+
+    /// How far one `ctrl-d` / `ctrl-u` jumps.
+    pub fn page_rows(&self) -> usize {
+        self.page
     }
 
     /// Move to an index, clamped.
@@ -109,11 +216,28 @@ impl ListCursor {
         self.index = self.index.saturating_sub(self.page);
     }
 
+    /// Apply one motion and return whether it moved **down**, which is what
+    /// [`ListView::reveal`] needs to know.
+    ///
+    /// This is the single call site a view needs for all six actions.
+    pub fn motion(&mut self, motion: ListMotion) -> bool {
+        match motion {
+            ListMotion::Down => self.down(),
+            ListMotion::Up => self.up(),
+            ListMotion::First => self.first(),
+            ListMotion::Last => self.last(),
+            ListMotion::PageDown => self.page_down(),
+            ListMotion::PageUp => self.page_up(),
+        }
+        motion.moves_down()
+    }
+
     /// Adopt a new length without moving the cursor off the item it was on.
     ///
-    /// `find_previous` receives the new length and returns where the previously selected item
-    /// went, if it is still present. This is the mechanism behind "a row that changes state
-    /// changes its glyph in place": the data can change under the cursor without moving it.
+    /// `find_previous` receives the previously selected index and returns where that item went
+    /// in the new data, if it is still present. This is the mechanism behind "a row that
+    /// changes state changes its glyph in place": the data can change under the cursor without
+    /// moving it.
     pub fn retain(&mut self, new_len: usize, find_previous: impl FnOnce(usize) -> Option<usize>) {
         let previous = self.index;
         self.len = new_len;
@@ -130,8 +254,9 @@ impl ListCursor {
 
     /// The index a scroll handle should be told to reveal, honouring the scrolloff.
     ///
-    /// Scrolling to `index + scrolloff` (clamped) keeps two rows of context below the cursor
-    /// when moving down, and `index - scrolloff` does the same above.
+    /// Revealing `index + scrolloff` when moving down keeps two rows of context below the
+    /// cursor; `index - scrolloff` does the same above. Both are clamped to the list, so the
+    /// margin collapses at the ends instead of refusing to scroll.
     pub fn scroll_target(&self, moving_down: bool) -> usize {
         if moving_down {
             (self.index + self.scrolloff).min(self.len.saturating_sub(1))
@@ -151,6 +276,8 @@ pub struct ListView {
     scroll: Option<UniformListScrollHandle>,
     render_row: RenderRow,
     empty: Option<AnyElement>,
+    loading: bool,
+    skeleton_rows: usize,
 }
 
 impl ListView {
@@ -171,6 +298,8 @@ impl ListView {
             scroll: None,
             render_row: Rc::new(render_row),
             empty: None,
+            loading: false,
+            skeleton_rows: SKELETON_ROWS,
         }
     }
 
@@ -180,14 +309,14 @@ impl ListView {
         self
     }
 
-    /// Override the row height. Only affects the empty-state box; `uniform_list` measures the
-    /// first rendered row itself.
+    /// Override the row height. Sizes the skeleton and the empty-state box too;
+    /// `uniform_list` measures the first rendered row itself.
     pub fn row_height(mut self, height: Pixels) -> Self {
         self.row_height = Some(height);
         self
     }
 
-    /// Track scrolling, so the view can call `scroll_to_item` after a cursor move.
+    /// Track scrolling, so the view can call [`ListView::reveal`] after a cursor move.
     pub fn track_scroll(mut self, handle: &UniformListScrollHandle) -> Self {
         self.scroll = Some(handle.clone());
         self
@@ -199,21 +328,48 @@ impl ListView {
         self
     }
 
-    /// Reveal `index` in `handle`, honouring the scrolloff of `cursor`.
+    /// Cold load: draw [`SkeletonRows`] instead of the list.
     ///
-    /// Call this from the action handler that moved the cursor, never from `render`.
+    /// **Cold only.** Everything in Fleet except a first PR fetch renders from `state.json`
+    /// immediately, and a skeleton where cached truth exists is a lie (§6.3).
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
+    }
+
+    /// How many placeholder rows the loading state draws. 6 by default.
+    pub fn skeleton_rows(mut self, rows: usize) -> Self {
+        self.skeleton_rows = rows;
+        self
+    }
+
+    /// Reveal the cursor in `handle`, honouring the scrolloff.
+    ///
+    /// Call this from the action handler that moved the cursor, never from `render`: scrolling
+    /// during layout is how a background refresh ends up moving the viewport.
+    /// [`gpui::ScrollStrategy::Nearest`] scrolls by the minimum amount, so a cursor that is
+    /// already inside the margin does not move the list at all.
     pub fn reveal(handle: &UniformListScrollHandle, cursor: &ListCursor, moving_down: bool) {
-        handle.scroll_to_item(cursor.scroll_target(moving_down), ScrollStrategy::Top);
+        handle.scroll_to_item(cursor.scroll_target(moving_down), ScrollStrategy::Nearest);
     }
 }
 
 impl RenderOnce for ListView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        if self.item_count == 0 {
-            let theme = cx.theme();
+        let theme = cx.theme();
+        let row_height = self.row_height.unwrap_or(theme.metrics.row_h);
+
+        if self.loading {
             return div()
                 .size_full()
-                .min_h(self.row_height.unwrap_or(theme.metrics.row_h))
+                .child(SkeletonRows::new(self.skeleton_rows).row_height(row_height))
+                .into_any_element();
+        }
+
+        if self.item_count == 0 {
+            return div()
+                .size_full()
+                .min_h(row_height)
                 .children(self.empty)
                 .into_any_element();
         }
@@ -236,7 +392,7 @@ impl RenderOnce for ListView {
 
 #[cfg(test)]
 mod tests {
-    use super::ListCursor;
+    use super::{ListCursor, ListMotion};
 
     #[test]
     fn moves_and_clamps() {
@@ -280,5 +436,29 @@ mod tests {
         assert_eq!(cursor.scroll_target(false), 8);
         cursor.set(19);
         assert_eq!(cursor.scroll_target(true), 19);
+        cursor.set(1);
+        assert_eq!(cursor.scroll_target(false), 0);
+    }
+
+    #[test]
+    fn motions_report_their_direction() {
+        let mut cursor = ListCursor::new(40).page(10);
+        assert!(cursor.motion(ListMotion::PageDown));
+        assert_eq!(cursor.index(), 10);
+        assert!(!cursor.motion(ListMotion::PageUp));
+        assert_eq!(cursor.index(), 0);
+        assert!(cursor.motion(ListMotion::Last));
+        assert_eq!(cursor.index(), 39);
+        assert!(!cursor.motion(ListMotion::First));
+        assert_eq!(cursor.index(), 0);
+    }
+
+    #[test]
+    fn ctrl_d_is_half_a_viewport() {
+        let mut cursor = ListCursor::new(100);
+        cursor.set_page_from_visible(24);
+        assert_eq!(cursor.page_rows(), 12);
+        cursor.set_page_from_visible(1);
+        assert_eq!(cursor.page_rows(), 1);
     }
 }

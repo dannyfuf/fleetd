@@ -150,6 +150,16 @@ impl FactList {
         }
     }
 
+    /// How many facts are reasons to stop.
+    pub fn risk_count(&self) -> usize {
+        self.facts.iter().filter(|fact| fact.risk).count()
+    }
+
+    /// How many decisive facts could not be determined. Any of them forces `Y`.
+    pub fn unknown_count(&self) -> usize {
+        self.facts.iter().filter(|fact| fact.unknown).count()
+    }
+
     /// How many facts there are.
     pub fn len(&self) -> usize {
         self.facts.len()
@@ -183,8 +193,22 @@ impl RenderOnce for FactList {
             .flex()
             .flex_col()
             .gap(gap)
+            // The dry run is still running: say so above the facts it will replace, and leave
+            // the facts already known on screen (§3.4 — never blank what is already true).
             .when(self.loading, |el| {
-                el.child(Text::ui("\u{2026}").faint())
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme.space.sm)
+                        .child(
+                            Icon::Hourglass
+                                .el()
+                                .size(IconSize::Medium)
+                                .color(theme.colors.text_muted),
+                        )
+                        .child(Text::ui("checking\u{2026}").faint()),
+                )
             })
             .children(rows)
     }

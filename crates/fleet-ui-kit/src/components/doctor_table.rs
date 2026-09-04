@@ -5,7 +5,18 @@
 
 use gpui::{App, Pixels, SharedString, Window, div, prelude::*, px};
 
-use crate::{text::Text, theme::ActiveTheme, tone::Tone};
+use crate::{
+    icons::{Icon, IconSize},
+    text::Text,
+    theme::ActiveTheme,
+    tone::Tone,
+};
+
+/// Width of the `CHECK` column, in pixels.
+pub const CHECK_WIDTH: f32 = 120.0;
+
+/// Width of the `STATUS` column, in pixels.
+pub const STATUS_WIDTH: f32 = 64.0;
 
 /// The outcome of one doctor check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,11 +40,24 @@ impl DoctorStatus {
     }
 
     /// The tone.
+    ///
+    /// `ok` is **secondary**, never green: good news does not get a hue (§1.2, applied at the
+    /// color level). Only the two rows a user has to act on carry one.
     pub fn tone(self) -> Tone {
         match self {
             DoctorStatus::Ok => Tone::Secondary,
             DoctorStatus::Warn => Tone::Warning,
             DoctorStatus::Fail => Tone::Danger,
+        }
+    }
+
+    /// The glyph, for the two statuses that have one. `ok` has none, for the same reason it has
+    /// no hue.
+    pub fn icon(self) -> Option<Icon> {
+        match self {
+            DoctorStatus::Ok => None,
+            DoctorStatus::Warn => Some(Icon::TriangleAlert),
+            DoctorStatus::Fail => Some(Icon::CircleX),
         }
     }
 }
@@ -77,8 +101,8 @@ impl DoctorTable {
     pub fn new(rows: impl IntoIterator<Item = DoctorRow>) -> Self {
         Self {
             rows: rows.into_iter().collect(),
-            check_width: px(120.0),
-            status_width: px(64.0),
+            check_width: px(CHECK_WIDTH),
+            status_width: px(STATUS_WIDTH),
         }
     }
 
@@ -103,6 +127,7 @@ impl RenderOnce for DoctorTable {
         let header = div()
             .flex()
             .items_center()
+            .w_full()
             .h(theme.metrics.section_header_h)
             .child(Text::label("check").w(check_w))
             .child(Text::label("status").w(status_w))
@@ -115,13 +140,36 @@ impl RenderOnce for DoctorTable {
             .child(header)
             .children(self.rows.into_iter().map(|row| {
                 let tone = row.status.tone();
+                let color = tone.color(theme);
                 div()
                     .flex()
                     .items_center()
+                    .w_full()
                     .h(theme.metrics.row_h)
                     .child(Text::data(row.check).w(check_w))
-                    .child(Text::data(row.status.word()).tone(tone).w(status_w))
-                    .child(Text::data(row.detail).tone(tone).ellipsize())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space.xs)
+                            .w(status_w)
+                            .flex_none()
+                            .children(
+                                row.status
+                                    .icon()
+                                    .map(|icon| icon.el().size(IconSize::Small).color(color)),
+                            )
+                            .child(Text::data(row.status.word()).tone(tone)),
+                    )
+                    // The detail line is the daemon's, verbatim; it ellipsizes rather than
+                    // wrapping so the table stays one row per check.
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Text::data(row.detail).tone(tone).ellipsize()),
+                    )
             }))
     }
 }
