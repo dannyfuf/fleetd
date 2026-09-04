@@ -6,3 +6,9 @@
 //! styling, never a raw color (`docs/DESIGN-SYSTEM.md`).
 //!
 //! Add one module per view and re-export it here.
+
+pub mod doctor_view;
+pub mod first_run;
+pub mod job_ticker;
+pub mod jobs_panel;
+pub mod sticky_error;
