@@ -6,3 +6,9 @@
 //! styling, never a raw color (`docs/DESIGN-SYSTEM.md`).
 //!
 //! Add one module per view and re-export it here.
+
+pub mod detail_panel;
+pub mod hub_context_bar;
+pub mod prs_screen;
+pub mod repos_rail;
+pub mod worktrees_list;
