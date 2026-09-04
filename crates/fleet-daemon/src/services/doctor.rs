@@ -1,0 +1,1 @@
+//! Environment and installation diagnostics.

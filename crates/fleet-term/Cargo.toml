@@ -1,0 +1,19 @@
+[package]
+name = "fleet-term"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["ghostty"]
+ghostty = []
+
+[dependencies]
+async-channel.workspace = true
+fleet-core = { path = "../fleet-core" }
+fleet-proto = { path = "../fleet-proto" }
+portable-pty.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# libghostty-vt will be added after the separate integration spike is validated.

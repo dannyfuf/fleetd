@@ -1,0 +1,20 @@
+[package]
+name = "fleet-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fleet"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+fleet-cli = { path = "../fleet-cli" }
+fleet-client = { path = "../fleet-client" }
+fleet-core = { path = "../fleet-core" }
+fleet-proto = { path = "../fleet-proto" }
+fleet-ui-kit = { path = "../fleet-ui-kit" }
+gpui.workspace = true
+gpui_platform.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "fleet-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fleetd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+fleet-core = { path = "../fleet-core" }
+fleet-proto = { path = "../fleet-proto" }
+fleet-term = { path = "../fleet-term" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
