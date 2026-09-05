@@ -11,6 +11,7 @@ use fleet_proto::{
 };
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
 use tokio::net::UnixStream;
+use tokio::sync::oneshot;
 use tokio_util::{codec::Framed, sync::CancellationToken};
 
 use crate::{DaemonError, DaemonResult, server::broadcast::BroadcastBus, services::Services};
@@ -100,6 +101,9 @@ impl Connection {
         let mut events = self.events.subscribe();
         let mut frames = self.services.sessions.subscribe_frames();
         let mut pending = FuturesUnordered::<DispatchFuture>::new();
+        // Service requests may complete out of order, but terminal input is a byte stream. Chain
+        // terminal requests in socket-read order while leaving unrelated daemon work concurrent.
+        let mut terminal_order_tail: Option<oneshot::Receiver<()>> = None;
         let result = loop {
             tokio::select! {
                 () = self.shutdown.cancelled() => break Ok(()),
@@ -134,6 +138,12 @@ impl Connection {
                             send_response(&mut framed, Response { id, result: Ok(ResponseBody::Ack) }).await?;
                         }
                         body => {
+                            let terminal_order = pty_input_request_is_ordered(&body).then(|| {
+                                let previous = terminal_order_tail.take();
+                                let (release, next) = oneshot::channel();
+                                terminal_order_tail = Some(next);
+                                (previous, release)
+                            });
                             let services = Arc::clone(&self.services);
                             let resize_existing = matches!(
                                 &body,
@@ -146,6 +156,14 @@ impl Connection {
                                     if !attached.contains(terminal)
                             );
                             pending.push(Box::pin(async move {
+                                let release_terminal_order = if let Some((previous, release)) = terminal_order {
+                                    if let Some(previous) = previous {
+                                        let _ = previous.await;
+                                    }
+                                    Some(release)
+                                } else {
+                                    None
+                                };
                                 let result = match body {
                                     RequestBody::AttachTerminal { terminal, cols, rows }
                                         if resize_existing =>
@@ -158,6 +176,9 @@ impl Connection {
                                     }
                                     body => services.dispatch(body).await,
                                 };
+                                if let Some(release) = release_terminal_order {
+                                    let _ = release.send(());
+                                }
                                 CompletedRequest { id, result, effects, attachment, shutdown_request }
                             }));
                         }
@@ -229,6 +250,17 @@ impl Connection {
 }
 
 type DispatchFuture = Pin<Box<dyn Future<Output = CompletedRequest> + Send>>;
+
+/// Requests whose effects append to the PTY input byte stream.
+fn pty_input_request_is_ordered(body: &RequestBody) -> bool {
+    matches!(
+        body,
+        RequestBody::TerminalInput { .. }
+            | RequestBody::TerminalKey { .. }
+            | RequestBody::TerminalMouse { .. }
+            | RequestBody::PasteTerminal { .. }
+    )
+}
 
 struct CompletedRequest {
     id: u64,

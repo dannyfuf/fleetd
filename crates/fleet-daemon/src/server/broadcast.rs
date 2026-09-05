@@ -17,6 +17,7 @@ struct BroadcastInner {
     snapshot_pending: AtomicBool,
     snapshot_revision: AtomicU64,
     services: Mutex<Weak<Services>>,
+    runtime: Mutex<Option<tokio::runtime::Handle>>,
 }
 
 /// Cloneable daemon-wide event fan-out bus.
@@ -36,6 +37,7 @@ impl BroadcastBus {
                 snapshot_pending: AtomicBool::new(false),
                 snapshot_revision: AtomicU64::new(0),
                 services: Mutex::new(Weak::new()),
+                runtime: Mutex::new(None),
             }),
         }
     }
@@ -57,6 +59,13 @@ impl BroadcastBus {
             .services
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = services;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            *self
+                .inner
+                .runtime
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
+        }
     }
 
     /// Requests a snapshot from the attached daemon facade, when available.
@@ -83,8 +92,24 @@ impl BroadcastBus {
         {
             return;
         }
+        // Terminal metadata is reported by a blocking PTY-forwarder thread. Preserve the daemon
+        // runtime when services are attached so that thread can request a coalesced snapshot
+        // without calling `tokio::spawn` outside a reactor (which both panicked and left
+        // `snapshot_pending` stuck true forever).
+        let runtime = tokio::runtime::Handle::try_current().ok().or_else(|| {
+            self.inner
+                .runtime
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
+        let Some(runtime) = runtime else {
+            self.inner.snapshot_pending.store(false, Ordering::Release);
+            tracing::warn!("snapshot requested before a Tokio runtime was attached");
+            return;
+        };
         let events = self.clone();
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             tokio::time::sleep(SNAPSHOT_COALESCE_WINDOW).await;
             let assembled_revision = events.inner.snapshot_revision.load(Ordering::Acquire);
             match services.snapshot().await {

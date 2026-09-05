@@ -158,6 +158,24 @@ impl Client {
         }
     }
 
+    /// Enqueues a raw protocol request without waiting for its response.
+    ///
+    /// Awaiting this method preserves the caller's request order through the connection actor.
+    /// It is intended for event-backed mutations whose result is observed through daemon events.
+    pub async fn request_background(&self, body: RequestBody) -> Result<(), ProtoError> {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let enqueue_deadline = Instant::now() + REQUEST_TIMEOUT;
+        let command = Command {
+            request: Request { id, body },
+            response: None,
+            expires_at: Some(enqueue_deadline),
+        };
+        timeout_at(enqueue_deadline, self.inner.commands.send(command))
+            .await
+            .map_err(|_| transport_error("Fleet daemon request timed out"))?
+            .map_err(|_| transport_error("Fleet daemon connection is closed"))
+    }
+
     /// Returns a receiver for all subscribed daemon events.
     #[must_use]
     pub fn events(&self) -> broadcast::Receiver<Event> {

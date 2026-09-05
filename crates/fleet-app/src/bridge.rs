@@ -323,7 +323,22 @@ async fn run(home: &Path, commands: &Receiver<Command>, events: &Sender<BridgeEv
                 Ok(Command::Request { body, reply }) => {
                     // With no link this answers `offline` immediately, which is what lets a
                     // caller awaiting its reply make progress while the daemon is down.
-                    dispatch(link.as_ref().map(|link| link.client.clone()), *body, reply);
+                    match reply {
+                        Some(reply) => dispatch(
+                            link.as_ref().map(|link| link.client.clone()),
+                            *body,
+                            reply,
+                        ),
+                        None => {
+                            // Fire-and-forget mutations still have an ordering contract. In
+                            // particular, one TerminalInput request is one key press; spawning
+                            // each request before it reaches the client's FIFO can scramble a
+                            // fast typist's bytes. Await only the enqueue, never the response.
+                            if let Some(client) = link.as_ref().map(|link| link.client.clone()) {
+                                let _ignored = client.request_background(*body).await;
+                            }
+                        }
+                    }
                 }
                 Ok(Command::Reconnect) => {
                     if link.is_none() {
@@ -408,19 +423,15 @@ impl Failure {
 fn dispatch(
     client: Option<Client>,
     body: RequestBody,
-    reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
+    reply: Sender<Result<ResponseBody, ProtoError>>,
 ) {
     let Some(client) = client else {
-        if let Some(reply) = reply {
-            let _ignored = reply.try_send(Err(offline("the Fleet daemon is not connected")));
-        }
+        let _ignored = reply.try_send(Err(offline("the Fleet daemon is not connected")));
         return;
     };
     tokio::spawn(async move {
         let result = client.request(body).await;
-        if let Some(reply) = reply {
-            let _ignored = reply.send(result).await;
-        }
+        let _ignored = reply.send(result).await;
     });
 }
 

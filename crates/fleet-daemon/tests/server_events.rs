@@ -39,6 +39,25 @@ async fn server_snapshot_requests_are_coalesced() {
 }
 
 #[tokio::test]
+async fn snapshot_requests_from_terminal_threads_use_the_daemon_runtime() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let home = temp.path().join("fleet");
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    let _services = services_with_events(&home, events.clone());
+
+    std::thread::spawn(move || events.request_snapshot_current())
+        .join()
+        .unwrap_or_else(|_| panic!("snapshot request thread panicked"));
+
+    let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap_or_else(|_| panic!("snapshot event timed out"))
+        .unwrap_or_else(|error| panic!("snapshot bus closed: {error}"));
+    assert!(matches!(event, Event::SnapshotChanged(_)));
+}
+
+#[tokio::test]
 async fn server_pid_guard_rejects_a_second_instance_even_without_socket_path() {
     let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
     let home = temp.path().join("fleet");
@@ -64,6 +83,18 @@ async fn server_pid_guard_rejects_a_second_instance_even_without_socket_path() {
 }
 
 fn services(home: &std::path::Path) -> Arc<Services> {
+    let (config, state, jobs, adapters) = service_parts(home);
+    Arc::new(Services::new(home, config, state, jobs, adapters))
+}
+
+fn services_with_events(home: &std::path::Path, events: BroadcastBus) -> Arc<Services> {
+    let (config, state, jobs, adapters) = service_parts(home);
+    Services::new_with_events(home, config, state, jobs, adapters, events)
+}
+
+fn service_parts(
+    home: &std::path::Path,
+) -> (Arc<ConfigStore>, Arc<StateStore>, Arc<JobManager>, Adapters) {
     let files = Arc::new(RealFiles::new(
         home.join("trash"),
         [home.join("repos"), home.join("worktrees")],
@@ -71,11 +102,6 @@ fn services(home: &std::path::Path) -> Arc<Services> {
     let config = Arc::new(ConfigStore::new(home, files.clone()));
     let state = Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock)));
     let jobs = Arc::new(JobManager::new(home));
-    Arc::new(Services::new(
-        home,
-        config,
-        state,
-        jobs,
-        Adapters::system(files),
-    ))
+    let adapters = Adapters::system(files);
+    (config, state, jobs, adapters)
 }
