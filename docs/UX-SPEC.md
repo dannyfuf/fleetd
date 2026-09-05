@@ -1620,14 +1620,20 @@ trimming adds `older output trimmed` above the log. Each watch retains at most
 
 | Workspace prefix | Action |
 | --- | --- |
+| `^s N` | Select the next watch in this session's start order, wrapping to the first; show the pane if hidden. |
+| `^s P` | Select the previous watch in this session's start order, wrapping to the last; show the pane if hidden. |
 | `^s v` | Toggle the pane locally. With no watches, toast `no subagent watches`. Repeated toggles never cycle tabs. |
 | `^s V` / mouse `×` | Dismiss the selected completed watch and select the next tab, wrapping at the end. If it was the last, close the pane. For a running watch, hide locally and toast `watch still running; pane hidden`. |
 
-Hiding persists per session across navigation and reconnect until a **new**
+`^s N`/`^s P` toast `no subagent watches` when the session has none. With one watch,
+selection is unchanged without a toast; the pane is shown if hidden. Lowercase
+`n`/`p` remain terminal-tab navigation. The `?` help overlay lists both watch keys.
+
+Hiding persists per session across navigation and reconnect until explicitly shown or a **new**
 WatchStarted event arrives. Every new start reopens that session's pane and selects
 the new watch. Duplicate start events, output, completion, and ordinary catch-up
 responses do not undo a user's hide or selection. First discovery selects the
-newest retained watch. There are no watch cycling keys beyond mouse tab selection.
+newest retained watch. Mouse tab selection and `^s N`/`^s P` share the same session-local selection.
 
 The pane never sends input and never takes keyboard focus from the terminal.
 Closing/hiding a pane never kills a process. Subscribe before listing/tailing;
