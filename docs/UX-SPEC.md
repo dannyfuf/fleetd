@@ -109,7 +109,13 @@ panel is inserted at the right; the repos rail never moves. Below **1120 px** to
 detail panel becomes a right-edge overlay (320 px) so the list never drops below **72 ch**.
 
 The Workspace replaces the rail + list + detail region entirely (full-bleed terminal) and keeps
-the context bar and the status bar at the same pixel positions — same chrome, same saccade.
+the context bar and the status bar at the same pixel positions — same chrome, same saccade. A
+**native tab** (§3.6) replaces the terminal grid with a Fleet-drawn pane in exactly that region
+and changes nothing above or below it: there is one context bar, one status bar and one mode
+word in the window, and they are the shell's. A pane that draws its own window chrome would put
+two status bars on screen, which is why `crates/fleet-lazygit` has an embedded render path with
+no `AppFrame`. The pane's own one-row key-hint bar is **not** window chrome — it is the pane's
+content, like a list header — and it stays.
 
 ### 2.2 Persistent chrome
 
@@ -654,7 +660,9 @@ what is running elsewhere.*
 | Keep-alive icon on a tab | `bot` / `server` / `file-pen` | inside the tab, after the name | marks the tabs `sleep` will preserve, before you press `^s x` | §4 keep-alive rules |
 | Exited tab | label at `fg.faint` + `circle-x` 12 px + exit code | — | a dead command must not look alive | `Terminal.status` |
 | `+` tab | `plus` glyph | end of the strip | mouse parity for `ctrl-s c` | — |
+| Native tab | `git-branch` glyph between the index and the name | inside the tab | the tab does not type what you press into a shell; the glyph is the only thing that says so before you try | `Terminal.kind = Native` |
 | Terminal area | painted cell grid, 8 px padding, no border | fills | maximum rows; chrome is ≤ 86 px total | — |
+| Native pane | the Fleet-drawn view for this tab, filling the terminal area exactly | replaces the grid | the tab is a tab: same header, same strip, same bars, same pixel positions | `Terminal.kind = Native`, `Worktree.path` |
 | Scroll pill | `SCROLL <offset>/<scrollback_len>`, + a second line `v select · y yank · Esc exit` while selecting; 176 × 22 px, `bg.raised`, amber left bar | overlay, top-right **inside** the terminal area, 12 px inset | during scroll the eyes are on content; top-right never covers the prompt and never shifts the grid | `viewport{scrollback_len, offset}` |
 | Prefix hint | `^S` pill + the 6 most-used prefix keys, mono 11 px, `fg.faint`, on `bg.raised` | bottom-left inside the terminal area, **delayed 400 ms** after `ctrl-s` | the expert types the second key in < 200 ms and never sees it; the returning user gets it exactly when they hesitate — 0 px and 0 frames of permanent cost | KEYMAP one-shot Prefix mode |
 | Exit strip | `⚠ process exited (<code>) · ^s r restart · ^s x close · ^s c new` | bottom, 22 px, only when the tab's command exited | tmux's `remain-on-exit` made this recoverable; Fleet must not silently swallow a crashed dev server | §4 `remain-on-exit on` |
@@ -682,6 +690,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the header reads `waking…` for ≤ 1.5 s |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
+| Native tab selected | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard" |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and a 26 px amber banner replaces the header — §3.12 |
 
@@ -689,7 +698,14 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 `zap`, `bot`, `sparkles` (opencode), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
 `chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
 
-**Keyboard:** all keys → PTY; `ctrl-s` then `ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
+The default third tab (`lg`) is a native tab: Fleet's own git UI (`crates/fleet-lazygit`) drawn
+in the terminal area, created the first time the tab is selected and kept alive per worktree
+until the daemon stops listing that worktree. Its own keys are documented in
+`crates/fleet-lazygit/README.md`; `q` inside it selects the previous tab rather than quitting
+Fleet. **[D-8] still holds**: the pane's key-hint bar lives *inside* the pane, which is its own
+key context, so its bare keys are not "drawn over Terminal mode".
+
+**Keyboard:** all keys → PTY (or → the native pane); `ctrl-s` then `ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·

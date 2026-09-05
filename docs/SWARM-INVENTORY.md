@@ -156,7 +156,7 @@ Missing fields deep-merge with `defaultConfig(SWARM_HOME)`. `~`/`~/` expansion a
 | `agent` | `"claude" \| "opencode"` | `"claude"` | Selected agent. |
 | `agentCommands.claude` | nonempty string | `"claude"` | Full shell command typed into pane. |
 | `agentCommands.opencode` | nonempty string | `"opencode"` | Same. Entries default independently. |
-| `windows` | `{name:nonempty string,command:nonempty string}[]` | `[ {"name":"nvim","command":"nvim ."}, {"name":"cc","command":"{agent}"}, {"name":"lg","command":"lazygit"} ]` | Ordered windows; `{agent}` replaced by selected configured command. Schema allows `[]`, mount does not. |
+| `windows` | `{name:nonempty string,command:nonempty string}[]` | `[ {"name":"nvim","command":"nvim ."}, {"name":"cc","command":"{agent}"}, {"name":"lg","command":"fleet://lazygit"} ]` | Ordered windows; `{agent}` replaced by selected configured command. A `fleet://` command names a Fleet-provided surface instead of a program (only `fleet://lazygit` exists; an unknown one is a validation error). **Fleet divergence**: the third default is the native git pane, not the `lazygit` binary; an imported swarm `lazygit` window is upgraded to it, while a `lazygit` written into Fleet's own `config.json` is left alone. Schema allows `[]`, mount does not. |
 | `sleep.enabled` | boolean | `true` | False keeps every window. |
 | `sleep.keepAlive` | rules below | four defaults below | Window-preservation rules. |
 | `sleep.keepAlive[].id` | string | below | Stable settings id. |
@@ -388,7 +388,7 @@ TUI-only: context create/update(service only)/switch/delete cascade; repo search
 | --- | --- |
 | 0 `nvim` | `nvim .` |
 | 1 `cc` | `{agent}` → selected `agentCommands[agent]` (default `claude`) |
-| 2 `lg` | `lazygit` |
+| 2 `lg` | `lazygit` (**Fleet**: `fleet://lazygit`, a native pane with no PTY — see `docs/ARCHITECTURE.md` "Native tabs"; swarm's `lazygit` is upgraded on import) |
 
 Mount creates first window/session, types command, appends only missing **names**, swaps named windows into configured order, selects original minimum index. Extra or wrong-command windows remain.
 

@@ -11,7 +11,7 @@
 use gpui::{Action, App, KeyBinding};
 
 use crate::actions::{
-    branches, commitfiles, commits, confirm, conflict, diff, files, global, help, list, menu,
+    branches, commitfiles, commits, conflict, diff, files, global, lg_confirm, lg_help, list, menu,
     prompt, remotes, staging, stash, subcommits, tags,
 };
 
@@ -205,54 +205,54 @@ key_table! {
     "h",            "Lazygit > Panels > Conflict" => conflict::PrevSection;
 
     // -------------------------------------------------------------- Confirmation dialog
-    "enter",        "Lazygit > Dialog > Confirm" => confirm::Accept;
-    "y",            "Lazygit > Dialog > Confirm" => confirm::Accept;
-    "escape",       "Lazygit > Dialog > Confirm" => confirm::Cancel;
-    "n",            "Lazygit > Dialog > Confirm" => confirm::Cancel;
+    "enter",        "Lazygit > LgDialog > LgConfirm" => lg_confirm::Accept;
+    "y",            "Lazygit > LgDialog > LgConfirm" => lg_confirm::Accept;
+    "escape",       "Lazygit > LgDialog > LgConfirm" => lg_confirm::Cancel;
+    "n",            "Lazygit > LgDialog > LgConfirm" => lg_confirm::Cancel;
 
     // -------------------------------------------------------------- Text prompt (no bare keys)
-    "enter",        "Lazygit > Dialog > Prompt" => prompt::Accept;
-    "cmd-enter",    "Lazygit > Dialog > Prompt" => prompt::Submit;
-    "ctrl-enter",   "Lazygit > Dialog > Prompt" => prompt::Submit;
-    "escape",       "Lazygit > Dialog > Prompt" => prompt::Cancel;
-    "backspace",    "Lazygit > Dialog > Prompt" => prompt::Backspace;
-    "ctrl-w",       "Lazygit > Dialog > Prompt" => prompt::DeleteWord;
-    "ctrl-u",       "Lazygit > Dialog > Prompt" => prompt::DeleteToStart;
-    "left",         "Lazygit > Dialog > Prompt" => prompt::Left;
-    "right",        "Lazygit > Dialog > Prompt" => prompt::Right;
-    "ctrl-a",       "Lazygit > Dialog > Prompt" => prompt::Home;
-    "ctrl-e",       "Lazygit > Dialog > Prompt" => prompt::End;
-    "cmd-v",        "Lazygit > Dialog > Prompt" => prompt::Paste;
-    "ctrl-v",       "Lazygit > Dialog > Prompt" => prompt::Paste;
+    "enter",        "Lazygit > LgDialog > Prompt" => prompt::Accept;
+    "cmd-enter",    "Lazygit > LgDialog > Prompt" => prompt::Submit;
+    "ctrl-enter",   "Lazygit > LgDialog > Prompt" => prompt::Submit;
+    "escape",       "Lazygit > LgDialog > Prompt" => prompt::Cancel;
+    "backspace",    "Lazygit > LgDialog > Prompt" => prompt::Backspace;
+    "ctrl-w",       "Lazygit > LgDialog > Prompt" => prompt::DeleteWord;
+    "ctrl-u",       "Lazygit > LgDialog > Prompt" => prompt::DeleteToStart;
+    "left",         "Lazygit > LgDialog > Prompt" => prompt::Left;
+    "right",        "Lazygit > LgDialog > Prompt" => prompt::Right;
+    "ctrl-a",       "Lazygit > LgDialog > Prompt" => prompt::Home;
+    "ctrl-e",       "Lazygit > LgDialog > Prompt" => prompt::End;
+    "cmd-v",        "Lazygit > LgDialog > Prompt" => prompt::Paste;
+    "ctrl-v",       "Lazygit > LgDialog > Prompt" => prompt::Paste;
 
     // -------------------------------------------------------------- Menu
-    "enter",        "Lazygit > Dialog > Menu" => menu::Accept;
-    "escape",       "Lazygit > Dialog > Menu" => menu::Cancel;
-    "j",            "Lazygit > Dialog > Menu" => menu::Down;
-    "down",         "Lazygit > Dialog > Menu" => menu::Down;
-    "k",            "Lazygit > Dialog > Menu" => menu::Up;
-    "up",           "Lazygit > Dialog > Menu" => menu::Up;
-    "/",            "Lazygit > Dialog > Menu" => menu::StartFilter;
+    "enter",        "Lazygit > LgDialog > Menu" => menu::Accept;
+    "escape",       "Lazygit > LgDialog > Menu" => menu::Cancel;
+    "j",            "Lazygit > LgDialog > Menu" => menu::Down;
+    "down",         "Lazygit > LgDialog > Menu" => menu::Down;
+    "k",            "Lazygit > LgDialog > Menu" => menu::Up;
+    "up",           "Lazygit > LgDialog > Menu" => menu::Up;
+    "/",            "Lazygit > LgDialog > Menu" => menu::StartFilter;
 
     // -------------------------------------------------------------- Menu, filtering (no bare keys)
-    "enter",        "Lazygit > Dialog > MenuFilter" => menu::Accept;
-    "escape",       "Lazygit > Dialog > MenuFilter" => menu::Cancel;
-    "down",         "Lazygit > Dialog > MenuFilter" => menu::Down;
-    "up",           "Lazygit > Dialog > MenuFilter" => menu::Up;
-    "ctrl-n",       "Lazygit > Dialog > MenuFilter" => menu::Down;
-    "ctrl-p",       "Lazygit > Dialog > MenuFilter" => menu::Up;
-    "backspace",    "Lazygit > Dialog > MenuFilter" => prompt::Backspace;
-    "ctrl-u",       "Lazygit > Dialog > MenuFilter" => prompt::DeleteToStart;
-    "ctrl-w",       "Lazygit > Dialog > MenuFilter" => prompt::DeleteWord;
+    "enter",        "Lazygit > LgDialog > MenuFilter" => menu::Accept;
+    "escape",       "Lazygit > LgDialog > MenuFilter" => menu::Cancel;
+    "down",         "Lazygit > LgDialog > MenuFilter" => menu::Down;
+    "up",           "Lazygit > LgDialog > MenuFilter" => menu::Up;
+    "ctrl-n",       "Lazygit > LgDialog > MenuFilter" => menu::Down;
+    "ctrl-p",       "Lazygit > LgDialog > MenuFilter" => menu::Up;
+    "backspace",    "Lazygit > LgDialog > MenuFilter" => prompt::Backspace;
+    "ctrl-u",       "Lazygit > LgDialog > MenuFilter" => prompt::DeleteToStart;
+    "ctrl-w",       "Lazygit > LgDialog > MenuFilter" => prompt::DeleteWord;
 
     // -------------------------------------------------------------- Help
-    "escape",       "Lazygit > Dialog > Help" => help::Close;
-    "q",            "Lazygit > Dialog > Help" => help::Close;
-    "?",            "Lazygit > Dialog > Help" => help::Close;
-    "j",            "Lazygit > Dialog > Help" => help::Down;
-    "down",         "Lazygit > Dialog > Help" => help::Down;
-    "k",            "Lazygit > Dialog > Help" => help::Up;
-    "up",           "Lazygit > Dialog > Help" => help::Up;
+    "escape",       "Lazygit > LgDialog > LgHelp" => lg_help::Close;
+    "q",            "Lazygit > LgDialog > LgHelp" => lg_help::Close;
+    "?",            "Lazygit > LgDialog > LgHelp" => lg_help::Close;
+    "j",            "Lazygit > LgDialog > LgHelp" => lg_help::Down;
+    "down",         "Lazygit > LgDialog > LgHelp" => lg_help::Down;
+    "k",            "Lazygit > LgDialog > LgHelp" => lg_help::Up;
+    "up",           "Lazygit > LgDialog > LgHelp" => lg_help::Up;
 }
 
 /// Registers the whole table with the app.

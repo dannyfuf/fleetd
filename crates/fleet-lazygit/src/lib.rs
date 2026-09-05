@@ -65,6 +65,15 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
                 cx.new(|cx| root::Lazygit::new(path, cx))
             }) {
                 Ok(window) => {
+                    // `q` no longer quits the process by itself: the view only reports that it
+                    // wants to leave, and the standalone binary is what decides that means
+                    // exiting. An embedder maps the same event onto closing its pane.
+                    if let Ok(view) = window.update(cx, |_view, _window, cx| cx.entity()) {
+                        cx.subscribe(&view, |_view, event, cx| match event {
+                            root::LazygitEvent::Quit => cx.quit(),
+                        })
+                        .detach();
+                    }
                     let _ignored = window.update(cx, |view, window, cx| {
                         window.activate_window();
                         window.focus(&view.focus_handle(cx), cx);

@@ -17,7 +17,8 @@ this file; where the two disagree, this file wins.
 | --- | --- | --- | --- |
 | Normal | `Hub` / `Hub > Repos` / `Hub > Worktrees` / `Hub > Prs` | app start, `ctrl-s s` from a terminal, `Esc` from dialogs | opening a session |
 | Terminal | `Workspace > Terminal` | opening a worktree/agent session, `Enter` on a session tab | `ctrl-s` (prefix) |
-| Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal | any key (consumed) or `Esc` |
+| Native | `Workspace > Native` | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`) | `ctrl-s` (prefix), or selecting a PTY tab |
+| Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal or Native | any key (consumed) or `Esc` |
 | Scroll | `Workspace > Scroll` | `ctrl-s [` | `Esc`, `q`, `i` |
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
 | Palette | `Palette` | `:` | `Esc`, `Enter` |
@@ -153,6 +154,25 @@ one escape key, `ctrl-s`. Affordances drawn over the grid are written `^s r`, `^
 | `v` | start selection, `y` yank selection, `Esc` clear |
 | `/` then text, `n` / `N` | search scrollback (may land after v1; keep the binding reserved) |
 | `q`, `i`, `Esc` | back to Terminal mode (viewport snaps to bottom) |
+
+## Workspace (Native mode)
+
+The default third tab (`lg`) is not a terminal: it is Fleet's own git pane
+(`crates/fleet-lazygit`) rendered inside the tab. `Workspace > Native` binds exactly what
+`Workspace > Terminal` binds — `ctrl-s`, and nothing else — so every other key belongs to the
+pane, whose own key table lives in `crates/fleet-lazygit/README.md`. The full context chain is
+`Fleet > Workspace > Native > Lazygit > …`, and the pane's own context words are prefixed `Lg`
+(`LgDialog`, `LgConfirm`, `LgHelp`) so they cannot satisfy Fleet's `Dialog`, `Dialog > Confirm`
+or `Dialog > Help` predicates.
+
+Two prefix keys behave differently over a native tab, because there is no process behind it:
+
+| Key | Over a native tab |
+| --- | --- |
+| `ctrl-s [` | no scrollback; a toast says so |
+| `ctrl-s r` | nothing to restart |
+
+`q` inside the pane leaves the tab (it selects the previous one) instead of quitting Fleet.
 
 Scroll mode is suppressed while an alt-screen app is running: `ctrl-s [` then shows the toast
 `no scrollback in alt-screen`.

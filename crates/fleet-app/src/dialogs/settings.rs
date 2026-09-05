@@ -401,9 +401,17 @@ pub fn rows(state: &SettingsState, app: &AppState) -> Vec<SettingRow> {
             .iter()
             .enumerate()
             .map(|(index, window)| {
+                // A reserved `fleet://` command is not a program the user could run, so the
+                // row says what it *is* instead of repeating a URL nobody can type into a
+                // shell. The raw value is still one `E` away in `config.json`.
+                let command = if fleet_core::config::is_native_command(&window.command) {
+                    format!("{} (built in)", window.command)
+                } else {
+                    window.command.clone()
+                };
                 fact(
                     &format!("{}", index + 1),
-                    format!("{} \u{2014} {}", window.name, window.command),
+                    format!("{} \u{2014} {command}", window.name),
                 )
             })
             .collect(),

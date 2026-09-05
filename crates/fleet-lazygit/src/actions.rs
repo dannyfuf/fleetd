@@ -333,11 +333,11 @@ pub mod conflict {
 }
 
 /// The confirmation dialog.
-pub mod confirm {
+pub mod lg_confirm {
     use gpui::actions;
 
     actions!(
-        confirm,
+        lg_confirm,
         [
             /// `enter` / `y` — confirm.
             Accept,
@@ -402,11 +402,11 @@ pub mod menu {
 }
 
 /// The keybinding help overlay.
-pub mod help {
+pub mod lg_help {
     use gpui::actions;
 
     actions!(
-        help,
+        lg_help,
         [
             /// `esc` / `q` / `?` — close.
             Close,

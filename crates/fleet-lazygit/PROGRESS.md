@@ -535,3 +535,93 @@ Window-only captures under
 | `09-context-widened.png` | `}` up to `-U6`: demo.ts's three hunks merged into one |
 | `10-context-narrowed.png` | `{` back down to `-U2` — visible in the command log — with the hunks split apart again |
 | `11-split-panned.png` | split mode after `L`: both columns pan together, the gutters and sign cells stay pinned, the divider does not move |
+
+## 15. Fleet integration — done
+
+The native lazygit view is now the third tab of every Fleet worktree session, in the same
+window. `fleet-app` depends on `fleet-lazygit` and renders `Lazygit` as a pane.
+
+### Checkpoints
+
+1. **Linkable next to `fleet-app`.** gpui registers actions process-wide as `namespace::Name`
+   through `inventory` and `App::load_actions` panics on a duplicate, so `confirm` → `lg_confirm`
+   and `help` → `lg_help` (actions.rs, keymap.rs, root.rs, README). gpui's `>` is a
+   *subsequence* test over the rendered chain, so the overlay context words `Dialog` / `Confirm`
+   / `Help` → `LgDialog` / `LgConfirm` / `LgHelp` (state.rs `context_chain`, keymap.rs,
+   overlays.rs, README) — otherwise fleet-app's bare `Dialog`, `Dialog > Confirm` and
+   `Dialog > Help` bindings would fire inside the pane. Two invariant tests in
+   `fleet-app/src/keymap.rs` keep both true: `no_action_name_is_registered_twice` walks the
+   whole gpui inventory, `the_embedded_pane_shares_no_context_word_with_the_app` intersects the
+   two key tables.
+2. **Embeddable.** `Lazygit::embedded(path, cx)` next to `Lazygit::new`. Its `render` builds the
+   same bands *without* `AppFrame` (`Lazygit::pane`), keeps the one-row key-hint/mode bar, drops
+   the unconditional per-frame `window.focus`, and takes focus only through
+   `set_active(bool, window, cx)` or a click. `cx.quit()` became `cx.emit(LazygitEvent::Quit)`;
+   `lib.rs` subscribes and quits for the standalone binary. Row budgets come from a measured
+   pane size (`canvas`) instead of `Window::viewport_size`, which is far too tall inside a tab.
+   `root::tests::the_embedded_frame_draws_no_app_frame` pins the frame split.
+3. **Config and daemon.** `fleet://` is a reserved `windows[].command` scheme; `fleet://lazygit`
+   is the only member. It is the third default window; `validate_config` rejects any other
+   `fleet://` command; `normalize_imported_windows` upgrades a swarm `lazygit` (bare or with
+   arguments) on import only, so a hand-written `lazygit` in Fleet's own `config.json` is the
+   opt-out. `Terminal.kind: Pty | Native` (serde default `Pty`, so the wire model is
+   backward-compatible and `PROTOCOL_VERSION` stays 1). `Sessions::new_native_terminal` registers
+   the tab with no PTY and no `TerminalHost`, so numbering, `active_terminal` and
+   `SelectTerminal` are unchanged while attach/key/resize/scroll/paste answer `NotFound` and
+   restart answers `Conflict`. Sleep treats it as idle by construction; `refresh_statuses` never
+   lets it report a session attached. A remote worktree degrades the command back to `lazygit`.
+4. **The mount.** `fleet-app` registers `fleet_lazygit::keymap::init` once. `TerminalTab` gained
+   a `kind` with a `git-branch` glyph. `WorkspaceScreen` holds `panes: HashMap<WorktreeId, Pane>`
+   created lazily on first activation, observed and subscribed, evicted when the daemon stops
+   listing the worktree. `TerminalMode::Native` gives the chain
+   `Fleet > Workspace > Native > Lazygit > …`, and `Workspace > Native` binds exactly one key,
+   `ctrl-s`, mirroring `Workspace > Terminal`. The shell yields focus to the pane while it owns
+   the keyboard and takes it back for any overlay. The tab strip's `on_select` is finally wired,
+   so a click reaches the pane too.
+5. **Tests and docs.** New tests: config validation + import normalization + the remote fallback
+   (fleet-core), `a_native_window_is_a_tab_without_a_process` and
+   `a_native_tab_is_idle_and_never_keeps_a_session_awake` and the import assertion
+   (fleet-daemon), `the_workspace_mode_follows_the_kind_of_the_active_tab`,
+   `a_native_tab_is_marked_but_keeps_its_number` and the two keymap invariants (fleet-app), and
+   the embedded-frame test here. Docs: `ARCHITECTURE.md` (native tabs), `SWARM-INVENTORY.md`
+   (the `windows` default and the divergence), `KEYMAP.md` (Native mode), `APP-CONTRACTS.md`
+   (the chain and the two collision rules), `UX-SPEC.md` §2.1 chrome contract and §3.6, this
+   crate's README ("Embedding"), and the settings dialog's read-only windows list.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` (the Makefile's `clippy` target) | clean |
+| `cargo test --workspace` | 646 passed, 0 failed |
+| `cargo build --release` | ok (`fleet`, `fleetd`, `fleet-lazygit`) |
+| `drive/run-suite.sh` | **77 passed, 0 failed** |
+
+The drive suite is timing-sensitive: run under a concurrently running Fleet app it flaked on
+`branches-upstream-set`, `branches-upstream-unset` and `branches-rebase-conflict-continue` with
+`unhandled key`, because a script's opening `wait 1500` is not enough for the first snapshot on a
+loaded machine. All three pass in isolation and the full suite is green when it runs alone.
+
+### Live verification
+
+A throwaway `FLEET_HOME` under the scratchpad, a throwaway repository and worktree, and the
+release binaries (`FLEET_DAEMON` pointed at `target/release/fleetd` — the ambient `FLEET_DAEMON`
+of a Fleet terminal otherwise wins and spawns a *stale* daemon from another checkout). The
+window-only captures live in
+`…/scratchpad/shots5/`; `winidpid.swift` matches the window by pid, because matching by owner
+name catches every other `fleet*` window on the machine.
+
+* `fleet import --from-swarm` on a fake swarm home upgraded `{"name":"lg","command":"lazygit"}`
+  to `fleet://lazygit` in Fleet's own `config.json`, live.
+* `02` / `12` / `24`: `ctrl-s 3` renders the pane with the worktree's real data (three changed
+  files, two branches, two commits, an empty stash, a syntax-highlighted diff with word marks),
+  inside the tab band, with Fleet's context bar, header, tab strip and status bar intact.
+* The tab strip reads `1 nvim │ 2 cc ⚡● │ 3 ⑂ lg │ +` — the `git-branch` glyph marks the native
+  tab and the index is still `3`.
+* `03` `j`/`k` · `04` `space` (unstaged `util.rs`, the diff re-read) · `05` `?` (the pane's help
+  overlay, clipped to the pane) · `06`/`07` `3`/`4` panels · `08`–`10` `+` half/full/normal ·
+  `11` `ctrl-s 1` back to the live nvim PTY · `22` `ctrl-s [` toasts `no scrollback in this tab`
+  · `23` `q` selects the previous tab · `13`/`14` a Fleet dialog takes the keyboard and gives it
+  back · `31`/`32` `ctrl-s s` returns to a *focused* Hub.
+

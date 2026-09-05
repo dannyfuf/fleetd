@@ -986,11 +986,11 @@ impl GitUiState {
     pub fn context_chain(&self) -> Vec<&'static str> {
         if let Some(overlay) = self.overlay() {
             return match overlay {
-                Overlay::Confirm(_) => vec!["Dialog", "Confirm"],
-                Overlay::Prompt(_) => vec!["Dialog", "Prompt"],
-                Overlay::Menu(menu) if menu.filter.is_some() => vec!["Dialog", "MenuFilter"],
-                Overlay::Menu(_) => vec!["Dialog", "Menu"],
-                Overlay::Help { .. } => vec!["Dialog", "Help"],
+                Overlay::Confirm(_) => vec!["LgDialog", "LgConfirm"],
+                Overlay::Prompt(_) => vec!["LgDialog", "Prompt"],
+                Overlay::Menu(menu) if menu.filter.is_some() => vec!["LgDialog", "MenuFilter"],
+                Overlay::Menu(_) => vec!["LgDialog", "Menu"],
+                Overlay::Help { .. } => vec!["LgDialog", "LgHelp"],
             };
         }
         match self.focused {
@@ -1888,7 +1888,7 @@ mod tests {
         state.focused = PanelId::Files;
         assert_eq!(state.context_chain(), vec!["Panels", "Files"]);
         state.push_overlay(Overlay::Help { top: 0 });
-        assert_eq!(state.context_chain(), vec!["Dialog", "Help"]);
+        assert_eq!(state.context_chain(), vec!["LgDialog", "LgHelp"]);
         assert!(state.pop_overlay());
         assert_eq!(state.context_chain(), vec!["Panels", "Files"]);
     }

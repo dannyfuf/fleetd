@@ -73,10 +73,10 @@ one renderer.
 | File | Purpose |
 | --- | --- |
 | `src/main.rs` | `maybe_run_from_env()` first (Git re-invokes this binary as `GIT_SEQUENCE_EDITOR`), then the path argument, then `run`. |
-| `src/lib.rs` | gpui boot: assets, theme, keymap, window, the optional drive script. |
+| `src/lib.rs` | gpui boot for the standalone binary: assets, theme, keymap, window, `LazygitEvent::Quit` → `cx.quit()`, the optional drive script. |
 | `src/bridge.rs` | One background thread with a Tokio runtime owning the `Repository` and its `RepoWatcher`; `GitRequest` in, `GitEvent` out over `async_channel`. |
 | `src/state.rs` | `GitUiState`: the `Arc<RepoSnapshot>`, every cursor, the overlay stack, the command log, plus the pure reducers and their unit tests. |
-| `src/root.rs` | The one gpui view: focus routing, the key-context chain, every action handler. |
+| `src/root.rs` | The one gpui view: focus routing, the key-context chain, every action handler, and the two frames (window and embedded pane — see "Embedding"). |
 | `src/keymap.rs` | The declarative key table; also feeds the `?` help and the bottom hint bar. |
 | `src/actions.rs` | One `gpui::actions!` namespace per key context. |
 | `src/panels/` | The five side panes, the banner, the bottom bar, the main panel and the command log. |
@@ -93,6 +93,51 @@ Rules the crate follows: no `git` call ever touches the foreground thread; every
 followed by a snapshot, successful or not; a snapshot whose `generation` is not newer than the one
 on screen is dropped; a refresh never moves the cursor, the scroll or the focus; **nothing fetches
 on a timer** — the network runs only on `f`, `p` and `P`.
+
+## Embedding
+
+The crate is both a standalone binary and one pane of another gpui application. `fleet-app`
+uses the second form: the default third window of every worktree session
+(`{"name": "lg", "command": "fleet://lazygit"}`) is this view, drawn inside the tab instead of a
+PTY running the `lazygit` binary.
+
+```rust
+// The host owns the window; the pane owns its tab.
+let pane = cx.new(|cx| fleet_lazygit::root::Lazygit::embedded(worktree_path, cx));
+
+// Repaint the host when the pane's state moves, and handle `q`.
+cx.observe(&pane, |_, cx| host.update(cx, |_, cx| cx.notify())).detach();
+cx.subscribe(&pane, |_, event, cx| match event {
+    fleet_lazygit::root::LazygitEvent::Quit => select_previous_tab(cx),
+})
+.detach();
+
+// The host says when the pane owns the keyboard; the pane never grabs it on its own.
+pane.update(cx, |pane, cx| pane.set_active(tab_is_active && no_dialog_is_open, window, cx));
+```
+
+What `embedded` changes, and why:
+
+| | Standalone (`Lazygit::new`) | Embedded (`Lazygit::embedded`) |
+| --- | --- | --- |
+| Frame | `fleet_ui_kit::AppFrame` — the window's chrome | a plain `div().size_full().relative()`; the host already drew the chrome, and a second frame would paint a second status bar |
+| Key-hint / mode bar | inside the frame | **still there**, inside the pane — it is lazygit's discoverability contract, not window chrome |
+| Focus | grabbed every frame | taken once per `set_active(true)`, and moved between the panel and overlay handles only while the pane already has it, because the host's root re-focuses itself whenever it is not focused |
+| `q` | `cx.quit()` | emits `LazygitEvent::Quit`; the host decides what leaving means |
+| Row budgets | from `Window::viewport_size` | from the pane's own measured bounds, so `ctrl-d` pages by half a real viewport |
+
+Two things the host must do once, before any pane exists:
+
+* `fleet_lazygit::keymap::init(cx)` — the pane's bindings are not registered by constructing it.
+* Install `fleet_ui_kit::KitAssets` and `Theme` — once for the whole application, not per pane.
+
+Two name spaces are shared with the host process and must not collide. gpui registers actions
+globally as `namespace::Name` and **panics** at startup on a duplicate, which is why the
+confirmation and help namespaces here are `lg_confirm` and `lg_help`. gpui's `>` in a binding
+predicate is a *subsequence* test over the rendered context chain, not a parent test, which is
+why the overlay context words are `LgDialog`, `LgConfirm` and `LgHelp`: bare `Dialog`,
+`Confirm` and `Help` would also satisfy the host's own predicates. In `fleet-app` the full
+chain reads `Fleet > Workspace > Native > Lazygit > Panels > Files`.
 
 ## Key map
 
@@ -246,11 +291,18 @@ patch, so `<` is how the whole-commit view stays one keystroke away.
 
 | Context | Keys |
 | --- | --- |
-| `Dialog > Confirm` | `enter` / `y` confirm · `esc` / `n` cancel |
-| `Dialog > Prompt` | printable characters type · `enter` confirms (inserts a newline in a multi-line prompt) · `⌘⏎` / `ctrl-enter` always submits · `esc` cancels · `backspace`, `ctrl-w`, `ctrl-u`, `←`/`→`, `ctrl-a`/`ctrl-e`, `⌘v`/`ctrl-v` edit |
-| `Dialog > Menu` | `enter` run · the letter printed beside a row runs that row · `j`/`k` move · `/` filter · `esc` close |
-| `Dialog > MenuFilter` | printable characters filter · `ctrl-n`/`ctrl-p` or `↓`/`↑` move · `enter` run · `esc` clears the filter |
-| `Dialog > Help` | `j`/`k` scroll (clamped at the last page) · `esc` / `q` / `?` close |
+| `LgDialog > LgConfirm` | `enter` / `y` confirm · `esc` / `n` cancel |
+| `LgDialog > Prompt` | printable characters type · `enter` confirms (inserts a newline in a multi-line prompt) · `⌘⏎` / `ctrl-enter` always submits · `esc` cancels · `backspace`, `ctrl-w`, `ctrl-u`, `←`/`→`, `ctrl-a`/`ctrl-e`, `⌘v`/`ctrl-v` edit |
+| `LgDialog > Menu` | `enter` run · the letter printed beside a row runs that row · `j`/`k` move · `/` filter · `esc` close |
+| `LgDialog > MenuFilter` | printable characters filter · `ctrl-n`/`ctrl-p` or `↓`/`↑` move · `enter` run · `esc` clears the filter |
+| `LgDialog > LgHelp` | `j`/`k` scroll (clamped at the last page) · `esc` / `q` / `?` close |
+
+The overlay context words are deliberately prefixed with `Lg`. gpui's `>` is a *subsequence*
+test over the rendered context chain, so a bare `Dialog` / `Confirm` / `Help` word would also
+satisfy the host application's own `Dialog`, `Dialog > Confirm` and `Dialog > Help` predicates
+once this crate is embedded in [`fleet-app`](../fleet-app). The same reasoning renames the
+`confirm` and `help` *action* namespaces to `lg_confirm` and `lg_help`: gpui registers actions
+globally under `namespace::Name` and panics at startup on a duplicate.
 
 **A context that hosts a text field binds no single-character key** — that rule is enforced by a
 test in `src/keymap.rs`, because gpui dispatches key bindings before any key listener, so a bare

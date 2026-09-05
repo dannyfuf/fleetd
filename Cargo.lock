@@ -1653,6 +1653,7 @@ dependencies = [
  "fleet-cli",
  "fleet-client",
  "fleet-core",
+ "fleet-lazygit",
  "fleet-proto",
  "fleet-ui-kit",
  "gpui",

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use fleet_core::{
-    config::WindowConfig,
+    config::{NATIVE_LAZYGIT, WindowConfig},
     ids::{ContextId, RepoId, SessionId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
-    sessions::{SessionState, TerminalStatus},
+    sessions::{SessionState, TerminalKind, TerminalStatus},
     state::default_state,
 };
 use fleet_daemon::{
@@ -249,4 +249,116 @@ async fn remote_worktrees_are_rejected_with_stable_message() {
     assert!(
         matches!(error, DaemonError::Unsupported(message) if message == "remote hosts are not supported yet")
     );
+}
+
+/// A `fleet://` window keeps its name and its position in the strip without a PTY.
+///
+/// That is the whole point of keeping it in `Session.terminals`: `ctrl-s <n>` counts positions,
+/// so a native tab that lived outside the list would renumber every tab after it.
+#[tokio::test]
+async fn a_native_window_is_a_tab_without_a_process() {
+    let fixture = fixture().await;
+    let mut effective = fixture
+        .config
+        .load()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    effective.windows.insert(
+        1,
+        WindowConfig {
+            name: "lg".to_owned(),
+            command: NATIVE_LAZYGIT.to_owned(),
+        },
+    );
+    fixture
+        .config
+        .save(effective)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let sessions = Sessions::new(Arc::clone(&fixture.config), Arc::clone(&fixture.state));
+    let session = sessions
+        .ensure(Some(fixture.worktree.clone()), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(
+        session
+            .terminals
+            .iter()
+            .map(|terminal| (terminal.name.as_str(), terminal.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            ("one", TerminalKind::Pty),
+            ("lg", TerminalKind::Native),
+            ("two", TerminalKind::Pty),
+        ],
+        "the configured order is the tab order, native or not"
+    );
+
+    let native = session.terminals[1].clone();
+    assert!(native.is_native());
+    assert_eq!(native.shell_pid, None, "there is no process behind it");
+    assert!(matches!(native.status, TerminalStatus::Running));
+
+    // `ctrl-s 2` reaches it, and selecting it is an ordinary selection.
+    let selected = sessions
+        .select_terminal(session.id.clone(), native.id)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(selected.active_terminal, Some(native.id));
+
+    // Everything that needs a PTY says so instead of reaching one that does not exist.
+    for outcome in [
+        sessions.attach(native.id, 80, 24).await,
+        sessions.resize(native.id, 100, 30).await,
+        sessions.request_full_frame(native.id).await,
+        sessions.paste(native.id, "x".to_owned()).await,
+    ] {
+        assert!(
+            matches!(outcome, Err(DaemonError::NotFound(_))),
+            "a native terminal has no host: {outcome:?}"
+        );
+    }
+    assert!(
+        matches!(
+            sessions.restart_terminal(native.id).await,
+            Err(DaemonError::Conflict(_))
+        ),
+        "there is nothing to restart"
+    );
+
+    // A native tab must not be able to report the session as attached on its own.
+    assert_eq!(
+        sessions
+            .refresh_statuses(None)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))[0]
+            .session,
+        SessionState::Detached
+    );
+
+    // Repair after a close puts it back in the same place.
+    sessions
+        .close_terminal(native.id)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let repaired = sessions
+        .ensure(Some(fixture.worktree.clone()), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        repaired
+            .terminals
+            .iter()
+            .map(|terminal| terminal.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["one", "lg", "two"]
+    );
+    assert!(repaired.terminals[1].is_native());
+
+    sessions
+        .kill(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 }

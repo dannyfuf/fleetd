@@ -20,7 +20,7 @@ const HELP_ROWS: usize = 18;
 /// The chain the panels *would* have while the help overlay owns the real one.
 fn help_chain(view: &Lazygit) -> Vec<&'static str> {
     let mut chain = view.state.context_chain();
-    if chain.first() == Some(&"Dialog") {
+    if chain.first() == Some(&"LgDialog") {
         chain = vec!["Panels"];
     }
     chain

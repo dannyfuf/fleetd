@@ -1,6 +1,6 @@
 //! The root view: focus routing, the key-context chain, every action handler and the frame.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -15,13 +15,13 @@ use fleet_git::{
 use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::{AppFrame, Toast};
 use gpui::{
-    AnyElement, App, Context, Div, FocusHandle, Focusable, KeyDownEvent, Render, Task,
-    UniformListScrollHandle, Window, div,
+    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Pixels,
+    Render, Size, Task, UniformListScrollHandle, Window, canvas, div,
 };
 
 use crate::actions::{
-    branches, commitfiles, commits, confirm, conflict, diff as diff_actions, files, global, help,
-    list, menu, prompt, remotes, staging, stash, subcommits, tags,
+    branches, commitfiles, commits, conflict, diff as diff_actions, files, global, lg_confirm,
+    lg_help, list, menu, prompt, remotes, staging, stash, subcommits, tags,
 };
 use crate::bridge::{GitBridge, GitEvent, GitRequest, Mutation};
 use crate::keymap::ROOT_CONTEXT;
@@ -104,6 +104,21 @@ pub struct Lazygit {
     pub(crate) side_ch: usize,
     /// How wide the main panel's payload column is, for the horizontal-scroll clamp.
     pub(crate) main_px_w: f32,
+    /// Whether the view draws its own [`AppFrame`] and owns the window.
+    ///
+    /// `false` when a host application ([`fleet-app`](https://github.com/dannyfuf/fleetd))
+    /// renders this view as one pane among others: the host owns the window chrome, the
+    /// keyboard and the quit decision, so the frame, the unconditional focus grab and
+    /// `cx.quit()` all have to come out. See [`Lazygit::embedded`].
+    embedded: bool,
+    /// Whether the host says this pane currently owns the keyboard. Always `true` standalone.
+    active: bool,
+    /// The pixel size the embedded pane was last laid out into.
+    ///
+    /// Standalone the window *is* the pane, so [`Window::viewport_size`] is exact; embedded it
+    /// is far too tall (the host's bars and tab strip sit inside it) and every row budget
+    /// derived from it would page past the end of the list.
+    pane_size: Rc<Cell<Option<Size<Pixels>>>>,
     /// Whether the window is active, which sets the refresh-fallback interval.
     window_active: bool,
     /// When the last periodic refresh went out.
@@ -139,10 +154,62 @@ impl Lazygit {
             rows_stash: 2,
             rows_main: fleet_ui_kit::DEFAULT_PAGE * 2,
             side_ch: 40,
+            embedded: false,
+            active: true,
+            pane_size: Rc::new(Cell::new(None)),
             window_active: true,
             last_refresh: Instant::now(),
             _tasks: tasks,
         }
+    }
+
+    /// The same view, rendered as one pane of a host application.
+    ///
+    /// The difference from [`Lazygit::new`] is entirely in `render`: no [`AppFrame`], no
+    /// per-frame focus grab, and `q` emits [`LazygitEvent::Quit`] instead of quitting the
+    /// process. lazygit's own one-row key-hint / mode bar stays inside the pane, because it is
+    /// the crate's discoverability contract and not window chrome.
+    pub fn embedded(path: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self {
+            embedded: true,
+            active: false,
+            ..Self::new(path, cx)
+        }
+    }
+
+    /// Whether this view renders as a pane of a host application.
+    #[must_use]
+    pub const fn is_embedded(&self) -> bool {
+        self.embedded
+    }
+
+    /// Tells the pane whether it currently owns the keyboard.
+    ///
+    /// Focus is taken exactly once per activation: taking it every frame would fight the host,
+    /// whose own root element also focuses itself whenever it is not focused.
+    pub fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let was = self.active;
+        self.active = active;
+        if active && !self.owns_keyboard(window) {
+            window.focus(self.wanted_focus(), cx);
+        }
+        if was != active {
+            cx.notify();
+        }
+    }
+
+    /// The handle that must hold the keyboard for the rendered context chain to answer keys.
+    fn wanted_focus(&self) -> &FocusHandle {
+        if self.state.overlay().is_some() {
+            &self.overlay_focus
+        } else {
+            &self.focus
+        }
+    }
+
+    /// Whether one of this view's two handles is the focused element.
+    fn owns_keyboard(&self, window: &Window) -> bool {
+        self.focus.is_focused(window) || self.overlay_focus.is_focused(window)
     }
 
     /// Drains the bridge's event stream into the state. Stored, never detached: dropping the task
@@ -687,7 +754,7 @@ impl Lazygit {
             return;
         }
         self.bridge.send(GitRequest::Shutdown);
-        cx.quit();
+        cx.emit(LazygitEvent::Quit);
     }
 
     fn refresh(&mut self, _: &global::Refresh, _: &mut Window, cx: &mut Context<Self>) {
@@ -2382,7 +2449,7 @@ impl Lazygit {
 
     // ---------------------------------------------------------------- Overlays
 
-    fn confirm_accept(&mut self, _: &confirm::Accept, _: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_accept(&mut self, _: &lg_confirm::Accept, _: &mut Window, cx: &mut Context<Self>) {
         let Some(Overlay::Confirm(confirm)) = self.state.overlays.pop() else {
             return;
         };
@@ -2390,7 +2457,7 @@ impl Lazygit {
             ConfirmOutcome::Request(request) => match *request {
                 GitRequest::Shutdown => {
                     self.bridge.send(GitRequest::Shutdown);
-                    cx.quit();
+                    cx.emit(LazygitEvent::Quit);
                 }
                 request => self.send(request),
             },
@@ -2405,7 +2472,7 @@ impl Lazygit {
         cx.notify();
     }
 
-    fn confirm_cancel(&mut self, _: &confirm::Cancel, _: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_cancel(&mut self, _: &lg_confirm::Cancel, _: &mut Window, cx: &mut Context<Self>) {
         self.state.pop_overlay();
         cx.notify();
     }
@@ -2674,12 +2741,12 @@ impl Lazygit {
         cx.notify();
     }
 
-    fn help_close(&mut self, _: &help::Close, _: &mut Window, cx: &mut Context<Self>) {
+    fn help_close(&mut self, _: &lg_help::Close, _: &mut Window, cx: &mut Context<Self>) {
         self.state.pop_overlay();
         cx.notify();
     }
 
-    fn help_down(&mut self, _: &help::Down, _: &mut Window, cx: &mut Context<Self>) {
+    fn help_down(&mut self, _: &lg_help::Down, _: &mut Window, cx: &mut Context<Self>) {
         // The last row is the last thing the overlay scrolls to; past it there is nothing to see.
         let last = crate::overlays::help_last_top(self);
         if let Some(Overlay::Help { top }) = self.state.overlay_mut() {
@@ -2688,7 +2755,7 @@ impl Lazygit {
         cx.notify();
     }
 
-    fn help_up(&mut self, _: &help::Up, _: &mut Window, cx: &mut Context<Self>) {
+    fn help_up(&mut self, _: &lg_help::Up, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(Overlay::Help { top }) = self.state.overlay_mut() {
             *top = top.saturating_sub(1);
         }
@@ -2757,7 +2824,11 @@ impl Lazygit {
                 f32::from(metrics.hairline),
             )
         };
-        let viewport = window.viewport_size();
+        let viewport = self
+            .pane_size
+            .get()
+            .filter(|size| size.width > gpui::px(0.0) && size.height > gpui::px(0.0))
+            .unwrap_or_else(|| window.viewport_size());
         let banner = if self.state.operation() == OperationState::None {
             0.0
         } else {
@@ -3041,6 +3112,20 @@ fn record_line(record: &fleet_git::CommandRecord) -> Option<String> {
     }
 }
 
+/// What the view tells a host application about.
+///
+/// Standalone there is nobody to tell, so [`crate::run`] subscribes and maps `Quit` onto
+/// `cx.quit()`; embedded the host decides what closing the pane means.
+/// Deliberately exhaustive: every embedder in this workspace should stop compiling when a new
+/// variant lands rather than silently ignoring it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LazygitEvent {
+    /// `q`, or the confirmation behind it, asked to leave.
+    Quit,
+}
+
+impl EventEmitter<LazygitEvent> for Lazygit {}
+
 impl Focusable for Lazygit {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
@@ -3061,7 +3146,12 @@ impl Render for Lazygit {
         } else {
             &self.focus
         };
-        if !wanted.is_focused(window) {
+        // Standalone the window is ours and the grab is unconditional. Embedded it is not: the
+        // host's own root element re-focuses itself whenever it is not focused, so a pane that
+        // grabbed every frame would flip the keyboard back and forth forever. The pane moves
+        // focus only *between its own two handles*, and only while it already has it.
+        let may_focus = !self.embedded || (self.active && self.owns_keyboard(window));
+        if may_focus && !wanted.is_focused(window) {
             window.focus(wanted, cx);
         }
 
@@ -3095,19 +3185,144 @@ impl Render for Lazygit {
             )
         };
 
-        let mut frame = AppFrame::new()
-            .body(body)
-            .status_bar(self.status_bar(&chain, cx));
-        if let Some(banner) = self.banner(cx) {
-            frame = frame.banner(banner);
-        }
-        if let Some(overlay) = overlay_element {
-            frame = frame.overlay(overlay);
-        }
-        if !self.state.toasts.is_empty() {
-            frame = frame.body_overlay(ToastStack::new(self.state.toasts.clone()));
-        }
+        let banner = self.banner(cx);
+        let status_bar = self.status_bar(&chain, cx);
+        let toasts = (!self.state.toasts.is_empty())
+            .then(|| ToastStack::new(self.state.toasts.clone()).into_any_element());
+
+        let frame: AnyElement = if self.embedded {
+            self.pane(body, banner, status_bar, overlay_element, toasts, cx)
+        } else {
+            let mut frame = AppFrame::new().body(body).status_bar(status_bar);
+            if let Some(banner) = banner {
+                frame = frame.banner(banner);
+            }
+            if let Some(overlay) = overlay_element {
+                frame = frame.overlay(overlay);
+            }
+            if let Some(toasts) = toasts {
+                frame = frame.body_overlay(toasts);
+            }
+            frame.into_any_element()
+        };
 
         Self::with_actions(div().size_full().key_context(ROOT_CONTEXT), cx).child(frame)
+    }
+}
+
+impl Lazygit {
+    /// The embedded frame: the same bands as [`AppFrame`] minus the window chrome.
+    ///
+    /// There is no context bar and no window background wash, because the host already drew
+    /// both; the banner, the body, the overlay layer and lazygit's own one-row key-hint bar
+    /// stay, because they are the pane's own UI and not the window's.
+    #[allow(clippy::too_many_arguments)]
+    fn pane(
+        &self,
+        body: AnyElement,
+        banner: Option<AnyElement>,
+        status_bar: AnyElement,
+        overlay: Option<AnyElement>,
+        toasts: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let size = Rc::clone(&self.pane_size);
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .overflow_hidden()
+            .bg(theme.colors.bg)
+            .text_color(theme.colors.text)
+            .font_family(theme.font_ui.clone())
+            .text_size(theme.text.ui.size)
+            .line_height(theme.text.ui.line_height)
+            // A click anywhere in the pane hands the keyboard back to it, which is how a
+            // mouse-first user leaves a Fleet dialog and lands back in the panels.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _event, window, cx| {
+                    if this.active && !this.owns_keyboard(window) {
+                        window.focus(this.wanted_focus(), cx);
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(
+                canvas(
+                    move |bounds, _window, _cx| size.set(Some(bounds.size)),
+                    |_bounds, (), _window, _cx| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .children(banner.map(|banner| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .h(theme.metrics.banner_h)
+                    .w_full()
+                    .overflow_hidden()
+                    .child(banner)
+            }))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(div().flex().size_full().min_w_0().min_h_0().child(body))
+                    .children(toasts),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .h(theme.metrics.status_bar_h)
+                    .w_full()
+                    .overflow_hidden()
+                    .child(status_bar),
+            )
+            .children(overlay)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The embedded frame must not draw an [`super::AppFrame`].
+    ///
+    /// The host owns the window chrome; a second frame inside the pane would paint a second
+    /// status bar, wash the pane in the window background and steal 62 px from the diff. The
+    /// check is textual on purpose — the alternative is a live gpui window, and the property
+    /// that matters ("`AppFrame` appears only on the standalone path") is exactly a property
+    /// of this source file.
+    #[test]
+    fn the_embedded_frame_draws_no_app_frame() {
+        let whole = include_str!("root.rs");
+        // Stop before this module, whose own assertions name the type they forbid.
+        let source = whole.split("#[cfg(test)]").next().unwrap_or(whole);
+        let start = source
+            .find("    fn pane(")
+            .unwrap_or_else(|| panic!("`Lazygit::pane` is the embedded frame builder"));
+        let end = source[start..]
+            .find("\n    }\n")
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+        let pane = &source[start..end];
+        assert!(
+            !pane.contains("AppFrame"),
+            "the embedded pane must not build an AppFrame"
+        );
+        assert_eq!(
+            source.matches("AppFrame::new()").count(),
+            1,
+            "only the standalone path may build a frame"
+        );
     }
 }
