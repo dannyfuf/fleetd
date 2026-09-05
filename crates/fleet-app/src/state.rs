@@ -1024,6 +1024,16 @@ impl AppState {
         }
     }
 
+    /// `^s N/P` shows and cycles watches without changing the active terminal.
+    pub fn cycle_watch(&mut self, forward: bool, now: Instant) {
+        self.leave_prefix();
+        if let Some(session) = self.active_session().map(|s| s.id.clone())
+            && !self.watches.cycle(&session, forward)
+        {
+            self.toast_short("no subagent watches", Icon::Info, now);
+        }
+    }
+
     /// `^s V` / ×: returns an exited watch to dismiss; a running watch is only hidden.
     pub fn close_selected_watch(&mut self, now: Instant) -> Option<fleet_core::watches::WatchId> {
         self.leave_prefix();
@@ -1600,6 +1610,14 @@ mod tests {
         state.screen = Screen::Workspace {
             session: session.id.clone(),
         };
+        state.enter_prefix();
+        state.cycle_watch(true, now);
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+        assert_eq!(
+            state.toasts.last().unwrap().toast.text.as_ref(),
+            "no subagent watches"
+        );
+        state.toasts.clear();
         let mut watch = Watch {
             id: WatchId(1),
             session: session.id.clone(),
@@ -1615,6 +1633,19 @@ mod tests {
         assert!(state.watches.panes[&session.id].visible);
         assert_eq!(state.watches.panes[&session.id].selected, Some(watch.id));
         assert!(state.tick(now + Duration::from_secs(1)));
+        for forward in [true, false] {
+            state.watches.hide(&session.id);
+            state.enter_prefix();
+            state.cycle_watch(forward, now);
+            assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+            assert!(state.watches.panes[&session.id].visible);
+            assert_eq!(state.watches.panes[&session.id].selected, Some(watch.id));
+            assert_eq!(
+                state.active_session().unwrap().active_terminal,
+                Some(TerminalId(1))
+            );
+            assert!(state.toasts.is_empty());
+        }
         state.enter_prefix();
         assert_eq!(state.close_selected_watch(now), None);
         assert_eq!(

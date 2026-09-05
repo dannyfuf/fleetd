@@ -460,7 +460,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn help_lists_watch_visibility_and_dismissal_keys() {
+    fn help_lists_watch_visibility_dismissal_and_navigation_keys() {
         let groups = groups();
         let prefix = groups
             .iter()
@@ -479,6 +479,14 @@ mod tests {
                 .iter()
                 .any(|(key, action)| key == "V" && action == "dismiss watch")
         );
+        for (key, action) in [("N", "next watch"), ("P", "prev watch")] {
+            assert!(
+                prefix
+                    .rows
+                    .iter()
+                    .any(|row| row == &(key.into(), action.into()))
+            );
+        }
     }
 
     #[test]
