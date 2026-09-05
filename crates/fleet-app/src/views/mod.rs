@@ -1,0 +1,21 @@
+//! Domain-oriented GPUI views composed from the Fleet UI kit.
+//!
+//! A *view* is a piece of the app that more than one screen draws: a worktree row, the detail
+//! panel, a PR row, a keep-alive chip strip. Screens live in [`crate::screens`]; the pieces
+//! they share belong here, and both compose only `fleet-ui-kit` components — never ad-hoc
+//! styling, never a raw color (`docs/DESIGN-SYSTEM.md`).
+//!
+//! Add one module per view and re-export it here.
+
+pub mod detail_panel;
+pub mod doctor_view;
+pub mod first_run;
+pub mod hub_context_bar;
+pub mod job_ticker;
+pub mod jobs_panel;
+pub mod prs_screen;
+pub mod repos_rail;
+pub mod sticky_error;
+pub mod workspace_header;
+pub mod workspace_tabs;
+pub mod worktrees_list;

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fleet-core",
+    "crates/fleet-proto",
+    "crates/fleet-term",
+    "crates/fleet-daemon",
+    "crates/fleet-client",
+    "crates/fleet-ui-kit",
+    "crates/fleet-cli",
+    "crates/fleet-app",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97.1"
+
+[workspace.dependencies]
+anyhow = "1"
+async-channel = "2"
+bitflags = "2"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.18.1", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.18.1", features = ["font-kit"] }
+portable-pty = "0.9.0"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol_str = "0.3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+libghostty-vt = "=0.2.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

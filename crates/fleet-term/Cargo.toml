@@ -1,0 +1,18 @@
+[package]
+name = "fleet-term"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["ghostty"]
+ghostty = ["dep:libghostty-vt"]
+
+[dependencies]
+async-channel.workspace = true
+fleet-core = { path = "../fleet-core" }
+fleet-proto = { path = "../fleet-proto" }
+libghostty-vt = { workspace = true, optional = true }
+portable-pty.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

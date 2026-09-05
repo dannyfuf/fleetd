@@ -1,0 +1,174 @@
+# Fleet
+
+Fleet is the native successor to `swarm`. It pairs a long-running daemon, `fleetd`, with the
+native GPUI app and CLI, `fleet`, to manage copy-on-write worktrees, GitHub pull requests, and
+terminal sessions that replace tmux. Jobs and terminals belong to the daemon, so background work
+survives closing a dialog, workspace, or the entire UI.
+
+## Requirements
+
+- macOS.
+- [rustup](https://rustup.rs/) with Rust 1.97.1. `rust-toolchain.toml` selects the pinned compiler,
+  `rustfmt`, and Clippy.
+- Xcode and its Metal toolchain. If Metal is missing, install it with
+  `xcodebuild -downloadComponent MetalToolchain`.
+- Zig 0.15.2. On Apple Silicon, `scripts/bootstrap-zig.sh` installs and verifies the pinned release
+  and exposes it at `~/.cargo/bin/zig`.
+- `git` and the GitHub CLI, `gh`, authenticated for the repositories Fleet will manage.
+
+## Build and run
+
+```sh
+scripts/bootstrap-zig.sh
+cargo build --release
+./target/release/fleet
+```
+
+Running `fleet` without a subcommand opens the app. The client auto-spawns `fleetd` when its Unix
+socket is unavailable. Fleet stores config, state, repositories, worktrees, caches, logs, trash,
+and daemon files under `FLEET_HOME`, which defaults to `~/.fleet`:
+
+```sh
+FLEET_HOME=/path/to/fleet-home ./target/release/fleet
+```
+
+To start copying compatible swarm v1 config and state without modifying `~/.swarm`:
+
+```sh
+./target/release/fleet import --from-swarm
+```
+
+## CLI reference
+
+Run `fleet --help` or `fleet <command> --help` for generated help.
+
+| Command | Description | JSON success fields |
+| --- | --- | --- |
+| `fleet create <REPO> <SLUG> [--branch <BRANCH>] [--base <BASE>] [--host <HOST>] [--url <URL>] [--default-branch <BRANCH>] [--hooks <JSON>] [--json]` | Create or find a worktree; `--url` is required for an unregistered repository. | `protocol`, `created`, `worktree` |
+| `fleet open <TARGET>` | Ensure a worktree session exists; accepts a worktree id, stored session name, or `repo/slug` alias. | — |
+| `fleet list [--json]` | List registered repositories and worktrees. | `protocol`, `version`, `repos`, `worktrees` |
+| `fleet inspect [IDS]... [--fetch] [--repo <REPO>] [--json]` | Inspect all or selected worktrees, optionally fetching or restricting by repository. | `protocol`, `worktrees` |
+| `fleet delete <IDS>... [--json]` | Unconditionally delete one or more exact worktree ids. | `protocol`, `ok`, `results` |
+| `fleet prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo <REPO>] [--json]` | Safely prune merged worktrees; fetching is on unless `--no-fetch` is used. | `protocol`, `dryRun`, `deleted`, `skipped` |
+| `fleet kill <ID> [--json]` | Hard-kill the session for an exact worktree id. | `protocol`, `ok` |
+| `fleet status [--json]` | Refresh local worktree runtime status. | `protocol`, `statuses` |
+| `fleet path <ID>` | Print an exact local worktree's absolute path. | — |
+| `fleet sleep [SESSION] [--json]` | Apply sleep policy to a session or worktree; a sole running session is inferred. | `protocol`, `kept`, `closed`, `sessionKilled` |
+| `fleet agent [claude\|opencode]` | Ensure a repository-level agent session exists; defaults to `config.agent`. | — |
+| `fleet doctor` | Run environment diagnostics; exits unsuccessfully when any check fails. | — |
+| `fleet import --from-swarm` | Start an import of compatible `~/.swarm/config.json` and `state.json`. | — |
+| `fleet update` | Run self-update, wait for completion, then exit with restart code 75. | — |
+| `fleet version`, `fleet -v`, or `fleet --version` | Print the package version and build Git revision. | — |
+
+Commands that accept `--json` emit one compact line using swarm-compatible protocol 1 envelopes.
+Their errors use `{"protocol":1,"error":{"kind":"<kind>","message":"<message>"}}`; other
+commands use human-readable output.
+
+## Keyboard basics
+
+Fleet is modal. The status bar always shows the current mode; overlays shadow the Hub or Workspace
+until closed.
+
+| Mode | Purpose | Leave with |
+| --- | --- | --- |
+| Normal | Navigate Hub repositories, worktrees, and pull requests. | Open a session |
+| Terminal | Send keys to the active PTY. | `ctrl-s` enters Prefix |
+| Prefix | One-shot Workspace command after `ctrl-s`. | Next key or `Esc` |
+| Scroll | Navigate and select terminal scrollback. | `Esc`, `q`, or `i` |
+| Filter | Filter the current list. | `Enter` or `Esc` |
+| Palette | Search navigation and actions. | `Enter` or `Esc` |
+| Dialog | Edit or confirm an action. | `Enter` or `Esc` |
+| Jobs | Inspect, cancel, or retry daemon jobs. | `J`, `q`, or `Esc` |
+| Daemon | Report startup, disconnect, or doctor state. | Reconnect, `Esc`, or `ctrl-q` |
+| FirstRun | Guide initial creation or import. | Complete an offered action |
+
+The 15 keys and key groups to learn first are:
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, `↓` / `↑` | Move the cursor. |
+| `h` / `l`, `←` / `→`, `S-Tab` / `Tab` | Focus the previous or next Hub pane. |
+| `gg` / `G` | Jump to the first or last row. |
+| `Enter`, `o` | Select a repository or open a worktree/session. |
+| `1`–`9`, `gt` / `gT` | Switch to a numbered, next, or previous context. |
+| `p` | Toggle Worktrees and Pull requests. |
+| `n` | Clone a repository or create a worktree in the focused pane. |
+| `d` | Delete the selected repository or worktree, with confirmation. |
+| `/` | Filter the current list. |
+| `:` | Open the command palette. |
+| `i` | Toggle the detail panel. |
+| `r` | Refresh status, pull requests, and discovery as a job. |
+| `J` | Open the Jobs panel. |
+| `?` | Open help. |
+| `Esc` / `q`, `ctrl-q`, `ctrl-shift-q` | Close the top layer; quit the app; or quit and stop the daemon. |
+
+Inside a terminal, every bare key goes to the PTY. `ctrl-s` is the only Workspace prefix:
+`ctrl-s s` returns to Hub, `ctrl-s S` sleeps then returns, `ctrl-s 1`–`9` switches tabs,
+`ctrl-s h`/`l` changes tabs, `ctrl-s w` opens the last session, `ctrl-s c`/`x` creates/closes a
+tab, `ctrl-s [` enters Scroll, `ctrl-s ]` pastes, and `ctrl-s J`/`?` opens Jobs/help. Use
+`ctrl-s ctrl-s` to send a literal `ctrl-s`. See [docs/KEYMAP.md](docs/KEYMAP.md) for the complete,
+authoritative map.
+
+## Architecture
+
+```text
+fleet-app    binary `fleet`: GPUI state mirror, screens, dialogs, and terminal rendering
+fleet-daemon binary `fleetd`: stores, adapters, services, jobs, PTYs, and Unix socket server
+fleet-core   domain types, schemas, validation, defaults, and pure helpers; no I/O
+fleet-proto  length-prefixed JSON Request/Response/Event types and terminal frame updates
+fleet-term   portable PTYs, VT engine abstraction, Ghostty VT, terminal host, and key encoding
+fleet-client async daemon connect/spawn, requests, events, and terminal attachment
+fleet-ui-kit domain-independent GPUI theme, assets, Lucide icons, and reusable components
+fleet-cli    Clap parser, protocol-1 JSON envelopes, and human-readable output
+runtime      `fleet` -> `fleet-client` -> `$FLEET_HOME/fleetd.sock` -> `fleetd`
+ownership    daemon owns jobs, sessions, PTYs, state, and filesystem work; clients mirror it
+```
+
+The dependency direction is `core <- proto <- {term, client, cli} <- {daemon, app}`; the UI kit
+depends only on GPUI. Read [architecture](docs/ARCHITECTURE.md), the [UX specification](docs/UX-SPEC.md),
+and the [design system](docs/DESIGN-SYSTEM.md) for the full contracts.
+
+## Development
+
+The checked-in `Makefile` provides all workspace targets:
+
+```sh
+make check
+make build
+make run-app
+make run-daemon
+make test
+make fmt
+make clippy
+```
+
+`make test` runs the workspace tests. Targeted Cargo tests work normally, for example
+`cargo test -p fleet-cli`. Keep parallel worktrees on separate target directories if overriding
+`CARGO_TARGET_DIR`; shared external artifacts can be stale.
+
+Run the complete UI-kit gallery or one of its focused galleries:
+
+```sh
+cargo run -p fleet-ui-kit --example kit_gallery
+cargo run -p fleet-ui-kit --example gallery_data
+cargo run -p fleet-ui-kit --example gallery_input
+cargo run -p fleet-ui-kit --example gallery_structure
+cargo run -p fleet-ui-kit --example gallery_terminal
+```
+
+For UI automation, set `FLEET_DRIVE` to an append-only script. The debug app polls it every 100 ms;
+commands include `key`, `type`, `wait`, `shot`, and `quit`, and results go to `$FLEET_DRIVE.log`:
+
+```sh
+mkdir -p /tmp/fleet-drive
+touch /tmp/fleet-drive/script.txt
+FLEET_HOME=/tmp/fleet-drive FLEET_DRIVE=/tmp/fleet-drive/script.txt ./target/debug/fleet &
+printf 'wait 500\nkey ?\nshot /tmp/fleet-drive/help.png\nkey escape\nquit\n' >> /tmp/fleet-drive/script.txt
+```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details, logs, and scripted-input semantics.
+
+## Status
+
+Fleet v1 is local-only: remote hosts are not supported yet. Terminal sessions survive closing the
+app because `fleetd` owns them, but they do not survive a daemon restart.
