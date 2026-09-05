@@ -82,6 +82,14 @@ pub enum BridgeEvent {
     },
     /// An ordinary daemon event.
     Daemon(Box<Event>),
+    /// The client's broadcast buffer overflowed and events were dropped.
+    ///
+    /// Terminal frames are diffs: the rows changed inside the gap are never re-sent, so every
+    /// mirror has to be re-primed from a full frame before it may accept another diff.
+    EventsLagged {
+        /// How many events the buffer dropped.
+        dropped: u64,
+    },
 }
 
 /// A command sent to the background thread.
@@ -462,9 +470,12 @@ async fn open(home: &Path, events: &Sender<BridgeEvent>) -> Result<(Link, Snapsh
 
 /// Forwards every daemon event into the UI channel.
 ///
-/// A lagging receiver is impossible on the UI side (that channel is unbounded), so the only
-/// lag comes from the client's broadcast buffer; the next snapshot event resynchronises the
-/// mirror and terminals ask for a full frame themselves.
+/// A lagging receiver is impossible on the UI side (that channel is unbounded), so the only lag
+/// comes from the client's broadcast buffer. That lag is **not** self-healing: a snapshot event
+/// resynchronises the snapshot mirror, but a terminal grid is rebuilt from diffs, and the rows
+/// that changed inside the gap are never sent again. `fleet-app` consumes raw
+/// `Event::TerminalFrame`s rather than `fleet-client`'s `TerminalHandle`, so nothing else asks
+/// for a full frame on its behalf — [`BridgeEvent::EventsLagged`] is what makes the shell do it.
 fn spawn_forwarder(
     mut source: broadcast::Receiver<Event>,
     events: Sender<BridgeEvent>,
@@ -482,7 +493,15 @@ fn spawn_forwarder(
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    if events
+                        .send(BridgeEvent::EventsLagged { dropped })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
             }
         }
     })

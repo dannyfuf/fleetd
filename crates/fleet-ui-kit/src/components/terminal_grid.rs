@@ -44,7 +44,7 @@ use gpui::{
 };
 
 use crate::{
-    components::{ScrollPill, ScrollbackBadge, TerminalMode, TerminalModes},
+    components::{ScrollPill, ScrollbackBadge, TerminalMode},
     theme::{ActiveTheme, Theme},
 };
 
@@ -636,8 +636,12 @@ impl TerminalGrid {
         self
     }
 
-    /// The VT modes this frame reports, drawn as [`TerminalModes`] badges in the grid's
-    /// top-left corner. Zero-suppressed: a plain shell shows nothing.
+    /// The VT modes this frame reports.
+    ///
+    /// Nothing is *drawn* for them here — the badges belong to the Workspace header
+    /// ([`crate::components::TerminalModes`]), because the grid is live content and a badge
+    /// over it hides
+    /// output. The grid only needs `AltScreen`, which suppresses the scroll overlays.
     pub fn modes(mut self, modes: impl IntoIterator<Item = TerminalMode>) -> Self {
         self.modes = modes.into_iter().collect();
         self
@@ -822,8 +826,6 @@ impl RenderOnce for TerminalGrid {
         let padding = self.padding.unwrap_or(theme.space.sm);
         let declared = self.declared_size();
         let alt_screen = self.modes.contains(&TerminalMode::AltScreen);
-        let modes = TerminalModes::new(self.modes.clone());
-        let show_modes = modes.is_visible();
 
         // The pill is the mode affordance and wins the corner; the badge is the state
         // affordance and only appears when nothing else claims it.
@@ -845,7 +847,6 @@ impl RenderOnce for TerminalGrid {
         let selection_color = theme.terminal.selection;
         let cursor_color = theme.terminal.cursor;
         let background = theme.terminal.background;
-        let inset = theme.space.md;
 
         let painter = canvas(
             move |bounds, window, cx| {
@@ -931,11 +932,10 @@ impl RenderOnce for TerminalGrid {
             .overflow_hidden()
             .when(self.dimmed, |el| el.opacity(0.55))
             .child(div().size_full().p(padding).child(painter))
-            // The mode badges take the free corner: the scroll overlays own the top right and
-            // the prefix hint owns the bottom left.
-            .when(show_modes, |el| {
-                el.child(div().absolute().top(inset).left(inset).child(modes))
-            })
+            // Nothing else is drawn over the cells: the grid is live content and §3.6 allows
+            // only the two scroll overlays and the prefix hint on top of it. The VT modes are
+            // rendered by the Workspace *header* (`TerminalModes`), never here — a badge over
+            // the grid permanently hides the first rows of output.
             // Both overlays position themselves 12 px inside this box; only one of them ever
             // exists at a time.
             .children(pill)

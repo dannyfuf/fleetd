@@ -893,11 +893,23 @@ pub(crate) fn render(
             let state = state.clone();
             let bridge = bridge.clone();
             move |_: &settings_actions::OpenConfigFile, _window, cx| {
+                // §3.8.6 surrenders every bound printable key to a focused input, `E` and `D`
+                // included: `Claude command` and `OpenCode command` are free text, and a key
+                // that replaced the screen instead of typing dropped the draft silently.
+                if insert_literal(&state, "E", cx) {
+                    return;
+                }
                 open_config_file(&state, &bridge, cx);
             }
         })
-        .on_action(move |_: &settings_actions::RunDoctor, _window, cx| {
-            run_doctor(&doctor_state, &doctor_bridge, cx);
+        .on_action({
+            let state = state.clone();
+            move |_: &settings_actions::RunDoctor, _window, cx| {
+                if insert_literal(&state, "D", cx) {
+                    return;
+                }
+                run_doctor(&doctor_state, &doctor_bridge, cx);
+            }
         })
         .child(card)
         .into_any_element()
@@ -1044,6 +1056,14 @@ fn accepts(kind: &RowKind, text: &str) -> bool {
         RowKind::Toggle(_) | RowKind::Choice { .. } | RowKind::Fact(_) => false,
     }
 }
+
+/// Every **printable** key `Dialog > Settings` binds, and therefore every key a focused text
+/// input has to be handed back as a character (§3.8.6).
+///
+/// It is a tripwire, not a dispatch table: each handler calls [`insert_literal`] with its own
+/// literal, and the test below fails the moment a new printable binding is added here without
+/// that call — which is how `E` and `D` came to replace the screen mid-word instead of typing.
+pub const SURRENDERED_KEYS: &[&str] = &["space", "h", "l", "j", "k", "E", "D"];
 
 /// Inserts a bound key's literal character when a text input owns the keyboard.
 ///
@@ -1274,6 +1294,52 @@ mod tests {
             config: Some(config),
             ..SettingsState::default()
         }
+    }
+
+    #[test]
+    fn every_printable_settings_binding_is_surrendered_to_a_focused_input() {
+        // §3.8.6: a bound printable key must reach a focused text input as a character.
+        // gpui dispatches bindings before any key listener, so each handler has to call
+        // `insert_literal` first; this catches a new binding that forgot to.
+        for spec in crate::keymap::table() {
+            if spec.context != "Dialog > Settings" {
+                continue;
+            }
+            // A chord or a named non-printable key types nothing.
+            let printable = spec.keys == "space"
+                || (!spec.keys.contains(' ')
+                    && !spec.keys.contains('-')
+                    && spec.keys.chars().count() == 1);
+            if !printable {
+                continue;
+            }
+            assert!(
+                SURRENDERED_KEYS.contains(&spec.keys),
+                "`{}` types into `Claude command`; route it through `insert_literal`",
+                spec.keys
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_row_takes_every_surrendered_key_as_a_character() {
+        for key in ["E", "D", "j", "k", "h", "l", " "] {
+            assert!(
+                accepts(&RowKind::Text(String::new()), key),
+                "a free-text row takes `{key}`"
+            );
+            assert!(
+                !accepts(&RowKind::Toggle(false), key),
+                "a toggle takes nothing, so `{key}` keeps its binding"
+            );
+        }
+        let number = RowKind::Number {
+            value: 1,
+            min: 0,
+            unit: None,
+        };
+        assert!(!accepts(&number, "E"), "a number row is not a text field");
+        assert!(accepts(&number, "7"));
     }
 
     #[test]

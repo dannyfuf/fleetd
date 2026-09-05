@@ -18,6 +18,8 @@
 //!
 //! Everything except [`measure`] is a pure function of its arguments and is unit tested.
 
+use std::collections::BTreeMap;
+
 use fleet_proto::terminal::{
     Cell as ProtoCell, CellAttrs, CellWidth as ProtoWidth, Color, CursorShape as ProtoShape,
     TerminalModes,
@@ -206,23 +208,61 @@ pub fn grid_cursor(grid: &MirrorGrid, focused: bool) -> GridCursor {
     }
 }
 
-/// A line-wise selection between two viewport rows, in either order.
+/// The absolute scrollback line the viewport's top row is showing.
 ///
-/// Fleet's copy mode selects whole lines: `v` anchors a row, movement extends the range and `y`
-/// yanks it. A column-wise selection would need a caret the spec does not draw, so the head
-/// column is simply the end of the head row.
+/// Line 0 is the oldest row the daemon still holds. `ViewportInfo::scrollback_len` counts the
+/// history *above* the screen and `offset` how far back the viewport was pulled, so the top row
+/// sits at `scrollback_len - offset`.
+///
+/// Scroll-mode selections are anchored in this space and never in viewport rows: a viewport row
+/// number means a different line after every scroll, so an anchor expressed that way silently
+/// re-points at whatever moved under it — which is why a `v`, `PageUp`, `y` used to yank the
+/// wrong single line.
 #[must_use]
-pub fn line_selection(grid: &MirrorGrid, anchor: u16, head: u16) -> GridSelection {
+pub fn viewport_base(grid: &MirrorGrid) -> u64 {
+    let scrollback = grid.viewport.scrollback_len as u64;
+    let offset = grid.viewport.offset as u64;
+    scrollback.saturating_sub(offset)
+}
+
+/// The last absolute line the viewport is showing, or `None` for an empty grid.
+#[must_use]
+pub fn viewport_last(grid: &MirrorGrid) -> Option<u64> {
+    (grid.rows > 0).then(|| viewport_base(grid) + u64::from(grid.rows - 1))
+}
+
+/// A line-wise selection between two **absolute** scrollback lines, in either order.
+///
+/// Fleet's copy mode selects whole lines: `v` anchors a line, movement extends the range and
+/// `y` yanks it. A column-wise selection would need a caret the spec does not draw, so the head
+/// column is simply the end of the head row.
+///
+/// The result is in viewport rows, clipped to what is on screen — the selection itself may run
+/// far past both edges — and is `None` when none of it is visible.
+#[must_use]
+pub fn line_selection(grid: &MirrorGrid, anchor: u64, head: u64) -> Option<GridSelection> {
+    let base = viewport_base(grid);
+    let bottom = viewport_last(grid)?;
     let (first, last) = if anchor <= head {
         (anchor, head)
     } else {
         (head, anchor)
     };
+    if last < base || first > bottom {
+        return None;
+    }
+    let start_row = first.max(base) - base;
+    let end_row = last.min(bottom) - base;
     let end = grid
         .lines
-        .get(usize::from(last))
+        .get(usize::try_from(end_row).unwrap_or(usize::MAX))
         .map_or(0, |line| line.iter().map(cell_columns).sum());
-    GridSelection::new(usize::from(first), 0, usize::from(last), end)
+    Some(GridSelection::new(
+        usize::try_from(start_row).unwrap_or(0),
+        0,
+        usize::try_from(end_row).unwrap_or(0),
+        end,
+    ))
 }
 
 fn cell_columns(cell: &ProtoCell) -> usize {
@@ -233,22 +273,27 @@ fn cell_columns(cell: &ProtoCell) -> usize {
     }
 }
 
-/// The text a selection yanks, one line per selected row with trailing blanks removed.
+/// The text a selection yanks, one line per selected scrollback line.
+///
+/// `history` is the client's record of every line it has painted since the selection was
+/// anchored, keyed by absolute scrollback line. The daemon mirrors only the *viewport*, so a
+/// selection that spans more than one screen can only be assembled from what this client saw —
+/// which is every line the user scrolled the selection over.
 ///
 /// Trailing blanks are what a terminal pads short rows with; keeping them would paste a
-/// rectangle of spaces into the next shell prompt.
+/// rectangle of spaces into the next shell prompt, so they are stripped on the way in.
 #[must_use]
-pub fn selection_text(grid: &MirrorGrid, selection: GridSelection) -> String {
-    let selection = selection.normalized();
-    let last = selection.end_row.min(grid.lines.len().saturating_sub(1));
-    let mut lines: Vec<String> = Vec::new();
-    for row in selection.start_row..=last {
-        let Ok(index) = u16::try_from(row) else {
-            break;
-        };
-        lines.push(grid.row_text(index).trim_end().to_owned());
-    }
-    lines.join("\n")
+pub fn selection_text(history: &BTreeMap<u64, String>, anchor: u64, head: u64) -> String {
+    let (first, last) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    history
+        .range(first..=last)
+        .map(|(_, line)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The pixel size of one cell, from the theme metrics.
@@ -322,6 +367,11 @@ mod tests {
     }
 
     fn grid_with(rows: &[&str]) -> MirrorGrid {
+        grid_scrolled(rows, 0, 0)
+    }
+
+    /// A grid whose viewport sits `scrollback_len - offset` lines into the scrollback.
+    fn grid_scrolled(rows: &[&str], scrollback_len: usize, offset: usize) -> MirrorGrid {
         let cols = rows
             .iter()
             .map(|row| row.chars().count())
@@ -349,8 +399,8 @@ mod tests {
                 shape: ProtoShape::Block,
             },
             viewport: ViewportInfo {
-                scrollback_len: 0,
-                offset: 0,
+                scrollback_len,
+                offset,
             },
             modes: TerminalModes::default(),
             title: None,
@@ -435,25 +485,57 @@ mod tests {
     #[test]
     fn a_line_selection_covers_whole_rows_in_either_direction() {
         let grid = grid_with(&["one", "two", "three"]);
-        let down = line_selection(&grid, 0, 2);
-        let up = line_selection(&grid, 2, 0);
+        let down = line_selection(&grid, 0, 2).unwrap_or_else(|| panic!("off screen"));
+        let up = line_selection(&grid, 2, 0).unwrap_or_else(|| panic!("off screen"));
         assert_eq!(down, up);
         assert_eq!((down.start_row, down.start_col), (0, 0));
         assert_eq!((down.end_row, down.end_col), (2, 5));
     }
 
     #[test]
-    fn yanked_text_drops_the_padding_a_terminal_adds() {
-        let grid = grid_with(&["one   ", "two", ""]);
-        let text = selection_text(&grid, line_selection(&grid, 0, 2));
-        assert_eq!(text, "one\ntwo\n");
+    fn the_viewport_base_is_where_the_top_row_sits_in_the_scrollback() {
+        // 900 lines of history, scrolled back 10: the top row is line 890.
+        let grid = grid_scrolled(&["a", "b", "c"], 900, 10);
+        assert_eq!(viewport_base(&grid), 890);
+        assert_eq!(viewport_last(&grid), Some(892));
+        // At the live bottom the viewport starts right after the history.
+        let live = grid_scrolled(&["a", "b", "c"], 900, 0);
+        assert_eq!(viewport_base(&live), 900);
     }
 
     #[test]
-    fn a_selection_past_the_end_of_the_grid_is_clamped() {
-        let grid = grid_with(&["one"]);
-        let text = selection_text(&grid, GridSelection::new(0, 0, 40, 0));
-        assert_eq!(text, "one");
+    fn a_selection_anchored_before_the_viewport_still_paints_what_is_visible() {
+        // terminal-008: `v` on line 890, then a page up — the anchor is above the screen now.
+        let grid = grid_scrolled(&["d", "e", "f"], 900, 13);
+        assert_eq!(viewport_base(&grid), 887);
+        let painted = line_selection(&grid, 890, 887).unwrap_or_else(|| panic!("off screen"));
+        assert_eq!(
+            (painted.start_row, painted.end_row),
+            (0, 2),
+            "the visible part of the selection is clipped to the viewport, not lost"
+        );
+
+        // A selection entirely above or below the viewport paints nothing at all.
+        assert_eq!(line_selection(&grid, 400, 401), None);
+        assert_eq!(line_selection(&grid, 1_000, 1_001), None);
+    }
+
+    #[test]
+    fn yanked_text_spans_every_line_the_selection_covers() {
+        // terminal-008: the yank reads the client's scrollback record, not the viewport, so a
+        // selection that started three pages up still yields all of its lines.
+        let mut history = BTreeMap::new();
+        for (offset, line) in ["one", "two", "three", "four"].into_iter().enumerate() {
+            history.insert(890 + offset as u64, line.to_owned());
+        }
+        assert_eq!(selection_text(&history, 890, 893), "one\ntwo\nthree\nfour");
+        assert_eq!(
+            selection_text(&history, 893, 890),
+            "one\ntwo\nthree\nfour",
+            "the range is the same in either direction"
+        );
+        assert_eq!(selection_text(&history, 891, 892), "two\nthree");
+        assert_eq!(selection_text(&history, 500, 501), "");
     }
 
     #[test]

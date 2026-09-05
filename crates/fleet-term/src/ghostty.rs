@@ -25,6 +25,11 @@ use crate::{
     keys::{ghostty_key_event, ghostty_mouse_event},
 };
 
+// Ghostty bounds scrollback storage in bytes, while Fleet's public configuration is in rows.
+// Reserving 1 KiB per requested row gives the default 10,000-row policy roughly 10 MiB, in line
+// with Ghostty's own scrollback sizing, while retaining enough room for styled terminal cells.
+const SCROLLBACK_BYTES_PER_LINE: usize = 1024;
+
 /// A headless Ghostty terminal emulator and its persistent render snapshot state.
 pub struct GhosttyEngine {
     terminal: Terminal<'static, 'static>,
@@ -127,7 +132,7 @@ impl VtEngine for GhosttyEngine {
         let mut terminal = Self::backend(Terminal::new(TerminalOptions {
             cols,
             rows,
-            max_scrollback: scrollback_lines,
+            max_scrollback: scrollback_byte_budget(scrollback_lines),
         }))?;
         let title_events = Arc::clone(&events);
         Self::backend(terminal.on_title_changed(move |terminal| {
@@ -345,6 +350,10 @@ fn lock_events(events: &Mutex<Vec<EngineEvent>>) -> MutexGuard<'_, Vec<EngineEve
     }
 }
 
+fn scrollback_byte_budget(scrollback_lines: usize) -> usize {
+    scrollback_lines.saturating_mul(SCROLLBACK_BYTES_PER_LINE)
+}
+
 fn mode(terminal: &Terminal<'_, '_>, mode: Mode) -> bool {
     terminal.mode(mode).unwrap_or(false)
 }
@@ -536,5 +545,23 @@ mod tests {
             event,
             EngineEvent::ClipboardWrite { data, .. } if data == "hello"
         )));
+    }
+
+    #[test]
+    fn line_limit_is_converted_to_a_sufficient_scrollback_byte_budget() {
+        let mut engine = GhosttyEngine::new(40, 10, 10_000)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+        let output = (1..=5_000)
+            .map(|line| format!("{line}\r\n"))
+            .collect::<String>();
+
+        engine.feed(output.as_bytes());
+
+        assert_eq!(engine.take_frame(true).viewport.scrollback_len, 4_991);
+    }
+
+    #[test]
+    fn scrollback_byte_budget_saturates_on_overflow() {
+        assert_eq!(scrollback_byte_budget(usize::MAX), usize::MAX);
     }
 }

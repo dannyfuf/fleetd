@@ -16,7 +16,7 @@
 use fleet_core::{
     config::Agent,
     ids::{ContextId, JobId, RepoId, SessionId, WorktreeId},
-    sessions::SessionState,
+    sessions::{SessionKind, SessionState},
 };
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{Icon, prelude::*};
@@ -29,6 +29,7 @@ use crate::{
         ConfirmRequest, Dialogs, TextInput, notify, request_confirm, step, type_into, with_host,
     },
     keymap,
+    screens::workspace::status_kind,
     state::{AppState, HubTab, Overlay, RepoScope, Screen, latest_failed_job, running_jobs},
 };
 
@@ -78,8 +79,12 @@ pub struct Entry {
     pub destructive: bool,
     /// The glyph, when it is not derived from a session state.
     pub icon: Icon,
-    /// The session state whose §2.5 glyph this row wears, for `GO` rows.
-    pub session: Option<SessionState>,
+    /// The §2.5 glyph this row wears, for `GO` rows.
+    ///
+    /// It is a resolved [`StatusKind`] and not a raw [`SessionState`] on purpose: `detached`
+    /// alone cannot tell `circle` from `moon`, and §5 invariant 1 requires the palette to
+    /// draw exactly the glyph the Hub draws for the same worktree.
+    pub status: Option<StatusKind>,
     /// What `Enter` does.
     pub run: Run,
 }
@@ -339,29 +344,50 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
         // GO: sessions first, because reaching one from inside another is the point (§3.9).
         let mut go: Vec<Entry> = Vec::new();
         for session in &snapshot.sessions {
-            let attached = session.slept_at.is_none();
+            // §5 invariant 1: the row wears the Hub's glyph and the Hub's wording for the same
+            // worktree, so both are resolved from the one `WorktreeStatus` the Hub reads.
+            // `slept_at` alone cannot tell `attached` from `running, detached` — it only tells
+            // `awake` from `sleeping` — and reading it as "attached" is how the palette came to
+            // call a detached session green.
+            let worktree = match &session.kind {
+                SessionKind::Worktree(id) => snapshot
+                    .worktrees
+                    .iter()
+                    .find(|worktree| &worktree.id == id),
+                SessionKind::Agent { .. } => None,
+            };
+            let slept = session.slept_at.is_some();
+            let state = worktree
+                .and_then(|worktree| {
+                    snapshot
+                        .statuses
+                        .iter()
+                        .find(|status| status.worktree_id == worktree.id)
+                })
+                .map_or(
+                    // An agent session has no `WorktreeStatus`; the session record itself is
+                    // then the only evidence, and it can only say awake or slept.
+                    if slept {
+                        SessionState::Detached
+                    } else {
+                        SessionState::Attached
+                    },
+                    |status| status.session,
+                );
+            let degraded = worktree.is_some_and(|worktree| worktree.degraded.is_some());
             go.push(Entry {
                 section: PaletteSectionKind::Go,
-                label: session.id.as_str().to_owned(),
-                detail: Some(
-                    session_detail(
-                        if attached {
-                            SessionState::Attached
-                        } else {
-                            SessionState::Detached
-                        },
-                        !attached,
-                    )
-                    .to_owned(),
+                // §3.9 lists worktrees by their `WorktreeId`; a session id is a different id
+                // scheme and mixing the two in one section makes the list unreadable.
+                label: worktree.map_or_else(
+                    || session.id.as_str().to_owned(),
+                    |worktree| worktree.id.as_str().to_owned(),
                 ),
+                detail: Some(session_detail(state, slept).to_owned()),
                 key: None,
                 destructive: false,
-                icon: Icon::CircleDot,
-                session: Some(if attached {
-                    SessionState::Attached
-                } else {
-                    SessionState::Detached
-                }),
+                icon: Icon::GitBranch,
+                status: Some(status_kind(state, slept, degraded)),
                 run: Run::OpenSession(session.id.clone()),
             });
         }
@@ -387,7 +413,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 key: None,
                 destructive: false,
                 icon: Icon::GitBranch,
-                session: Some(session),
+                status: Some(status_kind(session, false, worktree.degraded.is_some())),
                 run: Run::OpenWorktree(worktree.id.clone()),
             });
         }
@@ -399,7 +425,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 key: None,
                 destructive: false,
                 icon: Icon::FolderGit2,
-                session: None,
+                status: None,
                 run: Run::SelectRepo(repo.id.clone()),
             });
         }
@@ -422,7 +448,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 key: key_for(command.action()),
                 destructive: command.destructive(),
                 icon: command.icon(),
-                session: None,
+                status: None,
                 run: Run::Command(command),
             })
             .collect();
@@ -437,7 +463,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 key: key_for("fleet::OpenJobs"),
                 destructive: false,
                 icon: Icon::CircleStop,
-                session: None,
+                status: None,
                 run: Run::CancelJob(job.id.clone()),
             });
         }
@@ -449,7 +475,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 key: key_for("fleet::FocusStickyError"),
                 destructive: false,
                 icon: Icon::CircleX,
-                session: None,
+                status: None,
                 run: Run::Command(Command::JobsPanel),
             });
         }
@@ -471,7 +497,7 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 key: (index < 9).then(|| (index + 1).to_string()),
                 destructive: false,
                 icon: Icon::Boxes,
-                session: None,
+                status: None,
                 run: Run::SwitchContext(context.id.clone()),
             })
             .collect();
@@ -517,19 +543,10 @@ pub fn render(
                 let mut row = PaletteRow::new(entry.label.clone())
                     .destructive(entry.destructive)
                     .icon(entry.icon);
-                if let Some(session) = entry.session {
-                    row = row.leading(
-                        StatusGlyph::new(match session {
-                            SessionState::Attached => StatusKind::Attached,
-                            SessionState::Detached => StatusKind::Sleeping,
-                            SessionState::Unknown => StatusKind::Unknown,
-                            SessionState::None => StatusKind::NoSession,
-                        })
-                        .id(gpui::SharedString::from(format!(
-                            "palette-glyph-{}",
-                            entry.label
-                        ))),
-                    );
+                if let Some(status) = entry.status {
+                    row = row.leading(StatusGlyph::new(status).id(gpui::SharedString::from(
+                        format!("palette-glyph-{}", entry.label),
+                    )));
                 }
                 if let Some(detail) = entry.detail.clone() {
                     row = row.detail(detail);
@@ -913,6 +930,95 @@ mod tests {
             rows.is_empty(),
             "without a snapshot the palette has nothing to point at"
         );
+    }
+
+    fn go_snapshot(state: SessionState, slept: bool) -> fleet_proto::snapshot::Snapshot {
+        use fleet_core::sessions::{Session, SessionKind};
+        let id: WorktreeId = "acme/widgets#feature-one"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut snapshot = fleet_proto::snapshot::Snapshot {
+            generated_at: "2026-09-04T12:00:00Z".to_owned(),
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: Vec::new(),
+            active_context: None,
+            sessions: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: fleet_proto::snapshot::DaemonInfo {
+                version: "0.1.0".to_owned(),
+                pid: 1,
+                started_at: "2026-09-04T09:00:00Z".to_owned(),
+                home: "/tmp/fleet".to_owned(),
+            },
+        };
+        snapshot.worktrees = vec![fleet_core::model::Worktree {
+            id: id.clone(),
+            repo_id: "acme/widgets"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+            slug: "feature-one".to_owned(),
+            branch: "feature-one".to_owned(),
+            base_ref: "main".to_owned(),
+            path: "/tmp/widgets/feature-one".to_owned(),
+            session: "widgets/feature-one".to_owned(),
+            host: None,
+            created_at: "2026-09-04T09:00:00Z".to_owned(),
+            last_opened_at: None,
+            degraded: None,
+        }];
+        snapshot.sessions = vec![Session {
+            id: "widgets/feature-one"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+            kind: SessionKind::Worktree(id.clone()),
+            cwd: "/tmp/widgets/feature-one".to_owned(),
+            terminals: Vec::new(),
+            active_terminal: None,
+            slept_at: slept.then(|| "2026-09-04T11:00:00Z".to_owned()),
+            kept_terminals: Vec::new(),
+        }];
+        snapshot.statuses = vec![fleet_core::sessions::WorktreeStatus {
+            worktree_id: id,
+            session: state,
+            windows: Vec::new(),
+            running: Vec::new(),
+        }];
+        snapshot
+    }
+
+    #[test]
+    fn a_go_row_takes_its_state_and_its_id_from_the_same_place_the_hub_does() {
+        let now = Instant::now();
+        let mut app = AppState::new("/tmp/fleet", now);
+        app.apply_snapshot(go_snapshot(SessionState::Detached, false), now);
+        let rows = candidates(&app, "");
+        let go: Vec<_> = rows
+            .iter()
+            .filter(|entry| entry.section == PaletteSectionKind::Go)
+            .collect();
+        assert_eq!(go.len(), 1, "one worktree is one GO row, {go:?}");
+        assert_eq!(
+            go[0].label, "acme/widgets#feature-one",
+            "\u{a7}3.9 labels a GO row with its WorktreeId, never a session id"
+        );
+        assert_eq!(go[0].detail.as_deref(), Some("running, detached"));
+        assert_eq!(go[0].status, Some(StatusKind::DetachedAwake));
+
+        // The same worktree, actually attached, and slept.
+        let mut app = AppState::new("/tmp/fleet", now);
+        app.apply_snapshot(go_snapshot(SessionState::Attached, false), now);
+        let rows = candidates(&app, "");
+        assert_eq!(rows[0].status, Some(StatusKind::Attached));
+        let mut app = AppState::new("/tmp/fleet", now);
+        app.apply_snapshot(go_snapshot(SessionState::Detached, true), now);
+        let rows = candidates(&app, "");
+        assert_eq!(rows[0].status, Some(StatusKind::Sleeping));
+        assert_eq!(rows[0].detail.as_deref(), Some("sleeping"));
     }
 
     #[test]

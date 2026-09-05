@@ -304,8 +304,10 @@ pub(crate) fn render(
     let now = now_epoch();
     let rows = draft.rows();
 
+    // §3.8.2: the field carries a search affordance (the magnifier), not a sentence. The one
+    // instruction is the *idle* body line below, which also names the context; printing it
+    // twice, once with `this context` and once with the real name, says nothing extra.
     let search_field = TextField::new(draft.query.value().to_owned())
-        .placeholder("Type to search GitHub repos in this context's owners.")
         .icon(if draft.searching {
             Icon::LoaderCircle
         } else {

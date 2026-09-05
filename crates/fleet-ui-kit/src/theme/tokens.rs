@@ -458,7 +458,7 @@ pub struct Metrics {
     pub cell_w: Pixels,
     /// Terminal cell height.
     pub cell_h: Pixels,
-    /// 96 px fact-label column.
+    /// 104 px fact-label column, wide enough for the longest §3.4 label (`unique commits`).
     pub fact_label_w: Pixels,
     /// 120 px doctor check column.
     pub doctor_check_w: Pixels,
@@ -516,7 +516,7 @@ impl Default for Metrics {
             focus_ring_w: px(2.0),
             cell_w: px(CH),
             cell_h: px(18.0),
-            fact_label_w: px(96.0),
+            fact_label_w: px(104.0),
             doctor_check_w: px(120.0),
             doctor_status_w: px(64.0),
             text_field_h: px(36.0),

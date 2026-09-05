@@ -31,6 +31,7 @@ const KEY_COLUMN_CH: f32 = 5.0;
 /// One result row.
 pub struct FuzzyItem {
     primary: SharedString,
+    detail: Option<SharedString>,
     secondary: Option<SharedString>,
     trailing: Option<SharedString>,
     leading: Option<AnyElement>,
@@ -45,6 +46,7 @@ impl FuzzyItem {
     pub fn new(primary: impl Into<SharedString>) -> Self {
         Self {
             primary: primary.into(),
+            detail: None,
             secondary: None,
             trailing: None,
             leading: None,
@@ -59,6 +61,17 @@ impl FuzzyItem {
     /// an empty description must not leave a blank line).
     pub fn secondary(mut self, secondary: impl Into<SharedString>) -> Self {
         self.secondary = Some(secondary.into());
+        self
+    }
+
+    /// A muted qualifier drawn **on the same line**, after the primary label.
+    ///
+    /// Use it when the qualifier is what makes the row's identity (§3.8.5: a context's owners
+    /// are the reason a repo belongs to it) — [`FuzzyItem::secondary`] grows the row to two
+    /// lines, which is the right shape for a description and the wrong one for a qualifier the
+    /// eye reads with the name.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 
@@ -289,6 +302,9 @@ impl RenderOnce for FuzzyList {
                             &theme,
                         )));
 
+                        if let Some(detail) = item.detail {
+                            row = row.column(RowColumn::flex(Text::ui(detail).muted().ellipsize()));
+                        }
                         if let Some(trailing) = item.trailing {
                             row = row.column(
                                 RowColumn::auto(Text::ui(trailing).faint())

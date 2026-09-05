@@ -31,7 +31,7 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -51,7 +51,7 @@ use fleet_proto::{
 };
 use fleet_ui_kit::{
     ActiveTheme, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill, StatusKind,
-    TerminalGrid, TerminalTabStrip, Text,
+    TerminalGrid, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, Pixels,
@@ -65,7 +65,7 @@ use crate::{
     state::{AppState, Overlay, Screen, TerminalMode},
     terminal_element::{
         GRID_PADDING, cell_size, grid_cursor, grid_modes, grid_rows, grid_size, line_selection,
-        measure, selection_text, zoom_bar,
+        measure, selection_text, viewport_base, viewport_last, zoom_bar,
     },
     views::{workspace_header::WorkspaceHeader, workspace_tabs},
 };
@@ -82,6 +82,12 @@ const FALLBACK_GRID: (u16, u16) = (80, 24);
 /// what fleetd types at its first prompt, and it refuses an empty one. A shell tab wants no
 /// program, so it asks for the one thing that leaves a clean prompt behind.
 const SHELL_TAB_COMMAND: &str = "clear";
+
+/// How many scrollback lines one selection may remember.
+///
+/// A selection is bounded by what the user scrolled over, so this only exists so a held `k` on
+/// a million-line scrollback cannot grow the map without limit.
+const SELECTION_LINE_CAP: usize = 100_000;
 
 /// The six prefix keys the delayed hint strip lists (§3.6).
 fn prefix_hints() -> KeyHintRow {
@@ -115,10 +121,21 @@ struct Local {
     area: Size<Pixels>,
     /// Keys typed before the first frame landed. Flushed in order, then never used again.
     pending: Vec<KeyEvent>,
-    /// The anchor row of a scroll-mode selection, in viewport coordinates.
-    anchor: Option<u16>,
-    /// The scroll-mode caret row, which `j` / `k` move and a selection extends to.
-    caret: u16,
+    /// The anchor of a scroll-mode selection, as an **absolute** scrollback line.
+    ///
+    /// Viewport rows are not stable: a page of scrolling replaces every row's content while
+    /// leaving its number alone, so an anchor kept that way silently re-points at whatever
+    /// moved under it. See [`crate::terminal_element::viewport_base`].
+    anchor: Option<u64>,
+    /// The scroll-mode caret, as an absolute scrollback line. `j` / `k` move it and a
+    /// selection extends to it.
+    caret: u64,
+    /// Every line this client has painted since the selection was anchored, by absolute
+    /// scrollback line.
+    ///
+    /// The daemon mirrors only the viewport, so this is the only place a multi-page selection
+    /// can be assembled from. It is dropped the moment the selection ends.
+    history: BTreeMap<u64, String>,
     /// Whether the 400 ms prefix-hint timer is already running for this prefix.
     hint_armed: bool,
     /// Whether that timer has fired.
@@ -170,6 +187,7 @@ impl WorkspaceScreen {
         let cell = cell_size(cx.theme());
 
         self.reconcile(&model, bridge, cell);
+        self.track_selection(state, cx);
         self.arm_prefix_hint(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
 
@@ -238,6 +256,7 @@ impl WorkspaceScreen {
             }
             local.pending.clear();
             local.anchor = None;
+            local.history.clear();
             if let Some(terminal) = model.terminal {
                 let (cols, rows) = local.size_for(terminal, cell);
                 local.sizes.insert(terminal, (cols, rows));
@@ -263,11 +282,40 @@ impl WorkspaceScreen {
                 None => local.pending.clear(),
             }
         }
+    }
 
-        // The caret cannot survive outside a grid that shrank under it.
-        let last_row = model.rows.saturating_sub(1);
-        if local.caret > last_row {
-            local.caret = last_row;
+    /// Keeps the Scroll-mode caret inside the viewport and records what a live selection covers.
+    ///
+    /// The recording is what makes a selection survive scrolling: the daemon mirrors only the
+    /// rows on screen, so the lines that scroll out of the viewport exist nowhere else once the
+    /// next frame replaces them.
+    fn track_selection(&self, state: &Entity<AppState>, cx: &App) {
+        let app = state.read(cx);
+        let Some(grid) = app.active_grid() else {
+            return;
+        };
+        let (Some(base), Some(bottom)) = (Some(viewport_base(grid)), viewport_last(grid)) else {
+            return;
+        };
+        let mut local = self.local.borrow_mut();
+        local.caret = local.caret.clamp(base, bottom);
+        let Some(anchor) = local.anchor else {
+            local.history.clear();
+            return;
+        };
+        let (first, last) = if anchor <= local.caret {
+            (anchor, local.caret)
+        } else {
+            (local.caret, anchor)
+        };
+        for row in 0..grid.rows {
+            let line = base + u64::from(row);
+            if line < first || line > last || local.history.len() >= SELECTION_LINE_CAP {
+                continue;
+            }
+            local
+                .history
+                .insert(line, grid.row_text(row).trim_end().to_owned());
         }
     }
 
@@ -354,6 +402,11 @@ impl WorkspaceScreen {
             .status(model.status)
             .keep_alive(model.keep_alive.iter().cloned())
             .jobs(model.running_jobs, model.failed_jobs)
+            // §3.6: the frame's VT modes are the only thing that explains why a documented key
+            // behaves differently — no scrollback in alt-screen, the app owning drag-select
+            // under mouse reporting. They are badged here, in reserved chrome, and never over
+            // the grid, whose cells are live output. Zero-suppressed.
+            .modes(model.modes.iter().copied())
             .waking(model.waking);
         if let Some(repo) = &model.repo {
             header = header.repo(SharedString::from(repo.to_string()));
@@ -383,11 +436,12 @@ impl WorkspaceScreen {
             .unwrap_or(0);
         let _unused = cx;
         let (new_session, new_bridge, new_state) = (session.clone(), bridge.clone(), state.clone());
+        let new_local = Rc::clone(&self.local);
         TerminalTabStrip::new(tabs)
             .active(active)
             // Mouse parity for `ctrl-s c` (§3.6): the `+` is the same request.
             .on_new(move |_window, cx| {
-                request_shell_tab(&new_session, &new_bridge, &new_state, cx);
+                request_shell_tab(&new_local, &new_session, &new_bridge, &new_state, cx);
             })
             .into_any_element()
     }
@@ -408,7 +462,7 @@ impl WorkspaceScreen {
             let local = self.local.borrow();
             local
                 .anchor
-                .map(|anchor| line_selection(grid, anchor, local.caret))
+                .and_then(|anchor| line_selection(grid, anchor, local.caret))
         });
         let hint_visible = self.local.borrow().hint_visible;
 
@@ -421,10 +475,8 @@ impl WorkspaceScreen {
                     .id("workspace-terminal-grid")
                     .cursor(grid_cursor(grid, focused))
                     .focused(focused)
-                    // §3.6: the frame's VT modes are the only thing that explains why a
-                    // documented key behaves differently — no scrollback in alt-screen, the
-                    // app owning drag-select under mouse reporting. The badges are
-                    // zero-suppressed, so a plain shell still shows none.
+                    // Only so the grid can suppress its scroll overlays in alt-screen: the
+                    // badges themselves are drawn in the session header, never over the cells.
                     .modes(grid_modes(&grid.modes))
                     .padding(px(GRID_PADDING))
                     .scrollback(grid.viewport.offset, grid.viewport.scrollback_len)
@@ -586,12 +638,12 @@ impl WorkspaceScreen {
         };
         let root = self.tab_actions(root, bridge, state);
         let root = {
-            let (_, bridge, state) = self.handles(bridge, state);
+            let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::NewTerminal, _window, cx| {
                 let Some(session) = state.read(cx).active_session().cloned() else {
                     return;
                 };
-                request_shell_tab(&session, &bridge, &state, cx);
+                request_shell_tab(&local, &session, &bridge, &state, cx);
             })
         };
         let root = {
@@ -793,38 +845,65 @@ impl WorkspaceScreen {
                 step_line(&local, &bridge, &state, -1, cx);
             })
         };
-        macro_rules! scroll_by {
-            ($root:expr, $action:ty, $command:expr) => {{
-                let (_, bridge, state) = self.handles(bridge, state);
+        // Every page motion moves the caret by the same number of lines. Without that the
+        // viewport slides out from under a live selection and the anchor stops being reachable,
+        // which is what made a multi-page selection impossible.
+        macro_rules! scroll_pages {
+            ($root:expr, $action:ty, $down:expr) => {{
+                let (local, bridge, state) = self.handles(bridge, state);
                 $root.on_action(move |_: &$action, _window, cx| {
-                    scroll_viewport(&bridge, &state, $command, cx);
+                    let page = i32::from(visible_rows(&state, cx)).max(1);
+                    let lines = if $down { page } else { -page };
+                    scroll_lines(&local, &bridge, &state, lines, cx);
                 })
             }};
         }
         let root = {
-            let (_, bridge, state) = self.handles(bridge, state);
+            let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::HalfPageDown, _window, cx| {
                 let half = half_page(&state, cx);
-                scroll_viewport(&bridge, &state, ScrollCommand::Lines(half), cx);
+                scroll_lines(&local, &bridge, &state, half, cx);
             })
         };
         let root = {
-            let (_, bridge, state) = self.handles(bridge, state);
+            let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::HalfPageUp, _window, cx| {
                 let half = half_page(&state, cx);
-                scroll_viewport(&bridge, &state, ScrollCommand::Lines(-half), cx);
+                scroll_lines(&local, &bridge, &state, -half, cx);
             })
         };
-        let root = scroll_by!(root, scroll::PageDown, ScrollCommand::Pages(1));
-        let root = scroll_by!(root, scroll::PageUp, ScrollCommand::Pages(-1));
-        let root = scroll_by!(root, scroll::Top, ScrollCommand::Top);
-        let root = scroll_by!(root, scroll::Bottom, ScrollCommand::Bottom);
+        let root = scroll_pages!(root, scroll::PageDown, true);
+        let root = scroll_pages!(root, scroll::PageUp, false);
+        // `g` and `G` jump somewhere the caret cannot be derived from a delta. Parking it at
+        // either extreme lets the next frame clamp it onto the new viewport.
+        let root = {
+            let (local, bridge, state) = self.handles(bridge, state);
+            root.on_action(move |_: &scroll::Top, _window, cx| {
+                local.borrow_mut().caret = 0;
+                scroll_viewport(&bridge, &state, ScrollCommand::Top, cx);
+            })
+        };
+        let root = {
+            let (local, bridge, state) = self.handles(bridge, state);
+            root.on_action(move |_: &scroll::Bottom, _window, cx| {
+                local.borrow_mut().caret = u64::MAX;
+                scroll_viewport(&bridge, &state, ScrollCommand::Bottom, cx);
+            })
+        };
 
         let root = {
             let (local, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::StartSelection, _window, cx| {
-                let caret = local.borrow().caret;
-                local.borrow_mut().anchor = Some(caret);
+                let (base, rows) = viewport_span(&state, cx);
+                let mut borrowed = local.borrow_mut();
+                // A caret that has never moved is still at line 0; anchoring there would
+                // anchor the oldest line in the scrollback rather than the one on screen.
+                if rows > 0 {
+                    borrowed.caret = borrowed.caret.clamp(base, base + u64::from(rows - 1));
+                }
+                borrowed.anchor = Some(borrowed.caret);
+                borrowed.history.clear();
+                drop(borrowed);
                 state.update(cx, |_, cx| cx.notify());
             })
         };
@@ -833,19 +912,19 @@ impl WorkspaceScreen {
             root.on_action(move |_: &scroll::Yank, _window, cx| {
                 let text = {
                     let borrowed = local.borrow();
-                    let app = state.read(cx);
                     borrowed
                         .anchor
-                        .zip(app.active_grid())
-                        .map(|(anchor, grid)| {
-                            selection_text(grid, line_selection(grid, anchor, borrowed.caret))
-                        })
+                        .map(|anchor| selection_text(&borrowed.history, anchor, borrowed.caret))
                 };
                 let Some(text) = text else {
                     return;
                 };
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
-                local.borrow_mut().anchor = None;
+                {
+                    let mut borrowed = local.borrow_mut();
+                    borrowed.anchor = None;
+                    borrowed.history.clear();
+                }
                 state.update(cx, |app, cx| {
                     app.toast_short("copied", Icon::ClipboardCheck, Instant::now());
                     cx.notify();
@@ -857,9 +936,14 @@ impl WorkspaceScreen {
         let root = {
             let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::Escape, _window, cx| {
-                if local.borrow_mut().anchor.take().is_some() {
-                    state.update(cx, |_, cx| cx.notify());
-                    return;
+                {
+                    let mut borrowed = local.borrow_mut();
+                    if borrowed.anchor.take().is_some() {
+                        borrowed.history.clear();
+                        drop(borrowed);
+                        state.update(cx, |_, cx| cx.notify());
+                        return;
+                    }
                 }
                 exit_scroll(&local, &bridge, &state, cx);
             })
@@ -908,7 +992,13 @@ impl WorkspaceScreen {
 /// Asks fleetd for a plain shell tab in the session's worktree path.
 ///
 /// `ctrl-s c` and the `+` at the end of the strip are the same request, so they share this.
-fn request_shell_tab(session: &Session, bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
+fn request_shell_tab(
+    local: &Rc<RefCell<Local>>,
+    session: &Session,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
     let reply = bridge.request(RequestBody::NewTerminal {
         session: session.id.clone(),
         name: workspace_tabs::new_terminal_name(session),
@@ -916,10 +1006,18 @@ fn request_shell_tab(session: &Session, bridge: &Bridge, state: &Entity<AppState
         cwd: session.cwd.clone(),
     });
     let state = state.clone();
+    let bridge = bridge.clone();
+    let local = Rc::clone(local);
     cx.spawn(async move |cx| {
-        // A refused request is sticky, never silent (§1.8) — this key used to fail quietly.
-        if let Ok(Err(error)) = reply.recv().await {
-            cx.update(|cx| {
+        match reply.recv().await {
+            // §3.6: the tab the user just asked for is the tab they are about to type into.
+            // Selecting it is what moves the blue underline *and* what makes the daemon clear
+            // its unseen-output dot; without it the next keystrokes go to the previous PTY.
+            Ok(Ok(ResponseBody::Terminal(terminal))) => cx.update(|cx| {
+                select_terminal(&local, &bridge, &state, Some(terminal.id), cx);
+            }),
+            // A refused request is sticky, never silent (§1.8) — this key used to fail quietly.
+            Ok(Err(error)) => cx.update(|cx| {
                 state.update(cx, |app, cx| {
                     app.sticky_error = Some(crate::state::StickyError {
                         text: error.message,
@@ -928,7 +1026,8 @@ fn request_shell_tab(session: &Session, bridge: &Bridge, state: &Entity<AppState
                     });
                     cx.notify();
                 });
-            });
+            }),
+            _ => {}
         }
     })
     .detach();
@@ -965,17 +1064,42 @@ fn step_line(
     delta: isize,
     cx: &mut App,
 ) {
-    let rows = visible_rows(state, cx);
-    if move_caret(local, delta, rows) {
+    let (base, rows) = viewport_span(state, cx);
+    if move_caret(local, delta, base, rows) {
         state.update(cx, |_, cx| cx.notify());
         return;
     }
-    scroll_viewport(
-        bridge,
-        state,
-        ScrollCommand::Lines(i32::try_from(delta).unwrap_or(0)),
-        cx,
-    );
+    // The caret is against an edge: the viewport moves under it instead, and the caret goes
+    // with it so a selection keeps extending line by line.
+    scroll_lines(local, bridge, state, i32::try_from(delta).unwrap_or(0), cx);
+}
+
+/// The absolute line the viewport's top row shows, and how many rows it has.
+fn viewport_span(state: &Entity<AppState>, cx: &App) -> (u64, u16) {
+    state
+        .read(cx)
+        .active_grid()
+        .map_or((0, 0), |grid| (viewport_base(grid), grid.rows))
+}
+
+/// Scrolls by whole lines and carries the caret along, so a live selection grows with the view.
+fn scroll_lines(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    lines: i32,
+    cx: &mut App,
+) {
+    {
+        let mut local = local.borrow_mut();
+        let moved = i64::from(lines);
+        local.caret = if moved >= 0 {
+            local.caret.saturating_add(moved.unsigned_abs())
+        } else {
+            local.caret.saturating_sub(moved.unsigned_abs())
+        };
+    }
+    scroll_viewport(bridge, state, ScrollCommand::Lines(lines), cx);
 }
 
 /// Leaves Scroll mode: the viewport snaps back to the live bottom (KEYMAP §Scroll).
@@ -985,7 +1109,11 @@ fn exit_scroll(
     state: &Entity<AppState>,
     cx: &mut App,
 ) {
-    local.borrow_mut().anchor = None;
+    {
+        let mut borrowed = local.borrow_mut();
+        borrowed.anchor = None;
+        borrowed.history.clear();
+    }
     if let Some(terminal) = active_terminal(state, cx) {
         bridge.send(RequestBody::ScrollTerminal {
             terminal,
@@ -1000,18 +1128,29 @@ fn exit_scroll(
     });
 }
 
-/// Moves the scroll caret, returning whether it moved at all.
-fn move_caret(local: &Rc<RefCell<Local>>, delta: isize, rows: u16) -> bool {
+/// Moves the scroll caret inside the viewport, returning whether it moved at all.
+///
+/// The caret is an absolute scrollback line, so the viewport it must stay inside is passed in:
+/// `base` is the line the top row shows and `rows` how many are on screen. Returning `false`
+/// at either edge is what makes `j` / `k` scroll instead.
+fn move_caret(local: &Rc<RefCell<Local>>, delta: isize, base: u64, rows: u16) -> bool {
     if rows == 0 {
         return false;
     }
     let mut local = local.borrow_mut();
-    let last = rows.saturating_sub(1);
-    let current = local.caret.min(last);
-    let last = isize::try_from(last).unwrap_or(isize::MAX);
-    let next = (isize::try_from(current).unwrap_or(0) + delta).clamp(0, last);
-    let next = u16::try_from(next).unwrap_or(0);
-    if next == local.caret {
+    let bottom = base + u64::from(rows - 1);
+    let current = local.caret.clamp(base, bottom);
+    local.caret = current;
+    let next = if delta >= 0 {
+        current
+            .saturating_add(delta.unsigned_abs() as u64)
+            .min(bottom)
+    } else {
+        current
+            .saturating_sub(delta.unsigned_abs() as u64)
+            .max(base)
+    };
+    if next == current {
         return false;
     }
     local.caret = next;
@@ -1081,7 +1220,11 @@ fn select_terminal(
         session: session.clone(),
         terminal,
     });
-    local.borrow_mut().anchor = None;
+    {
+        let mut borrowed = local.borrow_mut();
+        borrowed.anchor = None;
+        borrowed.history.clear();
+    }
     state.update(cx, |app, cx| {
         app.touch_terminal(&session, terminal);
         // The snapshot decides which tab is really active; this only keeps the mode honest
@@ -1265,7 +1408,6 @@ struct Model {
     terminal: Option<TerminalId>,
     primed: bool,
     alt_screen: bool,
-    rows: u16,
     scroll_offset: usize,
     scrollback_len: usize,
     exit_code: Option<Option<i32>>,
@@ -1278,6 +1420,8 @@ struct Model {
     running_jobs: usize,
     failed_jobs: usize,
     waking: bool,
+    /// The VT modes the active terminal's last frame reported (§3.6: badged in the header).
+    modes: Vec<KitTerminalMode>,
 }
 
 impl Model {
@@ -1361,7 +1505,6 @@ impl Model {
             terminal,
             primed: grid.is_some_and(|grid| grid.primed),
             alt_screen: grid.is_some_and(|grid| grid.modes.alt_screen),
-            rows: grid.map_or(0, |grid| grid.rows),
             scroll_offset: grid.map_or(0, |grid| grid.viewport.offset),
             scrollback_len: grid.map_or(0, |grid| grid.viewport.scrollback_len),
             exit_code,
@@ -1378,6 +1521,7 @@ impl Model {
                     .terminals
                     .iter()
                     .any(|terminal| terminal.status == TerminalStatus::Starting),
+            modes: grid.map_or_else(Vec::new, |grid| grid_modes(&grid.modes)),
         }
     }
 }
@@ -1605,22 +1749,28 @@ mod tests {
 
     #[test]
     fn the_scroll_caret_stops_at_both_edges() {
-        let local = Rc::new(RefCell::new(Local::default()));
-        assert!(move_caret(&local, 1, 3));
-        assert_eq!(local.borrow().caret, 1);
-        assert!(move_caret(&local, 5, 3));
-        assert_eq!(local.borrow().caret, 2);
-        // At the bottom edge the caret no longer moves, which is what makes `j` scroll instead.
-        assert!(!move_caret(&local, 1, 3));
-        assert!(move_caret(&local, -9, 3));
-        assert_eq!(local.borrow().caret, 0);
-        assert!(!move_caret(&local, -1, 3));
+        // The caret is an absolute scrollback line: a viewport of 3 rows starting at line 900
+        // confines it to 900..=902, and the edges are where `j` / `k` start scrolling instead.
+        // `track_selection` clamps the caret into the viewport every frame, so a key only ever
+        // sees one that is already in range; `move_caret` normalizes as a safety net.
+        let local = Rc::new(RefCell::new(Local {
+            caret: 900,
+            ..Local::default()
+        }));
+        assert!(move_caret(&local, 1, 900, 3));
+        assert_eq!(local.borrow().caret, 901);
+        assert!(move_caret(&local, 5, 900, 3));
+        assert_eq!(local.borrow().caret, 902);
+        assert!(!move_caret(&local, 1, 900, 3));
+        assert!(move_caret(&local, -9, 900, 3));
+        assert_eq!(local.borrow().caret, 900);
+        assert!(!move_caret(&local, -1, 900, 3));
     }
 
     #[test]
     fn the_caret_cannot_move_in_an_empty_grid() {
         let local = Rc::new(RefCell::new(Local::default()));
-        assert!(!move_caret(&local, 1, 0));
+        assert!(!move_caret(&local, 1, 0, 0));
     }
 
     #[test]

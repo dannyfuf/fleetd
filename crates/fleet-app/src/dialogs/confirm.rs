@@ -335,6 +335,9 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
 
     match inspection.session {
         SessionState::None => list = list.fact(Fact::safe("no session")),
+        // §2.5 gives one wording per state and §5 invariant 1 makes it the *same* wording on
+        // every screen: a detached session must not be called attached here, because this is
+        // the one screen where a wrong session fact changes a destructive decision.
         SessionState::Detached | SessionState::Attached => {
             risky = true;
             let running = if inspection.running.is_empty() {
@@ -342,7 +345,11 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
             } else {
                 format!(" \u{00b7} {} running", inspection.running.join(", "))
             };
-            list = list.fact(Fact::risk(format!("session attached{running}")));
+            let state = match inspection.session {
+                SessionState::Attached => "attached",
+                _ => "running, detached",
+            };
+            list = list.fact(Fact::risk(format!("session {state}{running}")));
         }
         SessionState::Unknown => list = list.fact(Fact::unknown("session state unknown")),
     }
@@ -864,6 +871,37 @@ mod tests {
         let facts = worktree_facts(Some(&probe), false, 1_788_523_200);
         assert_eq!(facts.list.confirm_key(), ConfirmKey::Upper);
         assert!(!facts.list.is_compact());
+    }
+
+    #[test]
+    fn a_detached_session_is_never_called_attached() {
+        let mut probe = inspection();
+        probe.session = SessionState::Detached;
+        probe.running = vec!["claude".to_owned()];
+        let facts = worktree_facts(Some(&probe), false, 1_788_523_200);
+        let text = facts
+            .list
+            .ordered()
+            .iter()
+            .map(|fact| fact.text.to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            text.contains(&"session running, detached \u{00b7} claude running".to_owned()),
+            "\u{a7}2.5 wording for a detached session, got {text:?}"
+        );
+
+        probe.session = SessionState::Attached;
+        let facts = worktree_facts(Some(&probe), false, 1_788_523_200);
+        let text = facts
+            .list
+            .ordered()
+            .iter()
+            .map(|fact| fact.text.to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            text.contains(&"session attached \u{00b7} claude running".to_owned()),
+            "\u{a7}3.8.3 wording for an attached session, got {text:?}"
+        );
     }
 
     #[test]

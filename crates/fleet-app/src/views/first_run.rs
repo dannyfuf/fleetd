@@ -10,10 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
-use fleet_ui_kit::{
-    ActiveTheme, EmptyState, Icon, IconSize, KeyHint, KeyHintRow, Text, Tone, prelude::*,
-};
-use gpui::{AnyElement, App, SharedString, div};
+use fleet_ui_kit::{ActiveTheme, EmptyState, Icon, IconSize, Text, Tone, prelude::*};
+use gpui::{AnyElement, App, SharedString, div, px};
 
 /// The card's title.
 pub const TITLE: &str = "Fleet";
@@ -127,6 +125,13 @@ pub fn user_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// The width of the card's key column, in pixels.
+///
+/// §3.13 draws the card as a small table — `N   create your first context` — so the labels line
+/// up under each other. A fixed column is what makes them line up; joining the hints with `·`
+/// collapses the table into one unreadable line.
+const KEY_COLUMN: f32 = 20.0;
+
 /// The keys the card offers, in spec order. `i` appears only with something to import.
 #[must_use]
 pub fn keys(has_swarm: bool) -> Vec<(&'static str, &'static str)> {
@@ -139,6 +144,26 @@ pub fn keys(has_swarm: bool) -> Vec<(&'static str, &'static str)> {
     keys.push(("?", "keymap"));
     keys.push((",", "settings"));
     keys
+}
+
+/// The card's hint block, grouped into the §3.13 rows.
+///
+/// One key per row, except the last: the spec pairs `?   keymap` with `,   settings` on a
+/// single line because both are meta keys, not first steps. `i` is excluded — it is drawn by
+/// the import block, with the sentence that makes it safe to press.
+#[must_use]
+pub fn hint_rows(has_swarm: bool) -> Vec<Vec<(&'static str, &'static str)>> {
+    let mut rows: Vec<Vec<(&'static str, &'static str)>> = Vec::new();
+    for hint in keys(has_swarm).into_iter().filter(|(key, _)| *key != "i") {
+        if hint.0 == ","
+            && let Some(row) = rows.last_mut()
+        {
+            row.push(hint);
+        } else {
+            rows.push(vec![hint]);
+        }
+    }
+    rows
 }
 
 /// The card's footer: `◍ fleetd running · <version> · <home>` (§3.13).
@@ -168,25 +193,45 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
         Icon::Boxes
     };
 
+    // One row of the card's key table: the key in a fixed column, then what it does.
+    let hint = |key: &'static str, label: &'static str| {
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space.sm)
+            .child(div().w(px(KEY_COLUMN)).flex_none().child(Text::hint(key)))
+            .child(Text::hint(label))
+    };
+
     let import_block = has_swarm.then(|| {
         div()
             .flex()
             .flex_col()
-            .items_center()
+            .items_start()
             .gap(theme.space.xs)
             .child(Text::ui(FOUND_SWARM))
-            .child(KeyHint::labeled(
-                "i",
-                "import contexts, repos and worktrees",
-            ))
-            .child(Text::hint(IMPORT_IS_SAFE).faint())
+            .child(hint("i", "import contexts, repos and worktrees"))
+            .child(
+                div()
+                    .pl(px(KEY_COLUMN) + theme.space.sm)
+                    .child(Text::hint(IMPORT_IS_SAFE).faint()),
+            )
     });
 
-    // `i` is drawn by the import block above, with the sentence that makes it safe to press.
-    let mut hints = KeyHintRow::new();
-    for (key, label) in keys(has_swarm).into_iter().filter(|(key, _)| *key != "i") {
-        hints = hints.key(key, label);
-    }
+    // §3.13 is three rows, not one interpunct-joined line: the keys line up in a column so the
+    // eye reads down the first steps instead of scanning a sentence.
+    let hints = div()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(theme.space.xs)
+        .children(hint_rows(has_swarm).into_iter().map(|row| {
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.space.lg)
+                .children(row.into_iter().map(|(key, label)| hint(key, label)))
+        }));
 
     div()
         .flex()
@@ -195,13 +240,21 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
         .justify_center()
         .size_full()
         .gap(theme.space.lg)
+        // §3.13 draws the title as one line, `⛵ Fleet`: the glyph is part of the name, not a
+        // row of its own.
         .child(
-            glyph
-                .el()
-                .size(IconSize::Large)
-                .color(theme.colors.text_secondary),
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.space.sm)
+                .child(
+                    glyph
+                        .el()
+                        .size(IconSize::Large)
+                        .color(theme.colors.text_secondary),
+                )
+                .child(Text::title(TITLE)),
         )
-        .child(Text::title(TITLE))
         .child(Text::ui(TAGLINE).muted())
         .children(import_block)
         .child(hints)
@@ -232,6 +285,24 @@ mod tests {
             "without ~/.swarm the import block is omitted entirely"
         );
         assert_eq!(without.len(), 4);
+    }
+
+    #[test]
+    fn the_hint_block_is_three_rows_and_pairs_the_meta_keys() {
+        assert_eq!(
+            hint_rows(false),
+            vec![
+                vec![("N", "create your first context")],
+                vec![("n", "clone a repository")],
+                vec![("?", "keymap"), (",", "settings")],
+            ],
+            "§3.13 is a table of rows, never one interpunct-joined line"
+        );
+        assert_eq!(
+            hint_rows(true),
+            hint_rows(false),
+            "`i` belongs to the import block, which draws it with its own reassurance"
+        );
     }
 
     #[test]

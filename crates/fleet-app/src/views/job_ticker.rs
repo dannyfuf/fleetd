@@ -10,7 +10,7 @@ use fleet_ui_kit::{JobTicker, Tone};
 use gpui::{AnyElement, IntoElement, SharedString};
 
 use crate::{
-    shell::{domain_target, job_kind_label},
+    shell::{domain_target, job_kind_label, job_target},
     state::{StickyError, parse_percent, running_jobs},
 };
 
@@ -39,7 +39,7 @@ pub fn ticker_content(jobs: &[JobRecord]) -> Option<TickerContent> {
         .max_by(|left, right| left.started_at.cmp(&right.started_at))?;
     Some(TickerContent {
         kind: job_kind_label(&newest.kind).to_owned(),
-        target: domain_target(&newest.target).to_owned(),
+        target: job_target(&newest.kind, &newest.target).to_owned(),
         percent: newest.progress.as_deref().and_then(parse_percent),
         extra: running.len() - 1,
     })

@@ -646,6 +646,7 @@ what is running elsewhere.*
 | --- | --- | --- | --- | --- |
 | Session header | `git-branch` + branch (`fg`) + `repoId` (muted) + `cloud host` if remote + PR badge if any | top-left | one line answering "am I in the right worktree?" — the #1 terminal error | `Session.kind = Worktree(id)` |
 | Session state + keep-alive | §2.5 glyph + `⚡` labels | header, right | mirrors the Hub row so both screens read identically; these are what `sleep` keeps and `K` kills | `WorktreeStatus`, §4 |
+| VT modes | `TerminalModes` glyphs for `alt` / `mouse` / `paste` / `appcur`, zero-suppressed | header, right, before the state glyph | the only explanation for the keymap appearing to lie; it sits in reserved chrome because a badge over the grid permanently hides output | `FrameUpdate.modes` |
 | Jobs chip | `⟳n` (`⚠n` red when a job failed) | header, far right | the Hub chrome is not visible here, so background work must still be | §6 |
 | Tab strip | `<index> <name>` per `Terminal`, min 84 / max 200 px, auto-sized | under the header | indexes are the argument to `ctrl-s 1`–`9`; the strip is the legend for that binding | `Session.terminals`, `active_terminal` |
 | Active tab | `fg` text + 2 px blue bottom border | — | blue = "where am I" | — |

@@ -4,6 +4,7 @@
 //! ticker shows, what the breadcrumb reads — are separate, testable functions; the rest is
 //! kit composition with no styling of its own.
 
+use fleet_core::model::Context;
 use fleet_proto::job::JobKind;
 use fleet_ui_kit::{Chip, ContextBar, ContextTab, Icon, StatusBar, Tone};
 use gpui::{AnyElement, App, IntoElement, SharedString, px};
@@ -87,6 +88,23 @@ pub fn domain_target(target: &str) -> &str {
     if head.is_empty() { target } else { head }
 }
 
+/// The target a job row or the status-bar ticker prints (§3.7 Target column).
+///
+/// §3.7 asks that column for "`RepoId` or `WorktreeId` — the real domain id". Some jobs name no
+/// object at all: fleetd derives an inspect job's target from the job itself, so once the job
+/// id is stripped what is left is the *kind slug* that already fills the column beside it, and
+/// the row reads `inspect  inspect`. Repeating the kind is not a domain id, so the honest
+/// rendering is an empty cell.
+#[must_use]
+pub fn job_target<'job>(kind: &JobKind, target: &'job str) -> &'job str {
+    let target = domain_target(target);
+    if target.eq_ignore_ascii_case(job_kind_label(kind)) {
+        ""
+    } else {
+        target
+    }
+}
+
 /// Whether `text` is exactly a canonical `8-4-4-4-12` hexadecimal UUID.
 ///
 /// Deliberately strict: a loose "trailing hex run" test would eat a branch called
@@ -105,6 +123,22 @@ fn is_uuid(text: &str) -> bool {
     })
 }
 
+/// The context the app is actually in — the one the context bar underlines.
+///
+/// `Snapshot.active_context` is an *optional* field: a daemon whose state file has never
+/// recorded a choice leaves it unset, and the context bar then falls back to the first tab.
+/// Everything that names the current context has to resolve it the same way, or §2.2's
+/// breadcrumb loses its first segment on exactly the installs where the daemon never wrote
+/// the field.
+#[must_use]
+pub fn resolved_context(state: &AppState) -> Option<&Context> {
+    let contexts = state.snapshot.as_ref()?.contexts.as_slice();
+    state
+        .active_context()
+        .and_then(|active| contexts.iter().find(|context| &context.id == active))
+        .or_else(|| contexts.first())
+}
+
 /// The 36 px context bar (§2.1, §2.3, §3.1).
 #[must_use]
 pub fn context_bar(state: &AppState, _cx: &App) -> AnyElement {
@@ -113,9 +147,8 @@ pub fn context_bar(state: &AppState, _cx: &App) -> AnyElement {
         .as_ref()
         .map(|snapshot| snapshot.contexts.as_slice())
         .unwrap_or_default();
-    let active = state
-        .active_context()
-        .and_then(|active| contexts.iter().position(|context| &context.id == active))
+    let active = resolved_context(state)
+        .and_then(|active| contexts.iter().position(|context| context.id == active.id))
         .unwrap_or(0);
     let tabs = contexts
         .iter()
@@ -187,17 +220,10 @@ pub fn context_bar(state: &AppState, _cx: &App) -> AnyElement {
 /// The status-bar breadcrumb `context › repo › row` (§2.2).
 #[must_use]
 pub fn breadcrumb_text(state: &AppState) -> String {
-    let context = state
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| {
-            let active = snapshot.active_context.as_ref()?;
-            snapshot
-                .contexts
-                .iter()
-                .find(|context| &context.id == active)
-                .map(|context| context.name.clone())
-        })
+    // The same resolution the context bar's underline uses (§5 invariant 1): naming a
+    // different context here than the bar highlights is worse than naming none.
+    let context = resolved_context(state)
+        .map(|context| context.name.clone())
         .unwrap_or_default();
     let repo = match &state.scope {
         RepoScope::All => String::new(),
@@ -268,6 +294,30 @@ mod tests {
     }
 
     #[test]
+    fn a_target_that_only_repeats_the_kind_is_blank() {
+        assert_eq!(
+            job_target(
+                &JobKind::Inspect,
+                "inspect-2eea3e43-bbef-4352-aaaa-54a3a1c6f0d2"
+            ),
+            "",
+            "§3.7's target column is the domain id; `inspect  inspect` names nothing"
+        );
+        assert_eq!(
+            job_target(
+                &JobKind::Inspect,
+                "acme/widgets#feature-one:762d2efa-4911-4a0e-8b1c-8f3e0d5b2a91"
+            ),
+            "acme/widgets#feature-one",
+            "a real domain id is untouched"
+        );
+        assert_eq!(
+            job_target(&JobKind::PrFetch, "acme/widgets:mine"),
+            "acme/widgets:mine"
+        );
+    }
+
+    #[test]
     fn a_target_that_merely_ends_in_hex_is_left_alone() {
         // A branch name is not a job id: only the canonical 8-4-4-4-12 shape is stripped.
         assert_eq!(
@@ -281,6 +331,56 @@ mod tests {
             "762d2efa-4911-4a0e-8b1c-8f3e0d5b2a91",
             "with nothing in front of it, the id is all there is to say"
         );
+    }
+
+    fn one_context_snapshot(active: bool) -> fleet_proto::snapshot::Snapshot {
+        let id: fleet_core::ids::ContextId =
+            "acme".parse().unwrap_or_else(|error| panic!("{error}"));
+        fleet_proto::snapshot::Snapshot {
+            generated_at: "2026-09-04T12:00:00Z".to_owned(),
+            contexts: vec![Context {
+                id: id.clone(),
+                name: "acme".to_owned(),
+                owners: vec!["acme".to_owned()],
+                created_at: "2026-09-04T09:00:00Z".to_owned(),
+            }],
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: Vec::new(),
+            active_context: active.then_some(id),
+            sessions: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: fleet_proto::snapshot::DaemonInfo {
+                version: "0.1.0".to_owned(),
+                pid: 1,
+                started_at: "2026-09-04T09:00:00Z".to_owned(),
+                home: "/tmp/fleet".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_breadcrumb_names_the_context_the_bar_underlines() {
+        let now = std::time::Instant::now();
+        for active in [true, false] {
+            let mut state = AppState::new("/tmp/fleet", now);
+            state.apply_snapshot(one_context_snapshot(active), now);
+            state.breadcrumb_row = Some("feature-one".to_owned());
+            state.scope = RepoScope::Repo(
+                "acme/widgets"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+            );
+            assert_eq!(
+                breadcrumb_text(&state),
+                "acme \u{203a} widgets \u{203a} feature-one",
+                "§2.2 wants `context › repo › row`; an unset `active_context` is still the \
+                 first tab, which is what the bar underlines (active_context set: {active})"
+            );
+        }
     }
 
     #[test]

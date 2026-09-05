@@ -33,8 +33,27 @@ use crate::{
 
 /// Width of the panel when the window is too narrow to inset it (§3.4).
 pub const OVERLAY_WIDTH: f32 = 320.0;
-/// Character budget of a path shown in the panel's 340 px column.
-const PATH_BUDGET: usize = 38;
+/// The panel's two 12 px gutters (`theme.space.md`), together.
+const GUTTERS: f32 = 24.0;
+/// The label column of a fact row (`theme.metrics.fact_label_w`).
+const LABEL_W: f32 = 104.0;
+/// The gap between the label and the value column (`theme.space.sm`).
+const LABEL_GAP: f32 = 8.0;
+
+/// How many characters of the mono face fit in `width` pixels.
+const fn mono_budget(width: f32) -> usize {
+    // `as` truncates towards zero, which is exactly the number of whole columns that fit.
+    (width / fleet_ui_kit::theme::CH) as usize
+}
+
+/// Character budget of a path shown in a fact row's **value column**.
+///
+/// Derived from the column, never guessed, and sized for the narrower of the panel's two
+/// surfaces so it holds in both: a budget wider than the column produces a middle ellipsis
+/// *and* a wrapped second line on the same path, which is a lie about where the path was cut.
+const PATH_BUDGET: usize = mono_budget(OVERLAY_WIDTH - GUTTERS - LABEL_W - LABEL_GAP);
+/// Character budget of a full-width mono line in the panel body (a hook command).
+const LINE_BUDGET: usize = mono_budget(OVERLAY_WIDTH - GUTTERS);
 
 /// Collapses `$HOME` to `~` so the path fits and reads like the shell prints it.
 #[must_use]
@@ -428,7 +447,7 @@ pub fn repo(props: RepoProps<'_>, cx: &App) -> AnyElement {
         .iter()
         .chain(repo.hooks.post_create.iter())
         .map(|command| {
-            Text::data_small(truncate(command, PATH_BUDGET, Truncate::Tail))
+            Text::data_small(truncate(command, LINE_BUDGET, Truncate::Tail))
                 .muted()
                 .into_any_element()
         })
@@ -727,6 +746,29 @@ mod tests {
             labels: vec!["payroll".to_owned()],
             updated_at: "2026-09-04T10:00:00Z".to_owned(),
         }
+    }
+
+    #[test]
+    fn the_path_budget_is_the_column_it_is_drawn_in() {
+        // The derivation only holds while it mirrors the tokens it was derived from.
+        let theme = fleet_ui_kit::Theme::dark();
+        assert_eq!(f32::from(theme.space.md) * 2.0, GUTTERS);
+        assert_eq!(f32::from(theme.metrics.fact_label_w), LABEL_W);
+        assert_eq!(f32::from(theme.space.sm), LABEL_GAP);
+
+        // A middle-ellipsised path must fit its column on one line, on both surfaces.
+        let column = OVERLAY_WIDTH - GUTTERS - LABEL_W - LABEL_GAP;
+        let path = tilde("/home/u/fleet-review-ux/widgets/feature-one", "/home/u");
+        let drawn = truncate(&path, PATH_BUDGET, Truncate::Middle);
+        assert!(
+            drawn.chars().count() as f32 * fleet_ui_kit::theme::CH <= column,
+            "`{drawn}` is {} chars, wider than the {column} px value column",
+            drawn.chars().count()
+        );
+        assert!(
+            drawn.contains('\u{2026}'),
+            "a path longer than the column is still middle-ellipsised: {drawn}"
+        );
     }
 
     #[test]

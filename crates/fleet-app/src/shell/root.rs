@@ -8,9 +8,9 @@ use std::{
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{ActiveTheme, AppFrame, Icon, KitAssets, Theme, ThemeMode, ToastStack, Veil};
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Menu, MenuItem,
-    Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, size,
+    AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, IntoElement, Menu,
+    MenuItem, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, size,
 };
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
         help, hub, jobs, palette, prefix, quit_daemon_dialog, quit_dialog, repos, scroll,
         workspace,
     },
-    bridge::Bridge,
+    bridge::{Bridge, BridgeEvent},
     dialogs::Dialogs,
     drive,
     keymap::{self, ROOT_CONTEXT},
@@ -107,11 +107,24 @@ impl Shell {
         cx.spawn(async move |shell, cx| {
             while let Ok(event) = events.recv().await {
                 let now = Instant::now();
+                // A lagged broadcast leaves every mirror with a hole no later diff can fill;
+                // only a full frame repairs it, and nothing else in the app asks for one.
+                let lagged = matches!(event, BridgeEvent::EventsLagged { .. });
                 let updated = shell.update(cx, |shell, cx| {
-                    shell.state.update(cx, |state, cx| {
+                    let stale = shell.state.update(cx, |state, cx| {
                         state.apply_bridge_event(event, now);
                         cx.notify();
+                        if lagged {
+                            state.grids.keys().copied().collect()
+                        } else {
+                            Vec::new()
+                        }
                     });
+                    for terminal in stale {
+                        shell
+                            .bridge
+                            .send(RequestBody::RequestFullFrame { terminal });
+                    }
                 });
                 if updated.is_err() {
                     return;
@@ -521,12 +534,24 @@ impl Shell {
     fn quit(&mut self, _: &fleet::Quit, _: &mut Window, cx: &mut Context<Self>) {
         let (warn, running) = {
             let state = self.state.read(cx);
+            // §3.8.8 exists to say "these keep running **in fleetd**". While the daemon is
+            // starting or will not start, the last snapshot's running jobs belong to a daemon
+            // that is already gone, so there is nothing for the confirm to promise and
+            // `ctrl-q` quits — which is exactly what KEYMAP guarantees on those surfaces.
+            let daemon_gone = matches!(
+                state.daemon,
+                DaemonLink::Starting | DaemonLink::Failed { .. }
+            );
             (
                 state.warn_before_quit,
-                state
-                    .snapshot
-                    .as_ref()
-                    .map_or(0, |snapshot| running_count(&snapshot.jobs)),
+                if daemon_gone {
+                    0
+                } else {
+                    state
+                        .snapshot
+                        .as_ref()
+                        .map_or(0, |snapshot| running_count(&snapshot.jobs))
+                },
             )
         };
         match quit_decision(warn, running) {
@@ -722,32 +747,72 @@ impl Render for Shell {
                 .map(|live| live.toast.clone()),
         );
 
-        // §3.12 A and B are full-window surfaces with no chrome at all.
-        if let Some(splash) = splash {
-            if !self.body_focus.is_focused(window) {
-                window.focus(&self.body_focus, cx);
-            }
-            return div()
-                .size_full()
-                .key_context(ROOT_CONTEXT)
-                .bg(cx.theme().colors.bg)
-                .on_action(cx.listener(Self::quit))
-                .on_action(cx.listener(Self::daemon_retry))
-                .on_action(cx.listener(Self::daemon_open_log))
-                .on_action(cx.listener(Self::run_doctor))
-                .child(Self::contexts(
-                    &chain,
-                    div()
-                        .track_focus(&self.body_focus)
-                        .size_full()
-                        .child(splash)
-                        .into_any_element(),
-                ))
-                .into_any_element();
-        }
-
         let focus = self.body_focus.clone();
         let overlay_focus = self.overlay_focus.clone();
+
+        // Every overlay is built before the §3.12 branch, because a dialog opened *on* a splash
+        // — `ctrl-q` opens §3.8.8 whenever the last snapshot had a running job — has to be drawn
+        // and has to carry its key context, or it is an invisible modal nothing can dismiss.
+        let overlay_element: Option<AnyElement> = match &overlay {
+            Some(Overlay::Jobs) => {
+                Some(
+                    self.jobs
+                        .render(&state_handle, &bridge, &overlay_focus, window, cx),
+                )
+            }
+            Some(Overlay::Dialog(dialog)) => {
+                Some(dialog.render(&state_handle, &bridge, &overlay_focus, window, cx))
+            }
+            Some(Overlay::Palette) => Some(crate::dialogs::palette::render(
+                &state_handle,
+                &bridge,
+                &overlay_focus,
+                window,
+                cx,
+            )),
+            Some(Overlay::Filter) => Some(crate::dialogs::filter::render(
+                &state_handle,
+                &bridge,
+                &overlay_focus,
+                window,
+                cx,
+            )),
+            None => None,
+        };
+
+        // §3.12 A and B are full-window surfaces with no chrome at all.
+        if let Some(splash) = splash {
+            let wanted = if overlay_element.is_some() {
+                &self.overlay_focus
+            } else {
+                &self.body_focus
+            };
+            if !wanted.is_focused(window) {
+                window.focus(wanted, cx);
+            }
+            let surface = div()
+                .track_focus(&self.body_focus)
+                .size_full()
+                .child(splash)
+                .into_any_element();
+            // The chain belongs to whichever element is focused, exactly as in the normal
+            // branch: an overlay shadows the splash the same way it shadows the Hub.
+            let (surface, layer) = match overlay_element {
+                Some(element) => (surface, Some(Self::overlay_contexts(&chain, element))),
+                None => (Self::contexts(&chain, surface), None),
+            };
+            return Self::with_actions(
+                div()
+                    .relative()
+                    .size_full()
+                    .key_context(ROOT_CONTEXT)
+                    .bg(cx.theme().colors.bg),
+                cx,
+            )
+            .child(surface)
+            .children(layer)
+            .into_any_element();
+        }
         let body: AnyElement = if let Some(checks) = doctor.as_ref() {
             div()
                 .track_focus(&focus)
@@ -774,33 +839,6 @@ impl Render for Shell {
                     Veil::new(veil).child(workspace).into_any_element()
                 }
             }
-        };
-
-        let overlay_element: Option<AnyElement> = match &overlay {
-            Some(Overlay::Jobs) => {
-                Some(
-                    self.jobs
-                        .render(&state_handle, &bridge, &overlay_focus, window, cx),
-                )
-            }
-            Some(Overlay::Dialog(dialog)) => {
-                Some(dialog.render(&state_handle, &bridge, &overlay_focus, window, cx))
-            }
-            Some(Overlay::Palette) => Some(crate::dialogs::palette::render(
-                &state_handle,
-                &bridge,
-                &overlay_focus,
-                window,
-                cx,
-            )),
-            Some(Overlay::Filter) => Some(crate::dialogs::filter::render(
-                &state_handle,
-                &bridge,
-                &overlay_focus,
-                window,
-                cx,
-            )),
-            None => None,
         };
 
         // The focused element carries the key-context chain: the overlay when one is open,
@@ -841,10 +879,26 @@ impl Render for Shell {
             };
         }
 
-        div()
-            .size_full()
-            .key_context(ROOT_CONTEXT)
-            .bg(cx.theme().colors.bg)
+        Self::with_actions(
+            div()
+                .size_full()
+                .key_context(ROOT_CONTEXT)
+                .bg(cx.theme().colors.bg),
+            cx,
+        )
+        .child(frame)
+        .into_any_element()
+    }
+}
+
+impl Shell {
+    /// Installs every global action listener on `root`.
+    ///
+    /// Both branches of [`Shell::render`] use it, splash included: a surface that registers a
+    /// subset silently swallows the keys it left out — `ctrl-shift-q` and `Esc` among them —
+    /// and there is no way back out of whatever the missing key was meant to leave.
+    fn with_actions(root: Div, cx: &mut Context<Self>) -> Div {
+        root
             // Global
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::quit_and_stop_daemon))
@@ -897,8 +951,6 @@ impl Render for Shell {
             .on_action(cx.listener(Self::never_warn))
             .on_action(cx.listener(Self::accept_stop_daemon))
             .on_action(cx.listener(Self::reject_stop_daemon))
-            .child(frame)
-            .into_any_element()
     }
 }
 

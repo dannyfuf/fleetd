@@ -11,6 +11,8 @@ use async_channel::{Receiver, TryRecvError};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use thiserror::Error;
 
+const TERM: &str = "xterm-256color";
+
 /// Process and environment settings used to create a PTY.
 #[derive(Debug, Clone)]
 pub struct PtyOptions {
@@ -35,7 +37,7 @@ impl PtyOptions {
         cwd: impl Into<PathBuf>,
         session: impl AsRef<OsStr>,
         terminal: impl AsRef<OsStr>,
-        ghostty: bool,
+        _ghostty: bool,
         cols: u16,
         rows: u16,
     ) -> Self {
@@ -47,14 +49,7 @@ impl PtyOptions {
             args: vec![OsString::from("-l")],
             cwd: cwd.into(),
             env: vec![
-                (
-                    OsString::from("TERM"),
-                    OsString::from(if ghostty {
-                        "xterm-ghostty"
-                    } else {
-                        "xterm-256color"
-                    }),
-                ),
+                (OsString::from("TERM"), OsString::from(TERM)),
                 (OsString::from("COLORTERM"), OsString::from("truecolor")),
                 (OsString::from("FLEET_SESSION"), session.as_ref().to_owned()),
                 (
@@ -275,13 +270,27 @@ mod tests {
         assert!(
             options
                 .env
-                .contains(&(OsString::from("TERM"), OsString::from("xterm-ghostty")))
+                .contains(&(OsString::from("TERM"), OsString::from("xterm-256color")))
         );
         assert!(
             options
                 .env
                 .contains(&(OsString::from("FLEET_SESSION"), OsString::from("session")))
         );
+    }
+
+    #[test]
+    fn login_shell_uses_portable_term_for_every_backend() {
+        for ghostty in [false, true] {
+            let options = PtyOptions::login_shell("/tmp", "session", "editor", ghostty, 80, 24);
+            let term = options
+                .env
+                .iter()
+                .find(|(key, _)| key == "TERM")
+                .map(|(_, value)| value);
+
+            assert_eq!(term, Some(&OsString::from("xterm-256color")));
+        }
     }
 
     #[test]

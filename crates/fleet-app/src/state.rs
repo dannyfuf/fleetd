@@ -258,6 +258,13 @@ pub struct MirrorGrid {
     pub seq: u64,
     /// Whether a full frame has been applied yet.
     pub primed: bool,
+    /// Whether frames were dropped since the last full one.
+    ///
+    /// A diff only describes the rows that changed *since the previous frame*, so once one is
+    /// missed the mirror can never catch up on its own: the rows changed inside the gap are
+    /// never re-sent. While this is set the last good frame stays on screen — it is still the
+    /// best answer available — and every diff is refused until a full frame re-primes it.
+    pub desynced: bool,
     /// `Some(code)` once the PTY exited; the grid then freezes at its last frame.
     pub exit_code: Option<Option<i32>>,
 }
@@ -284,20 +291,22 @@ impl MirrorGrid {
             title: None,
             seq: 0,
             primed: false,
+            desynced: false,
             exit_code: None,
         }
     }
 
     /// Applies a frame update, returning whether anything changed.
     ///
-    /// A diff frame that arrives before the first full frame, or out of sequence, is dropped:
-    /// the daemon resends a full frame after a client falls behind.
+    /// A diff frame that arrives before the first full frame, out of sequence, or after a
+    /// dropped one, is refused: only a full frame can re-prime the mirror.
     pub fn apply(&mut self, frame: &FrameUpdate) -> bool {
-        if !frame.full && (!self.primed || frame.seq <= self.seq) {
+        if !frame.full && (!self.primed || self.desynced || frame.seq <= self.seq) {
             return false;
         }
         if frame.full {
             self.primed = true;
+            self.desynced = false;
         }
         if frame.cols != self.cols || frame.rows != self.rows || frame.full {
             self.resize(frame.cols, frame.rows);
@@ -787,17 +796,17 @@ impl AppState {
     /// and dismissing it (`Esc`) gives them straight back.
     #[must_use]
     pub fn context_chain(&self) -> Vec<&'static str> {
-        // §3.12 B is the one surface that outranks an overlay, because it replaces the whole
-        // window and renders no overlay layer at all; `apply_bridge_event` closes whatever was
-        // open when the link fails, so the two can never disagree.
-        if matches!(self.daemon, DaemonLink::Failed { .. }) {
-            return vec!["Daemon", "Down"];
-        }
-        // An open overlay owns the keyboard on every *other* base surface, the first-run card
-        // included: §3.13 binds `?` and `,` there, so a Help or Settings dialog opened from the
-        // card must still answer `Esc` instead of leaving the app stuck.
+        // An open overlay owns the keyboard on every base surface — the first-run card and the
+        // §3.12 daemon splashes included. `apply_bridge_event` closes what was open when the
+        // link *fails*, but nothing stops one being opened afterwards, and `ctrl-q` does
+        // exactly that: it opens §3.8.8 whenever a job was running in the last snapshot. An
+        // overlay whose keys are not in the chain answers nothing, and `Esc` cannot leave it.
         if let Some(overlay) = &self.overlay {
             return overlay.context_chain();
+        }
+        // §3.12 B replaces the whole window, so its keys outrank every base surface's.
+        if matches!(self.daemon, DaemonLink::Failed { .. }) {
+            return vec!["Daemon", "Down"];
         }
         if self.is_first_run() {
             return vec!["FirstRun"];
@@ -1198,7 +1207,26 @@ impl AppState {
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
+            // The gap is invisible in the frame stream — the next diff's `seq` simply skips —
+            // so nothing downstream can detect it. Marking every mirror desynced is what stops
+            // a diff from being applied on top of rows that are already wrong; the shell then
+            // asks for a full frame per terminal, which is the only thing that repairs them.
+            BridgeEvent::EventsLagged { .. } => {
+                self.desync_grids();
+            }
         }
+    }
+
+    /// Marks every mirror as having missed frames, and reports which terminals they belong to.
+    ///
+    /// The caller sends `RequestFullFrame` for each: `fleet-app` mirrors raw
+    /// `Event::TerminalFrame`s itself instead of going through `fleet-client`'s
+    /// `TerminalHandle`, so it owns this recovery.
+    pub fn desync_grids(&mut self) -> Vec<TerminalId> {
+        for grid in self.grids.values_mut() {
+            grid.desynced = true;
+        }
+        self.grids.keys().copied().collect()
     }
 
     /// Applies one ordinary daemon event to the mirror.
@@ -1361,6 +1389,63 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_dropped_frame_refuses_diffs_until_a_full_frame_repairs_the_mirror() {
+        // quality-F2: the client's broadcast buffer overflowed. The rows that changed inside
+        // the gap are never re-sent, so applying the *next* diff leaves them permanently wrong.
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.apply_frame(&frame(1, true, vec![row(0, "abcd"), row(1, "efgh")]));
+
+        let stale = state.desync_grids();
+        assert_eq!(
+            stale,
+            vec![TerminalId(1)],
+            "the shell re-primes each of these"
+        );
+
+        // The last good frame stays on screen — it is still the best answer available.
+        let grid = state
+            .grids
+            .get(&TerminalId(1))
+            .unwrap_or_else(|| panic!("no grid"));
+        assert!(grid.primed, "the painted rows are not blanked");
+        assert_eq!(grid.row_text(0), "abcd");
+
+        // A diff that skipped the gap is refused.
+        state.apply_frame(&frame(9, false, vec![row(1, "zzzz")]));
+        let grid = state
+            .grids
+            .get(&TerminalId(1))
+            .unwrap_or_else(|| panic!("no grid"));
+        assert_eq!(grid.row_text(1), "efgh", "a post-gap diff is not applied");
+
+        // The full frame the shell asked for repairs it, and diffs flow again.
+        state.apply_frame(&frame(10, true, vec![row(0, "wxyz"), row(1, "1234")]));
+        state.apply_frame(&frame(11, false, vec![row(1, "5678")]));
+        let grid = state
+            .grids
+            .get(&TerminalId(1))
+            .unwrap_or_else(|| panic!("no grid"));
+        assert!(!grid.desynced);
+        assert_eq!(grid.row_text(0), "wxyz");
+        assert_eq!(grid.row_text(1), "5678");
+    }
+
+    #[test]
+    fn a_lagged_bridge_event_desyncs_every_mirror() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.apply_frame(&frame(1, true, vec![row(0, "abcd")]));
+        state.apply_bridge_event(BridgeEvent::EventsLagged { dropped: 12 }, now);
+        assert!(
+            state
+                .grids
+                .values()
+                .all(|grid| grid.desynced && grid.primed)
+        );
     }
 
     #[test]
@@ -1668,6 +1753,28 @@ mod tests {
             state.overlay.is_none(),
             "§3.12 B draws no overlay layer, so nothing may stay open behind it"
         );
+        assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
+    }
+
+    #[test]
+    fn an_overlay_opened_after_the_link_failed_still_owns_the_keyboard() {
+        // KM-01: `apply_bridge_event` closes what was open when the link fails, but nothing
+        // stops one being opened *afterwards* — `ctrl-q` does exactly that. An overlay whose
+        // keys are not in the chain answers nothing, and `Esc` cannot leave it.
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.apply_bridge_event(
+            BridgeEvent::ConnectFailed {
+                message: "no socket".to_owned(),
+                log_tail: Vec::new(),
+                stale_socket: true,
+            },
+            now,
+        );
+        assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
+        state.open_overlay(Overlay::Dialog(Dialogs::Quit));
+        assert_eq!(state.context_chain(), vec!["Dialog", "Quit"]);
+        state.close_overlay();
         assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
     }
 

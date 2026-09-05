@@ -13,12 +13,12 @@ use std::{collections::HashSet, path::Path};
 use fleet_core::ids::JobId;
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{
-    ActiveTheme, Chip, EmptyState, Icon, IconSize, JobRow, JobStatus as RowStatus, KeyHint,
-    KeyHintRow, PaneHeader, Text, Tone, format_age,
+    ActiveTheme, EmptyState, Icon, IconSize, JobRow, JobStatus as RowStatus, KeyHint, KeyHintRow,
+    PaneHeader, Text, Tone, format_age,
 };
 use gpui::{AnyElement, App, SharedString, div, prelude::*};
 
-use crate::shell::{domain_target, job_kind_label};
+use crate::shell::{job_kind_label, job_target};
 
 /// The fact line of the empty Jobs panel (§3.13), verbatim.
 pub const EMPTY_FACT: &str = "Nothing running.";
@@ -137,6 +137,24 @@ pub fn job_counts(jobs: &[JobRecord]) -> JobCounts {
         }
     }
     counts
+}
+
+/// The header's three labelled counters, in §3.7 order and zero-suppressed (§1.2).
+///
+/// The label is the point: `11` alone answers no question the panel was opened to answer, and
+/// a glyph plus a bare number makes the reader decode the glyph first. Returned as data so the
+/// wording is testable without a window.
+#[must_use]
+pub fn count_labels(counts: JobCounts) -> Vec<(Icon, String, Tone)> {
+    [
+        (Icon::LoaderCircle, counts.running, "running", Tone::Warning),
+        (Icon::CircleX, counts.failed, "failed", Tone::Danger),
+        (Icon::CircleCheck, counts.done, "done", Tone::Success),
+    ]
+    .into_iter()
+    .filter(|(_, count, _, _)| *count > 0)
+    .map(|(icon, count, word, tone)| (icon, format!("{count} {word}"), tone))
+    .collect()
 }
 
 // ---------------------------------------------------------------------------- time
@@ -310,22 +328,35 @@ pub fn header(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let chips = div()
-        .flex()
-        .items_center()
-        .gap(theme.space.sm)
-        .child(
-            Chip::counter(Icon::LoaderCircle, counts.running)
-                .tone(Tone::Warning)
-                .spinning(true)
-                .id("jobs-panel-running"),
-        )
-        .child(Chip::counter(Icon::CircleX, counts.failed).tone(Tone::Danger))
-        .child(Chip::counter(Icon::CircleCheck, counts.done).tone(Tone::Success));
+    let labels = count_labels(counts);
+    let last = labels.len().saturating_sub(1);
+    let counters = div().flex().items_center().gap(theme.space.xs).children(
+        labels
+            .into_iter()
+            .enumerate()
+            .map(|(index, (icon, label, tone))| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.xs)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(theme.space.xxs)
+                            .child(icon.el().size(IconSize::Small).color(tone.color(theme)))
+                            .child(Text::ui(label).tone(tone)),
+                    )
+                    .when(index != last, |el| el.child(Text::ui("\u{00b7}").faint()))
+            }),
+    );
 
-    let mut header = PaneHeader::new("jobs").total(total).trailing(chips);
+    // §3.7's header is the three labelled counts and nothing else: an unlabelled total repeats
+    // what they already add up to. `shown/total` returns only while `f` is filtering, where it
+    // answers "how many did the filter hide".
+    let mut header = PaneHeader::new("jobs").trailing(counters);
     if let Some(label) = filter.label() {
-        header = header.scope(label).shown(shown);
+        header = header.scope(label).total(total).shown(shown);
     }
     div()
         .flex_none()
@@ -364,8 +395,9 @@ pub fn job_row(job: &JobRecord, cursor: bool, now: i64) -> AnyElement {
     let mut row = JobRow::new(
         row_status(&job.status),
         kind_slug(&job.kind).to_owned(),
-        // §3.7: the row names the domain id; the job id lives in the log path and on `y`.
-        domain_target(&job.target).to_owned(),
+        // §3.7: the row names the domain id, blank when the job names no object; the job id
+        // lives in the log path and on `y`.
+        job_target(&job.kind, &job.target).to_owned(),
     )
     .id(SharedString::from(format!("job-{}", job.id.as_str())))
     .selected(cursor)
@@ -564,6 +596,47 @@ mod tests {
         assert_eq!(counts.done, 2);
         assert!(!counts.is_empty());
         assert!(job_counts(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_header_counters_are_labelled_and_zero_suppressed() {
+        let counts = JobCounts {
+            running: 2,
+            failed: 1,
+            done: 5,
+        };
+        let labels: Vec<String> = count_labels(counts)
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["2 running", "1 failed", "5 done"],
+            "§3.7's header is `⟳n running · ✕n failed · ✓n done`, never bare numbers"
+        );
+        assert_eq!(
+            count_labels(JobCounts {
+                running: 0,
+                failed: 0,
+                done: 3,
+            })
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect::<Vec<_>>(),
+            vec!["3 done"],
+            "§1.2: a zero counter is not drawn"
+        );
+        assert!(count_labels(JobCounts::default()).is_empty());
+    }
+
+    #[test]
+    fn a_job_that_names_no_object_leaves_the_target_column_blank() {
+        let mut inspect = job("job-a", JobStatus::Running);
+        inspect.kind = JobKind::Inspect;
+        inspect.target = "inspect-2eea3e43-bbef-4352-aaaa-54a3a1c6f0d2".to_owned();
+        assert_eq!(job_target(&inspect.kind, &inspect.target), "");
+        let clone = job("job-b", JobStatus::Running);
+        assert_eq!(job_target(&clone.kind, &clone.target), "nixos");
     }
 
     #[test]

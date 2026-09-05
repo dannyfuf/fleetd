@@ -1682,6 +1682,10 @@ impl HubCtx {
         }
         let key = (row.repo.clone(), row.number);
         self.hub.update(cx, |hub, _| hub.creating.push(key.clone()));
+        // `HubState` is its own entity and the shell only observes `AppState`, so a mutation
+        // here repaints nothing on its own — and `creating` is what makes the §3.5 glyph spin
+        // for the length of the `gh` round trip.
+        self.state.update(cx, |_, cx| cx.notify());
         self.ask(
             RequestBody::CreateWorktreeFromPr {
                 repo: row.repo.clone(),
@@ -1692,13 +1696,14 @@ impl HubCtx {
                 ctx.hub.update(cx, |hub, _| {
                     hub.creating.retain(|candidate| candidate != &key);
                 });
+                // Same reason as above: the spinner has to stop even when the branch below
+                // repaints nothing of its own.
+                ctx.state.update(cx, |_, cx| cx.notify());
                 match result {
                     Ok(ResponseBody::Worktree { worktree, .. }) if open => {
                         ctx.ask_from_async(worktree.id, sleep_previous, cx);
                     }
-                    Ok(_) => {
-                        ctx.state.update(cx, |_, cx| cx.notify());
-                    }
+                    Ok(_) => {}
                     Err(error) => ctx.report(error, cx),
                 }
             },

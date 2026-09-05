@@ -13,7 +13,6 @@ use crate::{
     tone::Tone,
 };
 
-/// The label column of the 340 px detail panel (§3.4), in pixels.
 /// The three things a fact's value can be.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FactValue {
@@ -78,7 +77,7 @@ impl FactRow {
         }
     }
 
-    /// Width of the label column. 96 px in the 340 px detail panel.
+    /// Width of the label column. 104 px in the 340 px detail panel.
     pub fn label_width(mut self, width: Pixels) -> Self {
         self.label_width = Some(width);
         self
@@ -105,11 +104,14 @@ impl RenderOnce for FactRow {
         let theme = cx.theme();
         let label_width = self.label_width.unwrap_or(theme.metrics.fact_label_w);
         let value: gpui::AnyElement = match self.value {
+            // §3.4 is a label/value grid: one row per fact, one line high. A value that wraps
+            // pushes the grid out of alignment and — for a string that was already
+            // middle-ellipsised to fit — spends a second line saying nothing new.
             FactValue::Known(value) => {
                 if self.mono {
-                    Text::data(value).into_any_element()
+                    Text::data(value).ellipsize().into_any_element()
                 } else {
-                    Text::ui(value).into_any_element()
+                    Text::ui(value).ellipsize().into_any_element()
                 }
             }
             FactValue::Null => Text::ui("\u{2014}").faint().into_any_element(),
@@ -132,10 +134,11 @@ impl RenderOnce for FactRow {
             .items_start()
             .w_full()
             .gap(theme.space.sm)
-            .children(
-                self.label
-                    .map(|label| Text::ui(label).muted().w(label_width)),
-            )
+            .children(self.label.map(|label| {
+                // The column is sized for the longest label the spec puts in it; anything
+                // longer ellipsizes rather than wrapping and breaking the grid.
+                Text::ui(label).muted().w(label_width).ellipsize()
+            }))
             .child(
                 div()
                     .flex_1()

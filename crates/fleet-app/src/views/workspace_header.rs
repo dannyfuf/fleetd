@@ -9,7 +9,7 @@
 
 use fleet_ui_kit::{
     ActiveTheme, Chip, Icon, IconSize, KeepAliveChips, KeepAliveLabel, PrBadge, PrBadgeState,
-    StatusGlyph, StatusKind, Text, Tone, Truncate,
+    StatusGlyph, StatusKind, TerminalMode, TerminalModes, Text, Tone, Truncate,
 };
 use gpui::{App, SharedString, Window, div, prelude::*};
 
@@ -40,6 +40,7 @@ pub struct WorkspaceHeader {
     running_jobs: usize,
     failed_jobs: usize,
     waking: bool,
+    modes: Vec<TerminalMode>,
 }
 
 impl WorkspaceHeader {
@@ -57,6 +58,7 @@ impl WorkspaceHeader {
             running_jobs: 0,
             failed_jobs: 0,
             waking: false,
+            modes: Vec::new(),
         }
     }
 
@@ -101,6 +103,16 @@ impl WorkspaceHeader {
     pub fn jobs(mut self, running: usize, failed: usize) -> Self {
         self.running_jobs = running;
         self.failed_jobs = failed;
+        self
+    }
+
+    /// The VT modes the active terminal's last frame reported.
+    ///
+    /// They live here and never over the grid: the cells are live output and §3.6 allows only
+    /// the scroll overlays and the prefix hint on top of them.
+    #[must_use]
+    pub fn modes(mut self, modes: impl IntoIterator<Item = TerminalMode>) -> Self {
+        self.modes = modes.into_iter().collect();
         self
     }
 
@@ -177,8 +189,9 @@ impl RenderOnce for WorkspaceHeader {
             }))
             .children(self.pr.map(|(number, state)| PrBadge::new(number, state)))
             // Everything after this spacer is right-aligned, in the §3.6 order:
-            // status glyph · keep-alive · jobs.
+            // VT modes · status glyph · keep-alive · jobs.
             .child(div().flex_1())
+            .child(TerminalModes::new(self.modes).glyphs_only())
             .child(StatusGlyph::new(self.status).id("workspace-header-status"))
             .child(
                 KeepAliveChips::new(self.keep_alive.into_iter().map(KeepAliveLabel::new))

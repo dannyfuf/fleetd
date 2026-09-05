@@ -101,7 +101,10 @@ pub(crate) fn render(
     let list = FuzzyList::new(draft.rows.iter().map(|row| {
         let mut item = FuzzyItem::new(row.name.clone());
         if !row.owners.is_empty() {
-            item = item.secondary(row.owners.clone());
+            // §3.8.5 is one 30 px row — `▌buk  bukhr  current` — because the owners are the
+            // *reason* the repo belongs here, read with the name and not under it. A second
+            // line would double the row height for a single word.
+            item = item.detail(row.owners.clone());
         }
         if row.current {
             item = item.trailing("current");

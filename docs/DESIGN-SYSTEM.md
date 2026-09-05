@@ -209,7 +209,7 @@ nothing decays on a timer the user did not set.
 `sheet_expanded_w 640` · `toast_w 320` · `palette_w 640` · `palette_top 120` ·
 `mode_word_w 84` · `scroll_thumb_w 3` · `focus_ring_w 2` · `cell_w 7.5` · `cell_h 18`.
 The smaller component metrics live here too: `hairline 1` · `dot_size 8` ·
-`dot_size_small 6` · `fact_label_w 96` · `doctor_check_w 120` · `doctor_status_w 64` ·
+`dot_size_small 6` · `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` ·
 `text_field_h 36` · `field_status_h 18` · `palette_input_h 44` · `number_field_w 96`.
 The same token set owns the opacity ladder: `veil 0.55` · `dimmed 0.40` ·
 `refreshing 0.60` · `stale 0.55` · `skeleton 0.30` · `no_session 0.30`.
@@ -705,12 +705,14 @@ action must be removed while the field owns the keyboard.
 
 #### `FuzzyList` / `FuzzyItem`
 **Purpose.** A capped list of already-ranked results.
-**API.** `FuzzyItem::new(primary).secondary(..).trailing(..).leading(..).disabled(bool).key(..)
-.matches(..).destructive(bool)`;
+**API.** `FuzzyItem::new(primary).detail(..).secondary(..).trailing(..).leading(..)
+.disabled(bool).key(..).matches(..).destructive(bool)`;
 `FuzzyList::new(items).cursor(usize).cap(usize).under_text_field(bool).empty(..).row_height(Pixels)`;
 `.binds_jk()`, `.shown()`, `FuzzyList::{next_cursor, prev_cursor}`.
 **Variants.** one-line (no `secondary`) · two-line. An item with an empty description collapses
-to one line — zero-suppression.
+to one line — zero-suppression. `detail` is a muted qualifier drawn **on the same line**, after
+the primary label: use it when the qualifier is part of the row's identity (§3.8.5's context
+owners), and `secondary` only for a description that earns a second line.
 **Caps.** 8 (Clone results) · 6 (Create base list) · 10 (palette).
 **Keyboard.** `ctrl-n`/`ctrl-p` or `↓`/`↑` under a text field; `j`/`k` too when there is none.
 **Usage rule.** Matching, ranking and the 150 ms debounce belong to the caller — they need the
@@ -873,7 +875,9 @@ the app converts `proto::Cell` on the way in, resolving `Palette(u8)` through
 `TerminalPalette::color` and `Default` through the palette's `foreground`/`background`.
 An unfocused terminal draws a hollow cursor. The selection is painted as a
 `terminal.selection` quad per row span, behind the text. `.scrollback(offset, len)` paints a
-`ScrollbackBadge` in the top-right corner when `offset > 0`.
+`ScrollbackBadge` in the top-right corner when `offset > 0`. The only things ever drawn **over**
+the cells are the two scroll overlays and the prefix hint (§3.6); `.modes(..)` feeds the
+alt-screen suppression and paints nothing — the badges belong to the Workspace header.
 
 #### `TerminalModes`
 **Purpose.** Zero-suppressed badges for the VT modes a `FrameUpdate` reports.
@@ -884,7 +888,10 @@ An unfocused terminal draws a hollow cursor. The selection is painted as a
 alt-screen there is no scrollback (`ctrl-s [` refuses), with mouse reporting on the app owns
 drag-select, and without bracketed paste `ctrl-s ]` is unsafe in an editor. A plain shell shows
 no badge, so the row costs nothing in the common case. `alt` is the only amber one, because it
-is the only one that changes what a documented key does.
+is the only one that changes what a documented key does. The row lives in the Workspace
+**header**, in reserved chrome — never over the grid, whose cells are live output that a badge
+would hide (zsh with `zle` sets bracketed paste and application cursor keys, so those two badges
+are on in every plain shell).
 
 #### `ScrollbackBadge`
 **Purpose.** `↥ <offset>/<len>` in the grid's top-right corner.
