@@ -246,6 +246,8 @@ pub struct MirrorGrid {
     pub rows: u16,
     /// One row of cells per grid row, always exactly `rows` long.
     pub lines: Vec<Vec<Cell>>,
+    /// Soft-wrap continuation flag for each grid row.
+    pub wrapped: Vec<bool>,
     /// The cursor as of the last applied frame.
     pub cursor: CursorState,
     /// The scrollback viewport as of the last applied frame.
@@ -277,6 +279,7 @@ impl MirrorGrid {
             cols,
             rows,
             lines: vec![Vec::new(); rows as usize],
+            wrapped: vec![false; rows as usize],
             cursor: CursorState {
                 row: 0,
                 col: 0,
@@ -286,6 +289,7 @@ impl MirrorGrid {
             viewport: ViewportInfo {
                 scrollback_len: 0,
                 offset: 0,
+                history_epoch: 0,
             },
             modes: TerminalModes::default(),
             title: None,
@@ -315,6 +319,9 @@ impl MirrorGrid {
             if let Some(line) = self.lines.get_mut(row.index as usize) {
                 line.clone_from(&row.cells);
             }
+            if let Some(wrapped) = self.wrapped.get_mut(row.index as usize) {
+                *wrapped = row.wrapped;
+            }
         }
         self.cursor = frame.cursor;
         self.viewport = frame.viewport;
@@ -331,6 +338,7 @@ impl MirrorGrid {
         self.cols = cols;
         self.rows = rows;
         self.lines.resize(rows as usize, Vec::new());
+        self.wrapped.resize(rows as usize, false);
     }
 
     /// The cell at a position, or `None` outside the grid or past the end of a short row.
@@ -1338,6 +1346,7 @@ mod tests {
             viewport: ViewportInfo {
                 scrollback_len: 0,
                 offset: 0,
+                history_epoch: 0,
             },
             modes: TerminalModes::default(),
             title: None,
@@ -1380,6 +1389,7 @@ mod tests {
                     width: CellWidth::Narrow,
                 })
                 .collect(),
+            wrapped: false,
         }
     }
 
@@ -1443,13 +1453,17 @@ mod tests {
     #[test]
     fn mirror_grid_applies_full_then_diff_frames() {
         let mut grid = MirrorGrid::new(4, 2);
-        assert!(grid.apply(&frame(1, true, vec![row(0, "abcd"), row(1, "efgh")])));
+        let mut first = row(0, "abcd");
+        first.wrapped = true;
+        assert!(grid.apply(&frame(1, true, vec![first, row(1, "efgh")])));
         assert_eq!(grid.row_text(0), "abcd");
         assert_eq!(grid.row_text(1), "efgh");
+        assert_eq!(grid.wrapped, vec![true, false]);
 
         assert!(grid.apply(&frame(2, false, vec![row(1, "zzzz")])));
         assert_eq!(grid.row_text(0), "abcd", "untouched rows survive a diff");
         assert_eq!(grid.row_text(1), "zzzz");
+        assert_eq!(grid.wrapped, vec![true, false]);
         assert_eq!(grid.seq, 2);
     }
 

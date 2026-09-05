@@ -6,15 +6,15 @@
 //! and — because no other module can — the two behaviours `docs/APP-CONTRACTS.md` §6 assigns to
 //! it by name:
 //!
-//! * **Keys reach the PTY only in Terminal mode.** `Workspace > Terminal` binds exactly one key,
-//!   `ctrl-s`, so every other keystroke falls through gpui's binding pass into this element's
-//!   `on_key_down`, is turned into a [`KeyEvent`] and is sent to the daemon, which owns the
-//!   mode-aware encoder. A key typed in `Prefix` or `Scroll` is *dropped here*, never forwarded:
-//!   those modes exist precisely so that `x` closes a tab instead of typing an `x`.
+//! * **Keys reach the PTY only in Terminal mode.** Clipboard and prefix bindings dispatch actions
+//!   first; every other keystroke falls through gpui's binding pass into this element's
+//!   `on_key_down`, becomes a [`KeyEvent`], and reaches the daemon's mode-aware encoder. A key
+//!   typed in `Prefix` or `Scroll` is *dropped here*, never forwarded: those modes exist precisely
+//!   so that `x` closes a tab instead of typing an `x`.
 //! * **Keys are dropped, never buffered, while the daemon is gone** (§3.12 C). A buffer that
 //!   replayed twenty keystrokes into a shell the moment it reconnected would be a hazard, not a
-//!   convenience. The one buffer that does exist is the opposite case: keys typed *while
-//!   attaching* are held until the first frame lands, because that PTY is alive and listening.
+//!   convenience. The one buffer that does exist is the opposite case: keys and pastes produced
+//!   *while attaching* are held in order until the first frame lands, because that PTY is alive.
 //!
 //! # The attach lifecycle
 //!
@@ -50,22 +50,26 @@ use fleet_proto::{
     terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
 };
 use fleet_ui_kit::{
-    ActiveTheme, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill, StatusKind,
-    TerminalGrid, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
+    ActiveTheme, CellMetrics, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill,
+    StatusKind, TerminalGrid, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, Pixels,
-    SharedString, Size, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, SharedString, Size, Window, div,
+    prelude::*, px,
 };
 
 use crate::{
     actions::{fleet, prefix, scroll},
     bridge::Bridge,
     dialogs::{self, Dialogs},
-    state::{AppState, Overlay, Screen, TerminalMode},
+    state::{AppState, MirrorGrid, Overlay, Screen, TerminalMode},
     terminal_element::{
-        GRID_PADDING, cell_size, grid_cursor, grid_modes, grid_rows, grid_size, line_selection,
-        measure, selection_text, viewport_base, viewport_last, zoom_bar,
+        AbsoluteCellPoint, AbsoluteCellSelection, CachedGridRow, CellPoint, GRID_PADDING,
+        SelectionGranularity, absolute_selection_at, absolute_selection_text, cached_grid_row,
+        cell_at_position, cell_size, extend_absolute_selection, grid_cursor, grid_modes, grid_rows,
+        grid_size, line_selection, measure, selection_text, viewport_base, viewport_cell_selection,
+        viewport_last, zoom_bar,
     },
     views::{workspace_header::WorkspaceHeader, workspace_tabs},
 };
@@ -88,6 +92,9 @@ const SHELL_TAB_COMMAND: &str = "clear";
 /// A selection is bounded by what the user scrolled over, so this only exists so a held `k` on
 /// a million-line scrollback cannot grow the map without limit.
 const SELECTION_LINE_CAP: usize = 100_000;
+
+/// Maximum viewport rows retained for mouse-selection copy after they leave the mirror grid.
+const MOUSE_ROW_CACHE_CAP: usize = 5_000;
 
 /// The six prefix keys the delayed hint strip lists (§3.6).
 fn prefix_hints() -> KeyHintRow {
@@ -118,9 +125,9 @@ struct Local {
     /// The `cols × rows` the daemon was last told about, per terminal.
     sizes: HashMap<TerminalId, (u16, u16)>,
     /// The pixel area the grid was last laid out into.
-    area: Size<Pixels>,
-    /// Keys typed before the first frame landed. Flushed in order, then never used again.
-    pending: Vec<KeyEvent>,
+    area: Bounds<Pixels>,
+    /// Terminal input produced before the first frame landed, retained in exact input order.
+    pending: Vec<PendingInput>,
     /// The anchor of a scroll-mode selection, as an **absolute** scrollback line.
     ///
     /// Viewport rows are not stable: a page of scrolling replaces every row's content while
@@ -130,12 +137,19 @@ struct Local {
     /// The scroll-mode caret, as an absolute scrollback line. `j` / `k` move it and a
     /// selection extends to it.
     caret: u64,
+    /// Scrollback identity epoch in which the current scroll-mode selection was created.
+    anchor_history_epoch: Option<u64>,
     /// Every line this client has painted since the selection was anchored, by absolute
     /// scrollback line.
     ///
     /// The daemon mirrors only the viewport, so this is the only place a multi-page selection
     /// can be assembled from. It is dropped the moment the selection ends.
     history: BTreeMap<u64, String>,
+    /// The app-owned mouse selection. It exists independently of terminal modes, so a plain
+    /// left drag still selects while an alternate-screen program has mouse reporting enabled.
+    mouse_selection: Option<MouseSelection>,
+    /// Recent rows keyed by terminal and absolute scrollback line for mouse-selection copy.
+    row_caches: HashMap<TerminalId, TerminalRowCache>,
     /// Whether the 400 ms prefix-hint timer is already running for this prefix.
     hint_armed: bool,
     /// Whether that timer has fired.
@@ -147,11 +161,157 @@ struct Local {
 impl Local {
     /// The size to attach `terminal` at: the measured one, else the last one, else the fallback.
     fn size_for(&self, terminal: TerminalId, cell: Size<Pixels>) -> (u16, u16) {
-        if self.area.width <= px(0.0) || self.area.height <= px(0.0) {
+        if self.area.size.width <= px(0.0) || self.area.size.height <= px(0.0) {
             return self.sizes.get(&terminal).copied().unwrap_or(FALLBACK_GRID);
         }
-        grid_size(self.area, cell)
+        grid_size(self.area.size, cell)
     }
+
+    /// Clears both mouse and Scroll-mode selections, returning whether anything changed.
+    fn clear_selections(&mut self) -> bool {
+        let changed = self.mouse_selection.take().is_some() || self.anchor.take().is_some();
+        self.anchor_history_epoch = None;
+        self.history.clear();
+        self.row_caches.clear();
+        changed
+    }
+}
+
+/// A mouse drag anchored in absolute scrollback coordinates.
+#[derive(Clone, Copy, Debug)]
+struct MouseSelection {
+    anchor: AbsoluteCellPoint,
+    head: AbsoluteCellPoint,
+    initial: AbsoluteCellSelection,
+    initiating: AbsoluteCellPoint,
+    granularity: SelectionGranularity,
+    history_epoch: u64,
+    cols: u16,
+    alt_screen: bool,
+    dragging: bool,
+    selected: bool,
+}
+
+/// A terminal's bounded cache of rows that have appeared in its mirrored viewport.
+#[derive(Debug)]
+struct TerminalRowCache {
+    cols: u16,
+    alt_screen: bool,
+    history_epoch: u64,
+    last_seq: u64,
+    last_viewport_base: u64,
+    rows: BTreeMap<u64, CachedGridRow>,
+}
+
+/// One ordered input operation waiting for the terminal's first frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingInput {
+    Key(KeyEvent),
+    Paste(String),
+}
+
+impl PendingInput {
+    fn into_request(self, terminal: TerminalId) -> RequestBody {
+        match self {
+            Self::Key(key) => RequestBody::TerminalKey { terminal, key },
+            Self::Paste(text) => RequestBody::PasteTerminal { terminal, text },
+        }
+    }
+}
+
+fn drain_pending_requests(
+    pending: &mut Vec<PendingInput>,
+    terminal: TerminalId,
+) -> Vec<RequestBody> {
+    pending
+        .drain(..)
+        .map(|input| input.into_request(terminal))
+        .collect()
+}
+
+fn history_epoch_changed(selection_epoch: Option<u64>, current_epoch: Option<u64>) -> bool {
+    selection_epoch != current_epoch
+}
+
+fn invalidate_history_epoch(local: &mut Local, current_epoch: Option<u64>) -> bool {
+    let mut changed = false;
+    if local.mouse_selection.is_some_and(|selection| {
+        history_epoch_changed(Some(selection.history_epoch), current_epoch)
+    }) {
+        local.mouse_selection = None;
+        changed = true;
+    }
+    if local.anchor.is_some() && history_epoch_changed(local.anchor_history_epoch, current_epoch) {
+        local.anchor = None;
+        local.anchor_history_epoch = None;
+        local.history.clear();
+        changed = true;
+    }
+    if local
+        .row_caches
+        .values()
+        .any(|cache| Some(cache.history_epoch) != current_epoch)
+    {
+        local.row_caches.clear();
+        changed = true;
+    }
+    changed
+}
+
+fn visible_selected_rows(
+    viewport_base: u64,
+    viewport_rows: u16,
+    selection: Option<(u64, u64)>,
+) -> Vec<(usize, u64)> {
+    let Some((first, last)) = selection else {
+        return Vec::new();
+    };
+    if viewport_rows == 0 {
+        return Vec::new();
+    }
+    let (first, last) = (first.min(last), first.max(last));
+    let viewport_last = viewport_base + u64::from(viewport_rows - 1);
+    let first = first.max(viewport_base);
+    let last = last.min(viewport_last);
+    if first > last {
+        return Vec::new();
+    }
+    (first..=last)
+        .filter_map(|line| {
+            usize::try_from(line - viewport_base)
+                .ok()
+                .map(|row| (row, line))
+        })
+        .collect()
+}
+
+fn cache_selected_grid_rows(
+    cache: &mut TerminalRowCache,
+    grid: &MirrorGrid,
+    viewport_base: u64,
+    selection: Option<(u64, u64)>,
+) {
+    let selected_rows = visible_selected_rows(viewport_base, grid.rows, selection);
+    if selected_rows.is_empty() {
+        return;
+    }
+    let (first, last) =
+        selection.map_or((0, 0), |(first, last)| (first.min(last), first.max(last)));
+    cache.rows.retain(|line, _| *line >= first && *line <= last);
+    let frame_changed = cache.last_seq != grid.seq || cache.last_viewport_base != viewport_base;
+    for (row, line) in selected_rows {
+        if !frame_changed && cache.rows.contains_key(&line) {
+            continue;
+        }
+        if let Some(cached) = cached_grid_row(grid, row) {
+            cache.rows.insert(line, cached);
+        }
+    }
+    while cache.rows.len() > MOUSE_ROW_CACHE_CAP {
+        cache.rows.pop_first();
+    }
+    cache.last_seq = grid.seq;
+    cache.last_viewport_base = viewport_base;
 }
 
 /// The Workspace screen.
@@ -181,12 +341,14 @@ impl WorkspaceScreen {
         cx: &mut App,
     ) -> AnyElement {
         let Some(session) = state.read(cx).active_session().cloned() else {
+            self.local.borrow_mut().clear_selections();
             return self.empty(focus, cx);
         };
         let model = Model::build(state.read(cx), &session);
         let cell = cell_size(cx.theme());
 
         self.reconcile(&model, bridge, cell);
+        self.cache_viewport(state, cx);
         self.track_selection(state, cx);
         self.arm_prefix_hint(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
@@ -203,7 +365,7 @@ impl WorkspaceScreen {
         });
         let header = (!model.zoomed).then(|| self.header(&model, pr, cx));
         let tabs = (!model.zoomed).then(|| self.tab_strip(&model, &session, bridge, state, cx));
-        let body = self.terminal_area(&model, bridge, state, focused, cx);
+        let body = self.terminal_area(&model, bridge, state, focus, focused, cx);
         let theme = cx.theme().clone();
 
         let mut root = div()
@@ -246,7 +408,8 @@ impl WorkspaceScreen {
         // A new link means the daemon forgot every attachment, so the terminal on screen has
         // to be claimed again even though it did not change.
         let relinked = local.attached_generation != model.link_generation;
-        if local.attached != model.terminal || relinked {
+        let terminal_changed = local.attached != model.terminal;
+        if terminal_changed || relinked {
             if let Some(previous) = local.attached.take()
                 && !relinked
             {
@@ -256,7 +419,12 @@ impl WorkspaceScreen {
             }
             local.pending.clear();
             local.anchor = None;
+            local.anchor_history_epoch = None;
             local.history.clear();
+            local.row_caches.clear();
+            if terminal_changed {
+                local.mouse_selection = None;
+            }
             if let Some(terminal) = model.terminal {
                 let (cols, rows) = local.size_for(terminal, cell);
                 local.sizes.insert(terminal, (cols, rows));
@@ -270,18 +438,89 @@ impl WorkspaceScreen {
             local.attached_generation = model.link_generation;
         }
 
-        // §3.6 "Attaching": keys typed before the first frame are flushed in order once the
+        // Primary and alternate screens do not share coordinates, and changing the column count
+        // changes the meaning of a cell address. The daemon advances `history_epoch` whenever
+        // retained absolute row identities may have rebased.
+        if model.primed {
+            if local.mouse_selection.is_some_and(|selection| {
+                selection.alt_screen != model.alt_screen || Some(selection.cols) != model.grid_cols
+            }) {
+                local.mouse_selection = None;
+                local.row_caches.clear();
+            }
+            invalidate_history_epoch(&mut local, model.history_epoch);
+            if local.row_caches.values().any(|cache| {
+                Some(cache.cols) != model.grid_cols || cache.alt_screen != model.alt_screen
+            }) {
+                local.row_caches.clear();
+            }
+        }
+
+        // §3.6 "Attaching": input produced before the first frame is flushed in order once the
         // mirror is primed, and dropped if the terminal went away in the meantime.
         if model.primed && !local.pending.is_empty() {
             match model.terminal {
                 Some(terminal) => {
-                    for key in local.pending.drain(..) {
-                        bridge.send(RequestBody::TerminalKey { terminal, key });
+                    for request in drain_pending_requests(&mut local.pending, terminal) {
+                        bridge.send(request);
                     }
                 }
                 None => local.pending.clear(),
             }
         }
+    }
+
+    /// Retains the visible portion of an active selection by absolute line.
+    ///
+    /// The daemon mirror only contains rows currently on-screen. Rows are cloned only while a
+    /// mouse or Scroll-mode selection exists, only when covered by that selection, and only when
+    /// the frame/viewport changed or the selection newly covers an uncached row. Repeated renders
+    /// of the same state do no cell cloning. [`Self::reconcile`] clears the cache on an epoch or
+    /// coordinate-space change before this method can insert the current rows.
+    fn cache_viewport(&self, state: &Entity<AppState>, cx: &App) {
+        let app = state.read(cx);
+        let Some(terminal) = app
+            .active_session()
+            .and_then(|session| session.active_terminal)
+        else {
+            return;
+        };
+        let Some(grid) = app.grids.get(&terminal).filter(|grid| grid.primed) else {
+            return;
+        };
+        let base = viewport_base(grid);
+        let cols = grid.cols;
+        let alt_screen = grid.modes.alt_screen;
+        let history_epoch = grid.viewport.history_epoch;
+
+        let mut local = self.local.borrow_mut();
+        let selection = local.mouse_selection.map_or_else(
+            || local.anchor.map(|anchor| (anchor, local.caret)),
+            |selection| Some((selection.anchor.line, selection.head.line)),
+        );
+        if visible_selected_rows(base, grid.rows, selection).is_empty() {
+            return;
+        }
+        let reset = local.row_caches.get(&terminal).is_some_and(|cache| {
+            cache.cols != cols
+                || cache.alt_screen != alt_screen
+                || cache.history_epoch != history_epoch
+        });
+        if reset {
+            local.row_caches.remove(&terminal);
+        }
+        let cache = local
+            .row_caches
+            .entry(terminal)
+            .or_insert_with(|| TerminalRowCache {
+                cols,
+                alt_screen,
+                history_epoch,
+                last_seq: 0,
+                last_viewport_base: u64::MAX,
+                rows: BTreeMap::new(),
+            });
+        cache_selected_grid_rows(cache, grid, base, selection);
     }
 
     /// Keeps the Scroll-mode caret inside the viewport and records what a live selection covers.
@@ -452,6 +691,7 @@ impl WorkspaceScreen {
         model: &Model,
         bridge: &Bridge,
         state: &Entity<AppState>,
+        focus: &FocusHandle,
         focused: bool,
         cx: &App,
     ) -> AnyElement {
@@ -461,8 +701,16 @@ impl WorkspaceScreen {
         let selection = mirror.and_then(|grid| {
             let local = self.local.borrow();
             local
-                .anchor
-                .and_then(|anchor| line_selection(grid, anchor, local.caret))
+                .mouse_selection
+                .filter(|selection| selection.selected)
+                .and_then(|selection| {
+                    viewport_cell_selection(grid, selection.anchor, selection.head)
+                })
+                .or_else(|| {
+                    local
+                        .anchor
+                        .and_then(|anchor| line_selection(grid, anchor, local.caret))
+                })
         });
         let hint_visible = self.local.borrow().hint_visible;
 
@@ -470,6 +718,7 @@ impl WorkspaceScreen {
             Some(grid) => {
                 let resize_local = Rc::clone(&self.local);
                 let resize_bridge = bridge.clone();
+                let resize_state = state.clone();
                 let resize_terminal = model.terminal;
                 let mut painted = TerminalGrid::new(grid_rows(grid, theme))
                     .id("workspace-terminal-grid")
@@ -481,13 +730,20 @@ impl WorkspaceScreen {
                     .padding(px(GRID_PADDING))
                     .scrollback(grid.viewport.offset, grid.viewport.scrollback_len)
                     .frame_size(usize::from(grid.cols), usize::from(grid.rows))
-                    .on_resize(move |cols, rows, _window, _cx| {
+                    .on_resize(move |cols, rows, _window, cx| {
                         let Some(terminal) = resize_terminal else {
                             return;
                         };
                         let cols = u16::try_from(cols).unwrap_or(u16::MAX);
                         let rows = u16::try_from(rows).unwrap_or(u16::MAX);
                         let mut local = resize_local.borrow_mut();
+                        let selection_cleared = local
+                            .mouse_selection
+                            .is_some_and(|selection| selection.cols != cols);
+                        if selection_cleared {
+                            local.mouse_selection = None;
+                            local.row_caches.clear();
+                        }
                         if local.sizes.get(&terminal) != Some(&(cols, rows)) {
                             local.sizes.insert(terminal, (cols, rows));
                             resize_bridge.send(RequestBody::ResizeTerminal {
@@ -496,13 +752,17 @@ impl WorkspaceScreen {
                                 rows,
                             });
                         }
+                        drop(local);
+                        if selection_cleared {
+                            resize_state.update(cx, |_, cx| cx.notify());
+                        }
                     });
                 if let Some(selection) = selection {
                     painted = painted.selection(selection);
                 }
                 painted.into_any_element()
             }
-            // §3.6 "Attaching": one dim centered line, and the keys typed meanwhile are held.
+            // §3.6 "Attaching": one dim centered line, with input meanwhile held in order.
             None => div()
                 .flex()
                 .size_full()
@@ -517,12 +777,12 @@ impl WorkspaceScreen {
         // it every new or newly selected terminal was attached at 80 × 24 and then resized,
         // which costs a full-screen redraw at the wrong size before the right one arrives.
         let area_local = Rc::clone(&self.local);
-        div()
+        let area = div()
             .relative()
             .flex_1()
             .w_full()
             .overflow_hidden()
-            .child(measure(move |size| area_local.borrow_mut().area = size))
+            .child(measure(move |bounds| area_local.borrow_mut().area = bounds))
             .child(grid)
             .children((model.mode == TerminalMode::Scroll).then(|| {
                 ScrollPill::new(model.scroll_offset, model.scrollback_len)
@@ -532,7 +792,8 @@ impl WorkspaceScreen {
             .child(
                 PrefixHint::new(model.mode == TerminalMode::Prefix && hint_visible)
                     .hints(prefix_hints()),
-            )
+            );
+        self.with_mouse_selection(area, state, focus)
             .into_any_element()
     }
 
@@ -541,6 +802,7 @@ impl WorkspaceScreen {
     /// Installs every listener the Workspace owns on the focused element.
     fn with_keys(&self, root: Div, bridge: &Bridge, state: &Entity<AppState>) -> Div {
         let root = self.with_key_forwarding(root, bridge, state);
+        let root = self.with_clipboard_actions(root, bridge, state);
         let root = self.with_prefix_actions(root, bridge, state);
         self.with_scroll_actions(root, bridge, state)
     }
@@ -583,11 +845,200 @@ impl WorkspaceScreen {
             let Some(key) = key_event(&event.keystroke, event.is_held) else {
                 return;
             };
-            if primed {
-                bridge.send(RequestBody::TerminalKey { terminal, key });
-            } else {
-                local.borrow_mut().pending.push(key);
+            if local.borrow_mut().clear_selections() {
+                state.update(cx, |_, cx| cx.notify());
             }
+            send_or_queue_input(&local, &bridge, terminal, primed, PendingInput::Key(key));
+            cx.stop_propagation();
+        })
+    }
+
+    /// Standard clipboard actions while the terminal owns focus.
+    fn with_clipboard_actions(&self, root: Div, bridge: &Bridge, state: &Entity<AppState>) -> Div {
+        let root = {
+            let (local, bridge, state) = self.handles(bridge, state);
+            root.on_action(
+                move |_: &crate::actions::workspace::PasteClipboard, _window, cx| {
+                    paste_clipboard(&local, &bridge, &state, cx);
+                },
+            )
+        };
+        let (local, bridge, state) = self.handles(bridge, state);
+        root.on_action(
+            move |_: &crate::actions::workspace::CopySelection, _window, cx| {
+                match current_selection_text(&local, &state, cx) {
+                    CurrentSelectionText::Text(text) => {
+                        if !text.is_empty() {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            state.update(cx, |app, cx| {
+                                app.toast_short("copied", Icon::ClipboardCheck, Instant::now());
+                                cx.notify();
+                            });
+                        }
+                        return;
+                    }
+                    CurrentSelectionText::Missing => {
+                        selection_scrolled_away(&local, &state, cx);
+                        return;
+                    }
+                    CurrentSelectionText::None => {}
+                }
+
+                // A binding normally prevents `on_key_down` from seeing the keystroke. Forward the
+                // unmatched cmd-c explicitly so Fleet never steals a terminal program's shortcut.
+                if state.read(cx).terminal_mode == TerminalMode::Terminal
+                    && let Some((terminal, primed)) = terminal_input_target(&state, cx)
+                {
+                    send_or_queue_input(
+                        &local,
+                        &bridge,
+                        terminal,
+                        primed,
+                        PendingInput::Key(KeyEvent {
+                            key: Key::Char('c'),
+                            mods: Modifiers::SUPER,
+                            text: None,
+                            action: KeyAction::Press,
+                        }),
+                    );
+                }
+            },
+        )
+    }
+
+    /// Plain left-drag selection, independent of the program running in the PTY.
+    fn with_mouse_selection(
+        &self,
+        area: Div,
+        state: &Entity<AppState>,
+        focus: &FocusHandle,
+    ) -> Div {
+        let down_local = Rc::clone(&self.local);
+        let down_state = state.clone();
+        let down_focus = focus.clone();
+        let area = area.on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                window.focus(&down_focus, cx);
+                let Some(cell) = mouse_cell(&down_local, &down_state, event.position, window, cx)
+                else {
+                    return;
+                };
+                let granularity = if event.click_count >= 3 {
+                    SelectionGranularity::Line
+                } else if event.click_count == 2 {
+                    SelectionGranularity::Word
+                } else {
+                    SelectionGranularity::Cell
+                };
+                let initial = {
+                    let app = down_state.read(cx);
+                    app.active_grid().and_then(|grid| {
+                        absolute_selection_at(grid, cell.viewport, granularity).or_else(|| {
+                            absolute_selection_at(grid, cell.viewport, SelectionGranularity::Cell)
+                        })
+                    })
+                };
+                let Some(initial) = initial else {
+                    return;
+                };
+                {
+                    let mut local = down_local.borrow_mut();
+                    local.anchor = None;
+                    local.anchor_history_epoch = None;
+                    local.history.clear();
+                    local.row_caches.clear();
+                    local.mouse_selection = Some(MouseSelection {
+                        anchor: initial.start,
+                        head: initial.end,
+                        initial,
+                        initiating: cell.absolute,
+                        granularity,
+                        history_epoch: cell.history_epoch,
+                        cols: cell.cols,
+                        alt_screen: cell.alt_screen,
+                        dragging: true,
+                        selected: granularity != SelectionGranularity::Cell,
+                    });
+                }
+                down_state.update(cx, |_, cx| cx.notify());
+                cx.stop_propagation();
+            },
+        );
+
+        let move_local = Rc::clone(&self.local);
+        let move_state = state.clone();
+        let area = area.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+            if event.pressed_button != Some(MouseButton::Left)
+                || !move_local
+                    .borrow()
+                    .mouse_selection
+                    .is_some_and(|selection| selection.dragging)
+            {
+                return;
+            }
+            let Some(cell) = mouse_cell(&move_local, &move_state, event.position, window, cx)
+            else {
+                return;
+            };
+            let next = {
+                let app = move_state.read(cx);
+                app.active_grid().and_then(|grid| {
+                    let selection = move_local.borrow().mouse_selection?;
+                    extend_absolute_selection(
+                        grid,
+                        selection.initial,
+                        selection.initiating,
+                        cell.viewport,
+                        selection.granularity,
+                    )
+                })
+            };
+            let changed = {
+                let mut local = move_local.borrow_mut();
+                let Some(selection) = local.mouse_selection.as_mut() else {
+                    return;
+                };
+                if selection.cols != cell.cols
+                    || selection.alt_screen != cell.alt_screen
+                    || history_epoch_changed(
+                        Some(selection.history_epoch),
+                        Some(cell.history_epoch),
+                    )
+                {
+                    local.mouse_selection = None;
+                    local.row_caches.clear();
+                    true
+                } else if let Some(next) = next {
+                    let selected = selection.granularity != SelectionGranularity::Cell
+                        || cell.absolute != selection.initiating;
+                    let changed = selection.anchor != next.start
+                        || selection.head != next.end
+                        || selection.selected != selected;
+                    selection.anchor = next.start;
+                    selection.head = next.end;
+                    selection.selected = selected;
+                    changed
+                } else {
+                    false
+                }
+            };
+            if changed {
+                move_state.update(cx, |_, cx| cx.notify());
+            }
+            cx.stop_propagation();
+        });
+
+        let up_local = Rc::clone(&self.local);
+        let up_state = state.clone();
+        let area = area.on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
+            finish_mouse_selection(&up_local, &up_state, cx);
+            cx.stop_propagation();
+        });
+        let out_local = Rc::clone(&self.local);
+        let out_state = state.clone();
+        area.on_mouse_up_out(MouseButton::Left, move |_event, _window, cx| {
+            finish_mouse_selection(&out_local, &out_state, cx);
             cx.stop_propagation();
         })
     }
@@ -595,18 +1046,24 @@ impl WorkspaceScreen {
     /// Every `ctrl-s <key>` binding the shell does not already own.
     fn with_prefix_actions(&self, root: Div, bridge: &Bridge, state: &Entity<AppState>) -> Div {
         let root = {
-            let (_, bridge, state) = self.handles(bridge, state);
+            let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::SendLiteral, _window, cx| {
-                if let Some(terminal) = active_terminal(&state, cx) {
-                    bridge.send(RequestBody::TerminalKey {
+                if let Some((terminal, primed)) = terminal_input_target(&state, cx) {
+                    if local.borrow_mut().clear_selections() {
+                        state.update(cx, |_, cx| cx.notify());
+                    }
+                    send_or_queue_input(
+                        &local,
+                        &bridge,
                         terminal,
-                        key: KeyEvent {
+                        primed,
+                        PendingInput::Key(KeyEvent {
                             key: Key::Char('s'),
                             mods: Modifiers::CTRL,
                             text: None,
                             action: KeyAction::Press,
-                        },
-                    });
+                        }),
+                    );
                 }
             })
         };
@@ -701,16 +1158,9 @@ impl WorkspaceScreen {
             })
         };
         let root = {
-            let (_, bridge, state) = self.handles(bridge, state);
+            let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::Paste, _window, cx| {
-                let Some(terminal) = active_terminal(&state, cx) else {
-                    return;
-                };
-                // The daemon brackets the paste when the program asked for bracketed paste.
-                let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-                    return;
-                };
-                bridge.send(RequestBody::PasteTerminal { terminal, text });
+                paste_clipboard(&local, &bridge, &state, cx);
             })
         };
         let root = {
@@ -893,6 +1343,10 @@ impl WorkspaceScreen {
             let (local, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::StartSelection, _window, cx| {
                 let (base, rows) = viewport_span(&state, cx);
+                let history_epoch = state
+                    .read(cx)
+                    .active_grid()
+                    .map(|grid| grid.viewport.history_epoch);
                 let mut borrowed = local.borrow_mut();
                 // A caret that has never moved is still at line 0; anchoring there would
                 // anchor the oldest line in the scrollback rather than the one on screen.
@@ -900,7 +1354,9 @@ impl WorkspaceScreen {
                     borrowed.caret = borrowed.caret.clamp(base, base + u64::from(rows - 1));
                 }
                 borrowed.anchor = Some(borrowed.caret);
+                borrowed.anchor_history_epoch = history_epoch;
                 borrowed.history.clear();
+                borrowed.row_caches.clear();
                 drop(borrowed);
                 state.update(cx, |_, cx| cx.notify());
             })
@@ -921,7 +1377,9 @@ impl WorkspaceScreen {
                 {
                     let mut borrowed = local.borrow_mut();
                     borrowed.anchor = None;
+                    borrowed.anchor_history_epoch = None;
                     borrowed.history.clear();
+                    borrowed.row_caches.clear();
                 }
                 state.update(cx, |app, cx| {
                     app.toast_short("copied", Icon::ClipboardCheck, Instant::now());
@@ -937,7 +1395,9 @@ impl WorkspaceScreen {
                 {
                     let mut borrowed = local.borrow_mut();
                     if borrowed.anchor.take().is_some() {
+                        borrowed.anchor_history_epoch = None;
                         borrowed.history.clear();
+                        borrowed.row_caches.clear();
                         drop(borrowed);
                         state.update(cx, |_, cx| cx.notify());
                         return;
@@ -1038,6 +1498,182 @@ fn detach(local: &Rc<RefCell<Local>>, bridge: &Bridge) {
     }
 }
 
+/// Sends clipboard text through the same ordered attach gate as terminal keys.
+fn paste_clipboard(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    let Some((terminal, primed)) = terminal_input_target(state, cx) else {
+        return;
+    };
+    let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        return;
+    };
+    if local.borrow_mut().clear_selections() {
+        state.update(cx, |_, cx| cx.notify());
+    }
+    send_or_queue_input(local, bridge, terminal, primed, PendingInput::Paste(text));
+}
+
+fn terminal_input_target(state: &Entity<AppState>, cx: &App) -> Option<(TerminalId, bool)> {
+    let app = state.read(cx);
+    if app.drops_terminal_keys() {
+        return None;
+    }
+    let terminal = app
+        .active_session()
+        .and_then(|session| session.active_terminal)?;
+    let primed = app.grids.get(&terminal).is_some_and(|grid| grid.primed);
+    Some((terminal, primed))
+}
+
+fn send_or_queue_input(
+    local: &Rc<RefCell<Local>>,
+    bridge: &Bridge,
+    terminal: TerminalId,
+    primed: bool,
+    input: PendingInput,
+) {
+    if primed {
+        bridge.send(input.into_request(terminal));
+    } else {
+        local.borrow_mut().pending.push(input);
+    }
+}
+
+/// Result of resolving the currently active selection for a clipboard operation.
+enum CurrentSelectionText {
+    None,
+    Text(String),
+    Missing,
+}
+
+/// Text owned by either the mouse selection or the existing Scroll-mode selection.
+fn current_selection_text(
+    local: &Rc<RefCell<Local>>,
+    state: &Entity<AppState>,
+    cx: &App,
+) -> CurrentSelectionText {
+    let app = state.read(cx);
+    let Some(terminal) = app
+        .active_session()
+        .and_then(|session| session.active_terminal)
+    else {
+        return CurrentSelectionText::None;
+    };
+    let Some(grid) = app.grids.get(&terminal) else {
+        return CurrentSelectionText::None;
+    };
+    let local = local.borrow();
+    if let Some(selection) = local.mouse_selection.filter(|selection| selection.selected) {
+        let empty_cache = BTreeMap::new();
+        let cache = local
+            .row_caches
+            .get(&terminal)
+            .map_or(&empty_cache, |cache| &cache.rows);
+        return absolute_selection_text(
+            grid,
+            cache,
+            AbsoluteCellSelection::new(selection.anchor, selection.head),
+        )
+        .map_or(CurrentSelectionText::Missing, CurrentSelectionText::Text);
+    }
+    local.anchor.map_or(CurrentSelectionText::None, |anchor| {
+        CurrentSelectionText::Text(selection_text(&local.history, anchor, local.caret))
+    })
+}
+
+/// Clears a selection whose required rows have fallen outside both mirror and bounded cache.
+fn selection_scrolled_away(local: &Rc<RefCell<Local>>, state: &Entity<AppState>, cx: &mut App) {
+    local.borrow_mut().clear_selections();
+    state.update(cx, |app, cx| {
+        app.toast_short("selection scrolled away", Icon::Info, Instant::now());
+        cx.notify();
+    });
+}
+
+/// Maps a mouse position with the same measured metrics the grid painter uses.
+fn mouse_cell(
+    local: &Rc<RefCell<Local>>,
+    state: &Entity<AppState>,
+    position: gpui::Point<Pixels>,
+    window: &Window,
+    cx: &App,
+) -> Option<MouseCell> {
+    let (cols, rows, viewport_base, alt_screen, history_epoch) = {
+        let app = state.read(cx);
+        let grid = app.active_grid()?;
+        (
+            grid.cols,
+            grid.rows,
+            viewport_base(grid),
+            grid.modes.alt_screen,
+            grid.viewport.history_epoch,
+        )
+    };
+    let bounds = local.borrow().area;
+    let metrics = CellMetrics::measure(cx.theme(), window, cx);
+    let point = cell_at_position(
+        bounds,
+        position,
+        gpui::size(metrics.width, metrics.height),
+        cols,
+        rows,
+    )?;
+    Some(MouseCell {
+        viewport: point,
+        absolute: AbsoluteCellPoint::new(viewport_base + point.row as u64, point.col),
+        cols,
+        alt_screen,
+        history_epoch,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MouseCell {
+    viewport: CellPoint,
+    absolute: AbsoluteCellPoint,
+    cols: u16,
+    alt_screen: bool,
+    history_epoch: u64,
+}
+
+/// Ends a mouse drag and copies its non-empty text immediately.
+fn finish_mouse_selection(local: &Rc<RefCell<Local>>, state: &Entity<AppState>, cx: &mut App) {
+    let selected = {
+        let mut local = local.borrow_mut();
+        let Some(selection) = local.mouse_selection.as_mut() else {
+            return;
+        };
+        if !selection.dragging {
+            return;
+        }
+        selection.dragging = false;
+        if selection.selected {
+            true
+        } else {
+            local.mouse_selection = None;
+            local.row_caches.clear();
+            false
+        }
+    };
+    if selected {
+        match current_selection_text(local, state, cx) {
+            CurrentSelectionText::Text(text) if !text.is_empty() => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            CurrentSelectionText::Missing => {
+                selection_scrolled_away(local, state, cx);
+                return;
+            }
+            CurrentSelectionText::None | CurrentSelectionText::Text(_) => {}
+        }
+    }
+    state.update(cx, |_, cx| cx.notify());
+}
+
 /// Moves the viewport and repaints.
 fn scroll_viewport(
     bridge: &Bridge,
@@ -1110,7 +1746,9 @@ fn exit_scroll(
     {
         let mut borrowed = local.borrow_mut();
         borrowed.anchor = None;
+        borrowed.anchor_history_epoch = None;
         borrowed.history.clear();
+        borrowed.row_caches.clear();
     }
     if let Some(terminal) = active_terminal(state, cx) {
         bridge.send(RequestBody::ScrollTerminal {
@@ -1221,7 +1859,9 @@ fn select_terminal(
     {
         let mut borrowed = local.borrow_mut();
         borrowed.anchor = None;
+        borrowed.anchor_history_epoch = None;
         borrowed.history.clear();
+        borrowed.row_caches.clear();
     }
     state.update(cx, |app, cx| {
         app.touch_terminal(&session, terminal);
@@ -1404,6 +2044,8 @@ struct Model {
     mode: TerminalMode,
     zoomed: bool,
     terminal: Option<TerminalId>,
+    grid_cols: Option<u16>,
+    history_epoch: Option<u64>,
     primed: bool,
     alt_screen: bool,
     scroll_offset: usize,
@@ -1501,6 +2143,8 @@ impl Model {
             mode: app.terminal_mode,
             zoomed: app.zoomed,
             terminal,
+            grid_cols: grid.map(|grid| grid.cols),
+            history_epoch: grid.map(|grid| grid.viewport.history_epoch),
             primed: grid.is_some_and(|grid| grid.primed),
             alt_screen: grid.is_some_and(|grid| grid.modes.alt_screen),
             scroll_offset: grid.map_or(0, |grid| grid.viewport.offset),
@@ -1826,7 +2470,10 @@ mod tests {
     #[test]
     fn a_measured_area_decides_the_grid() {
         let local = Local {
-            area: gpui::size(px(216.0), px(416.0)),
+            area: Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(216.0), px(416.0)),
+            ),
             ..Local::default()
         };
         let cell = gpui::size(px(10.0), px(20.0));
@@ -1839,5 +2486,139 @@ mod tests {
         local.sizes.insert(TerminalId(7), (100, 30));
         let cell = gpui::size(px(10.0), px(20.0));
         assert_eq!(local.size_for(TerminalId(7), cell), (100, 30));
+    }
+
+    #[test]
+    fn pre_frame_keys_and_pastes_flush_in_input_order() {
+        let key = |character| {
+            PendingInput::Key(KeyEvent {
+                key: Key::Char(character),
+                mods: Modifiers::empty(),
+                text: Some(character.to_string()),
+                action: KeyAction::Press,
+            })
+        };
+        let mut pending = vec![key('a'), PendingInput::Paste("middle".to_owned()), key('b')];
+
+        let requests = drain_pending_requests(&mut pending, TerminalId(9));
+
+        assert!(pending.is_empty());
+        assert!(matches!(
+            requests.as_slice(),
+            [
+                RequestBody::TerminalKey {
+                    terminal: TerminalId(9),
+                    key: KeyEvent { key: Key::Char('a'), .. },
+                },
+                RequestBody::PasteTerminal {
+                    terminal: TerminalId(9),
+                    text,
+                },
+                RequestBody::TerminalKey {
+                    terminal: TerminalId(9),
+                    key: KeyEvent { key: Key::Char('b'), .. },
+                },
+            ] if text == "middle"
+        ));
+    }
+
+    #[test]
+    fn history_epoch_change_clears_selections_and_the_row_cache() {
+        let point = AbsoluteCellPoint::new(3, 1);
+        let mut local = Local {
+            anchor: Some(3),
+            anchor_history_epoch: Some(7),
+            mouse_selection: Some(MouseSelection {
+                anchor: point,
+                head: point,
+                initial: AbsoluteCellSelection::new(point, point),
+                initiating: point,
+                granularity: SelectionGranularity::Cell,
+                history_epoch: 7,
+                cols: 80,
+                alt_screen: false,
+                dragging: false,
+                selected: true,
+            }),
+            ..Local::default()
+        };
+        local.row_caches.insert(
+            TerminalId(1),
+            TerminalRowCache {
+                cols: 80,
+                alt_screen: false,
+                history_epoch: 7,
+                last_seq: 4,
+                last_viewport_base: 2,
+                rows: BTreeMap::new(),
+            },
+        );
+
+        assert!(invalidate_history_epoch(&mut local, Some(8)));
+        assert!(local.mouse_selection.is_none());
+        assert!(local.anchor.is_none());
+        assert!(local.row_caches.is_empty());
+    }
+
+    #[test]
+    fn unchanged_history_epoch_keeps_selections_and_the_row_cache() {
+        let point = AbsoluteCellPoint::new(3, 1);
+        let mut local = Local {
+            mouse_selection: Some(MouseSelection {
+                anchor: point,
+                head: point,
+                initial: AbsoluteCellSelection::new(point, point),
+                initiating: point,
+                granularity: SelectionGranularity::Cell,
+                history_epoch: 7,
+                cols: 80,
+                alt_screen: false,
+                dragging: false,
+                selected: true,
+            }),
+            ..Local::default()
+        };
+        local.row_caches.insert(
+            TerminalId(1),
+            TerminalRowCache {
+                cols: 80,
+                alt_screen: false,
+                history_epoch: 7,
+                last_seq: 4,
+                last_viewport_base: 2,
+                rows: BTreeMap::new(),
+            },
+        );
+
+        assert!(!invalidate_history_epoch(&mut local, Some(7)));
+        assert!(local.mouse_selection.is_some());
+        assert_eq!(local.row_caches.len(), 1);
+    }
+
+    #[test]
+    fn row_cache_is_untouched_without_a_selection_and_retains_only_selected_rows() {
+        let mut grid = MirrorGrid::new(4, 4);
+        grid.seq = 3;
+        let retained = cached_grid_row(&grid, 0)
+            .unwrap_or_else(|| panic!("an initialized mirror row must exist"));
+        let mut cache = TerminalRowCache {
+            cols: 4,
+            alt_screen: false,
+            history_epoch: 0,
+            last_seq: 1,
+            last_viewport_base: 99,
+            rows: BTreeMap::from([(99, retained)]),
+        };
+
+        cache_selected_grid_rows(&mut cache, &grid, 100, None);
+        assert_eq!(cache.rows.keys().copied().collect::<Vec<_>>(), vec![99]);
+        assert_eq!((cache.last_seq, cache.last_viewport_base), (1, 99));
+
+        cache_selected_grid_rows(&mut cache, &grid, 100, Some((102, 101)));
+        assert_eq!(
+            cache.rows.keys().copied().collect::<Vec<_>>(),
+            vec![101, 102]
+        );
+        assert_eq!((cache.last_seq, cache.last_viewport_base), (3, 100));
     }
 }

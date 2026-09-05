@@ -886,7 +886,7 @@ alt-screen suppression and paints nothing — the badges belong to the Workspace
 `.label() .icon() .tone()`.
 **Usage rule.** These modes are the only explanation for the keymap appearing to lie: in
 alt-screen there is no scrollback (`ctrl-s [` refuses), with mouse reporting on the app owns
-drag-select, and without bracketed paste `ctrl-s ]` is unsafe in an editor. A plain shell shows
+drag-select, and paste (`cmd-v` or `ctrl-s ]`) follows the program's bracketed-paste mode. A plain shell shows
 no badge, so the row costs nothing in the common case. `alt` is the only amber one, because it
 is the only one that changes what a documented key does. The row lives in the Workspace
 **header**, in reserved chrome — never over the grid, whose cells are live output that a badge

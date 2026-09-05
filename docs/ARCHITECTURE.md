@@ -91,12 +91,17 @@ pty (portable-pty) --bytes--> VtEngine (libghostty-vt) --dirty rows--> FrameUpda
 client key event --proto--> daemon key encoder (terminal modes aware) --bytes--> pty
 ```
 
-`FrameUpdate { terminal_id, seq, cols, rows, full: bool, rows: [RowUpdate{index, cells}],
-cursor{row,col,visible,shape}, viewport{scrollback_len, offset}, modes{alt_screen, mouse,
-bracketed_paste}, title }`. `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
+`FrameUpdate { terminal_id, seq, cols, rows, full: bool, rows: [RowUpdate{index, cells, wrapped}],
+cursor{row,col,visible,shape}, viewport{scrollback_len, offset, history_epoch},
+modes{alt_screen, mouse, bracketed_paste}, title }`.
+`Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid.
+on the client's mirror grid. The wire protocol is version 2; `wrapped` preserves logical lines
+during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
+row is discarded, history shrinks, or a column change reflows it, without treating viewport
+movement as eviction. Off-screen
+copy caches only visible rows covered by an active selection and caps them at 5,000.
 
 ## Client (`fleet` app)
 

@@ -28,7 +28,7 @@ use fleet_ui_kit::{
     CellWidth, CursorShape, GridCell, GridCursor, GridRow, GridSelection,
     TerminalMode as KitTerminalMode, Theme, UnderlineStyle,
 };
-use gpui::{Hsla, IntoElement, Pixels, Rgba, Size, canvas, prelude::*, px};
+use gpui::{Bounds, Hsla, IntoElement, Pixels, Point, Rgba, Size, canvas, prelude::*, px};
 
 use crate::state::MirrorGrid;
 
@@ -71,13 +71,425 @@ pub fn grid_size(area: Size<Pixels>, cell: Size<Pixels>) -> (u16, u16) {
 ///
 /// The Workspace fills the terminal area with it and turns the reported size into a
 /// `ResizeTerminal` request. It draws nothing: only the layout pass is interesting.
-pub fn measure(report: impl 'static + FnOnce(Size<Pixels>)) -> impl IntoElement {
+pub fn measure(report: impl 'static + FnOnce(Bounds<Pixels>)) -> impl IntoElement {
     canvas(
-        move |bounds, _window, _cx| report(bounds.size),
+        move |bounds, _window, _cx| report(bounds),
         |_bounds, (), _window, _cx| {},
     )
     .absolute()
     .size_full()
+}
+
+/// One cell in the visible terminal viewport.
+///
+/// Columns are terminal columns rather than indices into [`MirrorGrid::lines`]: a wide cell
+/// occupies two columns while its spacer cell occupies none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CellPoint {
+    /// Viewport row, zero based.
+    pub row: usize,
+    /// Terminal column, zero based.
+    pub col: usize,
+}
+
+impl CellPoint {
+    /// A viewport cell.
+    #[must_use]
+    pub const fn new(row: usize, col: usize) -> Self {
+        Self { row, col }
+    }
+}
+
+/// One terminal cell addressed in the absolute scrollback coordinate space.
+///
+/// Unlike a viewport row, `line` continues to identify the same terminal line when new output
+/// moves the viewport. Mouse selections use this type so repaints do not retarget their ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AbsoluteCellPoint {
+    /// Absolute scrollback line, zero based.
+    pub line: u64,
+    /// Terminal column, zero based.
+    pub col: usize,
+}
+
+impl AbsoluteCellPoint {
+    /// An absolute terminal cell.
+    #[must_use]
+    pub const fn new(line: u64, col: usize) -> Self {
+        Self { line, col }
+    }
+}
+
+/// Unit a mouse gesture expands by after its initiating click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionGranularity {
+    /// Individual terminal cells.
+    Cell,
+    /// Terminal-friendly word runs.
+    Word,
+    /// Complete visual rows.
+    Line,
+}
+
+/// Inclusive absolute endpoints of a stream selection, normalized in reading order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AbsoluteCellSelection {
+    /// First selected cell.
+    pub start: AbsoluteCellPoint,
+    /// Last selected cell.
+    pub end: AbsoluteCellPoint,
+}
+
+impl AbsoluteCellSelection {
+    /// Builds a normalized inclusive selection.
+    #[must_use]
+    pub fn new(first: AbsoluteCellPoint, second: AbsoluteCellPoint) -> Self {
+        let (start, end) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        Self { start, end }
+    }
+}
+
+/// A stream selection containing both the anchor cell and the head cell.
+///
+/// [`GridSelection`] uses half-open column ranges for painting. Mouse selection is naturally
+/// inclusive at both ends, so the later cell is advanced by one column before the range is
+/// returned. This also makes dragging backwards produce exactly the same range as dragging
+/// forwards.
+#[must_use]
+pub fn cell_selection(anchor: CellPoint, head: CellPoint) -> GridSelection {
+    let (first, last) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    GridSelection::new(first.row, first.col, last.row, last.col.saturating_add(1))
+}
+
+/// Selects the cell, word, or line at one viewport point in absolute coordinates.
+#[must_use]
+pub fn absolute_selection_at(
+    grid: &MirrorGrid,
+    point: CellPoint,
+    granularity: SelectionGranularity,
+) -> Option<AbsoluteCellSelection> {
+    let viewport = match granularity {
+        SelectionGranularity::Cell => cell_selection(point, point),
+        SelectionGranularity::Word => word_selection(grid, point)?,
+        SelectionGranularity::Line => {
+            GridSelection::new(point.row, 0, point.row, usize::from(grid.cols))
+        }
+    }
+    .normalized();
+    let base = viewport_base(grid);
+    Some(AbsoluteCellSelection::new(
+        AbsoluteCellPoint::new(base + viewport.start_row as u64, viewport.start_col),
+        AbsoluteCellPoint::new(
+            base + viewport.end_row as u64,
+            viewport.end_col.saturating_sub(1),
+        ),
+    ))
+}
+
+/// Extends an initial mouse selection according to its click granularity.
+///
+/// Pointer jitter inside the initiating cell returns the initial word or line unchanged. Once the
+/// pointer reaches another cell, the hovered word or line is included as a whole.
+#[must_use]
+pub fn extend_absolute_selection(
+    grid: &MirrorGrid,
+    initial: AbsoluteCellSelection,
+    initiating: AbsoluteCellPoint,
+    hovered: CellPoint,
+    granularity: SelectionGranularity,
+) -> Option<AbsoluteCellSelection> {
+    let hovered_cell =
+        AbsoluteCellPoint::new(viewport_base(grid) + hovered.row as u64, hovered.col);
+    if hovered_cell == initiating {
+        return Some(initial);
+    }
+    let hovered_range = absolute_selection_at(grid, hovered, granularity)?;
+    Some(if hovered_cell < initiating {
+        AbsoluteCellSelection::new(hovered_range.start, initial.end)
+    } else {
+        AbsoluteCellSelection::new(initial.start, hovered_range.end)
+    })
+}
+
+/// Converts an absolute cell selection into the currently visible viewport rows.
+///
+/// The returned selection is clipped at both viewport edges. `None` means every selected row is
+/// currently off-screen; callers must retain the absolute endpoints so it can become visible
+/// again after the viewport moves. Copy uses a separate bounded row cache for the off-screen part.
+#[must_use]
+pub fn viewport_cell_selection(
+    grid: &MirrorGrid,
+    anchor: AbsoluteCellPoint,
+    head: AbsoluteCellPoint,
+) -> Option<GridSelection> {
+    let (first, last) = if anchor <= head {
+        (anchor, head)
+    } else {
+        (head, anchor)
+    };
+    let base = viewport_base(grid);
+    let bottom = viewport_last(grid)?;
+    if last.line < base || first.line > bottom {
+        return None;
+    }
+
+    let visible_first = first.line.max(base);
+    let visible_last = last.line.min(bottom);
+    let start_col = if first.line < base { 0 } else { first.col };
+    let end_col = if last.line > bottom {
+        usize::from(grid.cols)
+    } else {
+        last.col.saturating_add(1)
+    };
+    Some(GridSelection::new(
+        usize::try_from(visible_first - base).unwrap_or(0),
+        start_col,
+        usize::try_from(visible_last - base).unwrap_or(0),
+        end_col,
+    ))
+}
+
+/// The word under `point`, using terminal-friendly word boundaries.
+///
+/// Letters, numbers and `_` form words; adjacent whitespace forms a blank run; punctuation forms
+/// a third run. This keeps paths pleasantly predictable without inventing shell-specific parsing.
+#[must_use]
+pub fn word_selection(grid: &MirrorGrid, point: CellPoint) -> Option<GridSelection> {
+    let line = grid.lines.get(point.row)?;
+    let mut cells = Vec::new();
+    let mut col = 0usize;
+    for cell in line {
+        let width = cell_columns(cell);
+        if width == 0 {
+            continue;
+        }
+        let end = col.saturating_add(width);
+        cells.push((col, end, selection_class(cell.text.as_str())));
+        col = end;
+    }
+    let index = cells
+        .iter()
+        .position(|(start, end, _)| point.col >= *start && point.col < *end)?;
+    let class = cells[index].2;
+    let first = (0..=index)
+        .rev()
+        .take_while(|candidate| cells[*candidate].2 == class)
+        .last()
+        .unwrap_or(index);
+    let last = (index..cells.len())
+        .take_while(|candidate| cells[*candidate].2 == class)
+        .last()
+        .unwrap_or(index);
+    Some(GridSelection::new(
+        point.row,
+        cells[first].0,
+        point.row,
+        cells[last].1,
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionClass {
+    Word,
+    Whitespace,
+    Punctuation,
+}
+
+fn selection_class(text: &str) -> SelectionClass {
+    let Some(character) = text.chars().next() else {
+        return SelectionClass::Whitespace;
+    };
+    if character.is_whitespace() {
+        SelectionClass::Whitespace
+    } else if character.is_alphanumeric() || character == '_' {
+        SelectionClass::Word
+    } else {
+        SelectionClass::Punctuation
+    }
+}
+
+/// The viewport cell under a window position, clamped to the visible terminal grid.
+///
+/// `bounds` includes the grid's padding. The returned point therefore subtracts
+/// [`GRID_PADDING`] before dividing by the measured cell size. Clamping lets a drag that ends
+/// in the padding still select the first or last cell instead of losing the mouse-up event.
+#[must_use]
+pub fn cell_at_position(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+    cell: Size<Pixels>,
+    cols: u16,
+    rows: u16,
+) -> Option<CellPoint> {
+    if cols == 0
+        || rows == 0
+        || bounds.size.width <= px(0.0)
+        || bounds.size.height <= px(0.0)
+        || cell.width <= px(0.0)
+        || cell.height <= px(0.0)
+    {
+        return None;
+    }
+    let x = f32::from(position.x - bounds.origin.x) - GRID_PADDING;
+    let y = f32::from(position.y - bounds.origin.y) - GRID_PADDING;
+    let col = (x / f32::from(cell.width)).floor() as isize;
+    let row = (y / f32::from(cell.height)).floor() as isize;
+    Some(CellPoint::new(
+        usize::try_from(row.clamp(0, isize::try_from(rows - 1).unwrap_or(isize::MAX))).unwrap_or(0),
+        usize::try_from(col.clamp(0, isize::try_from(cols - 1).unwrap_or(isize::MAX))).unwrap_or(0),
+    ))
+}
+
+/// The text inside a visible cell selection.
+///
+/// Rows are joined in reading order. A soft-wrapped row is joined directly to its continuation
+/// and keeps trailing cells because they are part of the logical line; hard rows are separated by
+/// `\n` and have terminal padding trimmed. Wide graphemes are emitted once when either of their
+/// two columns intersects the selection; their zero-column spacer is never emitted.
+#[must_use]
+pub fn grid_selection_text(grid: &MirrorGrid, selection: GridSelection) -> String {
+    if grid.lines.is_empty() || selection.start_row.min(selection.end_row) >= grid.lines.len() {
+        return String::new();
+    }
+    let selection = selection.normalized();
+    let mut text = String::new();
+    let mut previous_row = None;
+    for row in selection.start_row..=selection.end_row.min(grid.lines.len().saturating_sub(1)) {
+        let Some((start, end)) = selection.span_in_row(row, usize::from(grid.cols)) else {
+            continue;
+        };
+        let previous_wrapped = previous_row.and_then(|row| grid.wrapped.get(row)).copied();
+        let wrapped = grid.wrapped.get(row).copied().unwrap_or(false);
+        append_selected_row(
+            &mut text,
+            previous_wrapped,
+            &grid.lines[row],
+            start,
+            end,
+            wrapped,
+        );
+        previous_row = Some(row);
+    }
+    text
+}
+
+/// A mirrored viewport row retained for an absolute mouse selection.
+///
+/// Cells, rather than an already-trimmed string, are cached while a selection covers the row so
+/// partial first/last rows and wide cells retain the same extraction semantics off-screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CachedGridRow {
+    cells: Vec<ProtoCell>,
+    wrapped: bool,
+}
+
+/// Clones one visible row into the bounded selection cache owned by the Workspace.
+#[must_use]
+pub fn cached_grid_row(grid: &MirrorGrid, row: usize) -> Option<CachedGridRow> {
+    Some(CachedGridRow {
+        cells: grid.lines.get(row)?.clone(),
+        wrapped: grid.wrapped.get(row).copied().unwrap_or(false),
+    })
+}
+
+/// Extracts an absolute mouse selection from live viewport rows and retained cached rows.
+///
+/// Live rows take precedence over cached copies. Every selected line must be available: returning
+/// `None` prevents a partially scrolled-away selection from silently replacing the clipboard with
+/// truncated text. The Workspace bounds the selection-scoped cache and resets it whenever terminal
+/// coordinates become unrelated (terminal/screen/column changes or a history-epoch advance).
+#[must_use]
+pub fn absolute_selection_text(
+    grid: &MirrorGrid,
+    cache: &BTreeMap<u64, CachedGridRow>,
+    selection: AbsoluteCellSelection,
+) -> Option<String> {
+    let selection = AbsoluteCellSelection::new(selection.start, selection.end);
+    let line_count = selection
+        .end
+        .line
+        .checked_sub(selection.start.line)?
+        .checked_add(1)?;
+    if usize::try_from(line_count).ok()? > cache.len().saturating_add(grid.lines.len()) {
+        return None;
+    }
+
+    let base = viewport_base(grid);
+    let bottom = viewport_last(grid);
+    let mut text = String::new();
+    let mut previous_wrapped = None;
+    for line in selection.start.line..=selection.end.line {
+        let live_row = bottom
+            .filter(|bottom| line >= base && line <= *bottom)
+            .and_then(|_| usize::try_from(line - base).ok());
+        let (cells, wrapped) = if let Some(row) = live_row {
+            (
+                grid.lines.get(row)?,
+                grid.wrapped.get(row).copied().unwrap_or(false),
+            )
+        } else {
+            let cached = cache.get(&line)?;
+            (&cached.cells, cached.wrapped)
+        };
+        let start = if line == selection.start.line {
+            selection.start.col
+        } else {
+            0
+        };
+        let end = if line == selection.end.line {
+            selection.end.col.saturating_add(1)
+        } else {
+            usize::from(grid.cols)
+        };
+        append_selected_row(&mut text, previous_wrapped, cells, start, end, wrapped);
+        previous_wrapped = Some(wrapped);
+    }
+    Some(text)
+}
+
+fn append_selected_row(
+    text: &mut String,
+    previous_wrapped: Option<bool>,
+    cells: &[ProtoCell],
+    start: usize,
+    end: usize,
+    wrapped: bool,
+) {
+    if previous_wrapped == Some(false) {
+        text.push('\n');
+    }
+    text.push_str(&selected_row_text(cells, start, end, !wrapped));
+}
+
+fn selected_row_text(line: &[ProtoCell], start: usize, end: usize, trim_end: bool) -> String {
+    let mut text = String::new();
+    let mut col = 0usize;
+    for cell in line {
+        let width = cell_columns(cell);
+        if width == 0 {
+            continue;
+        }
+        let cell_end = col.saturating_add(width);
+        if col < end && cell_end > start {
+            text.push_str(cell.text.as_str());
+        }
+        col = cell_end;
+        if col >= end {
+            break;
+        }
+    }
+    if trim_end {
+        text.truncate(text.trim_end().len());
+    }
+    text
 }
 
 /// The kit badges a `FrameUpdate`'s VT modes map onto (§3.6, DESIGN-SYSTEM "Terminal modes").
@@ -210,9 +622,11 @@ pub fn grid_cursor(grid: &MirrorGrid, focused: bool) -> GridCursor {
 
 /// The absolute scrollback line the viewport's top row is showing.
 ///
-/// Line 0 is the oldest row the daemon still holds. `ViewportInfo::scrollback_len` counts the
-/// history *above* the screen and `offset` how far back the viewport was pulled, so the top row
-/// sits at `scrollback_len - offset`.
+/// `ViewportInfo::scrollback_len` counts history above the screen and `offset` how far back the
+/// viewport was pulled, so the top row sits at `scrollback_len - offset`. This coordinate remains
+/// stable within one `history_epoch`; the daemon advances that epoch when its tracked oldest row is
+/// discarded, history shrinks, or output arrives at the nominal bound. Viewport-only frames keep
+/// the epoch stable, so scrolling cannot invalidate a Scroll-mode selection.
 ///
 /// Scroll-mode selections are anchored in this space and never in viewport rows: a viewport row
 /// number means a different line after every scroll, so an anchor expressed that way silently
@@ -366,6 +780,20 @@ mod tests {
         }
     }
 
+    fn wide_cell(text: &str) -> ProtoCell {
+        ProtoCell {
+            width: ProtoWidth::Wide,
+            ..cell(text)
+        }
+    }
+
+    fn spacer() -> ProtoCell {
+        ProtoCell {
+            width: ProtoWidth::Spacer,
+            ..cell("")
+        }
+    }
+
     fn grid_with(rows: &[&str]) -> MirrorGrid {
         grid_scrolled(rows, 0, 0)
     }
@@ -390,6 +818,7 @@ mod tests {
                 .map(|(index, row)| RowUpdate {
                     index: index as u16,
                     cells: row.chars().map(|c| cell(&c.to_string())).collect(),
+                    wrapped: false,
                 })
                 .collect(),
             cursor: CursorState {
@@ -401,11 +830,18 @@ mod tests {
             viewport: ViewportInfo {
                 scrollback_len,
                 offset,
+                history_epoch: 0,
             },
             modes: TerminalModes::default(),
             title: None,
         });
         grid
+    }
+
+    fn cache_row(text: &str, wrapped: bool) -> CachedGridRow {
+        let mut grid = grid_with(&[text]);
+        grid.wrapped[0] = wrapped;
+        cached_grid_row(&grid, 0).unwrap_or_else(|| panic!("fixture row must exist"))
     }
 
     #[test]
@@ -490,6 +926,269 @@ mod tests {
         assert_eq!(down, up);
         assert_eq!((down.start_row, down.start_col), (0, 0));
         assert_eq!((down.end_row, down.end_col), (2, 5));
+    }
+
+    #[test]
+    fn cell_selection_is_inclusive_and_order_independent() {
+        let forward = cell_selection(CellPoint::new(1, 2), CellPoint::new(2, 4));
+        let backward = cell_selection(CellPoint::new(2, 4), CellPoint::new(1, 2));
+        assert_eq!(forward, backward);
+        assert_eq!(
+            forward,
+            GridSelection::new(1, 2, 2, 5),
+            "the head cell is included by the half-open painted range"
+        );
+    }
+
+    #[test]
+    fn absolute_cell_selection_clips_at_both_viewport_edges() {
+        let grid = grid_scrolled(&["aaaaaa", "bbbbbb", "cccccc"], 110, 10);
+        assert_eq!(viewport_base(&grid), 100);
+
+        assert_eq!(
+            viewport_cell_selection(
+                &grid,
+                AbsoluteCellPoint::new(99, 4),
+                AbsoluteCellPoint::new(101, 2),
+            ),
+            Some(GridSelection::new(0, 0, 1, 3)),
+            "an anchor above the viewport clips to its first cell"
+        );
+        assert_eq!(
+            viewport_cell_selection(
+                &grid,
+                AbsoluteCellPoint::new(101, 2),
+                AbsoluteCellPoint::new(103, 4),
+            ),
+            Some(GridSelection::new(1, 2, 2, 6)),
+            "a head below the viewport clips to its last cell"
+        );
+        assert_eq!(
+            viewport_cell_selection(
+                &grid,
+                AbsoluteCellPoint::new(103, 4),
+                AbsoluteCellPoint::new(101, 2),
+            ),
+            Some(GridSelection::new(1, 2, 2, 6)),
+            "backwards selections clip identically"
+        );
+    }
+
+    #[test]
+    fn absolute_cell_selection_survives_a_viewport_base_shift() {
+        let anchor = AbsoluteCellPoint::new(101, 1);
+        let head = AbsoluteCellPoint::new(102, 3);
+        let before = grid_scrolled(&["aaaaaa", "bbbbbb", "cccccc"], 110, 10);
+        let after = grid_scrolled(&["bbbbbb", "cccccc", "dddddd"], 111, 10);
+
+        assert_eq!(
+            viewport_cell_selection(&before, anchor, head),
+            Some(GridSelection::new(1, 1, 2, 4))
+        );
+        assert_eq!(
+            viewport_cell_selection(&after, anchor, head),
+            Some(GridSelection::new(0, 1, 1, 4)),
+            "the same absolute endpoints move up when output advances the viewport"
+        );
+    }
+
+    #[test]
+    fn off_screen_absolute_cell_selection_paints_nothing_without_losing_its_endpoints() {
+        let grid = grid_scrolled(&["aaaaaa", "bbbbbb", "cccccc"], 110, 10);
+        let selection = (AbsoluteCellPoint::new(90, 1), AbsoluteCellPoint::new(91, 3));
+
+        assert_eq!(
+            viewport_cell_selection(&grid, selection.0, selection.1),
+            None
+        );
+        assert_eq!(selection.0, AbsoluteCellPoint::new(90, 1));
+        assert_eq!(selection.1, AbsoluteCellPoint::new(91, 3));
+    }
+
+    #[test]
+    fn word_selection_stops_at_character_classes() {
+        let grid = grid_with(&["one_two:: three"]);
+        assert_eq!(
+            word_selection(&grid, CellPoint::new(0, 4)),
+            Some(GridSelection::new(0, 0, 0, 7))
+        );
+        assert_eq!(
+            word_selection(&grid, CellPoint::new(0, 7)),
+            Some(GridSelection::new(0, 7, 0, 9))
+        );
+        assert_eq!(
+            word_selection(&grid, CellPoint::new(0, 9)),
+            Some(GridSelection::new(0, 9, 0, 10))
+        );
+    }
+
+    #[test]
+    fn word_drag_ignores_jitter_then_extends_to_the_hovered_word_boundary() {
+        let grid = grid_with(&["one two"]);
+        let initiating = AbsoluteCellPoint::new(0, 1);
+        let initial =
+            absolute_selection_at(&grid, CellPoint::new(0, 1), SelectionGranularity::Word)
+                .unwrap_or_else(|| panic!("word missing"));
+
+        assert_eq!(
+            extend_absolute_selection(
+                &grid,
+                initial,
+                initiating,
+                CellPoint::new(0, 1),
+                SelectionGranularity::Word,
+            ),
+            Some(initial)
+        );
+        assert_eq!(
+            extend_absolute_selection(
+                &grid,
+                initial,
+                initiating,
+                CellPoint::new(0, 5),
+                SelectionGranularity::Word,
+            ),
+            Some(AbsoluteCellSelection::new(
+                AbsoluteCellPoint::new(0, 0),
+                AbsoluteCellPoint::new(0, 6),
+            ))
+        );
+    }
+
+    #[test]
+    fn line_drag_extends_by_whole_visual_rows() {
+        let grid = grid_with(&["aaaa", "bbbb", "cccc"]);
+        let initiating = AbsoluteCellPoint::new(1, 2);
+        let initial =
+            absolute_selection_at(&grid, CellPoint::new(1, 2), SelectionGranularity::Line)
+                .unwrap_or_else(|| panic!("line missing"));
+
+        assert_eq!(
+            extend_absolute_selection(
+                &grid,
+                initial,
+                initiating,
+                CellPoint::new(2, 1),
+                SelectionGranularity::Line,
+            ),
+            Some(AbsoluteCellSelection::new(
+                AbsoluteCellPoint::new(1, 0),
+                AbsoluteCellPoint::new(2, 3),
+            ))
+        );
+    }
+
+    #[test]
+    fn mouse_position_maps_through_grid_padding_and_clamps() {
+        let bounds = Bounds::new(
+            gpui::point(px(100.0), px(200.0)),
+            gpui::size(px(116.0), px(76.0)),
+        );
+        let cell = gpui::size(px(10.0), px(20.0));
+        assert_eq!(
+            cell_at_position(bounds, gpui::point(px(133.0), px(249.0)), cell, 10, 3),
+            Some(CellPoint::new(2, 2))
+        );
+        assert_eq!(
+            cell_at_position(bounds, gpui::point(px(100.0), px(200.0)), cell, 10, 3),
+            Some(CellPoint::new(0, 0)),
+            "padding maps to the nearest grid cell"
+        );
+    }
+
+    #[test]
+    fn grid_selection_text_orders_rows_and_trims_each_one() {
+        let mut grid = MirrorGrid::new(6, 2);
+        grid.lines = vec![
+            "abcdef".chars().map(|c| cell(&c.to_string())).collect(),
+            "gh    ".chars().map(|c| cell(&c.to_string())).collect(),
+        ];
+        let selection = cell_selection(CellPoint::new(1, 1), CellPoint::new(0, 2));
+        assert_eq!(grid_selection_text(&grid, selection), "cdef\ngh");
+    }
+
+    #[test]
+    fn grid_selection_text_joins_three_soft_wrapped_rows_as_one_line() {
+        let mut grid = MirrorGrid::new(4, 3);
+        grid.lines = ["abc ", "def ", "ghi "]
+            .map(|row| row.chars().map(|c| cell(&c.to_string())).collect())
+            .to_vec();
+        grid.wrapped = vec![true, true, false];
+
+        assert_eq!(
+            grid_selection_text(&grid, GridSelection::new(0, 0, 2, 4)),
+            "abc def ghi"
+        );
+    }
+
+    #[test]
+    fn grid_selection_text_emits_a_wide_cell_once() {
+        let mut grid = MirrorGrid::new(6, 1);
+        grid.lines = vec![vec![
+            cell("a"),
+            wide_cell("漢"),
+            spacer(),
+            cell("b"),
+            cell(" "),
+            cell(" "),
+        ]];
+        assert_eq!(
+            grid_selection_text(&grid, GridSelection::new(0, 0, 0, 6)),
+            "a漢b"
+        );
+        assert_eq!(
+            grid_selection_text(&grid, GridSelection::new(0, 2, 0, 3)),
+            "漢",
+            "selecting the second half of a wide cell still emits one grapheme"
+        );
+    }
+
+    #[test]
+    fn absolute_selection_uses_cache_for_the_offscreen_prefix() {
+        let grid = grid_scrolled(&["ef  ", "gh  "], 11, 0);
+        let cache = BTreeMap::from([(10, cache_row("abcd", true))]);
+        let selection = AbsoluteCellSelection::new(
+            AbsoluteCellPoint::new(10, 1),
+            AbsoluteCellPoint::new(12, 3),
+        );
+
+        assert_eq!(
+            absolute_selection_text(&grid, &cache, selection),
+            Some("bcdef\ngh".to_owned())
+        );
+    }
+
+    #[test]
+    fn absolute_selection_can_copy_fully_offscreen_cached_rows() {
+        let grid = grid_scrolled(&["live"], 20, 0);
+        let cache = BTreeMap::from([
+            (10, cache_row("abcd", false)),
+            (11, cache_row("efgh", false)),
+        ]);
+        let selection = AbsoluteCellSelection::new(
+            AbsoluteCellPoint::new(10, 1),
+            AbsoluteCellPoint::new(11, 1),
+        );
+
+        assert_eq!(
+            absolute_selection_text(&grid, &cache, selection),
+            Some("bcd\nef".to_owned())
+        );
+    }
+
+    #[test]
+    fn absolute_selection_fails_instead_of_truncating_a_missing_row() {
+        let grid = grid_scrolled(&["live"], 20, 0);
+        let cache = BTreeMap::from([
+            (10, cache_row("abcd", false)),
+            (12, cache_row("ijkl", false)),
+        ]);
+        let selection = AbsoluteCellSelection::new(
+            AbsoluteCellPoint::new(10, 0),
+            AbsoluteCellPoint::new(12, 3),
+        );
+
+        assert_eq!(absolute_selection_text(&grid, &cache, selection), None);
     }
 
     #[test]

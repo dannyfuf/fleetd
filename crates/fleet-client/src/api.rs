@@ -10,6 +10,7 @@ use fleet_core::{
     sessions::{Session, Terminal, WorktreeStatus},
 };
 use fleet_proto::{
+    PROTOCOL_VERSION,
     error::{ErrorKind, ProtoError},
     event::EventKind,
     job::JobRecord,
@@ -66,7 +67,7 @@ impl Client {
     pub async fn hello(&self, client: impl Into<String>) -> Result<HelloResult> {
         match self
             .request(RequestBody::Hello {
-                protocol: 1,
+                protocol: PROTOCOL_VERSION,
                 client: client.into(),
             })
             .await?
