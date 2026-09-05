@@ -120,3 +120,29 @@ Ports/adapters with fakes as in swarm §8: adapter tests assert exact argv; serv
 assert domain results and side-effect order; core helpers are pure-tested; proto has
 round-trip tests; `fleet-term` has an engine test (bytes in → cells out); `fleet-ui-kit`
 components are exercised by a `kit-gallery` example binary.
+
+## Cooperative subagent watches
+
+`fleet-core::watches` holds read-only child metadata and bounded sequenced output.
+The daemon `Watches` service indexes watches by ID, session, and terminal; it
+coalesces output events, retains completed results for 30 minutes, and removes
+watches on terminal/session removal. A connection lease marks unfinished watches
+interrupted on disconnect. No watch operation owns or kills the child process.
+
+```text
+piped child stdout/stderr -> fleet exec tee -> original stdout/stderr (raw bytes)
+                                         -> AppendWatchOutput -> bounded watch registry -> WatchOutput events / TailWatch -> phase 2 Workspace pane
+```
+
+Optional PATH shims wrap only piped `codex` / `claude` invocations inside Fleet.
+PTY login shells receive `FLEET_SESSION` (session ID), `FLEET_TERMINAL` (human
+terminal name for compatibility), and `FLEET_TERMINAL_ID` (the registered numeric
+terminal ID). Shims gate on `FLEET_TERMINAL_ID`; `fleet exec --watch` uses that ID
+to associate the watch with its terminal, never the name.
+`fleet exec` connects without autostart and falls back transparently when the
+daemon is unavailable or watch eligibility fails. `FLEET_DEBUG=1` reports a
+one-line reason for each passthrough decision; the default stays silent.
+The private launcher preserves the child's PID while
+waiting for its watch ID; it then execs the target with inherited stdin and piped
+stdout/stderr. `FLEET_WATCH` prevents nested watches. See
+`APP-CONTRACTS.md` for wire types, recovery, retention, and ownership semantics.
