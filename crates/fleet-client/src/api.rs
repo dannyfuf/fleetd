@@ -769,14 +769,14 @@ fn worktree_result(operation: &str, response: ResponseBody) -> Result<CreateWork
     }
 }
 
-fn expect_ack(operation: &str, response: ResponseBody) -> Result<()> {
+pub(crate) fn expect_ack(operation: &str, response: ResponseBody) -> Result<()> {
     match response {
         ResponseBody::Ack => Ok(()),
         response => Err(unexpected(operation, response)),
     }
 }
 
-fn unexpected(operation: &str, response: ResponseBody) -> ProtoError {
+pub(crate) fn unexpected(operation: &str, response: ResponseBody) -> ProtoError {
     ProtoError {
         kind: ErrorKind::Unknown,
         message: format!("unexpected response to {operation}: {response:?}"),

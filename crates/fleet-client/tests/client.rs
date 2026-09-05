@@ -286,7 +286,15 @@ async fn authenticate(
     if let Some(expected) = expected_subscription {
         assert_eq!(events, expected);
     } else {
-        assert_eq!(events.len(), 8);
+        assert_eq!(events.len(), 12);
+        for kind in [
+            EventKind::WatchStarted,
+            EventKind::WatchOutput,
+            EventKind::WatchExited,
+            EventKind::WatchDismissed,
+        ] {
+            assert!(events.contains(&kind));
+        }
     }
     send_response(transport, subscribe.id, ResponseBody::Ack).await;
 }

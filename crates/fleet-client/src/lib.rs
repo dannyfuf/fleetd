@@ -5,6 +5,7 @@ pub mod connection;
 pub mod events;
 pub mod spawn;
 pub mod terminal;
+pub mod watches;
 
 pub use api::{CreateWorktreeResult, DaemonVersion, HelloResult, Result};
 pub use connection::{Client, ConnectError};

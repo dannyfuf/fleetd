@@ -7,6 +7,8 @@ build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
+nix = { version = "0.28", features = ["signal", "process"] }
+tempfile = "3"
 clap.workspace = true
 fleet-client = { path = "../fleet-client" }
 fleet-core = { path = "../fleet-core" }
@@ -17,5 +19,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 futures-util = "0.3"
-tempfile = "3"
 tokio-util.workspace = true
