@@ -1628,6 +1628,7 @@ dependencies = [
  "fleet-core",
  "fleet-proto",
  "futures-util",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",

@@ -96,6 +96,8 @@ impl Connection {
             }
         }
 
+        let watch_owner = self.services.watches.owner();
+        let owner_id = watch_owner.id;
         let mut subscriptions = HashSet::new();
         let mut attached = HashSet::new();
         let mut events = self.events.subscribe();
@@ -174,7 +176,7 @@ impl Connection {
                                     RequestBody::DetachTerminal { .. } if detach_missing => {
                                         Ok(ResponseBody::Ack)
                                     }
-                                    body => services.dispatch(body).await,
+                                    body => services.dispatch_owned(body, owner_id).await,
                                 };
                                 if let Some(release) = release_terminal_order {
                                     let _ = release.send(());
@@ -240,6 +242,8 @@ impl Connection {
                 }
             }
         };
+        drop(pending);
+        drop(watch_owner);
         let detached_any = !attached.is_empty();
         for terminal in attached {
             if let Err(error) = self.services.sessions.detach(terminal).await
@@ -261,7 +265,10 @@ type DispatchFuture = Pin<Box<dyn Future<Output = CompletedRequest> + Send>>;
 fn pty_input_request_is_ordered(body: &RequestBody) -> bool {
     matches!(
         body,
-        RequestBody::TerminalInput { .. }
+        RequestBody::StartWatch { .. }
+            | RequestBody::AppendWatchOutput { .. }
+            | RequestBody::FinishWatch { .. }
+            | RequestBody::TerminalInput { .. }
             | RequestBody::TerminalKey { .. }
             | RequestBody::TerminalMouse { .. }
             | RequestBody::PasteTerminal { .. }
@@ -287,6 +294,22 @@ struct RequestEffects {
 
 impl RequestEffects {
     fn for_request(body: &RequestBody, services: &Services) -> Self {
+        // Watch output is a hot path and never changes session/snapshot metadata.
+        if matches!(
+            body,
+            RequestBody::StartWatch { .. }
+                | RequestBody::AppendWatchOutput { .. }
+                | RequestBody::FinishWatch { .. }
+                | RequestBody::ListWatches { .. }
+                | RequestBody::TailWatch { .. }
+                | RequestBody::DismissWatch { .. }
+        ) {
+            return Self {
+                snapshot_changed: false,
+                session_changed: false,
+                previous_session: None,
+            };
+        }
         let snapshot_changed = matches!(
             body,
             RequestBody::CreateContext { .. }
@@ -417,6 +440,10 @@ fn event_visible(
 
 fn event_kind(event: &Event) -> EventKind {
     match event {
+        Event::WatchStarted(_) => EventKind::WatchStarted,
+        Event::WatchOutput { .. } => EventKind::WatchOutput,
+        Event::WatchExited(_) => EventKind::WatchExited,
+        Event::WatchDismissed(_) => EventKind::WatchDismissed,
         Event::SnapshotChanged(_) => EventKind::SnapshotChanged,
         Event::JobUpdated(_) => EventKind::JobUpdated,
         Event::SessionChanged(_) => EventKind::SessionChanged,
@@ -455,6 +482,17 @@ mod tests {
     use fleet_core::ids::TerminalId;
 
     use super::*;
+
+    #[test]
+    fn watch_events_are_global_and_require_their_subscription() {
+        let event = Event::WatchDismissed(fleet_core::watches::WatchId(1));
+        assert!(event_visible(
+            &event,
+            &HashSet::from([EventKind::WatchDismissed]),
+            &HashSet::new()
+        ));
+        assert!(!event_visible(&event, &HashSet::new(), &HashSet::new()));
+    }
 
     #[test]
     fn wheel_and_scroll_share_the_pty_ordering_channel() {

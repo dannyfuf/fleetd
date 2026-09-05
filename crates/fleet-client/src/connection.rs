@@ -547,6 +547,10 @@ fn expect_ack(body: ResponseBody) -> Result<(), ConnectError> {
 
 fn all_event_kinds() -> Vec<EventKind> {
     vec![
+        EventKind::WatchStarted,
+        EventKind::WatchOutput,
+        EventKind::WatchExited,
+        EventKind::WatchDismissed,
         EventKind::SnapshotChanged,
         EventKind::JobUpdated,
         EventKind::SessionChanged,

@@ -241,6 +241,8 @@ key_table! {
     "a",            "Workspace > Prefix" => OpenAgentClaude;
     "A",            "Workspace > Prefix" => OpenAgentOpencode;
     "z",            "Workspace > Prefix" => prefix::ToggleZoom;
+    "v",            "Workspace > Prefix" => prefix::ToggleWatchPane;
+    "V",            "Workspace > Prefix" => prefix::DismissWatch;
     "!",            "Workspace > Prefix" => FocusStickyError;
     "J",            "Workspace > Prefix" => OpenJobs;
     "?",            "Workspace > Prefix" => OpenHelp;
@@ -519,6 +521,23 @@ mod tests {
                 && spec.keys == "ctrl-s"
                 && spec.action == "prefix::SendLiteral"
         }));
+    }
+
+    #[test]
+    fn watch_keys_are_prefix_only_and_uppercase_dismisses() {
+        for (key, name) in [
+            ("v", "prefix::ToggleWatchPane"),
+            ("V", "prefix::DismissWatch"),
+        ] {
+            let stroke = Keystroke::parse(key).unwrap();
+            assert_eq!(
+                action_for_keystroke("Workspace > Prefix", &stroke)
+                    .unwrap()
+                    .name(),
+                name
+            );
+            assert!(action_for_keystroke("Workspace > Terminal", &stroke).is_none());
+        }
     }
 
     #[test]

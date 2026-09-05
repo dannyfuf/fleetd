@@ -13,3 +13,4 @@ pub mod sleep;
 pub mod slug;
 pub mod state;
 pub mod validate;
+pub mod watches;

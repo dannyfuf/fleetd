@@ -33,6 +33,11 @@ pub struct Cli {
 /// A daemon-backed Fleet operation.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
+    /// Run a command, optionally teeing piped output to a read-only watch.
+    Exec(ExecArgs),
+    /// Private PID-preserving watch launcher.
+    #[command(hide = true)]
+    WatchChild(WatchChildArgs),
     /// Create or find a worktree.
     Create(CreateArgs),
     /// Ensure a worktree session exists.
@@ -65,6 +70,30 @@ pub enum Command {
     Daemon(DaemonArgs),
     /// Print Fleet's build version.
     Version,
+}
+
+/// Arguments accepted by `fleet exec`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ExecArgs {
+    /// Publish a watch when running inside a Fleet terminal.
+    #[arg(long)]
+    pub watch: bool,
+    /// Display label (defaults to command basename).
+    #[arg(long)]
+    pub label: Option<String>,
+    /// Command and unmodified arguments after --.
+    #[arg(last = true, required = true, num_args = 1..)]
+    pub command: Vec<std::ffi::OsString>,
+}
+
+/// Internal launcher arguments; not a user-facing command.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct WatchChildArgs {
+    /// Private launch handshake socket.
+    pub socket: std::path::PathBuf,
+    /// Target argv.
+    #[arg(last = true, required = true, num_args = 1..)]
+    pub command: Vec<std::ffi::OsString>,
 }
 
 /// Arguments accepted by `fleet daemon`.
@@ -344,5 +373,30 @@ mod tests {
                 "unexpected display result for {arguments:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+    #[test]
+    fn exec_keeps_child_flags_and_delimiters() {
+        let cli = Cli::try_parse_from([
+            "fleet", "exec", "--watch", "--label", "review", "--", "codex", "exec", "--json", "--",
+            "a b",
+        ])
+        .unwrap();
+        let Some(Command::Exec(args)) = cli.command else {
+            panic!("expected exec");
+        };
+        assert!(args.watch);
+        assert_eq!(args.label.as_deref(), Some("review"));
+        assert_eq!(
+            args.command,
+            ["codex", "exec", "--json", "--", "a b"].map(std::ffi::OsString::from)
+        );
+        assert!(Cli::try_parse_from(["fleet", "exec", "--", "true"]).is_ok());
+        assert!(Cli::try_parse_from(["fleet", "exec", "--watch"]).is_err());
+        assert!(Cli::try_parse_from(["fleet", "exec", "sh"]).is_err());
     }
 }

@@ -158,7 +158,9 @@ alone preserves them.
 | `[` | Scroll mode |
 | `]` | paste clipboard (bracketed when the app requests it) |
 | `a` / `A` | open the Claude / OpenCode agent session |
-| `z` | zoom: hide the session header and tab strip (toggle) |
+| `z` | zoom: hide the session header and terminal tab strip; watch pane stays visible (toggle) |
+| `v` | hide/show the subagent watch pane; no watches → `no subagent watches` |
+| `V` | dismiss the selected exited watch; if running, hide pane and show `watch still running; pane hidden` |
 | `!` | focus the sticky error slot [A18] |
 | `J` | jobs panel |
 | `?` | help overlay listing this table |

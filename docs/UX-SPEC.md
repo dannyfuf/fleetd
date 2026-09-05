@@ -1579,3 +1579,42 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `DaemonSplash` | The full-window cold-start and will-not-start surfaces: title, spinner, socket path, `fleetd.log` tail, bare recovery keys | daemon states A and B (§3.12) |
 | `DaemonDot` | 8 px liveness dot that expands into a labelled pill when degraded | context bar |
 | `Veil` | 55 % scrim over terminal grids only, with key-dropping | daemon disconnect |
+
+## Subagent watch pane
+
+A new subagent watch for the current Workspace session opens a read-only split
+on the right and selects that watch. The terminal is the flexible leading region
+of `SplitLayout::horizontal()`; the trailing region is 40% of the current window
+width, clamped to 360–640 px and recomputed on resize. PTY dimensions follow the
+terminal's actual reduced painted bounds. Zoom (`^s z`) hides the session header
+and terminal tabs while leaving the watch pane, including its header, visible.
+
+The pane header shows the child label, a status dot and `running`, `exited <code>`,
+or `interrupted` for signal-only completion; elapsed time as `mm:ss`, frozen after
+exit; the `^s v` hint; and a right-aligned clickable `×`. Multiple watches add a
+compact tab strip with each label and status dot. Clicking a tab selects it.
+
+The body uses `LogView` in following mode. Newline-delimited lines are assembled
+independently for stdout and stderr, with live partial trailing lines. Stdout uses
+normal text contrast and stderr uses secondary text. Empty output says
+`waiting for output…`; an unavailable earlier sequence range or local retention
+trimming adds `older output trimmed` above the log. Each watch retains at most
+1 MiB of text and 20,000 displayed lines, including partial lines.
+
+| Workspace prefix | Action |
+| --- | --- |
+| `^s v` | Toggle the pane locally. With no watches, toast `no subagent watches`. Repeated toggles never cycle tabs. |
+| `^s V` / mouse `×` | Dismiss the selected completed watch and select the next tab, wrapping at the end. If it was the last, close the pane. For a running watch, hide locally and toast `watch still running; pane hidden`. |
+
+Hiding persists per session across navigation and reconnect until a **new**
+WatchStarted event arrives. Every new start reopens that session's pane and selects
+the new watch. Duplicate start events, output, completion, and ordinary catch-up
+responses do not undo a user's hide or selection. First discovery selects the
+newest retained watch. There are no watch cycling keys beyond mouse tab selection.
+
+The pane never sends input and never takes keyboard focus from the terminal.
+Closing/hiding a pane never kills a process. Subscribe before listing/tailing;
+reconcile on Workspace entry, session changes, reconnect, and event gaps as
+specified in `APP-CONTRACTS.md`. Daemon dismissal, TTL, and terminal/session cleanup
+remove the corresponding local watch. See that contract for duration recovery
+limits when an already-completed watch is first discovered.

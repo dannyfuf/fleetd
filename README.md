@@ -55,6 +55,7 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet status [--json]` | Refresh local worktree runtime status. | `protocol`, `statuses` |
 | `fleet path <ID>` | Print an exact local worktree's absolute path. | — |
 | `fleet sleep [SESSION] [--json]` | Apply sleep policy to a session or worktree; a sole running session is inferred. | `protocol`, `kept`, `closed`, `sessionKilled` |
+| `fleet exec [--watch] [--label TEXT] -- CMD [ARGS...]` | Run a child with byte-exact passthrough; optionally publish a read-only subagent watch using `FLEET_SESSION` and numeric `FLEET_TERMINAL_ID` (`FLEET_TERMINAL` remains the human name). | Raw child stdout/stderr; child exit status |
 | `fleet agent [claude\|opencode]` | Ensure a repository-level agent session exists; defaults to `config.agent`. | — |
 | `fleet doctor` | Run environment diagnostics; exits unsuccessfully when any check fails. | — |
 | `fleet import --from-swarm` | Start an import of compatible `~/.swarm/config.json` and `state.json`. | — |

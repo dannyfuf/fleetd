@@ -3,6 +3,7 @@
 pub mod args;
 pub mod commands;
 pub mod envelope;
+mod exec;
 pub mod human;
 
 pub use args::{VERSION, VERSION_DISPLAY};

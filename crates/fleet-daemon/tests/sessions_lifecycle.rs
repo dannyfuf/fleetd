@@ -101,6 +101,91 @@ async fn fixture() -> Fixture {
 }
 
 #[tokio::test]
+async fn ensured_terminals_receive_their_registered_ids_in_the_pty_environment() {
+    // Isolate SHELL from both user startup files and concurrently running tests.
+    if std::env::var_os("FLEET_TEST_PTY_ENV_CHILD").is_none() {
+        let output = std::process::Command::new(
+            std::env::current_exe().unwrap_or_else(|error| panic!("{error}")),
+        )
+        .args([
+            "--exact",
+            "ensured_terminals_receive_their_registered_ids_in_the_pty_environment",
+            "--nocapture",
+        ])
+        .env("FLEET_TEST_PTY_ENV_CHILD", "1")
+        .env("SHELL", "/bin/sh")
+        .output()
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let fixture = fixture().await;
+    let mut config = fixture
+        .config
+        .load()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    for window in &mut config.windows {
+        window.command =
+            r#"printf '%s\n' "$FLEET_SESSION" "$FLEET_TERMINAL" "$FLEET_TERMINAL_ID" > "$FLEET_TERMINAL.env""#
+                .to_owned();
+    }
+    fixture
+        .config
+        .save(config)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let sessions = Sessions::new(fixture.config, fixture.state);
+    let created = sessions
+        .ensure(Some(fixture.worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let values: Option<Vec<String>> = created
+                .terminals
+                .iter()
+                .map(|terminal| {
+                    std::fs::read_to_string(
+                        std::path::Path::new(&terminal.cwd).join(format!("{}.env", terminal.name)),
+                    )
+                    .ok()
+                    .filter(|value| value.lines().count() == 3)
+                })
+                .collect();
+            if let Some(values) = values {
+                break values;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let registered = sessions
+        .list()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    sessions
+        .kill(created.id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let observed = observed.expect("login shells must write their Fleet environment");
+    assert_eq!(registered[0].id, created.id);
+    assert_eq!(registered[0].terminals.len(), created.terminals.len());
+    assert_ne!(created.terminals[0].id, created.terminals[1].id);
+    for (terminal, env) in registered[0].terminals.iter().zip(observed) {
+        assert_eq!(
+            env,
+            format!("{}\n{}\n{}\n", created.id, terminal.name, terminal.id)
+        );
+    }
+}
+
+#[tokio::test]
 async fn ensure_reuses_layout_and_attachment_drives_status() {
     let fixture = fixture().await;
     let sessions = Sessions::new(fixture.config, fixture.state);

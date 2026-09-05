@@ -19,3 +19,5 @@ pub mod sticky_error;
 pub mod workspace_header;
 pub mod workspace_tabs;
 pub mod worktrees_list;
+
+pub mod watch_pane;

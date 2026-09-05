@@ -774,6 +774,7 @@ impl Render for Shell {
         let now = Instant::now();
         let state_handle = self.state.clone();
         let bridge = self.bridge.clone();
+        crate::views::watch_pane::sync(&state_handle, &bridge, cx);
 
         // Everything below reads the state immutably; the borrow ends before the screens are
         // rendered, which is the only place that needs `&mut App`.
