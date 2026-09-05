@@ -19,17 +19,18 @@ survives closing a dialog, workspace, or the entire UI.
 ## Build and run
 
 ```sh
-scripts/bootstrap-zig.sh
-cargo build --release
-./target/release/fleet
+make bootstrap
+make run
 ```
 
-Running `fleet` without a subcommand opens the app. The client auto-spawns `fleetd` when its Unix
-socket is unavailable. Fleet stores config, state, repositories, worktrees, caches, logs, trash,
-and daemon files under `FLEET_HOME`, which defaults to `~/.fleet`:
+`make run` builds the workspace, restarts `fleetd` from the same debug build, and opens the app.
+Use `make run-release` for an optimized build. Running `fleet` without a subcommand opens the app.
+The client auto-spawns `fleetd` when its Unix socket is unavailable. Fleet stores config, state,
+repositories, worktrees, caches, logs, trash, and daemon files under `FLEET_HOME`, which defaults to
+`~/.fleet`:
 
 ```sh
-FLEET_HOME=/path/to/fleet-home ./target/release/fleet
+FLEET_HOME=/path/to/fleet-home make run
 ```
 
 To start copying compatible swarm v1 config and state without modifying `~/.swarm`:
@@ -133,10 +134,11 @@ and the [design system](docs/DESIGN-SYSTEM.md) for the full contracts.
 The checked-in `Makefile` provides all workspace targets:
 
 ```sh
+make help
 make check
 make build
-make run-app
-make run-daemon
+make run
+make daemon
 make test
 make fmt
 make clippy
