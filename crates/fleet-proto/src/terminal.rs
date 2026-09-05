@@ -91,6 +91,9 @@ pub struct RowUpdate {
     pub index: u16,
     /// Complete cells for the row.
     pub cells: Vec<Cell>,
+    /// Whether this visual row continues onto the next row without a hard line break.
+    #[serde(default)]
+    pub wrapped: bool,
 }
 
 /// Terminal cursor shape.
@@ -128,6 +131,13 @@ pub struct ViewportInfo {
     pub scrollback_len: usize,
     /// Rows above the live bottom currently displayed.
     pub offset: usize,
+    /// Monotonic identity epoch for retained scrollback rows.
+    ///
+    /// This advances when history shrinks, Ghostty reports that Fleet's tracked oldest row was
+    /// discarded, or PTY output arrives at the configured nominal row bound. Absolute row
+    /// coordinates are comparable only within one epoch.
+    #[serde(default)]
+    pub history_epoch: u64,
 }
 
 /// Terminal modes needed by rendering and key encoding.
@@ -384,6 +394,7 @@ mod tests {
                     attrs: CellAttrs::BOLD | CellAttrs::UNDERLINE,
                     width: CellWidth::Narrow,
                 }],
+                wrapped: true,
             }],
             cursor: CursorState {
                 row: 1,
@@ -394,6 +405,7 @@ mod tests {
             viewport: ViewportInfo {
                 scrollback_len: 100,
                 offset: 3,
+                history_epoch: 7,
             },
             modes: TerminalModes {
                 bracketed_paste: true,
@@ -402,8 +414,20 @@ mod tests {
             title: Some("shell".to_owned()),
         };
         let json = serde_json::to_string(&frame).unwrap_or_else(|error| panic!("{error}"));
+        assert!(json.contains(r#""historyEpoch":7"#));
         let decoded: FrameUpdate =
             serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn new_selection_metadata_defaults_when_decoding_protocol_one_frames() {
+        let row: RowUpdate = serde_json::from_str(r#"{"index":0,"cells":[]}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let viewport: ViewportInfo = serde_json::from_str(r#"{"scrollbackLen":12,"offset":3}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(!row.wrapped);
+        assert_eq!(viewport.history_epoch, 0);
     }
 }
