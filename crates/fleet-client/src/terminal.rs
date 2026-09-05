@@ -4,7 +4,7 @@ use fleet_core::ids::TerminalId;
 use fleet_proto::{
     event::Event,
     request::RequestBody,
-    terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand},
+    terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
 use tokio::{
     sync::{broadcast, mpsc},
@@ -115,6 +115,18 @@ impl TerminalHandle {
     /// Moves the attached terminal's server-side viewport.
     pub async fn scroll(&self, scroll: ScrollCommand) -> Result<()> {
         self.client.scroll_terminal(self.terminal_id, scroll).await
+    }
+
+    /// Enqueues a wheel event without waiting for acknowledgement.
+    pub async fn wheel(&self, wheel: WheelEvent) -> Result<()> {
+        self.client.wheel_terminal(self.terminal_id, wheel).await
+    }
+
+    /// Enqueues a viewport shortcut without waiting for acknowledgement.
+    pub async fn scroll_or_key(&self, scroll: ScrollCommand, key: KeyEvent) -> Result<()> {
+        self.client
+            .scroll_or_key_terminal(self.terminal_id, scroll, key)
+            .await
     }
 
     /// Requests a complete replacement frame.

@@ -301,7 +301,13 @@ impl MirrorGrid {
     /// A diff frame that arrives before the first full frame, out of sequence, or after a
     /// dropped one, is refused: only a full frame can re-prime the mirror.
     pub fn apply(&mut self, frame: &FrameUpdate) -> bool {
-        if !frame.full && (!self.primed || self.desynced || frame.seq <= self.seq) {
+        if self.primed && frame.seq <= self.seq {
+            return false;
+        }
+        if !frame.full && self.primed && frame.seq > self.seq.saturating_add(1) {
+            self.desynced = true;
+        }
+        if !frame.full && (!self.primed || self.desynced) {
             return false;
         }
         if frame.full {
@@ -310,6 +316,23 @@ impl MirrorGrid {
         }
         if frame.cols != self.cols || frame.rows != self.rows || frame.full {
             self.resize(frame.cols, frame.rows);
+        }
+        if !frame.full
+            && let Some(shift) = frame.shift
+        {
+            let count = (shift.unsigned_abs() as usize).min(self.lines.len());
+            if shift > 0 {
+                self.lines.rotate_left(count);
+                let start = self.lines.len() - count;
+                for row in &mut self.lines[start..] {
+                    row.clear();
+                }
+            } else {
+                self.lines.rotate_right(count);
+                for row in &mut self.lines[..count] {
+                    row.clear();
+                }
+            }
         }
         for row in &frame.rows_changed {
             if let Some(line) = self.lines.get_mut(row.index as usize) {
@@ -694,6 +717,8 @@ pub struct AppState {
     pub cursors: Cursors,
     /// The Workspace sub-mode.
     pub terminal_mode: TerminalMode,
+    /// Effective history and wheel configuration.
+    pub terminal_config: fleet_core::config::TerminalConfig,
     /// The overlay that owns the keyboard, when any.
     pub overlay: Option<Overlay>,
     /// The filter of the focused list.
@@ -770,6 +795,7 @@ impl AppState {
             scope: RepoScope::All,
             cursors: Cursors::default(),
             terminal_mode: TerminalMode::Terminal,
+            terminal_config: fleet_core::config::TerminalConfig::default(),
             overlay: None,
             filter: FilterState::default(),
             detail_open: false,
@@ -1147,6 +1173,7 @@ impl AppState {
     /// Applies one message from the daemon bridge.
     pub fn apply_bridge_event(&mut self, event: BridgeEvent, now: Instant) {
         match event {
+            BridgeEvent::TerminalConfig(config) => self.terminal_config = config,
             BridgeEvent::Connected(snapshot) => {
                 self.daemon = DaemonLink::Connected;
                 self.daemon_since = now;
@@ -1199,8 +1226,8 @@ impl AppState {
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
-            // The gap is invisible in the frame stream — the next diff's `seq` simply skips —
-            // so nothing downstream can detect it. Marking every mirror desynced is what stops
+            // Broadcast lag may affect any terminal, including one with no subsequent frame.
+            // Marking every mirror desynced is what stops
             // a diff from being applied on top of rows that are already wrong; the shell then
             // asks for a full frame per terminal, which is the only thing that repairs them.
             BridgeEvent::EventsLagged { .. } => {
@@ -1328,6 +1355,7 @@ mod tests {
             cols: 4,
             rows: 2,
             full,
+            shift: None,
             rows_changed: rows,
             cursor: CursorState {
                 row: 0,
@@ -1342,6 +1370,40 @@ mod tests {
             modes: TerminalModes::default(),
             title: None,
         }
+    }
+
+    #[test]
+    fn forward_sequence_gap_requires_full_recovery() {
+        let mut grid = MirrorGrid::new(4, 2);
+        grid.apply(&frame(1, true, vec![row(0, "old"), row(1, "keep")]));
+        assert!(!grid.apply(&frame(3, false, vec![row(0, "lost")])));
+        assert!(grid.desynced);
+        assert_eq!(grid.row_text(0), "old");
+        assert!(!grid.apply(&frame(4, false, vec![row(1, "bad")])));
+        assert!(grid.apply(&frame(5, true, vec![row(0, "new"), row(1, "good")])));
+        assert!(!grid.desynced);
+        assert!(!grid.apply(&frame(2, true, vec![row(0, "stale")])));
+        assert_eq!(grid.row_text(0), "new");
+    }
+
+    #[test]
+    fn shifted_rows_move_before_replacements_in_both_directions() {
+        let mut grid = MirrorGrid::new(4, 2);
+        grid.apply(&frame(1, true, vec![row(0, "aaa"), row(1, "bbb")]));
+        let mut down = frame(2, false, vec![row(1, "ccc")]);
+        down.shift = Some(1);
+        assert!(grid.apply(&down));
+        assert_eq!(
+            (grid.row_text(0), grid.row_text(1)),
+            ("bbb".into(), "ccc".into())
+        );
+        let mut up = frame(3, false, vec![row(0, "aaa")]);
+        up.shift = Some(-1);
+        assert!(grid.apply(&up));
+        assert_eq!(
+            (grid.row_text(0), grid.row_text(1)),
+            ("aaa".into(), "bbb".into())
+        );
     }
 
     fn snapshot() -> Snapshot {

@@ -332,7 +332,7 @@ mod tests {
             .send(Request {
                 id: 1,
                 body: RequestBody::Hello {
-                    protocol: 1,
+                    protocol: fleet_proto::PROTOCOL_VERSION,
                     client: "test".to_owned(),
                 },
             })
@@ -340,7 +340,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         assert!(matches!(
             next_response(&mut client).await.result,
-            Ok(ResponseBody::Hello { protocol: 1, .. })
+            Ok(ResponseBody::Hello {
+                protocol: fleet_proto::PROTOCOL_VERSION,
+                ..
+            })
         ));
         client
             .send(Request {

@@ -6,8 +6,8 @@
 //! and — because no other module can — the two behaviours `docs/APP-CONTRACTS.md` §6 assigns to
 //! it by name:
 //!
-//! * **Keys reach the PTY only in Terminal mode.** `Workspace > Terminal` binds exactly one key,
-//!   `ctrl-s`, so every other keystroke falls through gpui's binding pass into this element's
+//! * **Keys reach the PTY only in Terminal mode.** `Workspace > Terminal` binds `ctrl-s` and explicit viewport shortcuts;
+//!   other keystrokes fall through gpui's binding pass into this element's
 //!   `on_key_down`, is turned into a [`KeyEvent`] and is sent to the daemon, which owns the
 //!   mode-aware encoder. A key typed in `Prefix` or `Scroll` is *dropped here*, never forwarded:
 //!   those modes exist precisely so that `x` closes a tab instead of typing an `x`.
@@ -47,15 +47,15 @@ use fleet_proto::{
     job::{JobRecord, JobStatus},
     request::RequestBody,
     response::ResponseBody,
-    terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
+    terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand, WheelEvent},
 };
 use fleet_ui_kit::{
-    ActiveTheme, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill, StatusKind,
-    TerminalGrid, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
+    ActiveTheme, CellMetrics, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill,
+    StatusKind, TerminalGrid, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, Pixels,
-    SharedString, Size, Window, div, prelude::*, px,
+    AnyElement, App, Bounds, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke,
+    Pixels, ScrollWheelEvent, SharedString, Size, Window, div, prelude::*, px,
 };
 
 use crate::{
@@ -64,8 +64,8 @@ use crate::{
     dialogs::{self, Dialogs},
     state::{AppState, Overlay, Screen, TerminalMode},
     terminal_element::{
-        GRID_PADDING, cell_size, grid_cursor, grid_modes, grid_rows, grid_size, line_selection,
-        measure, selection_text, viewport_base, viewport_last, zoom_bar,
+        GRID_PADDING, WheelAccumulator, cell_size, grid_cursor, grid_modes, grid_rows, grid_size,
+        line_selection, measure, selection_text, viewport_base, viewport_last, zoom_bar,
     },
     views::{workspace_header::WorkspaceHeader, workspace_tabs},
 };
@@ -119,6 +119,9 @@ struct Local {
     sizes: HashMap<TerminalId, (u16, u16)>,
     /// The pixel area the grid was last laid out into.
     area: Size<Pixels>,
+    /// Measured inner grid bounds and cells, keyed to their terminal.
+    geometry: Option<(TerminalId, Bounds<Pixels>, CellMetrics)>,
+    wheel: WheelAccumulator,
     /// Keys typed before the first frame landed. Flushed in order, then never used again.
     pending: Vec<KeyEvent>,
     /// The anchor of a scroll-mode selection, as an **absolute** scrollback line.
@@ -243,6 +246,7 @@ impl WorkspaceScreen {
     /// Attaches, detaches and flushes so the daemon always mirrors what is on screen.
     fn reconcile(&self, model: &Model, bridge: &Bridge, cell: Size<Pixels>) {
         let mut local = self.local.borrow_mut();
+        local.wheel.reconcile(model.terminal);
         // A new link means the daemon forgot every attachment, so the terminal on screen has
         // to be claimed again even though it did not change.
         let relinked = local.attached_generation != model.link_generation;
@@ -469,6 +473,7 @@ impl WorkspaceScreen {
         let grid: AnyElement = match mirror.filter(|grid| grid.primed) {
             Some(grid) => {
                 let resize_local = Rc::clone(&self.local);
+                let geometry_local = Rc::clone(&self.local);
                 let resize_bridge = bridge.clone();
                 let resize_terminal = model.terminal;
                 let mut painted = TerminalGrid::new(grid_rows(grid, theme))
@@ -481,6 +486,12 @@ impl WorkspaceScreen {
                     .padding(px(GRID_PADDING))
                     .scrollback(grid.viewport.offset, grid.viewport.scrollback_len)
                     .frame_size(usize::from(grid.cols), usize::from(grid.rows))
+                    .on_geometry(move |bounds, metrics| {
+                        if let Some(terminal) = resize_terminal {
+                            geometry_local.borrow_mut().geometry =
+                                Some((terminal, bounds, metrics));
+                        }
+                    })
                     .on_resize(move |cols, rows, _window, _cx| {
                         let Some(terminal) = resize_terminal else {
                             return;
@@ -517,7 +528,65 @@ impl WorkspaceScreen {
         // it every new or newly selected terminal was attached at 80 × 24 and then resized,
         // which costs a full-screen redraw at the wrong size before the right one arrives.
         let area_local = Rc::clone(&self.local);
+        let wheel_local = Rc::clone(&self.local);
+        let pointer_local = Rc::clone(&self.local);
+        let wheel_bridge = bridge.clone();
+        let wheel_state = state.clone();
+        let wheel_terminal = model.terminal;
         div()
+            .id("terminal-wheel-area")
+            .on_mouse_move(move |_, _, _| {
+                if let Some(terminal) = wheel_terminal {
+                    pointer_local.borrow_mut().wheel.point_at(terminal);
+                }
+            })
+            .on_scroll_wheel(move |event: &ScrollWheelEvent, _, cx| {
+                let Some(terminal) = wheel_terminal else {
+                    return;
+                };
+                let app = wheel_state.read(cx);
+                if app.drops_terminal_keys() {
+                    return;
+                }
+                let Some(grid) = app.grids.get(&terminal).filter(|grid| grid.primed) else {
+                    return;
+                };
+                let lines = app.terminal_config.scroll_lines_per_step;
+                let mut local = wheel_local.borrow_mut();
+                let Some((id, bounds, metrics)) =
+                    local.geometry.filter(|(id, _, _)| *id == terminal)
+                else {
+                    return;
+                };
+                // Geometry is the actual painter bounds, already inset by GRID_PADDING.
+                let col = ((event.position.x - bounds.origin.x) / metrics.width)
+                    .floor()
+                    .max(0.0) as u16;
+                let row = ((event.position.y - bounds.origin.y) / metrics.height)
+                    .floor()
+                    .max(0.0) as u16;
+                let steps =
+                    local
+                        .wheel
+                        .steps(id, event.delta, metrics.height, lines, event.touch_phase);
+                let mut mods = Modifiers::empty();
+                mods.set(Modifiers::SHIFT, event.modifiers.shift);
+                mods.set(Modifiers::CTRL, event.modifiers.control);
+                mods.set(Modifiers::ALT, event.modifiers.alt);
+                mods.set(Modifiers::SUPER, event.modifiers.platform);
+                if steps != 0 {
+                    wheel_bridge.send(RequestBody::WheelTerminal {
+                        terminal,
+                        wheel: WheelEvent {
+                            steps,
+                            col: col.min(grid.cols.saturating_sub(1)),
+                            row: row.min(grid.rows.saturating_sub(1)),
+                            mods,
+                        },
+                    });
+                }
+                cx.stop_propagation();
+            })
             .relative()
             .flex_1()
             .w_full()
@@ -829,6 +898,61 @@ impl WorkspaceScreen {
 
     /// Scroll mode: viewport movement, the line-wise selection and the yank.
     fn with_scroll_actions(&self, root: Div, bridge: &Bridge, state: &Entity<AppState>) -> Div {
+        macro_rules! terminal_scroll {
+            ($root:expr, $action:ty, $command:expr, $key:expr, $mods:expr) => {{
+                let (_, bridge, state) = self.handles(bridge, state);
+                $root.on_action(move |_: &$action, _, cx| {
+                    let app = state.read(cx);
+                    if app.terminal_mode != TerminalMode::Terminal || app.drops_terminal_keys() {
+                        return;
+                    }
+                    let Some(terminal) = app
+                        .active_session()
+                        .and_then(|session| session.active_terminal)
+                    else {
+                        return;
+                    };
+                    bridge.send(RequestBody::ScrollOrKeyTerminal {
+                        terminal,
+                        scroll: $command,
+                        key: KeyEvent {
+                            key: $key,
+                            mods: $mods,
+                            text: None,
+                            action: KeyAction::Press,
+                        },
+                    });
+                })
+            }};
+        }
+        let root = terminal_scroll!(
+            root,
+            scroll::TerminalPageUp,
+            ScrollCommand::Pages(-1),
+            Key::PageUp,
+            Modifiers::SHIFT
+        );
+        let root = terminal_scroll!(
+            root,
+            scroll::TerminalPageDown,
+            ScrollCommand::Pages(1),
+            Key::PageDown,
+            Modifiers::SHIFT
+        );
+        let root = terminal_scroll!(
+            root,
+            scroll::TerminalTop,
+            ScrollCommand::Top,
+            Key::Home,
+            Modifiers::SUPER
+        );
+        let root = terminal_scroll!(
+            root,
+            scroll::TerminalBottom,
+            ScrollCommand::Bottom,
+            Key::End,
+            Modifiers::SUPER
+        );
         // `j` and `k` move the caret first and only scroll once it is against an edge, which is
         // what lets a selection be extended without the text moving under the eyes.
         let root = {

@@ -154,6 +154,8 @@ impl Pty {
             .master
             .take_writer()
             .map_err(|error| PtyError::Setup(error.to_string()))?;
+        // Keep draining while the host writes: an echoing child can otherwise deadlock
+        // a large paste. The host separately bounds parsing work per iteration.
         let (sender, output) = async_channel::unbounded();
         thread::Builder::new()
             .name("fleet-pty-reader".to_owned())

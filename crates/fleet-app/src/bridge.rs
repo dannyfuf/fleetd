@@ -80,6 +80,8 @@ pub enum BridgeEvent {
         /// The fresh snapshot.
         snapshot: Box<Snapshot>,
     },
+    /// Effective terminal settings loaded on connection or a config response.
+    TerminalConfig(fleet_core::config::TerminalConfig),
     /// An ordinary daemon event.
     Daemon(Box<Event>),
     /// The client's broadcast buffer overflowed and events were dropped.
@@ -328,6 +330,7 @@ async fn run(home: &Path, commands: &Receiver<Command>, events: &Sender<BridgeEv
                             link.as_ref().map(|link| link.client.clone()),
                             *body,
                             reply,
+                            events.clone(),
                         ),
                         None => {
                             // Fire-and-forget mutations still have an ordering contract. In
@@ -424,6 +427,7 @@ fn dispatch(
     client: Option<Client>,
     body: RequestBody,
     reply: Sender<Result<ResponseBody, ProtoError>>,
+    events: Sender<BridgeEvent>,
 ) {
     let Some(client) = client else {
         let _ignored = reply.try_send(Err(offline("the Fleet daemon is not connected")));
@@ -431,6 +435,11 @@ fn dispatch(
     };
     tokio::spawn(async move {
         let result = client.request(body).await;
+        if let Ok(ResponseBody::Config(config)) = &result {
+            let _ = events
+                .send(BridgeEvent::TerminalConfig(config.terminal.clone()))
+                .await;
+        }
         let _ignored = reply.send(result).await;
     });
 }
@@ -456,6 +465,11 @@ async fn open(home: &Path, events: &Sender<BridgeEvent>) -> Result<(Link, Snapsh
     };
     let _ignored = client.hello(CLIENT_NAME).await;
     let forwarder = spawn_forwarder(client.events(), events.clone());
+    if let Ok(config) = client.get_config().await {
+        let _ = events
+            .send(BridgeEvent::TerminalConfig(config.terminal))
+            .await;
+    }
     match client.get_snapshot().await {
         Ok(snapshot) => {
             let pid = snapshot.daemon.pid;

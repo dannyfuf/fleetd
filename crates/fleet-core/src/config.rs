@@ -138,6 +138,25 @@ impl Default for JobsConfig {
     }
 }
 
+/// Terminal history storage and wheel sensitivity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TerminalConfig {
+    /// Maximum retained history bytes per terminal (allocated on demand).
+    pub scrollback_bytes: usize,
+    /// Rows per line-based mouse wheel step.
+    pub scroll_lines_per_step: u32,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            scrollback_bytes: 1_073_741_824,
+            scroll_lines_per_step: 3,
+        }
+    }
+}
+
 /// Fleet's complete version-one configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,6 +195,9 @@ pub struct Config {
     /// Background-job retention and warning settings.
     #[serde(default)]
     pub jobs: JobsConfig,
+    /// Terminal history and wheel settings.
+    #[serde(default)]
+    pub terminal: TerminalConfig,
 }
 
 /// A malformed partial or complete Fleet configuration.
@@ -237,6 +259,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
         },
         trash: TrashConfig::default(),
         jobs: JobsConfig::default(),
+        terminal: TerminalConfig::default(),
     }
 }
 
@@ -310,6 +333,14 @@ pub fn normalize_legacy_agent_window(windows: &mut [WindowConfig]) {
 
 /// Validates cross-field and non-empty constraints in a complete configuration.
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
+    if config.terminal.scrollback_bytes == 0
+        || !(1..=50).contains(&config.terminal.scroll_lines_per_step)
+    {
+        return Err(ConfigError::Validation(
+            "terminal scrollbackBytes must be positive and scrollLinesPerStep must be in 1..=50"
+                .to_owned(),
+        ));
+    }
     if config.version != CONFIG_VERSION {
         return Err(ConfigError::Validation("version must be 1".to_owned()));
     }
@@ -391,12 +422,59 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_defaults_and_positive_byte_budget() {
+        let home = "/tmp/fleet";
+        let defaults = merge_config(home, serde_json::json!({})).unwrap();
+        assert_eq!(defaults.terminal.scrollback_bytes, 1_073_741_824);
+        assert_eq!(defaults.terminal.scroll_lines_per_step, 3);
+        for value in [1, 50] {
+            assert!(
+                merge_config(
+                    home,
+                    serde_json::json!({"terminal": {"scrollLinesPerStep": value}})
+                )
+                .is_ok()
+            );
+        }
+        for value in [51, u32::MAX] {
+            assert!(
+                merge_config(
+                    home,
+                    serde_json::json!({"terminal": {"scrollLinesPerStep": value}})
+                )
+                .is_err()
+            );
+        }
+        let custom = merge_config(
+            home,
+            serde_json::json!({"terminal": {"scrollbackBytes": 65536, "scrollLinesPerStep": 5}}),
+        )
+        .unwrap();
+        assert_eq!(custom.terminal.scrollback_bytes, 65536);
+        assert_eq!(custom.terminal.scroll_lines_per_step, 5);
+        assert!(
+            merge_config(
+                home,
+                serde_json::json!({"terminal": {"scrollbackBytes": 0}})
+            )
+            .is_err()
+        );
+        assert!(
+            merge_config(
+                home,
+                serde_json::json!({"terminal": {"scrollLinesPerStep": 0}})
+            )
+            .is_err()
+        );
+    }
+
     use serde_json::json;
 
     use super::*;
 
     #[test]
-    fn defaults_match_exact_swarm_json() {
+    fn defaults_match_swarm_json_with_fleet_terminal_settings() {
         let actual = serde_json::to_value(default_config("/home/me/.fleet"))
             .unwrap_or_else(|error| panic!("{error}"));
         let expected = json!({
@@ -428,7 +506,8 @@ mod tests {
             "github": {"cacheTtlSeconds":3600,"prTtlSeconds":90,"cloneProtocol":"ssh"},
             "ui": {"statusRefreshMs":2000,"remoteStatusRefreshMs":10000},
             "trash": {"retentionMs":600000},
-            "jobs": {"warnBeforeQuit":true,"keepFinishedFor":600000}
+            "jobs": {"warnBeforeQuit":true,"keepFinishedFor":600000},
+            "terminal": {"scrollbackBytes":1073741824,"scrollLinesPerStep":3}
         });
         assert_eq!(actual, expected);
     }

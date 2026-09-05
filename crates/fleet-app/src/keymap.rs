@@ -244,6 +244,11 @@ key_table! {
     "?",            "Workspace > Prefix" => OpenHelp;
     "escape",       "Workspace > Prefix" => prefix::Cancel;
 
+    "shift-pageup",   "Workspace > Terminal" => scroll::TerminalPageUp;
+    "shift-pagedown", "Workspace > Terminal" => scroll::TerminalPageDown;
+    "cmd-home",       "Workspace > Terminal" => scroll::TerminalTop;
+    "cmd-end",        "Workspace > Terminal" => scroll::TerminalBottom;
+
     // ---------------------------------------------------------------- Workspace › Scroll
     "j",            "Workspace > Scroll" => scroll::LineDown;
     "k",            "Workspace > Scroll" => scroll::LineUp;
@@ -476,13 +481,27 @@ mod tests {
     }
 
     #[test]
-    fn prefix_is_the_only_app_key_over_a_terminal() {
+    fn terminal_bindings_are_prefix_and_explicit_viewport_shortcuts() {
         let terminal: Vec<_> = table()
             .into_iter()
             .filter(|spec| spec.context == "Workspace > Terminal")
             .collect();
-        assert_eq!(terminal.len(), 1);
-        assert_eq!(terminal[0].keys, "ctrl-s");
+        assert_eq!(
+            terminal.iter().map(|spec| spec.keys).collect::<Vec<_>>(),
+            [
+                "ctrl-s",
+                "shift-pageup",
+                "shift-pagedown",
+                "cmd-home",
+                "cmd-end"
+            ]
+        );
+        for keys in ["pageup", "pagedown", "home", "end"] {
+            assert!(
+                action_for_keystroke("Workspace > Terminal", &Keystroke::parse(keys).unwrap())
+                    .is_none()
+            );
+        }
     }
 
     #[test]

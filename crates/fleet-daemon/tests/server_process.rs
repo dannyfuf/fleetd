@@ -35,7 +35,7 @@ async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
         Request {
             id: 1,
             body: RequestBody::Hello {
-                protocol: 1,
+                protocol: fleet_proto::PROTOCOL_VERSION,
                 client: "server-process-test".to_owned(),
             },
         },
@@ -43,7 +43,10 @@ async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
     .await;
     assert!(matches!(
         receive(&mut client).await.result,
-        Ok(ResponseBody::Hello { protocol: 1, .. })
+        Ok(ResponseBody::Hello {
+            protocol: fleet_proto::PROTOCOL_VERSION,
+            ..
+        })
     ));
 
     send(

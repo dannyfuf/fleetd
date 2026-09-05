@@ -380,7 +380,10 @@ mod tests {
     #[test]
     fn an_unknown_daemon_protocol_is_amber_never_ok() {
         assert_eq!(protocol_row(Some(APP_PROTOCOL)).status, DoctorStatus::Ok);
-        assert_eq!(protocol_row(Some(2)).status, DoctorStatus::Fail);
+        assert_eq!(
+            protocol_row(Some(APP_PROTOCOL + 1)).status,
+            DoctorStatus::Fail
+        );
         assert_eq!(
             protocol_row(None).status,
             DoctorStatus::Warn,
