@@ -18,9 +18,9 @@
 //!
 //! # Prefix mechanics
 //!
-//! `ctrl-s` is the Workspace's only app key: in `Workspace > Terminal` it fires
-//! [`crate::actions::workspace::EnterPrefix`] and every other key falls through to the PTY,
-//! because gpui dispatches bindings before `on_key_down` listeners. `Workspace > Prefix` is a
+//! `Workspace > Terminal` reserves `ctrl-s` plus the standard macOS clipboard keys. Every other
+//! key falls through to the PTY because gpui dispatches bindings before `on_key_down` listeners.
+//! `Workspace > Prefix` is a
 //! **one-shot** context: the shell leaves it on the next key whether or not that key matched a
 //! binding, so no timeout is needed and no key can leak into the PTY. `ctrl-s ctrl-s` sends a
 //! literal `ctrl-s`.
@@ -208,6 +208,8 @@ key_table! {
 
     // ---------------------------------------------------------------- Workspace › Terminal
     "ctrl-s",       "Workspace > Terminal" => workspace::EnterPrefix;
+    "cmd-c",        "Workspace > Terminal" => workspace::CopySelection;
+    "cmd-v",        "Workspace > Terminal" => workspace::PasteClipboard;
 
     // ---------------------------------------------------------------- Workspace › Native
     // A `fleet://` tab is a terminal as far as this table is concerned: exactly one app key,
@@ -246,10 +248,17 @@ key_table! {
     "a",            "Workspace > Prefix" => OpenAgentClaude;
     "A",            "Workspace > Prefix" => OpenAgentOpencode;
     "z",            "Workspace > Prefix" => prefix::ToggleZoom;
+    "v",            "Workspace > Prefix" => prefix::ToggleWatchPane;
+    "V",            "Workspace > Prefix" => prefix::DismissWatch;
     "!",            "Workspace > Prefix" => FocusStickyError;
     "J",            "Workspace > Prefix" => OpenJobs;
     "?",            "Workspace > Prefix" => OpenHelp;
     "escape",       "Workspace > Prefix" => prefix::Cancel;
+
+    "shift-pageup",   "Workspace > Terminal" => scroll::TerminalPageUp;
+    "shift-pagedown", "Workspace > Terminal" => scroll::TerminalPageDown;
+    "cmd-home",       "Workspace > Terminal" => scroll::TerminalTop;
+    "cmd-end",        "Workspace > Terminal" => scroll::TerminalBottom;
 
     // ---------------------------------------------------------------- Workspace › Scroll
     "j",            "Workspace > Scroll" => scroll::LineDown;
@@ -484,18 +493,49 @@ mod tests {
     }
 
     #[test]
-    fn prefix_is_the_only_app_key_over_a_terminal() {
-        // Both resting Workspace contexts, because both hand every other key to whatever is
-        // inside the tab: the PTY in one case, the embedded gpui view in the other.
-        for context in ["Workspace > Terminal", "Workspace > Native"] {
-            let bound: Vec<_> = table()
-                .into_iter()
-                .filter(|spec| spec.context == context)
-                .collect();
-            assert_eq!(bound.len(), 1, "{context} binds more than one key");
-            assert_eq!(bound[0].keys, "ctrl-s", "{context}");
-            assert_eq!(bound[0].action, "workspace::EnterPrefix", "{context}");
+    fn terminal_bindings_preserve_clipboard_and_viewport_shortcuts() {
+        let terminal: Vec<_> = table()
+            .into_iter()
+            .filter(|spec| spec.context == "Workspace > Terminal")
+            .collect();
+        assert_eq!(
+            terminal.iter().map(|spec| spec.keys).collect::<Vec<_>>(),
+            [
+                "ctrl-s",
+                "cmd-c",
+                "cmd-v",
+                "shift-pageup",
+                "shift-pagedown",
+                "cmd-home",
+                "cmd-end"
+            ]
+        );
+        for keys in ["pageup", "pagedown", "home", "end"] {
+            assert!(
+                action_for_keystroke("Workspace > Terminal", &Keystroke::parse(keys).unwrap())
+                    .is_none()
+            );
         }
+        assert!(
+            terminal.iter().all(|spec| spec.keys != "ctrl-v"),
+            "ctrl-v belongs to shells and terminal applications"
+        );
+    }
+
+    /// The resting context of a `fleet://` tab reserves `ctrl-s` and nothing else.
+    ///
+    /// A native tab hands every other key to the embedded gpui view, which resolves it against
+    /// its own bindings. `Workspace > Terminal` may reserve the macOS clipboard and viewport
+    /// keys because a PTY has no use for them; the pane does, so it keeps them.
+    #[test]
+    fn prefix_is_the_only_app_key_over_a_native_pane() {
+        let bound: Vec<_> = table()
+            .into_iter()
+            .filter(|spec| spec.context == "Workspace > Native")
+            .collect();
+        assert_eq!(bound.len(), 1, "Workspace > Native binds more than one key");
+        assert_eq!(bound[0].keys, "ctrl-s");
+        assert_eq!(bound[0].action, "workspace::EnterPrefix");
     }
 
     /// Every fleet-lazygit action name must differ from every fleet-app one.
@@ -575,6 +615,23 @@ mod tests {
                 && spec.keys == "ctrl-s"
                 && spec.action == "prefix::SendLiteral"
         }));
+    }
+
+    #[test]
+    fn watch_keys_are_prefix_only_and_uppercase_dismisses() {
+        for (key, name) in [
+            ("v", "prefix::ToggleWatchPane"),
+            ("V", "prefix::DismissWatch"),
+        ] {
+            let stroke = Keystroke::parse(key).unwrap();
+            assert_eq!(
+                action_for_keystroke("Workspace > Prefix", &stroke)
+                    .unwrap()
+                    .name(),
+                name
+            );
+            assert!(action_for_keystroke("Workspace > Terminal", &stroke).is_none());
+        }
     }
 
     #[test]

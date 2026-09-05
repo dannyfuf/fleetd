@@ -668,9 +668,10 @@ what is running elsewhere.*
 | Exit strip | `⚠ process exited (<code>) · ^s r restart · ^s x close · ^s c new` | bottom, 22 px, only when the tab's command exited | tmux's `remain-on-exit` made this recoverable; Fleet must not silently swallow a crashed dev server | §4 `remain-on-exit on` |
 | Mode word | `TERMINAL` / `^S` / `SCROLL` | status bar, center | §2.8 | KEYMAP modes |
 
-**[D-8]** Every affordance drawn over the Workspace states its prefix. In Terminal mode all keys
-go to the PTY except `ctrl-s`, so bare-key hints (`r restart`, `l log`, `⏎ start now`) are
-forbidden anywhere in this screen; they are written `^s r`, `^s l`, `^s ⏎`.
+**[D-8]** Every Workspace command drawn over the Workspace states its prefix. In Terminal mode
+keys go to the PTY except `ctrl-s` and the standard `cmd-c` / `cmd-v` clipboard actions, so
+bare-key hints (`r restart`, `l log`, `⏎ start now`) are forbidden anywhere in this screen; they
+are written `^s r`, `^s l`, `^s ⏎`.
 
 **Zoom (`ctrl-s z`)** hides the session header and the tab strip; a 2 px amber bar on the window's
 top edge remains as the only reminder that chrome is hidden. The status bar always stays, because
@@ -705,7 +706,9 @@ until the daemon stops listing that worktree. Its own keys are documented in
 Fleet. **[D-8] still holds**: the pane's key-hint bar lives *inside* the pane, which is its own
 key context, so its bare keys are not "drawn over Terminal mode".
 
-**Keyboard:** all keys → PTY (or → the native pane); `ctrl-s` then `ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
+**Keyboard:** all keys → PTY except `cmd-c` copy selection and `cmd-v` paste — or, on a native
+tab, every key except `ctrl-s` → the pane; `ctrl-s` then
+`ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
@@ -1119,7 +1122,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 | **Status** | `Local status refresh ms [2000]` (min 500) · `Remote status refresh ms [10000]` (min 500) |
 | **Windows** | read-only ordered list `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — lazygit` |
 | **Hosts** | read-only per host `devbox — ssh danny@devbox — fleet` |
-| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 1` · `E open config.json in a new terminal tab` · `Run doctor · D` |
+| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 3` · `E open config.json in a new terminal tab` · `Run doctor · D` |
 
 **[D-13]** The editable set closes §9's *"Settings cannot edit grace/rule definitions/windows/
 hosts/protocol/pool/timers/status intervals; many require JSON"* for everything a user changes
@@ -1151,7 +1154,7 @@ the app:
 > quitting Fleet (`ctrl-q`) never stops them. Only `c` in the Jobs panel, `K`, and `ctrl-shift-q`
 > stop things. Terminals do not survive a **daemon** restart.
 
-Footer: `Fleet <version> · protocol 1 · fleetd up 3h`.
+Footer: `Fleet <version> · protocol 3 · fleetd up 3h`.
 **Omitted:** prose explanations, links, a search field (the palette *is* the searchable surface).
 
 ---
@@ -1337,7 +1340,7 @@ to `circle-help` (`unknown`, never `none`), and read-only actions keep working (
  git            ok       git version 2.49.0
  gh auth        fail     gh: not logged in to github.com
  copy-on-write  ok       cp -c (APFS clonefile)
- fleetd         ok       pid 4211 · protocol 1 · up 3h
+ fleetd         ok       pid 4211 · protocol 3 · up 3h
  host devbox    fail     ssh: connect timed out after 5s
 ```
 
@@ -1593,3 +1596,42 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `DaemonSplash` | The full-window cold-start and will-not-start surfaces: title, spinner, socket path, `fleetd.log` tail, bare recovery keys | daemon states A and B (§3.12) |
 | `DaemonDot` | 8 px liveness dot that expands into a labelled pill when degraded | context bar |
 | `Veil` | 55 % scrim over terminal grids only, with key-dropping | daemon disconnect |
+
+## Subagent watch pane
+
+A new subagent watch for the current Workspace session opens a read-only split
+on the right and selects that watch. The terminal is the flexible leading region
+of `SplitLayout::horizontal()`; the trailing region is 40% of the current window
+width, clamped to 360–640 px and recomputed on resize. PTY dimensions follow the
+terminal's actual reduced painted bounds. Zoom (`^s z`) hides the session header
+and terminal tabs while leaving the watch pane, including its header, visible.
+
+The pane header shows the child label, a status dot and `running`, `exited <code>`,
+or `interrupted` for signal-only completion; elapsed time as `mm:ss`, frozen after
+exit; the `^s v` hint; and a right-aligned clickable `×`. Multiple watches add a
+compact tab strip with each label and status dot. Clicking a tab selects it.
+
+The body uses `LogView` in following mode. Newline-delimited lines are assembled
+independently for stdout and stderr, with live partial trailing lines. Stdout uses
+normal text contrast and stderr uses secondary text. Empty output says
+`waiting for output…`; an unavailable earlier sequence range or local retention
+trimming adds `older output trimmed` above the log. Each watch retains at most
+1 MiB of text and 20,000 displayed lines, including partial lines.
+
+| Workspace prefix | Action |
+| --- | --- |
+| `^s v` | Toggle the pane locally. With no watches, toast `no subagent watches`. Repeated toggles never cycle tabs. |
+| `^s V` / mouse `×` | Dismiss the selected completed watch and select the next tab, wrapping at the end. If it was the last, close the pane. For a running watch, hide locally and toast `watch still running; pane hidden`. |
+
+Hiding persists per session across navigation and reconnect until a **new**
+WatchStarted event arrives. Every new start reopens that session's pane and selects
+the new watch. Duplicate start events, output, completion, and ordinary catch-up
+responses do not undo a user's hide or selection. First discovery selects the
+newest retained watch. There are no watch cycling keys beyond mouse tab selection.
+
+The pane never sends input and never takes keyboard focus from the terminal.
+Closing/hiding a pane never kills a process. Subscribe before listing/tailing;
+reconcile on Workspace entry, session changes, reconnect, and event gaps as
+specified in `APP-CONTRACTS.md`. Daemon dismissal, TTL, and terminal/session cleanup
+remove the corresponding local watch. See that contract for duration recovery
+limits when an already-completed watch is first discovered.

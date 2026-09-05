@@ -254,3 +254,95 @@ Two behaviours the Workspace must implement itself, because only it can:
   typed in `Prefix` or `Scroll` must never reach the shell's PTY;
 * **drop** keys, never buffer them, while `drops_terminal_keys()` is true (§3.12 C). The shell
   already paints the 55 % veil over whatever the Workspace returns.
+
+## Subagent watches
+
+PTY login shells receive `FLEET_SESSION` (session ID), `FLEET_TERMINAL` (human
+terminal name, retained for compatibility), and `FLEET_TERMINAL_ID` (numeric
+daemon-local ID matching the terminal registry). `fleet exec --watch` requires
+a valid `FLEET_SESSION` and parses `FLEET_TERMINAL_ID` for `StartWatch.terminal`.
+Missing/invalid IDs, absent `--watch`, an existing `FLEET_WATCH`, or daemon
+connection failure cause transparent passthrough. `FLEET_DEBUG=1` enables a
+one-line reason for every passthrough decision; default stderr remains unchanged.
+Shims require `FLEET_TERMINAL_ID`, so older name-only daemon environments stay
+transparent.
+
+`fleet-core::watches` defines `WatchId` (daemon-local numeric ID), `Watch`,
+`WatchStatus::{Running, Exited { code, signal }}`, `WatchStream::{Stdout, Stderr}`,
+and immutable `WatchChunk { seq, stream, text }`. Watch metadata includes parent
+session/terminal, label, argv, optional cwd/PID, and RFC3339 `startedAt`.
+Watches are runtime-only and do not survive a daemon restart.
+
+| Request | Response |
+| --- | --- |
+| `StartWatch { terminal, label, command, cwd, pid }` | `WatchStarted(WatchId)`; validates terminal and derives session |
+| `AppendWatchOutput { watch, stream, text }` | `Ack`; completed watches reject output |
+| `FinishWatch { watch, code, signal }` | `Ack`; first completion wins |
+| `ListWatches { session }` | `Watches(Vec<Watch>)` in registration order |
+| `TailWatch { watch, from_seq }` | `WatchTail { watch: Watch, chunks, first_retained_seq, next_seq }` |
+| `DismissWatch { watch }` | `Ack`; Running returns `Conflict`; missing IDs return `NotFound` |
+
+Request discriminants and fields use snake_case, like other requests. Watch and
+catch-up struct fields use camelCase on the wire. Each event has its own
+`EventKind`: `WatchStarted(Watch)`, `WatchOutput { watch: WatchId, chunks }`,
+`WatchExited(Watch)`, `WatchDismissed(WatchId)`. These events are global, like
+`SessionChanged`; clients filter using watch metadata. No terminal attachment is
+needed. `Client::connect` subscribes to them by default. Explicit subscriptions
+should include all four kinds. `Client::events()` provides the receiver, and
+`fleet-client::watches` adds typed `start_watch`, `append_watch_output`,
+`finish_watch`, `list_watches`, `tail_watch`, and `dismiss_watch` methods.
+
+Subscribe/create the receiver before listing and tailing. Sequence numbers start
+at zero and `from_seq` is inclusive; `None` returns all retained chunks. Merge
+catch-up and queued events by sequence, ignoring duplicates. Resume from
+`next_seq`. On sequence gaps, receiver lag, or reconnect, list/tail again. If the
+requested cursor precedes `first_retained_seq`, show that older output was
+trimmed. Metadata and output in a tail response are atomic. After daemon restart,
+clear prior IDs before rebuilding from ListWatches.
+
+Each watch retains at most 1 MiB of UTF-8 text and 20,000 chunks, dropping whole
+oldest chunks (including a chunk larger than the cap). This keeps worst-case JSON
+escaping below the 16 MiB frame limit. Pending events reuse that bounded history.
+Output events coalesce on a 50 ms daemon tick; finish flushes pending output before
+`WatchExited`. Finished watches expire 30 minutes after completion. Dismissal,
+TTL, terminal close, and session kill emit `WatchDismissed`; none of the watch
+operations signal a child. Closing a running pane in phase 2 should hide it
+locally; `DismissWatch` is only for completed watches.
+
+AppendWatchOutput and FinishWatch require the starting connection (otherwise
+`Conflict`), preventing reconnected wrappers from modifying an unrelated reused
+ID after a daemon restart. A connection lease owns each StartWatch; dropping its socket marks unfinished
+watches Exited with `code: None, signal: Some(9)` (an interruption marker, not a
+claim that the child received SIGKILL). The wrapper uses a private PID-preserving
+launcher handshake so StartWatch has the child PID and the target starts with
+`FLEET_WATCH`. It forwards SIGINT/SIGTERM/SIGHUP and preserves normal/signalled
+exit codes. Reporting uses a bounded 128-chunk queue and batches up to 256 KiB
+per 50 ms, coalescing each stream separately (cross-stream interleaving is not
+preserved). Original bytes are written unchanged and flushed before enqueueing.
+A full queue applies backpressure to subsequent reads instead of silently losing
+burst output. A two-second RPC timeout closes the copy queue so daemon failure
+cannot strand the tee threads. Child completion is still attempted when output
+reporting failed; disconnect interruption remains authoritative if already set.
+
+### Workspace mirror and recovery
+
+`fleet-app::watches::Watches` owns metadata, stream-tagged lines, independent stdout
+and stderr partials, the next inclusive sequence cursor, trimming state, and
+per-session selection/visibility. The shell drains pending ListWatches/TailWatch
+work through the ordinary Bridge. Lists reconcile only watches known when the
+request was sent, preserving concurrent starts. Dismissal tombstones and link
+generation checks prevent delayed responses from reviving removed or prior-daemon
+IDs. One tail per watch is in flight; live chunks and catch-up results merge by
+sequence and a remaining gap requests another tail.
+
+Workspace entry/session changes and reconnect list then tail every retained watch
+with `from_seq: None`. A detected output gap tails from the next expected cursor.
+Receiver lag also invalidates the list. Tail retention gaps discard incomplete
+partial lines before resuming; local line/text retention also sets the trimmed
+indicator. `LogView::line_tones` uses existing semantic tones for stderr.
+
+Elapsed time starts from `Watch.started_at` and freezes when this client first
+observes exit. The wire contract has no completion timestamp, so a watch first
+loaded after it has finished uses an estimated duration through discovery time;
+a client that observed the exit retains its frozen duration across reconnect.
+No wire types or daemon lifecycle behavior changed for the pane.

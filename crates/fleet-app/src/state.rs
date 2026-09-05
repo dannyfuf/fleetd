@@ -257,6 +257,8 @@ pub struct MirrorGrid {
     pub rows: u16,
     /// One row of cells per grid row, always exactly `rows` long.
     pub lines: Vec<Vec<Cell>>,
+    /// Soft-wrap continuation flag for each grid row.
+    pub wrapped: Vec<bool>,
     /// The cursor as of the last applied frame.
     pub cursor: CursorState,
     /// The scrollback viewport as of the last applied frame.
@@ -288,6 +290,7 @@ impl MirrorGrid {
             cols,
             rows,
             lines: vec![Vec::new(); rows as usize],
+            wrapped: vec![false; rows as usize],
             cursor: CursorState {
                 row: 0,
                 col: 0,
@@ -297,6 +300,7 @@ impl MirrorGrid {
             viewport: ViewportInfo {
                 scrollback_len: 0,
                 offset: 0,
+                history_epoch: 0,
             },
             modes: TerminalModes::default(),
             title: None,
@@ -312,7 +316,24 @@ impl MirrorGrid {
     /// A diff frame that arrives before the first full frame, out of sequence, or after a
     /// dropped one, is refused: only a full frame can re-prime the mirror.
     pub fn apply(&mut self, frame: &FrameUpdate) -> bool {
-        if !frame.full && (!self.primed || self.desynced || frame.seq <= self.seq) {
+        if self.primed && frame.seq <= self.seq {
+            return false;
+        }
+        if !frame.full && self.primed && frame.seq > self.seq.saturating_add(1) {
+            self.desynced = true;
+        }
+        // A shift can reuse rows only within the same grid and history identity. Recover
+        // through a full frame rather than rotating stale cells across an epoch boundary.
+        if !frame.full
+            && frame.shift.is_some()
+            && (frame.viewport.history_epoch != self.viewport.history_epoch
+                || frame.cols != self.cols
+                || frame.rows != self.rows
+                || frame.modes.alt_screen != self.modes.alt_screen)
+        {
+            self.desynced = true;
+        }
+        if !frame.full && (!self.primed || self.desynced) {
             return false;
         }
         if frame.full {
@@ -322,9 +343,33 @@ impl MirrorGrid {
         if frame.cols != self.cols || frame.rows != self.rows || frame.full {
             self.resize(frame.cols, frame.rows);
         }
+        if !frame.full
+            && let Some(shift) = frame.shift
+        {
+            let count = (shift.unsigned_abs() as usize).min(self.lines.len());
+            if shift > 0 {
+                self.lines.rotate_left(count);
+                self.wrapped.rotate_left(count);
+                self.wrapped[self.lines.len() - count..].fill(false);
+                let start = self.lines.len() - count;
+                for row in &mut self.lines[start..] {
+                    row.clear();
+                }
+            } else {
+                self.lines.rotate_right(count);
+                self.wrapped.rotate_right(count);
+                self.wrapped[..count].fill(false);
+                for row in &mut self.lines[..count] {
+                    row.clear();
+                }
+            }
+        }
         for row in &frame.rows_changed {
             if let Some(line) = self.lines.get_mut(row.index as usize) {
                 line.clone_from(&row.cells);
+            }
+            if let Some(wrapped) = self.wrapped.get_mut(row.index as usize) {
+                *wrapped = row.wrapped;
             }
         }
         self.cursor = frame.cursor;
@@ -342,6 +387,7 @@ impl MirrorGrid {
         self.cols = cols;
         self.rows = rows;
         self.lines.resize(rows as usize, Vec::new());
+        self.wrapped.resize(rows as usize, false);
     }
 
     /// The cell at a position, or `None` outside the grid or past the end of a short row.
@@ -693,6 +739,8 @@ pub struct AppState {
     pub snapshot_at: Option<Instant>,
     /// One mirror grid per attached terminal.
     pub grids: HashMap<TerminalId, MirrorGrid>,
+    /// Read-only child output and per-session pane preferences.
+    pub watches: crate::watches::Watches,
     /// The screen being shown.
     pub screen: Screen,
     /// Which Hub pane owns the cursor.
@@ -705,6 +753,8 @@ pub struct AppState {
     pub cursors: Cursors,
     /// The Workspace sub-mode.
     pub terminal_mode: TerminalMode,
+    /// Effective history and wheel configuration.
+    pub terminal_config: fleet_core::config::TerminalConfig,
     /// The overlay that owns the keyboard, when any.
     pub overlay: Option<Overlay>,
     /// The filter of the focused list.
@@ -775,12 +825,14 @@ impl AppState {
             has_seen_non_empty_state: false,
             snapshot_at: None,
             grids: HashMap::new(),
+            watches: crate::watches::Watches::default(),
             screen: Screen::hub(),
             hub_pane: HubPane::List,
             pr_tab: PrTab::Mine,
             scope: RepoScope::All,
             cursors: Cursors::default(),
             terminal_mode: TerminalMode::Terminal,
+            terminal_config: fleet_core::config::TerminalConfig::default(),
             overlay: None,
             filter: FilterState::default(),
             detail_open: false,
@@ -960,6 +1012,30 @@ impl AppState {
         ) {
             self.terminal_mode = self.resting_terminal_mode();
         }
+    }
+
+    /// `^s v` toggles only local watch visibility and always returns to terminal mode.
+    pub fn toggle_watch_pane(&mut self, now: Instant) {
+        self.leave_prefix();
+        if let Some(session) = self.active_session().map(|s| s.id.clone())
+            && !self.watches.toggle(&session)
+        {
+            self.toast_short("no subagent watches", Icon::Info, now);
+        }
+    }
+
+    /// `^s V` / ×: returns an exited watch to dismiss; a running watch is only hidden.
+    pub fn close_selected_watch(&mut self, now: Instant) -> Option<fleet_core::watches::WatchId> {
+        self.leave_prefix();
+        let session = self.active_session()?.id.clone();
+        let id = self.watches.panes.get(&session)?.selected?;
+        if self.watches.entries.get(&id)?.watch.status == fleet_core::watches::WatchStatus::Running
+        {
+            self.watches.hide(&session);
+            self.toast_short("watch still running; pane hidden", Icon::Info, now);
+            return None;
+        }
+        Some(id)
     }
 
     /// Opens an overlay, replacing whatever was open.
@@ -1181,7 +1257,10 @@ impl AppState {
     /// Advances everything that expires on its own: toasts, the reconnect banner, the
     /// cold-start splash. Returns whether the frame has to be repainted.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = expire_toasts(&mut self.toasts, now);
+        let mut changed = expire_toasts(&mut self.toasts, now)
+            || self
+                .active_session()
+                .is_some_and(|s| self.watches.running_visible(&s.id));
         match self.daemon {
             DaemonLink::Reconnected { restarted, since } => {
                 let dwell = if restarted {
@@ -1204,10 +1283,12 @@ impl AppState {
     /// Applies one message from the daemon bridge.
     pub fn apply_bridge_event(&mut self, event: BridgeEvent, now: Instant) {
         match event {
+            BridgeEvent::TerminalConfig(config) => self.terminal_config = config,
             BridgeEvent::Connected(snapshot) => {
                 self.daemon = DaemonLink::Connected;
                 self.daemon_since = now;
                 self.link_generation = self.link_generation.wrapping_add(1);
+                self.watches.reconnect();
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::ConnectFailed {
@@ -1244,6 +1325,7 @@ impl AppState {
                     // ARCHITECTURE: PTYs do not survive fleetd. Dropping the mirrors is what
                     // stops the app from painting a grid that no longer has a process.
                     self.grids.clear();
+                    self.watches = crate::watches::Watches::default();
                 }
                 self.daemon = DaemonLink::Reconnected {
                     restarted,
@@ -1253,15 +1335,17 @@ impl AppState {
                 // The daemon-side connection is new and holds no attachments, whether or not
                 // fleetd itself restarted.
                 self.link_generation = self.link_generation.wrapping_add(1);
+                self.watches.reconnect();
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
-            // The gap is invisible in the frame stream — the next diff's `seq` simply skips —
-            // so nothing downstream can detect it. Marking every mirror desynced is what stops
+            // Broadcast lag may affect any terminal, including one with no subsequent frame.
+            // Marking every mirror desynced is what stops
             // a diff from being applied on top of rows that are already wrong; the shell then
             // asks for a full frame per terminal, which is the only thing that repairs them.
             BridgeEvent::EventsLagged { .. } => {
                 self.desync_grids();
+                self.watches.invalidate();
             }
         }
     }
@@ -1281,6 +1365,10 @@ impl AppState {
     /// Applies one ordinary daemon event to the mirror.
     pub fn apply_daemon_event(&mut self, event: Event, now: Instant) {
         match event {
+            Event::WatchStarted(watch) => self.watches.started(watch, now),
+            Event::WatchOutput { watch, chunks } => self.watches.output(watch, chunks),
+            Event::WatchExited(watch) => self.watches.exited(watch, now),
+            Event::WatchDismissed(id) => self.watches.dismissed(id),
             Event::SnapshotChanged(snapshot) => self.apply_snapshot(snapshot, now),
             Event::JobUpdated(job) => self.apply_job(job, now),
             Event::SessionChanged(session) => self.apply_session(session),
@@ -1385,6 +1473,7 @@ mod tests {
             cols: 4,
             rows: 2,
             full,
+            shift: None,
             rows_changed: rows,
             cursor: CursorState {
                 row: 0,
@@ -1395,10 +1484,68 @@ mod tests {
             viewport: ViewportInfo {
                 scrollback_len: 0,
                 offset: 0,
+                history_epoch: 0,
             },
             modes: TerminalModes::default(),
             title: None,
         }
+    }
+
+    #[test]
+    fn forward_sequence_gap_requires_full_recovery() {
+        let mut grid = MirrorGrid::new(4, 2);
+        grid.apply(&frame(1, true, vec![row(0, "old"), row(1, "keep")]));
+        assert!(!grid.apply(&frame(3, false, vec![row(0, "lost")])));
+        assert!(grid.desynced);
+        assert_eq!(grid.row_text(0), "old");
+        assert!(!grid.apply(&frame(4, false, vec![row(1, "bad")])));
+        assert!(grid.apply(&frame(5, true, vec![row(0, "new"), row(1, "good")])));
+        assert!(!grid.desynced);
+        assert!(!grid.apply(&frame(2, true, vec![row(0, "stale")])));
+        assert_eq!(grid.row_text(0), "new");
+    }
+
+    #[test]
+    fn shifted_rows_move_before_replacements_in_both_directions() {
+        let mut grid = MirrorGrid::new(4, 2);
+        let mut wrapped = row(1, "bbb");
+        wrapped.wrapped = true;
+        grid.apply(&frame(1, true, vec![row(0, "aaa"), wrapped]));
+        let mut down = frame(2, false, vec![row(1, "ccc")]);
+        down.shift = Some(1);
+        assert!(grid.apply(&down));
+        assert_eq!(grid.wrapped, vec![true, false]);
+        assert_eq!(
+            (grid.row_text(0), grid.row_text(1)),
+            ("bbb".into(), "ccc".into())
+        );
+        let mut up = frame(3, false, vec![row(0, "aaa")]);
+        up.shift = Some(-1);
+        assert!(grid.apply(&up));
+        assert_eq!(grid.wrapped, vec![false, true]);
+        assert_eq!(
+            (grid.row_text(0), grid.row_text(1)),
+            ("aaa".into(), "bbb".into())
+        );
+    }
+
+    #[test]
+    fn shift_across_history_epochs_freezes_rows_until_full_recovery() {
+        let mut grid = MirrorGrid::new(4, 2);
+        grid.apply(&frame(1, true, vec![row(0, "old"), row(1, "keep")]));
+        let before = grid.lines.clone();
+        let mut shifted = frame(2, false, vec![row(1, "new")]);
+        shifted.shift = Some(1);
+        shifted.viewport.history_epoch = 1;
+        assert!(!grid.apply(&shifted));
+        assert!(grid.desynced);
+        assert_eq!(grid.lines, before);
+        let mut recovery = frame(3, true, vec![row(0, "new"), row(1, "live")]);
+        recovery.viewport.history_epoch = 1;
+        assert!(grid.apply(&recovery));
+        assert!(!grid.desynced);
+        assert_eq!(grid.viewport.history_epoch, 1);
+        assert_eq!(grid.row_text(0), "new");
     }
 
     fn snapshot() -> Snapshot {
@@ -1437,7 +1584,100 @@ mod tests {
                     width: CellWidth::Narrow,
                 })
                 .collect(),
+            wrapped: false,
         }
+    }
+
+    #[test]
+    fn watch_pane_smoke_sequence_applies_real_events_without_changing_terminal_focus() {
+        use fleet_core::watches::{Watch, WatchChunk, WatchId, WatchStatus, WatchStream};
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet-watch-phase2", now);
+        let session = session_with("fleet/watch", &[1]);
+        let mut snapshot = snapshot();
+        snapshot.sessions = vec![session.clone()];
+        state.apply_bridge_event(BridgeEvent::Connected(Box::new(snapshot)), now);
+        state.screen = Screen::Workspace {
+            session: session.id.clone(),
+        };
+        let mut watch = Watch {
+            id: WatchId(1),
+            session: session.id.clone(),
+            terminal: TerminalId(1),
+            label: "codex".into(),
+            command: vec!["sh".into()],
+            cwd: None,
+            pid: Some(123),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            status: WatchStatus::Running,
+        };
+        state.apply_daemon_event(Event::WatchStarted(watch.clone()), now);
+        assert!(state.watches.panes[&session.id].visible);
+        assert_eq!(state.watches.panes[&session.id].selected, Some(watch.id));
+        assert!(state.tick(now + Duration::from_secs(1)));
+        state.enter_prefix();
+        assert_eq!(state.close_selected_watch(now), None);
+        assert_eq!(
+            state.watches.entries[&watch.id].watch.status,
+            WatchStatus::Running
+        );
+        assert!(!state.watches.panes[&session.id].visible);
+        assert_eq!(
+            state.toasts.last().unwrap().toast.text.as_ref(),
+            "watch still running; pane hidden"
+        );
+        state.toggle_watch_pane(now);
+        assert!(state.watches.panes[&session.id].visible);
+        for i in 0..5 {
+            state.apply_daemon_event(
+                Event::WatchOutput {
+                    watch: watch.id,
+                    chunks: vec![
+                        WatchChunk {
+                            seq: i * 2,
+                            stream: WatchStream::Stdout,
+                            text: format!("line {}\n", i + 1),
+                        },
+                        WatchChunk {
+                            seq: i * 2 + 1,
+                            stream: WatchStream::Stderr,
+                            text: format!("warn {}\n", i + 1),
+                        },
+                    ],
+                },
+                now,
+            );
+        }
+        assert_eq!(state.watches.entries[&watch.id].lines.len(), 10);
+        watch.status = WatchStatus::Exited {
+            code: Some(2),
+            signal: None,
+        };
+        state.apply_daemon_event(
+            Event::WatchExited(watch.clone()),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(state.watches.entries[&watch.id].watch.status, watch.status);
+        let duration = state.watches.entries[&watch.id].elapsed(now + Duration::from_secs(10));
+        assert!(duration >= Duration::from_secs(2) && duration < Duration::from_secs(3));
+        state.enter_prefix();
+        state.toggle_watch_pane(now);
+        assert!(!state.watches.panes[&session.id].visible);
+        state.enter_prefix();
+        state.toggle_watch_pane(now);
+        assert!(state.watches.panes[&session.id].visible);
+        state.zoomed = true;
+        assert!(state.watches.panes[&session.id].visible);
+        state.enter_prefix();
+        assert_eq!(state.close_selected_watch(now), Some(watch.id));
+        state.apply_daemon_event(Event::WatchDismissed(watch.id), now);
+        assert!(!state.watches.panes[&session.id].visible);
+        assert!(state.watches.entries.is_empty());
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+        assert_eq!(
+            state.active_session().unwrap().active_terminal,
+            Some(TerminalId(1))
+        );
     }
 
     #[test]
@@ -1500,13 +1740,17 @@ mod tests {
     #[test]
     fn mirror_grid_applies_full_then_diff_frames() {
         let mut grid = MirrorGrid::new(4, 2);
-        assert!(grid.apply(&frame(1, true, vec![row(0, "abcd"), row(1, "efgh")])));
+        let mut first = row(0, "abcd");
+        first.wrapped = true;
+        assert!(grid.apply(&frame(1, true, vec![first, row(1, "efgh")])));
         assert_eq!(grid.row_text(0), "abcd");
         assert_eq!(grid.row_text(1), "efgh");
+        assert_eq!(grid.wrapped, vec![true, false]);
 
         assert!(grid.apply(&frame(2, false, vec![row(1, "zzzz")])));
         assert_eq!(grid.row_text(0), "abcd", "untouched rows survive a diff");
         assert_eq!(grid.row_text(1), "zzzz");
+        assert_eq!(grid.wrapped, vec![true, false]);
         assert_eq!(grid.seq, 2);
     }
 

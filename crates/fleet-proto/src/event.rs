@@ -9,6 +9,14 @@ use crate::{job::JobRecord, snapshot::Snapshot, terminal::FrameUpdate};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    /// Watch registration.
+    WatchStarted,
+    /// Coalesced watch output.
+    WatchOutput,
+    /// Watch completion.
+    WatchExited,
+    /// Watch removal, including terminal close and TTL.
+    WatchDismissed,
     /// Complete domain snapshot changes.
     SnapshotChanged,
     /// Background job changes.
@@ -43,6 +51,19 @@ pub enum ToastLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    /// A child watch was registered.
+    WatchStarted(fleet_core::watches::Watch),
+    /// Retained output batched every 50 ms; sequence gaps require TailWatch.
+    WatchOutput {
+        /// Watch identifier.
+        watch: fleet_core::watches::WatchId,
+        /// Immutable sequenced output chunks.
+        chunks: Vec<fleet_core::watches::WatchChunk>,
+    },
+    /// A child exited or its owning connection disappeared.
+    WatchExited(fleet_core::watches::Watch),
+    /// A watch was removed; this never kills a process.
+    WatchDismissed(fleet_core::watches::WatchId),
     /// The authoritative domain snapshot changed.
     SnapshotChanged(Snapshot),
     /// A job was created or changed.

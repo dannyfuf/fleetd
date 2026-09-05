@@ -1,7 +1,8 @@
 //! The implementation-independent terminal-emulation contract.
 
 use fleet_proto::terminal::{
-    CursorState, FrameUpdate, KeyEvent, MouseEvent, ScrollCommand, TerminalModes,
+    CursorState, FrameUpdate, KeyEvent, MouseEvent, ScrollCommand, TerminalModes, ViewportInfo,
+    WheelEvent,
 };
 use thiserror::Error;
 
@@ -41,10 +42,21 @@ pub enum EngineError {
     Backend(String),
 }
 
+/// The live-mode decision for one wheel event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WheelAction {
+    /// Move Fleet's primary viewport.
+    Viewport(i32),
+    /// Send encoded application input to the PTY.
+    Pty(Vec<u8>),
+    /// No scrolling is supported in the active mode.
+    Drop,
+}
+
 /// Mode-aware terminal emulator used by the daemon-side host thread.
 pub trait VtEngine: Send {
     /// Constructs an empty terminal grid with bounded scrollback.
-    fn new(cols: u16, rows: u16, scrollback_lines: usize) -> Result<Self, EngineError>
+    fn new(cols: u16, rows: u16, scrollback_bytes: usize) -> Result<Self, EngineError>
     where
         Self: Sized;
 
@@ -68,6 +80,18 @@ pub trait VtEngine: Send {
 
     /// Moves the visible scrollback viewport.
     fn scroll(&mut self, command: ScrollCommand);
+
+    /// Routes wheel input using live terminal modes and Ghostty encoders.
+    fn wheel(&mut self, event: &WheelEvent) -> WheelAction;
+
+    /// Performs one bounded incremental history-compression step while idle.
+    fn compress_idle(&mut self);
+
+    /// Returns history bounds for coalescing viewport commands.
+    fn viewport(&self) -> ViewportInfo;
+
+    /// Returns the current viewport height.
+    fn rows(&self) -> u16;
 
     /// Returns the current bottom-relative scrollback offset.
     fn viewport_offset(&self) -> usize;

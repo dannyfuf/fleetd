@@ -163,6 +163,12 @@ pub struct KeepAliveRuleMatch {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ResponseBody {
+    /// Registered watch identifier.
+    WatchStarted(fleet_core::watches::WatchId),
+    /// Session's current and recently completed watches.
+    Watches(Vec<fleet_core::watches::Watch>),
+    /// Atomic output catch-up result.
+    WatchTail(crate::watch::WatchTail),
     /// Successful protocol negotiation.
     Hello {
         /// Negotiated protocol version.
@@ -253,7 +259,7 @@ mod tests {
             id: 9,
             result: Ok(ResponseBody::Version {
                 version: "fleet 0.1.0".to_owned(),
-                protocol: 1,
+                protocol: crate::PROTOCOL_VERSION,
             }),
         };
         let json = serde_json::to_string(&response).unwrap_or_else(|error| panic!("{error}"));

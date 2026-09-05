@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn a_version_mismatch_is_not_a_crash_and_never_offers_retry() {
         let mismatch = DaemonFailure::classify(
-            "Fleet daemon rejected the handshake: unsupported protocol 2; expected 1",
+            "Fleet daemon rejected the handshake: unsupported protocol 2; expected 3",
             false,
         );
         assert_eq!(mismatch, DaemonFailure::VersionMismatch);
@@ -380,7 +380,10 @@ mod tests {
     #[test]
     fn an_unknown_daemon_protocol_is_amber_never_ok() {
         assert_eq!(protocol_row(Some(APP_PROTOCOL)).status, DoctorStatus::Ok);
-        assert_eq!(protocol_row(Some(2)).status, DoctorStatus::Fail);
+        assert_eq!(
+            protocol_row(Some(APP_PROTOCOL.saturating_add(1))).status,
+            DoctorStatus::Fail
+        );
         assert_eq!(
             protocol_row(None).status,
             DoctorStatus::Warn,

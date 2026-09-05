@@ -43,6 +43,11 @@ pub const WHAT_KEEPS_RUNNING: &str = "What keeps running. Jobs and sessions live
 Closing a dialog, leaving a screen or quitting Fleet (`ctrl-q`) never stops them. Only `c` in \
 the Jobs panel, `K`, and `ctrl-shift-q` stop things. Terminals do not survive a daemon restart.";
 
+/// The terminal clipboard behaviour that is not expressible as a keymap row.
+pub const TERMINAL_CLIPBOARD: &str = "Terminal clipboard. Drag selects, double-click selects a \
+word, and triple-click selects a line; selection copies immediately. `cmd-c` copies the \
+selection; `cmd-v` pastes. `ctrl-c` and `ctrl-v` stay terminal keys.";
+
 /// Splits a backticked sentence into the plain text and the byte ranges of its key names.
 ///
 /// The app has no markdown renderer and needs none: the one paragraph it shows uses backticks
@@ -289,9 +294,9 @@ pub fn pretty_keys(keys: &str) -> String {
 ///
 /// It is one shaped run rather than a row of elements so the sentence wraps like a sentence;
 /// only the face and the contrast change inside it.
-fn what_keeps_running(cx: &App) -> AnyElement {
+fn key_paragraph_view(markdown: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let (text, keys) = key_paragraph(WHAT_KEEPS_RUNNING);
+    let (text, keys) = key_paragraph(markdown);
     let key_color = theme.colors.text;
     let mono = theme.font_mono.clone();
     let highlights = keys
@@ -333,6 +338,7 @@ pub(crate) fn render(
         (theme.space.lg, theme.space.xxs)
     };
     let paragraph = what_keeps_running(cx);
+    let clipboard = key_paragraph_view(TERMINAL_CLIPBOARD, cx);
     let app = state.read(cx);
     let from_terminal = matches!(app.screen, Screen::Workspace { .. });
     let (version, uptime) = app.snapshot.as_ref().map_or_else(
@@ -412,6 +418,7 @@ pub(crate) fn render(
         .flex_col()
         .gap(gap)
         .child(paragraph)
+        .child(clipboard)
         .child(Divider::horizontal())
         .child(
             div()
@@ -444,9 +451,35 @@ pub(crate) fn render(
         .into_any_element()
 }
 
+fn what_keeps_running(cx: &App) -> AnyElement {
+    key_paragraph_view(WHAT_KEEPS_RUNNING, cx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_lists_watch_visibility_and_dismissal_keys() {
+        let groups = groups();
+        let prefix = groups
+            .iter()
+            .flat_map(|g| &g.sections)
+            .find(|s| s.context == "Workspace > Prefix")
+            .unwrap();
+        assert!(
+            prefix
+                .rows
+                .iter()
+                .any(|(key, action)| key == "v" && action == "toggle watch pane")
+        );
+        assert!(
+            prefix
+                .rows
+                .iter()
+                .any(|(key, action)| key == "V" && action == "dismiss watch")
+        );
+    }
 
     #[test]
     fn every_group_has_rows_and_no_binding_is_orphaned() {

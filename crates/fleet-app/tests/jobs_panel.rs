@@ -284,7 +284,7 @@ async fn a_shutdown_reads_as_a_lost_daemon_not_as_a_crash() {
     assert!(DaemonFailure::classify("could not connect to Fleet daemon", true).is_retryable());
     assert!(
         !DaemonFailure::classify(
-            "Fleet daemon rejected the handshake: unsupported protocol 2; expected 1",
+            "Fleet daemon rejected the handshake: unsupported protocol 2; expected 3",
             false
         )
         .is_retryable()

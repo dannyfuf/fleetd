@@ -16,12 +16,11 @@ use crate::{
         shell::{Shell, ShellCommand},
     },
     jobs::JobManager,
-    services::update::Update,
+    services::{hosts::Hosts, update::Update},
     stores::config::ConfigStore,
 };
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-const REMOTE_UNSUPPORTED: &str = "remote hosts are not supported yet";
 
 /// Environment diagnostics and self-update service.
 #[derive(Clone)]
@@ -98,11 +97,31 @@ impl Doctor {
             },
             writable,
         ];
-        checks.extend(config.hosts.keys().map(|host| DoctorCheck {
-            check: format!("host {host}"),
-            status: DoctorStatus::Warn,
-            detail: REMOTE_UNSUPPORTED.to_owned(),
-        }));
+        let hosts = Hosts::new(home, Arc::clone(&self.shell));
+        checks.extend(
+            futures_util::future::join_all(config.hosts.iter().map(|(id, entry)| {
+                let hosts = &hosts;
+                async move {
+                    let (status, version) = hosts.probe_with_version(id, entry).await;
+                    DoctorCheck {
+                        check: format!("host {id}"),
+                        status: if status.reachable {
+                            DoctorStatus::Ok
+                        } else {
+                            DoctorStatus::Fail
+                        },
+                        detail: status.error.unwrap_or_else(|| {
+                            format!(
+                                "{} · {}",
+                                entry.ssh,
+                                version.as_deref().unwrap_or("swarm (version unknown)")
+                            )
+                        }),
+                    }
+                }
+            }))
+            .await,
+        );
         Ok(checks)
     }
 

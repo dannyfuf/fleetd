@@ -114,7 +114,7 @@ impl Default for ConnectionState {
 }
 
 impl Client {
-    /// Connects to `home/fleetd.sock`, negotiates protocol version one, and starts the connection actor.
+    /// Connects to `home/fleetd.sock`, negotiates Fleet's current protocol, and starts the actor.
     pub async fn connect(home: impl AsRef<Path>) -> Result<Self, ConnectError> {
         let home = home.as_ref().to_path_buf();
         let state = ConnectionState::default();
@@ -547,6 +547,10 @@ fn expect_ack(body: ResponseBody) -> Result<(), ConnectError> {
 
 fn all_event_kinds() -> Vec<EventKind> {
     vec![
+        EventKind::WatchStarted,
+        EventKind::WatchOutput,
+        EventKind::WatchExited,
+        EventKind::WatchDismissed,
         EventKind::SnapshotChanged,
         EventKind::JobUpdated,
         EventKind::SessionChanged,

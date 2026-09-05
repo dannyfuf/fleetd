@@ -17,7 +17,7 @@ use fleet_core::{
 };
 use fleet_proto::{
     event::Event,
-    terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand},
+    terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
 use fleet_term::{HostEvent, PtyOptions, TerminalHost, TerminalHostOptions};
 use tokio::sync::broadcast;
@@ -31,7 +31,6 @@ use crate::{
 
 const INITIAL_COLS: u16 = 120;
 const INITIAL_ROWS: u16 = 36;
-const SCROLLBACK_LINES: usize = 10_000;
 
 #[derive(Default)]
 struct Registry {
@@ -40,12 +39,14 @@ struct Registry {
     hosts: HashMap<TerminalId, Arc<TerminalHost>>,
     attachments: HashMap<TerminalId, usize>,
     next_terminal: u64,
+    next_sequences: HashMap<TerminalId, u64>,
     active_worktree: Option<SessionId>,
 }
 
 /// Runtime seam shared by the session and sleep services without persisting PTYs.
 pub(crate) struct SessionRuntime {
     registry: Mutex<Registry>,
+    watches: super::watches::Watches,
     frames: broadcast::Sender<FrameUpdate>,
     process: Mutex<Option<Arc<dyn Process>>>,
     events: Mutex<Option<BroadcastBus>>,
@@ -58,6 +59,7 @@ impl SessionRuntime {
                 next_terminal: 1,
                 ..Registry::default()
             }),
+            watches: super::watches::Watches::default(),
             frames,
             process: Mutex::new(None),
             events: Mutex::new(None),
@@ -65,6 +67,7 @@ impl SessionRuntime {
     }
 
     fn register_events(&self, events: BroadcastBus) {
+        self.watches.with_events(events.clone());
         *self
             .events
             .lock()
@@ -217,6 +220,7 @@ impl SessionRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let session_id = registry.terminal_sessions.remove(&terminal)?;
+            self.watches.remove_terminal(terminal);
             registry.attachments.remove(&terminal);
             let host = registry.hosts.remove(&terminal);
             let session = registry.sessions.get_mut(&session_id)?;
@@ -259,6 +263,7 @@ impl SessionRuntime {
                 .terminals
                 .into_iter()
                 .filter_map(|terminal| {
+                    self.watches.remove_terminal(terminal.id);
                     registry.terminal_sessions.remove(&terminal.id);
                     registry.attachments.remove(&terminal.id);
                     registry.hosts.remove(&terminal.id)
@@ -301,6 +306,55 @@ pub struct Sessions {
 }
 
 impl Sessions {
+    /// Shared watch registry for this terminal runtime.
+    #[must_use]
+    pub fn watches(&self) -> super::watches::Watches {
+        self.runtime.watches.clone()
+    }
+
+    pub(crate) fn start_watch(
+        &self,
+        owner: u64,
+        body: fleet_proto::request::RequestBody,
+    ) -> DaemonResult<fleet_core::watches::WatchId> {
+        use fleet_core::watches::{Watch, WatchId, WatchStatus};
+        let fleet_proto::request::RequestBody::StartWatch {
+            terminal,
+            label,
+            command,
+            cwd,
+            pid,
+        } = body
+        else {
+            return Err(DaemonError::Validation("expected StartWatch".into()));
+        };
+        let registry = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = registry
+            .terminal_sessions
+            .get(&terminal)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound(format!("terminal {terminal}")))?;
+        // Keep the terminal lock until insertion, so close cannot leave an orphan watch.
+        Ok(self.runtime.watches.start(
+            owner,
+            Watch {
+                id: WatchId(0),
+                session,
+                terminal,
+                label,
+                command,
+                cwd,
+                pid,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                status: WatchStatus::Running,
+            },
+        ))
+    }
+
     /// Creates an empty runtime session registry.
     #[must_use]
     pub fn new(config: Arc<ConfigStore>, state: Arc<StateStore>) -> Self {
@@ -543,7 +597,15 @@ impl Sessions {
             id
         };
 
-        let (terminal, host) = spawn_terminal(terminal_id, &session, name, command, cwd)?;
+        let (terminal, host) = spawn_terminal(
+            terminal_id,
+            &session,
+            name,
+            command,
+            cwd,
+            self.config.load().await?.terminal.scrollback_bytes,
+            1,
+        )?;
         forward_host_events(Arc::clone(&self.runtime), terminal_id, &host)?;
         let host = Arc::new(host);
         {
@@ -638,7 +700,7 @@ impl Sessions {
 
     /// Recreates an exited terminal from its retained command and working directory.
     pub async fn restart_terminal(&self, terminal: TerminalId) -> DaemonResult<Terminal> {
-        let (session_id, old) = {
+        let (session_id, old, starting_sequence) = {
             let registry = self
                 .runtime
                 .registry
@@ -665,10 +727,21 @@ impl Sessions {
                     "terminal `{terminal}` is still running"
                 )));
             }
-            (session_id, entry)
+            (
+                session_id,
+                entry,
+                registry.next_sequences.get(&terminal).copied().unwrap_or(1),
+            )
         };
-        let (replacement, host) =
-            spawn_terminal(terminal, &session_id, old.name, old.command, old.cwd)?;
+        let (replacement, host) = spawn_terminal(
+            terminal,
+            &session_id,
+            old.name,
+            old.command,
+            old.cwd,
+            self.config.load().await?.terminal.scrollback_bytes,
+            starting_sequence,
+        )?;
         forward_host_events(Arc::clone(&self.runtime), terminal, &host)?;
         {
             let mut registry = self
@@ -772,12 +845,14 @@ impl Sessions {
         let frame = host
             .attach(cols, rows)
             .map_err(|error| terminal_error(terminal, error))?;
-        let _ = self.runtime.frames.send(frame);
         let mut registry = self
             .runtime
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = registry.next_sequences.entry(terminal).or_insert(1);
+        *next = (*next).max(frame.seq.saturating_add(1));
+        let _ = self.runtime.frames.send(frame);
         *registry.attachments.entry(terminal).or_default() += 1;
         drop(registry);
         self.runtime.notify_terminal(terminal);
@@ -835,6 +910,25 @@ impl Sessions {
     pub async fn scroll(&self, terminal: TerminalId, scroll: ScrollCommand) -> DaemonResult<()> {
         self.host_or_not_found(terminal)?
             .scroll(scroll)
+            .map_err(|error| terminal_error(terminal, error))
+    }
+
+    /// Routes wheel input on the owning host thread.
+    pub async fn wheel(&self, terminal: TerminalId, wheel: WheelEvent) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .wheel(wheel)
+            .map_err(|error| terminal_error(terminal, error))
+    }
+
+    /// Routes a viewport shortcut on the owning host thread.
+    pub async fn scroll_or_key(
+        &self,
+        terminal: TerminalId,
+        scroll: ScrollCommand,
+        key: KeyEvent,
+    ) -> DaemonResult<()> {
+        self.host_or_not_found(terminal)?
+            .scroll_or_key(scroll, key)
             .map_err(|error| terminal_error(terminal, error))
     }
 
@@ -1000,11 +1094,14 @@ fn spawn_terminal(
     name: String,
     command: String,
     cwd: String,
+    scrollback_bytes: usize,
+    starting_sequence: u64,
 ) -> DaemonResult<(Terminal, TerminalHost)> {
     let pty = PtyOptions::login_shell(
         PathBuf::from(&cwd),
         session.as_str(),
         &name,
+        terminal,
         true,
         INITIAL_COLS,
         INITIAL_ROWS,
@@ -1012,7 +1109,8 @@ fn spawn_terminal(
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal,
         pty,
-        scrollback_lines: SCROLLBACK_LINES,
+        scrollback_bytes,
+        starting_sequence,
         initial_command: Some(command.clone()),
     })
     .map_err(|error| terminal_error(terminal, error))?;
@@ -1057,6 +1155,8 @@ fn forward_host_events(
                             .registry
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let next = registry.next_sequences.entry(terminal).or_insert(1);
+                        *next = (*next).max(frame.seq.saturating_add(1));
                         if let Some(session_id) = registry.terminal_sessions.get(&terminal).cloned()
                             && let Some(session) = registry.sessions.get_mut(&session_id)
                             && session.active_terminal != Some(terminal)

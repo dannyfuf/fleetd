@@ -1674,6 +1674,7 @@ dependencies = [
  "fleet-core",
  "fleet-proto",
  "futures-util",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",
@@ -1790,6 +1791,7 @@ dependencies = [
  "fleet-proto",
  "libghostty-vt",
  "portable-pty",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
 ]

@@ -567,6 +567,8 @@ pub struct TerminalGrid {
     dimmed: bool,
     #[allow(clippy::type_complexity)]
     on_resize: Option<Box<dyn Fn(usize, usize, &mut Window, &mut App) + 'static>>,
+    #[allow(clippy::type_complexity)]
+    on_geometry: Option<Box<dyn Fn(Bounds<Pixels>, CellMetrics) + 'static>>,
 }
 
 impl TerminalGrid {
@@ -585,6 +587,7 @@ impl TerminalGrid {
             frame_size: None,
             dimmed: false,
             on_resize: None,
+            on_geometry: None,
         }
     }
 
@@ -673,6 +676,12 @@ impl TerminalGrid {
         on_resize: impl Fn(usize, usize, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_resize = Some(Box::new(on_resize));
+        self
+    }
+
+    /// Reports the content bounds (padding already removed) and measured cell metrics.
+    pub fn on_geometry(mut self, report: impl Fn(Bounds<Pixels>, CellMetrics) + 'static) -> Self {
+        self.on_geometry = Some(Box::new(report));
         self
     }
 
@@ -844,6 +853,7 @@ impl RenderOnce for TerminalGrid {
         let selection = self.selection.map(GridSelection::normalized);
         let focused = self.focused;
         let on_resize = self.on_resize;
+        let on_geometry = self.on_geometry;
         let selection_color = theme.terminal.selection;
         let cursor_color = theme.terminal.cursor;
         let background = theme.terminal.background;
@@ -851,6 +861,9 @@ impl RenderOnce for TerminalGrid {
         let painter = canvas(
             move |bounds, window, cx| {
                 let metrics = CellMetrics::measure(&theme, window, cx);
+                if let Some(report) = &on_geometry {
+                    report(bounds, metrics);
+                }
                 if let Some(on_resize) = on_resize.as_ref() {
                     let (cols, rows) = metrics.fit(bounds.size);
                     if cols > 0 && rows > 0 && (cols, rows) != declared {

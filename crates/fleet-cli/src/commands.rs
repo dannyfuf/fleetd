@@ -83,6 +83,11 @@ fn run_from(arguments: Vec<OsString>) -> i32 {
         print_error(&error, json_requested);
         return FAILURE;
     };
+    let command = match command {
+        Command::Exec(args) => return crate::exec::run(args),
+        Command::WatchChild(args) => return crate::exec::child(args),
+        other => other,
+    };
     if matches!(command, Command::Version) {
         println!("{VERSION_DISPLAY}");
         return 0;
@@ -132,6 +137,9 @@ async fn run_command(command: Command) -> Result<CommandOutput, ProtoError> {
 
 async fn execute(client: &Client, command: Command) -> Result<CommandOutput, ProtoError> {
     match command {
+        Command::Exec(_) | Command::WatchChild(_) => {
+            Err(validation("exec must run before daemon autostart"))
+        }
         Command::Create(arguments) => create(client, arguments).await,
         Command::Open(arguments) => open(client, arguments).await,
         Command::List(arguments) => list(client, arguments).await,
@@ -561,7 +569,7 @@ where
         .map_err(|error| validation(error.to_string()))
 }
 
-fn fleet_home() -> Result<PathBuf, ProtoError> {
+pub(crate) fn fleet_home() -> Result<PathBuf, ProtoError> {
     if let Some(home) = std::env::var_os("FLEET_HOME") {
         return Ok(PathBuf::from(home));
     }
@@ -580,7 +588,9 @@ fn command_requests_json(command: &Command) -> bool {
         Command::Prune(arguments) => arguments.json,
         Command::Kill(arguments) => arguments.json,
         Command::Sleep(arguments) => arguments.json,
-        Command::Open(_)
+        Command::Exec(_)
+        | Command::WatchChild(_)
+        | Command::Open(_)
         | Command::Path(_)
         | Command::Agent(_)
         | Command::Doctor
@@ -637,6 +647,7 @@ mod tests {
     use std::path::Path;
 
     use fleet_proto::{
+        PROTOCOL_VERSION,
         codec::FleetCodec,
         error::{ErrorKind, ProtoError},
         job::{JobKind, JobRecord, JobStatus},
@@ -809,12 +820,18 @@ mod tests {
 
     async fn authenticate(transport: &mut ServerTransport) {
         let hello = next_request(transport).await;
-        assert!(matches!(hello.body, RequestBody::Hello { protocol: 1, .. }));
+        assert!(matches!(
+            hello.body,
+            RequestBody::Hello {
+                protocol: PROTOCOL_VERSION,
+                ..
+            }
+        ));
         send_result(
             transport,
             hello.id,
             Ok(ResponseBody::Hello {
-                protocol: 1,
+                protocol: PROTOCOL_VERSION,
                 server: "test-daemon".to_owned(),
             }),
         )

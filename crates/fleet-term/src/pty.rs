@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_channel::{Receiver, TryRecvError};
+use fleet_core::ids::TerminalId;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use thiserror::Error;
 
@@ -37,6 +38,7 @@ impl PtyOptions {
         cwd: impl Into<PathBuf>,
         session: impl AsRef<OsStr>,
         terminal: impl AsRef<OsStr>,
+        terminal_id: TerminalId,
         _ghostty: bool,
         cols: u16,
         rows: u16,
@@ -55,6 +57,10 @@ impl PtyOptions {
                 (
                     OsString::from("FLEET_TERMINAL"),
                     terminal.as_ref().to_owned(),
+                ),
+                (
+                    OsString::from("FLEET_TERMINAL_ID"),
+                    OsString::from(terminal_id.to_string()),
                 ),
             ],
             cols,
@@ -154,6 +160,8 @@ impl Pty {
             .master
             .take_writer()
             .map_err(|error| PtyError::Setup(error.to_string()))?;
+        // Keep draining while the host writes: an echoing child can otherwise deadlock
+        // a large paste. The host separately bounds parsing work per iteration.
         let (sender, output) = async_channel::unbounded();
         thread::Builder::new()
             .name("fleet-pty-reader".to_owned())
@@ -266,7 +274,8 @@ mod tests {
 
     #[test]
     fn login_shell_sets_fleet_environment() {
-        let options = PtyOptions::login_shell("/tmp", "session", "editor", true, 80, 24);
+        let options =
+            PtyOptions::login_shell("/tmp", "session", "editor", TerminalId(42), true, 80, 24);
         assert!(
             options
                 .env
@@ -277,12 +286,30 @@ mod tests {
                 .env
                 .contains(&(OsString::from("FLEET_SESSION"), OsString::from("session")))
         );
+        assert!(
+            options
+                .env
+                .contains(&(OsString::from("FLEET_TERMINAL"), OsString::from("editor")))
+        );
+        assert!(
+            options
+                .env
+                .contains(&(OsString::from("FLEET_TERMINAL_ID"), OsString::from("42")))
+        );
     }
 
     #[test]
     fn login_shell_uses_portable_term_for_every_backend() {
         for ghostty in [false, true] {
-            let options = PtyOptions::login_shell("/tmp", "session", "editor", ghostty, 80, 24);
+            let options = PtyOptions::login_shell(
+                "/tmp",
+                "session",
+                "editor",
+                TerminalId(42),
+                ghostty,
+                80,
+                24,
+            );
             let term = options
                 .env
                 .iter()

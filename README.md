@@ -19,17 +19,18 @@ survives closing a dialog, workspace, or the entire UI.
 ## Build and run
 
 ```sh
-scripts/bootstrap-zig.sh
-cargo build --release
-./target/release/fleet
+make bootstrap
+make run
 ```
 
-Running `fleet` without a subcommand opens the app. The client auto-spawns `fleetd` when its Unix
-socket is unavailable. Fleet stores config, state, repositories, worktrees, caches, logs, trash,
-and daemon files under `FLEET_HOME`, which defaults to `~/.fleet`:
+`make run` builds the workspace, restarts `fleetd` from the same debug build, and opens the app.
+Use `make run-release` for an optimized build. Running `fleet` without a subcommand opens the app.
+The client auto-spawns `fleetd` when its Unix socket is unavailable. Fleet stores config, state,
+repositories, worktrees, caches, logs, trash, and daemon files under `FLEET_HOME`, which defaults to
+`~/.fleet`:
 
 ```sh
-FLEET_HOME=/path/to/fleet-home ./target/release/fleet
+FLEET_HOME=/path/to/fleet-home make run
 ```
 
 To start copying compatible swarm v1 config and state without modifying `~/.swarm`:
@@ -54,6 +55,7 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet status [--json]` | Refresh local worktree runtime status. | `protocol`, `statuses` |
 | `fleet path <ID>` | Print an exact local worktree's absolute path. | — |
 | `fleet sleep [SESSION] [--json]` | Apply sleep policy to a session or worktree; a sole running session is inferred. | `protocol`, `kept`, `closed`, `sessionKilled` |
+| `fleet exec [--watch] [--label TEXT] -- CMD [ARGS...]` | Run a child with byte-exact passthrough; optionally publish a read-only subagent watch using `FLEET_SESSION` and numeric `FLEET_TERMINAL_ID` (`FLEET_TERMINAL` remains the human name). | Raw child stdout/stderr; child exit status |
 | `fleet agent [claude\|opencode]` | Ensure a repository-level agent session exists; defaults to `config.agent`. | — |
 | `fleet doctor` | Run environment diagnostics; exits unsuccessfully when any check fails. | — |
 | `fleet import --from-swarm` | Start an import of compatible `~/.swarm/config.json` and `state.json`. | — |
@@ -102,7 +104,10 @@ The 15 keys and key groups to learn first are:
 | `?` | Open help. |
 | `Esc` / `q`, `ctrl-q`, `ctrl-shift-q` | Close the top layer; quit the app; or quit and stop the daemon. |
 
-Inside a terminal, every bare key goes to the PTY. `ctrl-s` is the only Workspace prefix:
+Inside a terminal, every bare key goes to the PTY. Dragging selects text and copies it immediately;
+`cmd-c` copies the current selection and `cmd-v` pastes through the terminal's bracketed-paste
+path. Soft-wrapped visual rows copy as one logical line. `ctrl-c` and `ctrl-v` remain terminal
+keys. `ctrl-s` is the only Workspace prefix:
 `ctrl-s s` returns to Hub, `ctrl-s S` sleeps then returns, `ctrl-s 1`–`9` switches tabs,
 `ctrl-s h`/`l` changes tabs, `ctrl-s w` opens the last session, `ctrl-s c`/`x` creates/closes a
 tab, `ctrl-s [` enters Scroll, `ctrl-s ]` pastes, and `ctrl-s J`/`?` opens Jobs/help. Use
@@ -133,10 +138,11 @@ and the [design system](docs/DESIGN-SYSTEM.md) for the full contracts.
 The checked-in `Makefile` provides all workspace targets:
 
 ```sh
+make help
 make check
 make build
-make run-app
-make run-daemon
+make run
+make daemon
 make test
 make fmt
 make clippy
@@ -170,5 +176,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details, logs, and script
 
 ## Status
 
-Fleet v1 is local-only: remote hosts are not supported yet. Terminal sessions survive closing the
+Fleet v1 is local-only: `fleetd` probes configured remote hosts over SSH every minute and reports
+reachability in the Hub and `fleet doctor`, but remote worktree, session, and repository operations
+are not supported yet. Terminal sessions survive closing the
 app because `fleetd` owns them, but they do not survive a daemon restart.
