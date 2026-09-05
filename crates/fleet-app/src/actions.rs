@@ -211,8 +211,12 @@ pub mod workspace {
     actions!(
         workspace,
         [
-            /// `ctrl-s` — enter the one-shot prefix mode. The only app key over a terminal grid.
+            /// `ctrl-s` — enter the one-shot prefix mode.
             EnterPrefix,
+            /// `cmd-c` — copy the current terminal selection, when one exists.
+            CopySelection,
+            /// `cmd-v` — paste the clipboard through the terminal's mode-aware paste path.
+            PasteClipboard,
         ]
     );
 }

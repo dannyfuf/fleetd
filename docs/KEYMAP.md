@@ -5,8 +5,9 @@ app; `fleet-app` registers exactly these via gpui key contexts. Lowercase = safe
 uppercase = stronger variant. `ctrl-c` never quits the app (it belongs to terminals); quitting
 is `ctrl-q` (with a confirm only if a job is running and the user asked to be warned).
 `Esc` never quits. `q` never quits: it closes the topmost overlay, and where nothing is open it
-is unbound. Over a terminal grid no bare key is ever an app affordance — every Workspace
-affordance is written and bound with its `ctrl-s` prefix.
+is unbound. Over a terminal grid no bare key is ever an app affordance. The standard macOS
+clipboard shortcuts are the only direct exceptions; every Workspace command uses its `ctrl-s`
+prefix.
 
 This file is the single source of truth for keys. `docs/UX-SPEC.md` describes screens and cites
 this file; where the two disagree, this file wins.
@@ -111,7 +112,33 @@ depending on row state — same key, same pane, same mode, different blast radiu
 
 ## Workspace (Terminal mode)
 
-All keys go to the PTY except `ctrl-s`, which enters Prefix for one key:
+All keys go to the PTY except these direct terminal affordances:
+
+| Key | Action |
+| --- | --- |
+| `cmd-c` | copy the current selection; with no selection, forward the key to the PTY |
+| `cmd-v` | paste clipboard through the daemon's bracketed-paste-aware path |
+| `ctrl-s` | enter Prefix for one key |
+
+Plain left-drag selects cells in reading order, double-click selects a word, and triple-click
+selects a line. Non-empty text is copied on mouse-up, including inside alternate-screen programs
+and while terminal mouse reporting is active. A click without a drag clears the selection. Typing
+or pasting clears mouse selection; ordinary terminal repaints preserve it in absolute scrollback
+coordinates. Switching between primary and alternate screen, changing the active terminal, or
+resizing the grid columns clears it because those events change the coordinate space.
+Trailing padding is stripped from hard rows and wide cells are copied once. Soft-wrapped rows retain
+their cells and join directly to the following visual row; hard row boundaries copy as newlines.
+While a selection exists, Fleet caches only its visible rows, up to 5,000 rows, and skips repeated
+renders of the same frame and viewport. This lets selections that move partly or fully outside the
+mirror still copy. If a required row is no longer cached, Fleet clears the selection and reports
+“selection scrolled away” without changing the clipboard. Fleet clears selection coordinates when
+the daemon's `historyEpoch` advances after history shrinks, its tracked oldest row is discarded,
+a column change reflows it, or output arrives at the nominal history bound; viewport scrolling
+alone preserves them.
+`ctrl-c` remains the PTY interrupt and `ctrl-v` remains available to shells and applications
+(quoted insert / block selection); neither is a Fleet clipboard binding.
+
+`ctrl-s` then accepts one of:
 
 | After `ctrl-s` | Action |
 | --- | --- |
@@ -142,8 +169,9 @@ kills nothing but stops the terminals) are one shift apart. This is the riskiest
 the map; it is allowed only because it follows the uppercase-is-stronger rule and because sleep
 is reversible.
 
-**No bare keys over a terminal.** `!` is `ctrl-s !` here, never bare — the Workspace has exactly
-one escape key, `ctrl-s`. Affordances drawn over the grid are written `^s r`, `^s l`, `^s ⏎`.
+**No bare Workspace commands over a terminal.** `!` is `ctrl-s !` here, never bare. Affordances
+drawn over the grid are written `^s r`, `^s l`, `^s ⏎`; `cmd-c` / `cmd-v` are clipboard actions,
+not modal Workspace commands.
 
 ## Wheel and viewport shortcuts
 

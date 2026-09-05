@@ -283,6 +283,7 @@ mod tests {
     use std::sync::Arc;
 
     use fleet_proto::{
+        PROTOCOL_VERSION,
         codec::FleetCodec,
         request::{Request, RequestBody},
         response::{Response, ResponseBody},
@@ -332,7 +333,7 @@ mod tests {
             .send(Request {
                 id: 1,
                 body: RequestBody::Hello {
-                    protocol: fleet_proto::PROTOCOL_VERSION,
+                    protocol: PROTOCOL_VERSION,
                     client: "test".to_owned(),
                 },
             })
@@ -341,7 +342,7 @@ mod tests {
         assert!(matches!(
             next_response(&mut client).await.result,
             Ok(ResponseBody::Hello {
-                protocol: fleet_proto::PROTOCOL_VERSION,
+                protocol: PROTOCOL_VERSION,
                 ..
             })
         ));

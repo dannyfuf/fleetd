@@ -15,12 +15,13 @@ use libghostty_vt::{
     mouse::{Encoder as MouseEncoder, EncoderSize as MouseEncoderSize},
     paste,
     render::{CellIterator, CursorVisualStyle, Dirty, RowIterator},
-    screen::{CellWide, Screen},
+    screen::{CellWide, Screen, TrackedGridRef},
     style::{Style, StyleColor, Underline},
     terminal::{
         CompressionActivity, CompressionMode, CompressionResult, ConformanceLevel,
-        DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, PrimaryDeviceAttributes,
-        ScrollViewport, SecondaryDeviceAttributes, SizeReportSize, TertiaryDeviceAttributes,
+        DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, Point, PointCoordinate,
+        PointSpace, PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
+        SizeReportSize, TertiaryDeviceAttributes,
     },
 };
 use tracing::warn;
@@ -45,6 +46,12 @@ pub struct GhosttyEngine {
     events: Arc<Mutex<Vec<EngineEvent>>>,
     last_cursor: CursorState,
     last_frame_title: Option<String>,
+    last_row_wrapped: Vec<bool>,
+    history_epoch: u64,
+    last_frame_history_epoch: u64,
+    last_scrollback_len: usize,
+    oldest_history: Option<TrackedGridRef>,
+    output_since_frame: bool,
     cols: u16,
     rows: u16,
 }
@@ -66,6 +73,7 @@ impl GhosttyEngine {
     }
 
     fn try_take_frame(&mut self, full: bool) -> Result<FrameUpdate, EngineError> {
+        let full = full || self.history_epoch != self.last_frame_history_epoch;
         let snapshot = Self::backend(self.render_state.update(&self.terminal))?;
         let cols = Self::backend(snapshot.cols())?;
         let rows = Self::backend(snapshot.rows())?;
@@ -78,10 +86,17 @@ impl GhosttyEngine {
         let render_all = full || (dirty == Dirty::Full && shift.is_none());
         let cursor = cursor_from_snapshot(&snapshot, self.last_cursor);
         let mut rows_changed = Vec::new();
+        let mut row_wrapped = Vec::with_capacity(usize::from(rows));
         let mut row_iteration = Self::backend(self.row_iterator.update(&snapshot))?;
         let mut index = 0_u16;
         while let Some(row) = row_iteration.next() {
             let row_dirty = Self::backend(row.dirty())?;
+            let wrapped = Self::backend(Self::backend(row.raw_row())?.is_wrapped())?;
+            let wrap_changed = usize::try_from(i32::from(index) + shift.unwrap_or(0))
+                .ok()
+                .and_then(|source| self.last_row_wrapped.get(source))
+                != Some(&wrapped);
+            row_wrapped.push(wrapped);
             let exposed = shift.is_some_and(|shift| {
                 if shift > 0 {
                     index >= rows - shift as u16
@@ -89,7 +104,7 @@ impl GhosttyEngine {
                     index < shift.unsigned_abs() as u16
                 }
             });
-            if render_all || exposed || (shift.is_none() && row_dirty) {
+            if render_all || exposed || (shift.is_none() && row_dirty) || wrap_changed {
                 let mut cells = Vec::with_capacity(usize::from(cols));
                 {
                     let mut cell_iteration = Self::backend(self.cell_iterator.update(row))?;
@@ -97,7 +112,11 @@ impl GhosttyEngine {
                         cells.push(convert_cell(cell)?);
                     }
                 }
-                rows_changed.push(RowUpdate { index, cells });
+                rows_changed.push(RowUpdate {
+                    index,
+                    cells,
+                    wrapped,
+                });
             }
             Self::backend(row.set_dirty(false))?;
             index = index.saturating_add(1);
@@ -106,6 +125,7 @@ impl GhosttyEngine {
 
         self.cols = cols;
         self.rows = rows;
+        self.last_row_wrapped = row_wrapped;
         self.last_cursor = cursor;
         let current_title = self.title();
         let title = if render_all || current_title != self.last_frame_title {
@@ -114,6 +134,7 @@ impl GhosttyEngine {
             None
         };
         self.last_frame_title = current_title;
+        self.last_frame_history_epoch = self.history_epoch;
         self.reusable_rows = true;
         self.pending_shift = 0;
 
@@ -133,11 +154,64 @@ impl GhosttyEngine {
     }
 
     fn viewport_info(&self) -> ViewportInfo {
+        let scrollback_len = self.terminal.scrollback_rows().unwrap_or_default();
         ViewportInfo {
-            scrollback_len: self.terminal.scrollback_rows().unwrap_or_default(),
+            scrollback_len,
             offset: self.viewport_offset(),
+            history_epoch: self.history_epoch,
         }
     }
+
+    /// Advances the absolute-row epoch when Ghostty can no longer preserve row identity.
+    ///
+    /// `TrackedGridRef` is the binding's page-list-aware identity primitive: the reference follows
+    /// the oldest history cell through normal appends and viewport movement, but loses its value or
+    /// moves away from history row zero when that row is pruned/reset. Length shrink catches clear
+    /// and resize cases directly. Output without an available tracker conservatively invalidates
+    /// identity; the byte budget cannot be compared to a count of history rows.
+    fn update_history_epoch(&mut self, had_output: bool) {
+        let scrollback_len = self.terminal.scrollback_rows().unwrap_or_default();
+        let oldest_rebased = self.oldest_history.as_ref().is_some_and(|oldest| {
+            !matches!(
+                oldest.point(PointSpace::History),
+                Ok(Some(PointCoordinate { x: 0, y: 0 }))
+            )
+        });
+        let tracker_missing = self.last_scrollback_len > 0
+            && scrollback_len > 0
+            && self.oldest_history.is_none()
+            && had_output;
+        if history_identity_changed(
+            self.last_scrollback_len,
+            scrollback_len,
+            oldest_rebased,
+            tracker_missing,
+        ) {
+            self.history_epoch = self.history_epoch.saturating_add(1);
+            self.oldest_history = None;
+            self.reusable_rows = false;
+            self.pending_shift = 0;
+        }
+
+        if scrollback_len == 0 {
+            self.oldest_history = None;
+        } else if self.oldest_history.is_none() {
+            self.oldest_history = self
+                .terminal
+                .track_grid_ref(Point::History(PointCoordinate { x: 0, y: 0 }))
+                .ok();
+        }
+        self.last_scrollback_len = scrollback_len;
+    }
+}
+
+fn history_identity_changed(
+    previous_len: usize,
+    current_len: usize,
+    oldest_rebased: bool,
+    untracked_output: bool,
+) -> bool {
+    current_len < previous_len || oldest_rebased || untracked_output
 }
 
 impl VtEngine for GhosttyEngine {
@@ -245,6 +319,12 @@ impl VtEngine for GhosttyEngine {
                 shape: CursorShape::Block,
             },
             last_frame_title: None,
+            last_row_wrapped: vec![false; usize::from(rows)],
+            history_epoch: 0,
+            last_frame_history_epoch: 0,
+            last_scrollback_len: 0,
+            oldest_history: None,
+            output_since_frame: false,
             cols,
             rows,
         })
@@ -253,6 +333,7 @@ impl VtEngine for GhosttyEngine {
     fn feed(&mut self, bytes: &[u8]) {
         self.reusable_rows = false;
         self.pending_shift = 0;
+        self.output_since_frame |= !bytes.is_empty();
         self.terminal.vt_write(bytes);
     }
 
@@ -264,12 +345,25 @@ impl VtEngine for GhosttyEngine {
         self.pending_shift = 0;
         Self::backend(self.terminal.resize(cols, rows, 1, 1))?;
         configure_mouse_size(&mut self.mouse_encoder, cols, rows);
+        // A column change reflows the primary screen and its history: wrapped rows merge or
+        // split, so absolute scrollback lines no longer name the same text. The tracked oldest
+        // cell can survive a reflow at history (0, 0), so this rebase is invisible to
+        // `update_history_epoch` and has to be declared here.
+        if cols != self.cols {
+            self.history_epoch = self.history_epoch.saturating_add(1);
+            self.oldest_history = None;
+            self.reusable_rows = false;
+            self.pending_shift = 0;
+        }
         self.cols = cols;
         self.rows = rows;
+        self.last_row_wrapped.resize(usize::from(rows), false);
         Ok(())
     }
 
     fn take_frame(&mut self, full: bool) -> FrameUpdate {
+        let had_output = std::mem::take(&mut self.output_since_frame);
+        self.update_history_epoch(had_output);
         match self.try_take_frame(full) {
             Ok(frame) => frame,
             Err(error) => {
@@ -638,6 +732,77 @@ mod tests {
         assert!(first[0].attrs.is_empty());
         assert_eq!(frame.rows_changed[1].cells[0].text.as_str(), "x");
         assert_eq!(frame.rows_changed[1].cells[0].fg, Color::Default);
+    }
+
+    #[test]
+    fn frame_rows_expose_ghostty_soft_wraps() {
+        let mut engine = GhosttyEngine::new(4, 3, 100)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+        engine.feed(b"abcdefghij");
+
+        let frame = engine.take_frame(true);
+        assert!(frame.rows_changed[0].wrapped);
+        assert!(frame.rows_changed[1].wrapped);
+        assert!(!frame.rows_changed[2].wrapped);
+    }
+
+    #[test]
+    fn scrollback_shrink_advances_the_history_epoch() {
+        let mut engine = GhosttyEngine::new(8, 2, 100)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+        engine.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        let before = engine.take_frame(true).viewport;
+        assert!(before.scrollback_len > 0);
+        assert_eq!(before.history_epoch, 0);
+
+        engine.feed(b"\x1b[3J");
+        let after = engine.take_frame(false).viewport;
+        assert!(after.scrollback_len < before.scrollback_len);
+        assert_eq!(after.history_epoch, 1);
+    }
+
+    #[test]
+    fn a_changed_oldest_history_row_advances_the_epoch() {
+        assert!(history_identity_changed(20, 20, true, false));
+    }
+
+    #[test]
+    fn scroll_only_frames_do_not_advance_the_history_epoch() {
+        let mut engine = GhosttyEngine::new(8, 2, 100)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+        engine.feed(b"one\r\ntwo\r\nthree\r\nfour");
+        let epoch = engine.take_frame(true).viewport.history_epoch;
+
+        engine.scroll(ScrollCommand::Top);
+        assert_eq!(engine.take_frame(true).viewport.history_epoch, epoch);
+        engine.scroll(ScrollCommand::Bottom);
+        assert_eq!(engine.take_frame(true).viewport.history_epoch, epoch);
+    }
+
+    #[test]
+    fn missing_history_tracker_conservatively_advances_on_output() {
+        assert!(history_identity_changed(10, 10, false, true));
+    }
+
+    #[test]
+    fn narrowing_the_terminal_advances_the_history_epoch() {
+        // Reflow rewrites which absolute line holds which text, so every selection anchored
+        // in scrollback must be dropped. Losing rows only pushes screen rows *into* history,
+        // which keeps every existing line where it was.
+        let mut engine = GhosttyEngine::new(16, 4, 100)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+        engine.feed(b"a long wrapped line\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        let epoch = engine.take_frame(true).viewport.history_epoch;
+
+        engine
+            .resize(16, 2)
+            .unwrap_or_else(|error| panic!("failed to resize engine: {error}"));
+        assert_eq!(engine.take_frame(false).viewport.history_epoch, epoch);
+
+        engine
+            .resize(8, 2)
+            .unwrap_or_else(|error| panic!("failed to resize engine: {error}"));
+        assert_eq!(engine.take_frame(false).viewport.history_epoch, epoch + 1);
     }
 
     #[test]
@@ -1022,7 +1187,7 @@ mod tests {
         let mut engine = GhosttyEngine::new(40, 10, 1024 * 1024).unwrap();
         engine.feed(
             (0..100)
-                .map(|i| format!("{i}\r\n"))
+                .map(|i| format!("{i} {}\r\n", "x".repeat(i % 70)))
                 .collect::<String>()
                 .as_bytes(),
         );
@@ -1030,7 +1195,7 @@ mod tests {
             .take_frame(true)
             .rows_changed
             .into_iter()
-            .map(|r| r.cells)
+            .map(|r| (r.cells, r.wrapped))
             .collect::<Vec<_>>();
         for delta in [-3, 1, -4, 2] {
             engine.scroll(ScrollCommand::Lines(delta));
@@ -1044,7 +1209,7 @@ mod tests {
                 mirror.rotate_right(delta.unsigned_abs() as usize);
             }
             for row in frame.rows_changed {
-                mirror[usize::from(row.index)] = row.cells;
+                mirror[usize::from(row.index)] = (row.cells, row.wrapped);
             }
             assert_eq!(
                 mirror,
@@ -1052,7 +1217,7 @@ mod tests {
                     .take_frame(true)
                     .rows_changed
                     .into_iter()
-                    .map(|r| r.cells)
+                    .map(|r| (r.cells, r.wrapped))
                     .collect::<Vec<_>>()
             );
         }
@@ -1064,6 +1229,22 @@ mod tests {
         assert_eq!(engine.take_frame(false).shift, None);
         engine.scroll(ScrollCommand::Lines(-1));
         assert_eq!(engine.take_frame(true).shift, None);
+    }
+
+    #[test]
+    fn history_epoch_change_disables_pending_shift_and_replaces_every_row() {
+        let mut engine = GhosttyEngine::new(8, 3, 1024 * 1024).unwrap();
+        engine.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let epoch = engine.take_frame(true).viewport.history_epoch;
+        engine.scroll(ScrollCommand::Lines(-1));
+        assert_ne!(engine.pending_shift, 0);
+        // Emulate the backend pruning history without passing through feed's invalidation.
+        engine.terminal.vt_write(b"\x1b[3J");
+        let frame = engine.take_frame(false);
+        assert!(frame.viewport.history_epoch > epoch);
+        assert_eq!(frame.shift, None);
+        assert!(frame.full);
+        assert_eq!(frame.rows_changed.len(), usize::from(frame.rows));
     }
 
     #[test]

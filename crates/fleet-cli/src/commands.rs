@@ -637,6 +637,7 @@ mod tests {
     use std::path::Path;
 
     use fleet_proto::{
+        PROTOCOL_VERSION,
         codec::FleetCodec,
         error::{ErrorKind, ProtoError},
         job::{JobKind, JobRecord, JobStatus},
@@ -812,7 +813,7 @@ mod tests {
         assert!(matches!(
             hello.body,
             RequestBody::Hello {
-                protocol: fleet_proto::PROTOCOL_VERSION,
+                protocol: PROTOCOL_VERSION,
                 ..
             }
         ));
@@ -820,7 +821,7 @@ mod tests {
             transport,
             hello.id,
             Ok(ResponseBody::Hello {
-                protocol: fleet_proto::PROTOCOL_VERSION,
+                protocol: PROTOCOL_VERSION,
                 server: "test-daemon".to_owned(),
             }),
         )

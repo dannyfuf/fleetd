@@ -91,12 +91,17 @@ pty (portable-pty) --bytes--> VtEngine (libghostty-vt) --dirty rows--> FrameUpda
 client key event --proto--> daemon key encoder (terminal modes aware) --bytes--> pty
 ```
 
-`FrameUpdate { terminal_id, seq, cols, rows, full: bool, shift: Option<i32>, rows: [RowUpdate{index, cells}],
-cursor{row,col,visible,shape}, viewport{scrollback_len, offset}, modes{alt_screen, mouse,
-bracketed_paste}, title }`. `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
+`FrameUpdate { terminal_id, seq, cols, rows, full: bool, shift: Option<i32>, rows: [RowUpdate{index, cells, wrapped}],
+cursor{row,col,visible,shape}, viewport{scrollback_len, offset, history_epoch},
+modes{alt_screen, mouse, bracketed_paste}, title }`.
+`Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid.
+on the client's mirror grid. The wire protocol is version 3; `wrapped` preserves logical lines
+during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
+row is discarded, history shrinks, or a column change reflows it, without treating viewport
+movement as eviction. Off-screen
+copy caches only visible rows covered by an active selection and caps them at 5,000.
 
 Terminal history uses `terminal.scrollbackBytes` (Rust `terminal.scrollback_bytes`), a
 **byte budget passed directly to `TerminalOptions.max_scrollback`**, defaulting to
@@ -141,7 +146,10 @@ Viewport moves emit frames immediately, bypassing the normal 16,667 µs output f
 A blocking command receive wakes immediately for input, with a 4 ms timeout for PTY polling.
 
 Small viewport-only moves use `FrameUpdate.shift`: positive shifts move existing mirror rows
-up, negative shifts move them down, and only newly exposed rows are replaced. Output, resize,
+up, negative shifts move them down, and wrap flags rotate with their rows. Only newly exposed
+rows are replaced. Absolute selection anchors keep following the same text as the viewport moves;
+an epoch change clears selections and their caches. Epoch changes force full frames, and clients
+reject shifts across epochs and request full recovery. Output, resize,
 large moves and explicit full-frame requests use ordinary row/full frames. Broadcast lag
 requests full frames for all attached terminals; forward sequence gaps freeze the last valid
 mirror and reuse the client's full-frame recovery path. Stale frames are rejected. Sessions
@@ -154,7 +162,7 @@ handling on the alternate screen, using live modes for the four viewport shortcu
 At the bottom, output follows live. While scrolled up, Ghostty preserves the history anchor.
 Real keys, raw input and paste atomically return to bottom on the host before writing to the
 PTY. Wheel input and copy-mode navigation preserve the viewport; copy-mode exit retains its
-explicit return-to-bottom behavior. Wire protocol version is 2; the separate swarm-compatible
+explicit return-to-bottom behavior. Wire protocol version is 3; the separate swarm-compatible
 CLI JSON envelope remains version 1.
 
 ## Client (`fleet` app)

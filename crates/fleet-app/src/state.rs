@@ -246,6 +246,8 @@ pub struct MirrorGrid {
     pub rows: u16,
     /// One row of cells per grid row, always exactly `rows` long.
     pub lines: Vec<Vec<Cell>>,
+    /// Soft-wrap continuation flag for each grid row.
+    pub wrapped: Vec<bool>,
     /// The cursor as of the last applied frame.
     pub cursor: CursorState,
     /// The scrollback viewport as of the last applied frame.
@@ -277,6 +279,7 @@ impl MirrorGrid {
             cols,
             rows,
             lines: vec![Vec::new(); rows as usize],
+            wrapped: vec![false; rows as usize],
             cursor: CursorState {
                 row: 0,
                 col: 0,
@@ -286,6 +289,7 @@ impl MirrorGrid {
             viewport: ViewportInfo {
                 scrollback_len: 0,
                 offset: 0,
+                history_epoch: 0,
             },
             modes: TerminalModes::default(),
             title: None,
@@ -307,6 +311,17 @@ impl MirrorGrid {
         if !frame.full && self.primed && frame.seq > self.seq.saturating_add(1) {
             self.desynced = true;
         }
+        // A shift can reuse rows only within the same grid and history identity. Recover
+        // through a full frame rather than rotating stale cells across an epoch boundary.
+        if !frame.full
+            && frame.shift.is_some()
+            && (frame.viewport.history_epoch != self.viewport.history_epoch
+                || frame.cols != self.cols
+                || frame.rows != self.rows
+                || frame.modes.alt_screen != self.modes.alt_screen)
+        {
+            self.desynced = true;
+        }
         if !frame.full && (!self.primed || self.desynced) {
             return false;
         }
@@ -323,12 +338,16 @@ impl MirrorGrid {
             let count = (shift.unsigned_abs() as usize).min(self.lines.len());
             if shift > 0 {
                 self.lines.rotate_left(count);
+                self.wrapped.rotate_left(count);
+                self.wrapped[self.lines.len() - count..].fill(false);
                 let start = self.lines.len() - count;
                 for row in &mut self.lines[start..] {
                     row.clear();
                 }
             } else {
                 self.lines.rotate_right(count);
+                self.wrapped.rotate_right(count);
+                self.wrapped[..count].fill(false);
                 for row in &mut self.lines[..count] {
                     row.clear();
                 }
@@ -337,6 +356,9 @@ impl MirrorGrid {
         for row in &frame.rows_changed {
             if let Some(line) = self.lines.get_mut(row.index as usize) {
                 line.clone_from(&row.cells);
+            }
+            if let Some(wrapped) = self.wrapped.get_mut(row.index as usize) {
+                *wrapped = row.wrapped;
             }
         }
         self.cursor = frame.cursor;
@@ -354,6 +376,7 @@ impl MirrorGrid {
         self.cols = cols;
         self.rows = rows;
         self.lines.resize(rows as usize, Vec::new());
+        self.wrapped.resize(rows as usize, false);
     }
 
     /// The cell at a position, or `None` outside the grid or past the end of a short row.
@@ -1366,6 +1389,7 @@ mod tests {
             viewport: ViewportInfo {
                 scrollback_len: 0,
                 offset: 0,
+                history_epoch: 0,
             },
             modes: TerminalModes::default(),
             title: None,
@@ -1389,10 +1413,13 @@ mod tests {
     #[test]
     fn shifted_rows_move_before_replacements_in_both_directions() {
         let mut grid = MirrorGrid::new(4, 2);
-        grid.apply(&frame(1, true, vec![row(0, "aaa"), row(1, "bbb")]));
+        let mut wrapped = row(1, "bbb");
+        wrapped.wrapped = true;
+        grid.apply(&frame(1, true, vec![row(0, "aaa"), wrapped]));
         let mut down = frame(2, false, vec![row(1, "ccc")]);
         down.shift = Some(1);
         assert!(grid.apply(&down));
+        assert_eq!(grid.wrapped, vec![true, false]);
         assert_eq!(
             (grid.row_text(0), grid.row_text(1)),
             ("bbb".into(), "ccc".into())
@@ -1400,10 +1427,30 @@ mod tests {
         let mut up = frame(3, false, vec![row(0, "aaa")]);
         up.shift = Some(-1);
         assert!(grid.apply(&up));
+        assert_eq!(grid.wrapped, vec![false, true]);
         assert_eq!(
             (grid.row_text(0), grid.row_text(1)),
             ("aaa".into(), "bbb".into())
         );
+    }
+
+    #[test]
+    fn shift_across_history_epochs_freezes_rows_until_full_recovery() {
+        let mut grid = MirrorGrid::new(4, 2);
+        grid.apply(&frame(1, true, vec![row(0, "old"), row(1, "keep")]));
+        let before = grid.lines.clone();
+        let mut shifted = frame(2, false, vec![row(1, "new")]);
+        shifted.shift = Some(1);
+        shifted.viewport.history_epoch = 1;
+        assert!(!grid.apply(&shifted));
+        assert!(grid.desynced);
+        assert_eq!(grid.lines, before);
+        let mut recovery = frame(3, true, vec![row(0, "new"), row(1, "live")]);
+        recovery.viewport.history_epoch = 1;
+        assert!(grid.apply(&recovery));
+        assert!(!grid.desynced);
+        assert_eq!(grid.viewport.history_epoch, 1);
+        assert_eq!(grid.row_text(0), "new");
     }
 
     fn snapshot() -> Snapshot {
@@ -1442,6 +1489,7 @@ mod tests {
                     width: CellWidth::Narrow,
                 })
                 .collect(),
+            wrapped: false,
         }
     }
 
@@ -1505,13 +1553,17 @@ mod tests {
     #[test]
     fn mirror_grid_applies_full_then_diff_frames() {
         let mut grid = MirrorGrid::new(4, 2);
-        assert!(grid.apply(&frame(1, true, vec![row(0, "abcd"), row(1, "efgh")])));
+        let mut first = row(0, "abcd");
+        first.wrapped = true;
+        assert!(grid.apply(&frame(1, true, vec![first, row(1, "efgh")])));
         assert_eq!(grid.row_text(0), "abcd");
         assert_eq!(grid.row_text(1), "efgh");
+        assert_eq!(grid.wrapped, vec![true, false]);
 
         assert!(grid.apply(&frame(2, false, vec![row(1, "zzzz")])));
         assert_eq!(grid.row_text(0), "abcd", "untouched rows survive a diff");
         assert_eq!(grid.row_text(1), "zzzz");
+        assert_eq!(grid.wrapped, vec![true, false]);
         assert_eq!(grid.seq, 2);
     }
 

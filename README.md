@@ -103,7 +103,10 @@ The 15 keys and key groups to learn first are:
 | `?` | Open help. |
 | `Esc` / `q`, `ctrl-q`, `ctrl-shift-q` | Close the top layer; quit the app; or quit and stop the daemon. |
 
-Inside a terminal, every bare key goes to the PTY. `ctrl-s` is the only Workspace prefix:
+Inside a terminal, every bare key goes to the PTY. Dragging selects text and copies it immediately;
+`cmd-c` copies the current selection and `cmd-v` pastes through the terminal's bracketed-paste
+path. Soft-wrapped visual rows copy as one logical line. `ctrl-c` and `ctrl-v` remain terminal
+keys. `ctrl-s` is the only Workspace prefix:
 `ctrl-s s` returns to Hub, `ctrl-s S` sleeps then returns, `ctrl-s 1`–`9` switches tabs,
 `ctrl-s h`/`l` changes tabs, `ctrl-s w` opens the last session, `ctrl-s c`/`x` creates/closes a
 tab, `ctrl-s [` enters Scroll, `ctrl-s ]` pastes, and `ctrl-s J`/`?` opens Jobs/help. Use

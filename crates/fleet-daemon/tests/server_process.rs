@@ -6,6 +6,7 @@ use std::{
 };
 
 use fleet_proto::{
+    PROTOCOL_VERSION,
     codec::FleetCodec,
     request::{Request, RequestBody},
     response::{Response, ResponseBody},
@@ -35,7 +36,7 @@ async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
         Request {
             id: 1,
             body: RequestBody::Hello {
-                protocol: fleet_proto::PROTOCOL_VERSION,
+                protocol: PROTOCOL_VERSION,
                 client: "server-process-test".to_owned(),
             },
         },
@@ -44,7 +45,7 @@ async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
     assert!(matches!(
         receive(&mut client).await.result,
         Ok(ResponseBody::Hello {
-            protocol: fleet_proto::PROTOCOL_VERSION,
+            protocol: PROTOCOL_VERSION,
             ..
         })
     ));

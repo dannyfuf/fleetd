@@ -253,7 +253,7 @@ mod tests {
             id: 9,
             result: Ok(ResponseBody::Version {
                 version: "fleet 0.1.0".to_owned(),
-                protocol: 1,
+                protocol: crate::PROTOCOL_VERSION,
             }),
         };
         let json = serde_json::to_string(&response).unwrap_or_else(|error| panic!("{error}"));

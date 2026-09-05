@@ -3,6 +3,7 @@ use std::{path::Path, time::Duration};
 use fleet_client::{Client, TerminalUpdate, ensure_daemon};
 use fleet_core::ids::TerminalId;
 use fleet_proto::{
+    PROTOCOL_VERSION,
     codec::FleetCodec,
     event::{Event, EventKind, ToastLevel},
     request::{Request, RequestBody},
@@ -113,7 +114,7 @@ async fn negotiates_correlates_events_and_streams_terminal_frames() {
                 RequestBody::DaemonPing => ResponseBody::Pong,
                 RequestBody::DaemonVersion => ResponseBody::Version {
                     version: "test-daemon".to_owned(),
-                    protocol: fleet_proto::PROTOCOL_VERSION,
+                    protocol: PROTOCOL_VERSION,
                 },
                 ref other => panic!("unexpected correlated request: {other:?}"),
             };
@@ -187,7 +188,7 @@ async fn negotiates_correlates_events_and_streams_terminal_frames() {
     ping.unwrap();
     let version = version.unwrap();
     assert_eq!(version.version, "test-daemon");
-    assert_eq!(version.protocol, fleet_proto::PROTOCOL_VERSION);
+    assert_eq!(version.protocol, PROTOCOL_VERSION);
     assert_eq!(
         events.recv().await.unwrap(),
         Event::Toast {
@@ -348,7 +349,7 @@ async fn authenticate(
     assert!(matches!(
         hello.body,
         RequestBody::Hello {
-            protocol: fleet_proto::PROTOCOL_VERSION,
+            protocol: PROTOCOL_VERSION,
             ..
         }
     ));
@@ -356,7 +357,7 @@ async fn authenticate(
         transport,
         hello.id,
         ResponseBody::Hello {
-            protocol: fleet_proto::PROTOCOL_VERSION,
+            protocol: PROTOCOL_VERSION,
             server: "test-daemon".to_owned(),
         },
     )
@@ -412,6 +413,7 @@ fn frame(terminal: u64, seq: u64, full: bool) -> FrameUpdate {
                 attrs: CellAttrs::empty(),
                 width: CellWidth::Narrow,
             }],
+            wrapped: false,
         }],
         cursor: CursorState {
             row: 0,
@@ -422,6 +424,7 @@ fn frame(terminal: u64, seq: u64, full: bool) -> FrameUpdate {
         viewport: ViewportInfo {
             scrollback_len: 0,
             offset: 0,
+            history_epoch: 0,
         },
         modes: TerminalModes::default(),
         title: None,

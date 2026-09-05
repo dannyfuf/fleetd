@@ -114,7 +114,7 @@ impl Default for ConnectionState {
 }
 
 impl Client {
-    /// Connects to `home/fleetd.sock`, negotiates the current wire protocol, and starts the connection actor.
+    /// Connects to `home/fleetd.sock`, negotiates Fleet's current protocol, and starts the actor.
     pub async fn connect(home: impl AsRef<Path>) -> Result<Self, ConnectError> {
         let home = home.as_ref().to_path_buf();
         let state = ConnectionState::default();
