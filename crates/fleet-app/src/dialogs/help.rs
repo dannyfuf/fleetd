@@ -445,6 +445,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn help_lists_watch_visibility_and_dismissal_keys() {
+        let groups = groups();
+        let prefix = groups
+            .iter()
+            .flat_map(|g| &g.sections)
+            .find(|s| s.context == "Workspace > Prefix")
+            .unwrap();
+        assert!(
+            prefix
+                .rows
+                .iter()
+                .any(|(key, action)| key == "v" && action == "toggle watch pane")
+        );
+        assert!(
+            prefix
+                .rows
+                .iter()
+                .any(|(key, action)| key == "V" && action == "dismiss watch")
+        );
+    }
+
+    #[test]
     fn every_group_has_rows_and_no_binding_is_orphaned() {
         let groups = groups();
         assert_eq!(groups.len(), GROUPS.len());

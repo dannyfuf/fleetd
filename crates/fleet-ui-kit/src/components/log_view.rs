@@ -39,6 +39,7 @@ pub enum LogCommand {
 pub struct LogView {
     id: ElementId,
     lines: Rc<Vec<SharedString>>,
+    tones: Rc<Vec<Tone>>,
     following: bool,
     top: usize,
     scroll: Option<UniformListScrollHandle>,
@@ -55,6 +56,7 @@ impl LogView {
         Self {
             id: id.into(),
             lines: Rc::new(lines.into_iter().collect()),
+            tones: Rc::new(Vec::new()),
             following: true,
             top: 0,
             scroll: None,
@@ -63,6 +65,12 @@ impl LogView {
             show_badge: true,
             on_command: None,
         }
+    }
+
+    /// Optional per-line semantic tones; omitted entries use normal text contrast.
+    pub fn line_tones(mut self, tones: impl IntoIterator<Item = Tone>) -> Self {
+        self.tones = Rc::new(tones.into_iter().collect());
+        self
     }
 
     /// Whether the view is pinned to the tail.
@@ -136,6 +144,7 @@ impl RenderOnce for LogView {
         let pad = theme.space.md;
         let lines = self.lines.clone();
         let count = lines.len();
+        let tones = self.tones.clone();
         let scroll = self.scroll.clone();
         let following = self.following;
 
@@ -158,7 +167,12 @@ impl RenderOnce for LogView {
 
         let list = uniform_list(self.id.clone(), count, move |range, _window, _cx| {
             range
-                .map(|ix| div().px(pad).child(Text::data_small(lines[ix].clone())))
+                .map(|ix| {
+                    div().px(pad).whitespace_nowrap().child(
+                        Text::data_small(lines[ix].clone())
+                            .tone(tones.get(ix).copied().unwrap_or_default()),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .size_full();

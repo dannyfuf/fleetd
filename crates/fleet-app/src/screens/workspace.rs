@@ -50,12 +50,12 @@ use fleet_proto::{
     terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
 };
 use fleet_ui_kit::{
-    ActiveTheme, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill, StatusKind,
-    TerminalGrid, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
+    ActiveTheme, ExitStrip, Icon, KeyHintRow, PrBadgeState, PrefixHint, ScrollPill, SplitLayout,
+    StatusKind, TerminalGrid, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, Pixels,
-    SharedString, Size, Window, div, prelude::*, px,
+    SharedString, Size, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::{
@@ -75,6 +75,12 @@ use crate::{
 /// The first measured frame replaces it, so this is only ever the argument of the very first
 /// `AttachTerminal`; 80 × 24 is the size every program already copes with.
 const FALLBACK_GRID: (u16, u16) = (80, 24);
+
+/// The read-only trailing region follows the current window width.
+#[must_use]
+pub fn watch_width(window_width: f32) -> f32 {
+    (window_width * 0.4).clamp(360.0, 640.0)
+}
 
 /// What `ctrl-s c` and the `+` tab ask fleetd to type into a fresh login shell.
 ///
@@ -142,6 +148,8 @@ struct Local {
     hint_visible: bool,
     /// Repositories whose pull requests have already been asked for.
     pr_requested: Vec<RepoId>,
+    /// Read-only log following position, independent from terminal scrolling.
+    watch_scroll: UniformListScrollHandle,
 }
 
 impl Local {
@@ -203,7 +211,30 @@ impl WorkspaceScreen {
         });
         let header = (!model.zoomed).then(|| self.header(&model, pr, cx));
         let tabs = (!model.zoomed).then(|| self.tab_strip(&model, &session, bridge, state, cx));
-        let body = self.terminal_area(&model, bridge, state, focused, cx);
+        let terminal = self.terminal_area(&model, bridge, state, focused, cx);
+        let watch = crate::views::watch_pane::render(
+            &session.id,
+            state,
+            bridge,
+            &self.local.borrow().watch_scroll,
+            cx,
+        );
+        let body = if let Some(watch) = watch {
+            let width = watch_width(f32::from(window.viewport_size().width));
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(
+                    SplitLayout::horizontal()
+                        .leading(terminal)
+                        .trailing(watch)
+                        .trailing_size(px(width)),
+                )
+                .into_any_element()
+        } else {
+            terminal
+        };
         let theme = cx.theme().clone();
 
         let mut root = div()
@@ -632,6 +663,19 @@ impl WorkspaceScreen {
                     app.screen = Screen::hub();
                     cx.notify();
                 });
+            })
+        };
+        let root = {
+            let state = state.clone();
+            root.on_action(move |_: &prefix::ToggleWatchPane, _, cx| {
+                crate::views::watch_pane::toggle(&state, cx)
+            })
+        };
+        let root = {
+            let state = state.clone();
+            let bridge = bridge.clone();
+            root.on_action(move |_: &prefix::DismissWatch, _, cx| {
+                crate::views::watch_pane::dismiss_selected(&state, &bridge, cx)
             })
         };
         let root = self.tab_actions(root, bridge, state);
@@ -1571,6 +1615,24 @@ mod tests {
     fn encoded(key: &str, key_char: Option<&str>, mods: GpuiModifiers) -> KeyEvent {
         key_event(&keystroke(key, key_char, mods), false)
             .unwrap_or_else(|| panic!("`{key}` must encode"))
+    }
+
+    #[test]
+    fn watch_split_scales_and_the_terminal_uses_its_reduced_measured_area() {
+        assert_eq!(watch_width(800.0), 360.0);
+        assert_eq!(watch_width(1200.0), 480.0);
+        assert_eq!(watch_width(2000.0), 640.0);
+        let cell = gpui::size(px(10.0), px(20.0));
+        let mut local = Local {
+            area: gpui::size(px(1200.0), px(600.0)),
+            ..Local::default()
+        };
+        let full = local.size_for(TerminalId(1), cell);
+        local.area.width -= px(watch_width(1200.0) + 1.0);
+        let split = local.size_for(TerminalId(1), cell);
+        assert!(split.0 < full.0);
+        assert_eq!(split.1, full.1);
+        assert_eq!(split, grid_size(local.area, cell));
     }
 
     #[test]

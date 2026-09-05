@@ -274,6 +274,10 @@ pub mod prefix {
             Paste,
             /// `ctrl-s z` — zoom: hide the session header and tab strip.
             ToggleZoom,
+            /// `ctrl-s v` — hide/show the read-only watch split.
+            ToggleWatchPane,
+            /// `ctrl-s V` — dismiss a completed watch, or hide a running one.
+            DismissWatch,
             /// `ctrl-s Esc` — cancel the prefix.
             Cancel,
         ]

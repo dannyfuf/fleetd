@@ -12,3 +12,6 @@ pub mod terminal_element;
 pub mod views;
 
 pub use shell::{Shell, run};
+
+/// Read-only subagent output mirrors and catch-up cursors.
+pub mod watches;

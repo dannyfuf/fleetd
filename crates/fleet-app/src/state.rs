@@ -682,6 +682,8 @@ pub struct AppState {
     pub snapshot_at: Option<Instant>,
     /// One mirror grid per attached terminal.
     pub grids: HashMap<TerminalId, MirrorGrid>,
+    /// Read-only child output and per-session pane preferences.
+    pub watches: crate::watches::Watches,
     /// The screen being shown.
     pub screen: Screen,
     /// Which Hub pane owns the cursor.
@@ -764,6 +766,7 @@ impl AppState {
             has_seen_non_empty_state: false,
             snapshot_at: None,
             grids: HashMap::new(),
+            watches: crate::watches::Watches::default(),
             screen: Screen::hub(),
             hub_pane: HubPane::List,
             pr_tab: PrTab::Mine,
@@ -906,6 +909,30 @@ impl AppState {
         } else {
             false
         }
+    }
+
+    /// `^s v` toggles only local watch visibility and always returns to terminal mode.
+    pub fn toggle_watch_pane(&mut self, now: Instant) {
+        self.leave_prefix();
+        if let Some(session) = self.active_session().map(|s| s.id.clone())
+            && !self.watches.toggle(&session)
+        {
+            self.toast_short("no subagent watches", Icon::Info, now);
+        }
+    }
+
+    /// `^s V` / ×: returns an exited watch to dismiss; a running watch is only hidden.
+    pub fn close_selected_watch(&mut self, now: Instant) -> Option<fleet_core::watches::WatchId> {
+        self.leave_prefix();
+        let session = self.active_session()?.id.clone();
+        let id = self.watches.panes.get(&session)?.selected?;
+        if self.watches.entries.get(&id)?.watch.status == fleet_core::watches::WatchStatus::Running
+        {
+            self.watches.hide(&session);
+            self.toast_short("watch still running; pane hidden", Icon::Info, now);
+            return None;
+        }
+        Some(id)
     }
 
     /// Opens an overlay, replacing whatever was open.
@@ -1124,7 +1151,10 @@ impl AppState {
     /// Advances everything that expires on its own: toasts, the reconnect banner, the
     /// cold-start splash. Returns whether the frame has to be repainted.
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = expire_toasts(&mut self.toasts, now);
+        let mut changed = expire_toasts(&mut self.toasts, now)
+            || self
+                .active_session()
+                .is_some_and(|s| self.watches.running_visible(&s.id));
         match self.daemon {
             DaemonLink::Reconnected { restarted, since } => {
                 let dwell = if restarted {
@@ -1151,6 +1181,7 @@ impl AppState {
                 self.daemon = DaemonLink::Connected;
                 self.daemon_since = now;
                 self.link_generation = self.link_generation.wrapping_add(1);
+                self.watches.reconnect();
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::ConnectFailed {
@@ -1187,6 +1218,7 @@ impl AppState {
                     // ARCHITECTURE: PTYs do not survive fleetd. Dropping the mirrors is what
                     // stops the app from painting a grid that no longer has a process.
                     self.grids.clear();
+                    self.watches = crate::watches::Watches::default();
                 }
                 self.daemon = DaemonLink::Reconnected {
                     restarted,
@@ -1196,6 +1228,7 @@ impl AppState {
                 // The daemon-side connection is new and holds no attachments, whether or not
                 // fleetd itself restarted.
                 self.link_generation = self.link_generation.wrapping_add(1);
+                self.watches.reconnect();
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
@@ -1205,6 +1238,7 @@ impl AppState {
             // asks for a full frame per terminal, which is the only thing that repairs them.
             BridgeEvent::EventsLagged { .. } => {
                 self.desync_grids();
+                self.watches.invalidate();
             }
         }
     }
@@ -1224,6 +1258,10 @@ impl AppState {
     /// Applies one ordinary daemon event to the mirror.
     pub fn apply_daemon_event(&mut self, event: Event, now: Instant) {
         match event {
+            Event::WatchStarted(watch) => self.watches.started(watch, now),
+            Event::WatchOutput { watch, chunks } => self.watches.output(watch, chunks),
+            Event::WatchExited(watch) => self.watches.exited(watch, now),
+            Event::WatchDismissed(id) => self.watches.dismissed(id),
             Event::SnapshotChanged(snapshot) => self.apply_snapshot(snapshot, now),
             Event::JobUpdated(job) => self.apply_job(job, now),
             Event::SessionChanged(session) => self.apply_session(session),
@@ -1381,6 +1419,98 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn watch_pane_smoke_sequence_applies_real_events_without_changing_terminal_focus() {
+        use fleet_core::watches::{Watch, WatchChunk, WatchId, WatchStatus, WatchStream};
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet-watch-phase2", now);
+        let session = session_with("fleet/watch", &[1]);
+        let mut snapshot = snapshot();
+        snapshot.sessions = vec![session.clone()];
+        state.apply_bridge_event(BridgeEvent::Connected(Box::new(snapshot)), now);
+        state.screen = Screen::Workspace {
+            session: session.id.clone(),
+        };
+        let mut watch = Watch {
+            id: WatchId(1),
+            session: session.id.clone(),
+            terminal: TerminalId(1),
+            label: "codex".into(),
+            command: vec!["sh".into()],
+            cwd: None,
+            pid: Some(123),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            status: WatchStatus::Running,
+        };
+        state.apply_daemon_event(Event::WatchStarted(watch.clone()), now);
+        assert!(state.watches.panes[&session.id].visible);
+        assert_eq!(state.watches.panes[&session.id].selected, Some(watch.id));
+        assert!(state.tick(now + Duration::from_secs(1)));
+        state.enter_prefix();
+        assert_eq!(state.close_selected_watch(now), None);
+        assert_eq!(
+            state.watches.entries[&watch.id].watch.status,
+            WatchStatus::Running
+        );
+        assert!(!state.watches.panes[&session.id].visible);
+        assert_eq!(
+            state.toasts.last().unwrap().toast.text.as_ref(),
+            "watch still running; pane hidden"
+        );
+        state.toggle_watch_pane(now);
+        assert!(state.watches.panes[&session.id].visible);
+        for i in 0..5 {
+            state.apply_daemon_event(
+                Event::WatchOutput {
+                    watch: watch.id,
+                    chunks: vec![
+                        WatchChunk {
+                            seq: i * 2,
+                            stream: WatchStream::Stdout,
+                            text: format!("line {}\n", i + 1),
+                        },
+                        WatchChunk {
+                            seq: i * 2 + 1,
+                            stream: WatchStream::Stderr,
+                            text: format!("warn {}\n", i + 1),
+                        },
+                    ],
+                },
+                now,
+            );
+        }
+        assert_eq!(state.watches.entries[&watch.id].lines.len(), 10);
+        watch.status = WatchStatus::Exited {
+            code: Some(2),
+            signal: None,
+        };
+        state.apply_daemon_event(
+            Event::WatchExited(watch.clone()),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(state.watches.entries[&watch.id].watch.status, watch.status);
+        let duration = state.watches.entries[&watch.id].elapsed(now + Duration::from_secs(10));
+        assert!(duration >= Duration::from_secs(2) && duration < Duration::from_secs(3));
+        state.enter_prefix();
+        state.toggle_watch_pane(now);
+        assert!(!state.watches.panes[&session.id].visible);
+        state.enter_prefix();
+        state.toggle_watch_pane(now);
+        assert!(state.watches.panes[&session.id].visible);
+        state.zoomed = true;
+        assert!(state.watches.panes[&session.id].visible);
+        state.enter_prefix();
+        assert_eq!(state.close_selected_watch(now), Some(watch.id));
+        state.apply_daemon_event(Event::WatchDismissed(watch.id), now);
+        assert!(!state.watches.panes[&session.id].visible);
+        assert!(state.watches.entries.is_empty());
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+        assert_eq!(
+            state.active_session().unwrap().active_terminal,
+            Some(TerminalId(1))
+        );
     }
 
     #[test]
