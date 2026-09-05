@@ -36,6 +36,7 @@ pub mod repos;
 pub mod sessions;
 pub mod sleep;
 pub mod update;
+pub mod watches;
 pub mod worktrees;
 
 use contexts::Contexts;
@@ -77,6 +78,8 @@ pub struct Services {
     pub hosts: Hosts,
     /// Runtime PTY session service.
     pub sessions: Sessions,
+    /// Cooperative child output and lifecycle registry.
+    pub watches: watches::Watches,
     /// Session sleep-policy service.
     pub sleep: Sleep,
     /// Worktree inspection service.
@@ -281,6 +284,7 @@ impl Services {
             worktrees,
             pool,
             github,
+            watches: sessions.watches(),
             sessions,
             sleep,
             inspect,
@@ -352,8 +356,47 @@ impl Services {
 
     /// Dispatches one post-handshake protocol operation to its owning service.
     pub async fn dispatch(&self, body: RequestBody) -> DaemonResult<ResponseBody> {
+        self.dispatch_owned(body, 0).await
+    }
+
+    pub(crate) async fn dispatch_owned(
+        &self,
+        body: RequestBody,
+        owner: u64,
+    ) -> DaemonResult<ResponseBody> {
         self.reject_remote_request(&body).await?;
         match body {
+            body @ RequestBody::StartWatch { .. } => Ok(ResponseBody::WatchStarted(
+                self.sessions.start_watch(owner, body)?,
+            )),
+            RequestBody::AppendWatchOutput {
+                watch,
+                stream,
+                text,
+            } => {
+                self.watches.require_owner(watch, owner)?;
+                self.watches.append(watch, stream, text)?;
+                Ok(ResponseBody::Ack)
+            }
+            RequestBody::FinishWatch {
+                watch,
+                code,
+                signal,
+            } => {
+                self.watches.require_owner(watch, owner)?;
+                self.watches.finish(watch, code, signal)?;
+                Ok(ResponseBody::Ack)
+            }
+            RequestBody::ListWatches { session } => {
+                Ok(ResponseBody::Watches(self.watches.list(&session)))
+            }
+            RequestBody::TailWatch { watch, from_seq } => {
+                Ok(ResponseBody::WatchTail(self.watches.tail(watch, from_seq)?))
+            }
+            RequestBody::DismissWatch { watch } => {
+                self.watches.dismiss(watch)?;
+                Ok(ResponseBody::Ack)
+            }
             RequestBody::Hello { .. }
             | RequestBody::Subscribe { .. }
             | RequestBody::Unsubscribe => Err(DaemonError::Protocol(
@@ -681,6 +724,7 @@ impl Services {
         self.jobs
             .set_retention(Duration::from_millis(config.jobs.keep_finished_for));
         let mut handles = Vec::new();
+        handles.push(tokio::spawn(self.watches.clone().run(shutdown.clone())));
 
         let status_every = duration_from_millis(config.ui.status_refresh_ms, 500);
         handles.push(tokio::spawn(run_status_refresh(

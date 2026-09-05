@@ -46,6 +46,7 @@ struct Registry {
 /// Runtime seam shared by the session and sleep services without persisting PTYs.
 pub(crate) struct SessionRuntime {
     registry: Mutex<Registry>,
+    watches: super::watches::Watches,
     frames: broadcast::Sender<FrameUpdate>,
     process: Mutex<Option<Arc<dyn Process>>>,
     events: Mutex<Option<BroadcastBus>>,
@@ -58,6 +59,7 @@ impl SessionRuntime {
                 next_terminal: 1,
                 ..Registry::default()
             }),
+            watches: super::watches::Watches::default(),
             frames,
             process: Mutex::new(None),
             events: Mutex::new(None),
@@ -65,6 +67,7 @@ impl SessionRuntime {
     }
 
     fn register_events(&self, events: BroadcastBus) {
+        self.watches.with_events(events.clone());
         *self
             .events
             .lock()
@@ -217,6 +220,7 @@ impl SessionRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let session_id = registry.terminal_sessions.remove(&terminal)?;
+            self.watches.remove_terminal(terminal);
             registry.attachments.remove(&terminal);
             let host = registry.hosts.remove(&terminal);
             let session = registry.sessions.get_mut(&session_id)?;
@@ -259,6 +263,7 @@ impl SessionRuntime {
                 .terminals
                 .into_iter()
                 .filter_map(|terminal| {
+                    self.watches.remove_terminal(terminal.id);
                     registry.terminal_sessions.remove(&terminal.id);
                     registry.attachments.remove(&terminal.id);
                     registry.hosts.remove(&terminal.id)
@@ -301,6 +306,55 @@ pub struct Sessions {
 }
 
 impl Sessions {
+    /// Shared watch registry for this terminal runtime.
+    #[must_use]
+    pub fn watches(&self) -> super::watches::Watches {
+        self.runtime.watches.clone()
+    }
+
+    pub(crate) fn start_watch(
+        &self,
+        owner: u64,
+        body: fleet_proto::request::RequestBody,
+    ) -> DaemonResult<fleet_core::watches::WatchId> {
+        use fleet_core::watches::{Watch, WatchId, WatchStatus};
+        let fleet_proto::request::RequestBody::StartWatch {
+            terminal,
+            label,
+            command,
+            cwd,
+            pid,
+        } = body
+        else {
+            return Err(DaemonError::Validation("expected StartWatch".into()));
+        };
+        let registry = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = registry
+            .terminal_sessions
+            .get(&terminal)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound(format!("terminal {terminal}")))?;
+        // Keep the terminal lock until insertion, so close cannot leave an orphan watch.
+        Ok(self.runtime.watches.start(
+            owner,
+            Watch {
+                id: WatchId(0),
+                session,
+                terminal,
+                label,
+                command,
+                cwd,
+                pid,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                status: WatchStatus::Running,
+            },
+        ))
+    }
+
     /// Creates an empty runtime session registry.
     #[must_use]
     pub fn new(config: Arc<ConfigStore>, state: Arc<StateStore>) -> Self {
@@ -919,6 +973,7 @@ fn spawn_terminal(
         PathBuf::from(&cwd),
         session.as_str(),
         &name,
+        terminal,
         true,
         INITIAL_COLS,
         INITIAL_ROWS,
