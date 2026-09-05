@@ -119,9 +119,13 @@ impl Import {
                     .validate()
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;
                 let user_home = swarm_home.parent().unwrap_or(&swarm_home);
-                let imported_config =
+                let mut imported_config =
                     merge_config_with_user_home(&swarm_home, user_home, config_patch)
                         .map_err(|error| DaemonError::Validation(error.to_string()))?;
+                // Import-only: a swarm `lazygit` window means "the git UI lives in this tab",
+                // and Fleet has its own. Writing `lazygit` into Fleet's own config.json is
+                // left alone, which is the opt-out back to the binary in a PTY.
+                fleet_core::config::normalize_imported_windows(&mut imported_config.windows);
                 if context.cancel.is_cancelled() {
                     return Err(DaemonError::Cancelled);
                 }

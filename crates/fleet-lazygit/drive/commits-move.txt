@@ -1,0 +1,12 @@
+# Commits pane: `ctrl-k` on row 2 (c3) moves it one place toward HEAD.
+# Expected: the log order becomes c3, c4, c2, c1.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key ctrl-k
+wait 3500
+quit

@@ -137,7 +137,11 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Terminal (^s)",
-        &["Workspace > Terminal", "Workspace > Prefix"],
+        &[
+            "Workspace > Terminal",
+            "Workspace > Native",
+            "Workspace > Prefix",
+        ],
     ),
     ("Scroll", &["Workspace > Scroll"]),
     (

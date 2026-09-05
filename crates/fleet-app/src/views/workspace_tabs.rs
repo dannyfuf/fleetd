@@ -15,7 +15,7 @@ use fleet_core::{
     ids::TerminalId,
     sessions::{Session, Terminal, TerminalStatus},
 };
-use fleet_ui_kit::{Icon, TerminalTab};
+use fleet_ui_kit::{Icon, TerminalTab, TerminalTabKind};
 
 /// The glyph that names a keep-alive label's kind (§3.6: `bot` / `server` / `file-pen`).
 ///
@@ -85,7 +85,12 @@ pub fn tabs(
         .map(|(position, terminal)| {
             let mut tab = TerminalTab::new(position + 1, tab_label(terminal, renamed))
                 .activity(terminal.has_unseen_output && active != Some(terminal.id))
-                .starting(terminal.status == TerminalStatus::Starting);
+                .starting(terminal.status == TerminalStatus::Starting)
+                .kind(if terminal.is_native() {
+                    TerminalTabKind::Native
+                } else {
+                    TerminalTabKind::Pty
+                });
             if let Some(icon) = terminal_keep_alive_icon(terminal) {
                 tab = tab.keep_alive(icon);
             }
@@ -186,6 +191,7 @@ mod tests {
             title: None,
             keep_alive: Vec::new(),
             has_unseen_output: false,
+            kind: fleet_core::sessions::TerminalKind::Pty,
         }
     }
 
@@ -223,6 +229,24 @@ mod tests {
         let renamed: HashSet<TerminalId> = [TerminalId(1)].into_iter().collect();
         terminal.name = "editor".to_owned();
         assert_eq!(tab_label(&terminal, &renamed), "editor");
+    }
+
+    #[test]
+    fn a_native_tab_is_marked_but_keeps_its_number() {
+        let mut session = session(&["nvim", "cc", "lg"]);
+        session.terminals[2].kind = fleet_core::sessions::TerminalKind::Native;
+        let tabs = tabs(&session, Some(TerminalId(3)), &HashSet::new());
+        assert_eq!(
+            tabs.iter().map(|tab| tab.kind).collect::<Vec<_>>(),
+            vec![
+                TerminalTabKind::Pty,
+                TerminalTabKind::Pty,
+                TerminalTabKind::Native
+            ]
+        );
+        // The whole point of keeping a native tab in the session: `ctrl-s 3` still reaches it.
+        assert_eq!(tabs[2].index, 3);
+        assert_eq!(terminal_at(&session, 2), Some(TerminalId(3)));
     }
 
     #[test]

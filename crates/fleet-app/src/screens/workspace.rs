@@ -32,6 +32,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
+    path::PathBuf,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -43,6 +44,7 @@ use fleet_core::{
     model::Worktree,
     sessions::{Session, SessionKind, SessionState, Terminal, TerminalStatus},
 };
+use fleet_lazygit::root::{Lazygit, LazygitEvent};
 use fleet_proto::{
     job::{JobRecord, JobStatus},
     request::RequestBody,
@@ -56,7 +58,7 @@ use fleet_ui_kit::{
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollWheelEvent, SharedString, Size,
-    UniformListScrollHandle, Window, div, prelude::*, px,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::{
@@ -165,6 +167,17 @@ struct Local {
     hint_visible: bool,
     /// Repositories whose pull requests have already been asked for.
     pr_requested: Vec<RepoId>,
+    /// Whether the Fleet-drawn pane of the active tab owns the keyboard this frame.
+    ///
+    /// The shell reads it through [`WorkspaceScreen::pane_owns_keyboard`]: its own root
+    /// re-focuses itself whenever it is not focused, and that would fight the pane every frame.
+    pane_focused: bool,
+    /// Panes that asked to be left and must be dropped on the next frame.
+    ///
+    /// Leaving shuts the pane's `git` worker down, so the entity cannot be reused: the next
+    /// activation has to build a fresh one. It is recorded rather than dropped on the spot
+    /// because the request arrives from inside the pane's own event subscription.
+    pane_quit: Vec<WorktreeId>,
     /// Read-only log following position, independent from terminal scrolling.
     watch_scroll: UniformListScrollHandle,
 }
@@ -326,9 +339,26 @@ fn cache_selected_grid_rows(
     cache.last_viewport_base = viewport_base;
 }
 
+/// One Fleet-drawn tab, kept alive across frames.
+///
+/// The view holds a `fleet-git` worker thread and a cached diff model, so it is created once
+/// per worktree and reused: rebuilding it on every activation would re-run `git status`,
+/// `git log` and `git branch` and lose the cursor the user left in the Files pane.
+struct Pane {
+    view: Entity<Lazygit>,
+    /// Repaint on notify and the `Quit` handler. Dropping these ends both.
+    _subscriptions: Vec<Subscription>,
+}
+
 /// The Workspace screen.
 pub struct WorkspaceScreen {
     local: Rc<RefCell<Local>>,
+    /// One live pane per worktree whose `fleet://` tab has been visited.
+    ///
+    /// Keyed by worktree because that is what the pane is *about*: a session comes and goes
+    /// with sleep and wake, and re-opening the same worktree should find the same git view.
+    /// Evicted in [`WorkspaceScreen::sync_panes`] when the daemon stops listing the worktree.
+    panes: HashMap<WorktreeId, Pane>,
 }
 
 impl WorkspaceScreen {
@@ -337,7 +367,16 @@ impl WorkspaceScreen {
     pub fn new(_cx: &mut App) -> Self {
         Self {
             local: Rc::new(RefCell::new(Local::default())),
+            panes: HashMap::new(),
         }
+    }
+
+    /// Whether the active tab's Fleet-drawn pane holds the keyboard.
+    ///
+    /// The shell asks before taking focus back for its own body element.
+    #[must_use]
+    pub fn pane_owns_keyboard(&self) -> bool {
+        self.local.borrow().pane_focused
     }
 
     /// Renders the Workspace into the frame's body.
@@ -352,6 +391,9 @@ impl WorkspaceScreen {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        // Cleared before anything can set it: the screen with no session behind it draws no
+        // pane, so the shell must own the keyboard again.
+        self.local.borrow_mut().pane_focused = false;
         let Some(session) = state.read(cx).active_session().cloned() else {
             self.local.borrow_mut().clear_selections();
             return self.empty(focus, cx);
@@ -364,6 +406,7 @@ impl WorkspaceScreen {
         self.track_selection(state, cx);
         self.arm_prefix_hint(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
+        self.sync_panes(&model, bridge, state, window, cx);
 
         let focused = focus.is_focused(window);
         let pr = model.repo.as_ref().and_then(|repo| {
@@ -444,7 +487,10 @@ impl WorkspaceScreen {
         // A new link means the daemon forgot every attachment, so the terminal on screen has
         // to be claimed again even though it did not change.
         let relinked = local.attached_generation != model.link_generation;
-        let terminal_changed = local.attached != model.terminal;
+        // A Fleet-drawn tab has no PTY on the daemon side: attaching to it would answer
+        // `NotFound`, and detaching from the previous tab still has to happen.
+        let target = model.attach_target();
+        let terminal_changed = local.attached != target;
         if terminal_changed || relinked {
             if let Some(previous) = local.attached.take()
                 && !relinked
@@ -461,7 +507,7 @@ impl WorkspaceScreen {
             if terminal_changed {
                 local.mouse_selection = None;
             }
-            if let Some(terminal) = model.terminal {
+            if let Some(terminal) = target {
                 let (cols, rows) = local.size_for(terminal, cell);
                 local.sizes.insert(terminal, (cols, rows));
                 bridge.send(RequestBody::AttachTerminal {
@@ -470,7 +516,7 @@ impl WorkspaceScreen {
                     rows,
                 });
             }
-            local.attached = model.terminal;
+            local.attached = target;
             local.attached_generation = model.link_generation;
         }
 
@@ -495,7 +541,7 @@ impl WorkspaceScreen {
         // §3.6 "Attaching": input produced before the first frame is flushed in order once the
         // mirror is primed, and dropped if the terminal went away in the meantime.
         if model.primed && !local.pending.is_empty() {
-            match model.terminal {
+            match target {
                 Some(terminal) => {
                     for request in drain_pending_requests(&mut local.pending, terminal) {
                         bridge.send(request);
@@ -670,6 +716,91 @@ impl WorkspaceScreen {
         .detach();
     }
 
+    // ------------------------------------------------------------------ Fleet-drawn tabs
+
+    /// Creates, focuses, releases and evicts the Fleet-drawn panes.
+    ///
+    /// Creation is lazy — the first time a `fleet://` tab is actually selected — because a pane
+    /// starts a `git` worker thread and immediately runs a full snapshot of the repository.
+    /// Opening a worktree must not pay for a tab the user never looks at.
+    fn sync_panes(
+        &mut self,
+        model: &Model,
+        bridge: &Bridge,
+        state: &Entity<AppState>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // A pane that emitted `Quit` shut its own `git` worker down and can never come back to
+        // life, so it is dropped and rebuilt on the next activation.
+        let left: Vec<WorktreeId> = std::mem::take(&mut self.local.borrow_mut().pane_quit);
+        for worktree in left {
+            self.panes.remove(&worktree);
+        }
+        // The daemon's snapshot is authoritative: a worktree it no longer lists can never be
+        // painted again, so its pane — and the git worker behind it — goes with it.
+        if let Some(snapshot) = state.read(cx).snapshot.as_ref() {
+            let live: std::collections::HashSet<&WorktreeId> =
+                snapshot.worktrees.iter().map(|entry| &entry.id).collect();
+            self.panes.retain(|worktree, _| live.contains(worktree));
+        }
+
+        let active = model.native.then(|| model.worktree.clone()).flatten();
+        let Some((worktree, path)) = active else {
+            // Not on a Fleet-drawn tab: nothing owns the keyboard on our behalf, and every
+            // pane that exists is idle in the background.
+            self.local.borrow_mut().pane_focused = false;
+            for pane in self.panes.values() {
+                let view = pane.view.clone();
+                view.update(cx, |pane, cx| pane.set_active(false, window, cx));
+            }
+            return;
+        };
+
+        if !self.panes.contains_key(&worktree) {
+            let view = cx.new(|cx| Lazygit::embedded(path, cx));
+            let mut subscriptions = Vec::new();
+            // The pane is a separate entity, so the shell has to be told to repaint when its
+            // own state moves — a `git` result arriving, a cursor moving, an overlay opening.
+            let repaint = state.clone();
+            subscriptions.push(cx.observe(&view, move |_view, cx| {
+                repaint.update(cx, |_, cx| cx.notify());
+            }));
+            // `q` inside the pane means "leave this tab", not "quit Fleet": the tab the user
+            // came from is the one they want back.
+            let (quit_local, quit_bridge, quit_state) = self.handles(bridge, state);
+            let quit_worktree = worktree.clone();
+            subscriptions.push(cx.subscribe(&view, move |_view, event, cx| match event {
+                LazygitEvent::Quit => {
+                    quit_local
+                        .borrow_mut()
+                        .pane_quit
+                        .push(quit_worktree.clone());
+                    let previous = neighbour_terminal(&quit_state, -1, cx);
+                    select_terminal(&quit_local, &quit_bridge, &quit_state, previous, cx);
+                }
+            }));
+            self.panes.insert(
+                worktree.clone(),
+                Pane {
+                    view,
+                    _subscriptions: subscriptions,
+                },
+            );
+        }
+
+        // A Fleet overlay — a dialog, the palette, the filter, the jobs sheet — owns the
+        // keyboard over every screen (§2.8), so the pane must let go while one is open and
+        // take the keyboard back, unasked, when it closes.
+        let owns = !model.overlay_open;
+        self.local.borrow_mut().pane_focused = owns;
+        for (candidate, pane) in &self.panes {
+            let active = owns && candidate == &worktree;
+            let view = pane.view.clone();
+            view.update(cx, |pane, cx| pane.set_active(active, window, cx));
+        }
+    }
+
     // ------------------------------------------------------------------ pieces
 
     fn header(&self, model: &Model, pr: Option<(u64, PrBadgeState)>, cx: &mut App) -> AnyElement {
@@ -712,8 +843,28 @@ impl WorkspaceScreen {
         let _unused = cx;
         let (new_session, new_bridge, new_state) = (session.clone(), bridge.clone(), state.clone());
         let new_local = Rc::clone(&self.local);
+        let (select_local, select_bridge, select_state) =
+            (Rc::clone(&self.local), bridge.clone(), state.clone());
         TerminalTabStrip::new(tabs)
             .active(active)
+            // Mouse parity for `ctrl-s 1`-`9` (§3.6). It is also the only way a mouse-first
+            // user reaches a Fleet-drawn tab, which is why the strip is finally wired.
+            .on_select(move |position, _window, cx| {
+                let Some(terminal) = select_state
+                    .read(cx)
+                    .active_session()
+                    .and_then(|session| workspace_tabs::terminal_at(session, position))
+                else {
+                    return;
+                };
+                select_terminal(
+                    &select_local,
+                    &select_bridge,
+                    &select_state,
+                    Some(terminal),
+                    cx,
+                );
+            })
             // Mouse parity for `ctrl-s c` (§3.6): the `+` is the same request.
             .on_new(move |_window, cx| {
                 request_shell_tab(&new_local, &new_session, &new_bridge, &new_state, cx);
@@ -722,6 +873,9 @@ impl WorkspaceScreen {
     }
 
     /// The grid, its overlays, and the invisible element that measures it.
+    ///
+    /// A Fleet-drawn tab replaces the whole band: no grid, no scroll pill, no measuring
+    /// element, because none of them describe a pane that is not a terminal.
     fn terminal_area(
         &self,
         model: &Model,
@@ -731,6 +885,9 @@ impl WorkspaceScreen {
         focused: bool,
         cx: &App,
     ) -> AnyElement {
+        if model.native {
+            return self.pane_area(model, cx);
+        }
         let theme = cx.theme();
         let app = state.read(cx);
         let mirror = app.active_grid();
@@ -889,6 +1046,46 @@ impl WorkspaceScreen {
                     .hints(prefix_hints()),
             );
         self.with_mouse_selection(area, state, focus)
+            .into_any_element()
+    }
+
+    /// The band a Fleet-drawn tab fills.
+    ///
+    /// The element id is per worktree so gpui keeps each pane's hover, scroll and animation
+    /// state apart when the user moves between worktrees.
+    fn pane_area(&self, model: &Model, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let pane = model
+            .worktree
+            .as_ref()
+            .and_then(|(worktree, _)| self.panes.get(worktree));
+        let body: AnyElement = match pane {
+            Some(pane) => pane.view.clone().into_any_element(),
+            // One frame at most: `sync_panes` creates the view before this runs, unless the
+            // snapshot has no worktree for the session (an agent session, or a race with a
+            // deletion), in which case the tab has nothing to show and says so.
+            None => div()
+                .flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .child(Text::ui("no worktree for this tab").muted())
+                .into_any_element(),
+        };
+        let id = model.worktree.as_ref().map_or_else(
+            || "workspace-native-pane".to_owned(),
+            |(worktree, _)| format!("workspace-native-pane-{worktree}"),
+        );
+        div()
+            .id(SharedString::from(id))
+            .relative()
+            .flex()
+            .flex_1()
+            .w_full()
+            .min_h_0()
+            .overflow_hidden()
+            .bg(theme.colors.bg)
+            .child(body)
             .into_any_element()
     }
 
@@ -1929,7 +2126,7 @@ fn exit_scroll(
     }
     state.update(cx, |app, cx| {
         if app.terminal_mode == TerminalMode::Scroll {
-            app.terminal_mode = TerminalMode::Terminal;
+            app.terminal_mode = app.resting_terminal_mode();
         }
         cx.notify();
     });
@@ -2020,7 +2217,13 @@ fn select_terminal(
     let Some(terminal) = terminal else {
         return;
     };
-    let Some(session) = state.read(cx).active_session().map(|s| s.id.clone()) else {
+    let Some((session, native)) = state.read(cx).active_session().map(|session| {
+        let native = session
+            .terminals
+            .iter()
+            .any(|entry| entry.id == terminal && entry.is_native());
+        (session.id.clone(), native)
+    }) else {
         return;
     };
     bridge.send(RequestBody::SelectTerminal {
@@ -2037,8 +2240,13 @@ fn select_terminal(
     state.update(cx, |app, cx| {
         app.touch_terminal(&session, terminal);
         // The snapshot decides which tab is really active; this only keeps the mode honest
-        // while the round trip is in flight.
-        app.terminal_mode = TerminalMode::Terminal;
+        // while the round trip is in flight. The kind is read from the session record we
+        // already have, so switching to a `fleet://` tab does not flash a Terminal frame.
+        app.terminal_mode = if native {
+            TerminalMode::Native
+        } else {
+            TerminalMode::Terminal
+        };
         cx.notify();
     });
 }
@@ -2050,6 +2258,9 @@ fn open_session(state: &Entity<AppState>, session: SessionId, cx: &mut App) {
         app.touch_session(session.clone());
         app.screen = Screen::Workspace { session };
         app.terminal_mode = TerminalMode::Terminal;
+        // The session we are moving to may rest on a `fleet://` tab; the next snapshot would
+        // fix it anyway, this only avoids one frame in the wrong mode.
+        app.sync_terminal_mode();
         cx.notify();
     });
 }
@@ -2233,6 +2444,19 @@ struct Model {
     waking: bool,
     /// The VT modes the active terminal's last frame reported (§3.6: badged in the header).
     modes: Vec<KitTerminalMode>,
+    /// Whether the active tab is drawn by Fleet rather than by a PTY.
+    native: bool,
+    /// The worktree the session belongs to, and its path on disk — what a pane is built from.
+    worktree: Option<(WorktreeId, PathBuf)>,
+    /// Whether a Fleet overlay owns the keyboard, in which case no pane may hold it.
+    overlay_open: bool,
+}
+
+impl Model {
+    /// The terminal this client attaches to, which is never a Fleet-drawn tab.
+    const fn attach_target(&self) -> Option<TerminalId> {
+        if self.native { None } else { self.terminal }
+    }
 }
 
 impl Model {
@@ -2329,6 +2553,12 @@ impl Model {
             keep_alive,
             running_jobs,
             failed_jobs,
+            native: session
+                .terminals
+                .iter()
+                .any(|entry| Some(entry.id) == terminal && entry.is_native()),
+            worktree: worktree.map(|worktree| (worktree.id.clone(), PathBuf::from(&worktree.path))),
+            overlay_open: app.overlay.is_some(),
             waking: session.slept_at.is_some()
                 && session
                     .terminals

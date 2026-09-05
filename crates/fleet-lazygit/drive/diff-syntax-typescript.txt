@@ -1,0 +1,19 @@
+# demo.ts and demo.tsx must render with TypeScript syntax colours, which means
+# the background highlight pass has to land and repaint. Nothing to assert from
+# the shell beyond "no panic": the screenshot is the artefact.
+wait 1500
+key 2
+wait 500
+key <
+wait 400
+key j
+wait 1200
+key 0
+wait 900
+key 2
+wait 400
+key j
+wait 1200
+key 0
+wait 900
+quit

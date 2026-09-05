@@ -96,6 +96,12 @@ impl Screen {
 pub enum TerminalMode {
     /// Every key goes to the PTY except `ctrl-s`.
     Terminal,
+    /// Every key goes to the Fleet-drawn pane in the tab except `ctrl-s`.
+    ///
+    /// The resting mode of a `fleet://` tab. It is [`TerminalMode::Terminal`] with a different
+    /// consumer: the same one app key, everything else handled inside the tab — which is why
+    /// `Workspace > Native` binds exactly what `Workspace > Terminal` binds.
+    Native,
     /// One-shot, entered by `ctrl-s`, left by the very next key.
     Prefix,
     /// Scrollback and copy mode.
@@ -146,6 +152,8 @@ pub enum Mode {
     Normal,
     /// Keys go to the PTY.
     Terminal,
+    /// Keys go to the Fleet-drawn pane in the active tab.
+    Native,
     /// One key after `ctrl-s`.
     Prefix,
     /// Scrollback and copy mode.
@@ -166,7 +174,10 @@ impl Mode {
     pub const fn word(self) -> ModeWord {
         match self {
             Self::Normal => ModeWord::Normal,
-            Self::Terminal => ModeWord::Terminal,
+            // §2.8 has no ninth word and a native tab is still "the Workspace has the
+            // keyboard", so the status bar keeps saying TERMINAL; the tab strip's glyph is
+            // what distinguishes the two.
+            Self::Terminal | Self::Native => ModeWord::Terminal,
             Self::Prefix => ModeWord::Prefix,
             Self::Scroll => ModeWord::Scroll,
             Self::Filter => ModeWord::Filter,
@@ -882,6 +893,7 @@ impl AppState {
                 "Workspace",
                 match self.terminal_mode {
                     TerminalMode::Terminal => "Terminal",
+                    TerminalMode::Native => "Native",
                     TerminalMode::Prefix => "Prefix",
                     TerminalMode::Scroll => "Scroll",
                 },
@@ -911,6 +923,7 @@ impl AppState {
             Screen::Hub { .. } => Mode::Normal,
             Screen::Workspace { .. } => match self.terminal_mode {
                 TerminalMode::Terminal => Mode::Terminal,
+                TerminalMode::Native => Mode::Native,
                 TerminalMode::Prefix => Mode::Prefix,
                 TerminalMode::Scroll => Mode::Scroll,
             },
@@ -953,10 +966,51 @@ impl AppState {
     /// Returns whether the mode actually changed.
     pub fn leave_prefix(&mut self) -> bool {
         if self.terminal_mode == TerminalMode::Prefix {
-            self.terminal_mode = TerminalMode::Terminal;
+            self.terminal_mode = self.resting_terminal_mode();
             true
         } else {
             false
+        }
+    }
+
+    /// The mode a Workspace tab rests in: what owns the keyboard when no Fleet mode is active.
+    #[must_use]
+    pub fn resting_terminal_mode(&self) -> TerminalMode {
+        if self.active_terminal_is_native() {
+            TerminalMode::Native
+        } else {
+            TerminalMode::Terminal
+        }
+    }
+
+    /// Whether the active session's active tab is drawn by Fleet rather than by a PTY.
+    #[must_use]
+    pub fn active_terminal_is_native(&self) -> bool {
+        self.active_terminal_record()
+            .is_some_and(fleet_core::sessions::Terminal::is_native)
+    }
+
+    /// The active session's active terminal record, straight from the snapshot.
+    #[must_use]
+    pub fn active_terminal_record(&self) -> Option<&fleet_core::sessions::Terminal> {
+        let session = self.active_session()?;
+        let active = session.active_terminal?;
+        session
+            .terminals
+            .iter()
+            .find(|terminal| terminal.id == active)
+    }
+
+    /// Re-derives the resting mode after a snapshot moved, created or replaced the active tab.
+    ///
+    /// `Prefix` and `Scroll` are transient Fleet modes the user is standing in; a snapshot must
+    /// not yank them away underneath. Everything else follows the tab.
+    pub fn sync_terminal_mode(&mut self) {
+        if matches!(
+            self.terminal_mode,
+            TerminalMode::Terminal | TerminalMode::Native
+        ) {
+            self.terminal_mode = self.resting_terminal_mode();
         }
     }
 
@@ -1077,6 +1131,9 @@ impl AppState {
         self.forget_vanished(&snapshot);
         self.snapshot = Some(snapshot);
         self.snapshot_at = Some(now);
+        // The snapshot is what decides which tab is active, so it is also what decides whether
+        // the Workspace is over a PTY or over a Fleet-drawn pane.
+        self.sync_terminal_mode();
     }
 
     /// Drops the mirrors and MRU entries of everything the daemon no longer lists.
@@ -2225,12 +2282,73 @@ mod tests {
                     title: None,
                     keep_alive: Vec::new(),
                     has_unseen_output: false,
+                    kind: fleet_core::sessions::TerminalKind::Pty,
                 })
                 .collect(),
             active_terminal: terminals.first().map(|id| TerminalId(*id)),
             slept_at: None,
             kept_terminals: Vec::new(),
         }
+    }
+
+    /// A `fleet://` tab puts the Workspace in `Native`, and moving off it puts it back.
+    ///
+    /// The mode is what selects the key context, and `Workspace > Native` binds only `ctrl-s`,
+    /// so getting this wrong either deafens the pane or lets Fleet keys leak into it.
+    #[test]
+    fn the_workspace_mode_follows_the_kind_of_the_active_tab() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        let session: SessionId = "payroll/feat".parse().unwrap_or_else(|e| panic!("{e}"));
+        state.screen = Screen::Workspace {
+            session: session.clone(),
+        };
+
+        // Otherwise the empty sample snapshot reads as the first run and owns the chain.
+        state.has_seen_non_empty_state = true;
+
+        let mut open = snapshot();
+        let mut record = session_with("payroll/feat", &[1, 2, 3]);
+        record.terminals[2].kind = fleet_core::sessions::TerminalKind::Native;
+        record.active_terminal = Some(TerminalId(1));
+        open.sessions = vec![record.clone()];
+        state.apply_snapshot(open, now);
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+        assert_eq!(state.context_chain(), vec!["Workspace", "Terminal"]);
+        assert!(!state.active_terminal_is_native());
+
+        // `ctrl-s 3`.
+        let mut on_native = snapshot();
+        record.active_terminal = Some(TerminalId(3));
+        on_native.sessions = vec![record.clone()];
+        state.apply_snapshot(on_native, now);
+        assert!(state.active_terminal_is_native());
+        assert_eq!(state.terminal_mode, TerminalMode::Native);
+        assert_eq!(state.context_chain(), vec!["Workspace", "Native"]);
+        // §2.8 has no ninth word: the status bar still says the Workspace has the keyboard.
+        assert_eq!(state.mode().word(), ModeWord::Terminal);
+
+        // `ctrl-s` over the pane still enters the prefix, and leaving it comes back to Native.
+        state.enter_prefix();
+        assert_eq!(state.context_chain(), vec!["Workspace", "Prefix"]);
+        assert!(state.leave_prefix());
+        assert_eq!(state.terminal_mode, TerminalMode::Native);
+
+        // A snapshot must never yank a transient Fleet mode away underneath the user.
+        state.terminal_mode = TerminalMode::Scroll;
+        let mut again = snapshot();
+        again.sessions = vec![record.clone()];
+        state.apply_snapshot(again, now);
+        assert_eq!(state.terminal_mode, TerminalMode::Scroll);
+
+        // And `ctrl-s 1` goes back to a PTY.
+        state.terminal_mode = TerminalMode::Native;
+        let mut back = snapshot();
+        record.active_terminal = Some(TerminalId(1));
+        back.sessions = vec![record];
+        state.apply_snapshot(back, now);
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+        assert_eq!(state.context_chain(), vec!["Workspace", "Terminal"]);
     }
 
     #[test]

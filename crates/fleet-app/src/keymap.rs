@@ -211,6 +211,13 @@ key_table! {
     "cmd-c",        "Workspace > Terminal" => workspace::CopySelection;
     "cmd-v",        "Workspace > Terminal" => workspace::PasteClipboard;
 
+    // ---------------------------------------------------------------- Workspace › Native
+    // A `fleet://` tab is a terminal as far as this table is concerned: exactly one app key,
+    // and every other keystroke belongs to whatever is inside the tab. The consumer is a gpui
+    // view rather than a PTY, so the keys fall through to *its* bindings — which live under
+    // its own root context, nested inside this one — instead of through `on_key_down`.
+    "ctrl-s",       "Workspace > Native" => workspace::EnterPrefix;
+
     // ---------------------------------------------------------------- Workspace › Prefix
     "ctrl-s",       "Workspace > Prefix" => prefix::SendLiteral;
     "s",            "Workspace > Prefix" => prefix::GoHub;
@@ -407,7 +414,7 @@ pub fn init(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
 
@@ -419,6 +426,7 @@ mod tests {
         "Hub > Worktrees",
         "Hub > Prs",
         "Workspace > Terminal",
+        "Workspace > Native",
         "Workspace > Prefix",
         "Workspace > Scroll",
         "Filter",
@@ -511,6 +519,92 @@ mod tests {
         assert!(
             terminal.iter().all(|spec| spec.keys != "ctrl-v"),
             "ctrl-v belongs to shells and terminal applications"
+        );
+    }
+
+    /// The resting context of a `fleet://` tab reserves `ctrl-s` and nothing else.
+    ///
+    /// A native tab hands every other key to the embedded gpui view, which resolves it against
+    /// its own bindings. `Workspace > Terminal` may reserve the macOS clipboard and viewport
+    /// keys because a PTY has no use for them; the pane does, so it keeps them.
+    #[test]
+    fn prefix_is_the_only_app_key_over_a_native_pane() {
+        let bound: Vec<_> = table()
+            .into_iter()
+            .filter(|spec| spec.context == "Workspace > Native")
+            .collect();
+        assert_eq!(bound.len(), 1, "Workspace > Native binds more than one key");
+        assert_eq!(bound[0].keys, "ctrl-s");
+        assert_eq!(bound[0].action, "workspace::EnterPrefix");
+    }
+
+    /// Every fleet-lazygit action name must differ from every fleet-app one.
+    ///
+    /// gpui registers actions process-wide under `namespace::Name` through `inventory`, and
+    /// `App::load_actions` **panics** on a duplicate — at startup, before any window exists.
+    /// Linking the two crates is what makes that a real risk, so the check runs wherever they
+    /// are linked, which is here.
+    #[test]
+    fn no_action_name_is_registered_twice() {
+        let mut seen: HashMap<&'static str, usize> = HashMap::new();
+        let mut names = Vec::new();
+        for builder in gpui::private::inventory::iter::<gpui::MacroActionBuilder> {
+            let action = (builder.0)();
+            *seen.entry(action.name).or_default() += 1;
+            names.push(action.name);
+        }
+        let duplicates: Vec<_> = seen
+            .iter()
+            .filter(|(_, count)| **count > 1)
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            duplicates.is_empty(),
+            "these action names are registered more than once: {duplicates:?}"
+        );
+        // A sanity check that both crates really are linked into this test binary: without it
+        // the assertion above would pass on an empty inventory.
+        assert!(
+            names.contains(&"workspace::EnterPrefix"),
+            "fleet-app's actions are missing from the inventory"
+        );
+        assert!(
+            names.contains(&"lg_confirm::Accept"),
+            "fleet-lazygit's actions are missing from the inventory"
+        );
+    }
+
+    /// fleet-lazygit's own contexts must not satisfy any fleet-app binding predicate.
+    ///
+    /// gpui's `>` is a *subsequence* test over the rendered chain, not a parent test, so a
+    /// pane rendering `... > Dialog > Confirm` inside the Workspace would answer fleet-app's
+    /// `Dialog > Confirm` bindings as well as its own.
+    #[test]
+    fn the_embedded_pane_shares_no_context_word_with_the_app() {
+        let pane_words: HashSet<&str> = fleet_lazygit::keymap::table()
+            .into_iter()
+            .flat_map(|spec| {
+                spec.context
+                    .split('>')
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            })
+            .collect();
+        let app_words: HashSet<&str> = table()
+            .into_iter()
+            .flat_map(|spec| {
+                spec.context
+                    .split('>')
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            })
+            .collect();
+        let shared: Vec<_> = pane_words.intersection(&app_words).copied().collect();
+        assert!(
+            shared.is_empty(),
+            "these key-context words mean two things at once: {shared:?}"
         );
     }
 

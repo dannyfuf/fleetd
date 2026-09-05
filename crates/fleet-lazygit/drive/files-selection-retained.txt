@@ -1,0 +1,16 @@
+# Files pane: move to row 2 (gamma.txt, the staged file), `space` unstages it,
+# then `space` again. Expected: gamma.txt ends up staged and alpha.txt stays
+# unstaged — if the post-mutation refresh had reset the cursor to row 1 the
+# second `space` would have staged alpha.txt instead.
+wait 1500
+key 2
+wait 400
+key <
+wait 200
+key j
+wait 400
+key space
+wait 2500
+key space
+wait 2500
+quit

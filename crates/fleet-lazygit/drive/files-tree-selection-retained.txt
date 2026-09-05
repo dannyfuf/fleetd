@@ -1,0 +1,19 @@
+# Files pane, `tree` repository: `space` twice on the `src/app/deep` directory
+# row. The first stages both of its files, the refresh must leave the cursor on
+# the directory, and the second unstages them again.
+# Expected: nothing under src/app/deep is staged, new.txt is still on disk as an
+# untracked file, and gamma.txt is still staged — proof the cursor never moved.
+wait 1500
+key 2
+wait 400
+key <
+wait 200
+key j
+wait 200
+key j
+wait 400
+key space
+wait 2500
+key space
+wait 2500
+quit

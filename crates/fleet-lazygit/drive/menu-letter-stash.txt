@@ -1,0 +1,14 @@
+# Menus dispatch on the letter printed beside each row, as lazygit's do: `S` in
+# the Files pane opens the stash menu and `u` runs "stash all, including
+# untracked" without any j/k. The prompt then takes an empty message.
+# Expected: a second stash entry and untracked.txt gone from the worktree.
+wait 1500
+key 2
+wait 400
+key S
+wait 700
+key u
+wait 700
+key enter
+wait 3000
+quit

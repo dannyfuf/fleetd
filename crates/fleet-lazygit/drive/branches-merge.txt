@@ -1,0 +1,15 @@
+# Branches pane: `M` on `feature` (row 2) while `main` is checked out, then
+# `enter`. Expected: main gains feature's commits (fast-forward when main has not
+# moved, a two-parent merge commit when it has).
+wait 1500
+key 3
+wait 300
+key <
+wait 200
+key j
+wait 300
+key M
+wait 500
+key enter
+wait 2500
+quit

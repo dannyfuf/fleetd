@@ -1,0 +1,12 @@
+# Tags tab: `space` on the row-1 tag (`v1.0`). Expected: HEAD is detached at the
+# tag's commit.
+wait 1500
+key 3
+wait 300
+key ] ]
+wait 500
+key <
+wait 300
+key space
+wait 2500
+quit

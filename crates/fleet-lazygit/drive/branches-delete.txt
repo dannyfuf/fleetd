@@ -1,0 +1,16 @@
+# Branches pane: `d` on the merged branch `merged-b` (row 3: `main` is first as
+# the checked-out branch, then `feature` by checkout recency) then one `enter`.
+# Expected: `merged-b` is deleted straight away by `git branch -d` — the force
+# dialog only appears when Git refuses.
+wait 1500
+key 3
+wait 300
+key <
+wait 200
+key j j
+wait 400
+key d
+wait 400
+key enter
+wait 2000
+quit

@@ -1,0 +1,15 @@
+# Stash pane: `n` creates a branch from stash@{0}.
+# Expected: `from-stash` is checked out with the stashed beta.txt change applied
+# and the stash list empty.
+wait 1500
+key 5
+wait 500
+key <
+wait 300
+key n
+wait 700
+type from-stash
+wait 300
+key enter
+wait 3000
+quit

@@ -1,0 +1,17 @@
+# Reflog tab (`4` then `]`): `space` + `enter` on row 2, which is the
+# `commit: z1 lost commit` entry left behind by a `reset --hard HEAD~1`.
+# Expected: HEAD is detached at that lost commit, so lost.txt is back.
+wait 1500
+key 4
+wait 400
+key ]
+wait 600
+key <
+wait 200
+key j
+wait 300
+key space
+wait 500
+key enter
+wait 2500
+quit

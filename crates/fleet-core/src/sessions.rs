@@ -65,6 +65,22 @@ pub enum TerminalStatus {
     },
 }
 
+/// Where a terminal's content comes from.
+///
+/// The daemon owns every tab in a session, but not every tab is a process: a window whose
+/// configured command is a reserved [`crate::config::NATIVE_SCHEME`] command keeps its name and
+/// its position — so `ctrl-s <n>`, `active_terminal` and the tab strip are unchanged — while the
+/// Fleet app, not a PTY, draws what is inside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalKind {
+    /// A PTY running a login shell. The default, and what every field below describes.
+    #[default]
+    Pty,
+    /// A surface the client draws. No PTY, no shell pid, nothing to attach to.
+    Native,
+}
+
 /// Runtime metadata for one daemon-owned terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +110,23 @@ pub struct Terminal {
     /// Whether output arrived since the owning client last selected this terminal.
     #[serde(default)]
     pub has_unseen_output: bool,
+    /// Whether a process or the client provides this terminal's content.
+    ///
+    /// `#[serde(default)]` so a snapshot written by an older daemon still deserializes as the
+    /// PTY it was.
+    #[serde(default)]
+    pub kind: TerminalKind,
+}
+
+impl Terminal {
+    /// Whether the Fleet app, rather than a PTY, draws this terminal.
+    ///
+    /// Everything that assumes a process — attach, keys, resize, scroll, the exit strip, the
+    /// sleep observer — must ask this first: a native terminal has no `shell_pid` and no host.
+    #[must_use]
+    pub const fn is_native(&self) -> bool {
+        matches!(self.kind, TerminalKind::Native)
+    }
 }
 
 /// Observed attachment state for a worktree session.
@@ -163,6 +196,29 @@ pub fn default_terminals(config: &Config, agent: Agent) -> Vec<TerminalSpec> {
         .collect()
 }
 
+/// Rewrites reserved commands into the programs they stand for.
+///
+/// `fleet-git` — and therefore the native git pane — runs `git` in the worktree directory on
+/// *this* machine, so a worktree that lives on a remote host cannot use it. The tab keeps its
+/// name and position and goes back to being a PTY running the real `lazygit`, which is what
+/// the user had before Fleet grew its own.
+pub fn degrade_native_terminals(specs: &mut [TerminalSpec]) {
+    for spec in specs {
+        if let Some(fallback) = native_fallback_command(&spec.command) {
+            spec.command = fallback.to_owned();
+        }
+    }
+}
+
+/// The program a reserved command degrades to off the local machine, when there is one.
+#[must_use]
+pub fn native_fallback_command(command: &str) -> Option<&'static str> {
+    match command {
+        crate::config::NATIVE_LAZYGIT => Some("lazygit"),
+        _ => None,
+    }
+}
+
 /// Returns the runtime-only repository-level session name for an agent.
 pub fn agent_session_id(agent: Agent) -> Result<SessionId, IdError> {
     let name = match agent {
@@ -177,6 +233,21 @@ mod tests {
     use crate::config::default_config;
 
     use super::*;
+
+    #[test]
+    fn a_remote_worktree_falls_back_to_the_lazygit_binary() {
+        let config = default_config("/tmp/.fleet");
+        let mut terminals = default_terminals(&config, Agent::Claude);
+        degrade_native_terminals(&mut terminals);
+        assert_eq!(
+            terminals
+                .iter()
+                .map(|spec| (spec.name.as_str(), spec.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("nvim", "nvim ."), ("cc", "claude"), ("lg", "lazygit"),],
+            "the names and the order — what `ctrl-s <n>` counts — never move"
+        );
+    }
 
     #[test]
     fn resolves_default_layout() {
@@ -195,7 +266,7 @@ mod tests {
                 },
                 TerminalSpec {
                     name: "lg".to_owned(),
-                    command: "lazygit".to_owned()
+                    command: crate::config::NATIVE_LAZYGIT.to_owned()
                 },
             ]
         );

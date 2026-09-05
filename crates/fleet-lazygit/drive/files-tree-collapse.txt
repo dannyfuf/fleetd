@@ -1,0 +1,17 @@
+# Files pane, `tree` repository: `enter` on row 1 (`pkg`) collapses it, so one
+# `j` now lands on `src/app/deep` instead of on `pkg/three.txt`; `space` there
+# stages the directory.
+# Expected: src/app/deep/one.txt joins the index and pkg/three.txt stays in it —
+# had the collapse not happened, `space` would have unstaged pkg/three.txt.
+wait 1500
+key 2
+wait 400
+key <
+wait 200
+key enter
+wait 500
+key j
+wait 400
+key space
+wait 2500
+quit

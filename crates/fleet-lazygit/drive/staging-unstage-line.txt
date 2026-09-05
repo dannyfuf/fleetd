@@ -1,0 +1,18 @@
+# Same as staging-unstage-hunk but `a` switches to line mode first, so `space`
+# unstages only the `-line4` row.
+# Expected: the index has both "line4" and "line4 DIRTY" (a reverse-applied
+# single removal re-adds the old line without dropping the new one).
+wait 1500
+key 2
+wait 400
+key <
+wait 400
+key space
+wait 2500
+key enter
+wait 1500
+key a
+wait 500
+key space
+wait 2500
+quit

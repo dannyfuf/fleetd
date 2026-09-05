@@ -1,0 +1,18 @@
+# Files pane, `tree` repository: `d` + `enter` on the `src/app/deep` directory
+# row discards every change under it.
+# Expected: one.txt is back to its committed content and the untracked new.txt
+# is gone, while alpha.txt keeps its own dirt.
+wait 1500
+key 2
+wait 400
+key <
+wait 200
+key j
+wait 200
+key j
+wait 400
+key d
+wait 500
+key enter
+wait 2500
+quit

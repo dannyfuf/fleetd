@@ -146,6 +146,10 @@ pub(crate) async fn apply_session(
 
     let observations = observe_session(&session, process).await?;
     for terminal in &session.terminals {
+        if terminal.is_native() {
+            // Nothing to observe: the client draws this tab and no process belongs to it.
+            continue;
+        }
         let observation = observations.get(&terminal.id);
         let labels = observation.map_or_else(Vec::new, |observation| {
             match_keep_alive(
@@ -161,6 +165,13 @@ pub(crate) async fn apply_session(
     let mut kept = Vec::new();
     let mut closable = Vec::new();
     for terminal in session.terminals.iter().rev() {
+        if terminal.is_native() {
+            // Idle by construction: no keep-alive rule can match a tab with no process, and
+            // there is no editor to ask to save. It closes with the rest, and `ensure` puts it
+            // back — exactly what a `lazygit` PTY did before it was native.
+            closable.push((terminal.id, terminal.name.clone()));
+            continue;
+        }
         let observation = observations.get(&terminal.id);
         let labels = observation.map_or_else(Vec::new, |observation| {
             match_keep_alive(

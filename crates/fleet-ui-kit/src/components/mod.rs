@@ -127,7 +127,7 @@ pub use terminal_grid::{
     TerminalGrid, UnderlineStyle,
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
-pub use terminal_tab_strip::{TerminalTab, TerminalTabStrip};
+pub use terminal_tab_strip::{TerminalTab, TerminalTabKind, TerminalTabStrip};
 pub use text_field::{
     TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
 };

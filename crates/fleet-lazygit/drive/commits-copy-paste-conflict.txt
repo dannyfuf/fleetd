@@ -1,0 +1,32 @@
+# `c` on `feature`'s tip (f2) alone, then `main` is checked out and `v` + `enter`
+# pastes it. f2's parent is missing on main, so the cherry-pick conflicts;
+# `m` plus the second menu row aborts it.
+# Expected: PICKING with a DU conflict, then a clean main with no CHERRY_PICK_HEAD.
+wait 1500
+key 4
+wait 400
+key <
+wait 300
+key c
+wait 500
+key 3
+wait 600
+key <
+wait 200
+key j
+wait 300
+key space
+wait 2500
+key 4
+wait 800
+key v
+wait 500
+key enter
+wait 3000
+key m
+wait 700
+key j
+wait 300
+key enter
+wait 3000
+quit

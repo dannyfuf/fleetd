@@ -26,6 +26,20 @@ const TAB_MAX_W: f32 = 200.0;
 /// The trailing `+` tab.
 const NEW_TAB_W: f32 = 36.0;
 
+/// What draws a tab's content.
+///
+/// The strip is the legend for `ctrl-s 1`-`9`, so a tab that is *not* a terminal has to say so:
+/// otherwise the only difference the user can see between a PTY and a Fleet-drawn pane is that
+/// one of them ignores every key they type into it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalTabKind {
+    /// A PTY. The default, and what the rest of this component assumes.
+    #[default]
+    Pty,
+    /// A surface the app draws itself; marked with a glyph in front of the name.
+    Native,
+}
+
 /// One terminal tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalTab {
@@ -43,6 +57,8 @@ pub struct TerminalTab {
     /// The command exited. `Some(None)` is a signal-killed process, which has **no** exit
     /// code; the strip renders `—` rather than inventing one.
     pub exited: Option<Option<i32>>,
+    /// Whether a process or the app itself provides the tab's content.
+    pub kind: TerminalTabKind,
 }
 
 impl TerminalTab {
@@ -55,7 +71,14 @@ impl TerminalTab {
             starting: false,
             keep_alive: None,
             exited: None,
+            kind: TerminalTabKind::default(),
         }
+    }
+
+    /// What draws the tab's content.
+    pub fn kind(mut self, kind: TerminalTabKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Mark unread output.
@@ -166,6 +189,7 @@ impl RenderOnce for TerminalTabStrip {
                 let exited = tab.exited;
                 let starting = tab.starting;
                 let index = tab.index;
+                let native = tab.kind == TerminalTabKind::Native;
                 let select = on_select.clone();
                 let hover_bg = theme.colors.row_hover;
 
@@ -202,6 +226,15 @@ impl RenderOnce for TerminalTabStrip {
                             // The index is the argument to `ctrl-s <n>`; it never dims away,
                             // because the moment it does the binding stops being discoverable.
                             .child(Text::hint(index.to_string()).faint())
+                            // A Fleet-drawn pane is not a terminal: the glyph is the only
+                            // thing on the strip that says why this tab answers `j` and `k`
+                            // instead of typing them.
+                            .children(native.then(|| {
+                                Icon::GitBranch
+                                    .el()
+                                    .size(IconSize::Small)
+                                    .color(theme.colors.text_secondary)
+                            }))
                             .child(
                                 if exited.is_some() {
                                     Text::ui(tab.name).faint()

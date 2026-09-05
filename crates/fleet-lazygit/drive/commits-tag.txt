@@ -1,0 +1,16 @@
+# Commits pane: `T` on row 2 (c3) then a tag name.
+# Expected: the tag `from-commit` points at c3.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key T
+wait 700
+type from-commit
+wait 300
+key enter
+wait 2500
+quit

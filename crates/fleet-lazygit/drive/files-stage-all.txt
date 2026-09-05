@@ -1,0 +1,8 @@
+# Files pane: one `a`. Expected: alpha.txt, gamma.txt and untracked.txt are all
+# in the index.
+wait 1500
+key 2
+wait 400
+key a
+wait 2500
+quit

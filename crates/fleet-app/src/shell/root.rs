@@ -442,8 +442,17 @@ impl Shell {
             let alt_screen = state
                 .active_grid()
                 .is_some_and(|grid| grid.modes.alt_screen);
+            // A Fleet-drawn tab has no scrollback to enter: there is no PTY behind it and the
+            // pane scrolls itself. Saying so is better than a Scroll mode that answers nothing.
+            let native = state.active_terminal_is_native();
             state.leave_prefix();
-            if alt_screen {
+            if native {
+                state.toast_short(
+                    "no scrollback in this tab",
+                    Icon::ChevronsUp,
+                    Instant::now(),
+                );
+            } else if alt_screen {
                 // §3.6: scroll mode is suppressed while an alt-screen app is running.
                 state.toast_short(
                     "no scrollback in alt-screen",
@@ -481,7 +490,7 @@ impl Shell {
     fn exit_scroll(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |state, cx| {
             if state.terminal_mode == TerminalMode::Scroll {
-                state.terminal_mode = TerminalMode::Terminal;
+                state.terminal_mode = state.resting_terminal_mode();
                 cx.notify();
             }
         });
@@ -874,6 +883,9 @@ impl Render for Shell {
             .children(layer)
             .into_any_element();
         }
+        // Set only by the Workspace arm below, so a screen that never renders the Workspace can
+        // never inherit a stale "the pane has the keyboard" from the last time it did.
+        let mut pane_owns = false;
         let body: AnyElement = if let Some(checks) = doctor.as_ref() {
             div()
                 .track_focus(&focus)
@@ -897,6 +909,7 @@ impl Render for Shell {
                     let workspace =
                         self.workspace
                             .render(&state_handle, &bridge, &focus, window, cx);
+                    pane_owns = self.workspace.pane_owns_keyboard();
                     Veil::new(veil).child(workspace).into_any_element()
                 }
             }
@@ -916,7 +929,13 @@ impl Render for Shell {
         } else {
             &self.body_focus
         };
-        if !wanted.is_focused(window) {
+        // …with one exception. A Fleet-drawn tab is a gpui view of its own, nested inside the
+        // `Workspace > Native` context, and it must hold the keyboard for its own bindings to
+        // resolve. Its focus handle is a descendant of this element, so the whole chain —
+        // `Fleet > Workspace > Native > Lazygit > …` — still reaches the shell's own actions.
+        // Taking focus back here every frame is what would break it.
+        let pane_owns = pane_owns && overlay_element.is_none();
+        if !pane_owns && !wanted.is_focused(window) {
             window.focus(wanted, cx);
         }
 
@@ -1051,6 +1070,11 @@ pub fn run() -> anyhow::Result<()> {
         .run(move |cx: &mut App| {
             Theme::init(ThemeMode::Dark, cx);
             keymap::init(cx);
+            // The native git pane brings its own key table. Its contexts all sit under its own
+            // `Lazygit` root, which the Workspace renders inside `Fleet > Workspace > Native`,
+            // so its bindings are reachable exactly there and nowhere else. Theme and assets
+            // stay installed once, above, because there is one window and one design system.
+            fleet_lazygit::keymap::init(cx);
             cx.set_menus(vec![Menu {
                 name: "Fleet".into(),
                 items: vec![MenuItem::action("Quit", fleet::Quit)],

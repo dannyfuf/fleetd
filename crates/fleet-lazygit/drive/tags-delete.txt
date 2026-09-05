@@ -1,0 +1,15 @@
+# Tags tab: `>` selects the last tag (v2.0 — both tags point at HEAD so the
+# creatordate tie breaks alphabetically), `d` + `enter` deletes it.
+# Expected: v2.0 is gone and v1.0 survives.
+wait 1500
+key 3
+wait 300
+key ] ]
+wait 500
+key >
+wait 400
+key d
+wait 500
+key enter
+wait 2000
+quit

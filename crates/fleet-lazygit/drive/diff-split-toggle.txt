@@ -1,0 +1,22 @@
+# `|` switches the diff between unified and side by side, and back. The row
+# count changes with the layout, so the cursor and the page size have to follow.
+wait 1500
+key 2
+wait 500
+key <
+wait 400
+key j
+wait 900
+key 0
+wait 500
+key |
+wait 700
+key j j j j j
+wait 400
+key ctrl-d
+wait 400
+key |
+wait 700
+key G
+wait 400
+quit

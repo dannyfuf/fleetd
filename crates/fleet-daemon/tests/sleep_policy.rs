@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use fleet_core::{
-    config::WindowConfig,
+    config::{NATIVE_LAZYGIT, WindowConfig},
     ids::{ContextId, RepoId, SessionId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
     state::default_state,
@@ -226,4 +226,73 @@ async fn no_matches_kills_session_once() {
             .unwrap_or_else(|error| panic!("{error}"))
             .is_empty()
     );
+}
+
+/// Sleep treats a `fleet://` tab as idle: no process, so nothing can keep it alive.
+///
+/// A keep-alive rule matches process names, and there is no process; asking an editor to `:qa`
+/// needs a PTY to type into, and there is none. It closes with the other idle tabs, exactly as
+/// the `lazygit` PTY it replaces did, and `ensure` puts it back on the next wake.
+#[tokio::test]
+async fn a_native_tab_is_idle_and_never_keeps_a_session_awake() {
+    let (_temp, config, state, worktree) = stores(vec![
+        WindowConfig {
+            name: "worker".to_owned(),
+            command: "/bin/sh -c 'sleep 30'".to_owned(),
+        },
+        WindowConfig {
+            name: "lg".to_owned(),
+            command: NATIVE_LAZYGIT.to_owned(),
+        },
+    ])
+    .await;
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let session = sessions
+        .ensure(Some(worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(session.terminals[1].is_native());
+    let worker_shell = session.terminals[0]
+        .shell_pid
+        .unwrap_or_else(|| panic!("shell pid"));
+
+    let fake = Arc::new(FakeProcess::default());
+    fake.set_snapshot(vec![ProcessInfo {
+        pid: 50_003,
+        parent_pid: worker_shell,
+        command: "/usr/local/bin/claude".to_owned(),
+    }]);
+    // A port that belongs to nothing in this session must not be able to keep the native tab
+    // awake by accident.
+    fake.set_ports(vec![ListeningPort {
+        pid: 50_003,
+        port: 4_000,
+    }]);
+    let process: Arc<dyn Process> = fake;
+    let sleep = Sleep::new(config, state, process);
+    let result = sleep
+        .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        result
+            .kept
+            .iter()
+            .map(|kept| kept.window.as_str())
+            .collect::<Vec<_>>(),
+        vec!["worker"]
+    );
+    assert_eq!(result.closed, vec!["lg"]);
+    assert!(!result.session_killed);
+
+    // A session that is *only* a native tab sleeps away completely.
+    let remaining = sessions
+        .list()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(remaining[0].terminals.len(), 1);
+    sessions
+        .kill(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
 }

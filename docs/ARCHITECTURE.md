@@ -76,13 +76,26 @@ Toolchain decisions (verified on this machine, see `docs/research/`):
   `logs/jobs/<id>.log`. Jobs are never attached to a client connection.
 - **Sessions replace tmux**. `Session { id, kind: Worktree(id) | Agent(claude|opencode),
   cwd, terminals: Vec<Terminal>, active_terminal }`. `Terminal { id, name, command, cwd,
-  shell_pid, foreground_command, status, title, keep_alive labels }`. A terminal is one PTY
-  running the login shell with the configured command typed + Enter (so the shell survives
-  the command, like tmux). Session naming and the default `nvim | cc | lg` layout follow the
-  inventory. Multiple clients may attach to a terminal; the daemon keeps the VT state and sends
-  a full frame on attach and dirty-row diffs afterwards; the most recent attach's size wins.
-  Sleep applies the swarm policy (keep-alive rules, `:qa` handshake, port detection); "close
-  window" = kill that terminal. PTYs do not survive a daemon restart (like a tmux server).
+  shell_pid, foreground_command, status, title, keep_alive labels, kind: Pty | Native }`. A
+  terminal is one PTY running the login shell with the configured command typed + Enter (so the
+  shell survives the command, like tmux). Session naming and the default `nvim | cc | lg`
+  layout follow the inventory. Multiple clients may attach to a terminal; the daemon keeps the
+  VT state and sends a full frame on attach and dirty-row diffs afterwards; the most recent
+  attach's size wins. Sleep applies the swarm policy (keep-alive rules, `:qa` handshake, port
+  detection); "close window" = kill that terminal. PTYs do not survive a daemon restart (like a
+  tmux server).
+- **Native tabs (`kind: Native`)**. A `windows[].command` may be a reserved `fleet://` command
+  instead of a program. The daemon still owns the tab — same id counter, same position in
+  `terminals`, same `active_terminal` and `SelectTerminal` — but spawns no PTY: `shell_pid` is
+  `None`, there is no `TerminalHost`, and every process-shaped request (`AttachTerminal`,
+  `TerminalKey`, `ResizeTerminal`, `ScrollTerminal`, `WheelTerminal`, paste, restart) answers `NotFound` /
+  `Conflict` rather than reaching one. The **client** draws the tab. Keeping it in the session
+  list is what keeps `ctrl-s <n>` numbering stable. Sleep sees a tab with no process, so it is
+  always idle: it closes with the other idle tabs and `EnsureSession` puts it back on wake. A
+  worktree on a remote host degrades the command back to the program it stands for
+  (`fleet://lazygit` → `lazygit`), because the client-side implementation runs `git` locally.
+  The only reserved command today is `fleet://lazygit`, drawn by `crates/fleet-lazygit`
+  embedded in `fleet-app` (see that crate's README, "Embedding").
 
 ## Terminal pipeline
 

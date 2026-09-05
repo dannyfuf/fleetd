@@ -18,6 +18,37 @@ use crate::{
 /// The supported persisted configuration schema version.
 pub const CONFIG_VERSION: u32 = 1;
 
+/// The scheme that marks a `windows[].command` as a Fleet-provided surface rather than a
+/// program to run in a PTY.
+///
+/// A reserved scheme is what keeps the window list one flat array: the third tab is still a
+/// tab, still counted by `ctrl-s 3`, still named in `config.json` — it is only the *provider*
+/// of its content that changes. Anything after the scheme must be a name Fleet knows, because
+/// a typo that silently fell back to a PTY would be a tab that does nothing.
+pub const NATIVE_SCHEME: &str = "fleet://";
+
+/// The reserved command of the native git pane (`crates/fleet-lazygit`).
+pub const NATIVE_LAZYGIT: &str = "fleet://lazygit";
+
+/// Every reserved command Fleet answers, in the order the settings dialog lists them.
+pub const NATIVE_COMMANDS: &[&str] = &[NATIVE_LAZYGIT];
+
+/// Whether a `windows[].command` names a Fleet-provided surface instead of a program.
+#[must_use]
+pub fn is_native_command(command: &str) -> bool {
+    command.starts_with(NATIVE_SCHEME)
+}
+
+/// The legacy commands a swarm import upgrades to [`NATIVE_LAZYGIT`].
+///
+/// Only the bare program and the program with arguments count: `lazygit --help` still means
+/// "the user wants the git UI in this tab", while `my-lazygit-wrapper` does not.
+#[must_use]
+fn is_legacy_lazygit_command(command: &str) -> bool {
+    let command = command.trim();
+    command == "lazygit" || command.starts_with("lazygit ")
+}
+
 /// Supported interactive coding agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -240,7 +271,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
             },
             WindowConfig {
                 name: "lg".to_owned(),
-                command: "lazygit".to_owned(),
+                command: NATIVE_LAZYGIT.to_owned(),
             },
         ],
         sleep: SleepConfig {
@@ -331,6 +362,20 @@ pub fn normalize_legacy_agent_window(windows: &mut [WindowConfig]) {
     }
 }
 
+/// Upgrades an *imported* window list to Fleet's own surfaces.
+///
+/// Only [`crate::config`]'s import path calls this: a `lazygit` window in a swarm config means
+/// "the git UI lives in this tab", and Fleet has its own, so the tab keeps its name and
+/// position and changes provider. A `lazygit` written by hand into Fleet's own `config.json` is
+/// left alone — that is the documented opt-out for anyone who wants the real binary in a PTY.
+pub fn normalize_imported_windows(windows: &mut [WindowConfig]) {
+    for window in windows {
+        if is_legacy_lazygit_command(&window.command) {
+            window.command = NATIVE_LAZYGIT.to_owned();
+        }
+    }
+}
+
 /// Validates cross-field and non-empty constraints in a complete configuration.
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     if config.terminal.scrollback_bytes == 0
@@ -379,6 +424,15 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
         return Err(ConfigError::Validation(
             "window names and commands must be non-empty".to_owned(),
         ));
+    }
+    for window in &config.windows {
+        if is_native_command(&window.command) && !NATIVE_COMMANDS.contains(&window.command.as_str())
+        {
+            return Err(ConfigError::Validation(format!(
+                "window `{}` uses unknown reserved command `{}`; the only one Fleet provides is `{NATIVE_LAZYGIT}`",
+                window.name, window.command
+            )));
+        }
     }
     if config.ui.remote_status_refresh_ms <= 0 {
         return Err(ConfigError::Validation(
@@ -473,6 +527,10 @@ mod tests {
 
     use super::*;
 
+    /// The defaults still mirror swarm's `config.json` field for field, with one deliberate
+    /// difference: the third window's command is Fleet's own git pane, not the `lazygit`
+    /// binary. See [`normalize_imported_windows`] for the import path that upgrades the old
+    /// value, and `docs/SWARM-INVENTORY.md` for the divergence note.
     #[test]
     fn defaults_match_swarm_json_with_fleet_terminal_settings() {
         let actual = serde_json::to_value(default_config("/home/me/.fleet"))
@@ -491,7 +549,7 @@ mod tests {
             "windows": [
                 {"name": "nvim", "command": "nvim ."},
                 {"name": "cc", "command": "{agent}"},
-                {"name": "lg", "command": "lazygit"}
+                {"name": "lg", "command": "fleet://lazygit"}
             ],
             "sleep": {
                 "enabled": true,
@@ -510,6 +568,72 @@ mod tests {
             "terminal": {"scrollbackBytes":1073741824,"scrollLinesPerStep":3}
         });
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn the_reserved_scheme_accepts_only_commands_fleet_provides() {
+        let mut config = default_config("/home/me/.fleet");
+        assert!(validate_config(&config).is_ok());
+
+        config.windows[2].command = "fleet://lazygit".to_owned();
+        assert!(validate_config(&config).is_ok());
+
+        config.windows[2].command = "fleet://gitui".to_owned();
+        let error = validate_config(&config)
+            .err()
+            .unwrap_or_else(|| panic!("an unknown reserved command must be rejected"))
+            .to_string();
+        assert!(error.contains("fleet://gitui"), "{error}");
+        assert!(error.contains("fleet://lazygit"), "{error}");
+
+        // A plain program is never a reserved command, whatever it is called.
+        config.windows[2].command = "lazygit".to_owned();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn an_imported_lazygit_window_becomes_the_native_pane() {
+        let mut windows = vec![
+            WindowConfig {
+                name: "nvim".to_owned(),
+                command: "nvim .".to_owned(),
+            },
+            WindowConfig {
+                name: "lg".to_owned(),
+                command: "lazygit".to_owned(),
+            },
+            WindowConfig {
+                name: "lg2".to_owned(),
+                command: "lazygit --use-config-file ~/.lg.yml".to_owned(),
+            },
+            WindowConfig {
+                name: "wrapper".to_owned(),
+                command: "my-lazygit".to_owned(),
+            },
+        ];
+        normalize_imported_windows(&mut windows);
+        assert_eq!(windows[0].command, "nvim .");
+        assert_eq!(windows[1].command, NATIVE_LAZYGIT);
+        assert_eq!(windows[2].command, NATIVE_LAZYGIT);
+        assert_eq!(windows[3].command, "my-lazygit", "only `lazygit` upgrades");
+        // The names and the order — which `ctrl-s <n>` counts — never move.
+        assert_eq!(
+            windows.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+            vec!["nvim", "lg", "lg2", "wrapper"]
+        );
+    }
+
+    #[test]
+    fn fleet_own_config_keeps_an_explicit_lazygit_binary() {
+        // The opt-out: writing `lazygit` into Fleet's own config.json must survive a load.
+        let config = merge_config_with_user_home(
+            "/home/me/.fleet",
+            "/home/me",
+            json!({"windows": [{"name": "lg", "command": "lazygit"}]}),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(config.windows.len(), 1);
+        assert_eq!(config.windows[0].command, "lazygit");
     }
 
     #[test]

@@ -1,0 +1,24 @@
+# demo.tsx changes two words on two paired lines, so the intra-line pass has
+# marks to draw. `enter` from the Files pane opens staging mode on the same
+# model, which composites a selection over those marks; `a` switches to line
+# mode so the selection is a single row rather than a whole hunk.
+wait 1500
+key 2
+wait 500
+key <
+wait 400
+key j j
+wait 1200
+key 0
+wait 900
+key 2
+wait 400
+key enter
+wait 1500
+key a
+wait 500
+key j
+wait 500
+key escape
+wait 700
+quit

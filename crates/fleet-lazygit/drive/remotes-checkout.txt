@@ -1,0 +1,17 @@
+# Remotes tab (`3` then `]`): `enter` drills into `origin`, `space` checks out the
+# row-1 remote branch. Expected: a local branch tracking that remote branch is
+# created and checked out.
+wait 1500
+key 3
+wait 300
+key ]
+wait 500
+key <
+wait 300
+key enter
+wait 1200
+key <
+wait 400
+key space
+wait 2500
+quit

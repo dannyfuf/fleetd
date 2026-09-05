@@ -124,7 +124,8 @@ is always `Fleet`.
 | Hub, repos rail focused | `Fleet > Hub > Repos` |
 | Hub, worktrees list focused | `Fleet > Hub > Worktrees` |
 | Hub, PR screen focused | `Fleet > Hub > Prs` |
-| Workspace | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
+| Workspace, PTY tab | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
+| Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
 | Filter / Palette / Jobs | `Fleet > Filter` \| `Palette` \| `Jobs` |
 | Any dialog | `Fleet > Dialog > <name>` |
 | Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost |
@@ -134,6 +135,13 @@ is always `Fleet`.
 Two consequences worth knowing:
 
 * A deeper context wins, so `Hub > Prs`'s `l` (next PR tab) beats `Hub`'s `l` (next pane).
+* gpui's `>` is a **subsequence** test over the rendered chain, not a parent test. An embedded
+  view therefore may not reuse any context word this table uses: `crates/fleet-lazygit` renames
+  its overlay words to `LgDialog` / `LgConfirm` / `LgHelp` for exactly that reason, and the
+  `the_embedded_pane_shares_no_context_word_with_the_app` test in `keymap.rs` keeps it true.
+  The same test file checks that no gpui action name is registered twice: actions are
+  process-wide (`namespace::Name` via `inventory`) and `App::load_actions` panics on a
+  duplicate, so the pane's colliding namespaces are `lg_confirm` and `lg_help`.
 * While the §3.12 C banner is undismissed it is the **innermost** context, so `r`, `l` and
   `Esc` belong to it, exactly as `KEYMAP.md` says. `Esc` dismisses the banner and hands those
   keys straight back.

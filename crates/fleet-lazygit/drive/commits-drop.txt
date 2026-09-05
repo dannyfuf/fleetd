@@ -1,0 +1,14 @@
+# Commits pane: `d` on row 2 (c3). Expected: three commits (c4, c2, c1) and
+# alpha.txt back to its c1 content.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key d
+wait 500
+key enter
+wait 3500
+quit

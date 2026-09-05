@@ -1,0 +1,14 @@
+# Commits pane: `s` on row 2 (c3) squashes it into the commit below (c2).
+# Expected: four commits become three and the c2 message gains c3's subject.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key s
+wait 500
+key enter
+wait 3500
+quit

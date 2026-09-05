@@ -1,0 +1,18 @@
+# Files pane, `tree` repository: `~` switches to lazygit's flat layout, where
+# row 2 is src/app/deep/one.txt (tracked files first, untracked last) rather
+# than pkg/three.txt. `space` there stages it.
+# Expected: src/app/deep/one.txt is staged and pkg/three.txt is still staged —
+# in tree mode row 2 would have been pkg/three.txt and `space` would have
+# unstaged it.
+wait 1500
+key 2
+wait 400
+key ~
+wait 500
+key <
+wait 200
+key j
+wait 400
+key space
+wait 2500
+quit

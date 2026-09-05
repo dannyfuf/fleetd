@@ -1,0 +1,23 @@
+# Remotes tab: `enter` drills into `origin`, then `enter` on the row-1 remote
+# branch opens its sub-commits view; `j` walks the log and `enter` shows a
+# commit's patch. Expected: no error slot and a `git log … origin/main` line.
+wait 1500
+key 3
+wait 300
+key ]
+wait 500
+key <
+wait 300
+key enter
+wait 1200
+key <
+wait 400
+key enter
+wait 1800
+key j
+wait 400
+key enter
+wait 1800
+key escape
+wait 600
+quit

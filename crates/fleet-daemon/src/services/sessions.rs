@@ -8,10 +8,10 @@ use std::{
 };
 
 use fleet_core::{
-    config::Agent,
+    config::{Agent, is_native_command},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
     sessions::{
-        Session, SessionKind, SessionState, Terminal, TerminalStatus, WorktreeStatus,
+        Session, SessionKind, SessionState, Terminal, TerminalKind, TerminalStatus, WorktreeStatus,
         WorktreeWindowStatus, agent_session_id, default_terminals,
     },
 };
@@ -396,11 +396,19 @@ impl Sessions {
                 }
                 let session_id = SessionId::try_from(worktree.session.as_str())
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;
+                // `fleet://` surfaces are drawn by the client against a *local* git
+                // repository, so a worktree on another host goes back to the PTY program.
+                // Unreachable while the guard above rejects remote worktrees outright; kept
+                // here so the fallback lands with the feature rather than after it.
+                let mut specs = default_terminals(&config, config.agent);
+                if worktree.host.is_some() {
+                    fleet_core::sessions::degrade_native_terminals(&mut specs);
+                }
                 (
                     session_id,
                     SessionKind::Worktree(worktree_id),
                     worktree.path.clone(),
-                    default_terminals(&config, config.agent),
+                    specs,
                 )
             }
             (None, Some(agent)) => {
@@ -555,6 +563,9 @@ impl Sessions {
     }
 
     /// Adds a login-shell terminal and types its configured command.
+    ///
+    /// A reserved `fleet://` command adds the tab without a PTY: see
+    /// [`Sessions::new_native_terminal`].
     pub async fn new_terminal(
         &self,
         session: SessionId,
@@ -562,6 +573,9 @@ impl Sessions {
         command: String,
         cwd: String,
     ) -> DaemonResult<Terminal> {
+        if is_native_command(&command) {
+            return self.new_native_terminal(session, name, command, cwd);
+        }
         validate_terminal_input(&name, &command)?;
         let terminal_id = {
             let mut registry = self
@@ -615,6 +629,67 @@ impl Sessions {
         Ok(terminal)
     }
 
+    /// Adds a client-drawn terminal: a tab with a name and a position, and no process.
+    ///
+    /// It is registered exactly like a PTY terminal — same id counter, same `terminals` vector,
+    /// same `active_terminal` promotion — so tab numbering, `ctrl-s <n>` and `SelectTerminal`
+    /// cannot tell the difference. What it never gets is an entry in `hosts`, which is what
+    /// makes every process-shaped request (attach, key, resize, scroll, paste) answer
+    /// `NotFound` instead of reaching a PTY that does not exist.
+    fn new_native_terminal(
+        &self,
+        session: SessionId,
+        name: String,
+        command: String,
+        cwd: String,
+    ) -> DaemonResult<Terminal> {
+        validate_terminal_input(&name, &command)?;
+        let terminal = {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry
+                .sessions
+                .get(&session)
+                .ok_or_else(|| DaemonError::NotFound(session.to_string()))?
+                .terminals
+                .iter()
+                .any(|entry| entry.name == name)
+            {
+                return Err(DaemonError::Conflict(format!(
+                    "terminal name `{name}` already exists in session `{session}`"
+                )));
+            }
+            let id = TerminalId(registry.next_terminal);
+            registry.next_terminal = registry.next_terminal.saturating_add(1);
+            let terminal = Terminal {
+                id,
+                name,
+                command,
+                cwd,
+                shell_pid: None,
+                foreground_command: None,
+                status: TerminalStatus::Running,
+                title: None,
+                keep_alive: Vec::new(),
+                has_unseen_output: false,
+                kind: TerminalKind::Native,
+            };
+            let parent = registry
+                .sessions
+                .get_mut(&session)
+                .ok_or_else(|| DaemonError::NotFound(session.to_string()))?;
+            parent.terminals.push(terminal.clone());
+            parent.active_terminal.get_or_insert(id);
+            registry.terminal_sessions.insert(id, session.clone());
+            terminal
+        };
+        self.runtime.notify_session(&session);
+        Ok(terminal)
+    }
+
     /// Closes one terminal without affecting siblings; closing the last removes the session.
     pub async fn close_terminal(&self, terminal: TerminalId) -> DaemonResult<()> {
         self.runtime
@@ -642,6 +717,11 @@ impl Sessions {
                 .and_then(|session| session.terminals.iter().find(|entry| entry.id == terminal))
                 .cloned()
                 .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+            if entry.is_native() {
+                return Err(DaemonError::Conflict(format!(
+                    "terminal `{terminal}` has no process to restart"
+                )));
+            }
             if !matches!(entry.status, TerminalStatus::Exited { .. }) {
                 return Err(DaemonError::Conflict(format!(
                     "terminal `{terminal}` is still running"
@@ -896,9 +976,15 @@ impl Sessions {
                         running: Vec::new(),
                     };
                 };
-                let attached = session.terminals.iter().any(|terminal| {
-                    registry.attachments.get(&terminal.id).copied().unwrap_or(0) > 0
-                });
+                // A native tab is never attached in the daemon's sense — the client draws it
+                // — so it must not be able to report a session as attached on its own.
+                let attached = session
+                    .terminals
+                    .iter()
+                    .filter(|terminal| !terminal.is_native())
+                    .any(|terminal| {
+                        registry.attachments.get(&terminal.id).copied().unwrap_or(0) > 0
+                    });
                 let windows = session
                     .terminals
                     .iter()
@@ -1047,6 +1133,7 @@ fn spawn_terminal(
             title: None,
             keep_alive: Vec::new(),
             has_unseen_output: false,
+            kind: TerminalKind::Pty,
         },
         host,
     ))

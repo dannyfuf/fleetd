@@ -1,0 +1,14 @@
+# Commits pane: `f` on row 2 (c3) melds it into the commit below (c2) and drops
+# its message. Expected: three commits, subjects c4 / c2 / c1.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key f
+wait 500
+key enter
+wait 3500
+quit

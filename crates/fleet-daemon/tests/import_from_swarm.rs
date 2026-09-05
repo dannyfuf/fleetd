@@ -69,7 +69,14 @@ async fn import_validates_and_preserves_legacy_clone_directories() {
         serde_json::json!({
             "version": 1,
             "reposDir": legacy_repos,
-            "worktreesDir": legacy_worktrees
+            "worktreesDir": legacy_worktrees,
+            "windows": [
+                {"name": "nvim", "command": "nvim ."},
+                {"name": "cc", "command": "claude"},
+                {"name": "lg", "command": "lazygit"},
+                {"name": "lg2", "command": "lazygit -ucf ~/.lg.yml"},
+                {"name": "own", "command": "my-lazygit"}
+            ]
         })
         .to_string(),
     );
@@ -142,6 +149,24 @@ async fn import_validates_and_preserves_legacy_clone_directories() {
     assert_eq!(
         imported_config.worktrees_dir,
         legacy_worktrees.display().to_string()
+    );
+    // A swarm `lazygit` window means "the git UI lives in this tab", and Fleet has its own.
+    // Names and positions — what `ctrl-s <n>` counts — are untouched, and a command that only
+    // looks like lazygit is left alone.
+    assert_eq!(
+        imported_config
+            .windows
+            .iter()
+            .map(|window| (window.name.as_str(), window.command.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("nvim", "nvim ."),
+            // The `{agent}` upgrade of `normalize_legacy_agent_window` still applies first.
+            ("cc", "{agent}"),
+            ("lg", "fleet://lazygit"),
+            ("lg2", "fleet://lazygit"),
+            ("own", "my-lazygit"),
+        ]
     );
     let imported_state = state.load().await.unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(imported_state.contexts.len(), 1);

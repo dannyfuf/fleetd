@@ -1,0 +1,23 @@
+# Branches pane: `enter` on `feature` (row 2) opens lazygit's sub-commits view in
+# the main panel — the branch's own log, not its diff. `j` walks it, `enter` shows
+# the selected commit's patch below the list, `esc` returns to the pane.
+# Expected: no error slot; the command log shows a `git log … feature` and a
+# `git show` for the commit the second `enter` selected.
+wait 1500
+key 3
+wait 400
+key <
+wait 200
+key j
+wait 400
+key enter
+wait 1800
+key j
+wait 400
+key enter
+wait 1800
+key j
+wait 400
+key escape
+wait 600
+quit

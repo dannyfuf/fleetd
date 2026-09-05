@@ -1,0 +1,11 @@
+# Files pane: `a` stages everything (something is unstaged), then `a` again
+# unstages everything. Expected: after the first `a` the index holds alpha,
+# gamma and untracked; after the second nothing is staged.
+wait 1500
+key 2
+wait 400
+key a
+wait 2500
+key a
+wait 2500
+quit

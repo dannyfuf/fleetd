@@ -1,0 +1,27 @@
+# `c` on `feature`'s row 2 (f1, which adds feature.txt), then check `main` out
+# from the Branches pane and `v` + `enter` to cherry-pick it.
+# Expected: main gains one commit with f1's subject and feature.txt appears.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key c
+wait 500
+key 3
+wait 600
+key <
+wait 200
+key j
+wait 300
+key space
+wait 2500
+key 4
+wait 800
+key v
+wait 500
+key enter
+wait 3000
+quit

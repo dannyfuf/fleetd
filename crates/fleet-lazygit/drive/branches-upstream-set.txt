@@ -1,0 +1,15 @@
+# Branches pane: `u` on `main` (row 1, the checked-out branch) then the first menu
+# row (set upstream), accepting the prefilled `origin/main`.
+# Expected: main@{upstream} is origin/main.
+wait 1500
+key 3
+wait 300
+key <
+wait 400
+key u
+wait 700
+key enter
+wait 700
+key enter
+wait 2000
+quit
