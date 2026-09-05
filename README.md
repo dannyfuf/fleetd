@@ -172,5 +172,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details, logs, and script
 
 ## Status
 
-Fleet v1 is local-only: remote hosts are not supported yet. Terminal sessions survive closing the
+Fleet v1 is local-only: `fleetd` probes configured remote hosts over SSH every minute and reports
+reachability in the Hub and `fleet doctor`, but remote worktree, session, and repository operations
+are not supported yet. Terminal sessions survive closing the
 app because `fleetd` owns them, but they do not survive a daemon restart.

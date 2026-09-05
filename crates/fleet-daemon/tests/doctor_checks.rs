@@ -9,7 +9,7 @@ use fleet_daemon::{
 };
 
 #[tokio::test]
-async fn doctor_reports_local_runtime_and_unsupported_remote_hosts() {
+async fn doctor_reports_local_runtime_and_probes_remote_hosts() {
     let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
     let home = temp.path().join("fleet");
     let files = Arc::new(FakeFiles::new(
@@ -21,7 +21,8 @@ async fn doctor_reports_local_runtime_and_unsupported_remote_hosts() {
     config
         .update(serde_json::json!({
             "hosts": {
-                "devbox": {"ssh": "devbox.example.com", "swarmCommand": "swarm"}
+                "devbox": {"ssh": "devbox.example.com", "swarmCommand": "swarm"},
+                "offline": {"ssh": "offline.example.com", "swarmCommand": "swarm"}
             }
         }))
         .await
@@ -42,6 +43,26 @@ async fn doctor_reports_local_runtime_and_unsupported_remote_hosts() {
             status: 0,
             stdout: "authenticated\n".to_owned(),
             stderr: String::new(),
+        },
+    );
+    shell.when(
+        |command| {
+            command.program == "ssh" && command.args.contains(&"devbox.example.com".to_owned())
+        },
+        ShellResult {
+            status: 0,
+            stdout: r#"{"protocol":1,"version":"swarm 0.1.0+a5a11f0"}"#.to_owned(),
+            stderr: String::new(),
+        },
+    );
+    shell.when(
+        |command| {
+            command.program == "ssh" && command.args.contains(&"offline.example.com".to_owned())
+        },
+        ShellResult {
+            status: 255,
+            stdout: String::new(),
+            stderr: "warning\nPermission denied (publickey)\n".to_owned(),
         },
     );
     let git = Arc::new(FakeGit::new(shell.clone()));
@@ -70,9 +91,11 @@ async fn doctor_reports_local_runtime_and_unsupported_remote_hosts() {
     assert_eq!(find("runtime").status, DoctorStatus::Ok);
     assert_eq!(find("daemon socket").status, DoctorStatus::Ok);
     assert_eq!(find("FLEET_HOME writable").status, DoctorStatus::Ok);
-    assert_eq!(find("host devbox").status, DoctorStatus::Warn);
+    assert_eq!(find("host devbox").status, DoctorStatus::Ok);
     assert_eq!(
         find("host devbox").detail,
-        "remote hosts are not supported yet"
+        "devbox.example.com · swarm 0.1.0+a5a11f0"
     );
+    assert_eq!(find("host offline").status, DoctorStatus::Fail);
+    assert_eq!(find("host offline").detail, "Permission denied (publickey)");
 }
