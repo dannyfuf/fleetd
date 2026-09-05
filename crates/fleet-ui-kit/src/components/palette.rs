@@ -111,18 +111,22 @@ impl PaletteRow {
     }
 
     /// The [`FuzzyItem`] this row renders as.
-    fn into_item(self, danger: gpui::Hsla, secondary: gpui::Hsla) -> FuzzyItem {
+    fn into_item(self, secondary: gpui::Hsla) -> FuzzyItem {
         let mut item = FuzzyItem::new(self.label).matches(self.matches);
-        if let Some(leading) = self.leading {
+        if self.destructive {
+            // §3.9: "Destructive commands — prefixed with `triangle-alert`". Recolouring the
+            // action's own glyph is not that prefix: a red `trash` still reads as "delete",
+            // which is what the label already says, while the warning mark reads as "stop".
+            // Leaving the leading slot empty is what lets `FuzzyList` draw that mark.
+            item = item.destructive(true);
+        } else if let Some(leading) = self.leading {
             item = item.leading(leading);
         } else if let Some(icon) = self.icon {
             item = item.leading(
                 icon.el()
                     .size(crate::icons::IconSize::Large)
-                    .color(if self.destructive { danger } else { secondary }),
+                    .color(secondary),
             );
-        } else if self.destructive {
-            item = item.destructive(true);
         }
         if let Some(detail) = self.detail {
             item = item.trailing(detail);
@@ -241,7 +245,6 @@ impl RenderOnce for Palette {
         let total = self.total.max(shown);
         let cursor = self.cursor;
         let cap = self.cap;
-        let danger = theme.colors.danger;
         let secondary = theme.colors.text_secondary;
 
         let mut sections = self.sections;
@@ -260,7 +263,7 @@ impl RenderOnce for Palette {
                 .rows
                 .into_iter()
                 .take(take)
-                .map(|row| row.into_item(danger, secondary));
+                .map(|row| row.into_item(secondary));
             let local_cursor = cursor.checked_sub(consumed).unwrap_or(usize::MAX);
 
             blocks.push(
@@ -323,9 +326,11 @@ impl RenderOnce for Palette {
                     .child(
                         // The query line carries neither a preview nor a validation message,
                         // so it is the one field allowed to drop the 18 px status slot.
+                        // §3.9's prompt is `:` — the key that opens the palette. A `command`
+                        // glyph there advertises `⌘`, which Fleet binds nowhere.
                         TextField::new(self.query)
                             .placeholder("go to, or do")
-                            .icon(Icon::Command)
+                            .prefix(":")
                             .focused(true)
                             .height(theme.metrics.palette_input_h)
                             .hide_status_line(true)

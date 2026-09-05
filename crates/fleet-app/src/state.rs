@@ -11,7 +11,7 @@
 //! result; they never derive it a second time.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -392,6 +392,11 @@ impl<T: Clone + PartialEq> Mru<T> {
         self.entries.retain(|existing| existing != entry);
     }
 
+    /// Keeps only the entries a predicate accepts — used to reconcile with a fresh snapshot.
+    pub fn retain(&mut self, keep: impl Fn(&T) -> bool) {
+        self.entries.retain(|entry| keep(entry));
+    }
+
     /// The current entry.
     #[must_use]
     pub fn current(&self) -> Option<&T> {
@@ -713,6 +718,23 @@ pub struct AppState {
     /// The last element of the status-bar breadcrumb: the cursor row of the focused list.
     /// Screens publish it; the shell renders `context › repo › row` (§2.2).
     pub breadcrumb_row: Option<String>,
+    /// Terminals the user renamed with `ctrl-s ,`.
+    ///
+    /// §3.6 lets a program's OSC title name its tab **until the terminal is explicitly
+    /// renamed**, and the daemon's `Terminal` record has no "was renamed" flag to arbitrate
+    /// with — so the client remembers its own renames and lets them win.
+    pub renamed_terminals: HashSet<TerminalId>,
+    /// How many times the client's link to fleetd has been (re)established.
+    ///
+    /// A reconnect builds a brand-new `Client` **and** a brand-new daemon-side `Connection`
+    /// whose `attached` set starts empty, so every attachment the app believes it holds is
+    /// silently gone and frames stop arriving. Screens record the generation they attached
+    /// under and re-issue their `AttachTerminal` when this number has moved.
+    pub link_generation: u64,
+    /// The answer to the last `D`, which is what puts the app on the §3.12 `Daemon > Doctor`
+    /// surface. It lives here rather than on the shell because `D` is raised from two places —
+    /// the daemon-down splash and Settings › About — and both must land on the same screen.
+    pub doctor: Option<Vec<fleet_proto::response::DoctorCheck>>,
 }
 
 impl AppState {
@@ -751,6 +773,9 @@ impl AppState {
             review_pr_count: 0,
             update_version: None,
             breadcrumb_row: None,
+            renamed_terminals: HashSet::new(),
+            link_generation: 0,
+            doctor: None,
         }
     }
 
@@ -762,14 +787,20 @@ impl AppState {
     /// and dismissing it (`Esc`) gives them straight back.
     #[must_use]
     pub fn context_chain(&self) -> Vec<&'static str> {
+        // §3.12 B is the one surface that outranks an overlay, because it replaces the whole
+        // window and renders no overlay layer at all; `apply_bridge_event` closes whatever was
+        // open when the link fails, so the two can never disagree.
         if matches!(self.daemon, DaemonLink::Failed { .. }) {
             return vec!["Daemon", "Down"];
         }
-        if self.is_first_run() {
-            return vec!["FirstRun"];
-        }
+        // An open overlay owns the keyboard on every *other* base surface, the first-run card
+        // included: §3.13 binds `?` and `,` there, so a Help or Settings dialog opened from the
+        // card must still answer `Esc` instead of leaving the app stuck.
         if let Some(overlay) = &self.overlay {
             return overlay.context_chain();
+        }
+        if self.is_first_run() {
+            return vec!["FirstRun"];
         }
         let mut chain = match &self.screen {
             Screen::Hub { tab } => vec![
@@ -966,8 +997,39 @@ impl AppState {
         self.cursors.repos = clamp_cursor(self.cursors.repos, snapshot.repos.len() + 1);
         self.cursors.worktrees = clamp_cursor(self.cursors.worktrees, snapshot.worktrees.len());
         self.cursors.jobs = clamp_cursor(self.cursors.jobs, snapshot.jobs.len());
+        self.forget_vanished(&snapshot);
         self.snapshot = Some(snapshot);
         self.snapshot_at = Some(now);
+    }
+
+    /// Drops the mirrors and MRU entries of everything the daemon no longer lists.
+    ///
+    /// The snapshot is authoritative, so a terminal or session that is gone from it can never
+    /// be painted again. A `MirrorGrid` is `rows × cols` [`Cell`]s, each holding a heap
+    /// `SharedString`: a 200 × 60 grid is roughly 12 000 of them, and a day of opening and
+    /// closing terminals used to keep every one of them alive for the life of the process,
+    /// because `ctrl-s x` only told the daemon and `TerminalExited` only set an exit code.
+    fn forget_vanished(&mut self, snapshot: &Snapshot) {
+        let live_terminals: HashSet<TerminalId> = snapshot
+            .sessions
+            .iter()
+            .flat_map(|session| session.terminals.iter().map(|terminal| terminal.id))
+            .collect();
+        self.grids
+            .retain(|terminal, _| live_terminals.contains(terminal));
+
+        let live_sessions: HashSet<&SessionId> = snapshot
+            .sessions
+            .iter()
+            .map(|session| &session.id)
+            .collect();
+        self.renamed_terminals
+            .retain(|terminal| live_terminals.contains(terminal));
+        self.terminal_mru
+            .retain(|session, _| live_sessions.contains(session));
+        for mru in self.terminal_mru.values_mut() {
+            mru.retain(|terminal| live_terminals.contains(terminal));
+        }
     }
 
     /// Applies one terminal frame to its mirror grid, creating the grid on the first frame.
@@ -999,6 +1061,11 @@ impl AppState {
         for mru in self.terminal_mru.values_mut() {
             mru.forget(&terminal);
         }
+    }
+
+    /// Records that the user named this terminal, so its name outranks the program's title.
+    pub fn mark_renamed(&mut self, terminal: TerminalId) {
+        self.renamed_terminals.insert(terminal);
     }
 
     /// Moves the session MRU as a session is opened.
@@ -1082,6 +1149,7 @@ impl AppState {
             BridgeEvent::Connected(snapshot) => {
                 self.daemon = DaemonLink::Connected;
                 self.daemon_since = now;
+                self.link_generation = self.link_generation.wrapping_add(1);
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::ConnectFailed {
@@ -1095,6 +1163,9 @@ impl AppState {
                     stale_socket,
                 };
                 self.daemon_since = now;
+                // §3.12 B takes the whole window and draws no overlay layer, so anything that
+                // was open would keep its key context alive with nothing on screen to close.
+                self.overlay = None;
             }
             BridgeEvent::Disconnected { attempt } => {
                 let dismissed = matches!(
@@ -1121,6 +1192,9 @@ impl AppState {
                     since: now,
                 };
                 self.daemon_since = now;
+                // The daemon-side connection is new and holds no attachments, whether or not
+                // fleetd itself restarted.
+                self.link_generation = self.link_generation.wrapping_add(1);
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
@@ -1560,6 +1634,75 @@ mod tests {
     }
 
     #[test]
+    fn an_overlay_owns_the_keyboard_on_the_first_run_card() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.apply_snapshot(snapshot(), now);
+        assert!(state.is_first_run(), "the sample snapshot is empty");
+        assert_eq!(state.context_chain(), vec!["FirstRun"]);
+
+        // §3.13 binds `?` and `,` on the card; without this the dialog opens with the
+        // `FirstRun` chain and `Esc` can never match, trapping the app.
+        state.open_overlay(Overlay::Dialog(Dialogs::Help));
+        assert_eq!(state.context_chain(), vec!["Dialog", "Help"]);
+        state.open_overlay(Overlay::Dialog(Dialogs::Settings));
+        assert_eq!(state.context_chain(), vec!["Dialog", "Settings"]);
+        state.close_overlay();
+        assert_eq!(state.context_chain(), vec!["FirstRun"]);
+    }
+
+    #[test]
+    fn a_failed_link_takes_the_window_and_drops_the_overlay() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.open_overlay(Overlay::Dialog(Dialogs::Help));
+        state.apply_bridge_event(
+            BridgeEvent::ConnectFailed {
+                message: "no socket".to_owned(),
+                log_tail: Vec::new(),
+                stale_socket: true,
+            },
+            now,
+        );
+        assert!(
+            state.overlay.is_none(),
+            "§3.12 B draws no overlay layer, so nothing may stay open behind it"
+        );
+        assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
+    }
+
+    #[test]
+    fn every_new_link_bumps_the_generation_screens_re_attach_on() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        let start = state.link_generation;
+        state.apply_bridge_event(BridgeEvent::Connected(Box::new(snapshot())), now);
+        assert_eq!(state.link_generation, start + 1);
+
+        // A disconnect alone changes nothing: the attachment is still notionally held.
+        state.apply_bridge_event(BridgeEvent::Disconnected { attempt: 1 }, now);
+        assert_eq!(state.link_generation, start + 1);
+
+        // Both reconnect shapes replace the socket, so both invalidate every attachment.
+        state.apply_bridge_event(
+            BridgeEvent::Reconnected {
+                restarted: false,
+                snapshot: Box::new(snapshot()),
+            },
+            now,
+        );
+        assert_eq!(state.link_generation, start + 2);
+        state.apply_bridge_event(
+            BridgeEvent::Reconnected {
+                restarted: true,
+                snapshot: Box::new(snapshot()),
+            },
+            now,
+        );
+        assert_eq!(state.link_generation, start + 3);
+    }
+
+    #[test]
     fn prefix_is_one_shot() {
         let now = Instant::now();
         let mut state = AppState::new("/tmp/fleet", now);
@@ -1715,5 +1858,70 @@ mod tests {
         );
         state.forget_terminal(TerminalId(1));
         assert!(state.grids.is_empty());
+    }
+
+    fn session_with(id: &str, terminals: &[u64]) -> fleet_core::sessions::Session {
+        use fleet_core::sessions::{SessionKind, Terminal, TerminalStatus};
+        fleet_core::sessions::Session {
+            id: id.parse().unwrap_or_else(|error| panic!("{error}")),
+            kind: SessionKind::Worktree(
+                "buk/payroll#feat"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+            ),
+            cwd: "/tmp".to_owned(),
+            terminals: terminals
+                .iter()
+                .map(|id| Terminal {
+                    id: TerminalId(*id),
+                    name: format!("t{id}"),
+                    command: "clear".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    shell_pid: None,
+                    foreground_command: None,
+                    status: TerminalStatus::Running,
+                    title: None,
+                    keep_alive: Vec::new(),
+                    has_unseen_output: false,
+                })
+                .collect(),
+            active_terminal: terminals.first().map(|id| TerminalId(*id)),
+            slept_at: None,
+            kept_terminals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_without_a_terminal_frees_its_mirror_and_its_mru_entry() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        let session: SessionId = "payroll/feat".parse().unwrap_or_else(|e| panic!("{e}"));
+
+        let mut open = snapshot();
+        open.sessions = vec![session_with("payroll/feat", &[1, 2])];
+        state.apply_snapshot(open, now);
+        state.apply_frame(&frame(1, true, vec![row(0, "one")]));
+        let mut second = frame(1, true, vec![row(0, "two")]);
+        second.terminal = TerminalId(2);
+        state.apply_frame(&second);
+        state.touch_terminal(&session, TerminalId(1));
+        state.touch_terminal(&session, TerminalId(2));
+        assert_eq!(state.grids.len(), 2);
+
+        // `ctrl-s x` on terminal 2: the daemon drops it from the session, and nothing can ever
+        // paint its 12 000 cells again.
+        let mut closed = snapshot();
+        closed.sessions = vec![session_with("payroll/feat", &[1])];
+        state.apply_snapshot(closed, now);
+        assert_eq!(state.grids.keys().collect::<Vec<_>>(), vec![&TerminalId(1)]);
+        assert_eq!(
+            state.terminal_mru.get(&session).map(Mru::entries),
+            Some(&vec![TerminalId(1)][..])
+        );
+
+        // Killing the session frees the rest, MRU included.
+        state.apply_snapshot(snapshot(), now);
+        assert!(state.grids.is_empty());
+        assert!(state.terminal_mru.is_empty());
     }
 }

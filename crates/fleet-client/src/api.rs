@@ -46,6 +46,9 @@ pub struct CreateWorktreeResult {
     pub created: bool,
     /// The resulting worktree.
     pub worktree: Worktree,
+    /// Post-create hook job, when hooks were scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_create_job: Option<JobRecord>,
 }
 
 /// Daemon version information.
@@ -753,9 +756,15 @@ impl Client {
 
 fn worktree_result(operation: &str, response: ResponseBody) -> Result<CreateWorktreeResult> {
     match response {
-        ResponseBody::Worktree { created, worktree } => {
-            Ok(CreateWorktreeResult { created, worktree })
-        }
+        ResponseBody::Worktree {
+            created,
+            worktree,
+            post_create_job,
+        } => Ok(CreateWorktreeResult {
+            created,
+            worktree,
+            post_create_job: post_create_job.map(|job| *job),
+        }),
         response => Err(unexpected(operation, response)),
     }
 }

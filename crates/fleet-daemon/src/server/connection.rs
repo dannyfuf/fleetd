@@ -1,6 +1,6 @@
 //! Per-client protocol decoding, dispatch, responses, and subscriptions.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
 
 use fleet_core::{ids::SessionId, sessions::SessionKind};
 use fleet_proto::{
@@ -9,7 +9,7 @@ use fleet_proto::{
     request::{Request, RequestBody},
     response::{Response, ResponseBody},
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
 use tokio::net::UnixStream;
 use tokio_util::{codec::Framed, sync::CancellationToken};
 
@@ -99,6 +99,7 @@ impl Connection {
         let mut attached = HashSet::new();
         let mut events = self.events.subscribe();
         let mut frames = self.services.sessions.subscribe_frames();
+        let mut pending = FuturesUnordered::<DispatchFuture>::new();
         let result = loop {
             tokio::select! {
                 () = self.shutdown.cancelled() => break Ok(()),
@@ -119,29 +120,51 @@ impl Connection {
                         RequestBody::DetachTerminal { terminal } => Some((false, *terminal)),
                         _ => None,
                     };
-                    let result = match request.body {
-                        RequestBody::Hello { .. } => Err(DaemonError::Protocol("Hello is only valid as the first request".to_owned())),
+                    match request.body {
+                        RequestBody::Hello { .. } => {
+                            let result = Err(DaemonError::Protocol("Hello is only valid as the first request".to_owned()));
+                            send_response(&mut framed, Response { id, result: result.map_err(Into::into) }).await?;
+                        }
                         RequestBody::Subscribe { events } => {
                             subscriptions.extend(events);
-                            Ok(ResponseBody::Ack)
+                            send_response(&mut framed, Response { id, result: Ok(ResponseBody::Ack) }).await?;
                         }
                         RequestBody::Unsubscribe => {
                             subscriptions.clear();
-                            Ok(ResponseBody::Ack)
+                            send_response(&mut framed, Response { id, result: Ok(ResponseBody::Ack) }).await?;
                         }
-                        RequestBody::AttachTerminal { terminal, cols, rows }
-                            if attached.contains(&terminal) =>
-                        {
-                            self.services
-                                .sessions
-                                .resize(terminal, cols, rows)
-                                .await
-                                .map(|()| ResponseBody::Ack)
+                        body => {
+                            let services = Arc::clone(&self.services);
+                            let resize_existing = matches!(
+                                &body,
+                                RequestBody::AttachTerminal { terminal, .. }
+                                    if attached.contains(terminal)
+                            );
+                            let detach_missing = matches!(
+                                &body,
+                                RequestBody::DetachTerminal { terminal }
+                                    if !attached.contains(terminal)
+                            );
+                            pending.push(Box::pin(async move {
+                                let result = match body {
+                                    RequestBody::AttachTerminal { terminal, cols, rows }
+                                        if resize_existing =>
+                                    {
+                                        services.sessions.resize(terminal, cols, rows).await
+                                            .map(|()| ResponseBody::Ack)
+                                    }
+                                    RequestBody::DetachTerminal { .. } if detach_missing => {
+                                        Ok(ResponseBody::Ack)
+                                    }
+                                    body => services.dispatch(body).await,
+                                };
+                                CompletedRequest { id, result, effects, attachment, shutdown_request }
+                            }));
                         }
-                        RequestBody::DetachTerminal { terminal }
-                            if !attached.contains(&terminal) => Ok(ResponseBody::Ack),
-                        body => self.services.dispatch(body).await,
-                    };
+                    }
+                }
+                Some(completed) = pending.next(), if !pending.is_empty() => {
+                    let CompletedRequest { id, result, effects, attachment, shutdown_request } = completed;
                     let succeeded = result.is_ok();
                     if succeeded
                         && let Some((attach, terminal)) = attachment
@@ -203,6 +226,16 @@ impl Connection {
         }
         result
     }
+}
+
+type DispatchFuture = Pin<Box<dyn Future<Output = CompletedRequest> + Send>>;
+
+struct CompletedRequest {
+    id: u64,
+    result: DaemonResult<ResponseBody>,
+    effects: RequestEffects,
+    attachment: Option<(bool, fleet_core::ids::TerminalId)>,
+    shutdown_request: Option<bool>,
 }
 
 struct RequestEffects {

@@ -80,6 +80,36 @@ pub(crate) fn render(
                 notify(&state, cx);
             }
         })
+        // §KEYMAP "Dialogs and text inputs": the caret keys are bound on the shared `Dialog`
+        // context, so without these listeners they are consumed and do nothing.
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineStart, _window, cx| {
+                with_host(cx, |host| host.rename_terminal.input.home());
+                notify(&state, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineEnd, _window, cx| {
+                with_host(cx, |host| host.rename_terminal.input.end());
+                notify(&state, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorLeft, _window, cx| {
+                with_host(cx, |host| host.rename_terminal.input.left());
+                notify(&state, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorRight, _window, cx| {
+                with_host(cx, |host| host.rename_terminal.input.right());
+                notify(&state, cx);
+            }
+        })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
             let (terminal, name) = with_host(cx, |host| {
                 (
@@ -92,6 +122,9 @@ pub(crate) fn render(
             {
                 confirm_bridge.send(RequestBody::RenameTerminal { terminal, name });
                 confirm_state.update(cx, |app, cx| {
+                    // §3.6: from now on this tab keeps the user's name, whatever the program
+                    // sets its OSC title to.
+                    app.mark_renamed(terminal);
                     app.close_overlay();
                     cx.notify();
                 });

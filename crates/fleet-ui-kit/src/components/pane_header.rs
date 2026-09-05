@@ -63,7 +63,8 @@ impl PaneHeader {
         }
     }
 
-    /// The scope suffix, e.g. `payroll` in `WORKTREES · payroll`.
+    /// The scope suffix, e.g. `payroll` in `WORKTREES · payroll`. Rendered as written: a
+    /// repository name is not a label.
     pub fn scope(mut self, scope: impl Into<SharedString>) -> Self {
         self.scope = Some(scope.into());
         self
@@ -141,10 +142,12 @@ impl RenderOnce for PaneHeader {
                 .min_w_0()
                 .overflow_hidden()
                 .child(Text::label(self.label))
-                .children(
-                    self.scope
-                        .map(|scope| Text::label(format!("\u{b7} {scope}")).faint().ellipsize()),
-                )
+                .children(self.scope.map(|scope| {
+                    // §2.10 / §3.3: `WORKTREES · payroll`. Only the pane label is label
+                    // type; the scope is a repository's real name, and `Text::label`
+                    // would uppercase it into `WIDGETS`.
+                    Text::ui(format!("\u{b7} {scope}")).faint().ellipsize()
+                }))
                 .children(self.filter_chip.map(|query| {
                     div()
                         .flex()

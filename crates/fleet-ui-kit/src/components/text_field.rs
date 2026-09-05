@@ -43,6 +43,7 @@ use crate::{
 struct FieldChrome {
     label: Option<SharedString>,
     icon: Option<Icon>,
+    prefix: Option<SharedString>,
     preview: Option<SharedString>,
     invalid: Option<SharedString>,
     focused: bool,
@@ -106,6 +107,12 @@ impl FieldChrome {
                         self.icon
                             .map(|icon| icon.el().size(IconSize::Medium).color(icon_color)),
                     )
+                    // A literal prompt character, for a field whose leading mark *is* the key
+                    // the user pressed (§3.9's `:`), where a glyph would name a different key.
+                    .children(
+                        self.prefix
+                            .map(|prefix| Text::data(prefix).color(icon_color)),
+                    )
                     .child(
                         // The value area carries the role's font so a shaped caret lines up
                         // with the glyphs around it.
@@ -160,6 +167,7 @@ pub struct TextField {
     caret: Option<usize>,
     focused: bool,
     icon: Option<Icon>,
+    prefix: Option<SharedString>,
     preview: Option<SharedString>,
     invalid: Option<SharedString>,
     mono: bool,
@@ -177,6 +185,7 @@ impl TextField {
             caret: None,
             focused: false,
             icon: None,
+            prefix: None,
             preview: None,
             invalid: None,
             mono: false,
@@ -213,6 +222,16 @@ impl TextField {
     /// A leading glyph, e.g. `search` in the Clone dialog.
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// A literal leading character in the data face, e.g. the palette's `:`.
+    ///
+    /// Use it instead of [`Self::icon`] where the mark is the **key the user pressed**: the
+    /// palette opens on `:`, and a `command` glyph there advertises `⌘`, a key Fleet does not
+    /// bind.
+    pub fn prefix(mut self, prefix: impl Into<SharedString>) -> Self {
+        self.prefix = Some(prefix.into());
         self
     }
 
@@ -260,6 +279,7 @@ impl TextField {
         FieldChrome {
             label: self.label.clone(),
             icon: self.icon,
+            prefix: self.prefix.clone(),
             preview: self.preview.clone(),
             invalid: self.invalid.clone(),
             focused: self.focused,
@@ -884,6 +904,7 @@ impl TextInput {
         FieldChrome {
             label: self.label.clone(),
             icon: self.icon,
+            prefix: None,
             preview: self.preview.clone(),
             invalid: self.invalid.clone(),
             focused: false,

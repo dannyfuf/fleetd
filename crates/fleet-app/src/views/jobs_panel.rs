@@ -18,7 +18,7 @@ use fleet_ui_kit::{
 };
 use gpui::{AnyElement, App, SharedString, div, prelude::*};
 
-use crate::shell::job_kind_label;
+use crate::shell::{domain_target, job_kind_label};
 
 /// The fact line of the empty Jobs panel (§3.13), verbatim.
 pub const EMPTY_FACT: &str = "Nothing running.";
@@ -364,7 +364,8 @@ pub fn job_row(job: &JobRecord, cursor: bool, now: i64) -> AnyElement {
     let mut row = JobRow::new(
         row_status(&job.status),
         kind_slug(&job.kind).to_owned(),
-        job.target.clone(),
+        // §3.7: the row names the domain id; the job id lives in the log path and on `y`.
+        domain_target(&job.target).to_owned(),
     )
     .id(SharedString::from(format!("job-{}", job.id.as_str())))
     .selected(cursor)

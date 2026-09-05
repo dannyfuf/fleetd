@@ -5,12 +5,12 @@
 //! neighbourhood, and it is the thing a status bar gets wrong if every screen re-derives it.
 //! [`status_slot`] decides it once; [`crate::views::sticky_error`] owns the other half.
 
-use fleet_proto::job::{JobRecord, JobStatus};
+use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{JobTicker, Tone};
 use gpui::{AnyElement, IntoElement, SharedString};
 
 use crate::{
-    shell::job_kind_label,
+    shell::{domain_target, job_kind_label},
     state::{StickyError, parse_percent, running_jobs},
 };
 
@@ -39,7 +39,7 @@ pub fn ticker_content(jobs: &[JobRecord]) -> Option<TickerContent> {
         .max_by(|left, right| left.started_at.cmp(&right.started_at))?;
     Some(TickerContent {
         kind: job_kind_label(&newest.kind).to_owned(),
-        target: newest.target.clone(),
+        target: domain_target(&newest.target).to_owned(),
         percent: newest.progress.as_deref().and_then(parse_percent),
         extra: running.len() - 1,
     })
@@ -68,25 +68,39 @@ pub fn status_slot(jobs: &[JobRecord], sticky: Option<&StickyError>) -> StatusSl
 /// Whether the toast law (§2.7) allows announcing a job outcome as a toast.
 ///
 /// The law is *"a toast is allowed only when there is no row and no pill that already shows the
-/// outcome"*. A job always has a row in the Jobs panel and a pill in the context bar, so the
-/// only survivor is the §2.7 line "background success whose row is off-screen": a job that
-/// **succeeded** while the Jobs panel was closed. A failure is never a toast — it is sticky.
+/// outcome"*, and §2.7's "never a toast" list names *"job succeeded when its row is on screen"*
+/// outright. Two things follow, and both are conditions here:
+///
+/// 1. The Jobs panel must be closed, so the row really is off screen.
+/// 2. The job must be one the **user** started. The daemon's own cadence — PR fetches every
+///    `github.prTtlSeconds`, pool builds, status refreshes, inspects — has no news in it, and
+///    toasting it turned entering the PR screen into two toasts every 90 seconds.
+///
+/// A failure is never a toast: it is sticky (§1.8).
 #[must_use]
 pub fn job_outcome_toast(job: &JobRecord, jobs_panel_open: bool) -> Option<String> {
-    if jobs_panel_open {
+    if jobs_panel_open || !matches!(job.status, JobStatus::Succeeded) {
         return None;
     }
-    match job.status {
-        JobStatus::Succeeded => Some(format!(
-            "{} {} \u{00b7} J",
-            job_kind_label(&job.kind),
-            job.target
-        )),
-        JobStatus::Queued
-        | JobStatus::Running
-        | JobStatus::Cancelling
-        | JobStatus::Cancelled
-        | JobStatus::Failed { .. } => None,
+    let target = domain_target(&job.target);
+    match &job.kind {
+        JobKind::Clone => Some(format!("Cloned {target} \u{00b7} J")),
+        JobKind::CreateWorktree => Some(format!("Created {target} \u{00b7} J")),
+        JobKind::DeleteRepo | JobKind::DeleteWorktree => {
+            Some(format!("Deleted {target} \u{00b7} J"))
+        }
+        JobKind::Import => Some("Imported from ~/.swarm \u{00b7} J".to_owned()),
+        JobKind::Update => Some("Fleet updated \u{00b7} J".to_owned()),
+        // Background cadence: the ticker and the Jobs panel already say all there is to say.
+        JobKind::PoolBuild
+        | JobKind::PoolRefresh
+        | JobKind::Prune
+        | JobKind::Inspect
+        | JobKind::PostCreateHooks
+        | JobKind::PrFetch
+        | JobKind::RepoFetch
+        | JobKind::RepoDiscovery
+        | JobKind::Custom(_) => None,
     }
 }
 
@@ -121,8 +135,6 @@ pub const fn ticker_tone() -> Tone {
 
 #[cfg(test)]
 mod tests {
-    use fleet_proto::job::JobKind;
-
     use super::*;
 
     fn job(id: &str, status: JobStatus, started: &str, progress: Option<&str>) -> JobRecord {
@@ -207,7 +219,7 @@ mod tests {
         let succeeded = job("job-a", JobStatus::Succeeded, "2026-09-04T12:00:00Z", None);
         assert_eq!(
             job_outcome_toast(&succeeded, false),
-            Some("clone nixos \u{00b7} J".to_owned())
+            Some("Cloned nixos \u{00b7} J".to_owned())
         );
         assert_eq!(
             job_outcome_toast(&succeeded, true),
@@ -231,6 +243,42 @@ mod tests {
 
         let running = job("job-c", JobStatus::Running, "2026-09-04T12:00:00Z", None);
         assert_eq!(job_outcome_toast(&running, false), None);
+    }
+
+    #[test]
+    fn the_daemons_own_cadence_never_toasts() {
+        // §2.7: a PR fetch runs every `github.prTtlSeconds`; announcing it is noise, and its
+        // target is a synthetic key rather than anything the user recognises.
+        for kind in [
+            JobKind::PrFetch,
+            JobKind::PoolBuild,
+            JobKind::PoolRefresh,
+            JobKind::Inspect,
+            JobKind::RepoFetch,
+            JobKind::RepoDiscovery,
+            JobKind::PostCreateHooks,
+            JobKind::Prune,
+        ] {
+            let mut background = job("job-d", JobStatus::Succeeded, "2026-09-04T12:00:00Z", None);
+            background.kind = kind.clone();
+            assert_eq!(
+                job_outcome_toast(&background, false),
+                None,
+                "{kind:?} must not toast"
+            );
+        }
+    }
+
+    #[test]
+    fn a_toast_names_the_domain_id_never_the_job_id() {
+        let mut succeeded = job("job-a", JobStatus::Succeeded, "2026-09-04T12:00:00Z", None);
+        succeeded.kind = JobKind::CreateWorktree;
+        succeeded.target =
+            "acme/widgets#feature-one:762d2efa-4911-4a0e-8b1c-8f3e0d5b2a91".to_owned();
+        assert_eq!(
+            job_outcome_toast(&succeeded, false),
+            Some("Created acme/widgets#feature-one \u{00b7} J".to_owned())
+        );
     }
 
     #[test]

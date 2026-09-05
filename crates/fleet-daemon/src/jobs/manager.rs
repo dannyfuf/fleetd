@@ -1,7 +1,7 @@
 //! Job scheduling, concurrency limits, cancellation, logging, and event publication.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::OpenOptions,
     future::Future,
     io::Write,
@@ -73,6 +73,7 @@ struct JobManagerInner {
     state: Mutex<JobState>,
     updates: broadcast::Sender<JobRecord>,
     repo_locks: Mutex<HashMap<RepoId, Weak<AsyncMutex<()>>>>,
+    deleting_repos: Mutex<HashSet<RepoId>>,
     pool: Arc<Semaphore>,
     github: Arc<Semaphore>,
     retention: Mutex<RetentionPolicy>,
@@ -107,6 +108,7 @@ impl JobManager {
                 }),
                 updates,
                 repo_locks: Mutex::new(HashMap::new()),
+                deleting_repos: Mutex::new(HashSet::new()),
                 pool: Arc::new(Semaphore::new(2)),
                 github: Arc::new(Semaphore::new(4)),
                 retention: Mutex::new(RetentionPolicy {
@@ -276,13 +278,18 @@ impl JobManager {
                 cancel: cancel.clone(),
                 manager: manager.clone(),
             };
+            let mut future = operation(context);
             let result = if cancellable {
                 tokio::select! {
-                    () = cancel.cancelled() => Err(DaemonError::Cancelled),
-                    result = operation(context) => result,
+                    () = cancel.cancelled() => {
+                        tokio::time::timeout(StdDuration::from_secs(3), &mut future)
+                            .await
+                            .unwrap_or(Err(DaemonError::Cancelled))
+                    }
+                    result = &mut future => result,
                 }
             } else {
-                operation(context).await
+                future.await
             };
             manager.finish(&task_id, result);
         });
@@ -471,6 +478,31 @@ impl JobManager {
         self.inner.updates.subscribe()
     }
 
+    /// Waits for a retained job to reach a terminal state.
+    pub async fn wait(&self, id: &JobId) -> DaemonResult<JobRecord> {
+        let mut updates = self.subscribe();
+        loop {
+            let record = self
+                .record(id)
+                .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))?;
+            if !matches!(
+                record.status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling
+            ) {
+                return Ok(record);
+            }
+            loop {
+                match updates.recv().await {
+                    Ok(record) if &record.id == id => break,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(DaemonError::Cancelled);
+                    }
+                }
+            }
+        }
+    }
+
     /// Returns the shared in-process mutex for one repository.
     pub fn repo_lock(&self, repo: &RepoId) -> Arc<AsyncMutex<()>> {
         let mut locks = self
@@ -484,6 +516,65 @@ impl JobManager {
         let lock = Arc::new(AsyncMutex::new(()));
         locks.insert(repo.clone(), Arc::downgrade(&lock));
         lock
+    }
+
+    /// Prevents new work for a repository until the returned guard is dropped.
+    pub fn begin_repo_deletion(&self, repo: &RepoId) -> DaemonResult<RepoDeletionGuard> {
+        let mut deleting = self
+            .inner
+            .deleting_repos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !deleting.insert(repo.clone()) {
+            return Err(DaemonError::Conflict(format!(
+                "repository {repo} is already being deleted"
+            )));
+        }
+        Ok(RepoDeletionGuard {
+            manager: self.clone(),
+            repo: repo.clone(),
+        })
+    }
+
+    /// Rejects work submitted after repository deletion has started.
+    pub fn ensure_repo_available(&self, repo: &RepoId) -> DaemonResult<()> {
+        if self
+            .inner
+            .deleting_repos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(repo)
+        {
+            Err(DaemonError::Conflict(format!(
+                "repository {repo} is being deleted"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Cancels and awaits every active job scoped to a repository.
+    pub async fn quiesce_repo(&self, repo: &RepoId) -> DaemonResult<()> {
+        let active = self
+            .list()
+            .into_iter()
+            .filter(|job| {
+                job_targets_repo(&job.target, repo)
+                    && matches!(
+                        job.status,
+                        JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling
+                    )
+            })
+            .collect::<Vec<_>>();
+        for job in &active {
+            if job.cancellable {
+                let _ignored = self.cancel(&job.id);
+            }
+        }
+        for job in active {
+            let _record = self.wait(&job.id).await?;
+        }
+        Ok(())
     }
 
     /// Returns the global prepared-pool concurrency semaphore with two permits.
@@ -623,12 +714,10 @@ impl JobManager {
             .order
             .iter()
             .filter(|id| {
-                state.jobs.get(*id).is_some_and(|job| {
-                    !matches!(
-                        job.record.status,
-                        JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling
-                    )
-                })
+                state
+                    .jobs
+                    .get(*id)
+                    .is_some_and(|job| matches!(job.record.status, JobStatus::Succeeded))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -646,6 +735,29 @@ impl JobManager {
         state.order.retain(|id| !remove.contains(id));
         state.jobs.retain(|id, _job| !remove.contains(id));
     }
+}
+
+/// Exclusive repository-deletion tombstone.
+pub struct RepoDeletionGuard {
+    manager: JobManager,
+    repo: RepoId,
+}
+
+impl Drop for RepoDeletionGuard {
+    fn drop(&mut self) {
+        self.manager
+            .inner
+            .deleting_repos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.repo);
+    }
+}
+
+fn job_targets_repo(target: &str, repo: &RepoId) -> bool {
+    target == repo.as_str()
+        || target.starts_with(&format!("{repo}:"))
+        || target.starts_with(&format!("{repo}#"))
 }
 
 fn finished_before(record: &JobRecord, cutoff: DateTime<Utc>) -> bool {
@@ -671,7 +783,7 @@ mod tests {
     use super::*;
 
     async fn wait_finished(manager: &JobManager, id: &JobId) -> JobRecord {
-        for _ in 0..100 {
+        for _ in 0..400 {
             if let Some(record) = manager.list().into_iter().find(|record| &record.id == id)
                 && !matches!(
                     record.status,
@@ -825,5 +937,32 @@ mod tests {
         clock.set(initial + Duration::seconds(2));
 
         assert!(manager.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_jobs_do_not_expire_with_success_retention() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let initial = Utc
+            .with_ymd_and_hms(2026, 9, 4, 12, 0, 0)
+            .single()
+            .unwrap_or_else(|| panic!("valid timestamp"));
+        let clock = Arc::new(FixedClock::new(initial));
+        let manager = JobManager::with_clock(temp.path(), clock.clone());
+        manager.set_retention(StdDuration::from_secs(1));
+        let id = manager.submit(
+            JobKind::Inspect,
+            "all",
+            "Inspect",
+            true,
+            false,
+            |_context| async { Err(DaemonError::Git("failed".to_owned())) },
+        );
+        assert!(matches!(
+            wait_finished(&manager, &id).await.status,
+            JobStatus::Failed { .. }
+        ));
+        clock.set(initial + Duration::seconds(2));
+
+        assert!(manager.list().iter().any(|record| record.id == id));
     }
 }

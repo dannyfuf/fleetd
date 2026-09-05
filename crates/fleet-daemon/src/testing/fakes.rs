@@ -203,6 +203,9 @@ impl Git for FakeGit {
     async fn repair_origin_head(&self, cwd: &Path) -> DaemonResult<()> {
         self.inner.repair_origin_head(cwd).await
     }
+    async fn symbolic_head(&self, cwd: &Path) -> DaemonResult<String> {
+        self.inner.symbolic_head(cwd).await
+    }
     async fn remote_branch_exists(&self, cwd: &Path, branch: &str) -> DaemonResult<bool> {
         self.inner.remote_branch_exists(cwd, branch).await
     }
@@ -252,6 +255,9 @@ impl Git for FakeGit {
     }
     async fn unique_commits(&self, cwd: &Path, target: &str) -> DaemonResult<u64> {
         self.inner.unique_commits(cwd, target).await
+    }
+    async fn unique_commits_from(&self, cwd: &Path, target: &str, head: &str) -> DaemonResult<u64> {
+        self.inner.unique_commits_from(cwd, target, head).await
     }
     async fn is_ancestor(
         &self,

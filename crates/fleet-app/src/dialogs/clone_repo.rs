@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use fleet_core::{cache::RepoCache, github::RemoteRepo, ids::ContextId};
+use fleet_core::{cache::RepoCache, config::CloneProtocol, github::RemoteRepo, ids::ContextId};
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
@@ -24,7 +24,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(150);
 pub const RESULT_ROWS: usize = 8;
 
 /// The Clone dialog's draft.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CloneState {
     /// The context the repository is cloned into.
     pub context: Option<ContextId>,
@@ -44,10 +44,29 @@ pub struct CloneState {
     pub error: Option<String>,
     /// When the results came out of a cache rather than a live query.
     pub cached_at: Option<String>,
-    /// The clone protocol the footer names.
-    pub protocol: String,
+    /// `github.cloneProtocol`: the footer names it and `Enter` clones with it.
+    pub protocol: CloneProtocol,
     /// Bumps on every keystroke; a late answer to a superseded query is dropped.
     pub seq: u64,
+}
+
+impl Default for CloneState {
+    fn default() -> Self {
+        Self {
+            context: None,
+            context_name: String::new(),
+            owners: Vec::new(),
+            query: TextInput::default(),
+            results: Vec::new(),
+            cursor: 0,
+            searching: false,
+            error: None,
+            cached_at: None,
+            // Replaced by the effective `github.cloneProtocol` as soon as the daemon answers.
+            protocol: CloneProtocol::Ssh,
+            seq: 0,
+        }
+    }
 }
 
 impl CloneState {
@@ -73,6 +92,41 @@ impl CloneState {
     pub fn selected(&self) -> Option<RemoteRepo> {
         self.rows().get(self.cursor).cloned()
     }
+
+    /// The word the footer names the protocol with.
+    #[must_use]
+    pub const fn protocol_word(&self) -> &'static str {
+        match self.protocol {
+            CloneProtocol::Ssh => "ssh",
+            CloneProtocol::Https => "https",
+        }
+    }
+}
+
+/// The URL `github.cloneProtocol` selects for a repository.
+///
+/// `gh` only ever hands back the SSH URL, so the HTTPS form is derived from it rather than
+/// hard-coding `github.com` — an enterprise host has to survive the switch.
+#[must_use]
+pub fn clone_url(repo: &RemoteRepo, protocol: CloneProtocol) -> String {
+    match protocol {
+        CloneProtocol::Ssh => repo.ssh_url.clone(),
+        CloneProtocol::Https => https_url(repo),
+    }
+}
+
+fn https_url(repo: &RemoteRepo) -> String {
+    if repo.ssh_url.starts_with("https://") {
+        return repo.ssh_url.clone();
+    }
+    if let Some(rest) = repo.ssh_url.strip_prefix("git@")
+        && let Some((host, path)) = rest.split_once(':')
+        && !host.is_empty()
+        && !path.is_empty()
+    {
+        return format!("https://{host}/{path}");
+    }
+    format!("https://github.com/{}.git", repo.full_name)
 }
 
 /// A pasted `owner/name` or GitHub URL, turned into a first result row (§3.8.2).
@@ -113,11 +167,8 @@ pub fn manual_entry(query: &str) -> Option<RemoteRepo> {
 // ---------------------------------------------------------------------------- seeding
 
 /// Fills the draft from the snapshot. No search runs until something is typed.
-pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
-    let mut draft = CloneState {
-        protocol: "ssh".to_owned(),
-        ..CloneState::default()
-    };
+pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
+    let mut draft = CloneState::default();
     {
         let app = state.read(cx);
         if let Some(snapshot) = app.snapshot.as_ref() {
@@ -138,10 +189,34 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             }
         }
     }
-    with_host(cx, |host| {
+    let seq = with_host(cx, |host| {
         draft.seq = host.clone.seq.wrapping_add(1);
         host.clone = draft;
+        host.clone.seq
     });
+    // §SWARM-INVENTORY `github.cloneProtocol` decides the URL, so the dialog reads the
+    // effective configuration rather than assuming SSH. The answer lands before the user can
+    // finish typing a repository name, and a late one for a superseded opening is dropped.
+    let reply = bridge.request(RequestBody::GetConfig);
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        let Ok(Ok(ResponseBody::Config(config))) = reply.recv().await else {
+            return;
+        };
+        cx.update(|cx| {
+            let changed = with_host(cx, |host| {
+                if host.clone.seq != seq || host.clone.protocol == config.github.clone_protocol {
+                    return false;
+                }
+                host.clone.protocol = config.github.clone_protocol;
+                true
+            });
+            if changed {
+                notify(&state, cx);
+            }
+        });
+    })
+    .detach();
 }
 
 /// Issues the debounced search for the current query.
@@ -305,7 +380,7 @@ pub(crate) fn render(
             KeyHintRow::new()
                 .key("\u{2303}n/\u{2303}p", "move")
                 .key("esc", "cancel")
-                .key(draft.protocol.clone(), "clones in the background"),
+                .key(draft.protocol_word(), "clones in the background"),
         )
         .primary("\u{23ce} Clone");
 
@@ -371,6 +446,20 @@ pub(crate) fn render(
                 notify(&state, cx);
             }
         })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorLeft, _window, cx| {
+                with_host(cx, |host| host.clone.query.left());
+                notify(&state, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorRight, _window, cx| {
+                with_host(cx, |host| host.clone.query.right());
+                notify(&state, cx);
+            }
+        })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
             submit(&confirm_state, &confirm_bridge, cx);
         })
@@ -403,10 +492,12 @@ fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     }) else {
         return;
     };
+    let protocol = with_host(cx, |host| host.clone.protocol);
+    let url = clone_url(&repo, protocol);
     bridge.send(RequestBody::CloneRepo {
         owner: repo.owner,
         name: repo.name,
-        url: repo.ssh_url,
+        url,
         context,
         default_branch: Some(repo.default_branch),
     });
@@ -418,6 +509,43 @@ fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_clone_url_follows_the_configured_protocol() {
+        let repo = manual_entry("acme/widgets").unwrap_or_else(|| panic!("a valid owner/name"));
+        assert_eq!(
+            clone_url(&repo, CloneProtocol::Ssh),
+            "git@github.com:acme/widgets.git"
+        );
+        assert_eq!(
+            clone_url(&repo, CloneProtocol::Https),
+            "https://github.com/acme/widgets.git"
+        );
+    }
+
+    #[test]
+    fn the_https_url_keeps_an_enterprise_host() {
+        let mut repo = manual_entry("acme/widgets").unwrap_or_else(|| panic!("a valid name"));
+        repo.ssh_url = "git@github.acme.internal:acme/widgets.git".to_owned();
+        assert_eq!(
+            clone_url(&repo, CloneProtocol::Https),
+            "https://github.acme.internal/acme/widgets.git",
+            "the host comes from the URL gh gave us, never from a hard-coded github.com"
+        );
+        repo.ssh_url = "https://github.com/acme/widgets.git".to_owned();
+        assert_eq!(
+            clone_url(&repo, CloneProtocol::Https),
+            "https://github.com/acme/widgets.git"
+        );
+    }
+
+    #[test]
+    fn the_footer_names_the_protocol_it_will_use() {
+        let mut draft = CloneState::default();
+        assert_eq!(draft.protocol_word(), "ssh");
+        draft.protocol = CloneProtocol::Https;
+        assert_eq!(draft.protocol_word(), "https");
+    }
     use super::*;
 
     fn repo(full_name: &str) -> RemoteRepo {

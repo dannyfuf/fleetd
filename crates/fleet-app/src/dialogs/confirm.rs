@@ -90,10 +90,16 @@ pub enum ConfirmRequest {
 
 impl ConfirmRequest {
     /// The title §3.8.3 gives this action.
+    ///
+    /// The delete-worktree confirm has two, because it has two shapes: the compact form puts
+    /// the full `WorktreeId` in the title, the expanded form puts it on row 1 of the body and
+    /// the title falls back to `Delete worktree` — printing the id in both places says the
+    /// same long string twice and pushes the facts down.
     #[must_use]
-    pub fn title(&self) -> String {
+    pub fn title(&self, compact: bool) -> String {
         match self {
-            Self::DeleteWorktree { id } => format!("Delete {}?", id.as_str()),
+            Self::DeleteWorktree { id } if compact => format!("Delete {}?", id.as_str()),
+            Self::DeleteWorktree { .. } => "Delete worktree".to_owned(),
             Self::DeleteRepo { repo, .. } => format!("Delete repository {}?", repo.as_str()),
             Self::DeleteContext { name, .. } => format!("Delete context \"{name}\"?"),
             Self::Prune { repo } => format!("Prune {}", repo.as_str()),
@@ -246,6 +252,24 @@ pub struct Facts {
     pub age_secs: Option<i64>,
 }
 
+/// The ref the daemon actually compared against.
+///
+/// `WorktreeInspection::target_branch` is the bare branch name; the daemon merges against
+/// `origin/<branch>` (`inspect.rs`). §3.8.3 quotes the full ref — `✓ merged into origin/main` —
+/// because "merged into main" is ambiguous when a local `main` has drifted from the remote.
+#[must_use]
+pub fn target_ref(target_branch: &str) -> String {
+    let branch = target_branch.trim();
+    if branch.is_empty() {
+        return "the base ref".to_owned();
+    }
+    if branch.contains('/') && !branch.starts_with("refs/") {
+        // Already qualified, e.g. `origin/main` or `upstream/main`.
+        return branch.to_owned();
+    }
+    format!("origin/{branch}")
+}
+
 /// Turns one inspection into the fact list §3.8.3 draws.
 #[must_use]
 pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, now: i64) -> Facts {
@@ -275,7 +299,7 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
             risky = true;
             list = list.fact(Fact::risk(format!(
                 "{count} commits not on {}",
-                inspection.target_branch
+                target_ref(&inspection.target_branch)
             )));
         }
         None => {
@@ -286,7 +310,7 @@ pub fn worktree_facts(inspection: Option<&WorktreeInspection>, loading: bool, no
     if inspection.merged || inspection.merged_into_target {
         list = list.fact(Fact::safe(format!(
             "merged into {}",
-            inspection.target_branch
+            target_ref(&inspection.target_branch)
         )));
     } else if let Some(pull_request) = inspection.pr.as_ref() {
         let label = match pull_request.state {
@@ -571,12 +595,17 @@ fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyElement {
     if request.rechecks() {
         hints = hints.key("I", "re-check");
     }
-    let mut card = ConfirmDialog::new(request.title(), facts.list.clone())
-        .target(request.target())
+    let title = request.title(compact);
+    let target = request.target();
+    let mut card = ConfirmDialog::new(title.clone(), facts.list.clone())
         .consequence(request.consequence(&facts))
         .icon(request.icon(compact))
         .hints(hints)
         .action_label(request.action_label(0));
+    // §3.8.3 puts the full id in exactly one place: the title, or row 1 of the expanded body.
+    if !title.contains(&target) {
+        card = card.target(target);
+    }
     if request.always_strong() {
         card = card.force_confirm_key(ConfirmKey::Upper);
     }
@@ -677,7 +706,7 @@ fn prune_card(request: &ConfirmRequest, draft: &ConfirmState, cx: &mut App) -> A
 
     Dialog::new(format!(
         "{} \u{2014} {} of {total}",
-        request.title(),
+        request.title(true),
         deleted.len()
     ))
     .icon(Icon::Scissors)
@@ -883,11 +912,32 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_fact_names_the_remote_ref_the_daemon_compared_against() {
+        assert_eq!(target_ref("main"), "origin/main");
+        assert_eq!(
+            target_ref("release/2026"),
+            "release/2026",
+            "an already qualified ref is left alone"
+        );
+        assert_eq!(target_ref("origin/main"), "origin/main");
+        assert_eq!(target_ref(""), "the base ref");
+    }
+
+    #[test]
     fn every_action_has_the_wording_the_spec_fixes() {
         let id = WorktreeId::try_from("buk/payroll#fix-rut-validator")
             .unwrap_or_else(|error| panic!("{error}"));
         let request = ConfirmRequest::DeleteWorktree { id };
-        assert_eq!(request.title(), "Delete buk/payroll#fix-rut-validator?");
+        assert_eq!(
+            request.title(true),
+            "Delete buk/payroll#fix-rut-validator?",
+            "compact: the id is the title"
+        );
+        assert_eq!(
+            request.title(false),
+            "Delete worktree",
+            "expanded: row 1 carries the id, so the title must not repeat it"
+        );
         let benign = Facts::default();
         assert_eq!(
             request.consequence(&benign),

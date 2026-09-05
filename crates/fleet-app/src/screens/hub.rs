@@ -1481,6 +1481,9 @@ impl HubCtx {
             let slot = hub.inspections.entry(id.clone()).or_default();
             slot.loading = true;
         });
+        // Same reason as `fetch_pull_requests`: §3.4's dimmed fact list must land before the
+        // `git fetch`, not after it.
+        self.state.update(cx, |_, cx| cx.notify());
         self.ask(
             RequestBody::InspectWorktrees {
                 ids: vec![id.clone()],
@@ -1578,6 +1581,10 @@ impl HubCtx {
             hub.prs.started_at = Some(Instant::now());
             hub.prs.error = None;
         });
+        // `HubState` is its own entity and the shell only observes `AppState`, so a mutation
+        // here repaints nothing on its own. §3.5's `⟳ refreshing` has to appear *now* — the
+        // whole point of the indicator is the `gh` round trip it covers.
+        self.state.update(cx, |_, cx| cx.notify());
         for tab in [PrTab::Mine, PrTab::Review] {
             self.ask(
                 RequestBody::ListPullRequests {

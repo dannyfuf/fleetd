@@ -14,7 +14,7 @@ use fleet_core::{
     paths::FleetHome,
 };
 use fleet_proto::{
-    job::{JobKind, JobRecord, JobStatus},
+    job::{JobKind, JobRecord},
     response::BaseRefs,
 };
 use tokio::sync::oneshot;
@@ -109,7 +109,16 @@ impl Repos {
                         .map_or_else(|| process_is_alive(pid), |process| process.is_alive(pid))
                     {
                         tokio::select! {
-                            () = context.cancel.cancelled() => return Err(DaemonError::Cancelled),
+                            () = context.cancel.cancelled() => {
+                                terminate_process_group(pid).await;
+                                return fail_clone(
+                                    &state,
+                                    &clone.id,
+                                    Path::new(&clone.staging_path),
+                                    files.as_ref(),
+                                    DaemonError::Cancelled,
+                                ).await;
+                            }
                             () = tokio::time::sleep(Duration::from_millis(100)) => {}
                         }
                     }
@@ -131,6 +140,7 @@ impl Repos {
     ) -> DaemonResult<JobRecord> {
         let id = RepoId::try_from(format!("{owner}/{name}"))
             .map_err(|error| DaemonError::Validation(error.to_string()))?;
+        self.jobs.ensure_repo_available(&id)?;
         if url.trim().is_empty() {
             return Err(DaemonError::Validation(
                 "repository URL must not be empty".to_owned(),
@@ -220,6 +230,11 @@ impl Repos {
 
     /// Cascades repository deletion through registered children and recoverable trash.
     pub async fn delete(&self, repo: RepoId) -> DaemonResult<()> {
+        let _deleting = self.jobs.begin_repo_deletion(&repo)?;
+        self.delete_guarded(repo).await
+    }
+
+    pub(crate) async fn delete_guarded(&self, repo: RepoId) -> DaemonResult<()> {
         let snapshot = self.state.load().await?;
         if snapshot
             .worktrees
@@ -236,15 +251,9 @@ impl Repos {
             return Err(DaemonError::NotFound(format!("repository {repo}")));
         }
 
-        for job in self.jobs.list() {
-            if (job.target == repo.as_str()
-                || job.target.starts_with(&format!("{repo}:"))
-                || job.target.starts_with(&format!("{repo}#")))
-                && matches!(job.status, JobStatus::Queued | JobStatus::Running)
-            {
-                let _ignored = self.jobs.cancel(&job.id);
-            }
-        }
+        self.jobs.quiesce_repo(&repo).await?;
+        let lock = self.jobs.repo_lock(&repo);
+        let _repo_guard = lock.lock().await;
 
         let config = self.config.load().await?;
         let mut paths = Vec::new();
@@ -572,7 +581,16 @@ async fn clone_operation(
 
     while process_is_alive(process.pid) {
         tokio::select! {
-            () = context.cancel.cancelled() => return Err(DaemonError::Cancelled),
+            () = context.cancel.cancelled() => {
+                terminate_process_group(process.pid).await;
+                return fail_clone(
+                    &state,
+                    &clone.id,
+                    &staging,
+                    files.as_ref(),
+                    DaemonError::Cancelled,
+                ).await;
+            }
             () = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
@@ -675,15 +693,15 @@ async fn resolve_default_branch(git: &dyn Git, path: &Path, hint: &str) -> Strin
     {
         return branch.to_owned();
     }
-    if !hint.is_empty() && git.remote_branch_exists(path, hint).await.unwrap_or(false) {
-        return hint.to_owned();
-    }
     if git.repair_origin_head(path).await.is_ok()
         && let Ok(reference) = git.origin_head(path).await
         && let Some(branch) = reference.strip_prefix("refs/remotes/origin/")
         && !branch.is_empty()
     {
         return branch.to_owned();
+    }
+    if !hint.is_empty() && git.remote_branch_exists(path, hint).await.unwrap_or(false) {
+        return hint.to_owned();
     }
     if let Ok(branches) = git.remote_branches(path).await {
         for candidate in ["origin/main", "origin/master"] {
@@ -693,17 +711,21 @@ async fn resolve_default_branch(git: &dyn Git, path: &Path, hint: &str) -> Strin
         }
         if let Some(branch) = branches
             .iter()
-            .find_map(|branch| branch.strip_prefix("origin/"))
-            .filter(|branch| *branch != "HEAD" && !branch.is_empty())
+            .filter_map(|branch| branch.strip_prefix("origin/"))
+            .find(|branch| *branch != "HEAD" && !branch.is_empty())
         {
             return branch.to_owned();
         }
+        if branches.is_empty() && !hint.is_empty() {
+            return hint.to_owned();
+        }
     }
-    if hint.is_empty() {
-        "main".to_owned()
-    } else {
-        hint.to_owned()
+    if let Ok(branch) = git.symbolic_head(path).await
+        && !branch.is_empty()
+    {
+        return branch;
     }
+    "main".to_owned()
 }
 
 fn process_is_alive(pid: u32) -> bool {
@@ -713,6 +735,30 @@ fn process_is_alive(pid: u32) -> bool {
     // SAFETY: signal zero performs an existence/permission check and does not modify the process.
     let result = unsafe { libc::kill(pid, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+async fn terminate_process_group(pid: u32) {
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    signal_process_group(pid, libc::SIGTERM);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while process_is_alive(pid.cast_unsigned()) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if process_is_alive(pid.cast_unsigned()) {
+        signal_process_group(pid, libc::SIGKILL);
+    }
+}
+
+fn signal_process_group(pid: i32, signal: i32) {
+    // SAFETY: the PID comes from a child Fleet launched in its own process group.
+    let group_result = unsafe { libc::kill(-pid, signal) };
+    if group_result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        // Older persisted clone attempts may predate process-group launch.
+        // SAFETY: the PID is the exact persisted child PID.
+        let _result = unsafe { libc::kill(pid, signal) };
+    }
 }
 
 fn validate_owner(owner: &str) -> DaemonResult<()> {

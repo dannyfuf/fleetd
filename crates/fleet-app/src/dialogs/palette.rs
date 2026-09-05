@@ -312,6 +312,22 @@ pub fn matches(label: &str, query: &str) -> bool {
         .all(|wanted| chars.any(|actual| actual == wanted))
 }
 
+/// The §2.5 detail wording a `GO` row carries on its right.
+///
+/// §3.9 wants the row's **state** there (`session attached`, `sleeping`, `PR · mine`, `repo`),
+/// not a type word: "worktree" repeats what the id already says, while the state is the thing
+/// that decides whether jumping there resumes work or starts it.
+#[must_use]
+pub fn session_detail(session: SessionState, slept: bool) -> &'static str {
+    match session {
+        SessionState::Attached => "session attached",
+        SessionState::Detached if slept => "sleeping",
+        SessionState::Detached => "running, detached",
+        SessionState::Unknown => "unknown",
+        SessionState::None => "no session",
+    }
+}
+
 /// Every candidate row, in section order, before the cap.
 #[must_use]
 pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
@@ -328,11 +344,14 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 section: PaletteSectionKind::Go,
                 label: session.id.as_str().to_owned(),
                 detail: Some(
-                    if attached {
-                        "session attached"
-                    } else {
-                        "sleeping"
-                    }
+                    session_detail(
+                        if attached {
+                            SessionState::Attached
+                        } else {
+                            SessionState::Detached
+                        },
+                        !attached,
+                    )
                     .to_owned(),
                 ),
                 key: None,
@@ -354,14 +373,21 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
             {
                 continue;
             }
+            // §1.3: until the daemon reports a status the state is `unknown`, never a false
+            // `none` — the same rule the worktrees list follows.
+            let session = snapshot
+                .statuses
+                .iter()
+                .find(|status| status.worktree_id == worktree.id)
+                .map_or(SessionState::Unknown, |status| status.session);
             go.push(Entry {
                 section: PaletteSectionKind::Go,
                 label: worktree.id.as_str().to_owned(),
-                detail: Some("worktree".to_owned()),
+                detail: Some(session_detail(session, false).to_owned()),
                 key: None,
                 destructive: false,
                 icon: Icon::GitBranch,
-                session: Some(SessionState::None),
+                session: Some(session),
                 run: Run::OpenWorktree(worktree.id.clone()),
             });
         }
@@ -822,6 +848,22 @@ fn cursor_worktree(state: &Entity<AppState>, cx: &App) -> Option<WorktreeId> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_go_row_says_its_state_not_its_type() {
+        // §3.9's right-hand column is the §2.5 state; "worktree" is what the id already says.
+        assert_eq!(
+            session_detail(SessionState::Attached, false),
+            "session attached"
+        );
+        assert_eq!(session_detail(SessionState::Detached, true), "sleeping");
+        assert_eq!(
+            session_detail(SessionState::Detached, false),
+            "running, detached"
+        );
+        assert_eq!(session_detail(SessionState::None, false), "no session");
+        assert_eq!(session_detail(SessionState::Unknown, false), "unknown");
+    }
     use std::time::Instant;
 
     use super::*;

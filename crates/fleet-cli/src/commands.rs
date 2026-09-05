@@ -152,26 +152,21 @@ async fn create(client: &Client, arguments: CreateArgs) -> Result<CommandOutput,
     }
     let host = parse_host(arguments.host.as_deref())?;
     let supplied_hooks = arguments.hooks.as_deref().map(parse_hooks).transpose()?;
-    let (mut repo, registered_now) = ensure_repo(client, &repo_id, &arguments).await?;
+    let (mut repo, _registered_now) = ensure_repo(client, &repo_id, &arguments).await?;
 
     if let Some(hooks) = supplied_hooks {
         repo = client.set_repo_hooks(repo.id.clone(), hooks).await?;
     }
     let hooks = repo.hooks.clone();
-    let default_branch = if registered_now {
-        arguments
-            .default_branch
-            .as_deref()
-            .unwrap_or(&repo.default_branch)
-    } else {
-        &repo.default_branch
-    };
     let base = arguments
         .base
-        .or_else(|| Some(format!("origin/{}", default_branch)));
+        .or_else(|| Some(format!("origin/{}", repo.default_branch)));
     let result = client
         .create_worktree(repo.id, arguments.slug, arguments.branch, base, host, hooks)
         .await?;
+    if let Some(job) = &result.post_create_job {
+        wait_for_job(client, job, "post-create hooks").await?;
+    }
     let text = if arguments.json {
         to_json(&CreateEnvelope {
             protocol: PROTOCOL,
@@ -449,25 +444,29 @@ async fn import_from_swarm(client: &Client) -> Result<CommandOutput, ProtoError>
 
 async fn update(client: &Client) -> Result<CommandOutput, ProtoError> {
     let job = client.update().await?;
-    wait_for_job(client, &job).await?;
+    wait_for_job(client, &job, "update").await?;
     Ok(CommandOutput::with_exit_code(
         format!("Updated {}", job.id),
         UPDATE_RESTART,
     ))
 }
 
-async fn wait_for_job(client: &Client, initial: &JobRecord) -> Result<(), ProtoError> {
+async fn wait_for_job(
+    client: &Client,
+    initial: &JobRecord,
+    operation: &str,
+) -> Result<(), ProtoError> {
     let mut status = initial.status.clone();
     loop {
         match status {
             JobStatus::Succeeded => return Ok(()),
             JobStatus::Failed { error } => {
-                return Err(unknown(format!("update failed: {error}")));
+                return Err(unknown(format!("{operation} failed: {error}")));
             }
             JobStatus::Cancelled => {
                 return Err(ProtoError {
                     kind: ErrorKind::Cancelled,
-                    message: "update was cancelled".to_owned(),
+                    message: format!("{operation} was cancelled"),
                 });
             }
             JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling => {}

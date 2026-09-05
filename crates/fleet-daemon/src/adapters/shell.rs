@@ -196,6 +196,7 @@ impl Shell for RealShell {
         let description = describe(&command);
         let mut process = build_command(&command);
         process
+            .process_group(0)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         let child = process
@@ -294,5 +295,36 @@ fn concise_output<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
         stdout.trim()
     } else {
         stderr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detached_child_survives_runtime_shutdown() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let marker = temp.path().join("finished");
+        let log = temp.path().join("detached.log");
+        let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| panic!("{error}"));
+        runtime
+            .block_on(RealShell.run_detached(
+                ShellCommand::new("sh").args([
+                    "-c".to_owned(),
+                    "sleep 0.2; touch \"$1\"".to_owned(),
+                    "fleet-detached-test".to_owned(),
+                    marker.to_string_lossy().into_owned(),
+                ]),
+                &log,
+            ))
+            .unwrap_or_else(|error| panic!("{error}"));
+        drop(runtime);
+
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            marker.exists(),
+            "detached child was killed with its runtime"
+        );
     }
 }

@@ -221,6 +221,25 @@ render from it rather than restating keys, so a binding and its documentation ca
 `scroll`, `filter`, `palette`, `jobs`, `dialog`, `confirm`, `settings`, …). Listen for the ones
 your screen owns; the shell already owns the ones listed in §2.
 
+### Actions stop at the first listener
+
+gpui dispatches an action up the focus chain and, **in the bubble phase, stops at the first
+listener that handles it** (`window.rs`: `cx.propagate_event = false; // Actions stop
+propagation by default during the bubble phase`). `Interactivity::on_action` only ever fires on
+Bubble, and a screen or dialog tracks the focus handle, so *its* listener is always the
+innermost one and always runs first.
+
+A listener that does part of the work and expects the shell to do the rest must therefore end
+with `cx.propagate()`. There is no "also run the outer handler" by default, and the failure is
+silent: the key is consumed and nothing else happens. This is what made `J` / `q` / `Esc`
+unable to close the Jobs panel — the panel reset its own state and never handed `jobs::Close`
+back to `Shell::close_jobs`. Any comment that says "the shell owns …" is a promise that the
+listener calls `cx.propagate()`.
+
+The mirror-image rule holds too: a listener that fully handles an action and must stop an
+outer one from *also* acting calls `cx.stop_propagation()` explicitly, so both directions are
+stated rather than inherited.
+
 Two behaviours the Workspace must implement itself, because only it can:
 
 * forward a key to the PTY **only** while `terminal_mode == TerminalMode::Terminal` — a key

@@ -339,10 +339,21 @@ pub(crate) fn render(
     .under_text_field(true)
     .empty(Text::ui("No base refs yet.").muted());
 
-    let expectation = if draft.prepared_ready {
-        "\u{26a1} prepared copy ready \u{2014} create takes ~2 s"
+    // §3.8.1 Icons: `zap` and `hourglass`, both 16 px Lucide strokes. A colour emoji here was
+    // the one glyph on the screen that was not part of the icon set (§0), and §1.4 keeps amber
+    // for "in flight / needs attention" rather than for decoration.
+    let (expectation_icon, expectation_tone, expectation) = if draft.prepared_ready {
+        (
+            Icon::Zap,
+            Tone::Warning,
+            "prepared copy ready \u{2014} create takes ~2 s",
+        )
     } else {
-        "\u{29d6} no prepared copy \u{2014} the first create copies the repo (~40 s) in the background"
+        (
+            Icon::Hourglass,
+            Tone::Muted,
+            "no prepared copy \u{2014} the first create copies the repo (~40 s) in the background",
+        )
     };
     let hooks_line = if draft.hooks.is_empty() {
         "hooks: none".to_owned()
@@ -384,7 +395,19 @@ pub(crate) fn render(
                 .flex()
                 .flex_col()
                 .gap(hair)
-                .child(Text::ui(expectation).muted())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(hair)
+                        .child(
+                            expectation_icon
+                                .el()
+                                .size(IconSize::Medium)
+                                .color(expectation_tone.color(cx.theme())),
+                        )
+                        .child(Text::ui(expectation).muted()),
+                )
                 .child(Text::hint(hooks_line)),
         );
 
@@ -452,13 +475,26 @@ pub(crate) fn render(
             let state = state.clone();
             move |_: &dialog::CursorUp, _window, cx| move_base(&state, -1, cx)
         })
+        // §KEYMAP "Dialogs and text inputs" gives `←` / `→` to the caret, and §3.8.1 gives
+        // them to the host cycler. The branch field is a text input, so the cycler only claims
+        // the keys while something other than the branch has focus.
         .on_action({
             let state = state.clone();
-            move |_: &create_actions::HostPrev, _window, cx| cycle_host(&state, -1, cx)
+            move |_: &create_actions::HostPrev, _window, cx| {
+                if move_branch_caret(&state, cx, TextInput::left) {
+                    return;
+                }
+                cycle_host(&state, -1, cx);
+            }
         })
         .on_action({
             let state = state.clone();
-            move |_: &create_actions::HostNext, _window, cx| cycle_host(&state, 1, cx)
+            move |_: &create_actions::HostNext, _window, cx| {
+                if move_branch_caret(&state, cx, TextInput::right) {
+                    return;
+                }
+                cycle_host(&state, 1, cx);
+            }
         })
         .on_action({
             let state = state.clone();
@@ -523,6 +559,21 @@ pub(crate) fn render(
         })
         .child(card)
         .into_any_element()
+}
+
+/// Moves the branch caret when the branch field owns the keyboard. Returns whether it did.
+fn move_branch_caret(state: &Entity<AppState>, cx: &mut App, move_to: fn(&mut TextInput)) -> bool {
+    let moved = with_host(cx, |host| {
+        if host.create.field != Field::Branch {
+            return false;
+        }
+        move_to(&mut host.create.branch);
+        true
+    });
+    if moved {
+        notify(state, cx);
+    }
+    moved
 }
 
 fn move_field(state: &Entity<AppState>, delta: isize, cx: &mut App) {

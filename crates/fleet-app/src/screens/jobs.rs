@@ -211,10 +211,6 @@ impl JobsPanel {
             .filter(|job| job.cancellable && jobs_panel::is_active(&job.status))
             .count();
 
-        let theme = cx.theme();
-        let sheet_top = theme.metrics.context_bar_h;
-        let sheet_bottom = theme.metrics.status_bar_h;
-
         let body: AnyElement = if expanded.is_some() {
             self.log_body(&log, following, cx)
         } else if visible.is_empty() {
@@ -259,11 +255,10 @@ impl JobsPanel {
 
         div()
             .track_focus(focus)
+            // The shell hands the panel to `AppFrame::body_overlay`, whose band already ends
+            // at the two bars (§3.7), so the sheet simply fills it.
             .absolute()
-            .top(sheet_top)
-            .bottom(sheet_bottom)
-            .left_0()
-            .right_0()
+            .inset_0()
             .on_action(self.on_move_down(state, cx))
             .on_action(self.on_move_up(state, cx))
             .on_action(self.on_top(state, cx))
@@ -454,11 +449,14 @@ impl JobsPanel {
                 return;
             }
             // The shell closes the overlay; the panel forgets its transient state so the next
-            // opening seeds its cursor again.
+            // opening seeds its cursor again. gpui stops an action at the first bubble-phase
+            // listener, and this one is the innermost, so `Shell::close_jobs` is only reached
+            // by handing the action back explicitly.
             panel.update(cx, |panel, _| {
                 panel.opened = false;
                 panel.confirming_cancel_all = false;
             });
+            cx.propagate();
         }
     }
 

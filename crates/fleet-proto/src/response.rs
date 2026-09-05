@@ -190,6 +190,9 @@ pub enum ResponseBody {
         created: bool,
         /// Resulting worktree.
         worktree: Worktree,
+        /// Post-create hook job, when hooks were scheduled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_create_job: Option<Box<JobRecord>>,
     },
     /// Multi-worktree deletion results.
     WorktreesDeleted(Vec<WorktreeDeleteResult>),

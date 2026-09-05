@@ -695,10 +695,17 @@ fn row_backgrounds(row_ix: usize, row: &GridRow, theme: &Theme, out: &mut Vec<Ce
     let mut open: Option<CellRect> = None;
     for cell in &row.cells {
         let span = cell.width.columns() as usize;
+        if span == 0 {
+            // A `CellWidth::Spacer` is the trailing half of the wide cell before it: it owns
+            // no column of its own, so it must neither open, extend nor close a run. Counting
+            // it as one column would paint a third column for a two-column grapheme and make
+            // that rectangle overlap the next cell.
+            continue;
+        }
         let (_, bg) = cell.resolve(theme);
         match (bg, open.as_mut()) {
             (Some(color), Some(rect)) if rect.color == color && rect.col + rect.cols == col => {
-                rect.cols += span.max(1);
+                rect.cols += span;
             }
             (Some(color), _) => {
                 if let Some(rect) = open.take() {
@@ -708,7 +715,7 @@ fn row_backgrounds(row_ix: usize, row: &GridRow, theme: &Theme, out: &mut Vec<Ce
                     row: row_ix,
                     rows: 1,
                     col,
-                    cols: span.max(1),
+                    cols: span,
                     color,
                 });
             }
@@ -1124,6 +1131,45 @@ mod tests {
         row_backgrounds(0, &row, &t, &mut bg);
         assert_eq!(bg.len(), 1);
         assert_eq!(bg[0].cols, 1);
+    }
+
+    #[test]
+    fn a_wide_cell_and_its_spacer_paint_exactly_two_columns() {
+        let t = theme();
+        let red = t.terminal.ansi[1];
+        let row = GridRow::new([
+            GridCell::new("\u{6f22}", &t).bg(red).width(CellWidth::Wide),
+            GridCell::new("", &t).bg(red).width(CellWidth::Spacer),
+            GridCell::new("X", &t).bg(red),
+        ]);
+        let mut rects = Vec::new();
+        row_backgrounds(0, &row, &t, &mut rects);
+        assert_eq!(rects.len(), 1, "one colour, one run");
+        assert_eq!(
+            (rects[0].col, rects[0].cols),
+            (0, 3),
+            "two columns for the wide cell, one for the narrow one that follows"
+        );
+    }
+
+    #[test]
+    fn a_spacer_never_extends_a_run_past_the_cell_that_follows() {
+        let t = theme();
+        let red = t.terminal.ansi[1];
+        let blue = t.terminal.ansi[4];
+        let row = GridRow::new([
+            GridCell::new("\u{6f22}", &t).bg(red).width(CellWidth::Wide),
+            GridCell::new("", &t).bg(red).width(CellWidth::Spacer),
+            GridCell::new("X", &t).bg(blue),
+        ]);
+        let mut rects = Vec::new();
+        row_backgrounds(0, &row, &t, &mut rects);
+        let spans: Vec<_> = rects.iter().map(|rect| (rect.col, rect.cols)).collect();
+        assert_eq!(
+            spans,
+            vec![(0, 2), (2, 1)],
+            "the runs must tile the row, never overlap"
+        );
     }
 
     #[test]

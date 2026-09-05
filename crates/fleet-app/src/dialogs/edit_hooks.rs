@@ -118,6 +118,37 @@ pub(crate) fn render(
                 notify(&state, cx);
             }
         })
+        // §KEYMAP "Dialogs and text inputs": every text input answers `ctrl-a` / `ctrl-e` and
+        // `←` / `→`. The bindings live on the shared `Dialog` context, so a dialog without
+        // these listeners swallows the keys instead of moving the caret.
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineStart, _window, cx| {
+                with_host(cx, |host| edit_input(&mut host.edit_hooks).home());
+                notify(&state, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineEnd, _window, cx| {
+                with_host(cx, |host| edit_input(&mut host.edit_hooks).end());
+                notify(&state, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorLeft, _window, cx| {
+                with_host(cx, |host| edit_input(&mut host.edit_hooks).left());
+                notify(&state, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorRight, _window, cx| {
+                with_host(cx, |host| edit_input(&mut host.edit_hooks).right());
+                notify(&state, cx);
+            }
+        })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
             let draft = with_host(cx, |host| host.edit_hooks.clone());
             let Some(repo) = draft.repo else { return };

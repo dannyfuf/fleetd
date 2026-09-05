@@ -45,9 +45,10 @@ async fn worktrees_create_delete_and_restore_are_atomic() {
         .unwrap_or_else(|error| panic!("{error}"));
     let jobs = Arc::new(JobManager::new(&home));
     let git = Arc::new(ShellGit::new(Arc::new(RealShell)));
-    let worktrees = Worktrees::new(config, state.clone(), jobs, files, git);
+    let worktrees =
+        Worktrees::new(config, state.clone(), jobs, files, git).with_shell(Arc::new(RealShell));
 
-    let (created, worktree) = worktrees
+    let (created, worktree, _post_create_job) = worktrees
         .create(
             repo.id,
             "feature".to_owned(),
@@ -68,7 +69,7 @@ async fn worktrees_create_delete_and_restore_are_atomic() {
             .exists()
     );
 
-    let (created, same) = worktrees
+    let (created, same, _post_create_job) = worktrees
         .create(
             RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
             "feature".to_owned(),
@@ -134,7 +135,7 @@ async fn worktrees_create_delete_and_restore_are_atomic() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(path, worktree.path);
 
-    let (created, pull_request) = worktrees
+    let (created, pull_request, _post_create_job) = worktrees
         .create_from_pr(
             RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
             7,
@@ -149,7 +150,7 @@ async fn worktrees_create_delete_and_restore_are_atomic() {
         "pr/7"
     );
 
-    let (_created, hooked) = worktrees
+    let (_created, hooked, _post_create_job) = worktrees
         .create(
             RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
             "hooked".to_owned(),

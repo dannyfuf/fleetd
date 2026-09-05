@@ -1,11 +1,18 @@
 //! The `Theme` global: one token set, resolved for one appearance.
 
-use gpui::{App, BoxShadow, Global, Hsla, SharedString, Window, WindowAppearance, point, px};
+use gpui::{
+    App, BoxShadow, Global, Hsla, Pixels, SharedString, Window, WindowAppearance, point, px,
+};
 
 use super::palette::TerminalPalette;
 use super::tokens::{
     ColorTokens, Elevation, Metrics, Motion, Radii, ShadowToken, Spacing, TypeScale,
 };
+
+/// The size the monospace probe measures at. Any size works; the comparison is a ratio.
+const MONO_PROBE_SIZE: Pixels = px(12.5);
+/// How far two advances may differ and still count as the same cell width.
+const MONO_PROBE_EPSILON: Pixels = px(0.01);
 
 /// Which appearance the theme is resolved for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -66,7 +73,7 @@ pub struct Theme {
     pub metrics: Metrics,
     /// UI font family. `.SystemUIFont` resolves to SF Pro via CoreText with no registration.
     pub font_ui: SharedString,
-    /// Mono font family. `SF Mono` on macOS; set to `Menlo` if the system lacks it.
+    /// Mono font family, resolved from [`Theme::MONO_STACK`] by [`Theme::init`].
     pub font_mono: SharedString,
 }
 
@@ -109,9 +116,60 @@ impl Theme {
         }
     }
 
+    /// The monospaced faces §0 accepts, best first.
+    ///
+    /// `SF Mono` is the spec's face but it is **not** part of a stock macOS install — it ships
+    /// with Xcode / the SF font download. `Menlo` and `Monaco` do ship with every macOS, and
+    /// `DejaVu Sans Mono` / `Liberation Mono` cover the Linux builds. Without a stack, a
+    /// missing `SF Mono` silently resolves to the proportional UI face and the terminal grid,
+    /// branch names, paths and shas stop landing on the cell grid.
+    pub const MONO_STACK: &'static [&'static str] = &[
+        "SF Mono",
+        "SFMono-Regular",
+        "Menlo",
+        "Monaco",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "Courier New",
+    ];
+
+    /// The first face in [`Self::MONO_STACK`] the platform resolves to something that really is
+    /// monospaced.
+    ///
+    /// gpui has no "is this family installed" query: [`gpui::TextSystem::resolve_font`] answers
+    /// with the *fallback* face when a family is missing, and that fallback is the UI sans. The
+    /// only reliable probe is therefore metric: a monospaced face gives `i`, `M` and `W` the
+    /// same advance, a proportional one does not.
+    #[must_use]
+    pub fn resolve_mono_family(cx: &App) -> SharedString {
+        let text_system = cx.text_system();
+        let last = Self::MONO_STACK[Self::MONO_STACK.len() - 1];
+        for family in Self::MONO_STACK {
+            let font_id = text_system.resolve_font(&gpui::font(*family));
+            let advance = |character| {
+                text_system
+                    .advance(font_id, MONO_PROBE_SIZE, character)
+                    .ok()
+                    .map(|size| size.width)
+            };
+            let (Some(narrow), Some(wide), Some(widest)) =
+                (advance('i'), advance('M'), advance('W'))
+            else {
+                continue;
+            };
+            if (narrow - wide).abs() < MONO_PROBE_EPSILON
+                && (wide - widest).abs() < MONO_PROBE_EPSILON
+            {
+                return SharedString::new_static(family);
+            }
+        }
+        SharedString::new_static(last)
+    }
+
     /// Install the theme global. Must run before any kit component renders.
     pub fn init(mode: ThemeMode, cx: &mut App) {
-        cx.set_global(Self::for_mode(mode));
+        let mono = Self::resolve_mono_family(cx);
+        cx.set_global(Self::for_mode(mode).with_mono_family(mono));
     }
 
     /// Install the theme global from the window's OS appearance.
@@ -119,9 +177,20 @@ impl Theme {
         Self::init(ThemeMode::from_appearance(window.appearance()), cx);
     }
 
-    /// Replace the theme global with another mode.
+    /// Replace the theme global with another mode, keeping the resolved mono face.
     pub fn change(mode: ThemeMode, cx: &mut App) {
-        cx.set_global(Self::for_mode(mode));
+        let mono = cx.try_global::<Theme>().map_or_else(
+            || Self::resolve_mono_family(cx),
+            |theme| theme.font_mono.clone(),
+        );
+        cx.set_global(Self::for_mode(mode).with_mono_family(mono));
+    }
+
+    /// Override the mono family, e.g. with the face [`Self::resolve_mono_family`] settled on.
+    #[must_use]
+    pub fn with_mono_family(mut self, family: impl Into<SharedString>) -> Self {
+        self.font_mono = family.into();
+        self
     }
 
     /// Flip light/dark and return the new mode.

@@ -252,6 +252,30 @@ struct Failure {
     stale_socket: bool,
 }
 
+/// What the loop is doing while it is not connected.
+enum Backoff {
+    /// Connected, or waiting for the user to press `r` — nothing is scheduled.
+    Idle,
+    /// §3.12 C: the daemon died while attached and the loop is retrying on the backoff.
+    Reconnecting {
+        /// The pid of the daemon that died, so a restart can be told from a reconnect.
+        previous_pid: u32,
+        /// How many attempts have already failed.
+        attempt: u32,
+    },
+}
+
+/// Resolves after `delay`, or never when there is nothing scheduled.
+///
+/// A `select!` arm needs a future either way; `pending()` is how "this arm is disabled this
+/// round" is spelled without duplicating the whole loop.
+async fn after(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => tokio::time::sleep(delay).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn run(home: &Path, commands: &Receiver<Command>, events: &Sender<BridgeEvent>) {
     let mut link = match open(home, events).await {
         Ok((link, snapshot)) => {
@@ -274,11 +298,23 @@ async fn run(home: &Path, commands: &Receiver<Command>, events: &Sender<BridgeEv
 
     let mut ticker = tokio::time::interval(HEALTH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The reconnect is a *state*, not an inline loop. Sleeping through the backoff inside the
+    // ticker arm stopped `commands.recv()` from being polled at all, so `Shutdown` and every
+    // pending `Request` piled up unanswered — and `ctrl-shift-q`, which awaits its reply
+    // before quitting, hung the window for as long as fleetd stayed down.
+    let mut backoff = Backoff::Idle;
 
     loop {
+        let retry_in = match &backoff {
+            Backoff::Reconnecting { attempt, .. } => Some(reconnect_backoff(*attempt)),
+            Backoff::Idle => None,
+        };
+
         tokio::select! {
             command = commands.recv() => match command {
                 Ok(Command::Request { body, reply }) => {
+                    // With no link this answers `offline` immediately, which is what lets a
+                    // caller awaiting its reply make progress while the daemon is down.
                     dispatch(link.as_ref().map(|link| link.client.clone()), *body, reply);
                 }
                 Ok(Command::Reconnect) => {
@@ -288,6 +324,7 @@ async fn run(home: &Path, commands: &Receiver<Command>, events: &Sender<BridgeEv
                                 if events.send(BridgeEvent::Connected(Box::new(snapshot))).await.is_err() {
                                     return;
                                 }
+                                backoff = Backoff::Idle;
                                 Some(link)
                             }
                             Err(failure) => {
@@ -301,6 +338,35 @@ async fn run(home: &Path, commands: &Receiver<Command>, events: &Sender<BridgeEv
                 }
                 Ok(Command::Shutdown) | Err(_) => return,
             },
+            () = after(retry_in) => {
+                let Backoff::Reconnecting { previous_pid, attempt } = backoff else {
+                    continue;
+                };
+                match open(home, events).await {
+                    Ok((recovered, snapshot)) => {
+                        let restarted = recovered.pid != previous_pid;
+                        if events
+                            .send(BridgeEvent::Reconnected {
+                                restarted,
+                                snapshot: Box::new(snapshot),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        link = Some(recovered);
+                        backoff = Backoff::Idle;
+                    }
+                    Err(_) => {
+                        let attempt = attempt.saturating_add(1);
+                        if events.send(BridgeEvent::Disconnected { attempt }).await.is_err() {
+                            return;
+                        }
+                        backoff = Backoff::Reconnecting { previous_pid, attempt };
+                    }
+                }
+            },
             _ = ticker.tick() => {
                 let lost_pid = match link.as_ref() {
                     Some(current) => {
@@ -313,10 +379,7 @@ async fn run(home: &Path, commands: &Receiver<Command>, events: &Sender<BridgeEv
                     if events.send(BridgeEvent::Disconnected { attempt: 0 }).await.is_err() {
                         return;
                     }
-                    match recover(home, events, previous).await {
-                        Some(recovered) => link = Some(recovered),
-                        None => return,
-                    }
+                    backoff = Backoff::Reconnecting { previous_pid: previous, attempt: 0 };
                 }
             }
         }
@@ -393,40 +456,6 @@ async fn open(home: &Path, events: &Sender<BridgeEvent>) -> Result<(Link, Snapsh
                 log_tail: log_tail(home).await,
                 stale_socket: false,
             })
-        }
-    }
-}
-
-/// Retries on the §3.12 C backoff until the daemon answers, or `None` when the UI went away.
-async fn recover(home: &Path, events: &Sender<BridgeEvent>, previous_pid: u32) -> Option<Link> {
-    let mut attempt: u32 = 0;
-    loop {
-        tokio::time::sleep(reconnect_backoff(attempt)).await;
-        match open(home, events).await {
-            Ok((link, snapshot)) => {
-                let restarted = link.pid != previous_pid;
-                if events
-                    .send(BridgeEvent::Reconnected {
-                        restarted,
-                        snapshot: Box::new(snapshot),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return None;
-                }
-                return Some(link);
-            }
-            Err(_) => {
-                attempt = attempt.saturating_add(1);
-                if events
-                    .send(BridgeEvent::Disconnected { attempt })
-                    .await
-                    .is_err()
-                {
-                    return None;
-                }
-            }
         }
     }
 }

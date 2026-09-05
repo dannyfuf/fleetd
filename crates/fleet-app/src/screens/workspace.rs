@@ -64,8 +64,8 @@ use crate::{
     dialogs::{self, Dialogs},
     state::{AppState, Overlay, Screen, TerminalMode},
     terminal_element::{
-        GRID_PADDING, cell_size, grid_cursor, grid_rows, grid_size, line_selection, selection_text,
-        zoom_bar,
+        GRID_PADDING, cell_size, grid_cursor, grid_modes, grid_rows, grid_size, line_selection,
+        measure, selection_text, zoom_bar,
     },
     views::{workspace_header::WorkspaceHeader, workspace_tabs},
 };
@@ -75,6 +75,13 @@ use crate::{
 /// The first measured frame replaces it, so this is only ever the argument of the very first
 /// `AttachTerminal`; 80 × 24 is the size every program already copes with.
 const FALLBACK_GRID: (u16, u16) = (80, 24);
+
+/// What `ctrl-s c` and the `+` tab ask fleetd to type into a fresh login shell.
+///
+/// The PTY is always the user's `$SHELL -l` in the worktree path; the request's `command` is
+/// what fleetd types at its first prompt, and it refuses an empty one. A shell tab wants no
+/// program, so it asks for the one thing that leaves a clean prompt behind.
+const SHELL_TAB_COMMAND: &str = "clear";
 
 /// The six prefix keys the delayed hint strip lists (§3.6).
 fn prefix_hints() -> KeyHintRow {
@@ -95,6 +102,13 @@ fn prefix_hints() -> KeyHintRow {
 struct Local {
     /// The terminal this client is attached to.
     attached: Option<TerminalId>,
+    /// The [`AppState::link_generation`] that attachment was made under.
+    ///
+    /// A reconnect replaces both ends of the socket, so the daemon's `attached` set is empty
+    /// again and `TerminalFrame`s for this terminal are dropped on its side — while
+    /// `TerminalKey` still reaches the PTY, which is what made the grid look frozen but alive.
+    /// Comparing generations is what re-issues the attach.
+    attached_generation: u64,
     /// The `cols × rows` the daemon was last told about, per terminal.
     sizes: HashMap<TerminalId, (u16, u16)>,
     /// The pixel area the grid was last laid out into.
@@ -170,7 +184,7 @@ impl WorkspaceScreen {
             })
         });
         let header = (!model.zoomed).then(|| self.header(&model, pr, cx));
-        let tabs = (!model.zoomed).then(|| self.tab_strip(&model, &session, cx));
+        let tabs = (!model.zoomed).then(|| self.tab_strip(&model, &session, bridge, state, cx));
         let body = self.terminal_area(&model, bridge, state, focused, cx);
         let theme = cx.theme().clone();
 
@@ -211,8 +225,15 @@ impl WorkspaceScreen {
     /// Attaches, detaches and flushes so the daemon always mirrors what is on screen.
     fn reconcile(&self, model: &Model, bridge: &Bridge, cell: Size<Pixels>) {
         let mut local = self.local.borrow_mut();
-        if local.attached != model.terminal {
-            if let Some(previous) = local.attached.take() {
+        // A new link means the daemon forgot every attachment, so the terminal on screen has
+        // to be claimed again even though it did not change.
+        let relinked = local.attached_generation != model.link_generation;
+        if local.attached != model.terminal || relinked {
+            if let Some(previous) = local.attached.take()
+                && !relinked
+            {
+                // After a relink the old connection — and its attachment — is already gone;
+                // detaching would name a terminal this connection never claimed.
                 bridge.send(RequestBody::DetachTerminal { terminal: previous });
             }
             local.pending.clear();
@@ -227,6 +248,7 @@ impl WorkspaceScreen {
                 });
             }
             local.attached = model.terminal;
+            local.attached_generation = model.link_generation;
         }
 
         // §3.6 "Attaching": keys typed before the first frame are flushed in order once the
@@ -346,15 +368,27 @@ impl WorkspaceScreen {
         header.into_any_element()
     }
 
-    fn tab_strip(&self, model: &Model, session: &Session, cx: &mut App) -> AnyElement {
-        let tabs = workspace_tabs::tabs(session, model.terminal);
+    fn tab_strip(
+        &self,
+        model: &Model,
+        session: &Session,
+        bridge: &Bridge,
+        state: &Entity<AppState>,
+        cx: &mut App,
+    ) -> AnyElement {
+        let tabs = workspace_tabs::tabs(session, model.terminal, &state.read(cx).renamed_terminals);
         let active = model
             .terminal
             .and_then(|terminal| workspace_tabs::position_of(session, terminal))
             .unwrap_or(0);
         let _unused = cx;
+        let (new_session, new_bridge, new_state) = (session.clone(), bridge.clone(), state.clone());
         TerminalTabStrip::new(tabs)
             .active(active)
+            // Mouse parity for `ctrl-s c` (§3.6): the `+` is the same request.
+            .on_new(move |_window, cx| {
+                request_shell_tab(&new_session, &new_bridge, &new_state, cx);
+            })
             .into_any_element()
     }
 
@@ -387,6 +421,11 @@ impl WorkspaceScreen {
                     .id("workspace-terminal-grid")
                     .cursor(grid_cursor(grid, focused))
                     .focused(focused)
+                    // §3.6: the frame's VT modes are the only thing that explains why a
+                    // documented key behaves differently — no scrollback in alt-screen, the
+                    // app owning drag-select under mouse reporting. The badges are
+                    // zero-suppressed, so a plain shell still shows none.
+                    .modes(grid_modes(&grid.modes))
                     .padding(px(GRID_PADDING))
                     .scrollback(grid.viewport.offset, grid.viewport.scrollback_len)
                     .frame_size(usize::from(grid.cols), usize::from(grid.rows))
@@ -422,11 +461,16 @@ impl WorkspaceScreen {
                 .into_any_element(),
         };
 
+        // The pixel area the grid is laid out into, remembered for the *next* attach: without
+        // it every new or newly selected terminal was attached at 80 × 24 and then resized,
+        // which costs a full-screen redraw at the wrong size before the right one arrives.
+        let area_local = Rc::clone(&self.local);
         div()
             .relative()
             .flex_1()
             .w_full()
             .overflow_hidden()
+            .child(measure(move |size| area_local.borrow_mut().area = size))
             .child(grid)
             .children((model.mode == TerminalMode::Scroll).then(|| {
                 ScrollPill::new(model.scroll_offset, model.scrollback_len)
@@ -544,14 +588,10 @@ impl WorkspaceScreen {
         let root = {
             let (_, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::NewTerminal, _window, cx| {
-                if let Some(session) = state.read(cx).active_session() {
-                    bridge.send(RequestBody::NewTerminal {
-                        session: session.id.clone(),
-                        name: workspace_tabs::new_terminal_name(session),
-                        command: String::new(),
-                        cwd: session.cwd.clone(),
-                    });
-                }
+                let Some(session) = state.read(cx).active_session().cloned() else {
+                    return;
+                };
+                request_shell_tab(&session, &bridge, &state, cx);
             })
         };
         let root = {
@@ -865,6 +905,35 @@ impl WorkspaceScreen {
 // ---------------------------------------------------------------------------- helpers
 
 /// Detaches from whatever terminal this client holds.
+/// Asks fleetd for a plain shell tab in the session's worktree path.
+///
+/// `ctrl-s c` and the `+` at the end of the strip are the same request, so they share this.
+fn request_shell_tab(session: &Session, bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
+    let reply = bridge.request(RequestBody::NewTerminal {
+        session: session.id.clone(),
+        name: workspace_tabs::new_terminal_name(session),
+        command: SHELL_TAB_COMMAND.to_owned(),
+        cwd: session.cwd.clone(),
+    });
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        // A refused request is sticky, never silent (§1.8) — this key used to fail quietly.
+        if let Ok(Err(error)) = reply.recv().await {
+            cx.update(|cx| {
+                state.update(cx, |app, cx| {
+                    app.sticky_error = Some(crate::state::StickyError {
+                        text: error.message,
+                        job: None,
+                        retryable: false,
+                    });
+                    cx.notify();
+                });
+            });
+        }
+    })
+    .detach();
+}
+
 fn detach(local: &Rc<RefCell<Local>>, bridge: &Bridge) {
     let attached = local.borrow_mut().attached.take();
     if let Some(terminal) = attached {
@@ -1190,6 +1259,7 @@ pub fn status_kind(session: SessionState, sleeping: bool, degraded: bool) -> Sta
 /// the rows are being built, because copying a full terminal grid once per frame is exactly the
 /// cost this screen exists to avoid.
 struct Model {
+    link_generation: u64,
     mode: TerminalMode,
     zoomed: bool,
     terminal: Option<TerminalId>,
@@ -1285,6 +1355,7 @@ impl Model {
             });
 
         Self {
+            link_generation: app.link_generation,
             mode: app.terminal_mode,
             zoomed: app.zoomed,
             terminal,

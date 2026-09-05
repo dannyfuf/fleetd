@@ -126,10 +126,19 @@ Semantic tones are selected through `Tone`, never by reaching for the field:
 ### 2.3 Type scale
 
 Two families. The UI face is `.SystemUIFont`, which CoreText resolves to SF Pro with no
-registration; the data face is `SF Mono` (present on every macOS since 10.15). gpui panics only
-when a font *and all fallbacks* fail, and its fallback chain ends at Helvetica/Arial, so a
-missing `SF Mono` degrades rather than crashing — set `theme.font_mono = "Menlo"` if that ever
-happens.
+registration; the data face is `SF Mono`.
+
+`SF Mono` is **not** part of a stock macOS install — it arrives with Xcode or the SF font
+download — and gpui answers a missing family with its own fallback stack, which ends at the
+proportional Helvetica/Arial. Left alone that degrades silently and catastrophically: every
+terminal grid, branch, path and sha stops landing on the cell grid, because `CellMetrics`
+derives the column width from the advance of a proportional `M`.
+
+`Theme::init` therefore resolves the data face at startup from `Theme::MONO_STACK`
+(`SF Mono → SFMono-Regular → Menlo → Monaco → DejaVu Sans Mono → Liberation Mono →
+Courier New`), keeping the first candidate whose `i`, `M` and `W` share one advance. A family
+that is absent resolves to the UI sans and fails that probe, so the stack really is walked
+rather than trusted. `Theme::with_mono_family` overrides the result.
 
 | Role | Family | Size / line height | Weight | Case | Used for |
 | --- | --- | --- | --- | --- | --- |

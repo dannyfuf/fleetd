@@ -20,9 +20,11 @@
 
 use fleet_proto::terminal::{
     Cell as ProtoCell, CellAttrs, CellWidth as ProtoWidth, Color, CursorShape as ProtoShape,
+    TerminalModes,
 };
 use fleet_ui_kit::{
-    CellWidth, CursorShape, GridCell, GridCursor, GridRow, GridSelection, Theme, UnderlineStyle,
+    CellWidth, CursorShape, GridCell, GridCursor, GridRow, GridSelection,
+    TerminalMode as KitTerminalMode, Theme, UnderlineStyle,
 };
 use gpui::{Hsla, IntoElement, Pixels, Rgba, Size, canvas, prelude::*, px};
 
@@ -74,6 +76,29 @@ pub fn measure(report: impl 'static + FnOnce(Size<Pixels>)) -> impl IntoElement 
     )
     .absolute()
     .size_full()
+}
+
+/// The kit badges a `FrameUpdate`'s VT modes map onto (§3.6, DESIGN-SYSTEM "Terminal modes").
+///
+/// `TerminalModes` is zero-suppressed, so a plain shell produces an empty list and no badges.
+/// The Kitty keyboard flags and focus-event reporting have no badge: neither changes what a
+/// documented Fleet key does, which is the bar the badge row is drawn to.
+#[must_use]
+pub fn grid_modes(modes: &TerminalModes) -> Vec<KitTerminalMode> {
+    let mut active = Vec::with_capacity(4);
+    if modes.alt_screen {
+        active.push(KitTerminalMode::AltScreen);
+    }
+    if modes.mouse_reporting {
+        active.push(KitTerminalMode::MouseReporting);
+    }
+    if modes.bracketed_paste {
+        active.push(KitTerminalMode::BracketedPaste);
+    }
+    if modes.app_cursor_keys {
+        active.push(KitTerminalMode::ApplicationCursor);
+    }
+    active
 }
 
 /// Resolves a foreground color against the theme's terminal palette.
@@ -243,6 +268,39 @@ pub fn zoom_bar(theme: &Theme) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn frame_modes_become_zero_suppressed_badges() {
+        let quiet = TerminalModes::default();
+        assert!(
+            grid_modes(&quiet).is_empty(),
+            "a plain shell costs no badge row"
+        );
+
+        let vim = TerminalModes {
+            alt_screen: true,
+            mouse_reporting: false,
+            bracketed_paste: true,
+            focus_events: true,
+            kitty_keyboard_flags: 1,
+            app_cursor_keys: true,
+        };
+        assert_eq!(
+            grid_modes(&vim),
+            vec![
+                KitTerminalMode::AltScreen,
+                KitTerminalMode::BracketedPaste,
+                KitTerminalMode::ApplicationCursor,
+            ],
+            "focus events and Kitty flags change no documented Fleet key, so they get no badge"
+        );
+
+        let pager = TerminalModes {
+            mouse_reporting: true,
+            ..TerminalModes::default()
+        };
+        assert_eq!(grid_modes(&pager), vec![KitTerminalMode::MouseReporting]);
+    }
     use fleet_proto::terminal::{CursorState, RowUpdate, TerminalModes, ViewportInfo};
     use fleet_ui_kit::ThemeMode;
 

@@ -15,8 +15,9 @@ use gpui::{
 
 use crate::{
     actions::{
-        confirm, daemon as daemon_actions, dialog, filter, fleet, help, hub, jobs, palette, prefix,
-        quit_daemon_dialog, quit_dialog, scroll, workspace,
+        confirm, daemon as daemon_actions, dialog, filter, first_run as first_run_actions, fleet,
+        help, hub, jobs, palette, prefix, quit_daemon_dialog, quit_dialog, repos, scroll,
+        workspace,
     },
     bridge::Bridge,
     dialogs::Dialogs,
@@ -49,7 +50,6 @@ pub struct Shell {
     hub: HubScreen,
     workspace: WorkspaceScreen,
     jobs: JobsPanel,
-    doctor: Option<Vec<fleet_proto::response::DoctorCheck>>,
     _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
@@ -85,7 +85,6 @@ impl Shell {
             hub: HubScreen::new(cx),
             workspace: WorkspaceScreen::new(cx),
             jobs: JobsPanel::new(cx),
-            doctor: None,
             _subscriptions: subscriptions,
             _tasks: tasks,
         }
@@ -229,6 +228,35 @@ impl Shell {
 
     fn reject_confirm(&mut self, _: &confirm::Reject, _: &mut Window, cx: &mut Context<Self>) {
         self.close_overlay(cx);
+    }
+
+    // ------------------------------------------------------------------ first run (§3.13)
+
+    /// `i`: `fleet import --from-swarm`, as a daemon job.
+    ///
+    /// The three keys the card advertises are handled here rather than in [`HubScreen`],
+    /// because during first run the Hub is not rendered at all and its listeners are therefore
+    /// nowhere on the dispatch path. The Hub's own listeners are deeper, so they still win
+    /// whenever it *is* on screen.
+    fn first_run_import(
+        &mut self,
+        _: &first_run_actions::Import,
+        _: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // §2.7 forbids a "job started" toast: the import reports through the job ticker and
+        // the Jobs panel, and lands the user in a populated Hub when it finishes.
+        self.bridge.send(RequestBody::ImportFromSwarm);
+    }
+
+    /// `N` on the first-run card: create the first context.
+    fn new_context(&mut self, _: &hub::NewContext, _: &mut Window, cx: &mut Context<Self>) {
+        self.open(Overlay::Dialog(Dialogs::NewContext), cx);
+    }
+
+    /// `n` on the first-run card: clone the first repository.
+    fn clone_repo(&mut self, _: &repos::Clone, _: &mut Window, cx: &mut Context<Self>) {
+        self.open(Overlay::Dialog(Dialogs::CloneRepo), cx);
     }
 
     // ------------------------------------------------------------------ hub navigation
@@ -428,8 +456,14 @@ impl Shell {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.doctor.take().is_some() {
-            cx.notify();
+        let showed_doctor = self.state.update(cx, |state, cx| {
+            let showed = state.doctor.take().is_some();
+            if showed {
+                cx.notify();
+            }
+            showed
+        });
+        if showed_doctor {
             return;
         }
         self.state.update(cx, |state, cx| {
@@ -450,13 +484,33 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let reply = self.bridge.request(RequestBody::Doctor);
-        cx.spawn(async move |shell, cx| {
-            let Ok(Ok(ResponseBody::Doctor(checks))) = reply.recv().await else {
-                return;
-            };
-            let _ignored = shell.update(cx, |shell, cx| {
-                shell.doctor = Some(checks);
-                cx.notify();
+        let state = self.state.clone();
+        cx.spawn(async move |_, cx| {
+            let answer = reply.recv().await;
+            cx.update(|cx| {
+                state.update(cx, |app, cx| {
+                    match answer {
+                        Ok(Ok(ResponseBody::Doctor(checks))) => app.doctor = Some(checks),
+                        // §3.12 B is exactly where `D` matters and exactly where the bridge is
+                        // offline, so the refusal has to land in the sticky slot (§1.8) rather
+                        // than be dropped on the floor.
+                        Ok(Err(error)) => {
+                            app.sticky_error = Some(crate::state::StickyError {
+                                text: error.message,
+                                job: None,
+                                retryable: false,
+                            });
+                        }
+                        Ok(Ok(_)) | Err(_) => {
+                            app.sticky_error = Some(crate::state::StickyError {
+                                text: "doctor: the daemon did not answer".to_owned(),
+                                job: None,
+                                retryable: false,
+                            });
+                        }
+                    }
+                    cx.notify();
+                });
             });
         })
         .detach();
@@ -581,6 +635,28 @@ impl Shell {
         element
     }
 
+    /// The same nesting, but as a **layer** rather than a flex child.
+    ///
+    /// An overlay is handed to [`AppFrame::overlay`] / [`AppFrame::body_overlay`], which emit
+    /// their layers as children of a flex column. A `size_full` wrapper there is an in-flow
+    /// item that eats the whole column, collapsing the body to zero and shoving the status bar
+    /// under the context bar (§2.1: the chrome never moves). Absolute positioning takes the
+    /// wrapper out of the flow, and — because gpui resolves an absolute child against its
+    /// parent's box — also gives the dialog, sheet and palette inside it the frame's geometry,
+    /// which is what pins the palette to y = 120 (§3.9).
+    fn overlay_contexts(chain: &[&'static str], child: AnyElement) -> AnyElement {
+        let mut element = child;
+        for context in chain.iter().rev() {
+            element = div()
+                .absolute()
+                .inset_0()
+                .key_context(*context)
+                .child(element)
+                .into_any_element();
+        }
+        element
+    }
+
     /// The §3.13 first-run card: a migration, not an onboarding.
     fn first_run_card(&self, state: &AppState, focus: &FocusHandle, cx: &App) -> AnyElement {
         let has_swarm = crate::views::first_run::has_swarm_state(
@@ -616,7 +692,7 @@ impl Render for Shell {
 
         // Everything below reads the state immutably; the borrow ends before the screens are
         // rendered, which is the only place that needs `&mut App`.
-        let doctor = self.doctor.clone();
+        let doctor = state_handle.read(cx).doctor.clone();
         let (mut chain, overlay, screen, mut splash, banner, veil, first_run) = {
             let state = state_handle.read(cx);
             (
@@ -630,8 +706,11 @@ impl Render for Shell {
             )
         };
         if doctor.is_some() {
-            chain = vec!["Daemon", "Doctor"];
             splash = None;
+            // An overlay still shadows the doctor table, exactly as it shadows the Hub.
+            if overlay.is_none() {
+                chain = vec!["Daemon", "Doctor"];
+            }
         }
         let context_bar = chrome::context_bar(state_handle.read(cx), cx);
         let status_bar = chrome::status_bar(state_handle.read(cx), cx);
@@ -727,7 +806,7 @@ impl Render for Shell {
         // The focused element carries the key-context chain: the overlay when one is open,
         // the body otherwise, so overlays really do shadow the Hub and the Workspace.
         let (body, overlay_element) = match overlay_element {
-            Some(element) => (body, Some(Self::contexts(&chain, element))),
+            Some(element) => (body, Some(Self::overlay_contexts(&chain, element))),
             None => (Self::contexts(&chain, body), None),
         };
 
@@ -746,12 +825,20 @@ impl Render for Shell {
             .context_bar(context_bar)
             .body(body)
             .status_bar(status_bar)
-            .overlay(toasts);
+            // §2.2: the toast stack sits bottom-right *above* the status bar, so it belongs to
+            // the band between the bars, not to the whole window.
+            .body_overlay(toasts);
         if let Some(banner) = banner {
             frame = frame.banner(banner);
         }
-        if let Some(overlay) = overlay_element {
-            frame = frame.overlay(overlay);
+        if let Some(layer) = overlay_element {
+            // §3.7: the Jobs sheet is clipped to the band between the two bars, so both bars
+            // stay reachable while it is open. Every other overlay spans the window.
+            frame = if matches!(overlay, Some(Overlay::Jobs)) {
+                frame.body_overlay(layer)
+            } else {
+                frame.overlay(layer)
+            };
         }
 
         div()
@@ -767,6 +854,10 @@ impl Render for Shell {
             .on_action(cx.listener(Self::open_jobs))
             .on_action(cx.listener(Self::focus_sticky_error))
             .on_action(cx.listener(Self::cancel))
+            // First run (§3.13) — fallbacks for the three keys the card advertises
+            .on_action(cx.listener(Self::first_run_import))
+            .on_action(cx.listener(Self::new_context))
+            .on_action(cx.listener(Self::clone_repo))
             // Hub navigation
             .on_action(cx.listener(Self::focus_prev_pane))
             .on_action(cx.listener(Self::focus_next_pane))

@@ -292,7 +292,7 @@ fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
     with_host(cx, |host| host.open = Some(dialog.clone()));
     match dialog {
         Dialogs::CreateWorktree => create_worktree::seed(state, bridge, cx),
-        Dialogs::CloneRepo => clone_repo::seed(state, cx),
+        Dialogs::CloneRepo => clone_repo::seed(state, bridge, cx),
         Dialogs::Confirm => confirm::seed(state, bridge, cx),
         Dialogs::NewContext => context::seed(state, cx, false),
         Dialogs::EditContext => context::seed(state, cx, true),

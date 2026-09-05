@@ -24,7 +24,8 @@ use crate::{
     actions::{dialog, settings as settings_actions},
     bridge::Bridge,
     dialogs::{TextInput, notify, root, step, typed_char, uptime_label, with_host},
-    state::AppState,
+    state::{AppState, Screen},
+    views::workspace_tabs,
 };
 
 /// The section rail's width (§3.8.6).
@@ -438,7 +439,10 @@ fn about_rows(app: &AppState) -> Vec<SettingRow> {
     let mut list = Vec::new();
     let now = crate::dialogs::now_epoch();
     if let Some(snapshot) = app.snapshot.as_ref() {
-        list.push(fact("Fleet", snapshot.daemon.version.clone()));
+        list.push(fact(
+            "Fleet",
+            crate::shell::bare_version(&snapshot.daemon.version).to_owned(),
+        ));
         let uptime = crate::dialogs::age_secs(&snapshot.daemon.started_at, now)
             .map_or_else(|| "\u{2013}".to_owned(), uptime_label);
         list.push(fact(
@@ -831,42 +835,54 @@ pub(crate) fn render(
             let state = state.clone();
             move |_: &settings_actions::Toggle, _window, cx| toggle_row(&state, cx)
         })
+        // `Backspace` / `ctrl-u` / `ctrl-w` are unambiguous edit intents, so unlike `j` / `k`
+        // they focus the row's input themselves.
         .on_action({
             let state = state.clone();
             move |_: &dialog::Backspace, _window, cx| {
-                let changed = with_host(cx, |host| {
-                    host.settings
-                        .editing
-                        .as_mut()
-                        .is_some_and(TextInput::backspace)
-                });
-                if changed {
-                    flush(&state, cx);
-                }
+                edit_focused(&state, cx, TextInput::backspace);
             }
         })
         .on_action({
             let state = state.clone();
             move |_: &dialog::ClearInput, _window, cx| {
-                let changed = with_host(cx, |host| {
-                    host.settings.editing.as_mut().is_some_and(TextInput::clear)
-                });
-                if changed {
-                    flush(&state, cx);
-                }
+                edit_focused(&state, cx, TextInput::clear);
             }
         })
         .on_action({
             let state = state.clone();
             move |_: &dialog::DeleteWord, _window, cx| {
-                let changed = with_host(cx, |host| {
-                    host.settings
-                        .editing
-                        .as_mut()
-                        .is_some_and(TextInput::delete_word)
-                });
-                if changed {
-                    flush(&state, cx);
+                edit_focused(&state, cx, TextInput::delete_word);
+            }
+        })
+        // §KEYMAP "Dialogs and text inputs": `ctrl-a` / `ctrl-e` and `←` / `→` move the caret.
+        // `←` / `→` fall back to cycling a choice, which is what §3.8.6 gives them on a row
+        // that has no input.
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineStart, _window, cx| {
+                move_caret(&state, cx, TextInput::home);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineEnd, _window, cx| {
+                move_caret(&state, cx, TextInput::end);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorLeft, _window, cx| {
+                if !move_caret(&state, cx, TextInput::left) {
+                    cycle_row(&state, -1, "", cx);
+                }
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::CursorRight, _window, cx| {
+                if !move_caret(&state, cx, TextInput::right) {
+                    cycle_row(&state, 1, "", cx);
                 }
             }
         })
@@ -875,9 +891,9 @@ pub(crate) fn render(
         })
         .on_action({
             let state = state.clone();
+            let bridge = bridge.clone();
             move |_: &settings_actions::OpenConfigFile, _window, cx| {
-                let path = state.read(cx).home.join("config.json");
-                cx.open_with_system(&path);
+                open_config_file(&state, &bridge, cx);
             }
         })
         .on_action(move |_: &settings_actions::RunDoctor, _window, cx| {
@@ -940,6 +956,11 @@ fn focused_row(state: &Entity<AppState>, cx: &mut App) -> Option<SettingRow> {
 }
 
 /// `j` / `k` move the cursor — unless a text input has it, where they type (§3.8.6).
+///
+/// Landing on a row deliberately does **not** focus its input: §3.8.6 surrenders `j`/`k` only
+/// "while a text input has focus", and a row that grabbed the keyboard on arrival would make
+/// the next `j` type into the value instead of moving on. Typing (or `Backspace` / `ctrl-u` /
+/// `ctrl-w`) is what focuses an input; moving away drops it again.
 fn move_row(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App) {
     if !literal.is_empty() && insert_literal(state, literal, cx) {
         return;
@@ -949,7 +970,6 @@ fn move_row(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App)
         host.settings.row = step(host.settings.row, delta, len);
         host.settings.editing = None;
     });
-    begin_editing(state, cx);
     notify(state, cx);
 }
 
@@ -985,13 +1005,64 @@ fn toggle_row(state: &Entity<AppState>, cx: &mut App) {
     notify(state, cx);
 }
 
+/// Applies an edit to the focused row's input, focusing it first if it is not focused yet.
+fn edit_focused(state: &Entity<AppState>, cx: &mut App, edit: fn(&mut TextInput) -> bool) {
+    if !begin_editing(state, cx) {
+        return;
+    }
+    let changed = with_host(cx, |host| host.settings.editing.as_mut().is_some_and(edit));
+    if changed {
+        flush(state, cx);
+    }
+}
+
+/// Moves the caret of an **already focused** input. Returns whether there was one.
+fn move_caret(state: &Entity<AppState>, cx: &mut App, move_to: fn(&mut TextInput)) -> bool {
+    let moved = with_host(cx, |host| match host.settings.editing.as_mut() {
+        Some(input) => {
+            move_to(input);
+            true
+        }
+        None => false,
+    });
+    if moved {
+        notify(state, cx);
+    }
+    moved
+}
+
+/// Whether the focused row's input would take this text at all.
+///
+/// A number row is not a free-text field. Letting a `j` from the `move down` binding into its
+/// buffer makes `commit_value` fail to parse the result and clamp the setting to its minimum —
+/// which is how `j` on `Sleep › Grace` used to wipe `2000` to `0`. Rejecting the character here
+/// is also what lets the key fall through to row navigation.
+fn accepts(kind: &RowKind, text: &str) -> bool {
+    match kind {
+        RowKind::Text(_) => true,
+        RowKind::Number { .. } => !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()),
+        RowKind::Toggle(_) | RowKind::Choice { .. } | RowKind::Fact(_) => false,
+    }
+}
+
 /// Inserts a bound key's literal character when a text input owns the keyboard.
 ///
-/// §3.8.6 surrenders `j`, `k`, `h`, `l` and `Space` to a focused input. gpui dispatches those
-/// bindings before any key listener, so the surrender has to happen inside the action handler:
-/// there is no other place that sees the key.
+/// §3.8.6 surrenders `j`, `k`, `h`, `l` and `Space` to a **focused** input. gpui dispatches
+/// those bindings before any key listener, so the surrender has to happen inside the action
+/// handler: there is no other place that sees the key. Returning `false` hands the key back to
+/// its normal meaning, which is why an unfocused row — or a number row facing a letter — still
+/// navigates.
 fn insert_literal(state: &Entity<AppState>, literal: &str, cx: &mut App) -> bool {
-    if literal.is_empty() || !begin_editing(state, cx) {
+    if literal.is_empty() {
+        return false;
+    }
+    if !with_host(cx, |host| host.settings.editing.is_some()) {
+        return false;
+    }
+    let Some(row) = focused_row(state, cx) else {
+        return false;
+    };
+    if !accepts(&row.kind, literal) {
         return false;
     }
     with_host(cx, |host| {
@@ -1008,6 +1079,12 @@ fn type_into_row(state: &Entity<AppState>, event: &KeyDownEvent, cx: &mut App) -
     let Some(text) = typed_char(event) else {
         return false;
     };
+    let Some(row) = focused_row(state, cx) else {
+        return false;
+    };
+    if !accepts(&row.kind, &text) {
+        return false;
+    }
     if !begin_editing(state, cx) {
         return false;
     }
@@ -1073,7 +1150,6 @@ fn move_section(state: &Entity<AppState>, delta: isize, cx: &mut App) {
         host.settings.row = 0;
         host.settings.editing = None;
     });
-    begin_editing(state, cx);
     notify(state, cx);
 }
 
@@ -1114,29 +1190,70 @@ fn save(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 }
 
 /// `D`: run doctor and surface the first failing check in the sticky error slot.
+/// §3.8.6 About: `E` opens `config.json` **in a new terminal tab**, not in the OS handler.
+///
+/// KEYMAP scopes `E` per context and gives this one the terminal tab, so that editing the file
+/// happens inside Fleet, next to the daemon it configures. Without a live session there is no
+/// tab strip to add to, and the system handler is the honest fallback rather than a dead key.
+fn open_config_file(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
+    let path = state.read(cx).home.join("config.json");
+    let Some(session) = state.read(cx).active_session().cloned() else {
+        cx.open_with_system(&path);
+        return;
+    };
+    bridge.send(RequestBody::NewTerminal {
+        session: session.id.clone(),
+        name: workspace_tabs::unique_terminal_name(&session, "config"),
+        command: format!("{} {}", editor_command(), path.display()),
+        cwd: session.cwd.clone(),
+    });
+    state.update(cx, |app, cx| {
+        app.close_overlay();
+        app.screen = Screen::Workspace {
+            session: session.id.clone(),
+        };
+        cx.notify();
+    });
+}
+
+/// `$EDITOR`, or `vi` — the one editor POSIX guarantees.
+fn editor_command() -> String {
+    std::env::var("EDITOR")
+        .ok()
+        .map(|editor| editor.trim().to_owned())
+        .filter(|editor| !editor.is_empty())
+        .unwrap_or_else(|| "vi".to_owned())
+}
+
+/// §3.8.6 About: `D` runs doctor and shows the §3.12 `Daemon > Doctor` surface.
+///
+/// The same key means the same thing on the daemon-down splash, so both write the answer to
+/// [`AppState::doctor`] and the shell renders it; a toast would have been a second, weaker
+/// spelling of a screen that already exists.
 fn run_doctor(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let reply = bridge.request(RequestBody::Doctor);
     let state = state.clone();
     cx.spawn(async move |cx| {
-        let Ok(Ok(ResponseBody::Doctor(checks))) = reply.recv().await else {
-            return;
-        };
-        let failed = checks
-            .iter()
-            .find(|check| check.status == fleet_proto::response::DoctorStatus::Fail)
-            .map(|check| format!("{}: {}", check.check, check.detail));
-        cx.update(|cx| {
-            with_host(cx, |host| host.settings.error = failed.clone());
-            if failed.is_none() {
+        let answer = reply.recv().await;
+        cx.update(|cx| match answer {
+            Ok(Ok(ResponseBody::Doctor(checks))) => {
                 state.update(cx, |app, cx| {
-                    app.toast_short(
-                        "doctor: all checks ok",
-                        Icon::CircleCheck,
-                        std::time::Instant::now(),
-                    );
+                    app.doctor = Some(checks);
+                    // The doctor table is a full surface; it replaces the dialog it was
+                    // raised from, and `Esc` there comes back to the app.
+                    app.close_overlay();
                     cx.notify();
                 });
-            } else {
+            }
+            // A refused request keeps the dialog open with the exact error (§3.8.6 States).
+            Ok(Err(error)) => {
+                with_host(cx, |host| host.settings.error = Some(error.message.clone()));
+                notify(&state, cx);
+            }
+            Ok(Ok(_)) | Err(_) => {
+                with_host(cx, |host| {
+                    host.settings.error = Some("doctor: the daemon did not answer".to_owned());
+                });
                 notify(&state, cx);
             }
         });
@@ -1210,6 +1327,37 @@ mod tests {
             invalid: None,
         };
         assert!(!toggle.owns_typing());
+    }
+
+    #[test]
+    fn a_number_row_refuses_every_non_digit() {
+        let number = number_row(RowId::GraceMs, "Grace", 2_000, 0, "ms");
+        // `j` / `k` / `h` / `l` / space are bound to navigation: none may reach the buffer,
+        // where `commit_value` would clamp `2000j` down to the minimum.
+        for literal in ["j", "k", "h", "l", " ", "-", "x"] {
+            assert!(
+                !accepts(&number.kind, literal),
+                "`{literal}` must never type into a number row"
+            );
+        }
+        assert!(accepts(&number.kind, "7"));
+        assert!(!accepts(&number.kind, ""));
+
+        // A free-text row still takes every printable key, including those letters.
+        let text = text_row(RowId::ClaudeCommand, "Claude command", "claude");
+        for literal in ["j", "k", "h", "l", " ", "7"] {
+            assert!(accepts(&text.kind, literal));
+        }
+
+        // Rows with no input never take typing at all.
+        let toggle = SettingRow {
+            id: RowId::WarnBeforeQuit,
+            label: "Warn".to_owned(),
+            kind: RowKind::Toggle(true),
+            detail: None,
+            invalid: None,
+        };
+        assert!(!accepts(&toggle.kind, "j"));
     }
 
     #[test]

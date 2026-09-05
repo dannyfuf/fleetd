@@ -158,15 +158,18 @@ pub(crate) fn render(
         .placeholder("Buk HR")
         .caret(draft.name.caret())
         .focused(draft.field == Field::Name);
-    name_field = match (&duplicate, draft.id_locked) {
-        (Some(message), _) => name_field.invalid(message.clone()),
+    let preview_id = draft.preview_id();
+    name_field = match (&duplicate, draft.id_locked, preview_id.is_empty()) {
+        (Some(message), _, _) => name_field.invalid(message.clone()),
+        // §1.2 zero-suppression: with no name there is no id to preview, and a bare `→` with
+        // nothing after it is a dangling arrow, not information.
+        (None, _, true) => name_field,
         // §3.8.4: once repos exist the id is read-only outright, and saying so beats a
         // disabled-looking input.
-        (None, true) => name_field.preview(format!(
-            "\u{2192} {} (id is fixed once repos exist)",
-            draft.preview_id()
+        (None, true, false) => name_field.preview(format!(
+            "\u{2192} {preview_id} (id is fixed once repos exist)"
         )),
-        (None, false) => name_field.preview(format!("\u{2192} {}", draft.preview_id())),
+        (None, false, false) => name_field.preview(format!("\u{2192} {preview_id}")),
     };
 
     let owners_field = TextField::new(draft.owners.value().to_owned())
@@ -207,7 +210,9 @@ pub(crate) fn render(
         card = card.subtitle(format!("\u{00b7} {}", open.as_str()));
     }
     if draft.owner_list().is_empty() {
-        card = card.error("Without owners, GitHub repo search and PR \"mine\" are empty.");
+        // §3.8.4: empty owners is *allowed* and the footer warns. §2.4 keeps red for failures,
+        // so a permitted configuration is amber, not an error band.
+        card = card.warning("Without owners, GitHub repo search and PR \"mine\" are empty.");
     }
 
     let confirm_state = state.clone();

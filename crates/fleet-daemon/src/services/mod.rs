@@ -202,7 +202,7 @@ impl Services {
         )
         .with_integrations(sessions.clone(), Arc::clone(&adapters.github))
         .with_shell(Arc::clone(&adapters.shell));
-        let pool = Pool::new(
+        let pool = Pool::without_background(
             Arc::clone(&config),
             Arc::clone(&state),
             Arc::clone(&jobs),
@@ -445,11 +445,15 @@ impl Services {
                 host: None,
                 hooks,
             } => {
-                let (created, worktree) = self
+                let (created, worktree, post_create_job) = self
                     .worktrees
                     .create(repo, slug, branch, base, None, hooks)
                     .await?;
-                Ok(ResponseBody::Worktree { created, worktree })
+                Ok(ResponseBody::Worktree {
+                    created,
+                    worktree,
+                    post_create_job: post_create_job.map(Box::new),
+                })
             }
             RequestBody::DeleteWorktrees { ids } => Ok(ResponseBody::WorktreesDeleted(
                 self.worktrees.delete(ids).await?,
@@ -507,8 +511,13 @@ impl Services {
                     .await?,
             )),
             RequestBody::CreateWorktreeFromPr { repo, number } => {
-                let (created, worktree) = self.worktrees.create_from_pr(repo, number).await?;
-                Ok(ResponseBody::Worktree { created, worktree })
+                let (created, worktree, post_create_job) =
+                    self.worktrees.create_from_pr(repo, number).await?;
+                Ok(ResponseBody::Worktree {
+                    created,
+                    worktree,
+                    post_create_job: post_create_job.map(Box::new),
+                })
             }
             RequestBody::EnsureSession {
                 worktree,
@@ -636,6 +645,8 @@ impl Services {
     }
 
     async fn delete_repo_cascade(&self, repo: RepoId) -> DaemonResult<()> {
+        let _deleting = self.jobs.begin_repo_deletion(&repo)?;
+        self.jobs.quiesce_repo(&repo).await?;
         let ids = self
             .state
             .load()
@@ -660,7 +671,7 @@ impl Services {
         if !failures.is_empty() {
             return Err(DaemonError::Conflict(failures.join("; ")));
         }
-        self.repos.delete(repo).await
+        self.repos.delete_guarded(repo).await
     }
 
     /// Starts status, prepared-pool, and PR-cache maintenance loops.

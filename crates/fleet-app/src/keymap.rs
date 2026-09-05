@@ -320,9 +320,10 @@ key_table! {
     // ---------------------------------------------------------------- Dialog › Settings
     "space",        "Dialog > Settings" => settings::Toggle;
     "h",            "Dialog > Settings" => settings::CyclePrev;
-    "left",         "Dialog > Settings" => settings::CyclePrev;
     "l",            "Dialog > Settings" => settings::CycleNext;
-    "right",        "Dialog > Settings" => settings::CycleNext;
+    // `left` / `right` stay on the shared `dialog::CursorLeft` / `CursorRight` of the `Dialog`
+    // context: the settings dialog moves the caret when a text row has the keyboard and cycles
+    // the choice otherwise, so one binding serves both halves of §3.8.6.
     "j",            "Dialog > Settings" => settings::MoveDown;
     "k",            "Dialog > Settings" => settings::MoveUp;
     "E",            "Dialog > Settings" => settings::OpenConfigFile;

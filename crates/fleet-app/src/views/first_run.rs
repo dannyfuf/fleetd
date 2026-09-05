@@ -141,15 +141,20 @@ pub fn keys(has_swarm: bool) -> Vec<(&'static str, &'static str)> {
     keys
 }
 
-/// The card's footer: `◍ fleetd <version> · <home>`, the two facts that answer "is it there?".
+/// The card's footer: `◍ fleetd running · <version> · <home>` (§3.13).
+///
+/// The version is the bare semver — the daemon's build string already carries the product name
+/// the line just said — and the home path is tilde-collapsed, because a default install lives
+/// at `~/.fleet` and spelling out `/Users/<u>/.fleet` says nothing extra.
 #[must_use]
-pub fn footer_line(version: Option<&str>, home: &Path) -> String {
+pub fn footer_line(version: Option<&str>, home: &Path, user_home: Option<&Path>) -> String {
+    let home = crate::views::jobs_panel::tilde(&home.to_string_lossy(), user_home);
     match version {
         Some(version) => format!(
-            "\u{25CD} fleetd running \u{00b7} {version} \u{00b7} {}",
-            home.display()
+            "\u{25CD} fleetd running \u{00b7} {} \u{00b7} {home}",
+            crate::shell::bare_version(version)
         ),
-        None => format!("\u{25CD} fleetd \u{00b7} {}", home.display()),
+        None => format!("\u{25CD} fleetd \u{00b7} {home}"),
     }
 }
 
@@ -200,7 +205,14 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
         .child(Text::ui(TAGLINE).muted())
         .children(import_block)
         .child(hints)
-        .child(Text::hint(SharedString::from(footer_line(daemon_version, home))).tone(Tone::Muted))
+        .child(
+            Text::hint(SharedString::from(footer_line(
+                daemon_version,
+                home,
+                user_home().as_deref(),
+            )))
+            .tone(Tone::Muted),
+        )
         .into_any_element()
 }
 
@@ -272,13 +284,20 @@ mod tests {
     #[test]
     fn the_footer_states_the_home_and_the_version() {
         let home = Path::new("/home/u/.fleet");
+        let user = Path::new("/home/u");
         assert_eq!(
-            footer_line(Some("0.1.0"), home),
-            "\u{25CD} fleetd running \u{00b7} 0.1.0 \u{00b7} /home/u/.fleet"
+            footer_line(Some("fleetd 0.1.0"), home, Some(user)),
+            "\u{25CD} fleetd running \u{00b7} 0.1.0 \u{00b7} ~/.fleet",
+            "the daemon's build string already says `fleetd`, and `~` is where it lives"
         );
         assert_eq!(
-            footer_line(None, home),
-            "\u{25CD} fleetd \u{00b7} /home/u/.fleet",
+            footer_line(Some("0.1.0"), home, None),
+            "\u{25CD} fleetd running \u{00b7} 0.1.0 \u{00b7} /home/u/.fleet",
+            "without a home to compare against, the path is spelled out"
+        );
+        assert_eq!(
+            footer_line(None, home, Some(user)),
+            "\u{25CD} fleetd \u{00b7} ~/.fleet",
             "an unknown version is omitted, never guessed"
         );
     }

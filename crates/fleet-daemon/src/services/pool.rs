@@ -17,7 +17,6 @@ use fleet_core::{
     paths::{HotMarker, hot_marker_path, slot_path, slot_pid_path, slot_staging_path},
 };
 use fleet_proto::{job::JobKind, snapshot::PoolStatus};
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::{
@@ -42,6 +41,7 @@ pub struct Pool {
     git: Arc<dyn Git>,
     files: Arc<dyn Files>,
     shell: Option<Arc<dyn Shell>>,
+    in_flight: Arc<Mutex<HashMap<RepoId, fleet_core::ids::JobId>>>,
 }
 
 impl Pool {
@@ -73,6 +73,7 @@ impl Pool {
             git,
             files,
             shell: None,
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -85,9 +86,16 @@ impl Pool {
 
     /// Ensures configured slots exist. `force` refreshes every existing slot first.
     pub async fn prepare(&self, repo: RepoId, force: bool) -> DaemonResult<()> {
-        let (sender, receiver) = oneshot::channel();
-        self.submit_prepare(repo, force, Some(sender));
-        receiver.await.map_err(|_| DaemonError::Cancelled)?
+        self.jobs.ensure_repo_available(&repo)?;
+        let id = self.submit_prepare(repo, force);
+        match self.jobs.wait(&id).await?.status {
+            fleet_proto::job::JobStatus::Succeeded => Ok(()),
+            fleet_proto::job::JobStatus::Cancelled => Err(DaemonError::Cancelled),
+            fleet_proto::job::JobStatus::Failed { error } => Err(DaemonError::Shell(error)),
+            fleet_proto::job::JobStatus::Queued
+            | fleet_proto::job::JobStatus::Running
+            | fleet_proto::job::JobStatus::Cancelling => Err(DaemonError::Cancelled),
+        }
     }
 
     /// Claims the lowest ready slot into a private path and queues its replacement.
@@ -98,7 +106,7 @@ impl Pool {
         let destination = root.join(format!(".claimed-{}", Uuid::new_v4()));
         let claimed = self.claim_into(&repo, &destination).await?;
         if claimed {
-            self.submit_prepare(repo, false, None);
+            self.submit_prepare(repo, false);
             Ok(Some(destination))
         } else {
             Ok(None)
@@ -141,7 +149,9 @@ impl Pool {
 
     /// Queues one immediate replacement after a successful prepared-copy claim.
     pub(crate) fn refill(&self, repo: RepoId) {
-        self.submit_prepare(repo, false, None);
+        if self.jobs.ensure_repo_available(&repo).is_ok() {
+            self.submit_prepare(repo, false);
+        }
     }
 
     pub(crate) async fn is_fresh_copy(
@@ -180,21 +190,34 @@ impl Pool {
             .collect()
     }
 
-    fn submit_prepare(
-        &self,
-        repo: RepoId,
-        force: bool,
-        completion: Option<oneshot::Sender<DaemonResult<()>>>,
-    ) {
-        let completion = completion.map(|sender| Arc::new(Mutex::new(Some(sender))));
+    fn submit_prepare(&self, repo: RepoId, force: bool) -> fleet_core::ids::JobId {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(id) = in_flight.get(&repo).cloned() {
+            if self.jobs.record(&id).is_some_and(|record| {
+                matches!(
+                    record.status,
+                    fleet_proto::job::JobStatus::Queued
+                        | fleet_proto::job::JobStatus::Running
+                        | fleet_proto::job::JobStatus::Cancelling
+                )
+            }) {
+                return id;
+            }
+            in_flight.remove(&repo);
+        }
         let service = self.clone();
-        let target = format!("{}:{}", repo, Uuid::new_v4());
+        let target = repo.to_string();
+        let repo_for_cleanup = repo.clone();
+        let repo_for_job = repo.clone();
         let title = if force {
             format!("Refresh prepared copies for {repo}")
         } else {
             format!("Prepare copies for {repo}")
         };
-        self.jobs.submit(
+        let id = self.jobs.submit(
             if force {
                 JobKind::PoolRefresh
             } else {
@@ -205,22 +228,17 @@ impl Pool {
             true,
             true,
             move |context| async move {
-                let result = service.prepare_job(&repo, force, &context).await;
-                if let Some(completion) = &completion
-                    && let Some(sender) = completion
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                {
-                    let copied = match &result {
-                        Ok(()) => Ok(()),
-                        Err(error) => Err(clone_daemon_error(error)),
-                    };
-                    let _ignored = sender.send(copied);
-                }
+                let result = service.prepare_job(&repo_for_job, force, &context).await;
+                service
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&repo_for_cleanup);
                 result
             },
         );
+        in_flight.insert(repo, id.clone());
+        id
     }
 
     async fn prepare_job(
@@ -229,6 +247,7 @@ impl Pool {
         force: bool,
         context: &JobCtx,
     ) -> DaemonResult<()> {
+        self.jobs.ensure_repo_available(repo_id)?;
         let _permit = self
             .jobs
             .pool_semaphore()
@@ -237,6 +256,7 @@ impl Pool {
             .map_err(|_| DaemonError::Cancelled)?;
         let lock = self.jobs.repo_lock(repo_id);
         let _guard = lock.lock().await;
+        self.jobs.ensure_repo_available(repo_id)?;
         check_cancelled(context)?;
 
         let config = self.config.load().await?;
@@ -420,10 +440,17 @@ impl Pool {
             refs.push(branch_refspec(branch));
         }
         if let Err(combined_error) = self.git.fetch_refs(path, "origin", &refs).await {
-            self.git
-                .fetch_refs(path, "origin", std::slice::from_ref(&default_ref))
-                .await
-                .map_err(|_| combined_error)?;
+            if requested_branch.is_some() {
+                self.git
+                    .fetch_refs(path, "origin", std::slice::from_ref(&default_ref))
+                    .await
+                    .map_err(|_| combined_error)?;
+            } else {
+                self.git
+                    .fetch(path, true)
+                    .await
+                    .map_err(|_| combined_error)?;
+            }
         }
         if !self
             .git
@@ -658,7 +685,7 @@ impl Pool {
             tokio::task::yield_now().await;
             if let Ok(state) = startup.state.load().await {
                 for repo in state.repos {
-                    startup.submit_prepare(repo.id, false, None);
+                    startup.submit_prepare(repo.id, false);
                 }
             }
         });
@@ -816,28 +843,6 @@ fn scan_default_layout(repo: &Repo, configured_size: u64) -> Option<PoolStatus> 
         size: u32::try_from(configured_size).unwrap_or(u32::MAX),
         refreshed_at: refreshed.into_iter().next_back(),
     })
-}
-
-fn clone_daemon_error(error: &DaemonError) -> DaemonError {
-    match error {
-        DaemonError::NotFound(value) => DaemonError::NotFound(value.clone()),
-        DaemonError::Conflict(value) => DaemonError::Conflict(value.clone()),
-        DaemonError::Validation(value) => DaemonError::Validation(value.clone()),
-        DaemonError::Filesystem { path, source } => {
-            DaemonError::fs(path, std::io::Error::new(source.kind(), source.to_string()))
-        }
-        DaemonError::Json(value) => DaemonError::Validation(value.to_string()),
-        DaemonError::Shell(value) => DaemonError::Shell(value.clone()),
-        DaemonError::Git(value) => DaemonError::Git(value.clone()),
-        DaemonError::Github(value) => DaemonError::Github(value.clone()),
-        DaemonError::Process(value) => DaemonError::Process(value.clone()),
-        DaemonError::Timeout(value) => DaemonError::Timeout(value.clone()),
-        DaemonError::Cancelled => DaemonError::Cancelled,
-        DaemonError::Protocol(value) => DaemonError::Protocol(value.clone()),
-        DaemonError::Unimplemented(value) => DaemonError::Unimplemented(value),
-        DaemonError::Unsupported(value) => DaemonError::Unsupported(value.clone()),
-        DaemonError::Join(value) => DaemonError::Join(value.clone()),
-    }
 }
 
 pub(crate) struct CancellableCopy {

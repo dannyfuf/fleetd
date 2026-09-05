@@ -37,7 +37,7 @@ pub struct Dialog {
     body: Option<AnyElement>,
     hints: Option<AnyElement>,
     primary: Option<SharedString>,
-    footer_error: Option<SharedString>,
+    footer_note: Option<(SharedString, Tone)>,
 }
 
 impl Dialog {
@@ -56,7 +56,7 @@ impl Dialog {
             body: None,
             hints: None,
             primary: None,
-            footer_error: None,
+            footer_note: None,
         }
     }
 
@@ -118,7 +118,18 @@ impl Dialog {
     /// line sits directly above the hint row, and the hints never move (the error is its own
     /// 22 px strip), so the keys the user was about to press do not shift under their eyes.
     pub fn error(mut self, error: impl Into<SharedString>) -> Self {
-        self.footer_error = Some(error.into());
+        self.footer_note = Some((error.into(), Tone::Danger));
+        self
+    }
+
+    /// An amber footer line in the same strip: a consequence worth stating about a setting that
+    /// is nonetheless **allowed**.
+    ///
+    /// §2.4 reserves red for "failed, changes requested, danger". A permitted configuration —
+    /// §3.8.4's context with no owners, say — is a warning, not an error, and painting it red
+    /// tells the user they did something wrong when they did not.
+    pub fn warning(mut self, warning: impl Into<SharedString>) -> Self {
+        self.footer_note = Some((warning.into(), Tone::Warning));
         self
     }
 }
@@ -144,7 +155,7 @@ impl RenderOnce for Dialog {
             .child(Text::title(self.title).color(tone_color))
             .children(self.subtitle.map(|s| Text::ui(s).muted().ellipsize()));
 
-        let error_line = self.footer_error.map(|error| {
+        let error_line = self.footer_note.map(|(note, tone)| {
             div()
                 .flex()
                 .flex_none()
@@ -153,14 +164,14 @@ impl RenderOnce for Dialog {
                 .h(theme.metrics.strip_h)
                 .w_full()
                 .px(theme.space.lg)
-                .bg(Tone::Danger.fill(theme))
+                .bg(tone.fill(theme))
                 .child(
                     Icon::TriangleAlert
                         .el()
                         .size(IconSize::Small)
-                        .color(theme.colors.danger),
+                        .color(tone.color(theme)),
                 )
-                .child(Text::ui(error).tone(Tone::Danger).ellipsize())
+                .child(Text::ui(note).tone(tone).ellipsize())
         });
 
         let footer = div()

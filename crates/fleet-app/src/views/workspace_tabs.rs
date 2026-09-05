@@ -9,6 +9,8 @@
 //! `Terminal.foreground_command` is deliberately **not** rendered: §3.6 lists it under
 //! "intentionally omitted", and the kit's `TerminalTab` has no slot for it.
 
+use std::collections::HashSet;
+
 use fleet_core::{
     ids::TerminalId,
     sessions::{Session, Terminal, TerminalStatus},
@@ -46,18 +48,42 @@ pub fn terminal_keep_alive_icon(terminal: &Terminal) -> Option<Icon> {
         .map(|label| keep_alive_icon(label))
 }
 
+/// What a tab is called: the program's OSC title, unless the user named it.
+///
+/// §3.6: `FrameUpdate.title` names the tab "until the terminal is explicitly renamed", so a
+/// `vim README.md` tab says what it is holding instead of repeating the window name from
+/// `config.json`. `renamed` is the set of terminals the user renamed with `ctrl-s ,` — an
+/// explicit name always wins, and so does a title the program cleared.
+#[must_use]
+pub fn tab_label(terminal: &Terminal, renamed: &HashSet<TerminalId>) -> String {
+    if renamed.contains(&terminal.id) {
+        return terminal.name.clone();
+    }
+    terminal
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map_or_else(|| terminal.name.clone(), str::to_owned)
+}
+
 /// The tabs of a session, in `Session.terminals` order.
 ///
 /// `active` is the terminal the strip underlines. A tab is marked with the amber activity dot
 /// only when it is **not** active, because output in the tab you are looking at is not news.
+/// `renamed` is [`crate::state::AppState::renamed_terminals`]; see [`tab_label`].
 #[must_use]
-pub fn tabs(session: &Session, active: Option<TerminalId>) -> Vec<TerminalTab> {
+pub fn tabs(
+    session: &Session,
+    active: Option<TerminalId>,
+    renamed: &HashSet<TerminalId>,
+) -> Vec<TerminalTab> {
     session
         .terminals
         .iter()
         .enumerate()
         .map(|(position, terminal)| {
-            let mut tab = TerminalTab::new(position + 1, terminal.name.clone())
+            let mut tab = TerminalTab::new(position + 1, tab_label(terminal, renamed))
                 .activity(terminal.has_unseen_output && active != Some(terminal.id))
                 .starting(terminal.status == TerminalStatus::Starting);
             if let Some(icon) = terminal_keep_alive_icon(terminal) {
@@ -114,19 +140,28 @@ pub fn neighbour(
 /// a numbered suffix keeps the tab under the strip's 84 px minimum width.
 #[must_use]
 pub fn new_terminal_name(session: &Session) -> String {
+    unique_terminal_name(session, "sh")
+}
+
+/// `base`, or `base2`, `base3`, … — the first name the session does not already use.
+///
+/// fleetd refuses a duplicate terminal name, so every caller that invents one goes through
+/// here.
+#[must_use]
+pub fn unique_terminal_name(session: &Session, base: &str) -> String {
     let taken = |candidate: &str| {
         session
             .terminals
             .iter()
             .any(|terminal| terminal.name == candidate)
     };
-    if !taken("sh") {
-        return "sh".to_owned();
+    if !taken(base) {
+        return base.to_owned();
     }
     (2..)
-        .map(|index| format!("sh{index}"))
+        .map(|index| format!("{base}{index}"))
         .find(|candidate| !taken(candidate))
-        .unwrap_or_else(|| "sh".to_owned())
+        .unwrap_or_else(|| base.to_owned())
 }
 
 #[cfg(test)]
@@ -171,10 +206,30 @@ mod tests {
     }
 
     #[test]
+    fn an_osc_title_names_the_tab_until_the_user_renames_it() {
+        let mut terminal = terminal(1, "nvim");
+        assert_eq!(tab_label(&terminal, &HashSet::new()), "nvim");
+
+        // §3.6: `FrameUpdate.title` names the tab.
+        terminal.title = Some("README.md".to_owned());
+        assert_eq!(tab_label(&terminal, &HashSet::new()), "README.md");
+
+        // A cleared or blank title falls back to the configured window name.
+        terminal.title = Some("   ".to_owned());
+        assert_eq!(tab_label(&terminal, &HashSet::new()), "nvim");
+        terminal.title = Some("README.md".to_owned());
+
+        // After `ctrl-s ,` the user's name wins, whatever the program sets.
+        let renamed: HashSet<TerminalId> = [TerminalId(1)].into_iter().collect();
+        terminal.name = "editor".to_owned();
+        assert_eq!(tab_label(&terminal, &renamed), "editor");
+    }
+
+    #[test]
     fn tab_indexes_are_positions_not_identifiers() {
         let mut session = session(&["nvim", "cc", "lg"]);
         session.terminals[0].id = TerminalId(41);
-        let tabs = tabs(&session, Some(TerminalId(41)));
+        let tabs = tabs(&session, Some(TerminalId(41)), &HashSet::new());
         assert_eq!(
             tabs.iter().map(|tab| tab.index).collect::<Vec<_>>(),
             vec![1, 2, 3]
@@ -186,7 +241,7 @@ mod tests {
         let mut session = session(&["nvim", "cc"]);
         session.terminals[0].has_unseen_output = true;
         session.terminals[1].has_unseen_output = true;
-        let tabs = tabs(&session, Some(TerminalId(1)));
+        let tabs = tabs(&session, Some(TerminalId(1)), &HashSet::new());
         assert!(!tabs[0].activity);
         assert!(tabs[1].activity);
     }
@@ -195,7 +250,10 @@ mod tests {
     fn an_exited_terminal_carries_its_code() {
         let mut session = session(&["test"]);
         session.terminals[0].status = TerminalStatus::Exited { code: Some(1) };
-        assert_eq!(tabs(&session, None)[0].exited, Some(Some(1)));
+        assert_eq!(
+            tabs(&session, None, &HashSet::new())[0].exited,
+            Some(Some(1))
+        );
     }
 
     #[test]

@@ -83,7 +83,7 @@ pub(crate) struct ClientInner {
 struct Command {
     request: Request,
     response: Option<oneshot::Sender<Result<ResponseBody, ProtoError>>>,
-    expires_at: Instant,
+    expires_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -134,21 +134,27 @@ impl Client {
     pub async fn request(&self, body: RequestBody) -> Result<ResponseBody, ProtoError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel();
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let enqueue_deadline = Instant::now() + REQUEST_TIMEOUT;
+        let expires_at = request_timeout(&body).map(|duration| Instant::now() + duration);
         let command = Command {
             request: Request { id, body },
             response: Some(response_tx),
-            expires_at: deadline,
+            expires_at,
         };
-        timeout_at(deadline, self.inner.commands.send(command))
+        timeout_at(enqueue_deadline, self.inner.commands.send(command))
             .await
             .map_err(|_| transport_error("Fleet daemon request timed out"))?
             .map_err(|_| transport_error("Fleet daemon connection is closed"))?;
 
-        match timeout_at(deadline, response_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(transport_error("Fleet daemon connection is closed")),
-            Err(_) => Err(transport_error("Fleet daemon request timed out")),
+        match expires_at {
+            Some(deadline) => match timeout_at(deadline, response_rx).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(transport_error("Fleet daemon connection is closed")),
+                Err(_) => Err(transport_error("Fleet daemon request timed out")),
+            },
+            None => response_rx
+                .await
+                .map_err(|_| transport_error("Fleet daemon connection is closed"))?,
         }
     }
 
@@ -163,7 +169,7 @@ impl Client {
         let command = Command {
             request: Request { id, body },
             response: None,
-            expires_at: Instant::now() + REQUEST_TIMEOUT,
+            expires_at: Some(Instant::now() + REQUEST_TIMEOUT),
         };
         match self.inner.commands.try_send(command) {
             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
@@ -171,7 +177,9 @@ impl Client {
                 if let Ok(runtime) = Handle::try_current() {
                     let commands = self.inner.commands.clone();
                     runtime.spawn(async move {
-                        let _ = timeout_at(command.expires_at, commands.send(command)).await;
+                        if let Some(deadline) = command.expires_at {
+                            let _ = timeout_at(deadline, commands.send(command)).await;
+                        }
                     });
                 }
             }
@@ -354,6 +362,17 @@ fn update_connection_state(state: &mut ConnectionState, body: &RequestBody) {
     }
 }
 
+fn request_timeout(body: &RequestBody) -> Option<Duration> {
+    if matches!(
+        body,
+        RequestBody::CreateWorktree { .. } | RequestBody::CreateWorktreeFromPr { .. }
+    ) {
+        None
+    } else {
+        Some(REQUEST_TIMEOUT)
+    }
+}
+
 async fn reconnect(
     home: &Path,
     state: &ConnectionState,
@@ -522,7 +541,9 @@ fn all_event_kinds() -> Vec<EventKind> {
 }
 
 fn command_is_expired(command: &Command) -> bool {
-    command.expires_at <= Instant::now()
+    command
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Instant::now())
         || command
             .response
             .as_ref()
@@ -547,5 +568,32 @@ fn transport_error(message: impl Into<String>) -> ProtoError {
     ProtoError {
         kind: ErrorKind::Unknown,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fleet_core::{ids::RepoId, model::RepoHooks};
+
+    use super::*;
+
+    #[test]
+    fn create_requests_are_not_bound_by_the_generic_rpc_deadline() {
+        let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            request_timeout(&RequestBody::CreateWorktree {
+                repo,
+                slug: "slow".to_owned(),
+                branch: None,
+                base: None,
+                host: None,
+                hooks: RepoHooks::default(),
+            })
+            .is_none()
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::DaemonPing),
+            Some(REQUEST_TIMEOUT)
+        );
     }
 }

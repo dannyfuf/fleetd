@@ -27,6 +27,8 @@ pub trait Git: Send + Sync {
     async fn origin_head(&self, cwd: &Path) -> DaemonResult<String>;
     /// Repairs origin HEAD with `git remote set-head origin --auto`.
     async fn repair_origin_head(&self, cwd: &Path) -> DaemonResult<()>;
+    /// Reads the local symbolic branch checked out at `HEAD`.
+    async fn symbolic_head(&self, cwd: &Path) -> DaemonResult<String>;
     /// Checks whether an origin remote-tracking branch exists.
     async fn remote_branch_exists(&self, cwd: &Path, branch: &str) -> DaemonResult<bool>;
     /// Lists origin remote-tracking refs in short form.
@@ -58,6 +60,8 @@ pub trait Git: Send + Sync {
     async fn divergence(&self, cwd: &Path, upstream: &str) -> DaemonResult<(u64, u64)>;
     /// Counts commits in `<target>..HEAD`.
     async fn unique_commits(&self, cwd: &Path, target: &str) -> DaemonResult<u64>;
+    /// Counts commits in `<target>..<head>` using explicit revisions.
+    async fn unique_commits_from(&self, cwd: &Path, target: &str, head: &str) -> DaemonResult<u64>;
     /// Checks whether one revision is an ancestor of another.
     async fn is_ancestor(&self, cwd: &Path, ancestor: &str, descendant: &str)
     -> DaemonResult<bool>;
@@ -165,6 +169,19 @@ impl Git for ShellGit {
         )
         .await
         .map(drop)
+    }
+
+    async fn symbolic_head(&self, cwd: &Path) -> DaemonResult<String> {
+        self.checked(
+            cwd,
+            &[
+                "symbolic-ref".to_owned(),
+                "--short".to_owned(),
+                "HEAD".to_owned(),
+            ],
+            "read local symbolic HEAD",
+        )
+        .await
     }
 
     async fn remote_branch_exists(&self, cwd: &Path, branch: &str) -> DaemonResult<bool> {
@@ -357,13 +374,17 @@ impl Git for ShellGit {
     }
 
     async fn unique_commits(&self, cwd: &Path, target: &str) -> DaemonResult<u64> {
+        self.unique_commits_from(cwd, target, "HEAD").await
+    }
+
+    async fn unique_commits_from(&self, cwd: &Path, target: &str, head: &str) -> DaemonResult<u64> {
         let output = self
             .checked(
                 cwd,
                 &[
                     "rev-list".into(),
                     "--count".into(),
-                    format!("{target}..HEAD"),
+                    format!("{target}..{head}"),
                 ],
                 "count unique commits",
             )

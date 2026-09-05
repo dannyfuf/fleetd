@@ -150,7 +150,7 @@ impl Inspect {
             .collect::<HashMap<_, _>>();
         let fetch_failures = if fetch {
             context.progress("fetching repository remotes")?;
-            self.fetch_worktrees(&selected, context).await?
+            self.fetch_repositories(&selected, &repos, context).await?
         } else {
             HashMap::new()
         };
@@ -175,7 +175,7 @@ impl Inspect {
                 .get(&worktree.id)
                 .cloned()
                 .unwrap_or_else(|| unknown_status(&worktree));
-            let fetch_failed = fetch_failures.contains_key(&worktree.id);
+            let fetch_failed = fetch_failures.contains_key(&worktree.repo_id);
             let service = self.clone();
             let cancel = context.cancel.clone();
             pending.push(async move {
@@ -204,17 +204,26 @@ impl Inspect {
         Ok(inspections)
     }
 
-    async fn fetch_worktrees(
+    async fn fetch_repositories(
         &self,
         worktrees: &[Worktree],
+        repos: &HashMap<RepoId, Repo>,
         context: &JobCtx,
-    ) -> DaemonResult<HashMap<WorktreeId, String>> {
+    ) -> DaemonResult<HashMap<RepoId, String>> {
         let mut pending = FuturesUnordered::new();
-        for worktree in worktrees.iter().filter(|worktree| worktree.host.is_none()) {
+        let selected_repos = worktrees
+            .iter()
+            .filter(|worktree| worktree.host.is_none())
+            .map(|worktree| worktree.repo_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for repo_id in &selected_repos {
+            let Some(repo) = repos.get(repo_id) else {
+                continue;
+            };
             let git = Arc::clone(&self.git);
             let cancel = context.cancel.clone();
-            let id = worktree.id.clone();
-            let path = worktree.path.clone();
+            let id = repo.id.clone();
+            let path = repo.path.clone();
             pending.push(async move {
                 if cancel.is_cancelled() {
                     return Err(DaemonError::Cancelled);
@@ -225,9 +234,9 @@ impl Inspect {
         }
         let mut failures = HashMap::new();
         while let Some(result) = pending.next().await {
-            let (worktree, failure) = result?;
+            let (repo, failure) = result?;
             if let Some(failure) = failure {
-                failures.insert(worktree, failure);
+                failures.insert(repo, failure);
             }
         }
         Ok(failures)
@@ -259,6 +268,7 @@ impl Inspect {
         }
 
         let path = Path::new(&worktree.path);
+        let remote_path = Path::new(&repo.path);
         let mut warnings = Vec::new();
         if fetch_failed {
             warnings.push(WARNING_FETCH_FAILED.to_owned());
@@ -320,7 +330,10 @@ impl Inspect {
             (None, None)
         };
 
-        let remote_branch_exists = match self.git.remote_branch_exists(path, &worktree.branch).await
+        let remote_branch_exists = match self
+            .git
+            .remote_branch_exists(remote_path, &worktree.branch)
+            .await
         {
             Ok(exists) => exists,
             Err(_) => {
@@ -335,16 +348,20 @@ impl Inspect {
 
         let target = format!("origin/{target_branch}");
         let (unique_commits, merged_into_target) =
-            match self.git.revision_exists(path, &target).await {
+            match self.git.revision_exists(remote_path, &target).await {
                 Ok(true) => {
-                    let unique = match self.git.unique_commits(path, &target).await {
+                    let unique = match self
+                        .git
+                        .unique_commits_from(remote_path, &target, &head)
+                        .await
+                    {
                         Ok(count) => Some(count),
                         Err(_) => {
                             warnings.push(WARNING_UNIQUE_COMMIT_COUNT_UNAVAILABLE.to_owned());
                             None
                         }
                     };
-                    let merged = match self.git.is_ancestor(path, &head, &target).await {
+                    let merged = match self.git.is_ancestor(remote_path, &head, &target).await {
                         Ok(merged) => merged,
                         Err(_) => {
                             warnings.push(WARNING_TARGET_COMPARISON_FAILED.to_owned());
