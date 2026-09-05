@@ -660,9 +660,10 @@ what is running elsewhere.*
 | Exit strip | `⚠ process exited (<code>) · ^s r restart · ^s x close · ^s c new` | bottom, 22 px, only when the tab's command exited | tmux's `remain-on-exit` made this recoverable; Fleet must not silently swallow a crashed dev server | §4 `remain-on-exit on` |
 | Mode word | `TERMINAL` / `^S` / `SCROLL` | status bar, center | §2.8 | KEYMAP modes |
 
-**[D-8]** Every affordance drawn over the Workspace states its prefix. In Terminal mode all keys
-go to the PTY except `ctrl-s`, so bare-key hints (`r restart`, `l log`, `⏎ start now`) are
-forbidden anywhere in this screen; they are written `^s r`, `^s l`, `^s ⏎`.
+**[D-8]** Every Workspace command drawn over the Workspace states its prefix. In Terminal mode
+keys go to the PTY except `ctrl-s` and the standard `cmd-c` / `cmd-v` clipboard actions, so
+bare-key hints (`r restart`, `l log`, `⏎ start now`) are forbidden anywhere in this screen; they
+are written `^s r`, `^s l`, `^s ⏎`.
 
 **Zoom (`ctrl-s z`)** hides the session header and the tab strip; a 2 px amber bar on the window's
 top edge remains as the only reminder that chrome is hidden. The status bar always stays, because
@@ -689,7 +690,8 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 `zap`, `bot`, `sparkles` (opencode), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
 `chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
 
-**Keyboard:** all keys → PTY; `ctrl-s` then `ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
+**Keyboard:** all keys → PTY except `cmd-c` copy selection and `cmd-v` paste; `ctrl-s` then
+`ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
@@ -1103,7 +1105,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 | **Status** | `Local status refresh ms [2000]` (min 500) · `Remote status refresh ms [10000]` (min 500) |
 | **Windows** | read-only ordered list `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — lazygit` |
 | **Hosts** | read-only per host `devbox — ssh danny@devbox — fleet` |
-| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 1` · `E open config.json in a new terminal tab` · `Run doctor · D` |
+| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 2` · `E open config.json in a new terminal tab` · `Run doctor · D` |
 
 **[D-13]** The editable set closes §9's *"Settings cannot edit grace/rule definitions/windows/
 hosts/protocol/pool/timers/status intervals; many require JSON"* for everything a user changes
@@ -1135,7 +1137,7 @@ the app:
 > quitting Fleet (`ctrl-q`) never stops them. Only `c` in the Jobs panel, `K`, and `ctrl-shift-q`
 > stop things. Terminals do not survive a **daemon** restart.
 
-Footer: `Fleet <version> · protocol 1 · fleetd up 3h`.
+Footer: `Fleet <version> · protocol 2 · fleetd up 3h`.
 **Omitted:** prose explanations, links, a search field (the palette *is* the searchable surface).
 
 ---
@@ -1321,7 +1323,7 @@ to `circle-help` (`unknown`, never `none`), and read-only actions keep working (
  git            ok       git version 2.49.0
  gh auth        fail     gh: not logged in to github.com
  copy-on-write  ok       cp -c (APFS clonefile)
- fleetd         ok       pid 4211 · protocol 1 · up 3h
+ fleetd         ok       pid 4211 · protocol 2 · up 3h
  host devbox    fail     ssh: connect timed out after 5s
 ```
 
