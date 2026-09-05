@@ -134,7 +134,7 @@ pub struct ViewportInfo {
     /// Monotonic identity epoch for retained scrollback rows.
     ///
     /// This advances when history shrinks, Ghostty reports that Fleet's tracked oldest row was
-    /// discarded, or PTY output arrives at the configured nominal row bound. Absolute row
+    /// discarded, columns reflow, or PTY output arrives without a history tracker. Absolute row
     /// coordinates are comparable only within one epoch.
     #[serde(default)]
     pub history_epoch: u64,
@@ -172,6 +172,11 @@ pub struct FrameUpdate {
     pub rows: u16,
     /// Whether this frame replaces the complete mirror grid.
     pub full: bool,
+    /// Viewport row movement: positive shifts existing rows up, negative shifts them down.
+    /// Apply to cells and wrap flags before row replacements. Omitted on full frames and
+    /// content, size, or history-epoch changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shift: Option<i32>,
     /// Complete replacements for changed rows.
     pub rows_changed: Vec<RowUpdate>,
     /// Cursor state.
@@ -333,6 +338,20 @@ pub struct MouseEvent {
     pub mods: Modifiers,
 }
 
+/// Whole-row wheel input; routing uses the daemon's live VT modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WheelEvent {
+    /// Positive moves down toward live output; negative moves up into history.
+    pub steps: i32,
+    /// Zero-based pointer column.
+    pub col: u16,
+    /// Zero-based pointer row.
+    pub row: u16,
+    /// Shift, Control, Alt, and Super/Command modifiers.
+    pub mods: Modifiers,
+}
+
 /// Scrollback navigation command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -384,6 +403,7 @@ mod tests {
             cols: 80,
             rows: 24,
             full: true,
+            shift: None,
             rows_changed: vec![RowUpdate {
                 index: 0,
                 cells: vec![Cell {
@@ -418,6 +438,11 @@ mod tests {
         let decoded: FrameUpdate =
             serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, frame);
+        let mut shifted = frame;
+        shifted.full = false;
+        shifted.shift = Some(-3);
+        let json = serde_json::to_string(&shifted).unwrap();
+        assert_eq!(serde_json::from_str::<FrameUpdate>(&json).unwrap(), shifted);
     }
 
     #[test]

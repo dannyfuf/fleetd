@@ -91,17 +91,79 @@ pty (portable-pty) --bytes--> VtEngine (libghostty-vt) --dirty rows--> FrameUpda
 client key event --proto--> daemon key encoder (terminal modes aware) --bytes--> pty
 ```
 
-`FrameUpdate { terminal_id, seq, cols, rows, full: bool, rows: [RowUpdate{index, cells, wrapped}],
+`FrameUpdate { terminal_id, seq, cols, rows, full: bool, shift: Option<i32>, rows: [RowUpdate{index, cells, wrapped}],
 cursor{row,col,visible,shape}, viewport{scrollback_len, offset, history_epoch},
 modes{alt_screen, mouse, bracketed_paste}, title }`.
 `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid. The wire protocol is version 2; `wrapped` preserves logical lines
+on the client's mirror grid. The wire protocol is version 3; `wrapped` preserves logical lines
 during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
 row is discarded, history shrinks, or a column change reflows it, without treating viewport
 movement as eviction. Off-screen
 copy caches only visible rows covered by an active selection and caps them at 5,000.
+
+Terminal history uses `terminal.scrollbackBytes` (Rust `terminal.scrollback_bytes`), a
+**byte budget passed directly to `TerminalOptions.max_scrollback`**, defaulting to
+1,073,741,824 bytes (1 GiB) per terminal, allocated as history grows. Config validates a
+positive budget; it applies to newly spawned/restarted terminals. Ghostty retains history
+in pages, so retained row count depends on width and contents, and tiny budgets have page
+granularity. The low-level engine accepts zero to disable history; alternate screens never
+have history. No unlimited setting is supported. After 250 ms without PTY output or commands,
+the owner thread runs one bounded incremental compression step at most every 16 ms. Completed
+passes are skipped until Ghostty's compression activity token changes; synchronous full-history
+compression is never used.
+
+`WheelTerminal { terminal, wheel: { steps, col, row, mods } }` carries whole rows:
+positive steps move down toward live output, negative steps move up. Wheel, viewport, key,
+raw input and paste requests share ordered dispatch. The app only enqueues wheel requests;
+it never waits for acknowledgements. The host decides using **live emulator modes**:
+
+| State | Wheel behavior |
+| --- | --- |
+| Primary screen, any tracking state, no Shift | Move Fleet's viewport by `steps` rows |
+| Primary screen, Shift held, tracking enabled | Encode mouse wheel reports (Four/Five) and write to PTY |
+| Alternate screen, tracking enabled | Encode mouse wheel reports and write to PTY |
+| Alternate screen, tracking disabled, DECSET 1007 enabled | Encode Up/Down keys per step, honoring DECCKM |
+| Alternate screen, tracking disabled, DECSET 1007 disabled | Drop |
+
+PTY-directed wheel output is capped at four times the current row count, up to 1,024 steps.
+Primary-screen Shift without tracking also moves Fleet's viewport. All mouse/key sequences
+come from Ghostty encoders. Wheel pseudo-buttons never become held buttons.
+
+The app accumulates pixel deltas divided by measured cell height; line deltas use
+`terminal.scrollLinesPerStep` (default 3, range 1..=50). It truncates toward zero and retains the
+fractional remainder. GPUI positive content movement becomes negative steps. Changing the
+active terminal (including no terminal), the terminal under the pointer, ending or cancelling a gesture resets the remainder; momentum
+events otherwise pass through unchanged. Cell coordinates use measured inner painter bounds
+with grid padding already removed. Settings load on connection/reconnection and config responses.
+
+The PTY reader uses an unbounded queue so large writes into echoing children cannot deadlock.
+The host drains at most 256 KiB or 2 ms of PTY output per iteration and batches at most 1,024
+commands, coalescing adjacent viewport moves with per-command boundary clamping. Key/resize
+and application-directed wheel input preserve ordering by ending the current viewport batch.
+Viewport moves emit frames immediately, bypassing the normal 16,667 µs output frame gate.
+A blocking command receive wakes immediately for input, with a 4 ms timeout for PTY polling.
+
+Small viewport-only moves use `FrameUpdate.shift`: positive shifts move existing mirror rows
+up, negative shifts move them down, and wrap flags rotate with their rows. Only newly exposed
+rows are replaced. Absolute selection anchors keep following the same text as the viewport moves;
+an epoch change clears selections and their caches. Epoch changes force full frames, and clients
+reject shifts across epochs and request full recovery. Output, resize,
+large moves and explicit full-frame requests use ordinary row/full frames. Broadcast lag
+requests full frames for all attached terminals; forward sequence gaps freeze the last valid
+mirror and reuse the client's full-frame recovery path. Stale frames are rejected. Sessions
+retains the next sequence for each terminal across restarts, including attachment frames.
+
+`ScrollOrKeyTerminal { terminal, scroll, key }` shares the ordered input path. The host
+coalesces the scroll on the primary screen and forwards the key through normal input
+handling on the alternate screen, using live modes for the four viewport shortcuts.
+
+At the bottom, output follows live. While scrolled up, Ghostty preserves the history anchor.
+Real keys, raw input and paste atomically return to bottom on the host before writing to the
+PTY. Wheel input and copy-mode navigation preserve the viewport; copy-mode exit retains its
+explicit return-to-bottom behavior. Wire protocol version is 3; the separate swarm-compatible
+CLI JSON envelope remains version 1.
 
 ## Client (`fleet` app)
 

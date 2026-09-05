@@ -2258,7 +2258,7 @@ panic = "abort"          # verified to work with GPUI
 
 ## D4. Terminal rendering — **self-painted grid, not native-view hosting**
 
-**Decision: parse with `alacritty_terminal` 0.26.0 and paint the grid ourselves as a custom `impl Element`.**
+**Shipped: Ghostty via `libghostty-vt` in the daemon, with the mirror grid painted in GPUI.**
 
 Why not host libghostty's own Metal `NSView` (which *does* work — §5.6):
 - The native view lives **outside GPUI's scene**. It is never clipped by masks, rounded corners, or

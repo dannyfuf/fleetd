@@ -1,16 +1,16 @@
 //! The terminal host thread that owns PTYs and virtual-terminal engines.
 
-use std::{thread, time::Duration, time::Instant};
+use std::{sync::mpsc, thread, time::Duration, time::Instant};
 
-use async_channel::{Receiver, Sender, TryRecvError};
+use async_channel::{Receiver, Sender};
 use fleet_core::ids::TerminalId;
-use fleet_proto::terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand};
+use fleet_proto::terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand, WheelEvent};
 use thiserror::Error;
 use tracing::warn;
 
 use crate::{
     GhosttyEngine,
-    engine::{EngineError, EngineEvent, VtEngine},
+    engine::{EngineError, EngineEvent, VtEngine, WheelAction},
     pty::{Pty, PtyError, PtyOptions},
 };
 
@@ -24,10 +24,12 @@ const EXIT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 pub struct TerminalHostOptions {
     /// Stable terminal identifier stamped onto emitted frames.
     pub terminal: TerminalId,
+    /// Sequence carried by the first frame, including after restart.
+    pub starting_sequence: u64,
     /// PTY child-process settings.
     pub pty: PtyOptions,
-    /// Maximum retained scrollback rows.
-    pub scrollback_lines: usize,
+    /// Maximum retained scrollback bytes.
+    pub scrollback_bytes: usize,
     /// Command typed into the login shell after its prompt is likely ready.
     pub initial_command: Option<String>,
 }
@@ -52,6 +54,15 @@ pub enum HostCommand {
     },
     /// Moves the emulator's scrollback viewport.
     Scroll(ScrollCommand),
+    /// Routes wheel input using live VT modes.
+    Wheel(WheelEvent),
+    /// Scrolls on the primary screen or forwards a key on the alternate screen.
+    ScrollOrKey {
+        /// Primary-screen viewport movement.
+        scroll: ScrollCommand,
+        /// Alternate-screen input.
+        key: KeyEvent,
+    },
     /// Attaches a client, makes its dimensions authoritative, and returns a full frame.
     Attach {
         /// Attaching client's column count.
@@ -115,7 +126,7 @@ pub enum HostError {
 pub struct TerminalHost {
     terminal: TerminalId,
     child_pid: Option<u32>,
-    commands: Sender<HostCommand>,
+    commands: mpsc::Sender<HostCommand>,
     events: Receiver<HostEvent>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -127,8 +138,8 @@ impl TerminalHost {
         let rows = options.pty.rows;
         let pty = Pty::spawn(options.pty)?;
         let child_pid = pty.child_pid();
-        let engine = GhosttyEngine::new(cols, rows, options.scrollback_lines)?;
-        let (command_sender, command_receiver) = async_channel::unbounded();
+        let engine = GhosttyEngine::new(cols, rows, options.scrollback_bytes)?;
+        let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = async_channel::unbounded();
         let terminal = options.terminal;
         let initial_command = options.initial_command;
@@ -142,6 +153,7 @@ impl TerminalHost {
                     command_receiver,
                     event_sender,
                     initial_command,
+                    options.starting_sequence,
                 );
             })?;
         Ok(Self {
@@ -167,7 +179,7 @@ impl TerminalHost {
 
     /// Returns a cloneable sender for low-level command dispatch.
     #[must_use]
-    pub fn command_sender(&self) -> Sender<HostCommand> {
+    pub fn command_sender(&self) -> mpsc::Sender<HostCommand> {
         self.commands.clone()
     }
 
@@ -205,6 +217,16 @@ impl TerminalHost {
     /// Moves the visible scrollback viewport.
     pub fn scroll(&self, command: ScrollCommand) -> Result<(), HostError> {
         self.send(HostCommand::Scroll(command))
+    }
+
+    /// Sends whole-row wheel input for live-mode routing.
+    pub fn wheel(&self, event: WheelEvent) -> Result<(), HostError> {
+        self.send(HostCommand::Wheel(event))
+    }
+
+    /// Routes a viewport shortcut using live screen modes.
+    pub fn scroll_or_key(&self, scroll: ScrollCommand, key: KeyEvent) -> Result<(), HostError> {
+        self.send(HostCommand::ScrollOrKey { scroll, key })
     }
 
     /// Attaches at the supplied dimensions and synchronously returns a complete frame.
@@ -246,9 +268,7 @@ impl TerminalHost {
     }
 
     fn send(&self, command: HostCommand) -> Result<(), HostError> {
-        self.commands
-            .send_blocking(command)
-            .map_err(|_| HostError::Closed)
+        self.commands.send(command).map_err(|_| HostError::Closed)
     }
 }
 
@@ -256,9 +276,10 @@ fn run_host(
     terminal: TerminalId,
     mut pty: Pty,
     mut engine: Box<dyn VtEngine>,
-    commands: Receiver<HostCommand>,
+    commands: mpsc::Receiver<HostCommand>,
     events: Sender<HostEvent>,
     initial_command: Option<String>,
+    starting_sequence: u64,
 ) {
     let spawned_at = Instant::now();
     let mut pending_commands = initial_command
@@ -268,28 +289,20 @@ fn run_host(
     let mut first_output_at = None;
     let mut dirty = false;
     let mut force_full = false;
-    let mut sequence = 0_u64;
+    let mut viewport_moved = false;
+    let mut sequence = starting_sequence;
     let mut last_frame_at = spawned_at.checked_sub(FRAME_INTERVAL).unwrap_or(spawned_at);
     let mut exit = None;
     let mut exit_observed_at = None;
     let mut commands_closed = false;
+    let mut received = None;
+    let mut last_activity = spawned_at;
+    let mut last_compression = spawned_at;
 
     loop {
-        drain_commands(
-            terminal,
-            &commands,
-            &events,
-            &mut pty,
-            engine.as_mut(),
-            &mut pending_commands,
-            spawned_at,
-            first_output_at,
-            &mut force_full,
-            &mut sequence,
-            &mut commands_closed,
-        );
-
-        loop {
+        let mut output_bytes = 0;
+        let output_started = Instant::now();
+        while output_bytes < 256 * 1024 && output_started.elapsed() < Duration::from_millis(2) {
             match pty.try_read() {
                 Ok(Some(bytes)) => {
                     if first_output_at.is_none() {
@@ -300,6 +313,8 @@ fn run_host(
                             *deadline = (*deadline).min(prompt_deadline);
                         }
                     }
+                    output_bytes += bytes.len();
+                    last_activity = Instant::now();
                     engine.feed(&bytes);
                     dirty = true;
                 }
@@ -311,11 +326,40 @@ fn run_host(
             }
         }
 
+        let activity = drain_commands(
+            terminal,
+            &commands,
+            received.take(),
+            &events,
+            &mut pty,
+            engine.as_mut(),
+            &mut pending_commands,
+            spawned_at,
+            first_output_at,
+            &mut force_full,
+            &mut viewport_moved,
+            &mut sequence,
+            &mut commands_closed,
+        );
+
+        if activity {
+            last_activity = Instant::now();
+        }
+        if last_activity.elapsed() >= Duration::from_millis(250)
+            && last_compression.elapsed() >= Duration::from_millis(16)
+        {
+            engine.compress_idle();
+            last_compression = Instant::now();
+        }
+
         forward_engine_events(engine.as_mut(), &mut pty, terminal, &events);
         type_ready_commands(&mut pending_commands, &mut pty);
 
         let now = Instant::now();
-        if (dirty || force_full) && now.duration_since(last_frame_at) >= FRAME_INTERVAL {
+        if force_full
+            || viewport_moved
+            || (dirty && now.duration_since(last_frame_at) >= FRAME_INTERVAL)
+        {
             let frame = stamp_frame(engine.take_frame(force_full), terminal, &mut sequence);
             if events.send_blocking(HostEvent::Frame(frame)).is_err() {
                 let _ = pty.kill();
@@ -323,6 +367,7 @@ fn run_host(
             }
             dirty = false;
             force_full = false;
+            viewport_moved = false;
             last_frame_at = now;
         }
 
@@ -344,7 +389,7 @@ fn run_host(
         if let (Some(code), Some(observed_at)) = (exit, exit_observed_at)
             && (pty.output_closed() || now.duration_since(observed_at) >= EXIT_DRAIN_GRACE)
         {
-            if dirty || force_full {
+            if dirty || force_full || viewport_moved {
                 let since_last_frame = Instant::now().duration_since(last_frame_at);
                 if since_last_frame < FRAME_INTERVAL {
                     thread::sleep(FRAME_INTERVAL - since_last_frame);
@@ -359,7 +404,15 @@ fn run_host(
         if commands_closed {
             let _ = pty.kill();
         }
-        thread::sleep(Duration::from_millis(2));
+        // Commands wake the owner immediately; timeout bounds PTY output/prompt latency.
+        match commands.recv_timeout(Duration::from_millis(4)) {
+            Ok(command) => received = Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = pty.kill();
+                break;
+            }
+        }
     }
 }
 
@@ -369,7 +422,8 @@ fn run_host(
 )]
 fn drain_commands(
     terminal: TerminalId,
-    commands: &Receiver<HostCommand>,
+    commands: &mpsc::Receiver<HostCommand>,
+    first: Option<HostCommand>,
     events: &Sender<HostEvent>,
     pty: &mut Pty,
     engine: &mut dyn VtEngine,
@@ -377,21 +431,57 @@ fn drain_commands(
     spawned_at: Instant,
     first_output_at: Option<Instant>,
     force_full: &mut bool,
+    viewport_moved: &mut bool,
     sequence: &mut u64,
     commands_closed: &mut bool,
-) {
-    loop {
-        let command = match commands.try_recv() {
+) -> bool {
+    let mut first = first;
+    let mut activity = false;
+    let mut viewport = None;
+    // A bounded batch also prevents an input producer from starving frame emission.
+    for _ in 0..1024 {
+        let command = match first.take().map(Ok).unwrap_or_else(|| commands.try_recv()) {
             Ok(command) => command,
-            Err(TryRecvError::Empty) => break,
-            Err(TryRecvError::Closed) => {
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
                 *commands_closed = true;
                 break;
             }
         };
+        activity = true;
+        let command = match command {
+            HostCommand::Wheel(event) => match engine.wheel(&event) {
+                WheelAction::Viewport(steps) => HostCommand::Scroll(ScrollCommand::Lines(steps)),
+                WheelAction::Pty(bytes) => {
+                    flush_viewport(&mut viewport, engine, viewport_moved);
+                    write_or_warn(pty, &bytes, terminal);
+                    continue;
+                }
+                WheelAction::Drop => continue,
+            },
+            HostCommand::ScrollOrKey { scroll, key } => {
+                if engine.modes().alt_screen {
+                    HostCommand::Key(key)
+                } else {
+                    HostCommand::Scroll(scroll)
+                }
+            }
+            other => other,
+        };
+        if let HostCommand::Scroll(command) = command {
+            let pending = viewport.get_or_insert_with(|| PendingViewport::new(engine));
+            pending.push(command);
+            continue;
+        }
+        // Preserve input/resize ordering across scroll batches.
+        flush_viewport(&mut viewport, engine, viewport_moved);
         match command {
-            HostCommand::Write(bytes) => write_or_warn(pty, &bytes, terminal),
+            HostCommand::Write(bytes) => {
+                follow_input(engine, viewport_moved);
+                write_or_warn(pty, &bytes, terminal);
+            }
             HostCommand::Key(event) => {
+                follow_input(engine, viewport_moved);
                 let bytes = engine.encode_key(&event);
                 write_or_warn(pty, &bytes, terminal);
             }
@@ -400,6 +490,7 @@ fn drain_commands(
                 write_or_warn(pty, &bytes, terminal);
             }
             HostCommand::Paste(text) => {
+                follow_input(engine, viewport_moved);
                 let bytes = engine.encode_paste(&text);
                 write_or_warn(pty, &bytes, terminal);
             }
@@ -407,9 +498,8 @@ fn drain_commands(
                 Ok(()) => *force_full = true,
                 Err(error) => warn!(%error, %terminal, "failed to resize terminal"),
             },
-            HostCommand::Scroll(command) => {
-                engine.scroll(command);
-                *force_full = true;
+            HostCommand::Scroll(_) | HostCommand::Wheel(_) | HostCommand::ScrollOrKey { .. } => {
+                unreachable!("handled above")
             }
             HostCommand::Attach { cols, rows, reply } => match resize(pty, engine, cols, rows) {
                 Ok(()) => {
@@ -436,7 +526,73 @@ fn drain_commands(
             }
         }
     }
+    flush_viewport(&mut viewport, engine, viewport_moved);
     forward_engine_events(engine, pty, terminal, events);
+    activity
+}
+
+/// Fold signed/absolute moves while preserving clamping at each command boundary.
+struct PendingViewport {
+    offset: usize,
+    history: usize,
+    rows: u16,
+}
+
+impl PendingViewport {
+    fn new(engine: &dyn VtEngine) -> Self {
+        let viewport = engine.viewport();
+        Self {
+            offset: viewport.offset,
+            history: viewport.scrollback_len,
+            rows: engine.rows(),
+        }
+    }
+
+    fn push(&mut self, command: ScrollCommand) {
+        let delta = match command {
+            ScrollCommand::Lines(lines) => i64::from(lines),
+            ScrollCommand::Pages(pages) => i64::from(pages) * i64::from(self.rows),
+            ScrollCommand::Top => {
+                self.offset = self.history;
+                return;
+            }
+            ScrollCommand::Bottom => {
+                self.offset = 0;
+                return;
+            }
+            ScrollCommand::ToOffset(offset) => {
+                self.offset = offset.min(self.history);
+                return;
+            }
+        };
+        self.offset = if delta < 0 {
+            self.offset
+                .saturating_add(delta.unsigned_abs() as usize)
+                .min(self.history)
+        } else {
+            self.offset.saturating_sub(delta as usize)
+        };
+    }
+}
+
+fn flush_viewport(
+    pending: &mut Option<PendingViewport>,
+    engine: &mut dyn VtEngine,
+    force_full: &mut bool,
+) {
+    if let Some(pending) = pending.take()
+        && pending.offset != engine.viewport_offset()
+    {
+        engine.scroll(ScrollCommand::ToOffset(pending.offset));
+        *force_full = true;
+    }
+}
+
+fn follow_input(engine: &mut dyn VtEngine, force_full: &mut bool) {
+    if engine.viewport_offset() > 0 {
+        engine.scroll(ScrollCommand::Bottom);
+        *force_full = true;
+    }
 }
 
 fn resize(pty: &Pty, engine: &mut dyn VtEngine, cols: u16, rows: u16) -> Result<(), String> {
@@ -482,9 +638,9 @@ fn forward_engine_events(
 }
 
 fn stamp_frame(mut frame: FrameUpdate, terminal: TerminalId, sequence: &mut u64) -> FrameUpdate {
-    *sequence = sequence.saturating_add(1);
     frame.terminal = terminal;
     frame.seq = *sequence;
+    *sequence = sequence.saturating_add(1);
     frame
 }
 
@@ -501,6 +657,304 @@ mod tests {
     use std::{path::PathBuf, time::SystemTime};
 
     use super::*;
+    use async_channel::TryRecvError;
+
+    #[test]
+    fn large_paste_into_echoing_cat_does_not_block_frames_or_commands() {
+        let host = TerminalHost::spawn(TerminalHostOptions {
+            terminal: TerminalId(21),
+            pty: PtyOptions::command(
+                "/bin/cat",
+                std::iter::empty::<&str>(),
+                PathBuf::from("/tmp"),
+                80,
+                24,
+            ),
+            scrollback_bytes: 1024 * 1024,
+            initial_command: None,
+            starting_sequence: 1,
+        })
+        .unwrap();
+        let events = host.event_receiver();
+        // 2 MiB with short lines stays below canonical line limits and exercises echo backpressure.
+        host.paste(format!("{}\n", "x".repeat(63)).repeat(32 * 1024))
+            .unwrap();
+        let (reply, attached) = async_channel::bounded(1);
+        host.command_sender()
+            .send(HostCommand::Attach {
+                cols: 81,
+                rows: 24,
+                reply,
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut processed_command = false;
+        let mut produced_output = false;
+        while Instant::now() < deadline && !(processed_command && produced_output) {
+            if let Ok(frame) = attached.try_recv() {
+                let frame = frame.unwrap();
+                assert!(frame.full);
+                assert_eq!(frame.cols, 81);
+                processed_command = true;
+            }
+            if let Ok(HostEvent::Frame(frame)) = events.try_recv() {
+                produced_output |= frame.viewport.scrollback_len > 0;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        // A regression blocks the owner in write_all, so kill the child independently on failure.
+        if !(processed_command && produced_output) {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &host.child_pid().unwrap().to_string()])
+                .status();
+        }
+        host.kill().unwrap();
+        host.join().unwrap();
+        assert!(
+            processed_command,
+            "large paste blocked the subsequent attach command"
+        );
+        assert!(produced_output, "large paste blocked output frames");
+    }
+
+    #[test]
+    fn scroll_or_key_uses_live_screen_modes() {
+        use fleet_proto::terminal::{Key, KeyAction, Modifiers};
+        let mut pty = Pty::spawn(PtyOptions::command(
+            "/bin/sh",
+            ["-c", "stty raw -echo; printf READY; exec /bin/cat"],
+            PathBuf::from("/tmp"),
+            40,
+            10,
+        ))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while Instant::now() < deadline && output != b"READY" {
+            if let Some(bytes) = pty.try_read().unwrap() {
+                output.extend(bytes);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(output, b"READY");
+        let mut engine = GhosttyEngine::new(40, 10, 1024 * 1024).unwrap();
+        engine.feed("line\r\n".repeat(100).as_bytes());
+        engine.take_frame(true);
+        let (sender, receiver) = mpsc::channel();
+        let (events, _) = async_channel::unbounded();
+        let mut full = false;
+        let mut moved = false;
+        let mut sequence = 1;
+        let mut closed = false;
+        let mut pending = Vec::new();
+        for alternate in [false, true, false] {
+            engine.feed(if alternate {
+                b"\x1b[?1049h"
+            } else {
+                b"\x1b[?1049l"
+            });
+            let before = engine.viewport_offset();
+            sender
+                .send(HostCommand::ScrollOrKey {
+                    scroll: ScrollCommand::Pages(-1),
+                    key: KeyEvent {
+                        key: Key::PageUp,
+                        mods: Modifiers::SHIFT,
+                        text: None,
+                        action: KeyAction::Press,
+                    },
+                })
+                .unwrap();
+            drain_commands(
+                TerminalId(22),
+                &receiver,
+                None,
+                &events,
+                &mut pty,
+                &mut engine,
+                &mut pending,
+                Instant::now(),
+                None,
+                &mut full,
+                &mut moved,
+                &mut sequence,
+                &mut closed,
+            );
+            if alternate {
+                assert_eq!(engine.viewport_offset(), 0);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut output = Vec::new();
+                while Instant::now() < deadline && output.len() < 6 {
+                    if let Some(bytes) = pty.try_read().unwrap() {
+                        output.extend(bytes);
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert_eq!(output, b"\x1b[5;2~");
+            } else {
+                assert_eq!(engine.viewport_offset(), before + 10);
+                assert!(moved);
+                assert!(pty.try_read().unwrap().is_none());
+            }
+        }
+        pty.kill().unwrap();
+    }
+
+    #[test]
+    fn coalesced_scrolls_match_sequential_clamping() {
+        let mut batched = GhosttyEngine::new(40, 10, 1024 * 1024).unwrap();
+        let mut sequential = GhosttyEngine::new(40, 10, 1024 * 1024).unwrap();
+        for engine in [&mut batched, &mut sequential] {
+            engine.feed("line\r\n".repeat(100).as_bytes());
+        }
+        let commands = [
+            ScrollCommand::Lines(10),
+            ScrollCommand::Lines(-3),
+            ScrollCommand::Pages(-2),
+            ScrollCommand::Top,
+            ScrollCommand::Lines(-99),
+            ScrollCommand::Lines(5),
+            ScrollCommand::Bottom,
+            ScrollCommand::ToOffset(500),
+            ScrollCommand::Pages(1),
+        ];
+        let mut pending = PendingViewport::new(&batched);
+        for command in commands {
+            pending.push(command);
+            sequential.scroll(command);
+        }
+        let mut moved = false;
+        flush_viewport(&mut Some(pending), &mut batched, &mut moved);
+        assert!(moved);
+        assert_eq!(batched.viewport_offset(), sequential.viewport_offset());
+        assert_eq!(
+            batched.take_frame(true).rows_changed,
+            sequential.take_frame(true).rows_changed
+        );
+    }
+
+    #[test]
+    fn queued_wheels_coalesce_and_input_returns_to_bottom() {
+        use fleet_proto::terminal::{Key, KeyAction, Modifiers};
+        let mut pty = Pty::spawn(PtyOptions::command(
+            "/bin/cat",
+            std::iter::empty::<&str>(),
+            PathBuf::from("/tmp"),
+            40,
+            10,
+        ))
+        .unwrap();
+        let mut engine = GhosttyEngine::new(40, 10, 1024 * 1024).unwrap();
+        engine.feed("line\r\n".repeat(100).as_bytes());
+        engine.take_frame(true);
+        let (sender, receiver) = mpsc::channel();
+        let (events, _) = async_channel::unbounded();
+        for _ in 0..3 {
+            sender
+                .send(HostCommand::Wheel(WheelEvent {
+                    steps: -1,
+                    col: 0,
+                    row: 0,
+                    mods: Modifiers::empty(),
+                }))
+                .unwrap();
+        }
+        let mut full = false;
+        let mut moved = false;
+        let mut seq = 0;
+        let mut closed = false;
+        let mut pending = Vec::new();
+        drain_commands(
+            TerminalId(1),
+            &receiver,
+            None,
+            &events,
+            &mut pty,
+            &mut engine,
+            &mut pending,
+            Instant::now(),
+            None,
+            &mut full,
+            &mut moved,
+            &mut seq,
+            &mut closed,
+        );
+        assert_eq!(engine.viewport_offset(), 3);
+        assert!(moved && !full);
+        let frame = engine.take_frame(false);
+        assert_eq!(frame.shift, Some(-3));
+        assert_eq!(frame.rows_changed.len(), 3);
+        for input in [
+            HostCommand::Key(KeyEvent {
+                key: Key::Char('x'),
+                mods: Modifiers::empty(),
+                text: Some("x".into()),
+                action: KeyAction::Press,
+            }),
+            HostCommand::Paste("paste".into()),
+            HostCommand::Write(b"raw".to_vec()),
+        ] {
+            engine.scroll(ScrollCommand::Top);
+            sender.send(input).unwrap();
+            drain_commands(
+                TerminalId(1),
+                &receiver,
+                None,
+                &events,
+                &mut pty,
+                &mut engine,
+                &mut pending,
+                Instant::now(),
+                None,
+                &mut full,
+                &mut moved,
+                &mut seq,
+                &mut closed,
+            );
+            assert_eq!(engine.viewport_offset(), 0);
+        }
+        pty.kill().unwrap();
+    }
+
+    #[test]
+    fn continuous_output_does_not_starve_viewport_commands() {
+        let host = TerminalHost::spawn(TerminalHostOptions {
+            terminal: TerminalId(20),
+            pty: PtyOptions::command("/usr/bin/yes", ["output"], PathBuf::from("/tmp"), 80, 24),
+            scrollback_bytes: 1024 * 1024,
+            initial_command: None,
+            starting_sequence: 1,
+        })
+        .unwrap();
+        let events = host.event_receiver();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while Instant::now() < deadline {
+            if let Ok(HostEvent::Frame(frame)) = events.try_recv()
+                && frame.viewport.scrollback_len > 100
+            {
+                ready = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(ready, "continuous-output child produced no history");
+        host.scroll(ScrollCommand::Lines(-20)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut moved = false;
+        while Instant::now() < deadline {
+            if let Ok(HostEvent::Frame(frame)) = events.try_recv()
+                && frame.viewport.offset > 0
+            {
+                moved = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        host.kill().unwrap();
+        host.join().unwrap();
+        assert!(moved, "continuous PTY output starved the scroll frame");
+    }
 
     #[test]
     fn host_emits_command_output_before_exit() {
@@ -513,8 +967,9 @@ mod tests {
                 20,
                 4,
             ),
-            scrollback_lines: 100,
+            scrollback_bytes: 100,
             initial_command: None,
+            starting_sequence: 1,
         };
         let host = TerminalHost::spawn(options)
             .unwrap_or_else(|error| panic!("failed to spawn terminal host: {error}"));
@@ -561,8 +1016,9 @@ mod tests {
                 20,
                 4,
             ),
-            scrollback_lines: 100,
+            scrollback_bytes: 100,
             initial_command: None,
+            starting_sequence: 1,
         };
         let host = TerminalHost::spawn(options)
             .unwrap_or_else(|error| panic!("failed to spawn terminal host: {error}"));
@@ -635,8 +1091,9 @@ mod tests {
                 80,
                 24,
             ),
-            scrollback_lines: 100,
+            scrollback_bytes: 100,
             initial_command: None,
+            starting_sequence: 1,
         };
         let host = TerminalHost::spawn(options)
             .unwrap_or_else(|error| panic!("failed to spawn nvim terminal: {error}"));

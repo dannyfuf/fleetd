@@ -32,6 +32,57 @@ use gpui::{Bounds, Hsla, IntoElement, Pixels, Point, Rgba, Size, canvas, prelude
 
 use crate::state::MirrorGrid;
 
+/// Fractional wheel rows for the terminal currently under the pointer.
+#[derive(Debug, Default)]
+pub struct WheelAccumulator {
+    terminal: Option<fleet_core::ids::TerminalId>,
+    remainder: f64,
+}
+
+impl WheelAccumulator {
+    /// Reset when the pointer enters a different terminal, even without a wheel event.
+    pub fn point_at(&mut self, terminal: fleet_core::ids::TerminalId) {
+        self.reconcile(Some(terminal));
+    }
+
+    /// Reset when the active terminal changes, including an empty workspace.
+    pub fn reconcile(&mut self, terminal: Option<fleet_core::ids::TerminalId>) {
+        if self.terminal != terminal {
+            self.terminal = terminal;
+            self.remainder = 0.0;
+        }
+    }
+
+    /// Convert GPUI content movement into signed whole terminal rows.
+    pub fn steps(
+        &mut self,
+        terminal: fleet_core::ids::TerminalId,
+        delta: gpui::ScrollDelta,
+        cell_height: Pixels,
+        lines_per_step: u32,
+        phase: gpui::TouchPhase,
+    ) -> i32 {
+        self.point_at(terminal);
+        let rows = match delta {
+            gpui::ScrollDelta::Pixels(delta) => {
+                f64::from(f32::from(delta.y)) / f64::from(f32::from(cell_height))
+            }
+            gpui::ScrollDelta::Lines(delta) => f64::from(delta.y) * f64::from(lines_per_step),
+        };
+        // GPUI preserves AppKit scrollingDeltaY and adds it to the content origin:
+        // positive content motion is UP into Fleet history, hence the minus sign.
+        if rows.is_finite() {
+            self.remainder -= rows;
+        }
+        let steps = self.remainder.trunc() as i32;
+        self.remainder = self.remainder.fract();
+        if matches!(phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
+            self.remainder = 0.0;
+        }
+        steps
+    }
+}
+
 /// The inner padding [`fleet_ui_kit::TerminalGrid`] paints with (§3.6: 8 px, no border).
 ///
 /// It is subtracted on both axes before the area is divided into cells, so the grid the daemon
@@ -727,6 +778,118 @@ pub fn zoom_bar(theme: &Theme) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saturated_wheel_keeps_only_fractional_rows() {
+        use fleet_core::ids::TerminalId;
+        use gpui::{ScrollDelta, TouchPhase, point};
+        for (delta, expected) in [(f32::MAX, i32::MIN), (-f32::MAX, i32::MAX)] {
+            let mut acc = WheelAccumulator::default();
+            assert_eq!(
+                acc.steps(
+                    TerminalId(1),
+                    ScrollDelta::Lines(point(0.0, delta)),
+                    px(20.0),
+                    50,
+                    TouchPhase::Moved
+                ),
+                expected
+            );
+            assert!(acc.remainder.abs() < 1.0);
+            assert_eq!(
+                acc.steps(
+                    TerminalId(1),
+                    ScrollDelta::Lines(point(0.0, 0.0)),
+                    px(20.0),
+                    50,
+                    TouchPhase::Moved
+                ),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn focus_changes_reset_wheel_without_pointer_motion() {
+        use fleet_core::ids::TerminalId;
+        use gpui::{ScrollDelta, TouchPhase, point};
+        let mut acc = WheelAccumulator::default();
+        for next in [Some(TerminalId(2)), None] {
+            acc.steps(
+                TerminalId(1),
+                ScrollDelta::Lines(point(0.0, 0.25)),
+                px(20.0),
+                3,
+                TouchPhase::Moved,
+            );
+            acc.reconcile(Some(TerminalId(1)));
+            assert_eq!(acc.remainder, -0.75, "unchanged focus preserves momentum");
+            acc.reconcile(next);
+            acc.reconcile(Some(TerminalId(1)));
+            assert_eq!(
+                acc.remainder, 0.0,
+                "switching away and back clears momentum"
+            );
+        }
+    }
+
+    #[test]
+    fn wheel_accumulator_preserves_fractional_rows_and_reversals() {
+        use fleet_core::ids::TerminalId;
+        use gpui::{ScrollDelta, TouchPhase, point};
+        let mut acc = WheelAccumulator::default();
+        let mut pixel = |delta| {
+            acc.steps(
+                TerminalId(1),
+                ScrollDelta::Pixels(point(px(0.0), px(delta))),
+                px(20.0),
+                3,
+                TouchPhase::Moved,
+            )
+        };
+        assert_eq!(pixel(5.0), 0);
+        assert_eq!(pixel(10.0), 0);
+        assert_eq!(pixel(10.0), -1); // -0.25 remains
+        assert_eq!(pixel(-10.0), 0); // reverse to +0.25
+        assert_eq!(pixel(-20.0), 1); // +0.25 remains
+        assert_eq!(pixel(-15.0), 1); // exact row
+        assert_eq!(acc.remainder, 0.0);
+    }
+
+    #[test]
+    fn wheel_lines_pixels_and_terminal_phase_resets() {
+        use fleet_core::ids::TerminalId;
+        use gpui::{ScrollDelta, TouchPhase, point};
+        let mut acc = WheelAccumulator::default();
+        let lines = |y| ScrollDelta::Lines(point(0.0, y));
+        assert_eq!(
+            acc.steps(TerminalId(1), lines(0.5), px(20.0), 3, TouchPhase::Moved),
+            -1
+        );
+        assert_eq!(
+            acc.steps(
+                TerminalId(1),
+                ScrollDelta::Pixels(point(px(0.0), px(10.0))),
+                px(20.0),
+                3,
+                TouchPhase::Moved
+            ),
+            -1
+        );
+        for phase in [TouchPhase::Ended, TouchPhase::Cancelled] {
+            assert_eq!(acc.steps(TerminalId(1), lines(0.25), px(20.0), 3, phase), 0);
+            assert_eq!(acc.remainder, 0.0);
+        }
+        acc.steps(TerminalId(1), lines(0.25), px(20.0), 3, TouchPhase::Moved);
+        acc.point_at(TerminalId(2));
+        assert_eq!(
+            acc.steps(TerminalId(2), lines(0.25), px(20.0), 3, TouchPhase::Moved),
+            0
+        );
+        assert_eq!(
+            acc.steps(TerminalId(1), lines(0.25), px(20.0), 3, TouchPhase::Moved),
+            0
+        );
+    }
 
     #[test]
     fn frame_modes_become_zero_suppressed_badges() {
@@ -812,6 +975,7 @@ mod tests {
             cols: cols as u16,
             rows: rows.len() as u16,
             full: true,
+            shift: None,
             rows_changed: rows
                 .iter()
                 .enumerate()
@@ -989,6 +1153,47 @@ mod tests {
             viewport_cell_selection(&after, anchor, head),
             Some(GridSelection::new(0, 1, 1, 4)),
             "the same absolute endpoints move up when output advances the viewport"
+        );
+    }
+
+    #[test]
+    fn selection_and_copy_follow_wrapped_rows_through_a_shift_frame() {
+        let mut grid = grid_scrolled(&["aaaaaa", "bbbbbb", "cccccc"], 110, 10);
+        grid.wrapped[1] = true;
+        let selection = AbsoluteCellSelection::new(
+            AbsoluteCellPoint::new(101, 1),
+            AbsoluteCellPoint::new(102, 3),
+        );
+        let copied = absolute_selection_text(&grid, &BTreeMap::new(), selection);
+        assert_eq!(copied.as_deref(), Some("bbbbbcccc"));
+        let shifted = fleet_proto::terminal::FrameUpdate {
+            terminal: fleet_core::ids::TerminalId(1),
+            seq: 2,
+            cols: grid.cols,
+            rows: grid.rows,
+            full: false,
+            shift: Some(1),
+            rows_changed: vec![RowUpdate {
+                index: 2,
+                cells: "dddddd".chars().map(|c| cell(&c.to_string())).collect(),
+                wrapped: false,
+            }],
+            cursor: grid.cursor,
+            viewport: ViewportInfo {
+                offset: 9,
+                ..grid.viewport
+            },
+            modes: grid.modes,
+            title: None,
+        };
+        assert!(grid.apply(&shifted));
+        assert_eq!(
+            viewport_cell_selection(&grid, selection.start, selection.end),
+            Some(GridSelection::new(0, 1, 1, 4)),
+        );
+        assert_eq!(
+            absolute_selection_text(&grid, &BTreeMap::new(), selection),
+            copied
         );
     }
 

@@ -594,6 +594,18 @@ impl Services {
                 self.sessions.scroll(terminal, scroll).await?;
                 Ok(ResponseBody::Ack)
             }
+            RequestBody::WheelTerminal { terminal, wheel } => {
+                self.sessions.wheel(terminal, wheel).await?;
+                Ok(ResponseBody::Ack)
+            }
+            RequestBody::ScrollOrKeyTerminal {
+                terminal,
+                scroll,
+                key,
+            } => {
+                self.sessions.scroll_or_key(terminal, scroll, key).await?;
+                Ok(ResponseBody::Ack)
+            }
             RequestBody::RequestFullFrame { terminal } => {
                 self.sessions.request_full_frame(terminal).await?;
                 Ok(ResponseBody::Ack)

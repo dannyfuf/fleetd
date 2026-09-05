@@ -246,6 +246,11 @@ key_table! {
     "?",            "Workspace > Prefix" => OpenHelp;
     "escape",       "Workspace > Prefix" => prefix::Cancel;
 
+    "shift-pageup",   "Workspace > Terminal" => scroll::TerminalPageUp;
+    "shift-pagedown", "Workspace > Terminal" => scroll::TerminalPageDown;
+    "cmd-home",       "Workspace > Terminal" => scroll::TerminalTop;
+    "cmd-end",        "Workspace > Terminal" => scroll::TerminalBottom;
+
     // ---------------------------------------------------------------- Workspace › Scroll
     "j",            "Workspace > Scroll" => scroll::LineDown;
     "k",            "Workspace > Scroll" => scroll::LineUp;
@@ -478,15 +483,29 @@ mod tests {
     }
 
     #[test]
-    fn terminal_reserves_only_prefix_and_standard_clipboard_keys() {
+    fn terminal_bindings_preserve_clipboard_and_viewport_shortcuts() {
         let terminal: Vec<_> = table()
             .into_iter()
             .filter(|spec| spec.context == "Workspace > Terminal")
             .collect();
         assert_eq!(
             terminal.iter().map(|spec| spec.keys).collect::<Vec<_>>(),
-            vec!["ctrl-s", "cmd-c", "cmd-v"]
+            [
+                "ctrl-s",
+                "cmd-c",
+                "cmd-v",
+                "shift-pageup",
+                "shift-pagedown",
+                "cmd-home",
+                "cmd-end"
+            ]
         );
+        for keys in ["pageup", "pagedown", "home", "end"] {
+            assert!(
+                action_for_keystroke("Workspace > Terminal", &Keystroke::parse(keys).unwrap())
+                    .is_none()
+            );
+        }
         assert!(
             terminal.iter().all(|spec| spec.keys != "ctrl-v"),
             "ctrl-v belongs to shells and terminal applications"

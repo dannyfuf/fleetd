@@ -291,6 +291,14 @@ pub mod scroll {
     actions!(
         scroll,
         [
+            /// Shift+PageUp in Terminal mode; forwarded on the alternate screen.
+            TerminalPageUp,
+            /// Shift+PageDown in Terminal mode; forwarded on the alternate screen.
+            TerminalPageDown,
+            /// Cmd+Home in Terminal mode; forwarded on the alternate screen.
+            TerminalTop,
+            /// Cmd+End in Terminal mode; forwarded on the alternate screen.
+            TerminalBottom,
             /// `j` — move the viewport down one line.
             LineDown,
             /// `k` — move the viewport up one line.

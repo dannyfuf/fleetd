@@ -1105,7 +1105,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 | **Status** | `Local status refresh ms [2000]` (min 500) · `Remote status refresh ms [10000]` (min 500) |
 | **Windows** | read-only ordered list `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — lazygit` |
 | **Hosts** | read-only per host `devbox — ssh danny@devbox — fleet` |
-| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 2` · `E open config.json in a new terminal tab` · `Run doctor · D` |
+| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 3` · `E open config.json in a new terminal tab` · `Run doctor · D` |
 
 **[D-13]** The editable set closes §9's *"Settings cannot edit grace/rule definitions/windows/
 hosts/protocol/pool/timers/status intervals; many require JSON"* for everything a user changes
@@ -1137,7 +1137,7 @@ the app:
 > quitting Fleet (`ctrl-q`) never stops them. Only `c` in the Jobs panel, `K`, and `ctrl-shift-q`
 > stop things. Terminals do not survive a **daemon** restart.
 
-Footer: `Fleet <version> · protocol 2 · fleetd up 3h`.
+Footer: `Fleet <version> · protocol 3 · fleetd up 3h`.
 **Omitted:** prose explanations, links, a search field (the palette *is* the searchable surface).
 
 ---
@@ -1323,7 +1323,7 @@ to `circle-help` (`unknown`, never `none`), and read-only actions keep working (
  git            ok       git version 2.49.0
  gh auth        fail     gh: not logged in to github.com
  copy-on-write  ok       cp -c (APFS clonefile)
- fleetd         ok       pid 4211 · protocol 2 · up 3h
+ fleetd         ok       pid 4211 · protocol 3 · up 3h
  host devbox    fail     ssh: connect timed out after 5s
 ```
 

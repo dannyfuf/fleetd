@@ -173,6 +173,21 @@ is reversible.
 drawn over the grid are written `^s r`, `^s l`, `^s ⏎`; `cmd-c` / `cmd-v` are clipboard actions,
 not modal Workspace commands.
 
+## Wheel and viewport shortcuts
+
+| Input | Primary screen | Alternate screen |
+| --- | --- | --- |
+| Wheel / two-finger trackpad scroll | Fleet scrollback, including Claude Code with mouse tracking | Application wheel reports when tracking is enabled (e.g. OpenCode); otherwise arrow keys with DECSET 1007, or no action |
+| Shift + wheel | Application wheel reports if tracking is enabled; otherwise Fleet scrollback | Same routing as ordinary wheel |
+| Shift+PageUp / Shift+PageDown | Page up / down, outside copy mode | Forward the original modified key to the child |
+| Cmd+Home / Cmd+End | Oldest history / live bottom, outside copy mode | Forward the original modified key to the child |
+
+Trackpad movement accumulates fractional rows using measured cell height. Line-based wheels
+move three rows per step by default (`terminal.scrollLinesPerStep` in config.json). Momentum
+continues naturally. Typing or pasting returns to live bottom before input reaches the child;
+scrolling and copy-mode navigation do not. Output arriving while scrolled up preserves the
+history anchor.
+
 ## Scroll mode (inside a terminal)
 
 | Key | Action |
