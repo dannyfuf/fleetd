@@ -324,6 +324,26 @@ burst output. A two-second RPC timeout closes the copy queue so daemon failure
 cannot strand the tee threads. Child completion is still attempted when output
 reporting failed; disconnect interruption remains authoritative if already set.
 
+### Read-only watch CLI
+
+`fleet watch list [--session <id>] [--json]` calls `ListWatches`. An explicit session
+wins over `FLEET_SESSION`; if neither is available, validation fails before daemon
+autostart with `fleet watch list requires --session <id> or FLEET_SESSION`.
+Human output is one tab-separated row per watch: numeric id, single-line label,
+status (`running`, `exited N`, or `interrupted` when no exit code is available),
+RFC3339 start time, and numeric terminal id. Empty lists produce no human rows.
+JSON uses the CLI protocol-1 envelope `{"protocol":1,"watches":[...]}` with the
+existing serialized `Watch` metadata. Errors use the standard CLI error envelope.
+
+`fleet watch tail <id> [--follow]` initially calls `TailWatch` with no cursor and
+prints retained chunks as text, forwarding stderr chunks to stderr. With `--follow`,
+it polls every 250 ms from the previous response's `next_seq`, printing the final
+snapshot's output before stopping on `Exited` (including interruptions). Without
+`--follow`, it prints one snapshot. It needs no session environment variable and
+returns CLI success on completed reads, independently of the watched child's exit
+code. Output is bounded retained display text; evicted chunks cannot be recovered.
+No protocol or daemon lifecycle changes are needed for these commands.
+
 ### Workspace mirror and recovery
 
 `fleet-app::watches::Watches` owns metadata, stream-tagged lines, independent stdout
@@ -346,3 +366,16 @@ observes exit. The wire contract has no completion timestamp, so a watch first
 loaded after it has finished uses an estimated duration through discovery time;
 a client that observed the exit retains its frozen duration across reconnect.
 No wire types or daemon lifecycle behavior changed for the pane.
+
+`^s N` / `^s P` select in session-local registration order (monotonic watch IDs),
+wrap, show a hidden pane, and leave prefix mode without changing the active terminal.
+Empty sessions toast `no subagent watches`; a sole watch remains selected silently.
+The help overlay derives these entries from the authoritative keymap.
+
+Watch tabs and close controls use stateful GPUI `on_click` listeners. GPUI 0.2.2
+(Zed v1.18.1) delivers `on_mouse_up_out` during capture and clicks during bubble.
+The terminal's outside-release handler must stop propagation only when ending an
+active terminal drag; idle or already-completed selections must let sibling watch
+clicks reach bubble. The handler-path unit test covers this ownership decision,
+including retaining completed selections for copying. There is no GPUI test-app
+harness in this crate; actual pointer delivery still needs a host GUI smoke test.

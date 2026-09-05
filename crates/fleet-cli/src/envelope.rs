@@ -32,6 +32,13 @@ pub struct ListEnvelope<'a> {
     pub worktrees: &'a [Worktree],
 }
 
+/// A session's watch metadata in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct WatchesEnvelope<'a> {
+    pub protocol: u32,
+    pub watches: &'a [fleet_core::watches::Watch],
+}
+
 /// A multi-delete result compatible with swarm protocol one.
 #[derive(Debug, Serialize)]
 pub struct DeleteEnvelope<'a> {

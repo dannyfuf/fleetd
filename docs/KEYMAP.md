@@ -162,10 +162,17 @@ alone preserves them.
 | `z` | zoom: hide the session header and terminal tab strip; watch pane stays visible (toggle) |
 | `v` | hide/show the subagent watch pane; no watches → `no subagent watches` |
 | `V` | dismiss the selected exited watch; if running, hide pane and show `watch still running; pane hidden` |
+| `N` | next watch in the visible session's start order, wrapping; show the pane if hidden |
+| `P` | previous watch in the visible session's start order, wrapping; show the pane if hidden |
 | `!` | focus the sticky error slot [A18] |
 | `J` | jobs panel |
 | `?` | help overlay listing this table |
 | `Esc` | cancel prefix |
+
+Watch navigation uses uppercase `N`/`P` because lowercase `n`/`p` already move between
+terminal tabs; uppercase acts on the watch pane, mirroring `v`/`V`. With no watches,
+both keys toast `no subagent watches`. With one watch, selection is unchanged and no
+toast appears; a hidden pane is still shown. Keyboard focus stays in the terminal.
 
 **Caution [A5].** `ctrl-s s` (go to Hub, benign) and `ctrl-s S` (sleep this session, then Hub —
 kills nothing but stops the terminals) are one shift apart. This is the riskiest adjacency in
