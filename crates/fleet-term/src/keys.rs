@@ -35,6 +35,14 @@ pub fn ghostty_key_event(event: &KeyEvent) -> Result<key::Event<'static>, libgho
         Key::Char(character) => Some(character.to_string()),
         _ => None,
     });
+    // A platform key event's composed text already includes Shift (for example `shift-;`
+    // produces `:`). Ghostty needs that modifier marked consumed or Kitty keyboard mode reports
+    // the physical Shift+semicolon sequence instead of the text the user typed.
+    let consumed_mods = if event.text.is_some() && event.mods.contains(Modifiers::SHIFT) {
+        key::Mods::SHIFT
+    } else {
+        key::Mods::empty()
+    };
     result
         .set_action(match event.action {
             KeyAction::Press => key::Action::Press,
@@ -43,6 +51,7 @@ pub fn ghostty_key_event(event: &KeyEvent) -> Result<key::Event<'static>, libgho
         })
         .set_key(ghostty_key(event.key))
         .set_mods(ghostty_modifiers(event.mods))
+        .set_consumed_mods(consumed_mods)
         .set_utf8(text);
     if let Key::Char(character) = event.key {
         result.set_unshifted_codepoint(character.to_ascii_lowercase());

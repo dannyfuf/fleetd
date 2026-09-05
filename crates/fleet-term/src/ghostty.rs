@@ -16,7 +16,11 @@ use libghostty_vt::{
     render::{CellIterator, CursorVisualStyle, Dirty, RowIterator},
     screen::{CellWide, Screen},
     style::{Style, StyleColor, Underline},
-    terminal::{Mode, ScrollViewport},
+    terminal::{
+        ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
+        PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
+        TertiaryDeviceAttributes,
+    },
 };
 use tracing::warn;
 
@@ -133,6 +137,43 @@ impl VtEngine for GhosttyEngine {
             cols,
             rows,
             max_scrollback: scrollback_byte_budget(scrollback_lines),
+        }))?;
+        // Fleet maps the platform Option/Alt modifier to terminal Alt. Match conventional
+        // xterm behavior unless the child explicitly changes DEC mode 1036.
+        Self::backend(terminal.set_mode(Mode::ALT_ESC_PREFIX, true))?;
+        let pty_events = Arc::clone(&events);
+        Self::backend(terminal.on_pty_write(move |_, bytes| {
+            lock_events(&pty_events).push(EngineEvent::PtyWrite(bytes.to_vec()));
+        }))?;
+        Self::backend(terminal.on_device_attributes(|_| {
+            // Match the VT220/ANSI-color capabilities of the portable xterm-256color TERM
+            // advertised by `pty.rs`. An unanswered DA1 makes terminal applications wait for
+            // input that never comes; claiming features Fleet does not implement is worse.
+            Some(DeviceAttributes {
+                primary: PrimaryDeviceAttributes::new(
+                    ConformanceLevel::VT220,
+                    &[DeviceAttributeFeature::ANSI_COLOR],
+                ),
+                secondary: SecondaryDeviceAttributes {
+                    device_type: DeviceType::VT220,
+                    firmware_version: 0,
+                    rom_cartridge: 0,
+                },
+                tertiary: TertiaryDeviceAttributes { unit_id: 0 },
+            })
+        }))?;
+        Self::backend(
+            terminal.on_xtversion(|_| Some(concat!("fleet ", env!("CARGO_PKG_VERSION")))),
+        )?;
+        Self::backend(terminal.on_size(|terminal| {
+            Some(SizeReportSize {
+                rows: terminal.rows().ok()?,
+                columns: terminal.cols().ok()?,
+                // Fleet has no pixel geometry on the daemon side. Unit cells keep pixel reports
+                // internally consistent while the character-size report remains exact.
+                cell_width: 1,
+                cell_height: 1,
+            })
         }))?;
         let title_events = Arc::clone(&events);
         Self::backend(terminal.on_title_changed(move |terminal| {
@@ -293,7 +334,11 @@ impl VtEngine for GhosttyEngine {
         let Ok(event) = ghostty_key_event(event) else {
             return Vec::new();
         };
-        self.key_encoder.set_options_from_terminal(&self.terminal);
+        self.key_encoder
+            .set_options_from_terminal(&self.terminal)
+            // GPUI has already classified Option as terminal Alt. The Ghostty encoder resets
+            // this process-local preference while importing terminal modes, so restore it.
+            .set_macos_option_as_alt(libghostty_vt::key::OptionAsAlt::True);
         let mut output = Vec::new();
         if let Err(error) = self.key_encoder.encode_to_vec(&event, &mut output) {
             warn!(%error, "failed to encode Ghostty key event");
@@ -526,6 +571,177 @@ mod tests {
         };
         assert_eq!(engine.encode_key(&ctrl_c), b"\x03");
         assert_eq!(engine.encode_paste("hello"), b"\x1b[200~hello\x1b[201~");
+    }
+
+    #[test]
+    fn terminal_queries_are_answered_for_full_screen_apps() {
+        let mut engine = GhosttyEngine::new(80, 24, 100)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+
+        engine.feed(b"\x1b[c\x1b[>c\x1b[?7$p\x1b[6n\x1b[?u\x1b[18t\x1b[>q");
+        let replies = engine
+            .take_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::PtyWrite(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        for expected in [
+            b"\x1b[?62;22c".as_slice(),
+            b"\x1b[>1;0;0c".as_slice(),
+            b"\x1b[?7;1$y".as_slice(),
+            b"\x1b[1;1R".as_slice(),
+            b"\x1b[?0u".as_slice(),
+            b"\x1b[8;24;80t".as_slice(),
+            b"\x1bP>|fleet 0.1.0\x1b\\".as_slice(),
+        ] {
+            assert!(
+                replies.iter().any(|reply| reply == expected),
+                "missing terminal reply {expected:?}; got {replies:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nvim_mode_keys_encode_in_legacy_and_kitty_modes() {
+        let mut engine = GhosttyEngine::new(80, 24, 100)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+        let key = |key, mods, text: Option<&str>| KeyEvent {
+            key,
+            mods,
+            text: text.map(str::to_owned),
+            action: fleet_proto::terminal::KeyAction::Press,
+        };
+
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Escape,
+                fleet_proto::terminal::Modifiers::empty(),
+                None,
+            )),
+            b"\x1b"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char('i'),
+                fleet_proto::terminal::Modifiers::empty(),
+                Some("i"),
+            )),
+            b"i"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char(';'),
+                fleet_proto::terminal::Modifiers::SHIFT,
+                Some(":"),
+            )),
+            b":"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char('c'),
+                fleet_proto::terminal::Modifiers::CTRL,
+                None,
+            )),
+            b"\x03"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char('['),
+                fleet_proto::terminal::Modifiers::CTRL,
+                None,
+            )),
+            b"\x1b[91;5u"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char('x'),
+                fleet_proto::terminal::Modifiers::ALT,
+                Some("x"),
+            )),
+            b"\x1bx"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Up,
+                fleet_proto::terminal::Modifiers::SHIFT,
+                None,
+            )),
+            b"\x1b[1;2A"
+        );
+
+        // Nvim enables Kitty's disambiguation flag with CSI > 1 u. The encoder must follow
+        // that live terminal mode instead of continuing to emit an incompatible legacy mix.
+        engine.feed(b"\x1b[>1u");
+        assert_eq!(engine.modes().kitty_keyboard_flags, 1);
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Escape,
+                fleet_proto::terminal::Modifiers::empty(),
+                None,
+            )),
+            b"\x1b[27u"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char('i'),
+                fleet_proto::terminal::Modifiers::empty(),
+                Some("i"),
+            )),
+            b"i"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char(';'),
+                fleet_proto::terminal::Modifiers::SHIFT,
+                Some(":"),
+            )),
+            b":"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char('c'),
+                fleet_proto::terminal::Modifiers::CTRL,
+                None,
+            )),
+            b"\x1b[99;5u"
+        );
+        assert_eq!(
+            engine.encode_key(&key(
+                fleet_proto::terminal::Key::Char('['),
+                fleet_proto::terminal::Modifiers::CTRL,
+                None,
+            )),
+            b"\x1b[91;5u"
+        );
+    }
+
+    #[test]
+    fn modify_other_keys_encodes_ambiguous_control_keys() {
+        let mut engine = GhosttyEngine::new(80, 24, 100)
+            .unwrap_or_else(|error| panic!("failed to create engine: {error}"));
+        let shifted_semicolon = KeyEvent {
+            key: fleet_proto::terminal::Key::Char(';'),
+            mods: fleet_proto::terminal::Modifiers::SHIFT,
+            text: Some(":".to_owned()),
+            action: fleet_proto::terminal::KeyAction::Press,
+        };
+        let ctrl_i = KeyEvent {
+            key: fleet_proto::terminal::Key::Char('i'),
+            mods: fleet_proto::terminal::Modifiers::CTRL,
+            text: None,
+            action: fleet_proto::terminal::KeyAction::Press,
+        };
+
+        assert_eq!(engine.encode_key(&shifted_semicolon), b":");
+        assert_eq!(engine.encode_key(&ctrl_i), b"\x1b[105;5u");
+        engine.feed(b"\x1b[>4;2m");
+        // Shifted punctuation remains its composed text, while an ambiguous C0 control key is
+        // disambiguated exactly as xterm modifyOtherKeys level 2 specifies.
+        assert_eq!(engine.encode_key(&shifted_semicolon), b":");
+        assert_eq!(engine.encode_key(&ctrl_i), b"\x1b[27;5;105~");
     }
 
     #[test]

@@ -311,7 +311,7 @@ fn run_host(
             }
         }
 
-        forward_engine_events(engine.as_mut(), &events);
+        forward_engine_events(engine.as_mut(), &mut pty, terminal, &events);
         type_ready_commands(&mut pending_commands, &mut pty);
 
         let now = Instant::now();
@@ -436,7 +436,7 @@ fn drain_commands(
             }
         }
     }
-    forward_engine_events(engine, events);
+    forward_engine_events(engine, pty, terminal, events);
 }
 
 fn resize(pty: &Pty, engine: &mut dyn VtEngine, cols: u16, rows: u16) -> Result<(), String> {
@@ -460,9 +460,18 @@ fn type_ready_commands(pending: &mut Vec<(String, Instant)>, pty: &mut Pty) {
     }
 }
 
-fn forward_engine_events(engine: &mut dyn VtEngine, events: &Sender<HostEvent>) {
+fn forward_engine_events(
+    engine: &mut dyn VtEngine,
+    pty: &mut Pty,
+    terminal: TerminalId,
+    events: &Sender<HostEvent>,
+) {
     for event in engine.take_events() {
         let event = match event {
+            EngineEvent::PtyWrite(bytes) => {
+                write_or_warn(pty, &bytes, terminal);
+                continue;
+            }
             EngineEvent::Title(title) => HostEvent::Title(title),
             EngineEvent::Bell => HostEvent::Bell,
             EngineEvent::Cwd(cwd) => HostEvent::Cwd(cwd),
@@ -489,7 +498,7 @@ fn write_or_warn(pty: &mut Pty, bytes: &[u8], terminal: TerminalId) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::SystemTime};
 
     use super::*;
 
@@ -534,6 +543,189 @@ mod tests {
         }
         assert!(saw_ok, "no frame contained command output");
         assert!(saw_exit, "host did not report child exit");
+        host.join()
+            .unwrap_or_else(|_| panic!("terminal host thread panicked"));
+    }
+
+    #[test]
+    fn terminal_query_reply_reaches_the_pty_child() {
+        let options = TerminalHostOptions {
+            terminal: TerminalId(18),
+            pty: PtyOptions::command(
+                "/bin/sh",
+                [
+                    "-c",
+                    r#"stty raw -echo; printf '\033[6n'; dd bs=1 count=6 >/dev/null 2>&1; stty sane; printf 'GOT\n'"#,
+                ],
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+                20,
+                4,
+            ),
+            scrollback_lines: 100,
+            initial_command: None,
+        };
+        let host = TerminalHost::spawn(options)
+            .unwrap_or_else(|error| panic!("failed to spawn terminal host: {error}"));
+        let receiver = host.event_receiver();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = String::new();
+        let mut saw_exit = false;
+        while Instant::now() < deadline && !saw_exit {
+            match receiver.try_recv() {
+                Ok(HostEvent::Frame(frame)) => {
+                    for row in frame.rows_changed {
+                        output.extend(row.cells.iter().map(|cell| cell.text.as_str()));
+                        output.push('\n');
+                    }
+                }
+                Ok(HostEvent::Exited(code)) => {
+                    assert_eq!(code, Some(0));
+                    saw_exit = true;
+                }
+                Ok(_) | Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Closed) => break,
+            }
+        }
+        assert!(
+            output.contains("GOT"),
+            "the child did not receive the cursor-position response: {output:?}"
+        );
+        assert!(saw_exit, "querying child did not exit");
+        host.join()
+            .unwrap_or_else(|_| panic!("terminal host thread panicked"));
+    }
+
+    #[test]
+    fn nvim_can_enter_insert_escape_and_quit() {
+        let has_nvim = std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| directory.join("nvim").is_file())
+        });
+        if !has_nvim {
+            // The byte-level regression above always runs; this end-to-end proof is additive on
+            // developer and CI machines that have nvim installed.
+            return;
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("fleet-nvim-{nonce}"));
+        std::fs::create_dir(&directory).unwrap_or_else(|error| {
+            panic!(
+                "failed to create nvim test directory {}: {error}",
+                directory.display()
+            )
+        });
+        let path = directory.join("buffer.txt");
+        let options = TerminalHostOptions {
+            terminal: TerminalId(19),
+            pty: PtyOptions::command(
+                "nvim",
+                [
+                    "--clean".into(),
+                    "-n".into(),
+                    "-u".into(),
+                    "NONE".into(),
+                    "--cmd".into(),
+                    "set noswapfile".into(),
+                    path.as_os_str().to_owned(),
+                ],
+                directory.clone(),
+                80,
+                24,
+            ),
+            scrollback_lines: 100,
+            initial_command: None,
+        };
+        let host = TerminalHost::spawn(options)
+            .unwrap_or_else(|error| panic!("failed to spawn nvim terminal: {error}"));
+        let receiver = host.event_receiver();
+        let ready_by = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while Instant::now() < ready_by && !ready {
+            match receiver.try_recv() {
+                Ok(HostEvent::Frame(frame)) => ready = frame.modes.alt_screen,
+                Ok(HostEvent::Exited(code)) => panic!("nvim exited before input: {code:?}"),
+                Ok(_) | Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Closed) => break,
+            }
+        }
+        assert!(ready, "nvim never entered its alternate screen");
+
+        let send = |key, mods, text: Option<&str>| {
+            host.key(KeyEvent {
+                key,
+                mods,
+                text: text.map(str::to_owned),
+                action: fleet_proto::terminal::KeyAction::Press,
+            })
+            .unwrap_or_else(|error| panic!("failed to send nvim key: {error}"));
+        };
+        let plain = fleet_proto::terminal::Modifiers::empty();
+        for character in ['i', 'f', 'l', 'e', 'e', 't'] {
+            send(
+                fleet_proto::terminal::Key::Char(character),
+                plain,
+                Some(&character.to_string()),
+            );
+        }
+        send(fleet_proto::terminal::Key::Escape, plain, None);
+        send(
+            fleet_proto::terminal::Key::Char('a'),
+            fleet_proto::terminal::Modifiers::SHIFT,
+            Some("A"),
+        );
+        send(
+            fleet_proto::terminal::Key::Char('['),
+            fleet_proto::terminal::Modifiers::CTRL,
+            None,
+        );
+        send(
+            fleet_proto::terminal::Key::Char(';'),
+            fleet_proto::terminal::Modifiers::SHIFT,
+            Some(":"),
+        );
+        for character in ['w', 'q'] {
+            send(
+                fleet_proto::terminal::Key::Char(character),
+                plain,
+                Some(&character.to_string()),
+            );
+        }
+        send(fleet_proto::terminal::Key::Enter, plain, None);
+
+        let exit_by = Instant::now() + Duration::from_secs(5);
+        let mut exit = None;
+        while Instant::now() < exit_by && exit.is_none() {
+            match receiver.try_recv() {
+                Ok(HostEvent::Exited(code)) => exit = Some(code),
+                Ok(_) | Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Closed) => break,
+            }
+        }
+        if exit.is_none() {
+            let _ignored = host.kill();
+        }
+        assert_eq!(
+            exit,
+            Some(Some(0)),
+            "nvim did not accept Esc, Ctrl-[, then :wq"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("nvim did not write {}: {error}", path.display())),
+            "fleet\n"
+        );
+        std::fs::remove_file(&path)
+            .unwrap_or_else(|error| panic!("failed to remove {}: {error}", path.display()));
+        let _ignored = std::fs::remove_file(directory.join(".nvimlog"));
+        std::fs::remove_dir(&directory).unwrap_or_else(|error| {
+            panic!(
+                "failed to remove nvim test directory {}: {error}",
+                directory.display()
+            )
+        });
         host.join()
             .unwrap_or_else(|_| panic!("terminal host thread panicked"));
     }

@@ -8,6 +8,8 @@ use thiserror::Error;
 /// A terminal-side effect emitted while parsing the VT byte stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
+    /// The emulator answered a terminal query and the bytes must go back to the PTY child.
+    PtyWrite(Vec<u8>),
     /// The terminal title changed through OSC 0 or OSC 2.
     Title(String),
     /// The terminal emitted an audible or visual bell.
