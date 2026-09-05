@@ -5,7 +5,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use fleet_daemon::{
-    DaemonResult,
+    DaemonError, DaemonResult,
     jobs::JobManager,
     services::import::{Import, ImportNotifier},
     stores::{config::ConfigStore, state::StateStore},
@@ -22,6 +22,34 @@ impl ImportNotifier for CountingNotifier {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn existing_fleet_state_is_rejected_before_a_job_is_enqueued() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let fleet_home = temp.path().join(".fleet");
+    let swarm_home = temp.path().join(".swarm");
+    let files = Arc::new(FakeFiles::new(
+        fleet_home.join("trash"),
+        vec![fleet_home.join("repos"), fleet_home.join("worktrees")],
+    ));
+    let clock = Arc::new(FixedClock::new(chrono::Utc::now()));
+    let config = Arc::new(ConfigStore::new(&fleet_home, files.clone()));
+    let state = Arc::new(StateStore::new(&fleet_home, files.clone(), clock.clone()));
+    state
+        .save(fleet_core::state::default_state())
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let jobs = Arc::new(JobManager::with_clock(&fleet_home, clock));
+    let importer = Import::new(&fleet_home, swarm_home, config, state, jobs.clone(), files);
+
+    let error = importer.start().await.unwrap_err();
+
+    assert!(matches!(error, DaemonError::Conflict(_)));
+    assert!(
+        jobs.list().is_empty(),
+        "a rejected import is not a failed job"
+    );
 }
 
 #[tokio::test]

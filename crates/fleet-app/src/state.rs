@@ -669,8 +669,15 @@ pub struct AppState {
     pub daemon: DaemonLink,
     /// When the current [`DaemonLink`] was entered, for the splash and banner timings.
     pub daemon_since: Instant,
+    /// The sibling/on-path fleetd binary is newer than the connected daemon process.
+    pub daemon_outdated: bool,
     /// The authoritative daemon snapshot, absent until the first one arrives.
     pub snapshot: Option<Snapshot>,
+    /// Once a populated daemon state has been observed, FirstRun may never reappear.
+    ///
+    /// This is deliberately monotonic: a delayed, partial, or stale empty snapshot must not put
+    /// an established app back on the migration card where a terminal's bare `i` means import.
+    has_seen_non_empty_state: bool,
     /// When the snapshot was received, which is what `stale · <age>` ages (§1.3).
     pub snapshot_at: Option<Instant>,
     /// One mirror grid per attached terminal.
@@ -687,8 +694,6 @@ pub struct AppState {
     pub cursors: Cursors,
     /// The Workspace sub-mode.
     pub terminal_mode: TerminalMode,
-    /// True between `ctrl-s` and the key it prefixes. See [`AppState::prefix_saw_key`].
-    pub prefix_fresh: bool,
     /// The overlay that owns the keyboard, when any.
     pub overlay: Option<Overlay>,
     /// The filter of the focused list.
@@ -754,7 +759,9 @@ impl AppState {
             home: home.into(),
             daemon: DaemonLink::Starting,
             daemon_since: now,
+            daemon_outdated: false,
             snapshot: None,
+            has_seen_non_empty_state: false,
             snapshot_at: None,
             grids: HashMap::new(),
             screen: Screen::hub(),
@@ -763,7 +770,6 @@ impl AppState {
             scope: RepoScope::All,
             cursors: Cursors::default(),
             terminal_mode: TerminalMode::Terminal,
-            prefix_fresh: false,
             overlay: None,
             filter: FilterState::default(),
             detail_open: false,
@@ -862,9 +868,12 @@ impl AppState {
     /// Whether the first-run card replaces the whole window (§3.13).
     #[must_use]
     pub fn is_first_run(&self) -> bool {
-        self.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.contexts.is_empty() && snapshot.repos.is_empty() && snapshot.clones.is_empty()
-        })
+        !self.has_seen_non_empty_state
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.contexts.is_empty()
+                    && snapshot.repos.is_empty()
+                    && snapshot.clones.is_empty()
+            })
     }
 
     /// Whether keys typed into a terminal grid must be dropped rather than buffered (§3.12 C).
@@ -883,26 +892,7 @@ impl AppState {
     pub fn enter_prefix(&mut self) {
         if matches!(self.screen, Screen::Workspace { .. }) {
             self.terminal_mode = TerminalMode::Prefix;
-            self.prefix_fresh = true;
         }
-    }
-
-    /// Records that a keystroke was seen while the app was in `Prefix`, and returns whether
-    /// the mode changed.
-    ///
-    /// This is what makes the prefix one-shot **without a timeout**: the shell calls it for
-    /// every keystroke, including the ones an action already consumed. The first call is the
-    /// `ctrl-s` that opened the prefix, so it only disarms `prefix_fresh`; the next key —
-    /// bound or not — puts the Workspace back in Terminal mode.
-    pub fn prefix_saw_key(&mut self) -> bool {
-        if self.terminal_mode != TerminalMode::Prefix {
-            return false;
-        }
-        if self.prefix_fresh {
-            self.prefix_fresh = false;
-            return false;
-        }
-        self.leave_prefix()
     }
 
     /// Leaves the prefix, whatever the key was. Called for **every** key seen in `Prefix`,
@@ -910,7 +900,6 @@ impl AppState {
     ///
     /// Returns whether the mode actually changed.
     pub fn leave_prefix(&mut self) -> bool {
-        self.prefix_fresh = false;
         if self.terminal_mode == TerminalMode::Prefix {
             self.terminal_mode = TerminalMode::Terminal;
             true
@@ -1001,6 +990,9 @@ impl AppState {
 
     /// Replaces the snapshot mirror and re-derives everything that hangs off it.
     pub fn apply_snapshot(&mut self, snapshot: Snapshot, now: Instant) {
+        self.has_seen_non_empty_state |= !snapshot.contexts.is_empty()
+            || !snapshot.repos.is_empty()
+            || !snapshot.clones.is_empty();
         self.sticky_error =
             crate::views::sticky_error::sticky_error_for(&snapshot.jobs, &self.seen_failed);
         self.cursors.repos = clamp_cursor(self.cursors.repos, snapshot.repos.len() + 1);
@@ -1737,6 +1729,26 @@ mod tests {
     }
 
     #[test]
+    fn first_run_never_reappears_after_a_populated_snapshot() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        let mut populated = snapshot();
+        populated.contexts.push(fleet_core::model::Context {
+            id: "alpha".parse().unwrap_or_else(|error| panic!("{error}")),
+            name: "Alpha".to_owned(),
+            owners: vec!["acme".to_owned()],
+            created_at: "2026-09-05T00:00:00Z".to_owned(),
+        });
+        state.apply_snapshot(populated, now);
+        assert!(!state.is_first_run());
+
+        state.apply_snapshot(snapshot(), now);
+
+        assert!(!state.is_first_run());
+        assert_ne!(state.context_chain(), vec!["FirstRun"]);
+    }
+
+    #[test]
     fn a_failed_link_takes_the_window_and_drops_the_overlay() {
         let now = Instant::now();
         let mut state = AppState::new("/tmp/fleet", now);
@@ -1864,27 +1876,6 @@ mod tests {
         assert_eq!(state.mode().word(), ModeWord::Palette);
         state.open_overlay(Overlay::Dialog(Dialogs::Quit));
         assert_eq!(state.mode().word(), ModeWord::Dialog);
-    }
-
-    #[test]
-    fn the_prefix_leaves_on_the_key_after_ctrl_s() {
-        let now = Instant::now();
-        let mut state = AppState::new("/tmp/fleet", now);
-        state.screen = Screen::Workspace {
-            session: "payroll/feat"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        };
-        state.enter_prefix();
-
-        // The observer sees the `ctrl-s` that opened the prefix first; it only disarms.
-        assert!(!state.prefix_saw_key());
-        assert_eq!(state.mode(), Mode::Prefix);
-
-        // The next key — bound or not — ends the prefix.
-        assert!(state.prefix_saw_key());
-        assert_eq!(state.mode(), Mode::Terminal);
-        assert!(!state.prefix_saw_key());
     }
 
     #[test]

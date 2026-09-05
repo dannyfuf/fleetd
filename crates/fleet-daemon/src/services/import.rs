@@ -76,6 +76,13 @@ impl Import {
 
     /// Starts a cancellable import job and returns its initial record.
     pub async fn start(&self) -> DaemonResult<JobRecord> {
+        let destination_state = self.fleet_home.join("state.json");
+        if self.files.exists(&destination_state) {
+            return Err(DaemonError::Conflict(format!(
+                "Fleet state already exists at {}",
+                destination_state.display()
+            )));
+        }
         let fleet_home = self.fleet_home.clone();
         let swarm_home = self.swarm_home.clone();
         let config_store = Arc::clone(&self.config);
@@ -89,6 +96,8 @@ impl Import {
             true,
             false,
             move |context| async move {
+                // Keep the in-job check as a race guard: another client may create state after
+                // the synchronous preflight above but before this queued operation starts.
                 let destination_state = fleet_home.join("state.json");
                 if files.exists(&destination_state) {
                     return Err(DaemonError::Conflict(format!(

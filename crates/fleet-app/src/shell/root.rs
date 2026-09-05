@@ -8,9 +8,9 @@ use std::{
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{ActiveTheme, AppFrame, Icon, KitAssets, Theme, ThemeMode, ToastStack, Veil};
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, IntoElement, Menu,
-    MenuItem, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, prelude::*, px, size,
+    Action, AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, IntoElement,
+    Keystroke, Menu, MenuItem, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, size,
 };
 
 use crate::{
@@ -38,6 +38,27 @@ const DEFAULT_SIZE: (f32, f32) = (1280.0, 800.0);
 /// The smallest window the ladders of §2.9 are defined for.
 const MIN_SIZE: (f32, f32) = (900.0, 560.0);
 
+/// Takes the one key following `ctrl-s` from live state, even before GPUI repaints its contexts.
+fn take_live_prefix_action(
+    state: &mut AppState,
+    keystroke: &Keystroke,
+) -> (bool, Option<Box<dyn Action>>) {
+    // Overlays and daemon surfaces are allowed to shadow the Workspace even if they were opened
+    // by mouse or arrived while the prefix was live. Looking at the authoritative state chain,
+    // rather than just `terminal_mode`, keeps this interceptor out of those inner contexts.
+    if state.context_chain().as_slice() != ["Workspace", "Prefix"] {
+        return (false, None);
+    }
+    let action = keymap::action_for_keystroke("Workspace > Prefix", keystroke);
+    state.leave_prefix();
+    (true, action)
+}
+
+/// Whether the migration action is still valid at the instant its key reaches the root.
+fn first_run_import_allowed(is_first_run: bool, state_file_exists: bool) -> bool {
+    is_first_run && !state_file_exists
+}
+
 /// The root view: frame, routing, chrome, focus and the quit flow.
 pub struct Shell {
     state: Entity<AppState>,
@@ -62,18 +83,28 @@ impl Shell {
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.observe(&state, |_, _, cx| cx.notify()));
-        // The prefix is one-shot: whatever the next key was, and whether or not it matched a
-        // binding, the mode goes back to Terminal. A keystroke observer is the only hook that
-        // sees a key an action already consumed, so it is the only place this can live.
-        subscriptions.push(cx.observe_keystrokes(
-            |shell: &mut Self, _event, _window, cx: &mut Context<Self>| {
-                shell.state.update(cx, |state, cx| {
-                    if state.prefix_saw_key() {
-                        cx.notify();
-                    }
-                });
-            },
-        ));
+        // The prefix is one-shot and is driven from live state, not the last rendered context
+        // tree. The latter is necessarily one frame behind `EnterPrefix`; without this
+        // interceptor a fast (and every driver-issued) `ctrl-s s` sees `Workspace > Terminal`
+        // for both keys and silently drops the second one.
+        let prefix_state = state.clone();
+        subscriptions.push(cx.intercept_keystrokes(move |event, window, cx| {
+            let (consumed, action) = prefix_state.update(cx, |state, cx| {
+                let result = take_live_prefix_action(state, &event.keystroke);
+                if result.0 {
+                    cx.notify();
+                }
+                result
+            });
+            if !consumed {
+                return;
+            }
+            if let Some(action) = action {
+                window.dispatch_action(action, cx);
+            }
+            // The second prefix key is always consumed, bound or not, and can never reach PTY.
+            cx.stop_propagation();
+        }));
 
         let tasks = vec![Self::spawn_event_loop(&bridge, cx), Self::spawn_ticker(cx)];
 
@@ -140,7 +171,12 @@ impl Shell {
                 let now = Instant::now();
                 let ticked = shell.update(cx, |shell, cx| {
                     shell.state.update(cx, |state, cx| {
-                        if state.tick(now) {
+                        let outdated = state.snapshot.as_ref().is_some_and(|snapshot| {
+                            daemon::daemon_binary_is_newer(&snapshot.daemon.started_at)
+                        });
+                        let outdated_changed = state.daemon_outdated != outdated;
+                        state.daemon_outdated = outdated;
+                        if state.tick(now) || outdated_changed {
                             cx.notify();
                         }
                     });
@@ -255,8 +291,23 @@ impl Shell {
         &mut self,
         _: &first_run_actions::Import,
         _: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        let allowed = {
+            let state = self.state.read(cx);
+            first_run_import_allowed(state.is_first_run(), state.home.join("state.json").exists())
+        };
+        if !allowed {
+            self.state.update(cx, |state, cx| {
+                state.toast_short(
+                    "Fleet state already exists; import was not started",
+                    Icon::Info,
+                    Instant::now(),
+                );
+                cx.notify();
+            });
+            return;
+        }
         // §2.7 forbids a "job started" toast: the import reports through the job ticker and
         // the Jobs panel, and lands the user in a populated Hub when it finishes.
         self.bridge.send(RequestBody::ImportFromSwarm);
@@ -684,9 +735,11 @@ impl Shell {
 
     /// The §3.13 first-run card: a migration, not an onboarding.
     fn first_run_card(&self, state: &AppState, focus: &FocusHandle, cx: &App) -> AnyElement {
-        let has_swarm = crate::views::first_run::has_swarm_state(
-            crate::views::first_run::user_home().as_deref(),
-        );
+        let has_swarm =
+            first_run_import_allowed(state.is_first_run(), state.home.join("state.json").exists())
+                && crate::views::first_run::has_swarm_state(
+                    crate::views::first_run::user_home().as_deref(),
+                );
         div()
             .track_focus(focus)
             .size_full()
@@ -725,7 +778,7 @@ impl Render for Shell {
                 state.overlay.clone(),
                 state.screen.clone(),
                 daemon::splash(state, now, cx),
-                daemon::banner(&state.daemon, now),
+                daemon::banner(&state.daemon, state.daemon_outdated, now),
                 state.drops_terminal_keys(),
                 state.is_first_run(),
             )
@@ -1032,4 +1085,68 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_prefix_key_resolves_from_live_state_before_repaint() {
+        let mut state = AppState::new("/tmp/fleet", Instant::now());
+        state.screen = Screen::Workspace {
+            session: "owner/repo"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        state.enter_prefix();
+
+        let key = Keystroke::parse("s").unwrap_or_else(|error| panic!("{error}"));
+        let (consumed, action) = take_live_prefix_action(&mut state, &key);
+        assert!(consumed);
+        assert_eq!(
+            action
+                .unwrap_or_else(|| panic!("ctrl-s s must resolve"))
+                .name(),
+            Action::name(&prefix::GoHub)
+        );
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+
+        let unknown = Keystroke::parse("d").unwrap_or_else(|error| panic!("{error}"));
+        state.enter_prefix();
+        let (consumed, action) = take_live_prefix_action(&mut state, &unknown);
+        assert!(
+            consumed,
+            "an unknown second key is still a one-shot prefix key"
+        );
+        assert!(action.is_none());
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+    }
+
+    #[test]
+    fn live_prefix_never_steals_a_key_from_an_overlay() {
+        let mut state = AppState::new("/tmp/fleet", Instant::now());
+        state.screen = Screen::Workspace {
+            session: "owner/repo"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        state.enter_prefix();
+        state.open_overlay(Overlay::Jobs);
+
+        let key = Keystroke::parse("s").unwrap_or_else(|error| panic!("{error}"));
+        let (consumed, action) = take_live_prefix_action(&mut state, &key);
+
+        assert!(!consumed);
+        assert!(action.is_none());
+        assert_eq!(state.terminal_mode, TerminalMode::Prefix);
+    }
+
+    #[test]
+    fn import_is_rejected_for_a_stale_first_run_context_when_state_exists() {
+        assert!(first_run_import_allowed(true, false));
+        assert!(!first_run_import_allowed(true, true));
+        assert!(!first_run_import_allowed(false, false));
+        assert!(!first_run_import_allowed(false, true));
+    }
 }

@@ -112,6 +112,10 @@ fn keystroke_for(character: char) -> Keystroke {
         ' ' => ("space".to_owned(), false),
         '\t' => ("tab".to_owned(), false),
         upper if upper.is_ascii_uppercase() => (upper.to_ascii_lowercase().to_string(), true),
+        shifted if unshifted_ascii(shifted).is_some() => (
+            unshifted_ascii(shifted).unwrap_or(shifted).to_string(),
+            true,
+        ),
         other => (other.to_string(), false),
     };
     Keystroke {
@@ -120,8 +124,56 @@ fn keystroke_for(character: char) -> Keystroke {
             ..Modifiers::none()
         },
         key,
-        key_char: None,
+        key_char: (character != '\t').then(|| character.to_string()),
     }
+}
+
+/// Adds the composed text macOS supplies on a real printable `KeyDownEvent`.
+///
+/// `Window::dispatch_keystroke` does not run a synthetic keystroke through the platform's
+/// keyboard-layout translation, so the driver has to fill this field itself.
+fn with_simulated_key_char(mut keystroke: Keystroke) -> Keystroke {
+    if keystroke.key_char.is_some()
+        || keystroke.modifiers.control
+        || keystroke.modifiers.alt
+        || keystroke.modifiers.platform
+    {
+        return keystroke;
+    }
+    keystroke.key_char = match keystroke.key.as_str() {
+        "space" => Some(" ".to_owned()),
+        key if key.chars().count() == 1 => {
+            let character = key.chars().next().unwrap_or_default();
+            Some(if keystroke.modifiers.shift {
+                shifted_ascii(character).unwrap_or(character).to_string()
+            } else {
+                character.to_string()
+            })
+        }
+        _ => None,
+    };
+    keystroke
+}
+
+fn unshifted_ascii(character: char) -> Option<char> {
+    const SHIFTED: &str = "~!@#$%^&*()_+{}|:\"<>?";
+    const UNSHIFTED: &str = "`1234567890-=[]\\;',./";
+    SHIFTED
+        .chars()
+        .position(|candidate| candidate == character)
+        .and_then(|index| UNSHIFTED.chars().nth(index))
+}
+
+fn shifted_ascii(character: char) -> Option<char> {
+    const UNSHIFTED: &str = "`1234567890-=[]\\;',./";
+    const SHIFTED: &str = "~!@#$%^&*()_+{}|:\"<>?";
+    if character.is_ascii_lowercase() {
+        return Some(character.to_ascii_uppercase());
+    }
+    UNSHIFTED
+        .chars()
+        .position(|candidate| candidate == character)
+        .and_then(|index| SHIFTED.chars().nth(index))
 }
 
 /// The files one `shot` writes: `screencapture` takes one path per display, in display order.
@@ -240,6 +292,7 @@ pub fn spawn(script: PathBuf, window: &Window, cx: &App) -> Task<()> {
                 match step {
                     Step::Keys(keys) => {
                         for key in keys {
+                            let key = with_simulated_key_char(key);
                             let handled = cx.update(|window, cx| {
                                 window.dispatch_keystroke(key.clone(), cx)
                             });
@@ -361,7 +414,21 @@ mod tests {
         let keystroke = keystroke_for('A');
         assert_eq!(keystroke.key, "a");
         assert!(keystroke.modifiers.shift);
+        assert_eq!(keystroke.key_char.as_deref(), Some("A"));
         assert_eq!(keystroke_for(' ').key, "space");
+    }
+
+    #[test]
+    fn shifted_punctuation_has_the_platform_composed_text() {
+        let typed = keystroke_for(':');
+        assert_eq!(typed.key, ";");
+        assert!(typed.modifiers.shift);
+        assert_eq!(typed.key_char.as_deref(), Some(":"));
+
+        let parsed = Keystroke::parse("shift-;").expect("valid keystroke");
+        let simulated = with_simulated_key_char(parsed);
+        assert_eq!(simulated.key, ";");
+        assert_eq!(simulated.key_char.as_deref(), Some(":"));
     }
 
     #[test]

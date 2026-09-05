@@ -565,11 +565,9 @@ impl WorkspaceScreen {
                 )
             };
 
-            // An unbound key in Prefix or Scroll belongs to the mode, never to the PTY: it is
-            // dropped here. Propagation is deliberately **not** stopped — gpui runs the
-            // keystroke observers only while the event still propagates, and the shell's
-            // observer is what makes the prefix one-shot, so swallowing the event would leave
-            // an unbound `ctrl-s d` stuck in Prefix mode forever.
+            // A key in Prefix or Scroll belongs to that mode, never to the PTY. Prefix keys are
+            // normally consumed by the shell's live-state interceptor before this listener;
+            // this guard is the final backstop while the rendered tree catches up.
             if mode != TerminalMode::Terminal {
                 return;
             }
@@ -1623,6 +1621,51 @@ mod tests {
             assert_eq!(event.key, expected, "{name}");
             assert_eq!(event.text, None, "{name}");
         }
+    }
+
+    #[test]
+    fn nvim_mode_keys_survive_the_app_translation() {
+        let plain = GpuiModifiers::default();
+        assert_eq!(encoded("escape", None, plain).key, Key::Escape);
+        assert_eq!(encoded("i", Some("i"), plain).text.as_deref(), Some("i"));
+        assert_eq!(encoded("v", Some("v"), plain).text.as_deref(), Some("v"));
+        assert_eq!(encoded("up", None, plain).key, Key::Up);
+        assert_eq!(encoded("down", None, plain).key, Key::Down);
+
+        let shift = GpuiModifiers {
+            shift: true,
+            ..GpuiModifiers::default()
+        };
+        let colon = encoded(";", Some(":"), shift);
+        assert_eq!(colon.key, Key::Char(';'));
+        assert_eq!(colon.text.as_deref(), Some(":"));
+        let shift_up = encoded("up", None, shift);
+        assert_eq!(shift_up.key, Key::Up);
+        assert!(shift_up.mods.contains(Modifiers::SHIFT));
+
+        let control = GpuiModifiers {
+            control: true,
+            ..GpuiModifiers::default()
+        };
+        let ctrl_bracket = encoded("[", None, control);
+        assert_eq!(ctrl_bracket.key, Key::Char('['));
+        assert_eq!(ctrl_bracket.text, None);
+        assert!(ctrl_bracket.mods.contains(Modifiers::CTRL));
+        for key in ["c", "w"] {
+            let event = encoded(key, None, control);
+            assert_eq!(event.key, Key::Char(key.chars().next().unwrap_or_default()));
+            assert_eq!(event.text, None);
+            assert!(event.mods.contains(Modifiers::CTRL));
+        }
+
+        let alt = GpuiModifiers {
+            alt: true,
+            ..GpuiModifiers::default()
+        };
+        let alt_x = encoded("x", Some("x"), alt);
+        assert_eq!(alt_x.key, Key::Char('x'));
+        assert_eq!(alt_x.text.as_deref(), Some("x"));
+        assert!(alt_x.mods.contains(Modifiers::ALT));
     }
 
     #[test]

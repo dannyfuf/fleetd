@@ -31,7 +31,7 @@
 //!   query untypable, because bindings outrank the text input. Only `Esc` closes the palette;
 //!   see `docs/APP-CONTRACTS.md`.
 
-use gpui::{Action, App, KeyBinding};
+use gpui::{Action, App, KeyBinding, KeybindingKeystroke, Keystroke};
 
 use crate::actions::fleet::Cancel;
 use crate::actions::{
@@ -80,6 +80,31 @@ macro_rules! key_table {
                 context: $context,
                 action: Action::name(&$action),
             } ),*]
+        }
+
+        /// Resolves one keystroke against one exact key context.
+        ///
+        /// This is used by the Workspace's live prefix interceptor. GPUI's rendered context
+        /// tree is one frame behind a state change, so the second key of a fast `ctrl-s s`
+        /// cannot safely wait for `Workspace > Prefix` to be painted. Generating the resolver
+        /// from this macro keeps that fallback on the same table as ordinary key dispatch.
+        #[must_use]
+        pub fn action_for_keystroke(
+            context: &str,
+            keystroke: &Keystroke,
+        ) -> Option<Box<dyn Action>> {
+            $(
+                if context == $context && !$keys.contains(' ') {
+                    let parsed = Keystroke::parse($keys).unwrap_or_else(|error| {
+                        panic!("invalid key-table keystroke {:?}: {error}", $keys)
+                    });
+                    let target = KeybindingKeystroke::from_keystroke(parsed);
+                    if keystroke.should_match(&target) {
+                        return Some(Action::boxed_clone(&$action));
+                    }
+                }
+            )*
+            None
         }
     };
 }
@@ -467,6 +492,30 @@ mod tests {
                 && spec.keys == "ctrl-s"
                 && spec.action == "prefix::SendLiteral"
         }));
+    }
+
+    #[test]
+    fn live_prefix_resolution_uses_the_authoritative_table() {
+        for keys in ["s", "S", "ctrl-s", "1", "tab", "W", "[", "]", "escape"] {
+            let keystroke = Keystroke::parse(keys)
+                .unwrap_or_else(|error| panic!("invalid test key {keys:?}: {error}"));
+            let action = action_for_keystroke("Workspace > Prefix", &keystroke)
+                .unwrap_or_else(|| panic!("prefix key {keys:?} did not resolve"));
+            let spec = table()
+                .into_iter()
+                .find(|spec| spec.context == "Workspace > Prefix" && spec.keys == keys)
+                .unwrap_or_else(|| panic!("prefix key {keys:?} is absent from the table"));
+            assert_eq!(action.name(), spec.action, "{keys}");
+        }
+
+        assert!(
+            action_for_keystroke(
+                "Workspace > Prefix",
+                &Keystroke::parse("d").unwrap_or_else(|error| panic!("{error}"))
+            )
+            .is_none(),
+            "an unknown prefix key is consumed without inventing an action"
+        );
     }
 
     #[test]
