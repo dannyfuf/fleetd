@@ -16,6 +16,8 @@ use tokio::time::{Instant, timeout};
 use crate::{Client, ConnectError};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
+const STOP_GRACE: Duration = Duration::from_secs(2);
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A failure to discover, start, or observe the Fleet daemon.
@@ -39,6 +41,12 @@ pub enum SpawnError {
     /// The daemon did not answer a ping before the startup deadline.
     #[error("Fleet daemon did not become ready within 10 seconds")]
     Timeout,
+    /// The daemon ignored both its shutdown request and SIGTERM.
+    #[error("Fleet daemon process {pid} did not stop within 5 seconds")]
+    StopTimeout {
+        /// Live process identifier found before restart.
+        pid: u32,
+    },
     /// The daemon connected but rejected or violated the protocol handshake.
     #[error(transparent)]
     Connect(#[from] ConnectError),
@@ -103,6 +111,36 @@ pub async fn ensure_daemon(
     }
 }
 
+/// Gracefully stops the current daemon, falls back to SIGTERM, then starts the resolved binary.
+pub async fn restart_daemon(
+    home: impl AsRef<Path>,
+    fleetd_path: Option<PathBuf>,
+) -> Result<Client, SpawnError> {
+    let home = home.as_ref();
+    let pid = live_pid(home)?;
+    let graceful = match Client::connect(home).await {
+        Ok(client) => timeout(STOP_GRACE, client.daemon_shutdown(false))
+            .await
+            .is_ok_and(|result| result.is_ok()),
+        Err(_) => false,
+    };
+    if graceful && wait_until_stopped(home, pid, STOP_GRACE).await {
+        return ensure_daemon(home, fleetd_path).await;
+    }
+
+    if let Some(pid) = pid
+        && live_pid(home)? == Some(pid)
+    {
+        terminate(pid)?;
+    }
+    if !wait_until_stopped(home, pid, STOP_TIMEOUT).await {
+        return Err(SpawnError::StopTimeout {
+            pid: pid.unwrap_or_default(),
+        });
+    }
+    ensure_daemon(home, fleetd_path).await
+}
+
 /// Resolves `fleetd` from `FLEET_DAEMON`, the current executable's directory, then `PATH`.
 pub fn resolve_daemon_path() -> Result<PathBuf, io::Error> {
     if let Some(path) = env::var_os("FLEET_DAEMON") {
@@ -132,6 +170,20 @@ async fn probe_before(home: &Path, deadline: Instant) -> Option<Client> {
     timeout(remaining, probe(home)).await.ok().flatten()
 }
 
+async fn wait_until_stopped(home: &Path, pid: Option<u32>, timeout_after: Duration) -> bool {
+    let deadline = Instant::now() + timeout_after;
+    loop {
+        let process_stopped = pid.is_none_or(|pid| !process_is_alive(pid));
+        if process_stopped && !fleet_proto::paths::socket_path(home).exists() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+}
+
 fn live_pid(home: &Path) -> Result<Option<u32>, io::Error> {
     let contents = match fs::read_to_string(pid_path(home)) {
         Ok(contents) => contents,
@@ -159,6 +211,23 @@ fn process_is_alive(pid: u32) -> bool {
     // SAFETY: `kill` with signal zero does not deliver a signal and accepts any process ID.
     let result = unsafe { libc::kill(pid, 0) };
     result == 0 || io::Error::last_os_error().kind() == io::ErrorKind::PermissionDenied
+}
+
+#[cfg(unix)]
+fn terminate(pid: u32) -> Result<(), io::Error> {
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "daemon PID is out of range"))?;
+    // SAFETY: the PID was read and revalidated from this Fleet home's own pid file immediately
+    // before the signal. SIGTERM is the daemon's normal graceful-shutdown signal.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 #[cfg(unix)]

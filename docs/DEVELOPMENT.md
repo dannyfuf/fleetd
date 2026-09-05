@@ -18,6 +18,15 @@ make fmt         # format the workspace
 make clippy      # lint all targets and features with warnings denied
 ```
 
+After rebuilding `fleetd`, restart the already-running daemon with:
+
+```sh
+fleet daemon restart
+```
+
+The command requests a graceful shutdown, falls back to `SIGTERM` when the daemon cannot answer,
+waits for its socket to disappear, and starts the newly built sibling `fleetd` binary.
+
 Direct Cargo equivalents work as usual. Build artifacts use Cargo's default target directory,
 `target/` inside this repository. Sharing that repository-local directory between commands in
 the same worktree is supported. Do not point multiple worktrees at one external

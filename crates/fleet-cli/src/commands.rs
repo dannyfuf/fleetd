@@ -3,7 +3,7 @@
 use std::{ffi::OsString, path::PathBuf, str::FromStr, time::Duration};
 
 use clap::{Parser, error::ErrorKind as ClapErrorKind};
-use fleet_client::{Client, SpawnError, ensure_daemon};
+use fleet_client::{Client, SpawnError, ensure_daemon, restart_daemon};
 use fleet_core::{
     config::Agent,
     ids::{HostId, JobId, RepoId, SessionId, WorktreeId},
@@ -18,8 +18,8 @@ use fleet_proto::{
 
 use crate::{
     args::{
-        AgentChoice, Cli, Command, CreateArgs, DeleteArgs, InspectArgs, JsonArgs, KillArgs,
-        OpenArgs, PathArgs, PruneArgs, SleepArgs, VERSION_DISPLAY,
+        AgentChoice, Cli, Command, CreateArgs, DaemonCommand, DeleteArgs, InspectArgs, JsonArgs,
+        KillArgs, OpenArgs, PathArgs, PruneArgs, SleepArgs, VERSION_DISPLAY,
     },
     envelope::{
         CreateEnvelope, DeleteEnvelope, InspectEnvelope, ListEnvelope, OkEnvelope, PROTOCOL,
@@ -117,6 +117,15 @@ fn run_from(arguments: Vec<OsString>) -> i32 {
 
 async fn run_command(command: Command) -> Result<CommandOutput, ProtoError> {
     let home = fleet_home()?;
+    if matches!(
+        command,
+        Command::Daemon(crate::args::DaemonArgs {
+            command: DaemonCommand::Restart
+        })
+    ) {
+        let _client = restart_daemon(&home, None).await.map_err(spawn_error)?;
+        return Ok(CommandOutput::success("Restarted fleetd".to_owned()));
+    }
     let client = ensure_daemon(&home, None).await.map_err(spawn_error)?;
     execute(&client, command).await
 }
@@ -137,6 +146,7 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
         Command::Doctor => doctor(client).await,
         Command::Import(_) => import_from_swarm(client).await,
         Command::Update => update(client).await,
+        Command::Daemon(_) => Err(validation("daemon commands must run before connecting")),
         Command::Version => Ok(CommandOutput::success(VERSION_DISPLAY.to_owned())),
     }
 }
@@ -576,6 +586,7 @@ fn command_requests_json(command: &Command) -> bool {
         | Command::Doctor
         | Command::Import(_)
         | Command::Update
+        | Command::Daemon(_)
         | Command::Version => false,
     }
 }

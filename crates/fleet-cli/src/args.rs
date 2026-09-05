@@ -61,8 +61,25 @@ pub enum Command {
     Import(ImportArgs),
     /// Start a Fleet self-update job.
     Update,
+    /// Manage the Fleet daemon.
+    Daemon(DaemonArgs),
     /// Print Fleet's build version.
     Version,
+}
+
+/// Arguments accepted by `fleet daemon`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct DaemonArgs {
+    /// Daemon lifecycle operation.
+    #[command(subcommand)]
+    pub command: DaemonCommand,
+}
+
+/// Daemon lifecycle operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum DaemonCommand {
+    /// Gracefully stop the running daemon and start the current fleetd binary.
+    Restart,
 }
 
 /// Arguments accepted by `fleet create`.
@@ -275,6 +292,7 @@ mod tests {
             vec!["fleet", "doctor"],
             vec!["fleet", "import", "--from-swarm"],
             vec!["fleet", "update"],
+            vec!["fleet", "daemon", "restart"],
             vec!["fleet", "version"],
         ];
 
