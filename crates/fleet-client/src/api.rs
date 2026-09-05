@@ -10,6 +10,7 @@ use fleet_core::{
     sessions::{Session, Terminal, WorktreeStatus},
 };
 use fleet_proto::{
+    PROTOCOL_VERSION,
     error::{ErrorKind, ProtoError},
     event::EventKind,
     job::JobRecord,
@@ -19,7 +20,7 @@ use fleet_proto::{
         WorktreeDeleteResult,
     },
     snapshot::Snapshot,
-    terminal::{KeyEvent, MouseEvent, ScrollCommand},
+    terminal::{KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +67,7 @@ impl Client {
     pub async fn hello(&self, client: impl Into<String>) -> Result<HelloResult> {
         match self
             .request(RequestBody::Hello {
-                protocol: 1,
+                protocol: PROTOCOL_VERSION,
                 client: client.into(),
             })
             .await?
@@ -611,6 +612,27 @@ impl Client {
             self.request(RequestBody::ScrollTerminal { terminal, scroll })
                 .await?,
         )
+    }
+
+    /// Enqueues wheel input in order without waiting for the daemon's response.
+    pub async fn wheel_terminal(&self, terminal: TerminalId, wheel: WheelEvent) -> Result<()> {
+        self.request_background(RequestBody::WheelTerminal { terminal, wheel })
+            .await
+    }
+
+    /// Enqueues a viewport shortcut in order without waiting for acknowledgement.
+    pub async fn scroll_or_key_terminal(
+        &self,
+        terminal: TerminalId,
+        scroll: ScrollCommand,
+        key: KeyEvent,
+    ) -> Result<()> {
+        self.request_background(RequestBody::ScrollOrKeyTerminal {
+            terminal,
+            scroll,
+            key,
+        })
+        .await
     }
 
     /// Requests a complete frame for a terminal.

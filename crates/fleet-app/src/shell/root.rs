@@ -143,13 +143,20 @@ impl Shell {
                 let lagged = matches!(event, BridgeEvent::EventsLagged { .. });
                 let updated = shell.update(cx, |shell, cx| {
                     let stale = shell.state.update(cx, |state, cx| {
+                        let synced = state
+                            .grids
+                            .iter()
+                            .filter_map(|(id, grid)| (!grid.desynced).then_some(*id))
+                            .collect::<Vec<_>>();
                         state.apply_bridge_event(event, now);
                         cx.notify();
-                        if lagged {
-                            state.grids.keys().copied().collect()
-                        } else {
-                            Vec::new()
-                        }
+                        state
+                            .grids
+                            .iter()
+                            .filter_map(|(id, grid)| {
+                                (lagged || (grid.desynced && synced.contains(id))).then_some(*id)
+                            })
+                            .collect::<Vec<_>>()
                     });
                     for terminal in stale {
                         shell

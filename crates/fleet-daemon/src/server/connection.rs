@@ -230,7 +230,13 @@ impl Connection {
                                 break Err(error);
                             }
                         }
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // A broadcast gap does not identify which terminal lost rows.
+                            for terminal in &attached {
+                                let _ = self.services.sessions.request_full_frame(*terminal).await;
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
                     }
                 }
@@ -266,6 +272,9 @@ fn pty_input_request_is_ordered(body: &RequestBody) -> bool {
             | RequestBody::TerminalKey { .. }
             | RequestBody::TerminalMouse { .. }
             | RequestBody::PasteTerminal { .. }
+            | RequestBody::WheelTerminal { .. }
+            | RequestBody::ScrollOrKeyTerminal { .. }
+            | RequestBody::ScrollTerminal { .. }
     )
 }
 
@@ -483,6 +492,36 @@ mod tests {
             &HashSet::new()
         ));
         assert!(!event_visible(&event, &HashSet::new(), &HashSet::new()));
+    }
+
+    #[test]
+    fn wheel_and_scroll_share_the_pty_ordering_channel() {
+        use fleet_proto::terminal::{Modifiers, ScrollCommand, WheelEvent};
+        assert!(pty_input_request_is_ordered(&RequestBody::WheelTerminal {
+            terminal: TerminalId(1),
+            wheel: WheelEvent {
+                steps: -1,
+                col: 0,
+                row: 0,
+                mods: Modifiers::empty()
+            },
+        }));
+        assert!(pty_input_request_is_ordered(
+            &RequestBody::ScrollOrKeyTerminal {
+                terminal: TerminalId(1),
+                scroll: ScrollCommand::Pages(-1),
+                key: fleet_proto::terminal::KeyEvent {
+                    key: fleet_proto::terminal::Key::PageUp,
+                    mods: Modifiers::SHIFT,
+                    text: None,
+                    action: fleet_proto::terminal::KeyAction::Press,
+                },
+            }
+        ));
+        assert!(pty_input_request_is_ordered(&RequestBody::ScrollTerminal {
+            terminal: TerminalId(1),
+            scroll: ScrollCommand::Bottom,
+        }));
     }
 
     #[test]

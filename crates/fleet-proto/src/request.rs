@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::EventKind,
-    terminal::{KeyEvent, MouseEvent, ScrollCommand},
+    terminal::{KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
 
 /// A correlated client request.
@@ -380,6 +380,22 @@ pub enum RequestBody {
         /// Viewport movement.
         scroll: ScrollCommand,
     },
+    /// Route wheel input using the terminal's live screen and mouse modes.
+    WheelTerminal {
+        /// Destination terminal.
+        terminal: TerminalId,
+        /// Whole-row wheel movement and pointer context.
+        wheel: WheelEvent,
+    },
+    /// Scroll on the primary screen or forward a key on the alternate screen.
+    ScrollOrKeyTerminal {
+        /// Destination terminal.
+        terminal: TerminalId,
+        /// Primary-screen viewport movement.
+        scroll: ScrollCommand,
+        /// Alternate-screen input.
+        key: KeyEvent,
+    },
     /// Request a complete terminal frame after loss or attachment.
     RequestFullFrame {
         /// Destination terminal.
@@ -474,6 +490,25 @@ mod tests {
         let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
         let job = JobId::try_from("job-1").unwrap_or_else(|error| panic!("{error}"));
         let bodies = vec![
+            RequestBody::ScrollOrKeyTerminal {
+                terminal: TerminalId(8),
+                scroll: ScrollCommand::Pages(-1),
+                key: KeyEvent {
+                    key: crate::terminal::Key::PageUp,
+                    mods: crate::terminal::Modifiers::SHIFT,
+                    text: None,
+                    action: crate::terminal::KeyAction::Press,
+                },
+            },
+            RequestBody::WheelTerminal {
+                terminal: TerminalId(8),
+                wheel: WheelEvent {
+                    steps: -3,
+                    col: 12,
+                    row: 8,
+                    mods: crate::terminal::Modifiers::SHIFT | crate::terminal::Modifiers::SUPER,
+                },
+            },
             RequestBody::ListBaseRefs {
                 repo: repo.clone(),
                 force: true,

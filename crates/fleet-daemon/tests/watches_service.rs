@@ -178,7 +178,7 @@ async fn dropping_starter_socket_interrupts_running_watch_and_flushes_output() {
         .send(Request {
             id: 1,
             body: RequestBody::Hello {
-                protocol: 1,
+                protocol: fleet_proto::PROTOCOL_VERSION,
                 client: "watch-test".into(),
             },
         })

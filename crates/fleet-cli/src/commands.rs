@@ -647,6 +647,7 @@ mod tests {
     use std::path::Path;
 
     use fleet_proto::{
+        PROTOCOL_VERSION,
         codec::FleetCodec,
         error::{ErrorKind, ProtoError},
         job::{JobKind, JobRecord, JobStatus},
@@ -819,12 +820,18 @@ mod tests {
 
     async fn authenticate(transport: &mut ServerTransport) {
         let hello = next_request(transport).await;
-        assert!(matches!(hello.body, RequestBody::Hello { protocol: 1, .. }));
+        assert!(matches!(
+            hello.body,
+            RequestBody::Hello {
+                protocol: PROTOCOL_VERSION,
+                ..
+            }
+        ));
         send_result(
             transport,
             hello.id,
             Ok(ResponseBody::Hello {
-                protocol: 1,
+                protocol: PROTOCOL_VERSION,
                 server: "test-daemon".to_owned(),
             }),
         )

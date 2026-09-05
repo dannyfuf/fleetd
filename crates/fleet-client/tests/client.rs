@@ -3,6 +3,7 @@ use std::{path::Path, time::Duration};
 use fleet_client::{Client, TerminalUpdate, ensure_daemon};
 use fleet_core::ids::TerminalId;
 use fleet_proto::{
+    PROTOCOL_VERSION,
     codec::FleetCodec,
     event::{Event, EventKind, ToastLevel},
     request::{Request, RequestBody},
@@ -17,6 +18,83 @@ use smol_str::SmolStr;
 use tempfile::TempDir;
 use tokio::{net::UnixListener, sync::oneshot, time::timeout};
 use tokio_util::codec::Framed;
+
+#[tokio::test]
+async fn wheel_and_shortcut_are_enqueued_between_keys_without_waiting_for_a_response() {
+    use fleet_proto::terminal::{Modifiers, WheelEvent};
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let (done, release) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport, None).await;
+        let first = transport.next().await.unwrap().unwrap();
+        assert!(matches!(first.body, RequestBody::TerminalInput { bytes, .. } if bytes == b"a"));
+        let second = transport.next().await.unwrap().unwrap();
+        assert!(
+            matches!(second.body, RequestBody::WheelTerminal { wheel, .. } if wheel.steps == -3)
+        );
+        let third = transport.next().await.unwrap().unwrap();
+        assert!(matches!(
+            third.body,
+            RequestBody::ScrollOrKeyTerminal {
+                scroll: fleet_proto::terminal::ScrollCommand::Top,
+                ..
+            }
+        ));
+        let fourth = transport.next().await.unwrap().unwrap();
+        assert!(matches!(fourth.body, RequestBody::TerminalInput { bytes, .. } if bytes == b"b"));
+        // Deliberately send no acknowledgements while the caller enqueues all four.
+        release.await.unwrap();
+    });
+    let client = Client::connect(home.path()).await.unwrap();
+    timeout(Duration::from_secs(1), async {
+        client
+            .request_background(RequestBody::TerminalInput {
+                terminal: TerminalId(7),
+                bytes: b"a".to_vec(),
+            })
+            .await
+            .unwrap();
+        client
+            .wheel_terminal(
+                TerminalId(7),
+                WheelEvent {
+                    steps: -3,
+                    col: 4,
+                    row: 5,
+                    mods: Modifiers::empty(),
+                },
+            )
+            .await
+            .unwrap();
+        client
+            .scroll_or_key_terminal(
+                TerminalId(7),
+                fleet_proto::terminal::ScrollCommand::Top,
+                fleet_proto::terminal::KeyEvent {
+                    key: fleet_proto::terminal::Key::Home,
+                    mods: Modifiers::SUPER,
+                    text: None,
+                    action: fleet_proto::terminal::KeyAction::Press,
+                },
+            )
+            .await
+            .unwrap();
+        client
+            .request_background(RequestBody::TerminalInput {
+                terminal: TerminalId(7),
+                bytes: b"b".to_vec(),
+            })
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    done.send(()).unwrap();
+    server.await.unwrap();
+}
 
 type ServerTransport = Framed<tokio::net::UnixStream, FleetCodec<serde_json::Value, Request>>;
 
@@ -36,7 +114,7 @@ async fn negotiates_correlates_events_and_streams_terminal_frames() {
                 RequestBody::DaemonPing => ResponseBody::Pong,
                 RequestBody::DaemonVersion => ResponseBody::Version {
                     version: "test-daemon".to_owned(),
-                    protocol: 1,
+                    protocol: PROTOCOL_VERSION,
                 },
                 ref other => panic!("unexpected correlated request: {other:?}"),
             };
@@ -110,7 +188,7 @@ async fn negotiates_correlates_events_and_streams_terminal_frames() {
     ping.unwrap();
     let version = version.unwrap();
     assert_eq!(version.version, "test-daemon");
-    assert_eq!(version.protocol, 1);
+    assert_eq!(version.protocol, PROTOCOL_VERSION);
     assert_eq!(
         events.recv().await.unwrap(),
         Event::Toast {
@@ -268,12 +346,18 @@ async fn authenticate(
     expected_subscription: Option<Vec<EventKind>>,
 ) {
     let hello = transport.next().await.unwrap().unwrap();
-    assert!(matches!(hello.body, RequestBody::Hello { protocol: 1, .. }));
+    assert!(matches!(
+        hello.body,
+        RequestBody::Hello {
+            protocol: PROTOCOL_VERSION,
+            ..
+        }
+    ));
     send_response(
         transport,
         hello.id,
         ResponseBody::Hello {
-            protocol: 1,
+            protocol: PROTOCOL_VERSION,
             server: "test-daemon".to_owned(),
         },
     )
@@ -326,6 +410,7 @@ fn frame(terminal: u64, seq: u64, full: bool) -> FrameUpdate {
         cols: 100,
         rows: 30,
         full,
+        shift: None,
         rows_changed: vec![RowUpdate {
             index: 0,
             cells: vec![Cell {
@@ -336,6 +421,7 @@ fn frame(terminal: u64, seq: u64, full: bool) -> FrameUpdate {
                 attrs: CellAttrs::empty(),
                 width: CellWidth::Narrow,
             }],
+            wrapped: false,
         }],
         cursor: CursorState {
             row: 0,
@@ -346,6 +432,7 @@ fn frame(terminal: u64, seq: u64, full: bool) -> FrameUpdate {
         viewport: ViewportInfo {
             scrollback_len: 0,
             offset: 0,
+            history_epoch: 0,
         },
         modes: TerminalModes::default(),
         title: None,

@@ -18,9 +18,9 @@
 //!
 //! # Prefix mechanics
 //!
-//! `ctrl-s` is the Workspace's only app key: in `Workspace > Terminal` it fires
-//! [`crate::actions::workspace::EnterPrefix`] and every other key falls through to the PTY,
-//! because gpui dispatches bindings before `on_key_down` listeners. `Workspace > Prefix` is a
+//! `Workspace > Terminal` reserves `ctrl-s` plus the standard macOS clipboard keys. Every other
+//! key falls through to the PTY because gpui dispatches bindings before `on_key_down` listeners.
+//! `Workspace > Prefix` is a
 //! **one-shot** context: the shell leaves it on the next key whether or not that key matched a
 //! binding, so no timeout is needed and no key can leak into the PTY. `ctrl-s ctrl-s` sends a
 //! literal `ctrl-s`.
@@ -208,6 +208,8 @@ key_table! {
 
     // ---------------------------------------------------------------- Workspace › Terminal
     "ctrl-s",       "Workspace > Terminal" => workspace::EnterPrefix;
+    "cmd-c",        "Workspace > Terminal" => workspace::CopySelection;
+    "cmd-v",        "Workspace > Terminal" => workspace::PasteClipboard;
 
     // ---------------------------------------------------------------- Workspace › Prefix
     "ctrl-s",       "Workspace > Prefix" => prefix::SendLiteral;
@@ -245,6 +247,11 @@ key_table! {
     "J",            "Workspace > Prefix" => OpenJobs;
     "?",            "Workspace > Prefix" => OpenHelp;
     "escape",       "Workspace > Prefix" => prefix::Cancel;
+
+    "shift-pageup",   "Workspace > Terminal" => scroll::TerminalPageUp;
+    "shift-pagedown", "Workspace > Terminal" => scroll::TerminalPageDown;
+    "cmd-home",       "Workspace > Terminal" => scroll::TerminalTop;
+    "cmd-end",        "Workspace > Terminal" => scroll::TerminalBottom;
 
     // ---------------------------------------------------------------- Workspace › Scroll
     "j",            "Workspace > Scroll" => scroll::LineDown;
@@ -478,13 +485,33 @@ mod tests {
     }
 
     #[test]
-    fn prefix_is_the_only_app_key_over_a_terminal() {
+    fn terminal_bindings_preserve_clipboard_and_viewport_shortcuts() {
         let terminal: Vec<_> = table()
             .into_iter()
             .filter(|spec| spec.context == "Workspace > Terminal")
             .collect();
-        assert_eq!(terminal.len(), 1);
-        assert_eq!(terminal[0].keys, "ctrl-s");
+        assert_eq!(
+            terminal.iter().map(|spec| spec.keys).collect::<Vec<_>>(),
+            [
+                "ctrl-s",
+                "cmd-c",
+                "cmd-v",
+                "shift-pageup",
+                "shift-pagedown",
+                "cmd-home",
+                "cmd-end"
+            ]
+        );
+        for keys in ["pageup", "pagedown", "home", "end"] {
+            assert!(
+                action_for_keystroke("Workspace > Terminal", &Keystroke::parse(keys).unwrap())
+                    .is_none()
+            );
+        }
+        assert!(
+            terminal.iter().all(|spec| spec.keys != "ctrl-v"),
+            "ctrl-v belongs to shells and terminal applications"
+        );
     }
 
     #[test]

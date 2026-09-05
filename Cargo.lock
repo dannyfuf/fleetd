@@ -1713,6 +1713,7 @@ dependencies = [
  "fleet-proto",
  "libghostty-vt",
  "portable-pty",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
 ]
