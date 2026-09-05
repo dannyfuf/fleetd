@@ -1,0 +1,14 @@
+# Files pane: `S` then the third menu row (stash all including untracked).
+# Expected: one more stash entry and untracked.txt gone from the worktree.
+wait 1500
+key 2
+wait 400
+key S
+wait 700
+key j j
+wait 300
+key enter
+wait 700
+key enter
+wait 3000
+quit

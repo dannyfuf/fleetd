@@ -1,0 +1,13 @@
+# Files pane row 1 (alpha.txt), `enter` opens staging mode on the unstaged side,
+# `space` stages the hunk the cursor snapped to (the line4 change).
+# Expected: the index holds the line4 change only; line17 stays unstaged.
+wait 1500
+key 2
+wait 400
+key <
+wait 400
+key enter
+wait 1500
+key space
+wait 2500
+quit

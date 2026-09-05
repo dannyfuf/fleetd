@@ -1,0 +1,16 @@
+# Files pane row 1 (alpha.txt): `space` stages the whole file, `enter` then opens
+# staging mode on the staged side, and `space` unstages the first hunk.
+# Expected: the index keeps the line17 change; the line4 change returns to the
+# worktree.
+wait 1500
+key 2
+wait 400
+key <
+wait 400
+key space
+wait 2500
+key enter
+wait 1500
+key space
+wait 2500
+quit

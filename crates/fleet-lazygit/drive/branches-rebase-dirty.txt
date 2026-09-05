@@ -1,0 +1,15 @@
+# Branches pane: `r` on `main` (row 2) while `feature` is checked out **and the
+# worktree is dirty**. Expected: `--autostash` carries the dirt across, so the
+# rebase succeeds and alpha.txt keeps its uncommitted change afterwards.
+wait 1500
+key 3
+wait 300
+key <
+wait 200
+key j
+wait 300
+key r
+wait 500
+key enter
+wait 4000
+quit

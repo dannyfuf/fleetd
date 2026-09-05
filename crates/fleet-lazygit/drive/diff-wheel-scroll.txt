@@ -1,0 +1,34 @@
+# The wheel must scroll the diff even when the main panel is not focused, and
+# `H` / `L` must pan sideways without leaving blank rows behind.
+#
+# Files pane row 5 (long.ts, 124 added lines) is tall enough to scroll. The
+# first two wheel steps happen with the *Files* pane focused, which is the case
+# the old renderer could not serve at all.
+wait 1500
+key 2
+wait 500
+key <
+wait 400
+key j j j j
+wait 900
+wheel 25
+wait 300
+wheel 25
+wait 300
+key 0
+wait 500
+wheel -40
+wait 300
+key L L L
+wait 400
+key H H H H
+wait 400
+hwheel 12
+wait 300
+hwheel -12
+wait 300
+key G
+wait 500
+key <
+wait 500
+quit

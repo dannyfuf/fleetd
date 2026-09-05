@@ -1,0 +1,27 @@
+# `}` widens the context git prints, `{` narrows it. Three widenings turn
+# demo.ts's three hunks into one; two narrowings split them again.
+# Expected: the command log shows `-U6` and `-U2`, and nothing panics.
+wait 1500
+key 2
+wait 500
+key <
+wait 400
+key j
+wait 900
+key 0
+wait 500
+key }
+wait 900
+key }
+wait 900
+key }
+wait 900
+key {
+wait 900
+key {
+wait 900
+key {
+wait 900
+key {
+wait 900
+quit

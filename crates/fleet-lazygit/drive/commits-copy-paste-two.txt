@@ -1,0 +1,31 @@
+# `c` on `feature`'s row 2 (f1) and row 1 (f2) marks both, then `main` is checked
+# out and `v` + `enter` cherry-picks the pair in that order.
+# Expected: main gains f1 then f2.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key c
+wait 400
+key k
+wait 300
+key c
+wait 500
+key 3
+wait 600
+key <
+wait 200
+key j
+wait 300
+key space
+wait 2500
+key 4
+wait 800
+key v
+wait 500
+key enter
+wait 3500
+quit

@@ -1,0 +1,20 @@
+# With the `/` filter prompt open a printable key types into the filter instead
+# of firing a row: `S` opens the stash menu, `/` starts filtering, `untracked`
+# narrows it to one row (the `u` and the `a` in that word must not run the
+# "including untracked" and "all changes" rows), and `enter` runs what is left.
+# Expected: a second stash entry and untracked.txt gone — the filtered row ran
+# exactly once.
+wait 1500
+key 2
+wait 400
+key S
+wait 700
+key /
+wait 400
+type untracked
+wait 600
+key enter
+wait 700
+key enter
+wait 3000
+quit

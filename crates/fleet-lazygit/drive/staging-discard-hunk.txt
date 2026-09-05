@@ -1,0 +1,14 @@
+# Files pane row 1 (alpha.txt), `enter` then `d` + `enter` discards the first
+# hunk. Expected: line4 is back to "line4" and line17 keeps its DIRTY suffix.
+wait 1500
+key 2
+wait 400
+key <
+wait 400
+key enter
+wait 1500
+key d
+wait 600
+key enter
+wait 2500
+quit

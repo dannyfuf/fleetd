@@ -1,0 +1,21 @@
+# Branches pane: `r` on `main` (row 2) while `feature` is checked out and both
+# branches touched the same line. Expected: the rebase stops with a conflict and
+# REBASING; `m` then the third menu row (abort) restores feature's original tip.
+wait 1500
+key 3
+wait 300
+key <
+wait 200
+key j
+wait 300
+key r
+wait 500
+key enter
+wait 3000
+key m
+wait 700
+key j j
+wait 300
+key enter
+wait 3000
+quit

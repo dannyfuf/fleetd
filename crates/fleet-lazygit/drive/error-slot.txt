@@ -1,0 +1,20 @@
+# `n` in the Branches pane with a name that already exists makes git fail.
+# Expected: the status bar's error slot shows git's stderr ("a branch named
+# 'main' already exists") and the app still works — the following `space` checks
+# `feature` out (row 2, under the checked-out `main`).
+wait 1500
+key 3
+wait 400
+key n
+wait 700
+type main
+wait 300
+key enter
+wait 2500
+key <
+wait 200
+key j
+wait 300
+key space
+wait 2500
+quit

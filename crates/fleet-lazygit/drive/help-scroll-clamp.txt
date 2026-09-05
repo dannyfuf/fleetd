@@ -1,0 +1,22 @@
+# `?` opens the generated help; forty `j` presses must stop at the last page
+# instead of scrolling into an empty dialog, and `esc` closes it. Expected: the
+# dialog still shows its last rows in the screenshot, and the app keeps working
+# afterwards (the trailing `2` focuses the Files pane).
+wait 1500
+key 3
+wait 400
+key ?
+wait 800
+key j j j j j j j j j j
+wait 300
+key j j j j j j j j j j
+wait 300
+key j j j j j j j j j j
+wait 300
+key j j j j j j j j j j
+wait 500
+key escape
+wait 500
+key 2
+wait 500
+quit

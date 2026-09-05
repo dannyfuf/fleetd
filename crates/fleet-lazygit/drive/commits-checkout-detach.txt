@@ -1,0 +1,22 @@
+# Commits pane: `space` on row 2 (c3) then `enter` detaches HEAD there; then the
+# Branches pane checks `main` back out (`3`, row 1 — with HEAD detached the list is
+# ordered by checkout recency and `main` is the most recent).
+# Expected: HEAD ends up on main again after passing through a detached c3.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key space
+wait 500
+key enter
+wait 2500
+key 3
+wait 600
+key <
+wait 300
+key space
+wait 2500
+quit

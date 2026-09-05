@@ -1,0 +1,9 @@
+# Files pane, `tree` repository: the default tree layout, with `pkg` and the
+# compressed `src/app/deep` chain above the root-level files. Screenshot only —
+# the assertion is that the app renders it without touching the repository.
+wait 1500
+key 2
+wait 600
+shot /private/tmp/claude-501/-Users-danny--swarm-worktrees-dannyfuf-fleetd-lazygit/a9a6b104-1a54-433f-b4fa-2e71c0f146fa/scratchpad/shots3/drive-tree.png
+wait 400
+quit

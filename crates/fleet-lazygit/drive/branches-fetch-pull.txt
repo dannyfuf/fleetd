@@ -1,0 +1,10 @@
+# Branches pane: `f` fetch then `p` pull. Expected: origin/main advances to the
+# commit the bare origin gained, then main fast-forwards onto it.
+wait 1500
+key 3
+wait 300
+key f
+wait 2500
+key p
+wait 3000
+quit

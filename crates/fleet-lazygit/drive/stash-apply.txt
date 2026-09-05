@@ -1,0 +1,10 @@
+# Stash pane: `space` applies stash@{0} ("wip beta").
+# Expected: beta.txt gains "stashed content" and the entry is still listed.
+wait 1500
+key 5
+wait 500
+key <
+wait 300
+key space
+wait 2500
+quit

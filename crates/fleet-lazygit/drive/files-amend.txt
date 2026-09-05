@@ -1,0 +1,10 @@
+# Files pane: `A` + `enter` amends HEAD with the staged gamma.txt change.
+# Expected: still four commits and HEAD's gamma.txt is "staged change".
+wait 1500
+key 2
+wait 400
+key A
+wait 500
+key enter
+wait 3000
+quit

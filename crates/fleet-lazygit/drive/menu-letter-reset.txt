@@ -1,0 +1,17 @@
+# The reset menu's letters work the same way: `g` on row 3 (c2) opens it and `s`
+# runs the soft reset straight away; `enter` accepts the confirmation.
+# Expected: HEAD is c2 and c3+c4's content is staged.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j j
+wait 400
+key g
+wait 700
+key s
+wait 700
+key enter
+wait 2500
+quit

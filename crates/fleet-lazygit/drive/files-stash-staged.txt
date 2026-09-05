@@ -1,0 +1,15 @@
+# Files pane: `S` then the second menu row (stash staged changes) and `enter`
+# with no message. Expected: one more stash entry; gamma.txt is back to its
+# committed content while alpha.txt stays dirty.
+wait 1500
+key 2
+wait 400
+key S
+wait 700
+key j
+wait 300
+key enter
+wait 700
+key enter
+wait 3000
+quit

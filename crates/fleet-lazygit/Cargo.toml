@@ -1,0 +1,23 @@
+[package]
+name = "fleet-lazygit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fleet-lazygit"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+fleet-git = { path = "../fleet-git" }
+fleet-ui-kit = { path = "../fleet-ui-kit" }
+gpui.workspace = true
+gpui_platform.workspace = true
+similar.workspace = true
+syntect.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+two-face.workspace = true

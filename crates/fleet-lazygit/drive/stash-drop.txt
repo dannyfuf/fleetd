@@ -1,0 +1,12 @@
+# Stash pane: `d` + `enter` drops stash@{0}.
+# Expected: the stash list is empty and beta.txt is untouched.
+wait 1500
+key 5
+wait 500
+key <
+wait 300
+key d
+wait 500
+key enter
+wait 2500
+quit

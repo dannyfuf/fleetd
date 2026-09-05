@@ -1,0 +1,8 @@
+# Branches pane: `P` push. Expected: origin/main advances to the local main tip
+# (the branch already has an upstream, so no prompt appears).
+wait 1500
+key 3
+wait 300
+key P
+wait 3000
+quit

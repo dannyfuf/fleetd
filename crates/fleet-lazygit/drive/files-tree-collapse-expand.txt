@@ -1,0 +1,19 @@
+# Files pane, `tree` repository: `-` collapses every directory, `=` expands them
+# all again, so one `j` lands back on `pkg/three.txt`; `space` there unstages it.
+# Expected: pkg/three.txt leaves the index while gamma.txt stays in it — had `-`
+# left the tree collapsed, `j` would have landed on the `src/app/deep` directory
+# and `space` would have staged its files instead.
+wait 1500
+key 2
+wait 400
+key -
+wait 500
+key =
+wait 500
+key <
+wait 200
+key j
+wait 400
+key space
+wait 2500
+quit

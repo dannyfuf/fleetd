@@ -1,0 +1,13 @@
+# Files pane on a repo stopped mid-merge: `enter` on the one conflicted file
+# opens the conflict view, `t` keeps theirs.
+# Expected: conflict.txt is "theirs", staged, and no longer conflicted.
+wait 1500
+key 2
+wait 500
+key <
+wait 400
+key enter
+wait 1500
+key t
+wait 2500
+quit

@@ -1,0 +1,12 @@
+# Stash pane: `enter` shows stash@{0}'s diff in the main panel and `j` scrolls it.
+# Expected: no error and the command log shows `git stash show -p`.
+wait 1500
+key 5
+wait 500
+key <
+wait 300
+key enter
+wait 1500
+key j j j
+wait 500
+quit

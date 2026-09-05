@@ -1,0 +1,14 @@
+# Branches pane: `u` on `main` (row 1), then the second menu row (unset upstream).
+# Expected: `main` loses its upstream (`git rev-parse main@{upstream}` fails).
+wait 1500
+key 3
+wait 300
+key <
+wait 400
+key u
+wait 700
+key j
+wait 300
+key enter
+wait 2000
+quit

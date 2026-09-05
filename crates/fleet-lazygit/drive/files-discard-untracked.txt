@@ -1,0 +1,12 @@
+# Files pane: `d` + `enter` on row 3 (untracked.txt).
+# Expected: untracked.txt is deleted from the worktree.
+wait 1500
+key 2
+wait 400
+key >
+wait 300
+key d
+wait 500
+key enter
+wait 2500
+quit

@@ -1,0 +1,27 @@
+# Same conflicting rebase (`r` on `main`, row 2), resolved instead of aborted:
+# take theirs in the conflict view (`2` files, `enter`, `t`), then `m` + first menu
+# row (continue). Expected: the rebase finishes and feature sits on top of main.
+wait 1500
+key 3
+wait 300
+key <
+wait 200
+key j
+wait 300
+key r
+wait 500
+key enter
+wait 3000
+key 2
+wait 600
+key <
+wait 300
+key enter
+wait 1200
+key t
+wait 2000
+key m
+wait 700
+key enter
+wait 3500
+quit

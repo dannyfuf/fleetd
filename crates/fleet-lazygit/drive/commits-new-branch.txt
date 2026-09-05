@@ -1,0 +1,16 @@
+# Commits pane: `n` on row 2 (c3) creates and checks out a branch there.
+# Expected: `topic` exists at c3 and is HEAD.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key n
+wait 700
+type topic
+wait 300
+key enter
+wait 2500
+quit

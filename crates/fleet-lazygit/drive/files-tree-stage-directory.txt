@@ -1,0 +1,15 @@
+# Files pane, `tree` repository: `space` on the `src/app/deep` directory row
+# (row 3, after `pkg` and its file) stages every file under it.
+# Expected: src/app/deep/one.txt and src/app/deep/new.txt are both in the index.
+wait 1500
+key 2
+wait 400
+key <
+wait 200
+key j
+wait 200
+key j
+wait 400
+key space
+wait 2500
+quit

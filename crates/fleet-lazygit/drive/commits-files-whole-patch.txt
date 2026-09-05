@@ -1,0 +1,21 @@
+# Commit-files view: the whole-commit patch stays reachable from the header row.
+# `enter` opens the view (header row, whole patch), `j` moves onto the file (its
+# own patch), `<` goes back to the header row and `enter` re-reads the whole
+# patch there. Expected: no error slot, and two whole-commit `git show` lines in
+# the command log.
+wait 1500
+key 4
+wait 400
+key <
+wait 400
+key enter
+wait 1800
+key j
+wait 1200
+key <
+wait 800
+key enter
+wait 1500
+key escape
+wait 600
+quit

@@ -1,0 +1,18 @@
+# Branches pane: `d` on the unmerged branch `feature` (row 2 — row 1 is the
+# checked-out `main`) and `enter`. The safe delete fails, which raises the force
+# dialog; the second `enter` accepts it.
+# Expected: `feature` is gone and `git branch -D` ran.
+wait 1500
+key 3
+wait 300
+key <
+wait 200
+key j
+wait 300
+key d
+wait 400
+key enter
+wait 2500
+key enter
+wait 2500
+quit

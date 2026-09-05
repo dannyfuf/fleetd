@@ -1,0 +1,18 @@
+# Files pane row 1 (alpha.txt), `enter` then `space` twice stages both hunks.
+# Expected: with the unstaged side empty the staging view moves to the staged
+# side rather than showing "no changes"; a third `space` unstages the first hunk
+# again, which proves the side really switched.
+wait 1500
+key 2
+wait 400
+key <
+wait 400
+key enter
+wait 1500
+key space
+wait 2200
+key space
+wait 2500
+key space
+wait 2500
+quit

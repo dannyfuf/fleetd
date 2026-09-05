@@ -1,0 +1,21 @@
+# Reflog tab: `c` on row 2 (the `commit: z1 lost commit` entry), then back to the
+# Commits tab (`[`) and `v` + `enter`.
+# Expected: main gains a commit with the lost commit's content (lost.txt).
+wait 1500
+key 4
+wait 400
+key ]
+wait 600
+key <
+wait 200
+key j
+wait 300
+key c
+wait 500
+key [
+wait 600
+key v
+wait 500
+key enter
+wait 3000
+quit

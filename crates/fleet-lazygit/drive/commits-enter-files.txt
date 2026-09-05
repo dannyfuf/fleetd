@@ -1,0 +1,20 @@
+# Commits pane: `enter` on row 1 opens lazygit's commit-files view in the main
+# panel. The header row is selected first, so the whole-commit patch shows; `j`
+# steps onto the commit's one file and the panel switches to that file's patch;
+# `esc` returns to the pane.
+# Expected: no error slot; the command log shows `git diff-tree`, a whole-commit
+# `git show` and a path-restricted `git show … -- gamma.txt`.
+wait 1500
+key 4
+wait 400
+key <
+wait 400
+key enter
+wait 1800
+key j
+wait 1500
+key ctrl-d
+wait 400
+key escape
+wait 800
+quit

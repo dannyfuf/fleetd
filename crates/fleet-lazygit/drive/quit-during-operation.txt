@@ -1,0 +1,10 @@
+# Run this on a repository that is already stopped mid-rebase — drive
+# `commits-edit-stop.txt` over a `make-repo.sh <dir> clean` tree first.
+# `q` then asks before quitting (an operation is in progress) and `y` accepts.
+# Expected: the process exits and `.git/rebase-merge` is left exactly as it was.
+wait 2000
+key q
+wait 1000
+key y
+wait 2000
+quit

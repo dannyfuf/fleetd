@@ -1,0 +1,16 @@
+# Commits pane: `g` on row 3 (c2) then the first menu row (soft) and `enter`.
+# Expected: HEAD is c2 and c3+c4's content is staged in the index.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j j
+wait 300
+key g
+wait 700
+key enter
+wait 500
+key enter
+wait 2500
+quit

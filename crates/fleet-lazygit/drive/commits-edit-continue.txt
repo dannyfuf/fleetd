@@ -1,0 +1,17 @@
+# Commits pane: `e` on row 2 (c3) stops an interactive rebase there, then `m`
+# plus the first menu row continues it. Expected: REBASING while stopped, and
+# afterwards the same four commits with no rebase directory left behind.
+wait 1500
+key 4
+wait 400
+key <
+wait 200
+key j
+wait 300
+key e
+wait 3000
+key m
+wait 700
+key enter
+wait 3500
+quit

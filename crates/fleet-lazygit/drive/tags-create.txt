@@ -1,0 +1,14 @@
+# Tags tab (`3` then `]` twice): `n` creates the tag `v2.0` at HEAD.
+# Expected: `git tag -l` gains v2.0 and it points at HEAD.
+wait 1500
+key 3
+wait 300
+key ] ]
+wait 500
+key n
+wait 700
+type v2.0
+wait 300
+key enter
+wait 2000
+quit
