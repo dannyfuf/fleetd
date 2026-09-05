@@ -27,6 +27,55 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RequestBody {
+    /// Register a child watch under an existing terminal.
+    StartWatch {
+        /// Parent terminal.
+        terminal: fleet_core::ids::TerminalId,
+        /// Display label.
+        label: String,
+        /// Child argv.
+        command: Vec<String>,
+        /// Child working directory.
+        cwd: Option<std::path::PathBuf>,
+        /// Child process id.
+        pid: Option<u32>,
+    },
+    /// Append a lossy display copy of child output.
+    AppendWatchOutput {
+        /// Watch identifier.
+        watch: fleet_core::watches::WatchId,
+        /// Original channel.
+        stream: fleet_core::watches::WatchStream,
+        /// Output text.
+        text: String,
+    },
+    /// Report child completion.
+    FinishWatch {
+        /// Watch identifier.
+        watch: fleet_core::watches::WatchId,
+        /// Normal exit code.
+        code: Option<i32>,
+        /// Terminating signal.
+        signal: Option<i32>,
+    },
+    /// List running and retained finished watches for a session.
+    ListWatches {
+        /// Owning session.
+        session: SessionId,
+    },
+    /// Catch up from an inclusive sequence cursor.
+    TailWatch {
+        /// Watch identifier.
+        watch: fleet_core::watches::WatchId,
+        /// Inclusive cursor; None returns all retained output.
+        from_seq: Option<u64>,
+    },
+    /// Remove a finished watch. Running watches return Conflict; no process is killed.
+    DismissWatch {
+        /// Watch identifier.
+        watch: fleet_core::watches::WatchId,
+    },
+
     /// Negotiate the protocol immediately after connecting.
     Hello {
         /// Client protocol version.

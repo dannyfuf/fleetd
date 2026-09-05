@@ -12,3 +12,4 @@ pub mod request;
 pub mod response;
 pub mod snapshot;
 pub mod terminal;
+pub mod watch;
