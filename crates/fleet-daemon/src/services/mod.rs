@@ -11,7 +11,7 @@ use fleet_core::{ids::RepoId, paths::slot_path, sessions::WorktreeStatus};
 use fleet_proto::{
     request::RequestBody,
     response::ResponseBody,
-    snapshot::{DaemonInfo, HostStatus, PoolStatus, Snapshot},
+    snapshot::{DaemonInfo, PoolStatus, Snapshot},
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -27,6 +27,7 @@ use crate::{
 pub mod contexts;
 pub mod doctor;
 pub mod github;
+pub mod hosts;
 pub mod import;
 pub mod inspect;
 pub mod pool;
@@ -40,6 +41,7 @@ pub mod worktrees;
 use contexts::Contexts;
 use doctor::Doctor;
 use github::Github;
+use hosts::Hosts;
 use import::{Import, ImportNotifier};
 use inspect::Inspect;
 use pool::Pool;
@@ -71,6 +73,8 @@ pub struct Services {
     pub pool: Pool,
     /// GitHub and pull-request service.
     pub github: Github,
+    /// Remote-host reachability cache.
+    pub hosts: Hosts,
     /// Runtime PTY session service.
     pub sessions: Sessions,
     /// Session sleep-policy service.
@@ -267,7 +271,9 @@ impl Services {
                 .nth(2)
                 .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR"))),
         );
+        let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
         Self {
+            hosts,
             home,
             started_at: chrono::Utc::now().to_rfc3339(),
             contexts: Contexts::new(Arc::clone(&state)),
@@ -322,17 +328,7 @@ impl Services {
                 }
             })
             .collect();
-        let hosts = config
-            .hosts
-            .keys()
-            .cloned()
-            .map(|id| HostStatus {
-                id,
-                reachable: false,
-                checked_at: generated_at.clone(),
-                error: Some("remote hosts are not supported yet".to_owned()),
-            })
-            .collect();
+        let hosts = self.hosts.snapshot(&config, &generated_at).await;
         Ok(Snapshot {
             generated_at,
             contexts: state.contexts,
@@ -674,7 +670,7 @@ impl Services {
         self.repos.delete_guarded(repo).await
     }
 
-    /// Starts status, prepared-pool, and PR-cache maintenance loops.
+    /// Starts status, host, prepared-pool, and PR-cache maintenance loops.
     pub async fn start_periodic_tasks(
         self: &Arc<Self>,
         events: BroadcastBus,
@@ -693,6 +689,15 @@ impl Services {
             shutdown.clone(),
             status_every,
         )));
+
+        if !config.hosts.is_empty() {
+            handles.push(tokio::spawn(run_host_refresh(
+                Arc::clone(self),
+                events.clone(),
+                shutdown.clone(),
+                Duration::from_secs(60),
+            )));
+        }
 
         if config.hot_pool_size > 0 && config.hot_refresh_interval_ms > 0 {
             handles.push(tokio::spawn(run_pool_refresh(
@@ -860,6 +865,44 @@ async fn run_status_refresh(
     }
 }
 
+async fn run_host_refresh(
+    services: Arc<Services>,
+    events: BroadcastBus,
+    shutdown: CancellationToken,
+    every: Duration,
+) {
+    let mut interval = tokio::time::interval(every);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut previous = BTreeMap::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            _ = interval.tick() => {}
+        }
+        let refresh = async {
+            let config = services.config.load().await?;
+            let results = services.hosts.probe_all(&config).await;
+            let current = results
+                .into_iter()
+                .map(|(id, status)| (id, (status.reachable, status.error)))
+                .collect::<BTreeMap<_, _>>();
+            if current != previous {
+                previous = current;
+                events.request_snapshot(Arc::clone(&services));
+            }
+            Ok::<(), DaemonError>(())
+        };
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            result = refresh => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "periodic host refresh failed");
+                }
+            }
+        }
+    }
+}
+
 async fn run_pool_refresh(
     services: Arc<Services>,
     events: BroadcastBus,
@@ -964,4 +1007,110 @@ fn expire_cache_files(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod host_refresh_tests {
+    use super::*;
+    use crate::{
+        adapters::{clock::SystemClock, shell::ShellResult},
+        testing::fakes::{FakeFiles, FakeShell},
+    };
+    use fleet_proto::event::Event;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn host_refresh_publishes_changes_but_not_new_timestamps() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let home = temp.path();
+        let files = Arc::new(FakeFiles::new(
+            home.join("trash"),
+            vec![home.join("worktrees")],
+        ));
+        let config = Arc::new(ConfigStore::new(home, files.clone()));
+        config
+            .update(serde_json::json!({
+                "hosts": {"dev-box": {"ssh": "arch-dev", "swarmCommand": "swarm"}}
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let shell = Arc::new(FakeShell::new());
+        let online = Arc::new(AtomicBool::new(true));
+        let health = Arc::clone(&online);
+        shell.when(
+            move |_| health.load(Ordering::SeqCst),
+            ShellResult {
+                status: 0,
+                stdout: r#"{"protocol":1}"#.to_owned(),
+                stderr: String::new(),
+            },
+        );
+        shell.when(
+            |_| true,
+            ShellResult {
+                status: 255,
+                stdout: String::new(),
+                stderr: "Connection refused".to_owned(),
+            },
+        );
+        let mut adapters = Adapters::system(files.clone());
+        adapters.shell = shell.clone();
+        let services = Arc::new(Services::new(
+            home,
+            config,
+            Arc::new(StateStore::new(home, files, Arc::new(SystemClock))),
+            Arc::new(JobManager::new(home)),
+            adapters,
+        ));
+        let pending = services
+            .snapshot()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(pending.hosts[0].error.as_deref(), Some("probe pending"));
+        assert_eq!(pending.hosts[0].checked_at, pending.generated_at);
+        let events = BroadcastBus::default();
+        let mut receiver = events.subscribe();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run_host_refresh(
+            services,
+            events,
+            shutdown.clone(),
+            Duration::from_millis(10),
+        ));
+        let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let Event::SnapshotChanged(snapshot) = event else {
+            panic!("expected snapshot");
+        };
+        assert!(snapshot.hosts[0].reachable);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            shell.calls().len() > 1,
+            "must have refreshed unchanged results"
+        );
+        online.store(false, Ordering::SeqCst);
+        let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let Event::SnapshotChanged(snapshot) = event else {
+            panic!("expected snapshot");
+        };
+        assert!(!snapshot.hosts[0].reachable);
+        assert_eq!(
+            snapshot.hosts[0].error.as_deref(),
+            Some("Connection refused")
+        );
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
 }
