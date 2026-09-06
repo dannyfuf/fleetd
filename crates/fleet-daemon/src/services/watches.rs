@@ -1,9 +1,9 @@
-//! Runtime-only cooperative watches. All mutations and publication share one lock.
+//! Runtime-only cooperative and discovered watches. Mutations share one lock.
 
 use crate::{DaemonError, DaemonResult, server::BroadcastBus};
 use fleet_core::{
     ids::{SessionId, TerminalId},
-    watches::{Watch, WatchBuffer, WatchId, WatchStatus, WatchStream},
+    watches::{Watch, WatchBuffer, WatchId, WatchSource, WatchStatus, WatchStream},
 };
 use fleet_proto::{event::Event, watch::WatchTail};
 use std::{
@@ -18,7 +18,7 @@ struct Entry {
     watch: Watch,
     output: WatchBuffer,
     published_seq: u64,
-    owner: u64,
+    owner: Option<u64>,
     finished_at: Option<Instant>,
 }
 #[derive(Default)]
@@ -66,35 +66,117 @@ impl Watches {
         }
     }
     pub(crate) fn start(&self, owner: u64, mut watch: Watch) -> WatchId {
+        watch.source = WatchSource::Cooperative;
+        watch.log_file = None;
+        self.insert(Some(owner), watch, None)
+    }
+    pub(crate) fn start_discovered(
+        &self,
+        watch: Watch,
+        initial_output: Option<String>,
+    ) -> Option<WatchId> {
+        let pid = watch.pid?;
         let mut r = self.lock();
-        r.next_id += 1;
-        watch.id = WatchId(r.next_id);
-        let id = watch.id;
-        r.sessions
-            .entry(watch.session.clone())
-            .or_default()
-            .insert(id);
-        r.terminals.entry(watch.terminal).or_default().insert(id);
-        r.publish(Event::WatchStarted(watch.clone()));
-        r.entries.insert(
-            id,
-            Entry {
-                watch,
-                output: WatchBuffer::default(),
-                published_seq: 0,
-                owner,
-                finished_at: None,
-            },
-        );
-        id
+        if r.entries.values().any(|entry| entry.watch.pid == Some(pid)) {
+            return None;
+        }
+        Some(r.insert(None, watch, initial_output))
+    }
+    fn insert(&self, owner: Option<u64>, watch: Watch, initial_output: Option<String>) -> WatchId {
+        let mut r = self.lock();
+        r.insert(owner, watch, initial_output)
+    }
+    pub(crate) fn watch_for_pid(&self, pid: u32) -> Option<Watch> {
+        self.lock()
+            .entries
+            .values()
+            .find(|entry| entry.watch.pid == Some(pid))
+            .map(|entry| entry.watch.clone())
+    }
+    pub(crate) fn update_discovered(
+        &self,
+        id: WatchId,
+        label: String,
+        log_file: Option<std::path::PathBuf>,
+    ) -> DaemonResult<()> {
+        let mut r = self.lock();
+        let changed = {
+            let entry = r.entry(id)?;
+            if entry.watch.source != WatchSource::Discovered {
+                return Err(DaemonError::Conflict("watch is not discovered".into()));
+            }
+            if entry.watch.label == label && entry.watch.log_file == log_file {
+                None
+            } else {
+                entry.watch.label = label;
+                entry.watch.log_file = log_file;
+                Some(entry.watch.clone())
+            }
+        };
+        if let Some(watch) = changed {
+            // Duplicate starts are metadata upserts in clients and do not reopen a hidden pane.
+            r.publish(Event::WatchStarted(watch));
+        }
+        Ok(())
+    }
+    pub(crate) fn finish_discovered(&self, id: WatchId, code: Option<i32>) -> DaemonResult<()> {
+        let mut r = self.lock();
+        if r.entry(id)?.watch.source != WatchSource::Discovered {
+            return Err(DaemonError::Conflict("watch is not discovered".into()));
+        }
+        r.finish(id, code, None, Instant::now())
+    }
+    pub(crate) fn append_discovered(&self, id: WatchId, text: String) -> DaemonResult<()> {
+        let mut r = self.lock();
+        let entry = r.entry(id)?;
+        if entry.watch.source != WatchSource::Discovered {
+            return Err(DaemonError::Conflict("watch is not discovered".into()));
+        }
+        if entry.watch.status != WatchStatus::Running {
+            return Ok(());
+        }
+        entry.output.append(WatchStream::Stdout, text);
+        Ok(())
     }
     pub(crate) fn require_owner(&self, id: WatchId, owner: u64) -> DaemonResult<()> {
-        if self.lock().entry(id)?.owner != owner {
+        let r = self.lock();
+        let entry = r
+            .entries
+            .get(&id)
+            .ok_or_else(|| DaemonError::NotFound(format!("watch {id}")))?;
+        if entry.watch.source == WatchSource::Discovered {
+            return Err(DaemonError::Conflict(
+                "discovered watches are read-only".into(),
+            ));
+        }
+        if entry.owner != Some(owner) {
             return Err(DaemonError::Conflict(
                 "watch output and completion require the starting connection".into(),
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn append_owned(
+        &self,
+        id: WatchId,
+        owner: u64,
+        stream: WatchStream,
+        text: String,
+    ) -> DaemonResult<()> {
+        self.require_owner(id, owner)?;
+        self.append(id, stream, text)
+    }
+
+    pub(crate) fn finish_owned(
+        &self,
+        id: WatchId,
+        owner: u64,
+        code: Option<i32>,
+        signal: Option<i32>,
+    ) -> DaemonResult<()> {
+        self.require_owner(id, owner)?;
+        self.finish(id, code, signal)
     }
 
     /// Appends while Running; completed watches reject further output.
@@ -156,7 +238,7 @@ impl Watches {
         let ids: Vec<_> = r
             .entries
             .iter()
-            .filter(|(_, e)| e.owner == owner && e.watch.status == WatchStatus::Running)
+            .filter(|(_, e)| e.owner == Some(owner) && e.watch.status == WatchStatus::Running)
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
@@ -191,6 +273,37 @@ impl Watches {
     }
 }
 impl Registry {
+    fn insert(
+        &mut self,
+        owner: Option<u64>,
+        mut watch: Watch,
+        initial_output: Option<String>,
+    ) -> WatchId {
+        self.next_id += 1;
+        watch.id = WatchId(self.next_id);
+        let id = watch.id;
+        self.sessions
+            .entry(watch.session.clone())
+            .or_default()
+            .insert(id);
+        self.terminals.entry(watch.terminal).or_default().insert(id);
+        self.publish(Event::WatchStarted(watch.clone()));
+        let mut output = WatchBuffer::default();
+        if let Some(text) = initial_output {
+            output.append(WatchStream::Stdout, text);
+        }
+        self.entries.insert(
+            id,
+            Entry {
+                watch,
+                output,
+                published_seq: 0,
+                owner,
+                finished_at: None,
+            },
+        );
+        id
+    }
     fn entry(&mut self, id: WatchId) -> DaemonResult<&mut Entry> {
         self.entries
             .get_mut(&id)
@@ -261,6 +374,8 @@ mod tests {
             pid: None,
             started_at: "2026-09-05T00:00:00Z".into(),
             status: WatchStatus::Running,
+            source: WatchSource::Cooperative,
+            log_file: None,
         }
     }
     #[test]

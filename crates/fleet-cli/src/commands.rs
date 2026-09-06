@@ -795,6 +795,8 @@ mod tests {
             pid: None,
             started_at: "2026-09-05T12:00:00Z".into(),
             status: WatchStatus::Running,
+            source: fleet_core::watches::WatchSource::Cooperative,
+            log_file: None,
         }
     }
 
@@ -865,7 +867,7 @@ mod tests {
             watch.status = status;
             assert_eq!(
                 human::watches(&[watch.clone()]),
-                format!("42\treview\t{label}\t2026-09-05T12:00:00Z\t7")
+                format!("42\tcooperative\treview\t{label}\t2026-09-05T12:00:00Z\t7")
             );
         }
         assert_eq!(human::watches(&[]), "");

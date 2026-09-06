@@ -3,7 +3,7 @@
 use crate::{bridge::Bridge, state::AppState, watches::WatchMirror};
 use fleet_core::{
     ids::SessionId,
-    watches::{WatchStatus, WatchStream},
+    watches::{WatchSource, WatchStatus, WatchStream},
 };
 use fleet_proto::{error::ErrorKind, request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{ActiveTheme, Icon, KeyHint, LogView, Text, Tone, Truncate};
@@ -89,6 +89,14 @@ fn elapsed(mirror: &WatchMirror) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
+fn display_label(source: WatchSource, label: &str) -> String {
+    if source == WatchSource::Discovered {
+        format!("◦ {label}")
+    } else {
+        label.to_owned()
+    }
+}
+
 /// A non-focusable following log, with the only pointer actions on close and tabs.
 pub fn render(
     session: &SessionId,
@@ -112,24 +120,24 @@ pub fn render(
         .hover(|s| s.bg(theme.colors.row_hover))
         .on_click(move |_, _, cx| dismiss_selected(&close_state, &close_bridge, cx))
         .child(Text::ui("×").tone(Tone::Secondary));
-    let header =
-        div()
-            .flex()
-            .items_center()
-            .gap(theme.space.sm)
-            .h(theme.metrics.row_h)
-            .flex_none()
-            .px(theme.space.md)
-            .child(
-                div().flex_1().min_w_0().overflow_hidden().child(
-                    Text::ui_strong(mirror.watch.label.clone()).truncate_at(24, Truncate::Tail),
-                ),
-            )
-            .child(Text::data_small("●").tone(tone))
-            .child(Text::data_small(label).tone(tone))
-            .child(Text::data_small(elapsed(mirror)).tone(Tone::Secondary))
-            .child(KeyHint::new("^s v"))
-            .child(close);
+    let header = div()
+        .flex()
+        .items_center()
+        .gap(theme.space.sm)
+        .h(theme.metrics.row_h)
+        .flex_none()
+        .px(theme.space.md)
+        .child(
+            div().flex_1().min_w_0().overflow_hidden().child(
+                Text::ui_strong(display_label(mirror.watch.source, &mirror.watch.label))
+                    .truncate_at(24, Truncate::Tail),
+            ),
+        )
+        .child(Text::data_small("●").tone(tone))
+        .child(Text::data_small(label).tone(tone))
+        .child(Text::data_small(elapsed(mirror)).tone(Tone::Secondary))
+        .child(KeyHint::new("^s v"))
+        .child(close);
     let ids = app.watches.ids(session);
     let tabs = (ids.len() > 1).then(|| {
         let mut tabs = div()
@@ -164,7 +172,8 @@ pub fn render(
                     })
                     .child(Text::data_small("●").tone(tone))
                     .child(
-                        Text::data_small(entry.watch.label.clone()).truncate_at(24, Truncate::Tail),
+                        Text::data_small(display_label(entry.watch.source, &entry.watch.label))
+                            .truncate_at(24, Truncate::Tail),
                     ),
             );
         }
@@ -251,4 +260,15 @@ pub fn dismiss_selected(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App)
         });
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovered_labels_have_the_quiet_marker() {
+        assert_eq!(display_label(WatchSource::Discovered, "codex"), "◦ codex");
+        assert_eq!(display_label(WatchSource::Cooperative, "codex"), "codex");
+    }
 }

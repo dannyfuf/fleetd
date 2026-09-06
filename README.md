@@ -55,7 +55,7 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet status [--json]` | Refresh local worktree runtime status. | `protocol`, `statuses` |
 | `fleet path <ID>` | Print an exact local worktree's absolute path. | — |
 | `fleet sleep [SESSION] [--json]` | Apply sleep policy to a session or worktree; a sole running session is inferred. | `protocol`, `kept`, `closed`, `sessionKilled` |
-| `fleet watch list [--session <id>] [--json]` | List a session's watches (defaults to `FLEET_SESSION`); human rows contain id, label, status, start time, and terminal id. | `protocol`, `watches` |
+| `fleet watch list [--session <id>] [--json]` | List cooperative and daemon-discovered watches (defaults to `FLEET_SESSION`); human rows contain id, source, label, status, start time, and terminal id. | `protocol`, `watches` |
 | `fleet watch tail <id> [--follow]` | Print retained text on its original stdout/stderr channel; `--follow` polls every 250 ms until exit. | Raw retained stdout/stderr text |
 | `fleet exec [--watch] [--label TEXT] -- CMD [ARGS...]` | Run a child with byte-exact passthrough; optionally publish a read-only subagent watch using `FLEET_SESSION` and numeric `FLEET_TERMINAL_ID` (`FLEET_TERMINAL` remains the human name). | Raw child stdout/stderr; child exit status |
 | `fleet agent [claude\|opencode]` | Ensure a repository-level agent session exists; defaults to `config.agent`. | — |
