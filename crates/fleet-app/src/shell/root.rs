@@ -17,7 +17,7 @@ use gpui::{
     IntoElement, KeyDownEvent, Keystroke, Menu, MenuItem, MouseDownEvent, MouseEvent,
     MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, PinchEvent, PlatformInput,
     Render, ScrollWheelEvent, Subscription, Task, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, canvas, div, prelude::*, px, size,
+    WindowOptions, canvas, deferred, div, prelude::*, px, size,
 };
 
 use crate::{
@@ -50,6 +50,8 @@ const DEFAULT_SIZE: (f32, f32) = (1280.0, 800.0);
 const MIN_SIZE: (f32, f32) = (900.0, 560.0);
 /// Maximum input retained while GPUI is painting a new keyboard-focus owner.
 const STALE_KEY_CAPACITY: usize = 64;
+/// Paint after Fleet's deferred surfaces so their capture bookkeeping runs before this gate.
+const POINTER_GATE_PRIORITY: usize = usize::MAX;
 
 /// The authoritative focus-owner generation, keyboard replay marker, and queued stale input.
 #[derive(Debug)]
@@ -1148,11 +1150,11 @@ impl Shell {
         .into_any_element()
     }
 
-    /// Appends the gate after interactive content in paint order. GPUI visits capture listeners
-    /// forward and bubble listeners backward, so this preserves capture bookkeeping while still
-    /// suppressing every stale bubble handler.
+    /// Defers the gate above every Fleet overlay. GPUI visits capture listeners forward and bubble
+    /// listeners backward, so this preserves capture bookkeeping while still suppressing every
+    /// stale bubble handler.
     fn after_pointer_handlers(root: Div, pointer_gate: AnyElement) -> Div {
-        root.child(pointer_gate)
+        root.child(deferred(pointer_gate).with_priority(POINTER_GATE_PRIORITY))
     }
 
     /// Wraps `child` in one div per key context, outermost first.
@@ -1840,6 +1842,11 @@ mod tests {
         );
         assert!(keys.rejects_pointer(2, true, true));
         assert!(!keys.rejects_pointer(2, false, true));
+    }
+
+    #[test]
+    fn pointer_gate_paints_after_every_overlay_layer() {
+        assert!(POINTER_GATE_PRIORITY > fleet_ui_kit::OverlayLayer::Toast.priority());
     }
 
     #[test]
