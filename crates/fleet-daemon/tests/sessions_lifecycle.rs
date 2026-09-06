@@ -312,6 +312,42 @@ async fn terminal_lifecycle_preserves_identity_and_removes_last_session() {
 }
 
 #[tokio::test]
+async fn concurrent_agent_ensures_create_one_named_terminal() {
+    let fixture = fixture().await;
+    let sessions = Sessions::new(fixture.config, fixture.state);
+
+    let (first, second) = tokio::join!(
+        sessions.ensure(None, Some(fleet_core::config::Agent::Claude), false),
+        sessions.ensure(None, Some(fleet_core::config::Agent::Claude), false),
+    );
+    let first = first.unwrap_or_else(|error| panic!("{error}"));
+    let second = second.unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(first.id, second.id);
+
+    let sessions_snapshot = sessions
+        .list()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let agent_session = sessions_snapshot
+        .iter()
+        .find(|session| session.id == first.id)
+        .expect("agent session must exist");
+    assert_eq!(
+        agent_session
+            .terminals
+            .iter()
+            .filter(|terminal| terminal.name == "claude")
+            .count(),
+        1
+    );
+
+    sessions
+        .kill(first.id)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[tokio::test]
 async fn remote_worktrees_are_rejected_with_stable_message() {
     let fixture = fixture().await;
     let mut state = fixture

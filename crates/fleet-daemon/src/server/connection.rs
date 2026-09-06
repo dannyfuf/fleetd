@@ -22,6 +22,8 @@ pub struct Connection {
     services: Arc<Services>,
     events: BroadcastBus,
     shutdown: CancellationToken,
+    #[cfg(test)]
+    before_serialized_response: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 }
 
 impl Connection {
@@ -38,11 +40,25 @@ impl Connection {
             services,
             events,
             shutdown,
+            #[cfg(test)]
+            before_serialized_response: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_before_serialized_response(
+        mut self,
+        ready: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) -> Self {
+        self.before_serialized_response = Some((ready, release));
+        self
     }
 
     /// Runs Hello negotiation followed by request and event multiplexing.
     pub async fn run(self) -> DaemonResult<()> {
+        #[cfg(test)]
+        let mut before_serialized_response = self.before_serialized_response;
         let mut framed = Framed::new(self.stream, FleetCodec::<serde_json::Value, Request>::new());
         let Some(first) = framed.next().await else {
             return Ok(());
@@ -129,17 +145,96 @@ impl Connection {
                     match request.body {
                         RequestBody::Hello { .. } => {
                             let result = Err(DaemonError::Protocol("Hello is only valid as the first request".to_owned()));
-                            send_response(&mut framed, Response { id, result: result.map_err(Into::into) }).await?;
+                            if let Err(error) = send_response(
+                                &mut framed,
+                                Response { id, result: result.map_err(Into::into) },
+                            )
+                            .await
+                            {
+                                break Err(error);
+                            }
                         }
                         RequestBody::Subscribe { events } => {
                             subscriptions.extend(events);
-                            send_response(&mut framed, Response { id, result: Ok(ResponseBody::Ack) }).await?;
+                            if let Err(error) = send_response(
+                                &mut framed,
+                                Response { id, result: Ok(ResponseBody::Ack) },
+                            )
+                            .await
+                            {
+                                break Err(error);
+                            }
                         }
                         RequestBody::Unsubscribe => {
                             subscriptions.clear();
-                            send_response(&mut framed, Response { id, result: Ok(ResponseBody::Ack) }).await?;
+                            if let Err(error) = send_response(
+                                &mut framed,
+                                Response { id, result: Ok(ResponseBody::Ack) },
+                            )
+                            .await
+                            {
+                                break Err(error);
+                            }
                         }
                         body => {
+                            // Attachment membership and PTY dimensions are one ordered piece of
+                            // per-connection state. Running these requests in `pending` lets two
+                            // Attach calls both observe a missing membership (leaking a service
+                            // refcount), or lets an older resize finish after a newer one. They are
+                            // infrequent and must complete here before this actor accepts the next
+                            // control request.
+                            if terminal_attachment_request_is_serialized(&body) {
+                                let resize_existing = matches!(
+                                    &body,
+                                    RequestBody::AttachTerminal { terminal, .. }
+                                        if attached.contains(terminal)
+                                );
+                                let detach_missing = matches!(
+                                    &body,
+                                    RequestBody::DetachTerminal { terminal }
+                                        if !attached.contains(terminal)
+                                );
+                                let result = match body {
+                                    RequestBody::AttachTerminal { terminal, cols, rows }
+                                        if resize_existing =>
+                                    {
+                                        self.services.sessions.resize(terminal, cols, rows).await
+                                            .map(|()| ResponseBody::Ack)
+                                    }
+                                    RequestBody::DetachTerminal { .. } if detach_missing => {
+                                        Ok(ResponseBody::Ack)
+                                    }
+                                    body => self.services.dispatch_owned(body, owner_id).await,
+                                };
+                                let succeeded = result.is_ok();
+                                if succeeded
+                                    && let Some((attach, terminal)) = attachment
+                                {
+                                    if attach {
+                                        attached.insert(terminal);
+                                    } else {
+                                        attached.remove(&terminal);
+                                    }
+                                }
+                                if succeeded {
+                                    effects.publish(&result, &self.services, &self.events);
+                                }
+                                #[cfg(test)]
+                                if let Some((ready, release)) = before_serialized_response.take()
+                                {
+                                    let _ = ready.send(());
+                                    let _ = release.await;
+                                }
+                                if let Err(error) = send_response(
+                                    &mut framed,
+                                    Response { id, result: result.map_err(Into::into) },
+                                )
+                                .await
+                                {
+                                    break Err(error);
+                                }
+                                continue;
+                            }
                             let terminal_order = pty_input_request_is_ordered(&body).then(|| {
                                 let previous = terminal_order_tail.take();
                                 let (release, next) = oneshot::channel();
@@ -147,16 +242,6 @@ impl Connection {
                                 (previous, release)
                             });
                             let services = Arc::clone(&self.services);
-                            let resize_existing = matches!(
-                                &body,
-                                RequestBody::AttachTerminal { terminal, .. }
-                                    if attached.contains(terminal)
-                            );
-                            let detach_missing = matches!(
-                                &body,
-                                RequestBody::DetachTerminal { terminal }
-                                    if !attached.contains(terminal)
-                            );
                             pending.push(Box::pin(async move {
                                 let release_terminal_order = if let Some((previous, release)) = terminal_order {
                                     if let Some(previous) = previous {
@@ -166,34 +251,18 @@ impl Connection {
                                 } else {
                                     None
                                 };
-                                let result = match body {
-                                    RequestBody::AttachTerminal { terminal, cols, rows }
-                                        if resize_existing =>
-                                    {
-                                        services.sessions.resize(terminal, cols, rows).await
-                                            .map(|()| ResponseBody::Ack)
-                                    }
-                                    RequestBody::DetachTerminal { .. } if detach_missing => {
-                                        Ok(ResponseBody::Ack)
-                                    }
-                                    body => services.dispatch_owned(body, owner_id).await,
-                                };
+                                let result = services.dispatch_owned(body, owner_id).await;
                                 if let Some(release) = release_terminal_order {
                                     let _ = release.send(());
                                 }
-                                CompletedRequest { id, result, effects, attachment, shutdown_request }
+                                CompletedRequest { id, result, effects, shutdown_request }
                             }));
                         }
                     }
                 }
                 Some(completed) = pending.next(), if !pending.is_empty() => {
-                    let CompletedRequest { id, result, effects, attachment, shutdown_request } = completed;
+                    let CompletedRequest { id, result, effects, shutdown_request } = completed;
                     let succeeded = result.is_ok();
-                    if succeeded
-                        && let Some((attach, terminal)) = attachment
-                    {
-                        if attach { attached.insert(terminal); } else { attached.remove(&terminal); }
-                    }
                     if succeeded {
                         effects.publish(&result, &self.services, &self.events);
                     }
@@ -278,11 +347,19 @@ fn pty_input_request_is_ordered(body: &RequestBody) -> bool {
     )
 }
 
+fn terminal_attachment_request_is_serialized(body: &RequestBody) -> bool {
+    matches!(
+        body,
+        RequestBody::AttachTerminal { .. }
+            | RequestBody::DetachTerminal { .. }
+            | RequestBody::ResizeTerminal { .. }
+    )
+}
+
 struct CompletedRequest {
     id: u64,
     result: DaemonResult<ResponseBody>,
     effects: RequestEffects,
-    attachment: Option<(bool, fleet_core::ids::TerminalId)>,
     shutdown_request: Option<bool>,
 }
 
@@ -479,9 +556,119 @@ async fn send_event(
 
 #[cfg(test)]
 mod tests {
-    use fleet_core::ids::TerminalId;
+    use std::{net::Shutdown, path::Path, time::Duration};
+
+    use fleet_core::{config::Agent, ids::TerminalId};
+
+    use crate::{
+        adapters::{Adapters, clock::SystemClock, files::RealFiles},
+        jobs::JobManager,
+        stores::{config::ConfigStore, state::StateStore},
+    };
 
     use super::*;
+
+    async fn test_services(home: &Path) -> Arc<Services> {
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let config = Arc::new(ConfigStore::new(home, files.clone()));
+        let mut effective = config.load().await.expect("load test config");
+        effective.agent_commands.claude = "/bin/sleep 30".into();
+        config.save(effective).await.expect("save test config");
+        let state = Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock)));
+        Services::new_with_events(
+            home,
+            config,
+            state,
+            Arc::new(JobManager::new(home)),
+            Adapters::system(files),
+            BroadcastBus::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn response_write_failure_after_attach_runs_detach_cleanup() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let services = test_services(temp.path()).await;
+        let session = services
+            .sessions
+            .ensure(None, Some(Agent::Claude), false)
+            .await
+            .expect("ensure agent session");
+        let terminal = session.terminals[0].id;
+        let (server, client) = UnixStream::pair().expect("create socket pair");
+        let (response_ready, wait_for_response) = oneshot::channel();
+        let (release_response, response_released) = oneshot::channel();
+        let actor = tokio::spawn(
+            Connection::new(
+                server,
+                Arc::clone(&services),
+                services.events.clone(),
+                CancellationToken::new(),
+            )
+            .with_before_serialized_response(response_ready, response_released)
+            .run(),
+        );
+        let mut client = Framed::new(client, FleetCodec::<Request, Response>::new());
+        client
+            .send(Request {
+                id: 1,
+                body: RequestBody::Hello {
+                    protocol: fleet_proto::PROTOCOL_VERSION,
+                    client: "connection-test".into(),
+                },
+            })
+            .await
+            .expect("send hello");
+        client
+            .next()
+            .await
+            .expect("receive hello response")
+            .expect("decode hello response")
+            .result
+            .expect("hello succeeds");
+        client
+            .send(Request {
+                id: 2,
+                body: RequestBody::AttachTerminal {
+                    terminal,
+                    cols: 80,
+                    rows: 24,
+                },
+            })
+            .await
+            .expect("send attach");
+
+        tokio::time::timeout(Duration::from_secs(2), wait_for_response)
+            .await
+            .expect("actor reaches attachment response")
+            .expect("attachment response barrier remains open");
+        let client = client
+            .into_inner()
+            .into_std()
+            .expect("convert client socket");
+        client
+            .shutdown(Shutdown::Both)
+            .expect("reject response writes");
+        drop(client);
+        release_response
+            .send(())
+            .expect("release attachment response");
+        let result = tokio::time::timeout(Duration::from_secs(2), actor)
+            .await
+            .expect("connection actor exits")
+            .expect("connection task does not panic");
+        assert!(result.is_err(), "the acknowledgement write must fail");
+        assert_eq!(services.sessions.attachment_count(terminal), 0);
+
+        services
+            .sessions
+            .kill(session.id)
+            .await
+            .expect("kill test session");
+    }
 
     #[test]
     fn watch_events_are_global_and_require_their_subscription() {
@@ -522,6 +709,31 @@ mod tests {
             terminal: TerminalId(1),
             scroll: ScrollCommand::Bottom,
         }));
+    }
+
+    #[test]
+    fn attachment_and_resize_requests_are_serialized_by_the_connection_actor() {
+        let terminal = TerminalId(1);
+        assert!(terminal_attachment_request_is_serialized(
+            &RequestBody::AttachTerminal {
+                terminal,
+                cols: 80,
+                rows: 24,
+            }
+        ));
+        assert!(terminal_attachment_request_is_serialized(
+            &RequestBody::DetachTerminal { terminal }
+        ));
+        assert!(terminal_attachment_request_is_serialized(
+            &RequestBody::ResizeTerminal {
+                terminal,
+                cols: 120,
+                rows: 40,
+            }
+        ));
+        assert!(!terminal_attachment_request_is_serialized(
+            &RequestBody::RequestFullFrame { terminal }
+        ));
     }
 
     #[test]

@@ -21,6 +21,7 @@ integration request instead of editing another agent's file.
 | `actions.rs` / `keymap.rs` | one action per `KEYMAP.md` row and the binding table | app-shell |
 | `screens/hub.rs` | §3.1–§3.5 | hub agent |
 | `screens/workspace.rs` | §3.6 | workspace agent |
+| `screens/agent_popup.rs` | §3.6.1 floating agent surface, coordinated terminal attachment | app-shell |
 | `screens/jobs.rs` | §3.7 | jobs agent |
 | `dialogs/` | §3.8, §3.9, §3.10 | dialogs agent |
 | `terminal_element.rs` | the painted cell grid | workspace agent |
@@ -126,6 +127,7 @@ is always `Fleet`.
 | Hub, PR screen focused | `Fleet > Hub > Prs` |
 | Workspace, PTY tab | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
+| Floating agent terminal | `Fleet > Agent > Terminal` \| `Prefix` \| `Scroll` |
 | Filter / Palette / Jobs | `Fleet > Filter` \| `Palette` \| `Jobs` |
 | Any dialog | `Fleet > Dialog > <name>` |
 | Daemon banner showing (§3.12 C) | the base chain **plus** `Daemon > Banner`, innermost |
@@ -145,6 +147,27 @@ Two consequences worth knowing:
 * While the §3.12 C banner is undismissed it is the **innermost** context, so `r`, `l` and
   `Esc` belong to it, exactly as `KEYMAP.md` says. `Esc` dismisses the banner and hands those
   keys straight back.
+
+The floating agent is persistent state beside the ordinary `overlay` slot, not another member of
+that mutually-exclusive enum. When it is topmost, `Agent` owns focus and the Hub/Workspace remains
+mounted underneath. Help and `Quit` / `QuitDaemon` may occupy the one ordinary overlay slot above
+it; closing that dialog returns focus to `Agent`. Palette, Settings, Filter, and Jobs have no
+binding in `Agent`, so they cannot create a second competing topmost surface. `ctrl-q` resolves to
+`agent::Hide` in this context; `ctrl-shift-q` remains the global stop-confirm action.
+
+Every focus-owner generation change also dirties the window. gpui synchronously draws a dirty
+window before dispatching keyboard input, so the new context/focus tree is normally already live
+when the next key resolves. A bounded FIFO remains as a safety net if a generation ever advances
+without that draw: it retains the complete key-down event and replays it through gpui's normal
+dispatch in order; a replay that changes owner pauses the remaining events behind the next draw.
+Pointer input is never queued. Because gpui mouse dispatch hit-tests the last rendered frame, each
+painted root gate captures that frame's focus-owner generation and drops mouse events once the live
+generation advances past it. The gate also records whether its frame exposes the base screen, so
+an old base frame cannot receive pointer input once the popup is live-open. It is painted after the
+interactive tree: gpui's forward capture pass first clears pending clicks and pressed state, then
+the gate stops propagation before reverse-order bubble handlers can resize, scroll, select, focus,
+or send terminal input. Agent and Workspace terminal handlers additionally verify their exact live
+terminal owner.
 
 ### Arbitrations against `KEYMAP.md`
 
@@ -203,11 +226,15 @@ construction; there is no synchronous path and there must not be one.
 | `snapshot_at` / `snapshot_age(now)` | what the `stale · <age>` stamp ages (§1.3) |
 | `grids: HashMap<TerminalId, MirrorGrid>` | one mirror grid per terminal, diffs already applied |
 | `screen`, `hub_pane`, `pr_tab`, `scope`, `cursors` | where the cursor is, per list |
-| `terminal_mode`, `overlay`, `mode()` | the mode word and the key context |
+| `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode word/key context |
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
 | `daemon: DaemonLink` | §3.12; `refuses_mutations()` and `drops_terminal_keys()` are the two questions a screen asks |
+
+`agent_popup: Option<AgentPopupState>` is screen-independent. Its `Terminal` / `Prefix` / `Scroll`
+submodes reuse the existing `TERMINAL` / `^S` / `SCROLL` status words; it does not add a ninth mode
+word. An ordinary dialog above it temporarily shows `DIALOG`, then reveals the popup's prior word.
 
 Pure helpers worth reusing rather than re-deriving: `move_cursor`, `clamp_cursor`, `half_page`,
 `push_toast`, `expire_toasts`, `latest_failed_job`, `running_jobs`, `parse_percent`,

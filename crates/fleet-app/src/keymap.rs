@@ -35,7 +35,7 @@ use gpui::{Action, App, KeyBinding, KeybindingKeystroke, Keystroke};
 
 use crate::actions::fleet::Cancel;
 use crate::actions::{
-    confirm, context_dialog, create_worktree, daemon, dialog, filter, first_run,
+    agent, confirm, context_dialog, create_worktree, daemon, dialog, filter, first_run,
     fleet::{
         FocusStickyError, OpenAgentClaude, OpenAgentOpencode, OpenHelp, OpenJobs, OpenPalette,
         OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
@@ -278,6 +278,49 @@ key_table! {
     "i",            "Workspace > Scroll" => scroll::Exit;
     "escape",       "Workspace > Scroll" => scroll::Escape;
 
+    // ---------------------------------------------------------------- Floating agent popup
+    // Agent is the persistent popup context; its Terminal / Prefix / Scroll children mirror
+    // Workspace terminal mechanics without changing the Workspace underneath.
+    "ctrl-q",       "Agent" => agent::Hide;
+
+    "ctrl-s",       "Agent > Terminal" => agent::EnterPrefix;
+    "cmd-c",        "Agent > Terminal" => agent::CopySelection;
+    "cmd-v",        "Agent > Terminal" => agent::PasteClipboard;
+
+    "ctrl-s",       "Agent > Prefix" => prefix::SendLiteral;
+    "ctrl-q",       "Agent > Prefix" => agent::Hide;
+    "ctrl-shift-q", "Agent > Prefix" => QuitAndStopDaemon;
+    "cmd-c",        "Agent > Prefix" => agent::CopySelection;
+    "cmd-v",        "Agent > Prefix" => agent::PasteClipboard;
+    "q",            "Agent > Prefix" => agent::Hide;
+    "a",            "Agent > Prefix" => OpenAgentClaude;
+    "A",            "Agent > Prefix" => OpenAgentOpencode;
+    "[",            "Agent > Prefix" => prefix::EnterScroll;
+    "]",            "Agent > Prefix" => prefix::Paste;
+    "r",            "Agent > Prefix" => prefix::RestartCommand;
+    "?",            "Agent > Prefix" => OpenHelp;
+    "escape",       "Agent > Prefix" => prefix::Cancel;
+
+    "ctrl-s",       "Agent > Scroll" => agent::EnterPrefix;
+    "cmd-c",        "Agent > Scroll" => agent::CopySelection;
+    "cmd-v",        "Agent > Scroll" => agent::PasteClipboard;
+    "j",            "Agent > Scroll" => scroll::LineDown;
+    "k",            "Agent > Scroll" => scroll::LineUp;
+    "ctrl-d",       "Agent > Scroll" => scroll::HalfPageDown;
+    "ctrl-u",       "Agent > Scroll" => scroll::HalfPageUp;
+    "ctrl-f",       "Agent > Scroll" => scroll::PageDown;
+    "ctrl-b",       "Agent > Scroll" => scroll::PageUp;
+    "g g",          "Agent > Scroll" => scroll::Top;
+    "G",            "Agent > Scroll" => scroll::Bottom;
+    "v",            "Agent > Scroll" => scroll::StartSelection;
+    "y",            "Agent > Scroll" => scroll::Yank;
+    "/",            "Agent > Scroll" => scroll::Search;
+    "n",            "Agent > Scroll" => scroll::SearchNext;
+    "N",            "Agent > Scroll" => scroll::SearchPrev;
+    "q",            "Agent > Scroll" => scroll::Exit;
+    "i",            "Agent > Scroll" => scroll::Exit;
+    "escape",       "Agent > Scroll" => scroll::Escape;
+
     // ---------------------------------------------------------------- Filter
     "enter",        "Filter" => filter::Accept;
     "escape",       "Filter" => filter::Escape;
@@ -429,6 +472,10 @@ mod tests {
         "Workspace > Native",
         "Workspace > Prefix",
         "Workspace > Scroll",
+        "Agent",
+        "Agent > Terminal",
+        "Agent > Prefix",
+        "Agent > Scroll",
         "Filter",
         "Palette",
         "Jobs",
@@ -656,6 +703,70 @@ mod tests {
             .is_none(),
             "an unknown prefix key is consumed without inventing an action"
         );
+    }
+
+    #[test]
+    fn agent_popup_prefix_resolution_uses_the_authoritative_table() {
+        for (keys, expected) in [
+            ("q", "agent::Hide"),
+            ("a", "fleet::OpenAgentClaude"),
+            ("A", "fleet::OpenAgentOpencode"),
+            ("[", "prefix::EnterScroll"),
+            ("]", "prefix::Paste"),
+            ("r", "prefix::RestartCommand"),
+            ("?", "fleet::OpenHelp"),
+            ("ctrl-s", "prefix::SendLiteral"),
+            ("ctrl-q", "agent::Hide"),
+            ("ctrl-shift-q", "fleet::QuitAndStopDaemon"),
+            ("cmd-c", "agent::CopySelection"),
+            ("cmd-v", "agent::PasteClipboard"),
+            ("escape", "prefix::Cancel"),
+        ] {
+            let stroke = Keystroke::parse(keys)
+                .unwrap_or_else(|error| panic!("invalid test key {keys:?}: {error}"));
+            let action = action_for_keystroke("Agent > Prefix", &stroke)
+                .unwrap_or_else(|| panic!("agent prefix key {keys:?} did not resolve"));
+            assert_eq!(action.name(), expected, "{keys}");
+            assert!(table().iter().any(|spec| {
+                spec.context == "Agent > Prefix" && spec.keys == keys && spec.action == expected
+            }));
+        }
+    }
+
+    #[test]
+    fn agent_popup_ctrl_q_hides_instead_of_quitting() {
+        let stroke = Keystroke::parse("ctrl-q").unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            action_for_keystroke("Agent", &stroke)
+                .unwrap_or_else(|| panic!("Agent must override global ctrl-q"))
+                .name(),
+            "agent::Hide"
+        );
+        assert!(table().iter().any(|spec| {
+            spec.context == ROOT_CONTEXT
+                && spec.keys == "ctrl-shift-q"
+                && spec.action == "fleet::QuitAndStopDaemon"
+        }));
+        for (keys, expected) in [
+            ("ctrl-s", "agent::EnterPrefix"),
+            ("cmd-c", "agent::CopySelection"),
+            ("cmd-v", "agent::PasteClipboard"),
+        ] {
+            let stroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(
+                action_for_keystroke("Agent > Terminal", &stroke)
+                    .unwrap_or_else(|| panic!("missing Agent terminal reservation for {keys}"))
+                    .name(),
+                expected
+            );
+        }
+        for keys in ["shift-pageup", "shift-pagedown", "cmd-home", "cmd-end"] {
+            let stroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                action_for_keystroke("Agent > Terminal", &stroke).is_none(),
+                "{keys} must reach the agent PTY"
+            );
+        }
     }
 
     #[test]

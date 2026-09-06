@@ -36,9 +36,9 @@ pub mod fleet {
             UpdateFleet,
             /// `Esc` — clear the filter, else close the topmost overlay, else no-op. Never quits.
             Cancel,
-            /// `a` — open the Claude agent session.
+            /// `a` / `ctrl-s a` — toggle the floating Claude agent popup.
             OpenAgentClaude,
-            /// `A` — open the OpenCode agent session.
+            /// `A` / `ctrl-s A` — toggle the floating OpenCode agent popup.
             OpenAgentOpencode,
         ]
     );
@@ -216,6 +216,25 @@ pub mod workspace {
             /// `cmd-c` — copy the current terminal selection, when one exists.
             CopySelection,
             /// `cmd-v` — paste the clipboard through the terminal's mode-aware paste path.
+            PasteClipboard,
+        ]
+    );
+}
+
+/// Actions owned by the floating agent terminal.
+pub mod agent {
+    use gpui::actions;
+
+    actions!(
+        agent,
+        [
+            /// `ctrl-s` — enter the popup's one-shot prefix mode.
+            EnterPrefix,
+            /// `ctrl-q` / `ctrl-s q` — hide the popup without stopping its session.
+            Hide,
+            /// `cmd-c` — copy the popup terminal selection, when one exists.
+            CopySelection,
+            /// `cmd-v` — paste through the terminal's mode-aware paste path.
             PasteClipboard,
         ]
     );

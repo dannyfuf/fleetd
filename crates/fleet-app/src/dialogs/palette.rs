@@ -14,7 +14,6 @@
 //! before a text input sees the key, so binding `q` would make the query untypable.
 
 use fleet_core::{
-    config::Agent,
     ids::{ContextId, JobId, RepoId, SessionId, WorktreeId},
     sessions::{SessionKind, SessionState},
 };
@@ -828,29 +827,13 @@ fn run_command(
         }
         Command::Refresh => bridge.send(RequestBody::RefreshStatuses { repo: None }),
         Command::UpdateFleet => bridge.send(RequestBody::Update),
-        Command::OpenClaude => open_agent(Agent::Claude, state, bridge, cx),
-        Command::OpenOpencode => open_agent(Agent::Opencode, state, bridge, cx),
+        Command::OpenClaude => window.dispatch_action(Box::new(fleet::OpenAgentClaude), cx),
+        Command::OpenOpencode => window.dispatch_action(Box::new(fleet::OpenAgentOpencode), cx),
         // The shell owns the whole quit flow, and its listeners sit on the window root, which
         // is an ancestor of this overlay — so dispatching reaches them.
         Command::Quit => window.dispatch_action(Box::new(fleet::Quit), cx),
         Command::QuitDaemon => window.dispatch_action(Box::new(fleet::QuitAndStopDaemon), cx),
     }
-}
-
-fn open_agent(agent: Agent, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let reply = bridge.request(RequestBody::EnsureSession {
-        worktree: None,
-        agent: Some(agent),
-        sleep_previous: true,
-    });
-    let state = state.clone();
-    cx.spawn(async move |cx| {
-        let Ok(Ok(ResponseBody::Session(session))) = reply.recv().await else {
-            return;
-        };
-        cx.update(|cx| open_session(session.id, &state, cx));
-    })
-    .detach();
 }
 
 /// The worktree the Hub's cursor is on.

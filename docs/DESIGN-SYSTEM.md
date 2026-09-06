@@ -474,14 +474,16 @@ confirm · 720 settings/prune · 880 help.
 **States.** default · error (red footer line, dialog stays open).
 **Keyboard.** `Esc` closes. There is **no OK/Cancel button pair anywhere** — the hint row states
 the keys.
-**Usage rule.** `Dialog` ghosts the base screen; `Overlay` does not. Use `ConfirmDialog` for
-anything destructive so the `y`/`Y` escalation is computed, not typed.
+**Usage rule.** `Dialog` always ghosts the base screen. `Overlay` can do so when configured with
+`scrim(true)` and `OverlayLayer::Dialog`, as the floating Agent terminal does. Use `ConfirmDialog`
+for anything destructive so the `y`/`Y` escalation is computed, not typed.
 
 #### `Overlay`
-**Purpose.** A centered, top-anchored floating layer (the palette).
+**Purpose.** A centered floating layer used by the top-anchored palette and the Agent popup.
 **API.** `Overlay::new().top(Pixels).width(Pixels).scrim(bool).child(..)`.
 **Usage rule.** Default `top` is 120 px — the thinking position, not screen center. Leave
-`scrim` off for the palette: it is a jump, not a decision.
+`scrim` off and use `OverlayLayer::Anchored` for the palette: it is a jump, not a decision. The
+Agent popup is a modal floating surface, so it opts into the scrim and `OverlayLayer::Dialog`.
 
 #### `Toast` / `ToastStack`
 **Purpose.** Bottom-right transient acknowledgements, max 3.
