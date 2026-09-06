@@ -5,6 +5,7 @@ pub mod bridge;
 pub mod dialogs;
 pub mod drive;
 pub mod keymap;
+pub mod notify_sound;
 pub mod screens;
 pub mod shell;
 pub mod state;

@@ -258,6 +258,27 @@ impl Watches {
         }
         true
     }
+    /// Shows and cycles through this session's watches in registration order.
+    /// Returns false only when there are no watches.
+    pub fn cycle(&mut self, session: &SessionId, forward: bool) -> bool {
+        let ids = self.ids(session);
+        if ids.is_empty() {
+            return false;
+        }
+        let pane = self.panes.entry(session.clone()).or_default();
+        let current = pane
+            .selected
+            .and_then(|id| ids.iter().position(|candidate| *candidate == id));
+        let index = match current {
+            Some(index) if forward => (index + 1) % ids.len(),
+            Some(index) => (index + ids.len() - 1) % ids.len(),
+            None if forward => 0,
+            None => ids.len() - 1,
+        };
+        pane.selected = Some(ids[index]);
+        pane.visible = true;
+        true
+    }
     /// Hides the pane without changing or dismissing any watch.
     pub fn hide(&mut self, session: &SessionId) {
         if let Some(pane) = self.panes.get_mut(session) {
@@ -396,6 +417,8 @@ mod tests {
             pid: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             status: WatchStatus::Running,
+            source: fleet_core::watches::WatchSource::Cooperative,
+            log_file: None,
         }
     }
     fn chunk(seq: u64, stream: WatchStream, text: &str) -> WatchChunk {
@@ -405,6 +428,36 @@ mod tests {
             text: text.into(),
         }
     }
+    #[test]
+    fn cycling_wraps_in_start_order_within_the_session_and_reopens_hidden_panes() {
+        let mut state = Watches::default();
+        let now = Instant::now();
+        let session = watch(1).session;
+        assert!(!state.cycle(&session, true));
+        assert!(!state.cycle(&session, false));
+        state.started(watch(1), now);
+        for forward in [true, false] {
+            state.hide(&session);
+            assert!(state.cycle(&session, forward));
+            assert!(state.panes[&session].visible);
+            assert_eq!(state.panes[&session].selected, Some(WatchId(1)));
+        }
+        let mut other = watch(2);
+        other.session = "repo/other".parse().unwrap();
+        state.started(other.clone(), now);
+        // Events can arrive out of order; monotonic IDs preserve start order.
+        state.started(watch(4), now);
+        state.started(watch(3), now);
+        state.select(&session, WatchId(1));
+        for (forward, expected) in [(false, 4), (true, 1), (true, 3), (true, 4), (false, 3)] {
+            state.hide(&session);
+            assert!(state.cycle(&session, forward));
+            assert_eq!(state.panes[&session].selected, Some(WatchId(expected)));
+            assert!(state.panes[&session].visible);
+            assert_eq!(state.panes[&other.session].selected, Some(other.id));
+        }
+    }
+
     #[test]
     fn a_new_start_still_opens_when_its_list_response_arrived_first() {
         let mut state = Watches::default();

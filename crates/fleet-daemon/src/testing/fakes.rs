@@ -612,6 +612,8 @@ pub struct FakeProcess {
     snapshot: Mutex<Vec<ProcessInfo>>,
     ports: Mutex<Vec<ListeningPort>>,
     alive: Mutex<BTreeSet<u32>>,
+    environments: Mutex<BTreeMap<u32, Vec<(String, String)>>>,
+    environment_calls: Mutex<Vec<u32>>,
 }
 
 impl FakeProcess {
@@ -634,6 +636,36 @@ impl FakeProcess {
             .ports
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ports;
+    }
+
+    /// Replaces one process's environment.
+    pub fn set_environment(&self, pid: u32, environment: Vec<(String, String)>) {
+        self.environments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pid, environment);
+    }
+
+    /// Explicitly changes process liveness without changing the snapshot.
+    pub fn set_alive(&self, pid: u32, alive: bool) {
+        let mut pids = self
+            .alive
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if alive {
+            pids.insert(pid);
+        } else {
+            pids.remove(&pid);
+        }
+    }
+
+    /// Returns environment-read calls in order.
+    #[must_use]
+    pub fn environment_calls(&self) -> Vec<u32> {
+        self.environment_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -677,6 +709,19 @@ impl Process for FakeProcess {
             .filter(|port| pids.contains(&port.pid))
             .copied()
             .collect())
+    }
+    async fn environment(&self, pid: u32) -> DaemonResult<Vec<(String, String)>> {
+        self.environment_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(pid);
+        Ok(self
+            .environments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&pid)
+            .cloned()
+            .unwrap_or_default())
     }
     fn is_alive(&self, pid: u32) -> bool {
         self.alive

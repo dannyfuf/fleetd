@@ -1,6 +1,9 @@
 //! Asynchronous daemon events broadcast to subscribed clients.
 
-use fleet_core::{ids::TerminalId, sessions::Session};
+use fleet_core::{
+    ids::{SessionId, TerminalId},
+    sessions::{AgentActivity, Session},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{job::JobRecord, snapshot::Snapshot, terminal::FrameUpdate};
@@ -23,6 +26,8 @@ pub enum EventKind {
     JobUpdated,
     /// Session metadata changes.
     SessionChanged,
+    /// Coding-agent activity transitions.
+    AgentActivityChanged,
     /// Terminal frame updates.
     TerminalFrame,
     /// Terminal exits.
@@ -70,6 +75,19 @@ pub enum Event {
     JobUpdated(JobRecord),
     /// A session was created or changed.
     SessionChanged(Session),
+    /// A recognized agent terminal changed between unknown, working, and idle.
+    AgentActivityChanged {
+        /// Owning session.
+        session: SessionId,
+        /// Changed terminal.
+        terminal_id: TerminalId,
+        /// Recognized executable, when currently present.
+        agent: Option<String>,
+        /// New activity state.
+        activity: AgentActivity,
+        /// ISO-8601 transition time.
+        changed_at: String,
+    },
     /// A terminal's rendered grid changed.
     TerminalFrame(FrameUpdate),
     /// A terminal PTY exited.
@@ -116,6 +134,17 @@ mod tests {
         let decoded: EventKind =
             serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, EventKind::Toast);
+
+        let event = Event::AgentActivityChanged {
+            session: SessionId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
+            terminal_id: TerminalId(3),
+            agent: Some("claude".to_owned()),
+            activity: AgentActivity::Idle,
+            changed_at: "2026-09-05T12:00:00Z".to_owned(),
+        };
+        let json = serde_json::to_string(&event).unwrap_or_else(|error| panic!("{error}"));
+        let decoded: Event = serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(decoded, event);
 
         let json =
             serde_json::to_string(&ToastLevel::Warning).unwrap_or_else(|error| panic!("{error}"));

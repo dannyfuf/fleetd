@@ -15,7 +15,7 @@
 
 use fleet_core::{
     ids::{ContextId, JobId, RepoId, SessionId, WorktreeId},
-    sessions::{SessionKind, SessionState},
+    sessions::{AgentActivity, SessionKind, SessionState},
 };
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{Icon, prelude::*};
@@ -356,23 +356,26 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 SessionKind::Agent { .. } => None,
             };
             let slept = session.slept_at.is_some();
-            let state = worktree
-                .and_then(|worktree| {
-                    snapshot
-                        .statuses
-                        .iter()
-                        .find(|status| status.worktree_id == worktree.id)
-                })
-                .map_or(
-                    // An agent session has no `WorktreeStatus`; the session record itself is
-                    // then the only evidence, and it can only say awake or slept.
-                    if slept {
-                        SessionState::Detached
-                    } else {
-                        SessionState::Attached
-                    },
-                    |status| status.session,
-                );
+            let runtime_status = worktree.and_then(|worktree| {
+                snapshot
+                    .statuses
+                    .iter()
+                    .find(|status| status.worktree_id == worktree.id)
+            });
+            let agent_activity = runtime_status.map_or_else(
+                || state.session_agent_activity(&session.id),
+                |status| status.agent_activity,
+            );
+            let session_state = runtime_status.map_or(
+                // An agent session has no `WorktreeStatus`; the session record itself is
+                // then the only evidence, and it can only say awake or slept.
+                if slept {
+                    SessionState::Detached
+                } else {
+                    SessionState::Attached
+                },
+                |status| status.session,
+            );
             let degraded = worktree.is_some_and(|worktree| worktree.degraded.is_some());
             go.push(Entry {
                 section: PaletteSectionKind::Go,
@@ -382,11 +385,11 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                     || session.id.as_str().to_owned(),
                     |worktree| worktree.id.as_str().to_owned(),
                 ),
-                detail: Some(session_detail(state, slept).to_owned()),
+                detail: Some(session_detail(session_state, slept).to_owned()),
                 key: None,
                 destructive: false,
                 icon: Icon::GitBranch,
-                status: Some(status_kind(state, slept, degraded)),
+                status: Some(status_kind(session_state, slept, agent_activity, degraded)),
                 run: Run::OpenSession(session.id.clone()),
             });
         }
@@ -400,11 +403,11 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
             }
             // §1.3: until the daemon reports a status the state is `unknown`, never a false
             // `none` — the same rule the worktrees list follows.
-            let session = snapshot
+            let status = snapshot
                 .statuses
                 .iter()
-                .find(|status| status.worktree_id == worktree.id)
-                .map_or(SessionState::Unknown, |status| status.session);
+                .find(|status| status.worktree_id == worktree.id);
+            let session = status.map_or(SessionState::Unknown, |status| status.session);
             go.push(Entry {
                 section: PaletteSectionKind::Go,
                 label: worktree.id.as_str().to_owned(),
@@ -412,7 +415,12 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 key: None,
                 destructive: false,
                 icon: Icon::GitBranch,
-                status: Some(status_kind(session, false, worktree.degraded.is_some())),
+                status: Some(status_kind(
+                    session,
+                    false,
+                    status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
+                    worktree.degraded.is_some(),
+                )),
                 run: Run::OpenWorktree(worktree.id.clone()),
             });
         }
@@ -970,6 +978,8 @@ mod tests {
             session: state,
             windows: Vec::new(),
             running: Vec::new(),
+            agent_activity: fleet_core::sessions::AgentActivity::Unknown,
+            agent_activity_changed_at: None,
         }];
         snapshot
     }

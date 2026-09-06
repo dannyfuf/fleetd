@@ -524,6 +524,7 @@ fn event_kind(event: &Event) -> EventKind {
         Event::SnapshotChanged(_) => EventKind::SnapshotChanged,
         Event::JobUpdated(_) => EventKind::JobUpdated,
         Event::SessionChanged(_) => EventKind::SessionChanged,
+        Event::AgentActivityChanged { .. } => EventKind::AgentActivityChanged,
         Event::TerminalFrame(_) => EventKind::TerminalFrame,
         Event::TerminalExited { .. } => EventKind::TerminalExited,
         Event::TerminalTitle { .. } => EventKind::TerminalTitle,

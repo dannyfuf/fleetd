@@ -299,6 +299,10 @@ pub mod prefix {
             ToggleZoom,
             /// `ctrl-s v` — hide/show the read-only watch split.
             ToggleWatchPane,
+            /// `ctrl-s N` — select the next watch, wrapping in start order.
+            NextWatch,
+            /// `ctrl-s P` — select the previous watch, wrapping in start order.
+            PrevWatch,
             /// `ctrl-s V` — dismiss a completed watch, or hide a running one.
             DismissWatch,
             /// `ctrl-s Esc` — cancel the prefix.

@@ -1,6 +1,10 @@
 //! The terminal host thread that owns PTYs and virtual-terminal engines.
 
-use std::{sync::mpsc, thread, time::Duration, time::Instant};
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::{Duration, Instant},
+};
 
 use async_channel::{Receiver, Sender};
 use fleet_core::ids::TerminalId;
@@ -102,6 +106,17 @@ pub enum HostEvent {
     },
 }
 
+/// Monotonic input/output activity observed by a terminal host.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminalActivity {
+    /// Most recent PTY output.
+    pub last_output_at: Instant,
+    /// Most recent input written to the PTY.
+    pub last_input_at: Instant,
+    /// Total bytes read from the PTY since the host started.
+    pub output_bytes_total: u64,
+}
+
 /// Failure while starting or communicating with a terminal host.
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -128,6 +143,7 @@ pub struct TerminalHost {
     child_pid: Option<u32>,
     commands: mpsc::Sender<HostCommand>,
     events: Receiver<HostEvent>,
+    activity: Arc<Mutex<TerminalActivity>>,
     join: Option<thread::JoinHandle<()>>,
 }
 
@@ -143,6 +159,13 @@ impl TerminalHost {
         let (event_sender, event_receiver) = async_channel::unbounded();
         let terminal = options.terminal;
         let initial_command = options.initial_command;
+        let started_at = Instant::now();
+        let activity = Arc::new(Mutex::new(TerminalActivity {
+            last_output_at: started_at,
+            last_input_at: started_at,
+            output_bytes_total: 0,
+        }));
+        let host_activity = Arc::clone(&activity);
         let join = thread::Builder::new()
             .name(format!("fleet-terminal-{terminal}"))
             .spawn(move || {
@@ -154,6 +177,7 @@ impl TerminalHost {
                     event_sender,
                     initial_command,
                     options.starting_sequence,
+                    host_activity,
                 );
             })?;
         Ok(Self {
@@ -161,6 +185,7 @@ impl TerminalHost {
             child_pid,
             commands: command_sender,
             events: event_receiver,
+            activity,
             join: Some(join),
         })
     }
@@ -187,6 +212,15 @@ impl TerminalHost {
     #[must_use]
     pub fn event_receiver(&self) -> Receiver<HostEvent> {
         self.events.clone()
+    }
+
+    /// Returns the latest monotonic PTY input/output activity counters.
+    #[must_use]
+    pub fn activity(&self) -> TerminalActivity {
+        *self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Writes already encoded bytes to the PTY.
@@ -272,6 +306,10 @@ impl TerminalHost {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "host loop dependencies and mutable state are intentionally explicit"
+)]
 fn run_host(
     terminal: TerminalId,
     mut pty: Pty,
@@ -280,6 +318,7 @@ fn run_host(
     events: Sender<HostEvent>,
     initial_command: Option<String>,
     starting_sequence: u64,
+    activity: Arc<Mutex<TerminalActivity>>,
 ) {
     let spawned_at = Instant::now();
     let mut pending_commands = initial_command
@@ -296,7 +335,6 @@ fn run_host(
     let mut exit_observed_at = None;
     let mut commands_closed = false;
     let mut received = None;
-    let mut last_activity = spawned_at;
     let mut last_compression = spawned_at;
 
     loop {
@@ -314,7 +352,7 @@ fn run_host(
                         }
                     }
                     output_bytes += bytes.len();
-                    last_activity = Instant::now();
+                    record_output(&activity, bytes.len());
                     engine.feed(&bytes);
                     dirty = true;
                 }
@@ -326,7 +364,7 @@ fn run_host(
             }
         }
 
-        let activity = drain_commands(
+        drain_commands(
             terminal,
             &commands,
             received.take(),
@@ -340,11 +378,15 @@ fn run_host(
             &mut viewport_moved,
             &mut sequence,
             &mut commands_closed,
+            &activity,
         );
 
-        if activity {
-            last_activity = Instant::now();
-        }
+        let observed_activity = *activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let last_activity = observed_activity
+            .last_output_at
+            .max(observed_activity.last_input_at);
         if last_activity.elapsed() >= Duration::from_millis(250)
             && last_compression.elapsed() >= Duration::from_millis(16)
         {
@@ -353,7 +395,7 @@ fn run_host(
         }
 
         forward_engine_events(engine.as_mut(), &mut pty, terminal, &events);
-        type_ready_commands(&mut pending_commands, &mut pty);
+        type_ready_commands(&mut pending_commands, &mut pty, &activity);
 
         let now = Instant::now();
         if force_full
@@ -434,6 +476,7 @@ fn drain_commands(
     viewport_moved: &mut bool,
     sequence: &mut u64,
     commands_closed: &mut bool,
+    terminal_activity: &Arc<Mutex<TerminalActivity>>,
 ) -> bool {
     let mut first = first;
     let mut activity = false;
@@ -454,6 +497,7 @@ fn drain_commands(
                 WheelAction::Viewport(steps) => HostCommand::Scroll(ScrollCommand::Lines(steps)),
                 WheelAction::Pty(bytes) => {
                     flush_viewport(&mut viewport, engine, viewport_moved);
+                    record_input(terminal_activity);
                     write_or_warn(pty, &bytes, terminal);
                     continue;
                 }
@@ -478,20 +522,24 @@ fn drain_commands(
         match command {
             HostCommand::Write(bytes) => {
                 follow_input(engine, viewport_moved);
+                record_input(terminal_activity);
                 write_or_warn(pty, &bytes, terminal);
             }
             HostCommand::Key(event) => {
                 follow_input(engine, viewport_moved);
                 let bytes = engine.encode_key(&event);
+                record_input(terminal_activity);
                 write_or_warn(pty, &bytes, terminal);
             }
             HostCommand::Mouse(event) => {
                 let bytes = engine.encode_mouse(&event);
+                record_input(terminal_activity);
                 write_or_warn(pty, &bytes, terminal);
             }
             HostCommand::Paste(text) => {
                 follow_input(engine, viewport_moved);
                 let bytes = engine.encode_paste(&text);
+                record_input(terminal_activity);
                 write_or_warn(pty, &bytes, terminal);
             }
             HostCommand::Resize { cols, rows } => match resize(pty, engine, cols, rows) {
@@ -529,6 +577,23 @@ fn drain_commands(
     flush_viewport(&mut viewport, engine, viewport_moved);
     forward_engine_events(engine, pty, terminal, events);
     activity
+}
+
+fn record_output(activity: &Mutex<TerminalActivity>, bytes: usize) {
+    let mut activity = activity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    activity.last_output_at = Instant::now();
+    activity.output_bytes_total = activity
+        .output_bytes_total
+        .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+}
+
+fn record_input(activity: &Mutex<TerminalActivity>) {
+    activity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .last_input_at = Instant::now();
 }
 
 /// Fold signed/absolute moves while preserving clamping at each command boundary.
@@ -600,13 +665,18 @@ fn resize(pty: &Pty, engine: &mut dyn VtEngine, cols: u16, rows: u16) -> Result<
     engine.resize(cols, rows).map_err(|error| error.to_string())
 }
 
-fn type_ready_commands(pending: &mut Vec<(String, Instant)>, pty: &mut Pty) {
+fn type_ready_commands(
+    pending: &mut Vec<(String, Instant)>,
+    pty: &mut Pty,
+    activity: &Mutex<TerminalActivity>,
+) {
     let now = Instant::now();
     let mut index = 0;
     while index < pending.len() {
         if pending[index].1 <= now {
             let (mut command, _) = pending.remove(index);
             command.push('\r');
+            record_input(activity);
             if let Err(error) = pty.write(command.as_bytes()) {
                 warn!(%error, "failed to type initial terminal command");
             }
@@ -657,6 +727,15 @@ mod tests {
     use std::{path::PathBuf, time::SystemTime};
 
     use super::*;
+
+    fn test_activity() -> Arc<Mutex<TerminalActivity>> {
+        let now = Instant::now();
+        Arc::new(Mutex::new(TerminalActivity {
+            last_output_at: now,
+            last_input_at: now,
+            output_bytes_total: 0,
+        }))
+    }
     use async_channel::TryRecvError;
 
     #[test]
@@ -747,6 +826,7 @@ mod tests {
         let mut sequence = 1;
         let mut closed = false;
         let mut pending = Vec::new();
+        let activity = test_activity();
         for alternate in [false, true, false] {
             engine.feed(if alternate {
                 b"\x1b[?1049h"
@@ -779,6 +859,7 @@ mod tests {
                 &mut moved,
                 &mut sequence,
                 &mut closed,
+                &activity,
             );
             if alternate {
                 assert_eq!(engine.viewport_offset(), 0);
@@ -864,6 +945,7 @@ mod tests {
         let mut seq = 0;
         let mut closed = false;
         let mut pending = Vec::new();
+        let activity = test_activity();
         drain_commands(
             TerminalId(1),
             &receiver,
@@ -878,6 +960,7 @@ mod tests {
             &mut moved,
             &mut seq,
             &mut closed,
+            &activity,
         );
         assert_eq!(engine.viewport_offset(), 3);
         assert!(moved && !full);
@@ -910,6 +993,7 @@ mod tests {
                 &mut moved,
                 &mut seq,
                 &mut closed,
+                &activity,
             );
             assert_eq!(engine.viewport_offset(), 0);
         }

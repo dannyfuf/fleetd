@@ -17,10 +17,10 @@ use std::{
 };
 
 use fleet_core::{
-    config::Agent,
+    config::{Agent, NotificationsConfig},
     github::PrTab,
     ids::{ContextId, JobId, RepoId, SessionId, TerminalId},
-    sessions::{Session, SessionState},
+    sessions::{AgentActivity, Session, SessionKind, SessionState, aggregate_agent_activity},
 };
 use fleet_proto::{
     event::{Event, ToastLevel},
@@ -32,7 +32,11 @@ use fleet_proto::{
 };
 use fleet_ui_kit::{Icon, Mode as ModeWord, PrBadgeState, Toast, ToastDuration, Tone};
 
-use crate::{bridge::BridgeEvent, dialogs::Dialogs};
+use crate::{
+    bridge::BridgeEvent,
+    dialogs::Dialogs,
+    notify_sound::{NotificationSound, SystemSound},
+};
 
 /// Longest window in which two identical toasts coalesce into one `×n` toast (§2.7).
 pub const TOAST_COALESCE_WINDOW: Duration = Duration::from_secs(1);
@@ -46,6 +50,8 @@ pub const RESTART_BANNER_DWELL: Duration = Duration::from_secs(6);
 pub const RECONNECT_BANNER_DWELL: Duration = Duration::from_millis(800);
 /// How many entries an MRU list keeps.
 const MRU_CAPACITY: usize = 32;
+/// Minimum observed working time before an idle transition is treated as a completed turn.
+const AGENT_FINISH_MIN_WORKING: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------- screens and modes
 
@@ -797,6 +803,8 @@ pub struct AppState {
     pub agent_popup: Option<AgentPopupState>,
     /// Effective history and wheel configuration.
     pub terminal_config: fleet_core::config::TerminalConfig,
+    /// Enabled channels for agent-finished notifications.
+    pub notifications: NotificationsConfig,
     /// The overlay that owns the keyboard, when any.
     pub overlay: Option<Overlay>,
     /// The filter of the focused list.
@@ -813,6 +821,10 @@ pub struct AppState {
     pub terminal_mru: HashMap<SessionId, Mru<TerminalId>>,
     /// The live toasts, oldest first.
     pub toasts: Vec<LiveToast>,
+    /// Most recently observed aggregate activity and when that state was first seen, per session.
+    last_agent_activity: HashMap<SessionId, (AgentActivity, Instant)>,
+    /// Audible completion signal, replaceable by a recording implementation in tests.
+    notification_sound: Box<dyn NotificationSound>,
     /// The sticky error slot.
     pub sticky_error: Option<StickyError>,
     /// Failed jobs whose sticky slot was acknowledged by opening Jobs.
@@ -876,6 +888,7 @@ impl AppState {
             terminal_mode: TerminalMode::Terminal,
             agent_popup: None,
             terminal_config: fleet_core::config::TerminalConfig::default(),
+            notifications: NotificationsConfig::default(),
             overlay: None,
             filter: FilterState::default(),
             detail_open: false,
@@ -884,6 +897,8 @@ impl AppState {
             session_mru: Mru::new(),
             terminal_mru: HashMap::new(),
             toasts: Vec::new(),
+            last_agent_activity: HashMap::new(),
+            notification_sound: Box::new(SystemSound),
             sticky_error: None,
             seen_failed: Vec::new(),
             jobs_focus: None,
@@ -1091,6 +1106,14 @@ impl AppState {
             .find(|session| session.id == id)
     }
 
+    /// Latest aggregate activity for a daemon session, shared by Workspace status and the popup.
+    #[must_use]
+    pub fn session_agent_activity(&self, session: &SessionId) -> AgentActivity {
+        self.last_agent_activity
+            .get(session)
+            .map_or(AgentActivity::Unknown, |(activity, _)| *activity)
+    }
+
     /// The mirror grid of the popup agent's first terminal.
     #[must_use]
     pub fn agent_popup_grid(&self) -> Option<&MirrorGrid> {
@@ -1176,6 +1199,16 @@ impl AppState {
         self.leave_prefix();
         if let Some(session) = self.active_session().map(|s| s.id.clone())
             && !self.watches.toggle(&session)
+        {
+            self.toast_short("no subagent watches", Icon::Info, now);
+        }
+    }
+
+    /// `^s N/P` shows and cycles watches without changing the active terminal.
+    pub fn cycle_watch(&mut self, forward: bool, now: Instant) {
+        self.leave_prefix();
+        if let Some(session) = self.active_session().map(|s| s.id.clone())
+            && !self.watches.cycle(&session, forward)
         {
             self.toast_short("no subagent watches", Icon::Info, now);
         }
@@ -1275,8 +1308,88 @@ impl AppState {
         }
     }
 
+    /// Replaces agent-activity baselines without presenting historical completions.
+    fn seed_agent_activity(&mut self, snapshot: &Snapshot, now: Instant) {
+        self.last_agent_activity = snapshot_agent_activities(snapshot)
+            .into_iter()
+            .map(|(session, activity)| (session, (activity, now)))
+            .collect();
+    }
+
+    /// Records one aggregate activity observation and returns whether it completed real work.
+    fn observe_agent_activity(
+        &mut self,
+        session: SessionId,
+        activity: AgentActivity,
+        now: Instant,
+    ) -> bool {
+        let finished = self
+            .last_agent_activity
+            .get(&session)
+            .is_some_and(|(previous, seen_at)| {
+                *previous == AgentActivity::Working
+                    && activity == AgentActivity::Idle
+                    && now.saturating_duration_since(*seen_at) >= AGENT_FINISH_MIN_WORKING
+            });
+        match self.last_agent_activity.get_mut(&session) {
+            Some((previous, _)) if *previous == activity => {}
+            Some(entry) => *entry = (activity, now),
+            None => {
+                self.last_agent_activity.insert(session, (activity, now));
+            }
+        }
+        finished
+    }
+
+    /// Presents an agent completion through each enabled notification channel.
+    fn notify_agent_finished(&mut self, label: &str, now: Instant) {
+        if self.notifications.toast {
+            self.toast(
+                Toast::new(format!("{label}: agent finished"))
+                    .icon(Icon::CircleCheck)
+                    .tone(Tone::Success),
+                now,
+                dwell_for(ToastDuration::Normal),
+            );
+        }
+        if self.notifications.sound {
+            self.notification_sound.play();
+        }
+    }
+
+    /// Compares all aggregate session activities in a full snapshot.
+    fn observe_snapshot_agent_activity(&mut self, snapshot: &Snapshot, now: Instant) {
+        let activities = snapshot_agent_activities(snapshot);
+        let live: HashSet<SessionId> = activities
+            .iter()
+            .map(|(session, _)| session.clone())
+            .chain(
+                snapshot
+                    .sessions
+                    .iter()
+                    .filter(|session| matches!(&session.kind, SessionKind::Agent(_)))
+                    .map(|session| session.id.clone()),
+            )
+            .collect();
+        let mut finished = Vec::new();
+        for (session, activity) in activities {
+            if self.observe_agent_activity(session.clone(), activity, now) {
+                finished.push((
+                    session.clone(),
+                    agent_notification_label(snapshot, &session),
+                ));
+            }
+        }
+        self.last_agent_activity
+            .retain(|session, _| live.contains(session));
+        for (_, label) in finished {
+            self.notify_agent_finished(&label, now);
+        }
+    }
+
     /// Replaces the snapshot mirror and re-derives everything that hangs off it.
     pub fn apply_snapshot(&mut self, snapshot: Snapshot, now: Instant) {
+        self.observe_snapshot_agent_activity(&snapshot, now);
         self.has_seen_non_empty_state |= !snapshot.contexts.is_empty()
             || !snapshot.repos.is_empty()
             || !snapshot.clones.is_empty();
@@ -1441,11 +1554,13 @@ impl AppState {
     pub fn apply_bridge_event(&mut self, event: BridgeEvent, now: Instant) {
         match event {
             BridgeEvent::TerminalConfig(config) => self.terminal_config = config,
+            BridgeEvent::NotificationConfig(config) => self.notifications = config,
             BridgeEvent::Connected(snapshot) => {
                 self.daemon = DaemonLink::Connected;
                 self.daemon_since = now;
                 self.link_generation = self.link_generation.wrapping_add(1);
                 self.watches.reconnect();
+                self.seed_agent_activity(&snapshot, now);
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::ConnectFailed {
@@ -1493,6 +1608,7 @@ impl AppState {
                 // fleetd itself restarted.
                 self.link_generation = self.link_generation.wrapping_add(1);
                 self.watches.reconnect();
+                self.seed_agent_activity(&snapshot, now);
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
@@ -1529,6 +1645,13 @@ impl AppState {
             Event::SnapshotChanged(snapshot) => self.apply_snapshot(snapshot, now),
             Event::JobUpdated(job) => self.apply_job(job, now),
             Event::SessionChanged(session) => self.apply_session(session),
+            Event::AgentActivityChanged {
+                session,
+                terminal_id,
+                agent,
+                activity,
+                changed_at,
+            } => self.apply_agent_activity(session, terminal_id, agent, activity, changed_at, now),
             Event::TerminalFrame(frame) => {
                 self.apply_frame(&frame);
             }
@@ -1542,6 +1665,39 @@ impl AppState {
                 };
                 self.daemon_since = now;
             }
+        }
+    }
+
+    /// Applies one terminal activity edge and presents a qualifying aggregate completion.
+    pub fn apply_agent_activity(
+        &mut self,
+        session: SessionId,
+        terminal_id: TerminalId,
+        agent: Option<String>,
+        activity: AgentActivity,
+        changed_at: String,
+        now: Instant,
+    ) {
+        let label = self.snapshot.as_ref().map_or_else(
+            || session.as_str().to_owned(),
+            |snapshot| agent_notification_label(snapshot, &session),
+        );
+        let aggregate = self
+            .snapshot
+            .as_mut()
+            .and_then(|snapshot| {
+                patch_snapshot_agent_activity(
+                    snapshot,
+                    &session,
+                    terminal_id,
+                    agent,
+                    activity,
+                    changed_at,
+                )
+            })
+            .unwrap_or(activity);
+        if self.observe_agent_activity(session, aggregate, now) {
+            self.notify_agent_finished(&label, now);
         }
     }
 
@@ -1589,6 +1745,77 @@ impl AppState {
     }
 }
 
+/// Aggregate activity keyed by the real session id represented in a snapshot.
+fn snapshot_agent_activities(snapshot: &Snapshot) -> Vec<(SessionId, AgentActivity)> {
+    snapshot
+        .sessions
+        .iter()
+        .filter_map(|session| {
+            let SessionKind::Worktree(worktree) = &session.kind else {
+                return None;
+            };
+            let activity = snapshot
+                .statuses
+                .iter()
+                .find(|status| &status.worktree_id == worktree)
+                .map_or(AgentActivity::Unknown, |status| status.agent_activity);
+            Some((session.id.clone(), activity))
+        })
+        .collect()
+}
+
+/// The canonical `repo/slug` label used for a worktree session.
+fn agent_notification_label(snapshot: &Snapshot, session: &SessionId) -> String {
+    snapshot
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.session == session.as_str())
+        .map_or_else(
+            || session.as_str().to_owned(),
+            |worktree| worktree.session.clone(),
+        )
+}
+
+/// Patches an activity event into the current snapshot and returns its new session aggregate.
+fn patch_snapshot_agent_activity(
+    snapshot: &mut Snapshot,
+    session: &SessionId,
+    terminal_id: TerminalId,
+    agent: Option<String>,
+    activity: AgentActivity,
+    changed_at: String,
+) -> Option<AgentActivity> {
+    let (worktree, index) = {
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|candidate| &candidate.id == session)?;
+        let SessionKind::Worktree(worktree) = &session.kind else {
+            return None;
+        };
+        let index = session
+            .terminals
+            .iter()
+            .position(|terminal| terminal.id == terminal_id)?;
+        (worktree.clone(), u32::try_from(index).ok()?)
+    };
+    let status = snapshot
+        .statuses
+        .iter_mut()
+        .find(|status| status.worktree_id == worktree)?;
+    let window = status
+        .windows
+        .iter_mut()
+        .find(|window| window.index == index)?;
+    window.agent = agent;
+    window.agent_activity = activity;
+    window.agent_activity_changed_at = Some(changed_at);
+    let (aggregate, changed_at) = aggregate_agent_activity(&status.windows);
+    status.agent_activity = aggregate;
+    status.agent_activity_changed_at = changed_at;
+    Some(aggregate)
+}
+
 /// `<home>/logs/fleetd.log`.
 #[must_use]
 pub fn daemon_log_path(home: &Path) -> PathBuf {
@@ -1619,6 +1846,15 @@ pub fn breadcrumb(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use fleet_core::{
+        model::Worktree,
+        sessions::{SessionKind, WorktreeStatus, WorktreeWindowStatus},
+    };
     use fleet_proto::terminal::{CellAttrs, RowUpdate};
 
     use super::*;
@@ -1727,6 +1963,76 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingSound(Arc<AtomicUsize>);
+
+    impl NotificationSound for RecordingSound {
+        fn play(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn state_with_recording_sound(now: Instant) -> (AppState, Arc<AtomicUsize>) {
+        let plays = Arc::new(AtomicUsize::new(0));
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.notification_sound = Box::new(RecordingSound(Arc::clone(&plays)));
+        (state, plays)
+    }
+
+    fn agent_snapshot(entries: &[(&str, &str, u64, AgentActivity)]) -> Snapshot {
+        let mut snapshot = snapshot();
+        for (session_id, slug, terminal_id, activity) in entries {
+            let worktree_id: fleet_core::ids::WorktreeId = format!("buk/payroll#{slug}")
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}"));
+            let mut session = session_with(session_id, &[*terminal_id]);
+            session.kind = SessionKind::Worktree(worktree_id.clone());
+            snapshot.sessions.push(session);
+            snapshot.worktrees.push(Worktree {
+                id: worktree_id.clone(),
+                repo_id: "buk/payroll"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+                slug: (*slug).to_owned(),
+                branch: format!("feat/{slug}"),
+                base_ref: "origin/main".to_owned(),
+                path: format!("/tmp/{slug}"),
+                session: (*session_id).to_owned(),
+                host: None,
+                created_at: "2026-09-05T12:00:00Z".to_owned(),
+                last_opened_at: None,
+                degraded: None,
+            });
+            snapshot.statuses.push(WorktreeStatus {
+                worktree_id,
+                session: SessionState::Detached,
+                windows: vec![WorktreeWindowStatus {
+                    index: 0,
+                    name: "cc".to_owned(),
+                    command: "claude".to_owned(),
+                    keep_alive: vec!["claude".to_owned()],
+                    agent: Some("claude".to_owned()),
+                    agent_activity: *activity,
+                    agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
+                }],
+                running: vec!["claude".to_owned()],
+                agent_activity: *activity,
+                agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
+            });
+        }
+        snapshot
+    }
+
+    fn agent_event(session: &str, terminal_id: u64, activity: AgentActivity) -> Event {
+        Event::AgentActivityChanged {
+            session: session.parse().unwrap_or_else(|error| panic!("{error}")),
+            terminal_id: TerminalId(terminal_id),
+            agent: Some("claude".to_owned()),
+            activity,
+            changed_at: "2026-09-05T12:00:00Z".to_owned(),
+        }
+    }
+
     fn row(index: u16, text: &str) -> RowUpdate {
         RowUpdate {
             index,
@@ -1757,6 +2063,14 @@ mod tests {
         state.screen = Screen::Workspace {
             session: session.id.clone(),
         };
+        state.enter_prefix();
+        state.cycle_watch(true, now);
+        assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+        assert_eq!(
+            state.toasts.last().unwrap().toast.text.as_ref(),
+            "no subagent watches"
+        );
+        state.toasts.clear();
         let mut watch = Watch {
             id: WatchId(1),
             session: session.id.clone(),
@@ -1767,11 +2081,26 @@ mod tests {
             pid: Some(123),
             started_at: chrono::Utc::now().to_rfc3339(),
             status: WatchStatus::Running,
+            source: fleet_core::watches::WatchSource::Cooperative,
+            log_file: None,
         };
         state.apply_daemon_event(Event::WatchStarted(watch.clone()), now);
         assert!(state.watches.panes[&session.id].visible);
         assert_eq!(state.watches.panes[&session.id].selected, Some(watch.id));
         assert!(state.tick(now + Duration::from_secs(1)));
+        for forward in [true, false] {
+            state.watches.hide(&session.id);
+            state.enter_prefix();
+            state.cycle_watch(forward, now);
+            assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+            assert!(state.watches.panes[&session.id].visible);
+            assert_eq!(state.watches.panes[&session.id].selected, Some(watch.id));
+            assert_eq!(
+                state.active_session().unwrap().active_terminal,
+                Some(TerminalId(1))
+            );
+            assert!(state.toasts.is_empty());
+        }
         state.enter_prefix();
         assert_eq!(state.close_selected_watch(now), None);
         assert_eq!(
@@ -2014,6 +2343,176 @@ mod tests {
         assert!(!expire_toasts(&mut toasts, now));
         assert!(expire_toasts(&mut toasts, now + Duration::from_millis(200)));
         assert!(toasts.is_empty());
+    }
+
+    #[test]
+    fn working_to_idle_after_two_seconds_notifies_once() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.apply_bridge_event(
+            BridgeEvent::Connected(Box::new(agent_snapshot(&[(
+                "payroll/feat",
+                "feat",
+                1,
+                AgentActivity::Unknown,
+            )]))),
+            now,
+        );
+
+        state.apply_daemon_event(agent_event("payroll/feat", 1, AgentActivity::Working), now);
+        state.apply_daemon_event(
+            agent_event("payroll/feat", 1, AgentActivity::Idle),
+            now + Duration::from_secs(2),
+        );
+        state.apply_daemon_event(
+            agent_event("payroll/feat", 1, AgentActivity::Idle),
+            now + Duration::from_secs(3),
+        );
+
+        assert_eq!(state.toasts.len(), 1);
+        assert_eq!(
+            state.toasts[0].toast.text.as_ref(),
+            "payroll/feat: agent finished"
+        );
+        assert_eq!(state.toasts[0].toast.icon, Some(Icon::CircleCheck));
+        assert_eq!(state.toasts[0].toast.tone, Tone::Success);
+        assert_eq!(plays.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn popup_agent_activity_survives_snapshots_and_notifies_once() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        let session = fleet_core::sessions::agent_session_id(Agent::Claude)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut fixed_agent = session_with(session.as_str(), &[41]);
+        fixed_agent.kind = SessionKind::Agent(Agent::Claude);
+        let mut current = snapshot();
+        current.sessions.push(fixed_agent);
+        state.apply_bridge_event(BridgeEvent::Connected(Box::new(current.clone())), now);
+        state.toggle_agent_popup(Agent::Claude);
+
+        state.apply_daemon_event(
+            agent_event(session.as_str(), 41, AgentActivity::Working),
+            now,
+        );
+        assert_eq!(
+            state.session_agent_activity(&session),
+            AgentActivity::Working
+        );
+
+        state.apply_snapshot(current, now + Duration::from_secs(1));
+        assert_eq!(
+            state.session_agent_activity(&session),
+            AgentActivity::Working,
+            "an unrelated snapshot must not erase fixed-agent activity"
+        );
+
+        state.apply_daemon_event(
+            agent_event(session.as_str(), 41, AgentActivity::Idle),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(state.toasts.len(), 1);
+        assert_eq!(plays.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn short_working_flicker_does_not_notify() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.apply_daemon_event(agent_event("payroll/feat", 1, AgentActivity::Working), now);
+        state.apply_daemon_event(
+            agent_event("payroll/feat", 1, AgentActivity::Idle),
+            now + Duration::from_millis(1_999),
+        );
+        assert!(state.toasts.is_empty());
+        assert_eq!(plays.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn unknown_to_idle_does_not_notify() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.apply_daemon_event(
+            agent_event("payroll/feat", 1, AgentActivity::Idle),
+            now + Duration::from_secs(3),
+        );
+        assert!(state.toasts.is_empty());
+        assert_eq!(plays.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn reconnect_with_idle_sessions_seeds_silently() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.apply_daemon_event(agent_event("payroll/feat", 1, AgentActivity::Working), now);
+        state.apply_bridge_event(
+            BridgeEvent::Reconnected {
+                restarted: false,
+                snapshot: Box::new(agent_snapshot(&[(
+                    "payroll/feat",
+                    "feat",
+                    1,
+                    AgentActivity::Idle,
+                )])),
+            },
+            now + Duration::from_secs(3),
+        );
+        assert!(state.toasts.is_empty());
+        assert_eq!(plays.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn two_sessions_finishing_produce_two_notifications() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.apply_daemon_event(agent_event("payroll/one", 1, AgentActivity::Working), now);
+        state.apply_daemon_event(agent_event("payroll/two", 2, AgentActivity::Working), now);
+        state.apply_daemon_event(
+            agent_event("payroll/one", 1, AgentActivity::Idle),
+            now + Duration::from_secs(2),
+        );
+        state.apply_daemon_event(
+            agent_event("payroll/two", 2, AgentActivity::Idle),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(state.toasts.len(), 2);
+        assert_eq!(plays.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn sound_can_be_disabled_without_disabling_the_toast() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.notifications.sound = false;
+        state.apply_daemon_event(agent_event("payroll/feat", 1, AgentActivity::Working), now);
+        state.apply_daemon_event(
+            agent_event("payroll/feat", 1, AgentActivity::Idle),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(state.toasts.len(), 1);
+        assert_eq!(plays.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_full_snapshot_recovers_a_missed_finish_event() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.apply_bridge_event(
+            BridgeEvent::Connected(Box::new(agent_snapshot(&[(
+                "payroll/feat",
+                "feat",
+                1,
+                AgentActivity::Working,
+            )]))),
+            now,
+        );
+        state.apply_snapshot(
+            agent_snapshot(&[("payroll/feat", "feat", 1, AgentActivity::Idle)]),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(state.toasts.len(), 1);
+        assert_eq!(plays.load(Ordering::SeqCst), 1);
     }
 
     #[test]

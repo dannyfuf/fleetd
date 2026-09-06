@@ -15,6 +15,58 @@ use crate::{
     sleep::{KeepAliveRule, default_keep_alive_rules},
 };
 
+/// A configurable process pattern eligible for daemon-side watch discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredWatchRule {
+    /// Stable settings identifier.
+    pub id: String,
+    /// Full-command regular expression.
+    pub pattern: String,
+    /// Whether this pattern participates in discovery.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+/// Daemon-side process watch discovery configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveredWatchesConfig {
+    /// Whether process scanning is enabled.
+    pub enabled: bool,
+    /// Milliseconds between process-table scans.
+    pub interval_ms: u64,
+    /// Ordered candidate process patterns.
+    pub processes: Vec<DiscoveredWatchRule>,
+}
+
+impl Default for DiscoveredWatchesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_ms: 2_000,
+            processes: vec![
+                discovered_rule("codex-companion", r"codex-companion\.mjs task-worker"),
+                discovered_rule("codex", r"(^|/)codex( |$)"),
+                discovered_rule("claude", r"(^|/)claude( |$)"),
+                discovered_rule("opencode", r"(^|/)opencode( |$)"),
+            ],
+        }
+    }
+}
+
+fn discovered_rule(id: &str, pattern: &str) -> DiscoveredWatchRule {
+    DiscoveredWatchRule {
+        id: id.to_owned(),
+        pattern: pattern.to_owned(),
+        enabled: true,
+    }
+}
+
+const fn default_enabled() -> bool {
+    true
+}
+
 /// The supported persisted configuration schema version.
 pub const CONFIG_VERSION: u32 = 1;
 
@@ -124,7 +176,26 @@ pub enum CloneProtocol {
     Https,
 }
 
-/// UI status refresh intervals.
+/// Agent-finished notification settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotificationsConfig {
+    /// Whether an agent-finished toast is shown.
+    pub toast: bool,
+    /// Whether an agent-finished sound is played.
+    pub sound: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            toast: true,
+            sound: true,
+        }
+    }
+}
+
+/// UI status refresh intervals and notification preferences.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiConfig {
@@ -132,6 +203,9 @@ pub struct UiConfig {
     pub status_refresh_ms: i64,
     /// Remote status refresh interval in milliseconds.
     pub remote_status_refresh_ms: i64,
+    /// Agent-finished notification channels.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 /// Recoverable-deletion settings.
@@ -216,6 +290,9 @@ pub struct Config {
     pub windows: Vec<WindowConfig>,
     /// Terminal sleep policy.
     pub sleep: SleepConfig,
+    /// Read-only daemon discovery of agent subprocesses.
+    #[serde(default)]
+    pub discovered_watches: DiscoveredWatchesConfig,
     /// GitHub settings.
     pub github: GithubConfig,
     /// UI polling settings.
@@ -279,6 +356,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
             keep_alive: default_keep_alive_rules(),
             grace_ms: 2_000,
         },
+        discovered_watches: DiscoveredWatchesConfig::default(),
         github: GithubConfig {
             cache_ttl_seconds: 3_600,
             pr_ttl_seconds: 90,
@@ -287,6 +365,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
         ui: UiConfig {
             status_refresh_ms: 2_000,
             remote_status_refresh_ms: 10_000,
+            notifications: NotificationsConfig::default(),
         },
         trash: TrashConfig::default(),
         jobs: JobsConfig::default(),
@@ -528,9 +607,9 @@ mod tests {
     use super::*;
 
     /// The defaults still mirror swarm's `config.json` field for field, with one deliberate
-    /// difference: the third window's command is Fleet's own git pane, not the `lazygit`
-    /// binary. See [`normalize_imported_windows`] for the import path that upgrades the old
-    /// value, and `docs/SWARM-INVENTORY.md` for the divergence note.
+    /// differences: the third window is Fleet's own git pane and Fleet adds notification and
+    /// terminal settings. See [`normalize_imported_windows`] for the import path that upgrades
+    /// the old value, and `docs/SWARM-INVENTORY.md` for the divergence note.
     #[test]
     fn defaults_match_swarm_json_with_fleet_terminal_settings() {
         let actual = serde_json::to_value(default_config("/home/me/.fleet"))
@@ -561,8 +640,22 @@ mod tests {
                 ],
                 "graceMs": 2000
             },
+            "discoveredWatches": {
+                "enabled": true,
+                "intervalMs": 2000,
+                "processes": [
+                    {"id":"codex-companion","pattern":"codex-companion\\.mjs task-worker","enabled":true},
+                    {"id":"codex","pattern":"(^|/)codex( |$)","enabled":true},
+                    {"id":"claude","pattern":"(^|/)claude( |$)","enabled":true},
+                    {"id":"opencode","pattern":"(^|/)opencode( |$)","enabled":true}
+                ]
+            },
             "github": {"cacheTtlSeconds":3600,"prTtlSeconds":90,"cloneProtocol":"ssh"},
-            "ui": {"statusRefreshMs":2000,"remoteStatusRefreshMs":10000},
+            "ui": {
+                "statusRefreshMs":2000,
+                "remoteStatusRefreshMs":10000,
+                "notifications":{"toast":true,"sound":true}
+            },
             "trash": {"retentionMs":600000},
             "jobs": {"warnBeforeQuit":true,"keepFinishedFor":600000},
             "terminal": {"scrollbackBytes":1073741824,"scrollLinesPerStep":3}
@@ -646,7 +739,8 @@ mod tests {
                 "unknown": true,
                 "agentCommands": {"claude": "claude --model opus"},
                 "sleep": {"graceMs": -5},
-                "ui": {"statusRefreshMs": 1, "remoteStatusRefreshMs": 2}
+                "ui": {"statusRefreshMs": 1, "remoteStatusRefreshMs": 2,
+                    "notifications": {"sound": false}}
             }),
         )
         .unwrap_or_else(|error| panic!("{error}"));
@@ -655,6 +749,8 @@ mod tests {
         assert_eq!(config.sleep.grace_ms, 0);
         assert_eq!(config.ui.status_refresh_ms, 500);
         assert_eq!(config.ui.remote_status_refresh_ms, 500);
+        assert!(config.ui.notifications.toast);
+        assert!(!config.ui.notifications.sound);
         let json = serde_json::to_value(config).unwrap_or_else(|error| panic!("{error}"));
         assert!(json.get("unknown").is_none());
     }
@@ -671,6 +767,16 @@ mod tests {
         assert!(
             merge_config("/home/me/.fleet", json!({"ui":{"remoteStatusRefreshMs":0}})).is_err()
         );
+    }
+
+    #[test]
+    fn ui_notifications_default_when_older_config_omits_them() {
+        let ui: UiConfig = serde_json::from_value(json!({
+            "statusRefreshMs": 2_000,
+            "remoteStatusRefreshMs": 10_000
+        }))
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(ui.notifications, NotificationsConfig::default());
     }
 
     #[test]

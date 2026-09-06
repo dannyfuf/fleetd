@@ -110,7 +110,7 @@ modes{alt_screen, mouse, bracketed_paste}, title }`.
 `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid. The wire protocol is version 3; `wrapped` preserves logical lines
+on the client's mirror grid. The wire protocol is version 4; `wrapped` preserves logical lines
 during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
 row is discarded, history shrinks, or a column change reflows it, without treating viewport
 movement as eviction. Off-screen
@@ -175,7 +175,7 @@ handling on the alternate screen, using live modes for the four viewport shortcu
 At the bottom, output follows live. While scrolled up, Ghostty preserves the history anchor.
 Real keys, raw input and paste atomically return to bottom on the host before writing to the
 PTY. Wheel input and copy-mode navigation preserve the viewport; copy-mode exit retains its
-explicit return-to-bottom behavior. Wire protocol version is 3; the separate swarm-compatible
+explicit return-to-bottom behavior. Wire protocol version is 4; the separate swarm-compatible
 CLI JSON envelope remains version 1.
 
 ## Client (`fleet` app)
@@ -201,17 +201,22 @@ assert domain results and side-effect order; core helpers are pure-tested; proto
 round-trip tests; `fleet-term` has an engine test (bytes in → cells out); `fleet-ui-kit`
 components are exercised by a `kit-gallery` example binary.
 
-## Cooperative subagent watches
+## Cooperative and discovered subagent watches
 
-`fleet-core::watches` holds read-only child metadata and bounded sequenced output.
+`fleet-core::watches` holds read-only child metadata, its `cooperative` or
+`discovered` source, an optional discovered log path, and bounded sequenced output.
 The daemon `Watches` service indexes watches by ID, session, and terminal; it
 coalesces output events, retains completed results for 30 minutes, and removes
-watches on terminal/session removal. A connection lease marks unfinished watches
-interrupted on disconnect. No watch operation owns or kills the child process.
+watches on terminal/session removal. A connection lease marks unfinished cooperative
+watches interrupted on disconnect. Discovered watches have no lease. No watch
+operation owns, signals, or kills the observed process.
 
 ```text
 piped child stdout/stderr -> fleet exec tee -> original stdout/stderr (raw bytes)
                                          -> AppendWatchOutput -> bounded watch registry -> WatchOutput events / TailWatch -> phase 2 Workspace pane
+
+one ps snapshot / 2 s -> candidate regexes -> Fleet env or PTY ancestry -> discovered watch
+companion job JSON/log / 500 ms -----------------------------> metadata, exit, output
 ```
 
 Optional PATH shims wrap only piped `codex` / `claude` invocations inside Fleet.
@@ -226,3 +231,17 @@ The private launcher preserves the child's PID while
 waiting for its watch ID; it then execs the target with inherited stdin and piped
 stdout/stderr. `FLEET_WATCH` prevents nested watches. See
 `APP-CONTRACTS.md` for wire types, recovery, retention, and ownership semantics.
+
+The `WatchDiscovery` loop takes one process-table snapshot per scan. It reads
+environments only for matching candidates and caches them by PID. Ownership prefers
+`FLEET_SESSION` and a valid `FLEET_TERMINAL_ID`, then falls back to ancestry beneath a
+terminal login shell. Session-only tags select the configured agent terminal, then the
+first terminal. Helper processes and each terminal's own foreground program (a direct child of its
+PTY shell) are excluded, and a matching tree collapses to its topmost eligible process. Existing cooperative or
+discovered PIDs win deduplication.
+
+Codex companion workers are correlated with their per-workspace job JSON. Their log is
+tailed into stdout chunks, beginning with its last 64 KiB after discovery or daemon
+restart. Generic discoveries carry an informational line because their output is not
+captured. Liveness and companion terminal states only change watch metadata; discovery
+never obtains a process-control handle.

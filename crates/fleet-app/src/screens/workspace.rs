@@ -41,7 +41,7 @@ use fleet_core::{
     github::{PrChecks, PrReviewDecision, PrState, PrTab, derive_pr_state},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
     model::Worktree,
-    sessions::{Session, SessionKind, SessionState, Terminal, TerminalStatus},
+    sessions::{AgentActivity, Session, SessionKind, SessionState, Terminal, TerminalStatus},
 };
 use fleet_lazygit::root::{Lazygit, LazygitEvent};
 use fleet_proto::{
@@ -72,7 +72,7 @@ use crate::{
         grid_modes, grid_rows, grid_size, line_selection, measure, selection_text, viewport_base,
         viewport_cell_selection, viewport_last, zoom_bar,
     },
-    views::{workspace_header::WorkspaceHeader, workspace_tabs},
+    views::{workspace_header::WorkspaceHeader, workspace_tabs, worktrees_list::session_glyph},
 };
 
 /// The size a terminal is attached at before the grid has ever been laid out.
@@ -853,7 +853,17 @@ impl WorkspaceScreen {
         state: &Entity<AppState>,
         cx: &mut App,
     ) -> AnyElement {
-        let tabs = workspace_tabs::tabs(session, model.terminal, &state.read(cx).renamed_terminals);
+        let app = state.read(cx);
+        let status = match &session.kind {
+            SessionKind::Worktree(worktree) => app.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .statuses
+                    .iter()
+                    .find(|status| &status.worktree_id == worktree)
+            }),
+            SessionKind::Agent { .. } => None,
+        };
+        let tabs = workspace_tabs::tabs(session, status, model.terminal, &app.renamed_terminals);
         let active = model
             .terminal
             .and_then(|terminal| workspace_tabs::position_of(session, terminal))
@@ -1300,21 +1310,31 @@ impl WorkspaceScreen {
         let up_state = state.clone();
         let area = area.on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
             if !workspace_terminal_is_live_owner(up_state.read(cx), terminal) {
-                cx.stop_propagation();
+                if cancel_active_mouse_drag(&mut up_local.borrow_mut()) {
+                    up_state.update(cx, |_, cx| cx.notify());
+                    cx.stop_propagation();
+                }
                 return;
             }
-            finish_mouse_selection(&up_local, &up_state, cx);
-            cx.stop_propagation();
+            if finish_mouse_selection(&up_local, &up_state, cx) {
+                cx.stop_propagation();
+            }
         });
         let out_local = Rc::clone(&self.local);
         let out_state = state.clone();
         area.on_mouse_up_out(MouseButton::Left, move |_event, _window, cx| {
             if !workspace_terminal_is_live_owner(out_state.read(cx), terminal) {
-                cx.stop_propagation();
+                if cancel_active_mouse_drag(&mut out_local.borrow_mut()) {
+                    out_state.update(cx, |_, cx| cx.notify());
+                    cx.stop_propagation();
+                }
                 return;
             }
-            finish_mouse_selection(&out_local, &out_state, cx);
-            cx.stop_propagation();
+            // GPUI runs mouse-up-out in capture, before sibling on_click handlers.
+            // Only consume a release that belongs to an active terminal drag.
+            if finish_mouse_selection(&out_local, &out_state, cx) {
+                cx.stop_propagation();
+            }
         })
     }
 
@@ -1377,6 +1397,24 @@ impl WorkspaceScreen {
             let bridge = bridge.clone();
             root.on_action(move |_: &prefix::DismissWatch, _, cx| {
                 crate::views::watch_pane::dismiss_selected(&state, &bridge, cx)
+            })
+        };
+        let root = {
+            let state = state.clone();
+            root.on_action(move |_: &prefix::NextWatch, _, cx| {
+                state.update(cx, |app, cx| {
+                    app.cycle_watch(true, Instant::now());
+                    cx.notify();
+                });
+            })
+        };
+        let root = {
+            let state = state.clone();
+            root.on_action(move |_: &prefix::PrevWatch, _, cx| {
+                state.update(cx, |app, cx| {
+                    app.cycle_watch(false, Instant::now());
+                    cx.notify();
+                });
             })
         };
         let root = self.tab_actions(root, bridge, state);
@@ -2075,24 +2113,42 @@ struct MouseCell {
     history_epoch: u64,
 }
 
-/// Ends a mouse drag and copies its non-empty text immediately.
-fn finish_mouse_selection(local: &Rc<RefCell<Local>>, state: &Entity<AppState>, cx: &mut App) {
-    let selected = {
-        let mut local = local.borrow_mut();
-        let Some(selection) = local.mouse_selection.as_mut() else {
-            return;
-        };
-        if !selection.dragging {
-            return;
-        }
-        selection.dragging = false;
-        if selection.selected {
-            true
-        } else {
-            local.mouse_selection = None;
-            local.row_caches.clear();
-            false
-        }
+/// Claims a release only for an active terminal drag; completed selections do not own clicks.
+fn end_mouse_drag(local: &mut Local) -> Option<bool> {
+    let selection = local.mouse_selection.as_mut()?;
+    if !selection.dragging {
+        return None;
+    }
+    selection.dragging = false;
+    let selected = selection.selected;
+    if !selected {
+        local.mouse_selection = None;
+        local.row_caches.clear();
+    }
+    Some(selected)
+}
+
+/// Cancels only a drag owned by a stale terminal surface; completed selections own no release.
+fn cancel_active_mouse_drag(local: &mut Local) -> bool {
+    if !local
+        .mouse_selection
+        .is_some_and(|selection| selection.dragging)
+    {
+        return false;
+    }
+    local.mouse_selection = None;
+    local.row_caches.clear();
+    true
+}
+
+/// Ends and copies a terminal drag, returning whether its release should be consumed.
+fn finish_mouse_selection(
+    local: &Rc<RefCell<Local>>,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) -> bool {
+    let Some(selected) = end_mouse_drag(&mut local.borrow_mut()) else {
+        return false;
     };
     if selected {
         match current_selection_text(local, state, cx) {
@@ -2101,12 +2157,13 @@ fn finish_mouse_selection(local: &Rc<RefCell<Local>>, state: &Entity<AppState>, 
             }
             CurrentSelectionText::Missing => {
                 selection_scrolled_away(local, state, cx);
-                return;
+                return true;
             }
             CurrentSelectionText::None | CurrentSelectionText::Text(_) => {}
         }
     }
     state.update(cx, |_, cx| cx.notify());
+    true
 }
 
 /// Moves the viewport and repaints.
@@ -2444,17 +2501,16 @@ pub fn job_counts(jobs: &[JobRecord], targets: &[String]) -> (usize, usize) {
 
 /// The status glyph a session shows, identical to the Hub's for the same worktree (§2.5).
 #[must_use]
-pub fn status_kind(session: SessionState, sleeping: bool, degraded: bool) -> StatusKind {
+pub fn status_kind(
+    session: SessionState,
+    sleeping: bool,
+    agent_activity: AgentActivity,
+    degraded: bool,
+) -> StatusKind {
     if degraded {
         return StatusKind::Degraded;
     }
-    match session {
-        SessionState::Attached => StatusKind::Attached,
-        SessionState::Detached if sleeping => StatusKind::Sleeping,
-        SessionState::Detached => StatusKind::DetachedAwake,
-        SessionState::Unknown => StatusKind::Unknown,
-        SessionState::None => StatusKind::NoSession,
-    }
+    session_glyph(session, sleeping, agent_activity)
 }
 
 // ---------------------------------------------------------------------------- the frame model
@@ -2537,19 +2593,16 @@ impl Model {
         };
 
         let status = worktree.map_or(StatusKind::Attached, |worktree| {
-            let session_state = app
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .statuses
-                        .iter()
-                        .find(|status| status.worktree_id == worktree.id)
-                })
-                .map_or(SessionState::Attached, |status| status.session);
+            let runtime_status = app.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .statuses
+                    .iter()
+                    .find(|status| status.worktree_id == worktree.id)
+            });
             status_kind(
-                session_state,
+                runtime_status.map_or(SessionState::Attached, |status| status.session),
                 session.slept_at.is_some(),
+                runtime_status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                 worktree.degraded.is_some(),
             )
         });
@@ -2856,29 +2909,33 @@ mod tests {
     #[test]
     fn the_status_glyph_matches_the_hub_row() {
         assert_eq!(
-            status_kind(SessionState::Attached, false, false),
+            status_kind(SessionState::Attached, false, AgentActivity::Unknown, false,),
             StatusKind::Attached
         );
         assert_eq!(
-            status_kind(SessionState::Detached, true, false),
+            status_kind(SessionState::Detached, true, AgentActivity::Unknown, false,),
             StatusKind::Sleeping
         );
         assert_eq!(
-            status_kind(SessionState::Detached, false, false),
+            status_kind(SessionState::Detached, false, AgentActivity::Unknown, false,),
             StatusKind::DetachedAwake
         );
         assert_eq!(
-            status_kind(SessionState::Unknown, false, false),
+            status_kind(SessionState::Unknown, false, AgentActivity::Unknown, false,),
             StatusKind::Unknown
         );
         assert_eq!(
-            status_kind(SessionState::None, false, false),
+            status_kind(SessionState::None, false, AgentActivity::Unknown, false,),
             StatusKind::NoSession
         );
         // A failed post-create hook outranks every session state (§2.5).
         assert_eq!(
-            status_kind(SessionState::Attached, false, true),
+            status_kind(SessionState::Attached, false, AgentActivity::Working, true,),
             StatusKind::Degraded
+        );
+        assert_eq!(
+            status_kind(SessionState::Detached, true, AgentActivity::Idle, false,),
+            StatusKind::AgentFinished
         );
     }
 
@@ -2996,6 +3053,49 @@ mod tests {
                 },
             ] if text == "middle"
         ));
+    }
+
+    #[test]
+    fn mouse_release_only_consumes_an_active_terminal_drag() {
+        let mut local = Local::default();
+        // The capture-phase mouse-up-out handler must let watch tab/close clicks bubble.
+        assert_eq!(end_mouse_drag(&mut local), None);
+        let point = AbsoluteCellPoint::new(3, 1);
+        for selected in [false, true] {
+            local.mouse_selection = Some(MouseSelection {
+                anchor: point,
+                head: point,
+                initial: AbsoluteCellSelection::new(point, point),
+                initiating: point,
+                granularity: SelectionGranularity::Cell,
+                history_epoch: 7,
+                cols: 80,
+                alt_screen: false,
+                dragging: true,
+                selected,
+            });
+            assert_eq!(end_mouse_drag(&mut local), Some(selected));
+            assert_eq!(local.mouse_selection.is_some(), selected);
+            // Even a retained selection no longer owns subsequent releases on sibling controls.
+            assert_eq!(end_mouse_drag(&mut local), None);
+        }
+
+        let point = AbsoluteCellPoint::new(3, 1);
+        local.mouse_selection = Some(MouseSelection {
+            anchor: point,
+            head: point,
+            initial: AbsoluteCellSelection::new(point, point),
+            initiating: point,
+            granularity: SelectionGranularity::Cell,
+            history_epoch: 0,
+            cols: 80,
+            alt_screen: false,
+            dragging: true,
+            selected: true,
+        });
+        assert!(cancel_active_mouse_drag(&mut local));
+        assert!(local.mouse_selection.is_none());
+        assert!(!cancel_active_mouse_drag(&mut local));
     }
 
     #[test]

@@ -554,6 +554,7 @@ fn all_event_kinds() -> Vec<EventKind> {
         EventKind::SnapshotChanged,
         EventKind::JobUpdated,
         EventKind::SessionChanged,
+        EventKind::AgentActivityChanged,
         EventKind::TerminalFrame,
         EventKind::TerminalExited,
         EventKind::TerminalTitle,

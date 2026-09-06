@@ -250,6 +250,8 @@ key_table! {
     "z",            "Workspace > Prefix" => prefix::ToggleZoom;
     "v",            "Workspace > Prefix" => prefix::ToggleWatchPane;
     "V",            "Workspace > Prefix" => prefix::DismissWatch;
+    "N",            "Workspace > Prefix" => prefix::NextWatch;
+    "P",            "Workspace > Prefix" => prefix::PrevWatch;
     "!",            "Workspace > Prefix" => FocusStickyError;
     "J",            "Workspace > Prefix" => OpenJobs;
     "?",            "Workspace > Prefix" => OpenHelp;
@@ -665,10 +667,12 @@ mod tests {
     }
 
     #[test]
-    fn watch_keys_are_prefix_only_and_uppercase_dismisses() {
+    fn watch_keys_are_prefix_only() {
         for (key, name) in [
             ("v", "prefix::ToggleWatchPane"),
             ("V", "prefix::DismissWatch"),
+            ("N", "prefix::NextWatch"),
+            ("P", "prefix::PrevWatch"),
         ] {
             let stroke = Keystroke::parse(key).unwrap();
             assert_eq!(

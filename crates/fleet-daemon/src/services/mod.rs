@@ -9,6 +9,7 @@ use std::{
 
 use fleet_core::{ids::RepoId, paths::slot_path, sessions::WorktreeStatus};
 use fleet_proto::{
+    event::Event,
     request::RequestBody,
     response::ResponseBody,
     snapshot::{DaemonInfo, PoolStatus, Snapshot},
@@ -24,6 +25,7 @@ use crate::{
     stores::{config::ConfigStore, state::StateStore},
 };
 
+pub mod agent_activity;
 pub mod contexts;
 pub mod doctor;
 pub mod github;
@@ -36,6 +38,7 @@ pub mod repos;
 pub mod sessions;
 pub mod sleep;
 pub mod update;
+mod watch_discovery;
 pub mod watches;
 pub mod worktrees;
 
@@ -78,8 +81,9 @@ pub struct Services {
     pub hosts: Hosts,
     /// Runtime PTY session service.
     pub sessions: Sessions,
-    /// Cooperative child output and lifecycle registry.
+    /// Cooperative and discovered child output and lifecycle registry.
     pub watches: watches::Watches,
+    watch_discovery: watch_discovery::WatchDiscovery,
     /// Session sleep-policy service.
     pub sleep: Sleep,
     /// Worktree inspection service.
@@ -275,6 +279,13 @@ impl Services {
                 .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR"))),
         );
         let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
+        let watches = sessions.watches();
+        let watch_discovery = watch_discovery::WatchDiscovery::new(
+            Arc::clone(&config),
+            sessions.clone(),
+            Arc::clone(&adapters.process),
+            watches.clone(),
+        );
         Self {
             hosts,
             home,
@@ -284,7 +295,8 @@ impl Services {
             worktrees,
             pool,
             github,
-            watches: sessions.watches(),
+            watches,
+            watch_discovery,
             sessions,
             sleep,
             inspect,
@@ -374,8 +386,7 @@ impl Services {
                 stream,
                 text,
             } => {
-                self.watches.require_owner(watch, owner)?;
-                self.watches.append(watch, stream, text)?;
+                self.watches.append_owned(watch, owner, stream, text)?;
                 Ok(ResponseBody::Ack)
             }
             RequestBody::FinishWatch {
@@ -383,8 +394,7 @@ impl Services {
                 code,
                 signal,
             } => {
-                self.watches.require_owner(watch, owner)?;
-                self.watches.finish(watch, code, signal)?;
+                self.watches.finish_owned(watch, owner, code, signal)?;
                 Ok(ResponseBody::Ack)
             }
             RequestBody::ListWatches { session } => {
@@ -538,6 +548,21 @@ impl Services {
                     merge_observed_statuses(&mut cached, &statuses);
                 }
                 Ok(ResponseBody::Statuses(statuses))
+            }
+            RequestBody::SetAgentActivity {
+                session,
+                terminal_id,
+                activity,
+            } => {
+                let transition = self.sessions.set_agent_activity(
+                    &session,
+                    terminal_id,
+                    activity,
+                    std::time::Instant::now(),
+                )?;
+                self.apply_agent_activity_transitions(transition.into_iter().collect())
+                    .await?;
+                Ok(ResponseBody::Ack)
             }
             RequestBody::ListPullRequests {
                 repo,
@@ -737,6 +762,10 @@ impl Services {
             .set_retention(Duration::from_millis(config.jobs.keep_finished_for));
         let mut handles = Vec::new();
         handles.push(tokio::spawn(self.watches.clone().run(shutdown.clone())));
+        handles.push(tokio::spawn(self.watch_discovery.clone().run(
+            shutdown.clone(),
+            Duration::from_millis(config.discovered_watches.interval_ms.max(500)),
+        )));
 
         let status_every = duration_from_millis(config.ui.status_refresh_ms, 500);
         handles.push(tokio::spawn(run_status_refresh(
@@ -744,6 +773,10 @@ impl Services {
             events.clone(),
             shutdown.clone(),
             status_every,
+        )));
+        handles.push(tokio::spawn(run_agent_activity_refresh(
+            Arc::clone(self),
+            shutdown.clone(),
         )));
 
         if !config.hosts.is_empty() {
@@ -779,6 +812,28 @@ impl Services {
                 tracing::warn!(%error, "failed to stop session during daemon shutdown");
             }
         }
+    }
+
+    async fn apply_agent_activity_transitions(
+        &self,
+        transitions: Vec<sessions::AgentActivityTransition>,
+    ) -> DaemonResult<()> {
+        if transitions.is_empty() {
+            return Ok(());
+        }
+        let statuses = self.sessions.refresh_statuses(None).await?;
+        *self.statuses.write().await = Some(statuses);
+        for transition in transitions {
+            self.events.publish(Event::AgentActivityChanged {
+                session: transition.session,
+                terminal_id: transition.terminal,
+                agent: transition.agent,
+                activity: transition.activity,
+                changed_at: transition.changed_at,
+            });
+        }
+        self.events.request_snapshot_current();
+        Ok(())
     }
 
     async fn reject_remote_request(&self, body: &RequestBody) -> DaemonResult<()> {
@@ -915,6 +970,24 @@ async fn run_status_refresh(
                     }
                     Err(DaemonError::Unimplemented(_)) => {}
                     Err(error) => tracing::warn!(%error, "periodic status refresh failed"),
+                }
+            }
+        }
+    }
+}
+
+async fn run_agent_activity_refresh(services: Arc<Services>, shutdown: CancellationToken) {
+    let mut interval = tokio::time::interval(agent_activity::TRACK_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            _ = interval.tick() => {
+                let transitions = services
+                    .sessions
+                    .observe_agent_activities(std::time::Instant::now());
+                if let Err(error) = services.apply_agent_activity_transitions(transitions).await {
+                    tracing::warn!(%error, "agent activity refresh failed");
                 }
             }
         }

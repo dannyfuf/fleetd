@@ -68,25 +68,29 @@ pub struct RailRow {
 
 /// Worst-of aggregation for a repository's session glyph (§3.2).
 ///
-/// The order is `unknown > attached > detached > none`, with `detached` split into awake and
-/// slept so a repo whose only session is asleep shows the moon rather than a plain circle.
-/// A host that cannot be reached ranks with `unknown`: absence of knowledge never renders as
-/// good news (§1.3).
+/// Health failures and active jobs stay at the top. Among ordinary session states, unknown
+/// remains worst; then a finished agent outranks a working agent because finished work needs the
+/// user's attention, and both outrank attachment/sleep state.
 #[must_use]
 pub fn aggregate_glyph(kinds: impl IntoIterator<Item = StatusKind>) -> StatusKind {
     fn rank(kind: StatusKind) -> u8 {
         match kind {
-            StatusKind::Unknown | StatusKind::HostUnreachable => 5,
+            StatusKind::CloneFailed => 11,
+            StatusKind::HostUnreachable => 10,
+            StatusKind::Degraded => 9,
+            StatusKind::JobRunning | StatusKind::Cloning => 8,
+            StatusKind::Unknown => 7,
+            StatusKind::AgentFinished => 6,
+            StatusKind::AgentWorking => 5,
             StatusKind::Attached => 4,
             StatusKind::DetachedAwake => 3,
             StatusKind::Sleeping => 2,
-            _ => 0,
+            StatusKind::NoSession => 1,
         }
     }
     kinds
         .into_iter()
         .max_by_key(|kind| rank(*kind))
-        .filter(|kind| rank(*kind) > 0)
         .unwrap_or(StatusKind::NoSession)
 }
 
@@ -423,6 +427,22 @@ mod tests {
         assert_eq!(
             aggregate_glyph([StatusKind::Attached, StatusKind::HostUnreachable]),
             StatusKind::HostUnreachable
+        );
+    }
+
+    #[test]
+    fn finished_agents_aggregate_above_working_and_plain_sessions() {
+        assert_eq!(
+            aggregate_glyph([
+                StatusKind::Attached,
+                StatusKind::AgentWorking,
+                StatusKind::AgentFinished,
+            ]),
+            StatusKind::AgentFinished
+        );
+        assert_eq!(
+            aggregate_glyph([StatusKind::AgentFinished, StatusKind::Unknown]),
+            StatusKind::Unknown
         );
     }
 

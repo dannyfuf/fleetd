@@ -3,7 +3,7 @@
 use fleet_core::{
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
-    sessions::WorktreeStatus,
+    sessions::{AgentActivity, WorktreeStatus},
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
@@ -30,6 +30,13 @@ pub struct ListEnvelope<'a> {
     pub version: &'a str,
     pub repos: &'a [Repo],
     pub worktrees: &'a [Worktree],
+}
+
+/// A session's watch metadata in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct WatchesEnvelope<'a> {
+    pub protocol: u32,
+    pub watches: &'a [fleet_core::watches::Watch],
 }
 
 /// A multi-delete result compatible with swarm protocol one.
@@ -69,6 +76,17 @@ pub struct OkEnvelope {
 pub struct StatusEnvelope<'a> {
     pub protocol: u32,
     pub statuses: &'a [WorktreeStatus],
+}
+
+/// A successful explicit agent-activity signal.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatusEnvelope<'a> {
+    pub protocol: u32,
+    pub ok: bool,
+    pub session: &'a fleet_core::ids::SessionId,
+    pub terminal_id: fleet_core::ids::TerminalId,
+    pub activity: AgentActivity,
 }
 
 /// A sleep result compatible with swarm protocol one.

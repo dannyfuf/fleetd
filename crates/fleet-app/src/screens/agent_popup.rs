@@ -14,7 +14,7 @@ use std::{
 use fleet_core::{
     config::Agent,
     ids::{SessionId, TerminalId},
-    sessions::{TerminalStatus, agent_session_id},
+    sessions::{AgentActivity, TerminalStatus, agent_session_id},
 };
 use fleet_proto::{
     request::RequestBody,
@@ -155,6 +155,7 @@ struct Model {
     scroll_offset: usize,
     scrollback_len: usize,
     exit_code: Option<Option<i32>>,
+    activity: AgentActivity,
 }
 
 impl Model {
@@ -182,6 +183,7 @@ impl Model {
             TerminalStatus::Exited { code } => Some(code),
             TerminalStatus::Starting | TerminalStatus::Running => None,
         });
+        let activity = app.session_agent_activity(&session);
         Some(Self {
             agent: popup.agent,
             session,
@@ -197,6 +199,7 @@ impl Model {
             scroll_offset: grid.map_or(0, |grid| grid.viewport.offset),
             scrollback_len: grid.map_or(0, |grid| grid.viewport.scrollback_len),
             exit_code,
+            activity,
         })
     }
 }
@@ -305,7 +308,6 @@ impl AgentPopup {
             Agent::Claude => "claude",
             Agent::Opencode => "opencode",
         };
-        let live = model.reachable && model.exit_code.is_none() && model.terminal.is_some();
         div()
             .flex()
             .flex_none()
@@ -315,11 +317,7 @@ impl AgentPopup {
             .gap(theme.space.sm)
             .border_b(px(1.0))
             .border_color(theme.colors.border)
-            .child(StatusDot::new(if live {
-                Tone::Success
-            } else {
-                Tone::Danger
-            }))
+            .child(StatusDot::new(header_status_tone(model)))
             .child(Text::ui_strong(label))
             .child(Text::data(model.session.to_string()).muted().ellipsize())
             .child(div().flex_1())
@@ -1391,6 +1389,16 @@ fn add_signed(value: u64, delta: i32) -> u64 {
         value.saturating_add(delta as u64)
     } else {
         value.saturating_sub(u64::from(delta.unsigned_abs()))
+    }
+}
+
+fn header_status_tone(model: &Model) -> Tone {
+    if !model.reachable || model.exit_code.is_some() || model.terminal.is_none() {
+        return Tone::Danger;
+    }
+    match model.activity {
+        AgentActivity::Working => Tone::Warning,
+        AgentActivity::Idle | AgentActivity::Unknown => Tone::Success,
     }
 }
 

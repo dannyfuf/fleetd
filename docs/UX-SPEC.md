@@ -183,6 +183,8 @@ Terminal `Palette(u8)` colors resolve through a theme palette table shipped with
 | `detached`, slept (`slept_at` set, §6) | `moon` | `fg.muted` | `sleeping — kept cc (claude)` |
 | `none` | **`dot` at 30 % opacity** | `fg.faint` | `no session` |
 | `unknown` | `circle-help` | **amber** | `unknown — <reason>` |
+| agent working | `loader-circle` (spin) | amber | `Agent working` |
+| agent finished | `circle-check` | green | `Agent finished — waiting for you` |
 | degraded (hooks failed, §6) | `triangle-alert` | amber | `post-create hooks failed — J for log` |
 | job running on this row | `loader-circle` (spin) | amber | job kind + phase |
 | clone in flight (`CloneJob.status`) | `loader-circle` (spin) | amber | `cloning…` |
@@ -689,13 +691,14 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Attaching | one dim centered line `attaching…`; typed keys are buffered and flushed on the first frame |
 | Attached | normal |
 | Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the header reads `waking…` for ≤ 1.5 s |
+| Recognized agent working / finished | the agent terminal shows an amber spinning `loader-circle` / green `circle-check`; the header uses the same aggregate state |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
 | Native tab selected | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard" |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and a 26 px amber banner replaces the header — §3.12 |
 
-**Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`,
+**Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`, `circle-check`, `loader-circle`,
 `zap`, `bot`, `sparkles` (opencode), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
 `chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
 
@@ -724,7 +727,9 @@ The Claude/OpenCode agent is a window-wide `AppFrame.overlay` surface above the 
 Workspace, centered at **90 % of window width × 85 % of window height** with the dialog scrim.
 The base screen remains mounted and rendering: its list selection, active tab, native pane, and
 terminal attachment do not change. A 44 px header shows `claude` or `opencode`, the fixed session
-id, a live/exited dot, and `^s q hide · ^s a/A switch · ctrl-q hide`. The body is the same
+id, and a status dot driven by the shared agent-activity source: amber while working, green while
+idle or otherwise live, and red when exited or unreachable. It ends with
+`^s q hide · ^s a/A switch · ctrl-q hide`. The body is the same
 `TerminalGrid` used by Workspace, sized from its measured popup area and resized with the window.
 
 Hiding releases only the popup's attachment claim (leaving an identical underlying Workspace
@@ -1147,7 +1152,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 | **Status** | `Local status refresh ms [2000]` (min 500) · `Remote status refresh ms [10000]` (min 500) |
 | **Windows** | read-only ordered list `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — lazygit` |
 | **Hosts** | read-only per host `devbox — ssh danny@devbox — fleet` |
-| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 3` · `E open config.json in a new terminal tab` · `Run doctor · D` |
+| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 4` · `E open config.json in a new terminal tab` · `Run doctor · D` |
 
 **[D-13]** The editable set closes §9's *"Settings cannot edit grace/rule definitions/windows/
 hosts/protocol/pool/timers/status intervals; many require JSON"* for everything a user changes
@@ -1180,7 +1185,7 @@ the app:
 > quitting Fleet (`ctrl-q`) never stops them. Only `c` in the Jobs panel, `K`, and `ctrl-shift-q`
 > stop things. Terminals do not survive a **daemon** restart.
 
-Footer: `Fleet <version> · protocol 3 · fleetd up 3h`.
+Footer: `Fleet <version> · protocol 4 · fleetd up 3h`.
 **Omitted:** prose explanations, links, a search field (the palette *is* the searchable surface).
 
 ---
@@ -1366,7 +1371,7 @@ to `circle-help` (`unknown`, never `none`), and read-only actions keep working (
  git            ok       git version 2.49.0
  gh auth        fail     gh: not logged in to github.com
  copy-on-write  ok       cp -c (APFS clonefile)
- fleetd         ok       pid 4211 · protocol 3 · up 3h
+ fleetd         ok       pid 4211 · protocol 4 · up 3h
  host devbox    fail     ssh: connect timed out after 5s
 ```
 
@@ -1632,10 +1637,12 @@ width, clamped to 360–640 px and recomputed on resize. PTY dimensions follow t
 terminal's actual reduced painted bounds. Zoom (`^s z`) hides the session header
 and terminal tabs while leaving the watch pane, including its header, visible.
 
-The pane header shows the child label, a status dot and `running`, `exited <code>`,
+The pane header shows the child label, prefixed with the quiet `◦ ` marker when the
+daemon discovered the process, a status dot and `running`, `exited <code>`,
 or `interrupted` for signal-only completion; elapsed time as `mm:ss`, frozen after
 exit; the `^s v` hint; and a right-aligned clickable `×`. Multiple watches add a
-compact tab strip with each label and status dot. Clicking a tab selects it.
+compact tab strip with each label and status dot; discovered tab labels use the same
+marker. Clicking a tab selects it.
 
 The body uses `LogView` in following mode. Newline-delimited lines are assembled
 independently for stdout and stderr, with live partial trailing lines. Stdout uses
@@ -1646,14 +1653,21 @@ trimming adds `older output trimmed` above the log. Each watch retains at most
 
 | Workspace prefix | Action |
 | --- | --- |
+| `^s N` | Select the next watch in this session's start order, wrapping to the first; show the pane if hidden. |
+| `^s P` | Select the previous watch in this session's start order, wrapping to the last; show the pane if hidden. |
 | `^s v` | Toggle the pane locally. With no watches, toast `no subagent watches`. Repeated toggles never cycle tabs. |
 | `^s V` / mouse `×` | Dismiss the selected completed watch and select the next tab, wrapping at the end. If it was the last, close the pane. For a running watch, hide locally and toast `watch still running; pane hidden`. |
 
-Hiding persists per session across navigation and reconnect until a **new**
+Both cooperative and discovered watches participate in the same session-local list.
+`^s N`/`^s P` toast `no subagent watches` when the session has none. With one watch,
+selection is unchanged without a toast; the pane is shown if hidden. Lowercase
+`n`/`p` remain terminal-tab navigation. The `?` help overlay lists both watch keys.
+
+Hiding persists per session across navigation and reconnect until explicitly shown or a **new**
 WatchStarted event arrives. Every new start reopens that session's pane and selects
 the new watch. Duplicate start events, output, completion, and ordinary catch-up
 responses do not undo a user's hide or selection. First discovery selects the
-newest retained watch. There are no watch cycling keys beyond mouse tab selection.
+newest retained watch. Mouse tab selection and `^s N`/`^s P` share the same session-local selection.
 
 The pane never sends input and never takes keyboard focus from the terminal.
 Closing/hiding a pane never kills a process. Subscribe before listing/tailing;

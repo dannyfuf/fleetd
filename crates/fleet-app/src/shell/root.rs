@@ -1765,6 +1765,20 @@ mod tests {
         );
         assert_eq!(state.terminal_mode, TerminalMode::Terminal);
 
+        for (keys, expected) in [
+            ("v", Action::name(&prefix::ToggleWatchPane)),
+            ("V", Action::name(&prefix::DismissWatch)),
+            ("N", Action::name(&prefix::NextWatch)),
+            ("P", Action::name(&prefix::PrevWatch)),
+        ] {
+            state.enter_prefix();
+            let keystroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
+            let (consumed, action) = take_live_prefix_action(&mut state, &keystroke);
+            assert!(consumed, "{keys} must consume the live one-shot prefix");
+            assert_eq!(action.as_ref().map(|action| action.name()), Some(expected));
+            assert_eq!(state.terminal_mode, TerminalMode::Terminal);
+        }
+
         state.enter_prefix();
         let unbound = Keystroke::parse("d").unwrap_or_else(|error| panic!("{error}"));
         let (consumed, action) = take_live_prefix_action(&mut state, &unbound);
