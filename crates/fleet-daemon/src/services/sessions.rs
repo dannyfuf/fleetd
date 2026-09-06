@@ -22,7 +22,7 @@ use fleet_proto::{
     terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
 use fleet_term::{HostEvent, PtyOptions, TerminalHost, TerminalHostOptions};
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, broadcast};
 
 use crate::{
     DaemonError, DaemonResult,
@@ -62,10 +62,49 @@ pub(crate) struct AgentActivityTransition {
 /// Runtime seam shared by the session and sleep services without persisting PTYs.
 pub(crate) struct SessionRuntime {
     registry: Mutex<Registry>,
+    /// Serializes EnsureSession repair per stable session id.
+    ensure_locks: Mutex<HashMap<SessionId, Weak<EnsureLock>>>,
     watches: super::watches::Watches,
     frames: broadcast::Sender<FrameUpdate>,
     process: Mutex<Option<Arc<dyn Process>>>,
     events: Mutex<Option<BroadcastBus>>,
+}
+
+/// One session's shared mutex. Lock futures retain the mutex, while claims retain this wrapper.
+struct EnsureLock {
+    mutex: Arc<AsyncMutex<()>>,
+}
+
+/// One serialized ensure operation. The final active or waiting claim removes its map entry.
+struct EnsureLockClaim {
+    runtime: Weak<SessionRuntime>,
+    session: SessionId,
+    lock: Arc<EnsureLock>,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for EnsureLockClaim {
+    fn drop(&mut self) {
+        // Lock futures retain only the inner mutex, so this count represents claims exactly and
+        // remains correct regardless of the order in which a cancelled future drops its fields.
+        if Arc::strong_count(&self.lock) != 1 {
+            return;
+        }
+        let Some(runtime) = self.runtime.upgrade() else {
+            return;
+        };
+        let mut locks = runtime
+            .ensure_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::strong_count(&self.lock) == 1
+            && locks
+                .get(&self.session)
+                .is_some_and(|entry| Weak::ptr_eq(entry, &Arc::downgrade(&self.lock)))
+        {
+            locks.remove(&self.session);
+        }
+    }
 }
 
 impl SessionRuntime {
@@ -75,6 +114,7 @@ impl SessionRuntime {
                 next_terminal: 1,
                 ..Registry::default()
             }),
+            ensure_locks: Mutex::new(HashMap::new()),
             watches: super::watches::Watches::default(),
             frames,
             process: Mutex::new(None),
@@ -88,6 +128,49 @@ impl SessionRuntime {
             .events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(events);
+    }
+
+    async fn claim_ensure_lock(self: &Arc<Self>, session: SessionId) -> EnsureLockClaim {
+        let lock = {
+            let mut locks = self
+                .ensure_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&session).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(EnsureLock {
+                    mutex: Arc::new(AsyncMutex::new(())),
+                });
+                locks.insert(session.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        // Construct the pruning guard before awaiting. If this future is cancelled while queued,
+        // its Drop implementation removes the expired weak map entry after the lock future's Arc
+        // has unwound.
+        let mut claim = EnsureLockClaim {
+            runtime: Arc::downgrade(self),
+            session,
+            lock,
+            guard: None,
+        };
+        claim.guard = Some(Arc::clone(&claim.lock.mutex).lock_owned().await);
+        claim
+    }
+
+    fn prune_ensure_lock(&self, session: &SessionId) {
+        let mut locks = self
+            .ensure_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if locks
+            .get(session)
+            .is_some_and(|lock| lock.strong_count() == 0)
+        {
+            locks.remove(session);
+        }
     }
 
     fn notify_session(&self, id: &SessionId) {
@@ -333,7 +416,7 @@ impl SessionRuntime {
     }
 
     pub(crate) fn close_terminal_if_present(&self, terminal: TerminalId) -> Option<String> {
-        let (name, host) = {
+        let (name, host, removed_session) = {
             let mut registry = self
                 .registry
                 .lock()
@@ -354,16 +437,20 @@ impl SessionRuntime {
             if session.active_terminal == Some(terminal) {
                 session.active_terminal = session.terminals.first().map(|entry| entry.id);
             }
-            if session.terminals.is_empty() {
+            let removed_session = session.terminals.is_empty();
+            if removed_session {
                 registry.sessions.remove(&session_id);
                 if registry.active_worktree.as_ref() == Some(&session_id) {
                     registry.active_worktree = None;
                 }
             }
-            (name, host)
+            (name, host, removed_session.then_some(session_id))
         };
         if let Some(host) = host {
             let _ = host.kill();
+        }
+        if let Some(session) = removed_session.as_ref() {
+            self.prune_ensure_lock(session);
         }
         self.notify_snapshot();
         Some(name)
@@ -398,6 +485,7 @@ impl SessionRuntime {
         for host in hosts {
             let _ = host.kill();
         }
+        self.prune_ensure_lock(session);
         self.notify_snapshot();
         true
     }
@@ -583,6 +671,10 @@ impl Sessions {
                 "a session requires at least one configured terminal".to_owned(),
             ));
         }
+        // Keep the entire existence-check/repair sequence atomic for this session. Different
+        // sessions still ensure concurrently, while duplicate requests cannot both reserve and
+        // append the same configured terminal name.
+        let _ensure_claim = self.runtime.claim_ensure_lock(session_id.clone()).await;
         let configured_order = specs
             .iter()
             .enumerate()
@@ -1020,6 +1112,18 @@ impl Sessions {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn attachment_count(&self, terminal: TerminalId) -> usize {
+        self.runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .attachments
+            .get(&terminal)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Writes already encoded bytes to the terminal process.
     pub async fn input(&self, terminal: TerminalId, bytes: Vec<u8>) -> DaemonResult<()> {
         self.host_or_not_found(terminal)?
@@ -1386,6 +1490,89 @@ fn terminal_error(terminal: TerminalId, error: impl std::fmt::Display) -> Daemon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ensure_lock_entry_is_pruned_after_its_session_is_gone() {
+        let (frames, _receiver) = broadcast::channel(1);
+        let runtime = Arc::new(SessionRuntime::new(frames));
+        let session = agent_session_id(Agent::Claude).expect("valid fixed agent session id");
+        runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .insert(
+                session.clone(),
+                Session {
+                    id: session.clone(),
+                    kind: SessionKind::Agent(Agent::Claude),
+                    cwd: "/tmp".to_owned(),
+                    terminals: Vec::new(),
+                    active_terminal: None,
+                    slept_at: None,
+                    kept_terminals: Vec::new(),
+                },
+            );
+
+        let claim = runtime.claim_ensure_lock(session.clone()).await;
+        assert!(runtime.kill_if_present(&session));
+        assert!(
+            runtime
+                .ensure_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&session),
+            "an in-flight claim keeps serialization intact while it unwinds"
+        );
+
+        drop(claim);
+        assert!(
+            !runtime
+                .ensure_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&session),
+            "the final claim must not leave a historical session id behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_ensure_lock_waiter_prunes_the_expired_entry() {
+        let (frames, _receiver) = broadcast::channel(1);
+        let runtime = Arc::new(SessionRuntime::new(frames));
+        let session = agent_session_id(Agent::Claude).expect("valid fixed agent session id");
+        let owner = runtime.claim_ensure_lock(session.clone()).await;
+
+        let waiting_runtime = Arc::clone(&runtime);
+        let waiting_session = session.clone();
+        let mut waiter =
+            Box::pin(async move { waiting_runtime.claim_ensure_lock(waiting_session).await });
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(matches!(
+            std::future::Future::poll(waiter.as_mut(), &mut context),
+            std::task::Poll::Pending
+        ));
+
+        // Wake the queued waiter, then cancel it before it can be polled into an acquired claim.
+        // The owner observes the waiter's Arc and cannot prune; the waiter's pre-await guard must.
+        drop(owner);
+        assert!(
+            runtime
+                .ensure_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&session)
+        );
+        drop(waiter);
+        assert!(
+            !runtime
+                .ensure_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&session)
+        );
+    }
 
     #[tokio::test]
     async fn unchanged_process_observation_does_not_publish_again() {

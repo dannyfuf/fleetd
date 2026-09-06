@@ -107,7 +107,7 @@ until closed.
 | --- | --- | --- |
 | Normal | Navigate Hub repositories, worktrees, and pull requests. | Open a session |
 | Terminal | Send keys to the active PTY. | `ctrl-s` enters Prefix |
-| Prefix | One-shot Workspace command after `ctrl-s`. | Next key or `Esc` |
+| Prefix | One-shot Workspace or Agent popup command after `ctrl-s`. | Next key or `Esc` |
 | Scroll | Navigate and select terminal scrollback. | `Esc`, `q`, or `i` |
 | Filter | Filter the current list. | `Enter` or `Esc` |
 | Palette | Search navigation and actions. | `Enter` or `Esc` |
@@ -116,7 +116,7 @@ until closed.
 | Daemon | Report startup, disconnect, or doctor state. | Reconnect, `Esc`, or `ctrl-q` |
 | FirstRun | Guide initial creation or import. | Complete an offered action |
 
-The 15 keys and key groups to learn first are:
+The 16 keys and key groups to learn first are:
 
 | Key | Action |
 | --- | --- |
@@ -131,6 +131,7 @@ The 15 keys and key groups to learn first are:
 | `/` | Filter the current list. |
 | `:` | Open the command palette. |
 | `i` | Toggle the detail panel. |
+| `a` / `A` | Open the floating Claude / OpenCode agent popup. |
 | `r` | Refresh status, pull requests, and discovery as a job. |
 | `J` | Open the Jobs panel. |
 | `?` | Open help. |
@@ -142,7 +143,9 @@ path. Soft-wrapped visual rows copy as one logical line. `ctrl-c` and `ctrl-v` r
 keys. `ctrl-s` is the only Workspace prefix:
 `ctrl-s s` returns to Hub, `ctrl-s S` sleeps then returns, `ctrl-s 1`–`9` switches tabs,
 `ctrl-s h`/`l` changes tabs, `ctrl-s w` opens the last session, `ctrl-s c`/`x` creates/closes a
-tab, `ctrl-s [` enters Scroll, `ctrl-s ]` pastes, and `ctrl-s J`/`?` opens Jobs/help. Use
+tab, `ctrl-s a`/`A` opens the floating agent popup, `ctrl-s [` enters Scroll, `ctrl-s ]` pastes,
+and `ctrl-s J`/`?` opens Jobs/help. Inside the popup, `ctrl-q` hides it without stopping the
+agent session. Use
 `ctrl-s ctrl-s` to send a literal `ctrl-s`. See [docs/KEYMAP.md](docs/KEYMAP.md) for the complete,
 authoritative map.
 

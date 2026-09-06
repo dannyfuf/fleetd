@@ -641,7 +641,7 @@ what is running elsewhere.*
 │                                                          │ SCROLL 412/2000│ │ scroll pill
 │                                                          └────────────────┘ │
 │  ┌────┐                                                                     │
-│  │ ^S │ s hub · 1-9 tab · c new · x close · [ scroll · w last session       │ prefix hint
+│  │ ^S │ s hub · 1-9 tab · c new · x close · [ scroll · a agent              │ prefix hint
 │  └────┘  (appears only after 400 ms of hesitation)                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ ⚠ process exited (1) · ^s r restart · ^s x close · ^s c new                 │ 22  only on exit
@@ -715,9 +715,36 @@ tab, every key except `ctrl-s` → the pane; `ctrl-s` then
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
-`a`/`A` agent session · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
+`a`/`A` floating agent popup · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
 · `z` zoom · `!` sticky error slot (prefixed: `^s !`, KEYMAP A18) · `J` jobs · `?` help · `Esc` cancel
 prefix.
+
+---
+
+### 3.6.1 Agent popup
+
+The Claude/OpenCode agent is a window-wide `AppFrame.overlay` surface above the current Hub or
+Workspace, centered at **90 % of window width × 85 % of window height** with the dialog scrim.
+The base screen remains mounted and rendering: its list selection, active tab, native pane, and
+terminal attachment do not change. A 44 px header shows `claude` or `opencode`, the fixed session
+id, and a status dot driven by the shared agent-activity source: amber while working, green while
+idle or otherwise live, and red when exited or unreachable. It ends with
+`^s q hide · ^s a/A switch · ctrl-q hide`. The body is the same
+`TerminalGrid` used by Workspace, sized from its measured popup area and resized with the window.
+
+Hiding releases only the popup's attachment claim (leaving an identical underlying Workspace
+claim intact); it never kills or sleeps the daemon session. Reopening therefore restores the same
+PTY and scrollback. Popup state is independent of the base screen and focus returns to the Hub
+pane, Workspace terminal, or native pane underneath. Help and the quit/stop confirmation dialogs
+may open above the popup; palette and Settings are unavailable while the popup owns focus.
+`ctrl-q` hides here (swarm parity), while `ctrl-shift-q` retains the global quit-and-stop-daemon
+confirmation.
+
+**Keyboard:** Hub `a`/`A` and Workspace `ctrl-s a`/`ctrl-s A` open the floating Claude/OpenCode
+popup. Inside it all keys go to the PTY except `ctrl-s`, `cmd-c`, `cmd-v`, `ctrl-q`, and the
+unchanged global `ctrl-shift-q`. Popup Prefix binds `q` hide · `a`/`A` hide-current-or-switch ·
+`[` scroll · `]` paste · `r` restart exited command · `?` Help · `ctrl-s` literal · `Esc` cancel.
+Agent Scroll mode matches Workspace Scroll mode.
 
 ---
 
@@ -1146,9 +1173,10 @@ has focus) · `Space` toggles · `←`/`→` cycles a choice · `Enter` saves ·
 #### 3.8.7 Help (`?`)
 
 880 × 620, **three columns × ~14 rows**, grouped by *mode* because the app is modal:
-`Hub` · `Worktrees & PRs` · `Terminal (^s)` · `Scroll` · `Dialogs & filter`. Keys in a 68 px mono
-`fg` column, action in `fg.muted`. Context-sensitive: opening `?` from a terminal renders the
-`Terminal (^s)` column **first and in accent** and dims the others to 55 %.
+`Hub` · `Worktrees & PRs` · `Terminal (^s)` · `Scroll` · `Agent popup (^s)` ·
+`Dialogs & filter`. Keys in a 68 px mono `fg` column, action in `fg.muted`. Context-sensitive:
+opening `?` from a Workspace or Agent terminal renders that surface's group **first and in
+accent** and dims the others to 55 %.
 
 The dialog opens with one block above the columns, which is the single most valuable paragraph in
 the app:
@@ -1533,7 +1561,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `PaneHeader` | Label · scope · `shown/total` · visible range · `stale` stamp; swaps in `FilterBar` in place | §2.10, every list |
 | `Sheet` | Right-docked panel, 440 / 640 px, 160 ms slide, non-blocking, focus-restoring on close | Jobs panel (§3.7) |
 | `Dialog` | The shared frame: scrim + card + 44 px header + 44 px footer, `Esc` close, no button pair | all of §3.8 |
-| `Overlay` | Centered top-anchored layer at y = 120 | Palette (§3.9) |
+| `Overlay` | Centered floating layer with optional scrim and explicit paint layer | Palette (§3.9), Agent popup (§3.6.1) |
 | `ToastStack` | Bottom-right stack, max 3, 3.2 / 1.6 s, 1 s identical-text coalescing into `×n` | §2.7 |
 | `SplitLayout` | Two panes with a fixed side and a flex side, on either axis | Hub body, Workspace body |
 | `Divider` | 1 px rule, horizontal or vertical | dialogs, panels |
@@ -1587,13 +1615,13 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `JobTicker` | Newest running job as one status-bar line with a `+n` suffix | status bar |
 | `StickyErrorSlot` | Red, addressable (`!`), persists until dismissed; owns the last failed job | status bar |
 | `LogView` | Tail of `logs/jobs/<id>.log`, last 200 lines, 16 ms batching, follow toggle, `G` re-follow | Jobs panel |
-| `TerminalGrid` | Paints the mirror cell grid from `FrameUpdate`: the full VT attribute set (bold, dim, italic, single/double/curly underline with its own color, strikethrough, inverse, blink, invisible), narrow/wide/spacer cells, the four cursor shapes, the selection overlay and the scrollback badge | Workspace |
+| `TerminalGrid` | Paints the mirror cell grid from `FrameUpdate`: the full VT attribute set (bold, dim, italic, single/double/curly underline with its own color, strikethrough, inverse, blink, invisible), narrow/wide/spacer cells, the four cursor shapes, the selection overlay and the scrollback badge | Workspace, Agent popup |
 | `TerminalModes` | Zero-suppressed badges for `alt` / `mouse` / `paste` / `appcur` — why the keymap appears to lie | Workspace header |
 | `ScrollbackBadge` | `↥ <offset>/<len>` in the grid corner whenever the viewport is scrolled back, in or out of Scroll mode | Workspace |
 | `TerminalTabStrip` | Numbered tabs 84–200 px with an activity dot, a per-tab waking spinner, keep-alive icon, exited mark (code or `—`) and a `+` tab | Workspace |
-| `ScrollPill` | `SCROLL <offset>/<len>` overlay with a selection hint line; **suppressed in alt-screen** | Workspace Scroll mode |
-| `PrefixHint` | `^S` pill + 6 keys, 400 ms delayed, bottom-left inside the terminal area | Workspace Prefix mode |
-| `ExitStrip` | `⚠ process exited (<code>)` + prefixed recovery keys | Workspace |
+| `ScrollPill` | `SCROLL <offset>/<len>` overlay with a selection hint line; **suppressed in alt-screen** | Workspace and Agent Scroll modes |
+| `PrefixHint` | `^S` pill + contextual keys, 400 ms delayed, bottom-left inside the terminal area | Workspace and Agent Prefix modes |
+| `ExitStrip` | `⚠ process exited (<code>)` + prefixed recovery keys | Workspace, Agent popup |
 | `ModeWord` | The §2.8 mode word, fixed 84 px | status bar |
 | `Banner` | 28 px full-width amber/red strip with a countdown and prefixed keys | daemon state C (§3.12) |
 | `DaemonSplash` | The full-window cold-start and will-not-start surfaces: title, spinner, socket path, `fleetd.log` tail, bare recovery keys | daemon states A and B (§3.12) |

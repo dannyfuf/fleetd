@@ -4,8 +4,8 @@
 //! documentation cannot drift (`docs/APP-CONTRACTS.md` §6). The action label is the action's
 //! own name, de-camel-cased; that is what makes the guarantee mechanical.
 //!
-//! The dialog is context-sensitive: opened from a terminal it puts the `Terminal (^s)` column
-//! first and in accent and dims the rest, because that is the only column you can act on.
+//! The dialog is context-sensitive: opened from a Workspace or Agent terminal it puts that
+//! surface's group first and in accent and dims the rest.
 
 use fleet_ui_kit::{Icon, TextRole, prelude::*, styled_with};
 use gpui::{AnyElement, App, Entity, FocusHandle, HighlightStyle, StyledText, Window, div, px};
@@ -27,7 +27,7 @@ const KEY_COLUMN: f32 = 68.0;
 
 /// How many columns §3.8.7 gives the grid.
 ///
-/// Five groups over three columns, not five columns: in an 880 px card five side-by-side
+/// Six groups over three columns, not six columns: in an 880 px card six side-by-side
 /// columns leave ~70 px for the action label, which ellipsized nearly every one of them
 /// (`half p…`, `select…` nine rows running). Three columns leave ~190 px, which is what makes
 /// the labels readable — and readable labels are the entire job of a keymap.
@@ -144,6 +144,15 @@ const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("Scroll", &["Workspace > Scroll"]),
+    (
+        "Agent popup (^s)",
+        &[
+            "Agent",
+            "Agent > Terminal",
+            "Agent > Prefix",
+            "Agent > Scroll",
+        ],
+    ),
     (
         "Dialogs & filter",
         &[
@@ -340,7 +349,13 @@ pub(crate) fn render(
     let paragraph = what_keeps_running(cx);
     let clipboard = key_paragraph_view(TERMINAL_CLIPBOARD, cx);
     let app = state.read(cx);
-    let from_terminal = matches!(app.screen, Screen::Workspace { .. });
+    let active_group = if app.agent_popup.is_some() {
+        Some("Agent popup (^s)")
+    } else if matches!(app.screen, Screen::Workspace { .. }) {
+        Some("Terminal (^s)")
+    } else {
+        None
+    };
     let (version, uptime) = app.snapshot.as_ref().map_or_else(
         || ("\u{2013}".to_owned(), "\u{2013}".to_owned()),
         |snapshot| {
@@ -354,12 +369,9 @@ pub(crate) fn render(
     );
 
     let mut columns = groups();
-    if from_terminal {
-        // §3.8.7: the terminal column comes first and in accent when `?` was pressed there.
-        if let Some(index) = columns
-            .iter()
-            .position(|group| group.title == "Terminal (^s)")
-        {
+    if let Some(active_group) = active_group {
+        // §3.8.7: the originating terminal group comes first and in accent.
+        if let Some(index) = columns.iter().position(|group| group.title == active_group) {
             let terminal = columns.remove(index);
             columns.insert(0, terminal);
         }
@@ -378,8 +390,8 @@ pub(crate) fn render(
                     .gap(gap)
                     .children(groups.into_iter().enumerate().map(|(stacked, group)| {
                         // Only the group the caller moved to the front is accented (§3.8.7).
-                        let accented = from_terminal && column_index == 0 && stacked == 0;
-                        let dimmed = from_terminal && !accented;
+                        let accented = active_group.is_some() && column_index == 0 && stacked == 0;
+                        let dimmed = active_group.is_some() && !accented;
                         div()
                             .flex()
                             .flex_col()
@@ -501,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn the_five_groups_are_laid_over_three_balanced_columns() {
+    fn the_six_groups_are_laid_over_three_balanced_columns() {
         let packed = columns(groups());
         assert_eq!(packed.len(), COLUMNS);
         assert!(

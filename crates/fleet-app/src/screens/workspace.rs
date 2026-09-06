@@ -38,7 +38,6 @@ use std::{
 };
 
 use fleet_core::{
-    config::Agent,
     github::{PrChecks, PrReviewDecision, PrState, PrTab, derive_pr_state},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
     model::Worktree,
@@ -62,7 +61,7 @@ use gpui::{
 };
 
 use crate::{
-    actions::{fleet, prefix, scroll},
+    actions::{prefix, scroll},
     bridge::Bridge,
     dialogs::{self, Dialogs},
     state::{AppState, MirrorGrid, Overlay, Screen, TerminalMode},
@@ -112,7 +111,7 @@ fn prefix_hints() -> KeyHintRow {
         .key("c", "new")
         .key("x", "close")
         .key("[", "scroll")
-        .key("w", "last session")
+        .key("a", "agent")
 }
 
 /// Everything the screen remembers between frames.
@@ -130,6 +129,8 @@ struct Local {
     /// `TerminalKey` still reaches the PTY, which is what made the grid look frozen but alive.
     /// Comparing generations is what re-issues the attach.
     attached_generation: u64,
+    /// Whether the popup owned this Workspace terminal's PTY dimensions last frame.
+    popup_owned_size: bool,
     /// The `cols × rows` the daemon was last told about, per terminal.
     sizes: HashMap<TerminalId, (u16, u16)>,
     /// The pixel area the grid was last laid out into.
@@ -494,6 +495,7 @@ impl WorkspaceScreen {
         if terminal_changed || relinked {
             if let Some(previous) = local.attached.take()
                 && !relinked
+                && Some(previous) != model.popup_terminal
             {
                 // After a relink the old connection — and its attachment — is already gone;
                 // detaching would name a terminal this connection never claimed.
@@ -519,6 +521,22 @@ impl WorkspaceScreen {
             local.attached = target;
             local.attached_generation = model.link_generation;
         }
+
+        // Both views deliberately keep the shared terminal attached. While the popup is visible
+        // it owns the PTY dimensions; when it disappears, restore the Workspace's cached size
+        // even though this view's bounds and terminal id did not change.
+        if local.popup_owned_size
+            && !model.popup_owns_terminal
+            && let Some(terminal) = target
+            && let Some(&(cols, rows)) = local.sizes.get(&terminal)
+        {
+            bridge.send(RequestBody::ResizeTerminal {
+                terminal,
+                cols,
+                rows,
+            });
+        }
+        local.popup_owned_size = model.popup_owns_terminal;
 
         // Primary and alternate screens do not share coordinates, and changing the column count
         // changes the meaning of a cell address. The daemon advances `history_epoch` whenever
@@ -923,7 +941,11 @@ impl WorkspaceScreen {
                 let geometry_local = Rc::clone(&self.local);
                 let resize_bridge = bridge.clone();
                 let resize_state = state.clone();
+                // A full-Workspace agent session can also be opened in the popup. Both views
+                // remain attached, but only the popup may resize their shared PTY while visible.
+                // This grid still records its desired size so hiding restores it immediately.
                 let resize_terminal = model.terminal;
+                let resize_sends = !model.popup_owns_terminal;
                 let mut painted = TerminalGrid::new(grid_rows(grid, theme))
                     .id("workspace-terminal-grid")
                     .cursor(grid_cursor(grid, focused))
@@ -954,8 +976,11 @@ impl WorkspaceScreen {
                             local.mouse_selection = None;
                             local.row_caches.clear();
                         }
-                        if local.sizes.get(&terminal) != Some(&(cols, rows)) {
+                        let changed = local.sizes.get(&terminal) != Some(&(cols, rows));
+                        if changed {
                             local.sizes.insert(terminal, (cols, rows));
+                        }
+                        if changed && resize_sends {
                             resize_bridge.send(RequestBody::ResizeTerminal {
                                 terminal,
                                 cols,
@@ -998,6 +1023,10 @@ impl WorkspaceScreen {
                     return;
                 };
                 let app = wheel_state.read(cx);
+                if !workspace_terminal_is_live_owner(app, Some(terminal)) {
+                    cx.stop_propagation();
+                    return;
+                }
                 if app.drops_terminal_keys() {
                     return;
                 }
@@ -1055,7 +1084,7 @@ impl WorkspaceScreen {
                 PrefixHint::new(model.mode == TerminalMode::Prefix && hint_visible)
                     .hints(prefix_hints()),
             );
-        self.with_mouse_selection(area, state, focus)
+        self.with_mouse_selection(area, state, focus, model.terminal)
             .into_any_element()
     }
 
@@ -1113,45 +1142,9 @@ impl WorkspaceScreen {
     fn with_key_forwarding(&self, root: Div, bridge: &Bridge, state: &Entity<AppState>) -> Div {
         let (local, bridge, state) = self.handles(bridge, state);
         root.on_key_down(move |event: &KeyDownEvent, _window, cx| {
-            let (mode, terminal, drops, primed) = {
-                let app = state.read(cx);
-                if !matches!(app.screen, Screen::Workspace { .. }) {
-                    return;
-                }
-                let terminal = app
-                    .active_session()
-                    .and_then(|session| session.active_terminal);
-                (
-                    app.terminal_mode,
-                    terminal,
-                    app.drops_terminal_keys(),
-                    terminal.is_some_and(|id| app.grids.get(&id).is_some_and(|grid| grid.primed)),
-                )
-            };
-
-            // A key in Prefix or Scroll belongs to that mode, never to the PTY. Prefix keys are
-            // normally consumed by the shell's live-state interceptor before this listener;
-            // this guard is the final backstop while the rendered tree catches up.
-            if mode != TerminalMode::Terminal {
-                return;
-            }
-            let Some(terminal) = terminal else {
-                return;
-            };
-            // §3.12 C: a veiled terminal drops keys. Buffering them would replay a burst into a
-            // live shell the instant the daemon came back.
-            if drops {
+            if forward_terminal_key(&local, &state, &bridge, &event.keystroke, event.is_held, cx) {
                 cx.stop_propagation();
-                return;
             }
-            let Some(key) = key_event(&event.keystroke, event.is_held) else {
-                return;
-            };
-            if local.borrow_mut().clear_selections() {
-                state.update(cx, |_, cx| cx.notify());
-            }
-            send_or_queue_input(&local, &bridge, terminal, primed, PendingInput::Key(key));
-            cx.stop_propagation();
         })
     }
 
@@ -1168,42 +1161,7 @@ impl WorkspaceScreen {
         let (local, bridge, state) = self.handles(bridge, state);
         root.on_action(
             move |_: &crate::actions::workspace::CopySelection, _window, cx| {
-                match current_selection_text(&local, &state, cx) {
-                    CurrentSelectionText::Text(text) => {
-                        if !text.is_empty() {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text));
-                            state.update(cx, |app, cx| {
-                                app.toast_short("copied", Icon::ClipboardCheck, Instant::now());
-                                cx.notify();
-                            });
-                        }
-                        return;
-                    }
-                    CurrentSelectionText::Missing => {
-                        selection_scrolled_away(&local, &state, cx);
-                        return;
-                    }
-                    CurrentSelectionText::None => {}
-                }
-
-                // A binding normally prevents `on_key_down` from seeing the keystroke. Forward the
-                // unmatched cmd-c explicitly so Fleet never steals a terminal program's shortcut.
-                if state.read(cx).terminal_mode == TerminalMode::Terminal
-                    && let Some((terminal, primed)) = terminal_input_target(&state, cx)
-                {
-                    send_or_queue_input(
-                        &local,
-                        &bridge,
-                        terminal,
-                        primed,
-                        PendingInput::Key(KeyEvent {
-                            key: Key::Char('c'),
-                            mods: Modifiers::SUPER,
-                            text: None,
-                            action: KeyAction::Press,
-                        }),
-                    );
-                }
+                copy_selection(&local, &state, &bridge, cx);
             },
         )
     }
@@ -1214,6 +1172,7 @@ impl WorkspaceScreen {
         area: gpui::Stateful<Div>,
         state: &Entity<AppState>,
         focus: &FocusHandle,
+        terminal: Option<TerminalId>,
     ) -> gpui::Stateful<Div> {
         let down_local = Rc::clone(&self.local);
         let down_state = state.clone();
@@ -1221,6 +1180,10 @@ impl WorkspaceScreen {
         let area = area.on_mouse_down(
             MouseButton::Left,
             move |event: &MouseDownEvent, window, cx| {
+                if !workspace_terminal_is_live_owner(down_state.read(cx), terminal) {
+                    cx.stop_propagation();
+                    return;
+                }
                 window.focus(&down_focus, cx);
                 let Some(cell) = mouse_cell(&down_local, &down_state, event.position, window, cx)
                 else {
@@ -1271,6 +1234,10 @@ impl WorkspaceScreen {
         let move_local = Rc::clone(&self.local);
         let move_state = state.clone();
         let area = area.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+            if !workspace_terminal_is_live_owner(move_state.read(cx), terminal) {
+                cx.stop_propagation();
+                return;
+            }
             if let Some(terminal) = move_state
                 .read(cx)
                 .active_session()
@@ -1342,6 +1309,13 @@ impl WorkspaceScreen {
         let up_local = Rc::clone(&self.local);
         let up_state = state.clone();
         let area = area.on_mouse_up(MouseButton::Left, move |_event, _window, cx| {
+            if !workspace_terminal_is_live_owner(up_state.read(cx), terminal) {
+                if cancel_active_mouse_drag(&mut up_local.borrow_mut()) {
+                    up_state.update(cx, |_, cx| cx.notify());
+                    cx.stop_propagation();
+                }
+                return;
+            }
             if finish_mouse_selection(&up_local, &up_state, cx) {
                 cx.stop_propagation();
             }
@@ -1349,6 +1323,13 @@ impl WorkspaceScreen {
         let out_local = Rc::clone(&self.local);
         let out_state = state.clone();
         area.on_mouse_up_out(MouseButton::Left, move |_event, _window, cx| {
+            if !workspace_terminal_is_live_owner(out_state.read(cx), terminal) {
+                if cancel_active_mouse_drag(&mut out_local.borrow_mut()) {
+                    out_state.update(cx, |_, cx| cx.notify());
+                    cx.stop_propagation();
+                }
+                return;
+            }
             // GPUI runs mouse-up-out in capture, before sibling on_click handlers.
             // Only consume a release that belongs to an active terminal drag.
             if finish_mouse_selection(&out_local, &out_state, cx) {
@@ -1547,7 +1528,7 @@ impl WorkspaceScreen {
                 }
             })
         };
-        let root = {
+        {
             let (_, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::SessionSwitcher, _window, cx| {
                 state.update(cx, |app, cx| {
@@ -1557,17 +1538,7 @@ impl WorkspaceScreen {
                     cx.notify();
                 });
             })
-        };
-        let root = {
-            let (local, bridge, state) = self.handles(bridge, state);
-            root.on_action(move |_: &fleet::OpenAgentClaude, _window, cx| {
-                open_agent(&local, &bridge, &state, Agent::Claude, cx);
-            })
-        };
-        let (local, bridge, state) = self.handles(bridge, state);
-        root.on_action(move |_: &fleet::OpenAgentOpencode, _window, cx| {
-            open_agent(&local, &bridge, &state, Agent::Opencode, cx);
-        })
+        }
     }
 
     /// `ctrl-s 1`–`9`, `h` / `l`, `p` / `n` and `Tab`.
@@ -1919,7 +1890,7 @@ fn paste_clipboard(
 
 fn terminal_input_target(state: &Entity<AppState>, cx: &App) -> Option<(TerminalId, bool)> {
     let app = state.read(cx);
-    if app.drops_terminal_keys() {
+    if app.overlay.is_some() || app.agent_popup.is_some() || app.drops_terminal_keys() {
         return None;
     }
     let terminal = app
@@ -1927,6 +1898,64 @@ fn terminal_input_target(state: &Entity<AppState>, cx: &App) -> Option<(Terminal
         .and_then(|session| session.active_terminal)?;
     let primed = app.grids.get(&terminal).is_some_and(|grid| grid.primed);
     Some((terminal, primed))
+}
+
+/// Pointer input is never replayed. A listener from an older rendered frame may only mutate the
+/// Workspace terminal that is still the authoritative, uncovered topmost owner.
+fn workspace_terminal_is_live_owner(app: &AppState, terminal: Option<TerminalId>) -> bool {
+    matches!(app.screen, Screen::Workspace { .. })
+        && app.overlay.is_none()
+        && app.agent_popup.is_none()
+        && terminal.is_some()
+        && app
+            .active_session()
+            .and_then(|session| session.active_terminal)
+            == terminal
+        && !app.active_terminal_is_native()
+}
+
+fn forward_terminal_key(
+    local: &Rc<RefCell<Local>>,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    keystroke: &gpui::Keystroke,
+    is_held: bool,
+    cx: &mut App,
+) -> bool {
+    let target = {
+        let app = state.read(cx);
+        if !matches!(app.screen, Screen::Workspace { .. })
+            || app.overlay.is_some()
+            || app.agent_popup.is_some()
+            || app.terminal_mode != TerminalMode::Terminal
+        {
+            return false;
+        }
+        if app.drops_terminal_keys() {
+            local.borrow_mut().pending.clear();
+            return true;
+        }
+        let terminal = app
+            .active_session()
+            .and_then(|session| session.active_terminal);
+        terminal.map(|terminal| {
+            (
+                terminal,
+                app.grids.get(&terminal).is_some_and(|grid| grid.primed),
+            )
+        })
+    };
+    let Some((terminal, primed)) = target else {
+        return false;
+    };
+    let Some(key) = key_event(keystroke, is_held) else {
+        return false;
+    };
+    if local.borrow_mut().clear_selections() {
+        state.update(cx, |_, cx| cx.notify());
+    }
+    send_or_queue_input(local, bridge, terminal, primed, PendingInput::Key(key));
+    true
 }
 
 fn send_or_queue_input(
@@ -1948,6 +1977,50 @@ enum CurrentSelectionText {
     None,
     Text(String),
     Missing,
+}
+
+fn copy_selection(
+    local: &Rc<RefCell<Local>>,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    cx: &mut App,
+) {
+    match current_selection_text(local, state, cx) {
+        CurrentSelectionText::Text(text) => {
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                state.update(cx, |app, cx| {
+                    app.toast_short("copied", Icon::ClipboardCheck, Instant::now());
+                    cx.notify();
+                });
+            }
+            return;
+        }
+        CurrentSelectionText::Missing => {
+            selection_scrolled_away(local, state, cx);
+            return;
+        }
+        CurrentSelectionText::None => {}
+    }
+
+    // A binding normally prevents `on_key_down` from seeing the keystroke. Forward the unmatched
+    // cmd-c explicitly so Fleet never steals a terminal program's shortcut.
+    if state.read(cx).terminal_mode == TerminalMode::Terminal
+        && let Some((terminal, primed)) = terminal_input_target(state, cx)
+    {
+        send_or_queue_input(
+            local,
+            bridge,
+            terminal,
+            primed,
+            PendingInput::Key(KeyEvent {
+                key: Key::Char('c'),
+                mods: Modifiers::SUPER,
+                text: None,
+                action: KeyAction::Press,
+            }),
+        );
+    }
 }
 
 /// Text owned by either the mouse selection or the existing Scroll-mode selection.
@@ -2053,6 +2126,19 @@ fn end_mouse_drag(local: &mut Local) -> Option<bool> {
         local.row_caches.clear();
     }
     Some(selected)
+}
+
+/// Cancels only a drag owned by a stale terminal surface; completed selections own no release.
+fn cancel_active_mouse_drag(local: &mut Local) -> bool {
+    if !local
+        .mouse_selection
+        .is_some_and(|selection| selection.dragging)
+    {
+        return false;
+    }
+    local.mouse_selection = None;
+    local.row_caches.clear();
+    true
 }
 
 /// Ends and copies a terminal drag, returning whether its release should be consumed.
@@ -2303,30 +2389,6 @@ fn open_session(state: &Entity<AppState>, session: SessionId, cx: &mut App) {
     });
 }
 
-/// `ctrl-s a` / `ctrl-s A`: ensure the repository-level agent session and go to it.
-fn open_agent(
-    local: &Rc<RefCell<Local>>,
-    bridge: &Bridge,
-    state: &Entity<AppState>,
-    agent: Agent,
-    cx: &mut App,
-) {
-    detach(local, bridge);
-    let reply = bridge.request(RequestBody::EnsureSession {
-        worktree: None,
-        agent: Some(agent),
-        sleep_previous: false,
-    });
-    let state = state.clone();
-    cx.spawn(async move |cx| {
-        let Ok(Ok(ResponseBody::Session(session))) = reply.recv().await else {
-            return;
-        };
-        cx.update(|cx| open_session(&state, session.id, cx));
-    })
-    .detach();
-}
-
 /// Turns a gpui keystroke into the daemon's semantic key event.
 ///
 /// The daemon owns the encoder, so this only has to be faithful: the semantic key is gpui's
@@ -2487,6 +2549,10 @@ struct Model {
     worktree: Option<(WorktreeId, PathBuf)>,
     /// Whether a Fleet overlay owns the keyboard, in which case no pane may hold it.
     overlay_open: bool,
+    /// The popup is showing this exact terminal and temporarily owns its PTY dimensions.
+    popup_owns_terminal: bool,
+    /// The popup terminal that must remain attached if this Workspace switches away from it.
+    popup_terminal: Option<TerminalId>,
 }
 
 impl Model {
@@ -2500,6 +2566,11 @@ impl Model {
     fn build(app: &AppState, session: &Session) -> Self {
         let terminal = session.active_terminal;
         let grid = terminal.and_then(|id| app.grids.get(&id));
+        let popup_terminal = app
+            .agent_popup_session()
+            .and_then(|session| session.terminals.first())
+            .map(|terminal| terminal.id);
+        let popup_owns_terminal = terminal.is_some() && popup_terminal == terminal;
         let worktree = worktree_of(app, session);
         let (title, branch_key, repo, host) = match worktree {
             Some(worktree) => (
@@ -2592,7 +2663,9 @@ impl Model {
                 .iter()
                 .any(|entry| Some(entry.id) == terminal && entry.is_native()),
             worktree: worktree.map(|worktree| (worktree.id.clone(), PathBuf::from(&worktree.path))),
-            overlay_open: app.overlay.is_some(),
+            overlay_open: app.overlay.is_some() || app.agent_popup.is_some(),
+            popup_owns_terminal,
+            popup_terminal,
             waking: session.slept_at.is_some()
                 && session
                     .terminals
@@ -3006,6 +3079,23 @@ mod tests {
             // Even a retained selection no longer owns subsequent releases on sibling controls.
             assert_eq!(end_mouse_drag(&mut local), None);
         }
+
+        let point = AbsoluteCellPoint::new(3, 1);
+        local.mouse_selection = Some(MouseSelection {
+            anchor: point,
+            head: point,
+            initial: AbsoluteCellSelection::new(point, point),
+            initiating: point,
+            granularity: SelectionGranularity::Cell,
+            history_epoch: 0,
+            cols: 80,
+            alt_screen: false,
+            dragging: true,
+            selected: true,
+        });
+        assert!(cancel_active_mouse_drag(&mut local));
+        assert!(local.mouse_selection.is_none());
+        assert!(!cancel_active_mouse_drag(&mut local));
     }
 
     #[test]

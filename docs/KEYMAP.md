@@ -5,9 +5,9 @@ app; `fleet-app` registers exactly these via gpui key contexts. Lowercase = safe
 uppercase = stronger variant. `ctrl-c` never quits the app (it belongs to terminals); quitting
 is `ctrl-q` (with a confirm only if a job is running and the user asked to be warned).
 `Esc` never quits. `q` never quits: it closes the topmost overlay, and where nothing is open it
-is unbound. Over a terminal grid no bare key is ever an app affordance. The standard macOS
-clipboard shortcuts are the only direct exceptions; every Workspace command uses its `ctrl-s`
-prefix.
+is unbound. Over a terminal grid no bare key is ever an app affordance. Workspace commands use
+the `ctrl-s` prefix except for the standard macOS clipboard shortcuts. The floating Agent popup
+also binds direct `ctrl-q` to hide itself; its other commands use `ctrl-s`.
 
 This file is the single source of truth for keys. `docs/UX-SPEC.md` describes screens and cites
 this file; where the two disagree, this file wins.
@@ -17,10 +17,13 @@ this file; where the two disagree, this file wins.
 | Mode | gpui key context | Entered by | Left by |
 | --- | --- | --- | --- |
 | Normal | `Hub` / `Hub > Repos` / `Hub > Worktrees` / `Hub > Prs` | app start, `ctrl-s s` from a terminal, `Esc` from dialogs | opening a session |
-| Terminal | `Workspace > Terminal` | opening a worktree/agent session, `Enter` on a session tab | `ctrl-s` (prefix) |
+| Terminal | `Workspace > Terminal` | opening a worktree session, `Enter` on a session tab | `ctrl-s` (prefix) |
 | Native | `Workspace > Native` | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`) | `ctrl-s` (prefix), or selecting a PTY tab |
 | Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal or Native | any key (consumed) or `Esc` |
 | Scroll | `Workspace > Scroll` | `ctrl-s [` | `Esc`, `q`, `i` |
+| Agent terminal | `Agent > Terminal` | `a`/`A` in Hub, `ctrl-s a`/`ctrl-s A` in Workspace | `ctrl-s` (agent prefix), `ctrl-q` (hide) |
+| Agent prefix | `Agent > Prefix` (one-shot) | `ctrl-s` inside the popup | any key (consumed) or `Esc` |
+| Agent scroll | `Agent > Scroll` | `ctrl-s [` inside the popup | `Esc`, `q`, `i` |
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
 | Palette | `Palette` | `:` | `Esc`, `Enter` |
 | Dialog | `Dialog > <name>` | action | `Esc`, `Enter` |
@@ -28,9 +31,9 @@ this file; where the two disagree, this file wins.
 | Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
 
-The context stack is ordered: `Dialog` / `Palette` / `Jobs` / `Filter` shadow `Hub` and
-`Workspace`; `Daemon > Down` and `FirstRun` are full-window and shadow everything except
-`ctrl-q`.
+The context stack is ordered: the Agent popup shadows `Hub` and `Workspace`; Help and the two
+quit confirms may shadow the Agent popup. Palette and Settings are unavailable while the popup
+owns focus. `Daemon > Down` and `FirstRun` are full-window and shadow everything except `ctrl-q`.
 
 ## Global (Normal mode, all Hub screens)
 
@@ -51,7 +54,7 @@ The context stack is ordered: `Dialog` / `Palette` / `Jobs` / `Filter` shadow `H
 | `!` | focus the sticky error slot: the last failed job, offering `R retry` [A18] |
 | `i` | toggle the detail panel (never focusable; it mirrors the cursor row) |
 | `H` | collapse / expand the repos rail (240 ↔ 44 px icon rail) [A22] |
-| `a` / `A` | open the Claude / OpenCode agent session [A21] |
+| `a` / `A` | open the floating Claude / OpenCode agent popup [A21] |
 | `r` | refresh (status, PRs, discovery) — runs as a job, never blocks |
 | `U` | update Fleet (job) |
 | `N` / `E` / `D` | new context / edit active context / delete active context (confirm) [A15] |
@@ -158,7 +161,7 @@ alone preserves them.
 | `,` | rename current terminal |
 | `[` | Scroll mode |
 | `]` | paste clipboard (bracketed when the app requests it) |
-| `a` / `A` | open the Claude / OpenCode agent session |
+| `a` / `A` | open the floating Claude / OpenCode agent popup |
 | `z` | zoom: hide the session header and terminal tab strip; watch pane stays visible (toggle) |
 | `v` | hide/show the cooperative/discovered subagent watch pane; no watches → `no subagent watches` |
 | `V` | dismiss the selected exited watch; if running, hide pane and show `watch still running; pane hidden` |
@@ -183,6 +186,42 @@ is reversible.
 **No bare Workspace commands over a terminal.** `!` is `ctrl-s !` here, never bare. Affordances
 drawn over the grid are written `^s r`, `^s l`, `^s ⏎`; `cmd-c` / `cmd-v` are clipboard actions,
 not modal Workspace commands.
+
+## Agent popup
+
+The popup uses `Agent > Terminal`, `Agent > Prefix`, and `Agent > Scroll`. In Terminal mode every
+unlisted key goes to the agent PTY. Mouse selection, wheel routing, and Scroll mode match a
+Workspace terminal; direct viewport keystrokes remain PTY input unless Scroll mode is entered.
+
+| Key | Action |
+| --- | --- |
+| `ctrl-s` | enter the popup's one-shot Prefix |
+| `cmd-c` | copy selection; with no selection, forward the key to the PTY |
+| `cmd-v` | paste through the bracketed-paste-aware path |
+| `ctrl-q` | hide the popup; do **not** quit Fleet or stop the session |
+| `ctrl-shift-q` | unchanged global quit-and-stop-daemon flow |
+
+After `ctrl-s`:
+
+| Key | Action |
+| --- | --- |
+| `ctrl-s` | send a literal `ctrl-s` to the agent PTY |
+| `q` | hide the popup |
+| `a` | hide when Claude is visible; otherwise switch to Claude |
+| `A` | hide when OpenCode is visible; otherwise switch to OpenCode |
+| `[` | enter Agent Scroll mode |
+| `]` | paste clipboard |
+| `r` | restart the exited agent command [A10] |
+| `?` | open Help above the popup |
+| `Esc` | cancel Prefix |
+
+Agent Scroll mode uses the same `j`/`k`, half/page, `gg`/`G`, `v`/`y`, search-reservation, and
+exit keys as Workspace Scroll mode.
+
+**Rationale [A25].** The agent surface is a detachable view of the fixed daemon session, not a
+navigation destination. Repeating the visible agent key therefore hides it, switching agent keys
+reattaches the other live session, and neither path kills a PTY or loses scrollback. `ctrl-q` is
+scoped to `Agent` so swarm's hide muscle memory cannot quit Fleet.
 
 ## Wheel and viewport shortcuts
 

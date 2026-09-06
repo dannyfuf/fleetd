@@ -17,7 +17,7 @@ use std::{
 };
 
 use fleet_core::{
-    config::NotificationsConfig,
+    config::{Agent, NotificationsConfig},
     github::PrTab,
     ids::{ContextId, JobId, RepoId, SessionId, TerminalId},
     sessions::{AgentActivity, Session, SessionKind, SessionState, aggregate_agent_activity},
@@ -113,6 +113,45 @@ pub enum TerminalMode {
     Prefix,
     /// Scrollback and copy mode.
     Scroll,
+}
+
+/// The floating agent popup's terminal sub-mode.
+///
+/// This is deliberately separate from [`TerminalMode`]: a Workspace keeps its own mode while
+/// the popup is above it, so hiding the popup restores the exact surface the user left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPopupMode {
+    /// Every unreserved key goes to the agent PTY.
+    Terminal,
+    /// One-shot, entered by `ctrl-s`, left by the very next key.
+    Prefix,
+    /// Scrollback and copy mode.
+    Scroll,
+}
+
+/// The persistent, screen-independent floating-agent state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentPopupState {
+    /// Which fixed daemon-owned agent session is visible.
+    pub agent: Agent,
+    /// Which terminal input mode owns the popup keyboard.
+    pub mode: AgentPopupMode,
+    /// The mode restored after the one-shot prefix consumes its next key.
+    ///
+    /// This matters when `ctrl-s` is entered from Scroll: returning directly to Terminal would
+    /// bypass Scroll's selection and viewport cleanup while making the mode word lie.
+    pub prefix_return: AgentPopupMode,
+}
+
+/// The result of pressing an agent toggle key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPopupTransition {
+    /// A closed popup opened.
+    Opened,
+    /// The other agent replaced the visible one.
+    Switched,
+    /// Pressing the already-visible agent's key hid the popup.
+    Hidden,
 }
 
 /// The overlay that currently owns the keyboard. Overlays shadow the Hub and the Workspace.
@@ -760,6 +799,8 @@ pub struct AppState {
     pub cursors: Cursors,
     /// The Workspace sub-mode.
     pub terminal_mode: TerminalMode,
+    /// The floating agent popup, independent of the base Hub or Workspace screen.
+    pub agent_popup: Option<AgentPopupState>,
     /// Effective history and wheel configuration.
     pub terminal_config: fleet_core::config::TerminalConfig,
     /// Enabled channels for agent-finished notifications.
@@ -845,6 +886,7 @@ impl AppState {
             scope: RepoScope::All,
             cursors: Cursors::default(),
             terminal_mode: TerminalMode::Terminal,
+            agent_popup: None,
             terminal_config: fleet_core::config::TerminalConfig::default(),
             notifications: NotificationsConfig::default(),
             overlay: None,
@@ -896,6 +938,23 @@ impl AppState {
         if self.is_first_run() {
             return vec!["FirstRun"];
         }
+        if let Some(popup) = self.agent_popup {
+            let mut chain = vec![
+                "Agent",
+                match popup.mode {
+                    AgentPopupMode::Terminal => "Terminal",
+                    AgentPopupMode::Prefix => "Prefix",
+                    AgentPopupMode::Scroll => "Scroll",
+                },
+            ];
+            if let DaemonLink::Lost {
+                dismissed: false, ..
+            } = self.daemon
+            {
+                chain.extend_from_slice(&["Daemon", "Banner"]);
+            }
+            return chain;
+        }
         let mut chain = match &self.screen {
             Screen::Hub { tab } => vec![
                 "Hub",
@@ -933,6 +992,13 @@ impl AppState {
                 Overlay::Palette => Mode::Palette,
                 Overlay::Jobs => Mode::Jobs,
                 Overlay::Dialog(_) => Mode::Dialog,
+            };
+        }
+        if let Some(popup) = self.agent_popup {
+            return match popup.mode {
+                AgentPopupMode::Terminal => Mode::Terminal,
+                AgentPopupMode::Prefix => Mode::Prefix,
+                AgentPopupMode::Scroll => Mode::Scroll,
             };
         }
         match self.screen {
@@ -974,6 +1040,104 @@ impl AppState {
         if matches!(self.screen, Screen::Workspace { .. }) {
             self.terminal_mode = TerminalMode::Prefix;
         }
+    }
+
+    /// Opens, switches, or hides the floating agent popup without changing the base screen.
+    pub fn toggle_agent_popup(&mut self, agent: Agent) -> AgentPopupTransition {
+        match self.agent_popup {
+            Some(current) if current.agent == agent => {
+                self.agent_popup = None;
+                AgentPopupTransition::Hidden
+            }
+            Some(_) => {
+                self.agent_popup = Some(AgentPopupState {
+                    agent,
+                    mode: AgentPopupMode::Terminal,
+                    prefix_return: AgentPopupMode::Terminal,
+                });
+                AgentPopupTransition::Switched
+            }
+            None => {
+                self.agent_popup = Some(AgentPopupState {
+                    agent,
+                    mode: AgentPopupMode::Terminal,
+                    prefix_return: AgentPopupMode::Terminal,
+                });
+                AgentPopupTransition::Opened
+            }
+        }
+    }
+
+    /// Hides the floating agent surface. The daemon session is intentionally untouched.
+    pub fn hide_agent_popup(&mut self) -> bool {
+        self.agent_popup.take().is_some()
+    }
+
+    /// Enters the popup's one-shot prefix mode.
+    pub fn enter_agent_prefix(&mut self) {
+        if let Some(popup) = &mut self.agent_popup {
+            popup.prefix_return = popup.mode;
+            popup.mode = AgentPopupMode::Prefix;
+        }
+    }
+
+    /// Leaves the popup prefix after its one following key.
+    pub fn leave_agent_prefix(&mut self) -> bool {
+        let Some(popup) = &mut self.agent_popup else {
+            return false;
+        };
+        if popup.mode == AgentPopupMode::Prefix {
+            popup.mode = popup.prefix_return;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The daemon session currently selected by the floating agent popup.
+    #[must_use]
+    pub fn agent_popup_session(&self) -> Option<&Session> {
+        let agent = self.agent_popup?.agent;
+        let id = fleet_core::sessions::agent_session_id(agent).ok()?;
+        self.snapshot
+            .as_ref()?
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+    }
+
+    /// Latest aggregate activity for a daemon session, shared by Workspace status and the popup.
+    #[must_use]
+    pub fn session_agent_activity(&self, session: &SessionId) -> AgentActivity {
+        self.last_agent_activity
+            .get(session)
+            .map_or(AgentActivity::Unknown, |(activity, _)| *activity)
+    }
+
+    /// The mirror grid of the popup agent's first terminal.
+    #[must_use]
+    pub fn agent_popup_grid(&self) -> Option<&MirrorGrid> {
+        let terminal = self.agent_popup_session()?.terminals.first()?.id;
+        self.grids.get(&terminal)
+    }
+
+    /// The selected popup agent whose fixed runtime session is absent from a reachable daemon.
+    ///
+    /// The shell uses this as the pure half of its single-flight recovery gate after reconnects
+    /// and authoritative snapshots that remove an agent session.
+    #[must_use]
+    pub fn missing_agent_popup_session(&self) -> Option<Agent> {
+        let popup = self.agent_popup?;
+        if !self.daemon.is_connected() {
+            return None;
+        }
+        let session = fleet_core::sessions::agent_session_id(popup.agent).ok()?;
+        self.snapshot
+            .as_ref()?
+            .sessions
+            .iter()
+            .all(|candidate| candidate.id != session)
+            .then_some(popup.agent)
     }
 
     /// Leaves the prefix, whatever the key was. Called for **every** key seen in `Prefix`,
@@ -1199,6 +1363,13 @@ impl AppState {
         let live: HashSet<SessionId> = activities
             .iter()
             .map(|(session, _)| session.clone())
+            .chain(
+                snapshot
+                    .sessions
+                    .iter()
+                    .filter(|session| matches!(&session.kind, SessionKind::Agent(_)))
+                    .map(|session| session.id.clone()),
+            )
             .collect();
         let mut finished = Vec::new();
         for (session, activity) in activities {
@@ -2209,6 +2380,43 @@ mod tests {
     }
 
     #[test]
+    fn popup_agent_activity_survives_snapshots_and_notifies_once() {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        let session = fleet_core::sessions::agent_session_id(Agent::Claude)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut fixed_agent = session_with(session.as_str(), &[41]);
+        fixed_agent.kind = SessionKind::Agent(Agent::Claude);
+        let mut current = snapshot();
+        current.sessions.push(fixed_agent);
+        state.apply_bridge_event(BridgeEvent::Connected(Box::new(current.clone())), now);
+        state.toggle_agent_popup(Agent::Claude);
+
+        state.apply_daemon_event(
+            agent_event(session.as_str(), 41, AgentActivity::Working),
+            now,
+        );
+        assert_eq!(
+            state.session_agent_activity(&session),
+            AgentActivity::Working
+        );
+
+        state.apply_snapshot(current, now + Duration::from_secs(1));
+        assert_eq!(
+            state.session_agent_activity(&session),
+            AgentActivity::Working,
+            "an unrelated snapshot must not erase fixed-agent activity"
+        );
+
+        state.apply_daemon_event(
+            agent_event(session.as_str(), 41, AgentActivity::Idle),
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(state.toasts.len(), 1);
+        assert_eq!(plays.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn short_working_flicker_does_not_notify() {
         let now = Instant::now();
         let (mut state, plays) = state_with_recording_sound(now);
@@ -2457,6 +2665,103 @@ mod tests {
             stale_socket: true,
         };
         assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
+    }
+
+    #[test]
+    fn agent_popup_open_switch_hide_preserves_the_underlying_focus_state() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.hub_pane = HubPane::Repos;
+        let base = state.screen.clone();
+
+        assert_eq!(
+            state.toggle_agent_popup(Agent::Claude),
+            AgentPopupTransition::Opened
+        );
+        assert_eq!(state.screen, base);
+        assert_eq!(state.hub_pane, HubPane::Repos);
+        assert_eq!(state.context_chain(), vec!["Agent", "Terminal"]);
+
+        state.open_overlay(Overlay::Dialog(Dialogs::Help));
+        assert_eq!(state.context_chain(), vec!["Dialog", "Help"]);
+        assert_eq!(state.mode(), Mode::Dialog);
+        assert!(state.close_overlay());
+        assert_eq!(state.context_chain(), vec!["Agent", "Terminal"]);
+
+        state.enter_agent_prefix();
+        assert_eq!(state.context_chain(), vec!["Agent", "Prefix"]);
+        assert!(state.leave_agent_prefix());
+        assert_eq!(
+            state.toggle_agent_popup(Agent::Opencode),
+            AgentPopupTransition::Switched
+        );
+        assert_eq!(state.screen, base);
+        assert_eq!(
+            state.agent_popup.map(|popup| popup.agent),
+            Some(Agent::Opencode)
+        );
+
+        assert_eq!(
+            state.toggle_agent_popup(Agent::Opencode),
+            AgentPopupTransition::Hidden
+        );
+        assert!(state.agent_popup.is_none());
+        assert_eq!(state.context_chain(), vec!["Hub", "Repos"]);
+        assert_eq!(state.screen, base);
+        assert_eq!(state.hub_pane, HubPane::Repos);
+    }
+
+    #[test]
+    fn agent_popup_does_not_change_workspace_terminal_mode() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.screen = Screen::Workspace {
+            session: "owner/repo"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        state.terminal_mode = TerminalMode::Scroll;
+
+        state.toggle_agent_popup(Agent::Claude);
+        state.enter_agent_prefix();
+        assert_eq!(state.terminal_mode, TerminalMode::Scroll);
+        assert!(state.hide_agent_popup());
+        assert_eq!(state.terminal_mode, TerminalMode::Scroll);
+        assert_eq!(state.context_chain(), vec!["Workspace", "Scroll"]);
+    }
+
+    #[test]
+    fn agent_prefix_restores_scroll_instead_of_bypassing_its_cleanup() {
+        let mut state = AppState::new("/tmp/fleet", Instant::now());
+        state.toggle_agent_popup(Agent::Claude);
+        state
+            .agent_popup
+            .as_mut()
+            .unwrap_or_else(|| panic!("popup must be open"))
+            .mode = AgentPopupMode::Scroll;
+
+        state.enter_agent_prefix();
+        assert_eq!(
+            state.agent_popup.map(|popup| popup.mode),
+            Some(AgentPopupMode::Prefix)
+        );
+        assert!(state.leave_agent_prefix());
+        assert_eq!(
+            state.agent_popup.map(|popup| popup.mode),
+            Some(AgentPopupMode::Scroll)
+        );
+    }
+
+    #[test]
+    fn missing_visible_agent_session_is_recoverable_only_while_connected() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.toggle_agent_popup(Agent::Claude);
+        state.snapshot = Some(snapshot());
+
+        assert_eq!(state.missing_agent_popup_session(), None);
+        state.daemon = DaemonLink::Connected;
+        assert_eq!(state.missing_agent_popup_session(), Some(Agent::Claude));
     }
 
     #[test]

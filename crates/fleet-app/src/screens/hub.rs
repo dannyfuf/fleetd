@@ -27,7 +27,6 @@ use std::{
 };
 
 use fleet_core::{
-    config::Agent,
     github::{PrTab, PullRequest, worktree_matches_pr},
     ids::{ContextId, RepoId, WorktreeId},
     inspection::WorktreeInspection,
@@ -611,12 +610,6 @@ impl HubScreen {
             .on_action(ctx.act(|ctx, _: &fleet::Refresh, _w, cx| ctx.refresh(cx)))
             .on_action(ctx.act(|ctx, _: &fleet::UpdateFleet, _w, _cx| {
                 ctx.bridge.send(RequestBody::Update);
-            }))
-            .on_action(ctx.act(|ctx, _: &fleet::OpenAgentClaude, _w, cx| {
-                ctx.open_agent(Agent::Claude, cx);
-            }))
-            .on_action(ctx.act(|ctx, _: &fleet::OpenAgentOpencode, _w, cx| {
-                ctx.open_agent(Agent::Opencode, cx);
             }))
             // ---- §3.2 repos rail
             .on_action(ctx.act(|ctx, _: &repos::Open, _w, cx| ctx.open_repo(cx)))
@@ -1749,21 +1742,6 @@ impl HubCtx {
     }
 
     // ------------------------------------------------------------------ shared keys
-
-    fn open_agent(&self, agent: Agent, cx: &mut App) {
-        if self.refuses(cx) {
-            return;
-        }
-        self.ask(
-            RequestBody::EnsureSession {
-                worktree: None,
-                agent: Some(agent),
-                sleep_previous: true,
-            },
-            cx,
-            |result, ctx, cx| ctx.enter_session(result, cx),
-        );
-    }
 
     fn refresh(&self, cx: &mut App) {
         if self.refuses(cx) {
