@@ -38,6 +38,8 @@ pub trait Process: Send + Sync {
     async fn descendants(&self, pid: u32) -> DaemonResult<Vec<ProcessInfo>>;
     /// Returns TCP listeners owned by the supplied process identifiers.
     async fn listening_ports(&self, pids: &[u32]) -> DaemonResult<Vec<ListeningPort>>;
+    /// Reads a same-user process environment without mutating it.
+    async fn environment(&self, pid: u32) -> DaemonResult<Vec<(String, String)>>;
     /// Returns whether a process currently exists or is permission-protected.
     fn is_alive(&self, pid: u32) -> bool;
 }
@@ -130,6 +132,45 @@ impl Process for RealProcess {
         Ok(parse_lsof(&result.stdout))
     }
 
+    async fn environment(&self, pid: u32) -> DaemonResult<Vec<(String, String)>> {
+        #[cfg(target_os = "linux")]
+        {
+            let path = format!("/proc/{pid}/environ");
+            let bytes =
+                std::fs::read(&path).map_err(|error| DaemonError::fs(path.clone(), error))?;
+            return Ok(bytes
+                .split(|byte| *byte == 0)
+                .filter_map(|entry| {
+                    let entry = String::from_utf8_lossy(entry);
+                    let (key, value) = entry.split_once('=')?;
+                    Some((key.to_owned(), value.to_owned()))
+                })
+                .collect());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let result = self
+                .shell
+                .run(ShellCommand::new("ps").args([
+                    "-E",
+                    "-ww",
+                    "-o",
+                    "command=",
+                    "-p",
+                    &pid.to_string(),
+                ]))
+                .await?;
+            if !result.success() {
+                return Err(DaemonError::Process(format!(
+                    "ps environment for pid {pid} exited {}: {}",
+                    result.status,
+                    result.stderr.trim()
+                )));
+            }
+            Ok(parse_environment_suffix(&result.stdout))
+        }
+    }
+
     fn is_alive(&self, pid: u32) -> bool {
         if pid == 0 || pid > i32::MAX as u32 {
             return false;
@@ -138,6 +179,27 @@ impl Process for RealProcess {
         let result = unsafe { libc::kill(pid.cast_signed(), 0) };
         result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
+}
+
+fn parse_environment_suffix(command: &str) -> Vec<(String, String)> {
+    let mut environment = Vec::new();
+    for token in command.split_whitespace().rev() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        if !valid_environment_key(key) {
+            continue;
+        }
+        environment.push((key.to_owned(), value.to_owned()));
+    }
+    environment.reverse();
+    environment
+}
+
+fn valid_environment_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some('A'..='Z' | '_'))
+        && chars.all(|character| matches!(character, 'A'..='Z' | '0'..='9' | '_'))
 }
 
 fn parse_process(line: &str) -> DaemonResult<ProcessInfo> {
@@ -234,6 +296,19 @@ mod tests {
                     pid: 12,
                     port: 4000
                 }
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_only_environment_tokens_from_the_right() {
+        assert_eq!(
+            parse_environment_suffix(
+                "/usr/bin/node worker --flag VALUE FLEET_SESSION=repo/main TMPDIR=/tmp/a"
+            ),
+            vec![
+                ("FLEET_SESSION".to_owned(), "repo/main".to_owned()),
+                ("TMPDIR".to_owned(), "/tmp/a".to_owned()),
             ]
         );
     }

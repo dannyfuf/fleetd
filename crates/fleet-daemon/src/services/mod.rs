@@ -38,6 +38,7 @@ pub mod repos;
 pub mod sessions;
 pub mod sleep;
 pub mod update;
+mod watch_discovery;
 pub mod watches;
 pub mod worktrees;
 
@@ -80,8 +81,9 @@ pub struct Services {
     pub hosts: Hosts,
     /// Runtime PTY session service.
     pub sessions: Sessions,
-    /// Cooperative child output and lifecycle registry.
+    /// Cooperative and discovered child output and lifecycle registry.
     pub watches: watches::Watches,
+    watch_discovery: watch_discovery::WatchDiscovery,
     /// Session sleep-policy service.
     pub sleep: Sleep,
     /// Worktree inspection service.
@@ -277,6 +279,13 @@ impl Services {
                 .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR"))),
         );
         let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
+        let watches = sessions.watches();
+        let watch_discovery = watch_discovery::WatchDiscovery::new(
+            Arc::clone(&config),
+            sessions.clone(),
+            Arc::clone(&adapters.process),
+            watches.clone(),
+        );
         Self {
             hosts,
             home,
@@ -286,7 +295,8 @@ impl Services {
             worktrees,
             pool,
             github,
-            watches: sessions.watches(),
+            watches,
+            watch_discovery,
             sessions,
             sleep,
             inspect,
@@ -376,8 +386,7 @@ impl Services {
                 stream,
                 text,
             } => {
-                self.watches.require_owner(watch, owner)?;
-                self.watches.append(watch, stream, text)?;
+                self.watches.append_owned(watch, owner, stream, text)?;
                 Ok(ResponseBody::Ack)
             }
             RequestBody::FinishWatch {
@@ -385,8 +394,7 @@ impl Services {
                 code,
                 signal,
             } => {
-                self.watches.require_owner(watch, owner)?;
-                self.watches.finish(watch, code, signal)?;
+                self.watches.finish_owned(watch, owner, code, signal)?;
                 Ok(ResponseBody::Ack)
             }
             RequestBody::ListWatches { session } => {
@@ -754,6 +762,10 @@ impl Services {
             .set_retention(Duration::from_millis(config.jobs.keep_finished_for));
         let mut handles = Vec::new();
         handles.push(tokio::spawn(self.watches.clone().run(shutdown.clone())));
+        handles.push(tokio::spawn(self.watch_discovery.clone().run(
+            shutdown.clone(),
+            Duration::from_millis(config.discovered_watches.interval_ms.max(500)),
+        )));
 
         let status_every = duration_from_millis(config.ui.status_refresh_ms, 500);
         handles.push(tokio::spawn(run_status_refresh(

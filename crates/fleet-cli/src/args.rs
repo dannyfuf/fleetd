@@ -35,6 +35,8 @@ pub struct Cli {
 pub enum Command {
     /// Run a command, optionally teeing piped output to a read-only watch.
     Exec(ExecArgs),
+    /// Inspect subagent watches and their retained output.
+    Watch(WatchArgs),
     /// Private PID-preserving watch launcher.
     #[command(hide = true)]
     WatchChild(WatchChildArgs),
@@ -72,6 +74,44 @@ pub enum Command {
     Daemon(DaemonArgs),
     /// Print Fleet's build version.
     Version,
+}
+
+/// Arguments accepted by `fleet watch`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct WatchArgs {
+    /// Watch query operation.
+    #[command(subcommand)]
+    pub command: WatchCommand,
+}
+
+/// Read-only watch operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum WatchCommand {
+    /// List watches for --session or FLEET_SESSION.
+    List(WatchListArgs),
+    /// Print retained output, optionally following until the watch exits.
+    Tail(WatchTailArgs),
+}
+
+/// Session and output format for a watch list.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct WatchListArgs {
+    /// Session ID; defaults to FLEET_SESSION.
+    #[arg(long)]
+    pub session: Option<fleet_core::ids::SessionId>,
+    /// Print a protocol-1 JSON envelope.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Output query for one watch.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct WatchTailArgs {
+    /// Numeric daemon-local watch ID.
+    pub id: fleet_core::watches::WatchId,
+    /// Poll every 250 ms until exit, preserving stdout/stderr channels.
+    #[arg(long)]
+    pub follow: bool,
 }
 
 /// Arguments accepted by `fleet exec`.
@@ -408,6 +448,58 @@ mod tests {
 #[cfg(test)]
 mod exec_tests {
     use super::*;
+    #[test]
+    fn watch_commands_parse_options_and_reject_invalid_ids() {
+        assert_eq!(
+            Cli::try_parse_from(["fleet", "watch", "list"])
+                .unwrap()
+                .command,
+            Some(Command::Watch(WatchArgs {
+                command: WatchCommand::List(WatchListArgs {
+                    session: None,
+                    json: false
+                })
+            }))
+        );
+        assert_eq!(
+            Cli::try_parse_from(["fleet", "watch", "list", "--session", "repo/main", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Watch(WatchArgs {
+                command: WatchCommand::List(WatchListArgs {
+                    session: Some("repo/main".parse().unwrap()),
+                    json: true
+                })
+            }))
+        );
+        for follow in [false, true] {
+            let mut arguments = vec!["fleet", "watch", "tail", "42"];
+            if follow {
+                arguments.push("--follow");
+            }
+            assert_eq!(
+                Cli::try_parse_from(arguments).unwrap().command,
+                Some(Command::Watch(WatchArgs {
+                    command: WatchCommand::Tail(WatchTailArgs {
+                        id: fleet_core::watches::WatchId(42),
+                        follow
+                    })
+                }))
+            );
+        }
+        for arguments in [
+            vec!["fleet", "watch"],
+            vec!["fleet", "watch", "list", "--session"],
+            vec!["fleet", "watch", "list", "--session", "invalid"],
+            vec!["fleet", "watch", "tail"],
+            vec!["fleet", "watch", "tail", "invalid"],
+            vec!["fleet", "watch", "tail", "-1"],
+            vec!["fleet", "watch", "tail", "42", "--json"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+    }
+
     #[test]
     fn exec_keeps_child_flags_and_delimiters() {
         let cli = Cli::try_parse_from([

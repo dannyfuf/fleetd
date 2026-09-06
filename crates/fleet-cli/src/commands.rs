@@ -1,6 +1,6 @@
 //! Command dispatch and daemon client orchestration.
 
-use std::{ffi::OsString, path::PathBuf, str::FromStr, time::Duration};
+use std::{ffi::OsString, io::Write, path::PathBuf, str::FromStr, time::Duration};
 
 use clap::{Parser, error::ErrorKind as ClapErrorKind};
 use fleet_client::{Client, SpawnError, ensure_daemon, restart_daemon};
@@ -10,6 +10,7 @@ use fleet_core::{
     model::{CloneStatus, Repo, RepoHooks, Worktree},
     sessions::AgentActivity,
     validate::{validate_branch, validate_slug},
+    watches::{WatchStatus, WatchStream},
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
@@ -21,12 +22,12 @@ use crate::{
     args::{
         AgentChoice, AgentStatusArgs, AgentStatusChoice, Cli, Command, CreateArgs, DaemonCommand,
         DeleteArgs, InspectArgs, JsonArgs, KillArgs, OpenArgs, PathArgs, PruneArgs, SleepArgs,
-        VERSION_DISPLAY,
+        VERSION_DISPLAY, WatchArgs, WatchCommand, WatchListArgs, WatchTailArgs,
     },
     envelope::{
         AgentStatusEnvelope, CreateEnvelope, DeleteEnvelope, InspectEnvelope, ListEnvelope,
-        OkEnvelope, PROTOCOL, PruneEnvelope, SleepEnvelope, StatusEnvelope, error_json,
-        single_line, to_json,
+        OkEnvelope, PROTOCOL, PruneEnvelope, SleepEnvelope, StatusEnvelope, WatchesEnvelope,
+        error_json, single_line, to_json,
     },
     human,
 };
@@ -123,7 +124,16 @@ fn run_from(arguments: Vec<OsString>) -> i32 {
     }
 }
 
-async fn run_command(command: Command) -> Result<CommandOutput, ProtoError> {
+async fn run_command(mut command: Command) -> Result<CommandOutput, ProtoError> {
+    if let Command::Watch(WatchArgs {
+        command: WatchCommand::List(arguments),
+    }) = &mut command
+    {
+        arguments.session = Some(watch_session(
+            arguments.session.take(),
+            std::env::var("FLEET_SESSION").ok().as_deref(),
+        )?);
+    }
     let home = fleet_home()?;
     if matches!(
         command,
@@ -143,6 +153,10 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
         Command::Exec(_) | Command::WatchChild(_) => {
             Err(validation("exec must run before daemon autostart"))
         }
+        Command::Watch(arguments) => match arguments.command {
+            WatchCommand::List(arguments) => watch_list(client, arguments).await,
+            WatchCommand::Tail(arguments) => watch_tail(client, arguments).await,
+        },
         Command::Create(arguments) => create(client, arguments).await,
         Command::Open(arguments) => open(client, arguments).await,
         Command::List(arguments) => list(client, arguments).await,
@@ -160,6 +174,77 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
         Command::Update => update(client).await,
         Command::Daemon(_) => Err(validation("daemon commands must run before connecting")),
         Command::Version => Ok(CommandOutput::success(VERSION_DISPLAY.to_owned())),
+    }
+}
+
+fn watch_session(
+    explicit: Option<SessionId>,
+    environment: Option<&str>,
+) -> Result<SessionId, ProtoError> {
+    if let Some(session) = explicit {
+        return Ok(session);
+    }
+    let value = environment
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| validation("fleet watch list requires --session <id> or FLEET_SESSION"))?;
+    parse_id(value).map_err(|error| validation(format!("invalid FLEET_SESSION: {}", error.message)))
+}
+
+async fn watch_list(
+    client: &Client,
+    arguments: WatchListArgs,
+) -> Result<CommandOutput, ProtoError> {
+    let session = watch_session(arguments.session, None)?;
+    let watches = client.list_watches(session).await?;
+    let text = if arguments.json {
+        to_json(&WatchesEnvelope {
+            protocol: PROTOCOL,
+            watches: &watches,
+        })?
+    } else {
+        human::watches(&watches)
+    };
+    Ok(CommandOutput::success(text))
+}
+
+async fn watch_tail(
+    client: &Client,
+    arguments: WatchTailArgs,
+) -> Result<CommandOutput, ProtoError> {
+    watch_tail_to(
+        client,
+        arguments,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+    .await?;
+    Ok(CommandOutput::success(String::new()))
+}
+
+async fn watch_tail_to(
+    client: &Client,
+    arguments: WatchTailArgs,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<(), ProtoError> {
+    let mut next_seq = None;
+    loop {
+        let tail = client.tail_watch(arguments.id, next_seq).await?;
+        for chunk in tail.chunks {
+            let output: &mut dyn Write = match chunk.stream {
+                WatchStream::Stdout => stdout,
+                WatchStream::Stderr => stderr,
+            };
+            output
+                .write_all(chunk.text.as_bytes())
+                .and_then(|()| output.flush())
+                .map_err(|error| unknown(format!("could not write watch output: {error}")))?;
+        }
+        if !arguments.follow || matches!(tail.watch.status, WatchStatus::Exited { .. }) {
+            return Ok(());
+        }
+        next_seq = Some(tail.next_seq);
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -640,6 +725,9 @@ pub(crate) fn fleet_home() -> Result<PathBuf, ProtoError> {
 
 fn command_requests_json(command: &Command) -> bool {
     match command {
+        Command::Watch(arguments) => {
+            matches!(&arguments.command, WatchCommand::List(arguments) if arguments.json)
+        }
         Command::Create(arguments) => arguments.json,
         Command::List(arguments) | Command::Status(arguments) => arguments.json,
         Command::Inspect(arguments) => arguments.json,
@@ -721,7 +809,203 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn watch_session_prefers_explicit_and_requires_a_valid_fallback() {
+        let explicit: SessionId = "repo/explicit".parse().unwrap();
+        assert_eq!(
+            watch_session(Some(explicit.clone()), Some("invalid")).unwrap(),
+            explicit
+        );
+        assert_eq!(
+            watch_session(None, Some("repo/main")).unwrap().as_str(),
+            "repo/main"
+        );
+        for environment in [None, Some(""), Some(" ")] {
+            let error = watch_session(None, environment).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Validation);
+            assert!(error.message.contains("--session <id> or FLEET_SESSION"));
+        }
+        assert!(
+            watch_session(None, Some("invalid"))
+                .unwrap_err()
+                .message
+                .contains("invalid FLEET_SESSION")
+        );
+        let command = Command::Watch(WatchArgs {
+            command: WatchCommand::List(WatchListArgs {
+                session: None,
+                json: true,
+            }),
+        });
+        assert!(command_requests_json(&command));
+    }
+
     type ServerTransport = Framed<tokio::net::UnixStream, FleetCodec<serde_json::Value, Request>>;
+
+    fn sample_watch() -> fleet_core::watches::Watch {
+        fleet_core::watches::Watch {
+            id: fleet_core::watches::WatchId(42),
+            session: "repo/main".parse().unwrap(),
+            terminal: fleet_core::ids::TerminalId(7),
+            label: "review".into(),
+            command: vec!["sh".into()],
+            cwd: None,
+            pid: None,
+            started_at: "2026-09-05T12:00:00Z".into(),
+            status: WatchStatus::Running,
+            source: fleet_core::watches::WatchSource::Cooperative,
+            log_file: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_list_uses_the_requested_session_and_protocol_envelope() {
+        let home = TempDir::new().unwrap();
+        let listener = bind(home.path()).await;
+        let watch = sample_watch();
+        let expected = watch.clone();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut transport = Framed::new(socket, FleetCodec::new());
+            authenticate(&mut transport).await;
+            let request = next_request(&mut transport).await;
+            assert_eq!(
+                request.body,
+                RequestBody::ListWatches {
+                    session: watch.session.clone()
+                }
+            );
+            send_result(
+                &mut transport,
+                request.id,
+                Ok(ResponseBody::Watches(vec![watch])),
+            )
+            .await;
+        });
+        let client = Client::connect(home.path()).await.unwrap();
+        let output = execute(
+            &client,
+            Command::Watch(WatchArgs {
+                command: WatchCommand::List(WatchListArgs {
+                    session: Some(expected.session.clone()),
+                    json: true,
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output.text).unwrap(),
+            serde_json::json!({ "protocol": 1, "watches": [expected] })
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn watch_list_human_rows_include_status_time_and_terminal() {
+        let mut watch = sample_watch();
+        for (status, label) in [
+            (WatchStatus::Running, "running"),
+            (
+                WatchStatus::Exited {
+                    code: Some(3),
+                    signal: None,
+                },
+                "exited 3",
+            ),
+            (
+                WatchStatus::Exited {
+                    code: None,
+                    signal: Some(9),
+                },
+                "interrupted",
+            ),
+        ] {
+            watch.status = status;
+            assert_eq!(
+                human::watches(&[watch.clone()]),
+                format!("42\tcooperative\treview\t{label}\t2026-09-05T12:00:00Z\t7")
+            );
+        }
+        assert_eq!(human::watches(&[]), "");
+    }
+
+    #[tokio::test]
+    async fn watch_tail_preserves_streams_and_follows_next_cursor_through_final_output() {
+        for follow in [false, true] {
+            let home = TempDir::new().unwrap();
+            let listener = bind(home.path()).await;
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut transport = Framed::new(socket, FleetCodec::new());
+                authenticate(&mut transport).await;
+                for index in 0..=usize::from(follow) {
+                    let request = next_request(&mut transport).await;
+                    assert_eq!(
+                        request.body,
+                        RequestBody::TailWatch {
+                            watch: sample_watch().id,
+                            from_seq: (index == 1).then_some(5),
+                        }
+                    );
+                    let mut watch = sample_watch();
+                    if index == 1 {
+                        watch.status = WatchStatus::Exited {
+                            code: None,
+                            signal: Some(9),
+                        };
+                    }
+                    send_result(
+                        &mut transport,
+                        request.id,
+                        Ok(ResponseBody::WatchTail(fleet_proto::watch::WatchTail {
+                            watch,
+                            chunks: vec![fleet_core::watches::WatchChunk {
+                                seq: 4 + index as u64,
+                                stream: if index == 0 {
+                                    WatchStream::Stdout
+                                } else {
+                                    WatchStream::Stderr
+                                },
+                                text: if index == 0 { "retained\n" } else { "final" }.into(),
+                            }],
+                            first_retained_seq: 4,
+                            next_seq: 5 + index as u64,
+                        })),
+                    )
+                    .await;
+                }
+            });
+            let client = Client::connect(home.path()).await.unwrap();
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                watch_tail_to(
+                    &client,
+                    WatchTailArgs {
+                        id: sample_watch().id,
+                        follow,
+                    },
+                    &mut stdout,
+                    &mut stderr,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(stdout, b"retained\n");
+            assert_eq!(
+                stderr,
+                if follow {
+                    b"final".as_slice()
+                } else {
+                    b"".as_slice()
+                }
+            );
+            server.await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn formats_success_envelope_against_an_in_process_daemon() {

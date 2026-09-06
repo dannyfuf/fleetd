@@ -268,10 +268,14 @@ Shims require `FLEET_TERMINAL_ID`, so older name-only daemon environments stay
 transparent.
 
 `fleet-core::watches` defines `WatchId` (daemon-local numeric ID), `Watch`,
+`WatchSource::{Cooperative, Discovered}`,
 `WatchStatus::{Running, Exited { code, signal }}`, `WatchStream::{Stdout, Stderr}`,
 and immutable `WatchChunk { seq, stream, text }`. Watch metadata includes parent
-session/terminal, label, argv, optional cwd/PID, and RFC3339 `startedAt`.
-Watches are runtime-only and do not survive a daemon restart.
+session/terminal, label, argv, optional cwd/PID, RFC3339 `startedAt`, `source`, and
+optional `logFile`. Struct fields are camelCase on the wire. `source` and `logFile`
+have serde defaults (`cooperative` and null), so new clients accept older daemon data.
+Watch IDs and retained buffers are runtime-only; live discovered watches are rebuilt
+by the next scan after a daemon restart.
 
 | Request | Response |
 | --- | --- |
@@ -298,7 +302,8 @@ catch-up and queued events by sequence, ignoring duplicates. Resume from
 `next_seq`. On sequence gaps, receiver lag, or reconnect, list/tail again. If the
 requested cursor precedes `first_retained_seq`, show that older output was
 trimmed. Metadata and output in a tail response are atomic. After daemon restart,
-clear prior IDs before rebuilding from ListWatches.
+clear prior IDs before rebuilding from ListWatches; live matching processes receive
+new IDs on the next discovery scan.
 
 Each watch retains at most 1 MiB of UTF-8 text and 20,000 chunks, dropping whole
 oldest chunks (including a chunk larger than the cap). This keeps worst-case JSON
@@ -311,7 +316,8 @@ locally; `DismissWatch` is only for completed watches.
 
 AppendWatchOutput and FinishWatch require the starting connection (otherwise
 `Conflict`), preventing reconnected wrappers from modifying an unrelated reused
-ID after a daemon restart. A connection lease owns each StartWatch; dropping its socket marks unfinished
+ID after a daemon restart. They always return `Conflict` for a `discovered` watch.
+A connection lease owns each StartWatch; dropping its socket marks unfinished
 watches Exited with `code: None, signal: Some(9)` (an interruption marker, not a
 claim that the child received SIGKILL). The wrapper uses a private PID-preserving
 launcher handshake so StartWatch has the child PID and the target starts with
@@ -323,6 +329,65 @@ A full queue applies backpressure to subsequent reads instead of silently losing
 burst output. A two-second RPC timeout closes the copy queue so daemon failure
 cannot strand the tee threads. Child completion is still attempted when output
 reporting failed; disconnect interruption remains authoritative if already set.
+
+### Discovered lifecycle and configuration
+
+`discoveredWatches.enabled` defaults to `true`; `intervalMs` defaults to 2000 and is
+clamped to at least 500 ms by the loop. `processes` is an ordered list of
+`{ id, pattern, enabled }` rules. Invalid regexes are skipped. Defaults are:
+
+| id | pattern |
+| --- | --- |
+| `codex-companion` | `codex-companion\.mjs task-worker` |
+| `codex` | `(^|/)codex( |$)` |
+| `claude` | `(^|/)claude( |$)` |
+| `opencode` | `(^|/)opencode( |$)` |
+
+Each scan uses one process snapshot. Environment reads are limited to candidates and
+cached by PID. Ownership order is valid Fleet env tags, then descent from a session
+terminal's shell PID. A valid session without a valid terminal selects the terminal
+whose launch command matches the configured agent command, then the first terminal.
+Any process launched directly by a terminal's PTY shell (the terminal's own foreground
+program, such as `cc` resolving to `claude`), shell wrappers, nested matching
+children, and these helpers are hidden: `app-server-broker.mjs`, `codex app-server`,
+`codex-code-mode-host`, `unified-computer-use.*launch.mjs`, and
+`codex-companion.mjs status`. PID dedupe includes both sources.
+
+Discovered watches have no owner connection. A dead PID exits with null code and
+signal. Companion `done`/`completed`/`succeeded` maps to code 0 and `failed`/`error`
+maps to code 1. The companion job path uses `CLAUDE_PLUGIN_DATA/state` when set;
+otherwise it prefers the worker's `TMPDIR/codex-companion`, then the daemon temp dir.
+The JSON `logFile` wins over the computed jobs path. The daemon polls logs every 500 ms,
+starts at the last 64 KiB, appends new bytes as stdout, and restarts at byte zero after
+truncation or file replacement. Generic discoveries emit one output-not-captured line.
+All watches retain the same 30-minute completion TTL and dismissal rules. Discovery is
+strictly observational and never signals a process.
+
+The fallback state directory is
+`<temp>/codex-companion/<slug>-<hash>/jobs`: `slug` is the workspace basename with each
+run of non-`[a-zA-Z0-9._-]` characters replaced by `-`, and `hash` is the first 16 hex
+digits of SHA-256 over the real workspace path. Each job uses `<job-id>.json` and
+`<job-id>.log` beneath that directory.
+
+### Read-only watch CLI
+
+`fleet watch list [--session <id>] [--json]` calls `ListWatches`. An explicit session
+wins over `FLEET_SESSION`; if neither is available, validation fails before daemon
+autostart with `fleet watch list requires --session <id> or FLEET_SESSION`.
+Human output is one tab-separated row per watch: numeric id, source, single-line label,
+status (`running`, `exited N`, or `interrupted` when no exit code is available),
+RFC3339 start time, and numeric terminal id. Empty lists produce no human rows.
+JSON uses the CLI protocol-1 envelope `{"protocol":1,"watches":[...]}` with the
+existing serialized `Watch` metadata. Errors use the standard CLI error envelope.
+
+`fleet watch tail <id> [--follow]` initially calls `TailWatch` with no cursor and
+prints retained chunks as text, forwarding stderr chunks to stderr. With `--follow`,
+it polls every 250 ms from the previous response's `next_seq`, printing the final
+snapshot's output before stopping on `Exited` (including interruptions). Without
+`--follow`, it prints one snapshot. It needs no session environment variable and
+returns CLI success on completed reads, independently of the watched child's exit
+code. Output is bounded retained display text; evicted chunks cannot be recovered.
+No protocol or daemon lifecycle changes are needed for these commands.
 
 ### Workspace mirror and recovery
 
@@ -345,4 +410,18 @@ Elapsed time starts from `Watch.started_at` and freezes when this client first
 observes exit. The wire contract has no completion timestamp, so a watch first
 loaded after it has finished uses an estimated duration through discovery time;
 a client that observed the exit retains its frozen duration across reconnect.
-No wire types or daemon lifecycle behavior changed for the pane.
+The pane consumes the shared `source` marker and discovered lifecycle without adding
+another request or key binding.
+
+`^s N` / `^s P` select in session-local registration order (monotonic watch IDs),
+wrap, show a hidden pane, and leave prefix mode without changing the active terminal.
+Empty sessions toast `no subagent watches`; a sole watch remains selected silently.
+The help overlay derives these entries from the authoritative keymap.
+
+Watch tabs and close controls use stateful GPUI `on_click` listeners. GPUI 0.2.2
+(Zed v1.18.1) delivers `on_mouse_up_out` during capture and clicks during bubble.
+The terminal's outside-release handler must stop propagation only when ending an
+active terminal drag; idle or already-completed selections must let sibling watch
+clicks reach bubble. The handler-path unit test covers this ownership decision,
+including retaining completed selections for copying. There is no GPUI test-app
+harness in this crate; actual pointer delivery still needs a host GUI smoke test.

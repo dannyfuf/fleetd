@@ -1609,10 +1609,12 @@ width, clamped to 360–640 px and recomputed on resize. PTY dimensions follow t
 terminal's actual reduced painted bounds. Zoom (`^s z`) hides the session header
 and terminal tabs while leaving the watch pane, including its header, visible.
 
-The pane header shows the child label, a status dot and `running`, `exited <code>`,
+The pane header shows the child label, prefixed with the quiet `◦ ` marker when the
+daemon discovered the process, a status dot and `running`, `exited <code>`,
 or `interrupted` for signal-only completion; elapsed time as `mm:ss`, frozen after
 exit; the `^s v` hint; and a right-aligned clickable `×`. Multiple watches add a
-compact tab strip with each label and status dot. Clicking a tab selects it.
+compact tab strip with each label and status dot; discovered tab labels use the same
+marker. Clicking a tab selects it.
 
 The body uses `LogView` in following mode. Newline-delimited lines are assembled
 independently for stdout and stderr, with live partial trailing lines. Stdout uses
@@ -1623,14 +1625,21 @@ trimming adds `older output trimmed` above the log. Each watch retains at most
 
 | Workspace prefix | Action |
 | --- | --- |
+| `^s N` | Select the next watch in this session's start order, wrapping to the first; show the pane if hidden. |
+| `^s P` | Select the previous watch in this session's start order, wrapping to the last; show the pane if hidden. |
 | `^s v` | Toggle the pane locally. With no watches, toast `no subagent watches`. Repeated toggles never cycle tabs. |
 | `^s V` / mouse `×` | Dismiss the selected completed watch and select the next tab, wrapping at the end. If it was the last, close the pane. For a running watch, hide locally and toast `watch still running; pane hidden`. |
 
-Hiding persists per session across navigation and reconnect until a **new**
+Both cooperative and discovered watches participate in the same session-local list.
+`^s N`/`^s P` toast `no subagent watches` when the session has none. With one watch,
+selection is unchanged without a toast; the pane is shown if hidden. Lowercase
+`n`/`p` remain terminal-tab navigation. The `?` help overlay lists both watch keys.
+
+Hiding persists per session across navigation and reconnect until explicitly shown or a **new**
 WatchStarted event arrives. Every new start reopens that session's pane and selects
 the new watch. Duplicate start events, output, completion, and ordinary catch-up
 responses do not undo a user's hide or selection. First discovery selects the
-newest retained watch. There are no watch cycling keys beyond mouse tab selection.
+newest retained watch. Mouse tab selection and `^s N`/`^s P` share the same session-local selection.
 
 The pane never sends input and never takes keyboard focus from the terminal.
 Closing/hiding a pane never kills a process. Subscribe before listing/tailing;

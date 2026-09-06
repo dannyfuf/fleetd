@@ -1,4 +1,4 @@
-//! Cooperative child-process watches and bounded, sequenced output.
+//! Cooperative and daemon-discovered child-process watches with bounded output.
 
 use crate::ids::{SessionId, TerminalId};
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,32 @@ pub struct Watch {
     pub started_at: String,
     /// Observed lifecycle.
     pub status: WatchStatus,
+    /// How the watch was registered.
+    #[serde(default)]
+    pub source: WatchSource,
+    /// File tailed by a discovered watch, when one is known.
+    #[serde(default)]
+    pub log_file: Option<PathBuf>,
+}
+
+/// Registration mechanism for a watch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchSource {
+    /// A client explicitly registered and streams this watch.
+    #[default]
+    Cooperative,
+    /// The daemon found and observes an existing process.
+    Discovered,
+}
+
+impl std::fmt::Display for WatchSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Cooperative => "cooperative",
+            Self::Discovered => "discovered",
+        })
+    }
 }
 
 /// Observed completion; never authorizes process control.
@@ -51,7 +77,7 @@ pub struct Watch {
 pub enum WatchStatus {
     /// Wrapper is connected and has not reported exit.
     Running,
-    /// Completed or interrupted (signal 9 on owner disconnect).
+    /// Completed or interrupted (signal 9 on cooperative-owner disconnect).
     Exited {
         /// Normal process exit code.
         code: Option<i32>,

@@ -14,6 +14,34 @@ pub fn list(repo_count: usize, worktree_count: usize) -> String {
     format!("{repo_count} repos, {worktree_count} worktrees")
 }
 
+/// Formats one row per watch: ID, source, label, status, start time, and terminal ID.
+#[must_use]
+pub fn watches(watches: &[fleet_core::watches::Watch]) -> String {
+    use fleet_core::watches::WatchStatus;
+    watches
+        .iter()
+        .map(|watch| {
+            let status = match watch.status {
+                WatchStatus::Running => "running".to_owned(),
+                WatchStatus::Exited {
+                    code: Some(code), ..
+                } => format!("exited {code}"),
+                WatchStatus::Exited { .. } => "interrupted".to_owned(),
+            };
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                watch.id,
+                watch.source,
+                crate::envelope::single_line(&watch.label),
+                status,
+                watch.started_at,
+                watch.terminal
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Formats independent deletion results, one worktree per line.
 #[must_use]
 pub fn delete(results: &[WorktreeDeleteResult]) -> String {

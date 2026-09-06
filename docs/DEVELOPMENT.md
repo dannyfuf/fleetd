@@ -33,6 +33,11 @@ the same worktree is supported. Do not point multiple worktrees at one external
 `CARGO_TARGET_DIR`: Cargo's relative dep-info paths can make one worktree accept another's stale
 artifacts. Give parallel worktrees separate target directories when an override is necessary.
 
+Daemon-discovered subagent watches are configured by `discoveredWatches` in
+`config.json`: `enabled` defaults true, `intervalMs` defaults 2000, and `processes`
+contains configurable `{id, pattern, enabled}` candidate rules. See
+`docs/APP-CONTRACTS.md` for the exact defaults, exclusions, and read-only lifecycle.
+
 ## Zig
 
 Building `fleet-term` with its default `ghostty` feature requires Zig **0.15.2**. The pinned

@@ -18,8 +18,11 @@ fleet-proto = { path = "../fleet-proto" }
 fleet-term = { path = "../fleet-term" }
 futures-util = { version = "0.3", features = ["sink"] }
 libc = "0.2"
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+shell-words = "1"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["codec", "rt"] }

@@ -26,7 +26,7 @@ mod tests {
     };
     use fleet_core::{
         ids::TerminalId,
-        watches::{WatchId, WatchStatus, WatchStream},
+        watches::{WatchId, WatchSource, WatchStatus, WatchStream},
     };
 
     fn round_trip<T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
@@ -48,6 +48,8 @@ mod tests {
             pid: Some(123),
             started_at: "2026-09-05T00:00:00Z".into(),
             status: WatchStatus::Running,
+            source: WatchSource::Discovered,
+            log_file: Some("/tmp/watch.log".into()),
         };
         let chunks = vec![WatchChunk {
             seq: 0,
@@ -109,5 +111,32 @@ mod tests {
         ] {
             round_trip(kind);
         }
+    }
+
+    #[test]
+    fn watch_fields_are_camel_case_and_missing_new_fields_default_to_cooperative() {
+        let value = serde_json::json!({
+            "id": 1,
+            "session": "repo/main",
+            "terminal": 2,
+            "label": "old",
+            "command": ["codex"],
+            "cwd": null,
+            "pid": 123,
+            "startedAt": "2026-09-05T00:00:00Z",
+            "status": "running"
+        });
+        let watch: Watch = serde_json::from_value(value).unwrap();
+        assert_eq!(watch.source, WatchSource::Cooperative);
+        assert_eq!(watch.log_file, None);
+
+        let serialized = serde_json::to_value(Watch {
+            source: WatchSource::Discovered,
+            log_file: Some("/tmp/job.log".into()),
+            ..watch
+        })
+        .unwrap();
+        assert_eq!(serialized["source"], "discovered");
+        assert_eq!(serialized["logFile"], "/tmp/job.log");
     }
 }

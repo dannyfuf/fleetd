@@ -15,6 +15,58 @@ use crate::{
     sleep::{KeepAliveRule, default_keep_alive_rules},
 };
 
+/// A configurable process pattern eligible for daemon-side watch discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredWatchRule {
+    /// Stable settings identifier.
+    pub id: String,
+    /// Full-command regular expression.
+    pub pattern: String,
+    /// Whether this pattern participates in discovery.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+/// Daemon-side process watch discovery configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveredWatchesConfig {
+    /// Whether process scanning is enabled.
+    pub enabled: bool,
+    /// Milliseconds between process-table scans.
+    pub interval_ms: u64,
+    /// Ordered candidate process patterns.
+    pub processes: Vec<DiscoveredWatchRule>,
+}
+
+impl Default for DiscoveredWatchesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_ms: 2_000,
+            processes: vec![
+                discovered_rule("codex-companion", r"codex-companion\.mjs task-worker"),
+                discovered_rule("codex", r"(^|/)codex( |$)"),
+                discovered_rule("claude", r"(^|/)claude( |$)"),
+                discovered_rule("opencode", r"(^|/)opencode( |$)"),
+            ],
+        }
+    }
+}
+
+fn discovered_rule(id: &str, pattern: &str) -> DiscoveredWatchRule {
+    DiscoveredWatchRule {
+        id: id.to_owned(),
+        pattern: pattern.to_owned(),
+        enabled: true,
+    }
+}
+
+const fn default_enabled() -> bool {
+    true
+}
+
 /// The supported persisted configuration schema version.
 pub const CONFIG_VERSION: u32 = 1;
 
@@ -238,6 +290,9 @@ pub struct Config {
     pub windows: Vec<WindowConfig>,
     /// Terminal sleep policy.
     pub sleep: SleepConfig,
+    /// Read-only daemon discovery of agent subprocesses.
+    #[serde(default)]
+    pub discovered_watches: DiscoveredWatchesConfig,
     /// GitHub settings.
     pub github: GithubConfig,
     /// UI polling settings.
@@ -301,6 +356,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
             keep_alive: default_keep_alive_rules(),
             grace_ms: 2_000,
         },
+        discovered_watches: DiscoveredWatchesConfig::default(),
         github: GithubConfig {
             cache_ttl_seconds: 3_600,
             pr_ttl_seconds: 90,
@@ -583,6 +639,16 @@ mod tests {
                     {"id":"servers","label":"server","kind":"listening-port","pattern":"","enabled":true}
                 ],
                 "graceMs": 2000
+            },
+            "discoveredWatches": {
+                "enabled": true,
+                "intervalMs": 2000,
+                "processes": [
+                    {"id":"codex-companion","pattern":"codex-companion\\.mjs task-worker","enabled":true},
+                    {"id":"codex","pattern":"(^|/)codex( |$)","enabled":true},
+                    {"id":"claude","pattern":"(^|/)claude( |$)","enabled":true},
+                    {"id":"opencode","pattern":"(^|/)opencode( |$)","enabled":true}
+                ]
             },
             "github": {"cacheTtlSeconds":3600,"prTtlSeconds":90,"cloneProtocol":"ssh"},
             "ui": {
