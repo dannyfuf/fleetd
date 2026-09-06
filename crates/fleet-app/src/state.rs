@@ -1628,6 +1628,8 @@ mod tests {
             pid: Some(123),
             started_at: chrono::Utc::now().to_rfc3339(),
             status: WatchStatus::Running,
+            source: fleet_core::watches::WatchSource::Cooperative,
+            log_file: None,
         };
         state.apply_daemon_event(Event::WatchStarted(watch.clone()), now);
         assert!(state.watches.panes[&session.id].visible);

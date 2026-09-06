@@ -165,6 +165,9 @@ Missing fields deep-merge with `defaultConfig(SWARM_HOME)`. `~`/`~/` expansion a
 | `sleep.keepAlive[].pattern` | string | `""` at rule-schema level | Case-insensitive full-command regex; ignored for port. |
 | `sleep.keepAlive[].enabled` | boolean | `true` | Active flag. |
 | `sleep.graceMs` | integer; negative schema-valid, runtime clamps 0 | `2000` | Wait after `:qa`. |
+| `discoveredWatches.enabled` | boolean | `true` | Enables read-only daemon process discovery. |
+| `discoveredWatches.intervalMs` | nonnegative integer; runtime minimum 500 | `2000` | Process snapshot cadence. |
+| `discoveredWatches.processes` | `{id,pattern,enabled}[]` | four agent rules below | Full-command regex candidates; invalid expressions are skipped. |
 | `github.cacheTtlSeconds` | integer | `3600` | Repo cache TTL. |
 | `github.prTtlSeconds` | integer | `90` | PR cache TTL; omitted from README sample. |
 | `github.cloneProtocol` | `"ssh" \| "https"` | `"ssh"` | URL choice. |
@@ -179,6 +182,11 @@ Missing fields deep-merge with `defaultConfig(SWARM_HOME)`. `~`/`~/` expansion a
   { "id": "servers", "label": "server", "kind": "listening-port", "pattern": "", "enabled": true }
 ]
 ```
+
+Fleet additionally defaults `discoveredWatches.processes` to
+`codex-companion\.mjs task-worker`, `(^|/)codex( |$)`, `(^|/)claude( |$)`, and
+`(^|/)opencode( |$)`, all enabled. This is a Fleet daemon extension, not a Swarm
+sleep-policy field.
 
 Legacy normalization: if no window contains `{agent}`, the first exact command among `cc`, `claude`, `opencode` becomes `{agent}`.
 

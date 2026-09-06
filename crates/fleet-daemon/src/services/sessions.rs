@@ -317,7 +317,7 @@ impl Sessions {
         owner: u64,
         body: fleet_proto::request::RequestBody,
     ) -> DaemonResult<fleet_core::watches::WatchId> {
-        use fleet_core::watches::{Watch, WatchId, WatchStatus};
+        use fleet_core::watches::{Watch, WatchId, WatchSource, WatchStatus};
         let fleet_proto::request::RequestBody::StartWatch {
             terminal,
             label,
@@ -351,6 +351,8 @@ impl Sessions {
                 pid,
                 started_at: chrono::Utc::now().to_rfc3339(),
                 status: WatchStatus::Running,
+                source: WatchSource::Cooperative,
+                log_file: None,
             },
         ))
     }

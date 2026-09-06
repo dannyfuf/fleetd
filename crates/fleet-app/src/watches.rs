@@ -417,6 +417,8 @@ mod tests {
             pid: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             status: WatchStatus::Running,
+            source: fleet_core::watches::WatchSource::Cooperative,
+            log_file: None,
         }
     }
     fn chunk(seq: u64, stream: WatchStream, text: &str) -> WatchChunk {
