@@ -529,9 +529,10 @@ impl AgentPopup {
             })
             .relative()
             .flex()
-            .flex_1()
+            // `Veil` is a block container, so this nested area is no longer a flex item of the
+            // card. Give its grid a definite height to fill instead.
+            .size_full()
             .min_h_0()
-            .w_full()
             .overflow_hidden()
             .child(measure(move |bounds| area_local.borrow_mut().area = bounds))
             .child(grid)
