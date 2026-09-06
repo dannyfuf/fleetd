@@ -18,7 +18,7 @@ use fleet_core::{
         derive_merged, derive_published,
     },
     model::{Repo, Worktree},
-    sessions::{SessionState, WorktreeStatus},
+    sessions::{AgentActivity, SessionState, WorktreeStatus},
 };
 use fleet_proto::job::JobKind;
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -506,6 +506,8 @@ fn status_snapshot(worktrees: &[Worktree]) -> Vec<WorktreeStatus> {
             },
             windows: Vec::new(),
             running: Vec::new(),
+            agent_activity: AgentActivity::Unknown,
+            agent_activity_changed_at: None,
         })
         .collect()
 }
@@ -516,6 +518,8 @@ fn unknown_status(worktree: &Worktree) -> WorktreeStatus {
         session: SessionState::Unknown,
         windows: Vec::new(),
         running: Vec::new(),
+        agent_activity: AgentActivity::Unknown,
+        agent_activity_changed_at: None,
     }
 }
 

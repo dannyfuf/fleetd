@@ -110,7 +110,7 @@ modes{alt_screen, mouse, bracketed_paste}, title }`.
 `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid. The wire protocol is version 3; `wrapped` preserves logical lines
+on the client's mirror grid. The wire protocol is version 4; `wrapped` preserves logical lines
 during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
 row is discarded, history shrinks, or a column change reflows it, without treating viewport
 movement as eviction. Off-screen
@@ -175,7 +175,7 @@ handling on the alternate screen, using live modes for the four viewport shortcu
 At the bottom, output follows live. While scrolled up, Ghostty preserves the history anchor.
 Real keys, raw input and paste atomically return to bottom on the host before writing to the
 PTY. Wheel input and copy-mode navigation preserve the viewport; copy-mode exit retains its
-explicit return-to-bottom behavior. Wire protocol version is 3; the separate swarm-compatible
+explicit return-to-bottom behavior. Wire protocol version is 4; the separate swarm-compatible
 CLI JSON envelope remains version 1.
 
 ## Client (`fleet` app)

@@ -144,6 +144,19 @@ pub enum SessionState {
     Unknown,
 }
 
+/// Whether a recognized coding agent is actively producing work or waiting for input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentActivity {
+    /// No recognized agent process or no activity signal yet.
+    #[default]
+    Unknown,
+    /// The agent is producing output or was explicitly marked as working.
+    Working,
+    /// The live agent is quiet and waiting for the user.
+    Idle,
+}
+
 /// Per-terminal summary used by worktree status views.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +169,12 @@ pub struct WorktreeWindowStatus {
     pub command: String,
     /// Keep-alive labels for this terminal.
     pub keep_alive: Vec<String>,
+    /// Recognized coding-agent executable in this terminal.
+    pub agent: Option<String>,
+    /// Current activity of the recognized agent.
+    pub agent_activity: AgentActivity,
+    /// ISO-8601 time when `agent_activity` last changed.
+    pub agent_activity_changed_at: Option<String>,
 }
 
 /// Runtime status of a published worktree.
@@ -170,6 +189,37 @@ pub struct WorktreeStatus {
     pub windows: Vec<WorktreeWindowStatus>,
     /// Combined keep-alive labels.
     pub running: Vec<String>,
+    /// Aggregate activity across the worktree's terminals.
+    pub agent_activity: AgentActivity,
+    /// Latest transition time among terminals determining the aggregate.
+    pub agent_activity_changed_at: Option<String>,
+}
+
+/// Aggregates terminal activity with `Working` taking precedence over `Idle`.
+#[must_use]
+pub fn aggregate_agent_activity(
+    windows: &[WorktreeWindowStatus],
+) -> (AgentActivity, Option<String>) {
+    let activity = if windows
+        .iter()
+        .any(|window| window.agent_activity == AgentActivity::Working)
+    {
+        AgentActivity::Working
+    } else if windows
+        .iter()
+        .any(|window| window.agent_activity == AgentActivity::Idle)
+    {
+        AgentActivity::Idle
+    } else {
+        AgentActivity::Unknown
+    };
+    let changed_at = windows
+        .iter()
+        .filter(|window| window.agent_activity == activity)
+        .filter_map(|window| window.agent_activity_changed_at.as_ref())
+        .max()
+        .cloned();
+    (activity, changed_at)
 }
 
 /// A resolved default-terminal definition ready for session creation.
@@ -233,6 +283,60 @@ mod tests {
     use crate::config::default_config;
 
     use super::*;
+
+    fn window(activity: AgentActivity, changed_at: Option<&str>) -> WorktreeWindowStatus {
+        WorktreeWindowStatus {
+            index: 0,
+            name: "agent".to_owned(),
+            command: "claude".to_owned(),
+            keep_alive: Vec::new(),
+            agent: Some("claude".to_owned()),
+            agent_activity: activity,
+            agent_activity_changed_at: changed_at.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn agent_activity_aggregate_uses_priority_and_determining_timestamp() {
+        let windows = vec![
+            window(AgentActivity::Idle, Some("2026-09-05T12:00:00Z")),
+            window(AgentActivity::Working, Some("2026-09-05T11:00:00Z")),
+            window(AgentActivity::Working, Some("2026-09-05T13:00:00Z")),
+        ];
+        assert_eq!(
+            aggregate_agent_activity(&windows),
+            (
+                AgentActivity::Working,
+                Some("2026-09-05T13:00:00Z".to_owned())
+            )
+        );
+        assert_eq!(
+            aggregate_agent_activity(&[window(AgentActivity::Idle, Some("2026-09-05T14:00:00Z"))]),
+            (AgentActivity::Idle, Some("2026-09-05T14:00:00Z".to_owned()))
+        );
+        assert_eq!(
+            aggregate_agent_activity(&[]),
+            (AgentActivity::Unknown, None)
+        );
+    }
+
+    #[test]
+    fn worktree_activity_serializes_with_camel_case_status_fields() {
+        let value = serde_json::to_value(WorktreeStatus {
+            worktree_id: WorktreeId::try_from("acme/api#feature")
+                .unwrap_or_else(|error| panic!("{error}")),
+            session: SessionState::Detached,
+            windows: vec![window(AgentActivity::Idle, Some("2026-09-05T14:00:00Z"))],
+            running: vec!["claude".to_owned()],
+            agent_activity: AgentActivity::Idle,
+            agent_activity_changed_at: Some("2026-09-05T14:00:00Z".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(value["agentActivity"], "idle");
+        assert_eq!(value["agentActivityChangedAt"], "2026-09-05T14:00:00Z");
+        assert_eq!(value["windows"][0]["agent"], "claude");
+        assert_eq!(value["windows"][0]["agentActivity"], "idle");
+    }
 
     #[test]
     fn a_remote_worktree_falls_back_to_the_lazygit_binary() {

@@ -5,6 +5,9 @@
 //! > **A toast is allowed only when there is no row and no pill that already shows the
 //! > outcome.**
 //!
+//! Agent-finished toasts deliberately make one exception: their session is usually off-screen,
+//! so the visible row glyph is not a sufficient completion signal.
+//!
 //! That rule is a decision the *caller* makes, but three of its consequences are mechanical
 //! and are therefore encoded here rather than left to be re-derived at every call site:
 //!

@@ -5,14 +5,16 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock, Weak},
     thread,
+    time::Instant,
 };
 
 use fleet_core::{
     config::{Agent, is_native_command},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
     sessions::{
-        Session, SessionKind, SessionState, Terminal, TerminalKind, TerminalStatus, WorktreeStatus,
-        WorktreeWindowStatus, agent_session_id, default_terminals,
+        AgentActivity, Session, SessionKind, SessionState, Terminal, TerminalKind, TerminalStatus,
+        WorktreeStatus, WorktreeWindowStatus, agent_session_id, aggregate_agent_activity,
+        default_terminals,
     },
 };
 use fleet_proto::{
@@ -29,6 +31,8 @@ use crate::{
     stores::{config::ConfigStore, state::StateStore},
 };
 
+use super::agent_activity::AgentActivityTracker;
+
 const INITIAL_COLS: u16 = 120;
 const INITIAL_ROWS: u16 = 36;
 
@@ -41,6 +45,18 @@ struct Registry {
     next_terminal: u64,
     next_sequences: HashMap<TerminalId, u64>,
     active_worktree: Option<SessionId>,
+    observed_agents: HashMap<TerminalId, Option<String>>,
+    activity_trackers: HashMap<TerminalId, AgentActivityTracker>,
+    activity_changed_at: HashMap<TerminalId, String>,
+}
+
+/// One activity transition produced by a heuristic or explicit signal.
+pub(crate) struct AgentActivityTransition {
+    pub(crate) session: SessionId,
+    pub(crate) terminal: TerminalId,
+    pub(crate) agent: Option<String>,
+    pub(crate) activity: AgentActivity,
+    pub(crate) changed_at: String,
 }
 
 /// Runtime seam shared by the session and sleep services without persisting PTYs.
@@ -173,6 +189,7 @@ impl SessionRuntime {
         terminal: TerminalId,
         foreground_command: Option<String>,
         keep_alive: Vec<String>,
+        agent: Option<String>,
     ) {
         let mut registry = self
             .registry
@@ -184,16 +201,118 @@ impl SessionRuntime {
         let Some(session) = registry.sessions.get_mut(&session_id) else {
             return;
         };
+        let mut changed = false;
         if let Some(entry) = session
             .terminals
             .iter_mut()
             .find(|entry| entry.id == terminal)
+            && (entry.foreground_command != foreground_command || entry.keep_alive != keep_alive)
         {
             entry.foreground_command = foreground_command;
             entry.keep_alive = keep_alive;
+            changed = true;
         }
+        changed |= registry.observed_agents.get(&terminal) != Some(&agent);
+        registry.observed_agents.insert(terminal, agent);
         drop(registry);
-        self.notify_session(&session_id);
+        if changed {
+            self.notify_session(&session_id);
+        }
+    }
+
+    pub(crate) fn observe_agent_activities(&self, now: Instant) -> Vec<AgentActivityTransition> {
+        let observations = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .hosts
+                .iter()
+                .filter_map(|(terminal, host)| {
+                    registry
+                        .observed_agents
+                        .get(terminal)
+                        .cloned()
+                        .map(|agent| (*terminal, host.activity(), agent))
+                })
+                .collect::<Vec<_>>()
+        };
+        let changed_at = chrono::Utc::now().to_rfc3339();
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut transitions = Vec::new();
+        for (terminal, activity, agent) in observations {
+            let Some(next) = registry
+                .activity_trackers
+                .entry(terminal)
+                .or_default()
+                .observe(now, activity, agent.as_deref())
+            else {
+                continue;
+            };
+            let Some(session) = registry.terminal_sessions.get(&terminal).cloned() else {
+                continue;
+            };
+            registry
+                .activity_changed_at
+                .insert(terminal, changed_at.clone());
+            transitions.push(AgentActivityTransition {
+                session,
+                terminal,
+                agent,
+                activity: next,
+                changed_at: changed_at.clone(),
+            });
+        }
+        transitions
+    }
+
+    pub(crate) fn set_agent_activity(
+        &self,
+        session: &SessionId,
+        terminal: TerminalId,
+        activity: AgentActivity,
+        now: Instant,
+    ) -> DaemonResult<Option<AgentActivityTransition>> {
+        let changed_at = chrono::Utc::now().to_rfc3339();
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owns_terminal = registry
+            .sessions
+            .get(session)
+            .is_some_and(|entry| entry.terminals.iter().any(|entry| entry.id == terminal));
+        if !owns_terminal {
+            return Err(DaemonError::NotFound(format!(
+                "terminal `{terminal}` in session `{session}`"
+            )));
+        }
+        let output_bytes_total = registry
+            .hosts
+            .get(&terminal)
+            .map(|host| host.activity().output_bytes_total);
+        let changed = registry
+            .activity_trackers
+            .entry(terminal)
+            .or_default()
+            .set_explicit(activity, now, output_bytes_total);
+        let Some(activity) = changed else {
+            return Ok(None);
+        };
+        registry
+            .activity_changed_at
+            .insert(terminal, changed_at.clone());
+        Ok(Some(AgentActivityTransition {
+            session: session.clone(),
+            terminal,
+            agent: registry.observed_agents.get(&terminal).cloned().flatten(),
+            activity,
+            changed_at,
+        }))
     }
 
     pub(crate) fn record_sleep(
@@ -222,6 +341,9 @@ impl SessionRuntime {
             let session_id = registry.terminal_sessions.remove(&terminal)?;
             self.watches.remove_terminal(terminal);
             registry.attachments.remove(&terminal);
+            registry.observed_agents.remove(&terminal);
+            registry.activity_trackers.remove(&terminal);
+            registry.activity_changed_at.remove(&terminal);
             let host = registry.hosts.remove(&terminal);
             let session = registry.sessions.get_mut(&session_id)?;
             let position = session
@@ -266,6 +388,9 @@ impl SessionRuntime {
                     self.watches.remove_terminal(terminal.id);
                     registry.terminal_sessions.remove(&terminal.id);
                     registry.attachments.remove(&terminal.id);
+                    registry.observed_agents.remove(&terminal.id);
+                    registry.activity_trackers.remove(&terminal.id);
+                    registry.activity_changed_at.remove(&terminal.id);
                     registry.hosts.remove(&terminal.id)
                 })
                 .collect::<Vec<_>>()
@@ -310,6 +435,21 @@ impl Sessions {
     #[must_use]
     pub fn watches(&self) -> super::watches::Watches {
         self.runtime.watches.clone()
+    }
+
+    pub(crate) fn observe_agent_activities(&self, now: Instant) -> Vec<AgentActivityTransition> {
+        self.runtime.observe_agent_activities(now)
+    }
+
+    pub(crate) fn set_agent_activity(
+        &self,
+        session: &SessionId,
+        terminal: TerminalId,
+        activity: AgentActivity,
+        now: Instant,
+    ) -> DaemonResult<Option<AgentActivityTransition>> {
+        self.runtime
+            .set_agent_activity(session, terminal, activity, now)
     }
 
     pub(crate) fn start_watch(
@@ -974,6 +1114,8 @@ impl Sessions {
                         session: SessionState::None,
                         windows: Vec::new(),
                         running: Vec::new(),
+                        agent_activity: AgentActivity::Unknown,
+                        agent_activity_changed_at: None,
                     };
                 };
                 // A native tab is never attached in the daemon's sense — the client draws it
@@ -997,8 +1139,23 @@ impl Sessions {
                             .clone()
                             .unwrap_or_else(|| terminal.command.clone()),
                         keep_alive: terminal.keep_alive.clone(),
+                        agent: registry
+                            .observed_agents
+                            .get(&terminal.id)
+                            .cloned()
+                            .flatten(),
+                        agent_activity: registry
+                            .activity_trackers
+                            .get(&terminal.id)
+                            .map_or(AgentActivity::Unknown, AgentActivityTracker::activity),
+                        agent_activity_changed_at: registry
+                            .activity_changed_at
+                            .get(&terminal.id)
+                            .cloned(),
                     })
                     .collect::<Vec<_>>();
+                let (agent_activity, agent_activity_changed_at) =
+                    aggregate_agent_activity(&windows);
                 let mut running = Vec::new();
                 for label in session
                     .terminals
@@ -1018,6 +1175,8 @@ impl Sessions {
                     },
                     windows,
                     running,
+                    agent_activity,
+                    agent_activity_changed_at,
                 }
             })
             .collect())
@@ -1071,6 +1230,8 @@ fn unknown_status(worktree_id: WorktreeId) -> WorktreeStatus {
         session: SessionState::Unknown,
         windows: Vec::new(),
         running: Vec::new(),
+        agent_activity: AgentActivity::Unknown,
+        agent_activity_changed_at: None,
     }
 }
 
@@ -1218,4 +1379,72 @@ fn update_terminal(
 
 fn terminal_error(terminal: TerminalId, error: impl std::fmt::Display) -> DaemonError {
     DaemonError::Process(format!("terminal `{terminal}`: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unchanged_process_observation_does_not_publish_again() {
+        let (frames, _) = broadcast::channel(8);
+        let runtime = SessionRuntime::new(frames);
+        let events = BroadcastBus::default();
+        let mut receiver = events.subscribe();
+        runtime.register_events(events);
+        let session_id =
+            SessionId::try_from("agent/session").unwrap_or_else(|error| panic!("{error}"));
+        let terminal_id = TerminalId(1);
+        {
+            let mut registry = runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .terminal_sessions
+                .insert(terminal_id, session_id.clone());
+            registry.sessions.insert(
+                session_id.clone(),
+                Session {
+                    id: session_id,
+                    kind: SessionKind::Agent(Agent::Claude),
+                    cwd: "/tmp".to_owned(),
+                    terminals: vec![Terminal {
+                        id: terminal_id,
+                        name: "agent".to_owned(),
+                        command: "claude".to_owned(),
+                        cwd: "/tmp".to_owned(),
+                        shell_pid: None,
+                        foreground_command: None,
+                        status: TerminalStatus::Running,
+                        title: None,
+                        keep_alive: Vec::new(),
+                        has_unseen_output: false,
+                        kind: TerminalKind::Native,
+                    }],
+                    active_terminal: Some(terminal_id),
+                    slept_at: None,
+                    kept_terminals: Vec::new(),
+                },
+            );
+        }
+
+        runtime.update_observation(
+            terminal_id,
+            Some("claude".to_owned()),
+            vec!["claude".to_owned()],
+            Some("claude".to_owned()),
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Ok(Event::SessionChanged(_))
+        ));
+        runtime.update_observation(
+            terminal_id,
+            Some("claude".to_owned()),
+            vec!["claude".to_owned()],
+            Some("claude".to_owned()),
+        );
+        assert!(receiver.try_recv().is_err());
+    }
 }

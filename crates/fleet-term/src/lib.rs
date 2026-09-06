@@ -12,5 +12,7 @@ pub use engine::{EngineError, EngineEvent, VtEngine};
 #[cfg(feature = "ghostty")]
 pub use ghostty::GhosttyEngine;
 #[cfg(feature = "ghostty")]
-pub use host::{HostCommand, HostError, HostEvent, TerminalHost, TerminalHostOptions};
+pub use host::{
+    HostCommand, HostError, HostEvent, TerminalActivity, TerminalHost, TerminalHostOptions,
+};
 pub use pty::{Pty, PtyError, PtyOptions};

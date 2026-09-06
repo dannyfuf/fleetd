@@ -183,6 +183,8 @@ Terminal `Palette(u8)` colors resolve through a theme palette table shipped with
 | `detached`, slept (`slept_at` set, §6) | `moon` | `fg.muted` | `sleeping — kept cc (claude)` |
 | `none` | **`dot` at 30 % opacity** | `fg.faint` | `no session` |
 | `unknown` | `circle-help` | **amber** | `unknown — <reason>` |
+| agent working | `loader-circle` (spin) | amber | `Agent working` |
+| agent finished | `circle-check` | green | `Agent finished — waiting for you` |
 | degraded (hooks failed, §6) | `triangle-alert` | amber | `post-create hooks failed — J for log` |
 | job running on this row | `loader-circle` (spin) | amber | job kind + phase |
 | clone in flight (`CloneJob.status`) | `loader-circle` (spin) | amber | `cloning…` |
@@ -689,13 +691,14 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Attaching | one dim centered line `attaching…`; typed keys are buffered and flushed on the first frame |
 | Attached | normal |
 | Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the header reads `waking…` for ≤ 1.5 s |
+| Recognized agent working / finished | the agent terminal shows an amber spinning `loader-circle` / green `circle-check`; the header uses the same aggregate state |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
 | Native tab selected | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard" |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and a 26 px amber banner replaces the header — §3.12 |
 
-**Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`,
+**Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`, `circle-check`, `loader-circle`,
 `zap`, `bot`, `sparkles` (opencode), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
 `chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
 
@@ -1122,7 +1125,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 | **Status** | `Local status refresh ms [2000]` (min 500) · `Remote status refresh ms [10000]` (min 500) |
 | **Windows** | read-only ordered list `1 nvim — nvim .` / `2 cc — {agent}` / `3 lg — lazygit` |
 | **Hosts** | read-only per host `devbox — ssh danny@devbox — fleet` |
-| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 3` · `E open config.json in a new terminal tab` · `Run doctor · D` |
+| **About** | `Fleet 0.1.0+<sha>` · update row `Fleet 0.2.0 available · U` (§2.3) · `fleetd running · pid 4211 · up 3h` · `FLEET_HOME ~/.fleet` · `protocol 4` · `E open config.json in a new terminal tab` · `Run doctor · D` |
 
 **[D-13]** The editable set closes §9's *"Settings cannot edit grace/rule definitions/windows/
 hosts/protocol/pool/timers/status intervals; many require JSON"* for everything a user changes
@@ -1154,7 +1157,7 @@ the app:
 > quitting Fleet (`ctrl-q`) never stops them. Only `c` in the Jobs panel, `K`, and `ctrl-shift-q`
 > stop things. Terminals do not survive a **daemon** restart.
 
-Footer: `Fleet <version> · protocol 3 · fleetd up 3h`.
+Footer: `Fleet <version> · protocol 4 · fleetd up 3h`.
 **Omitted:** prose explanations, links, a search field (the palette *is* the searchable surface).
 
 ---
@@ -1340,7 +1343,7 @@ to `circle-help` (`unknown`, never `none`), and read-only actions keep working (
  git            ok       git version 2.49.0
  gh auth        fail     gh: not logged in to github.com
  copy-on-write  ok       cp -c (APFS clonefile)
- fleetd         ok       pid 4211 · protocol 3 · up 3h
+ fleetd         ok       pid 4211 · protocol 4 · up 3h
  host devbox    fail     ssh: connect timed out after 5s
 ```
 

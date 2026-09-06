@@ -8,6 +8,7 @@ use std::{
 };
 
 use fleet_core::{
+    agents::recognized_agent,
     ids::{SessionId, TerminalId, WorktreeId},
     sessions::{KeptTerminal, Session},
     sleep::{KeepAliveKind, KeepAliveRule, match_keep_alive},
@@ -159,7 +160,15 @@ pub(crate) async fn apply_session(
             )
         });
         let foreground = observation.and_then(Observation::foreground_command);
-        runtime.update_observation(terminal.id, foreground, labels);
+        let agent = observation
+            .and_then(|observation| {
+                observation
+                    .commands
+                    .iter()
+                    .find_map(|command| recognized_agent(command))
+            })
+            .map(str::to_owned);
+        runtime.update_observation(terminal.id, foreground, labels, agent);
     }
 
     let mut kept = Vec::new();
@@ -498,6 +507,14 @@ async fn refresh_observations(
                 terminal.id,
                 observation.and_then(Observation::foreground_command),
                 labels,
+                observation
+                    .and_then(|observation| {
+                        observation
+                            .commands
+                            .iter()
+                            .find_map(|command| recognized_agent(command))
+                    })
+                    .map(str::to_owned),
             );
         }
     }

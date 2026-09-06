@@ -42,7 +42,7 @@ use fleet_core::{
     github::{PrChecks, PrReviewDecision, PrState, PrTab, derive_pr_state},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
     model::Worktree,
-    sessions::{Session, SessionKind, SessionState, Terminal, TerminalStatus},
+    sessions::{AgentActivity, Session, SessionKind, SessionState, Terminal, TerminalStatus},
 };
 use fleet_lazygit::root::{Lazygit, LazygitEvent};
 use fleet_proto::{
@@ -73,7 +73,7 @@ use crate::{
         grid_modes, grid_rows, grid_size, line_selection, measure, selection_text, viewport_base,
         viewport_cell_selection, viewport_last, zoom_bar,
     },
-    views::{workspace_header::WorkspaceHeader, workspace_tabs},
+    views::{workspace_header::WorkspaceHeader, workspace_tabs, worktrees_list::session_glyph},
 };
 
 /// The size a terminal is attached at before the grid has ever been laid out.
@@ -835,7 +835,17 @@ impl WorkspaceScreen {
         state: &Entity<AppState>,
         cx: &mut App,
     ) -> AnyElement {
-        let tabs = workspace_tabs::tabs(session, model.terminal, &state.read(cx).renamed_terminals);
+        let app = state.read(cx);
+        let status = match &session.kind {
+            SessionKind::Worktree(worktree) => app.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .statuses
+                    .iter()
+                    .find(|status| &status.worktree_id == worktree)
+            }),
+            SessionKind::Agent { .. } => None,
+        };
+        let tabs = workspace_tabs::tabs(session, status, model.terminal, &app.renamed_terminals);
         let active = model
             .terminal
             .and_then(|terminal| workspace_tabs::position_of(session, terminal))
@@ -2401,17 +2411,16 @@ pub fn job_counts(jobs: &[JobRecord], targets: &[String]) -> (usize, usize) {
 
 /// The status glyph a session shows, identical to the Hub's for the same worktree (§2.5).
 #[must_use]
-pub fn status_kind(session: SessionState, sleeping: bool, degraded: bool) -> StatusKind {
+pub fn status_kind(
+    session: SessionState,
+    sleeping: bool,
+    agent_activity: AgentActivity,
+    degraded: bool,
+) -> StatusKind {
     if degraded {
         return StatusKind::Degraded;
     }
-    match session {
-        SessionState::Attached => StatusKind::Attached,
-        SessionState::Detached if sleeping => StatusKind::Sleeping,
-        SessionState::Detached => StatusKind::DetachedAwake,
-        SessionState::Unknown => StatusKind::Unknown,
-        SessionState::None => StatusKind::NoSession,
-    }
+    session_glyph(session, sleeping, agent_activity)
 }
 
 // ---------------------------------------------------------------------------- the frame model
@@ -2485,19 +2494,16 @@ impl Model {
         };
 
         let status = worktree.map_or(StatusKind::Attached, |worktree| {
-            let session_state = app
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .statuses
-                        .iter()
-                        .find(|status| status.worktree_id == worktree.id)
-                })
-                .map_or(SessionState::Attached, |status| status.session);
+            let runtime_status = app.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .statuses
+                    .iter()
+                    .find(|status| status.worktree_id == worktree.id)
+            });
             status_kind(
-                session_state,
+                runtime_status.map_or(SessionState::Attached, |status| status.session),
                 session.slept_at.is_some(),
+                runtime_status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                 worktree.degraded.is_some(),
             )
         });
@@ -2802,29 +2808,33 @@ mod tests {
     #[test]
     fn the_status_glyph_matches_the_hub_row() {
         assert_eq!(
-            status_kind(SessionState::Attached, false, false),
+            status_kind(SessionState::Attached, false, AgentActivity::Unknown, false,),
             StatusKind::Attached
         );
         assert_eq!(
-            status_kind(SessionState::Detached, true, false),
+            status_kind(SessionState::Detached, true, AgentActivity::Unknown, false,),
             StatusKind::Sleeping
         );
         assert_eq!(
-            status_kind(SessionState::Detached, false, false),
+            status_kind(SessionState::Detached, false, AgentActivity::Unknown, false,),
             StatusKind::DetachedAwake
         );
         assert_eq!(
-            status_kind(SessionState::Unknown, false, false),
+            status_kind(SessionState::Unknown, false, AgentActivity::Unknown, false,),
             StatusKind::Unknown
         );
         assert_eq!(
-            status_kind(SessionState::None, false, false),
+            status_kind(SessionState::None, false, AgentActivity::Unknown, false,),
             StatusKind::NoSession
         );
         // A failed post-create hook outranks every session state (§2.5).
         assert_eq!(
-            status_kind(SessionState::Attached, false, true),
+            status_kind(SessionState::Attached, false, AgentActivity::Working, true,),
             StatusKind::Degraded
+        );
+        assert_eq!(
+            status_kind(SessionState::Detached, true, AgentActivity::Idle, false,),
+            StatusKind::AgentFinished
         );
     }
 

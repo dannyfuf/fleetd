@@ -18,7 +18,7 @@ use fleet_core::{
     github::InspectionPrState,
     ids::{HostId, RepoId, WorktreeId},
     model::Worktree,
-    sessions::{Session, SessionKind, SessionState, WorktreeStatus},
+    sessions::{AgentActivity, Session, SessionKind, SessionState, WorktreeStatus},
 };
 use fleet_proto::{
     job::{JobKind, JobRecord, JobStatus},
@@ -135,6 +135,12 @@ fn job_for<'a>(id: &WorktreeId, jobs: &'a [JobRecord]) -> Option<&'a JobRecord> 
     })
 }
 
+/// Whether a queued or running row-level job currently owns this worktree.
+#[must_use]
+pub fn has_running_job(id: &WorktreeId, jobs: &[JobRecord]) -> bool {
+    job_for(id, jobs).is_some()
+}
+
 /// Whether the worktree's session was put to sleep rather than merely detached (§2.5).
 fn is_slept(id: &WorktreeId, sessions: &[Session]) -> bool {
     sessions.iter().any(|session| {
@@ -152,23 +158,19 @@ fn host_unreachable(host: Option<&HostId>, hosts: &[HostStatus]) -> bool {
     })
 }
 
-/// The §2.5 glyph of one row, in the priority the spec fixes.
+/// Maps session and recognized-agent activity to the shared primary status glyph.
+///
+/// Recognized activity deliberately outranks attachment and sleep state on every surface.
 #[must_use]
-pub fn row_glyph(
+pub fn session_glyph(
     session: SessionState,
     slept: bool,
-    degraded: bool,
-    unreachable: bool,
-    job: bool,
+    agent_activity: AgentActivity,
 ) -> StatusKind {
-    if job {
-        return StatusKind::JobRunning;
-    }
-    if unreachable {
-        return StatusKind::HostUnreachable;
-    }
-    if degraded {
-        return StatusKind::Degraded;
+    match agent_activity {
+        AgentActivity::Working => return StatusKind::AgentWorking,
+        AgentActivity::Idle => return StatusKind::AgentFinished,
+        AgentActivity::Unknown => {}
     }
     match session {
         SessionState::Attached => StatusKind::Attached,
@@ -177,6 +179,28 @@ pub fn row_glyph(
         SessionState::Unknown => StatusKind::Unknown,
         SessionState::None => StatusKind::NoSession,
     }
+}
+
+/// The §2.5 glyph of one row, in the priority the spec fixes.
+#[must_use]
+pub fn row_glyph(
+    session: SessionState,
+    slept: bool,
+    agent_activity: AgentActivity,
+    degraded: bool,
+    unreachable: bool,
+    job: bool,
+) -> StatusKind {
+    if unreachable {
+        return StatusKind::HostUnreachable;
+    }
+    if degraded {
+        return StatusKind::Degraded;
+    }
+    if job {
+        return StatusKind::JobRunning;
+    }
+    session_glyph(session, slept, agent_activity)
 }
 
 /// Everything the model needs from the snapshot to build the rows.
@@ -229,6 +253,7 @@ pub fn build_rows(inputs: &RowInputs<'_>) -> Vec<WorktreeRow> {
                 glyph: row_glyph(
                     session,
                     is_slept(&worktree.id, inputs.sessions),
+                    status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                     worktree.degraded.is_some(),
                     unreachable,
                     job.is_some(),
@@ -671,33 +696,66 @@ mod tests {
     }
 
     #[test]
-    fn glyph_priority_puts_jobs_and_offline_hosts_first() {
+    fn glyph_priority_keeps_health_and_jobs_above_agent_activity() {
         assert_eq!(
-            row_glyph(SessionState::Attached, false, true, true, true),
-            StatusKind::JobRunning
-        );
-        assert_eq!(
-            row_glyph(SessionState::Attached, false, true, true, false),
+            row_glyph(
+                SessionState::Attached,
+                false,
+                AgentActivity::Working,
+                true,
+                true,
+                true
+            ),
             StatusKind::HostUnreachable
         );
         assert_eq!(
-            row_glyph(SessionState::Attached, false, true, false, false),
+            row_glyph(
+                SessionState::Attached,
+                false,
+                AgentActivity::Working,
+                true,
+                false,
+                true
+            ),
             StatusKind::Degraded
         );
         assert_eq!(
-            row_glyph(SessionState::Detached, true, false, false, false),
+            row_glyph(
+                SessionState::Attached,
+                false,
+                AgentActivity::Working,
+                false,
+                false,
+                true
+            ),
+            StatusKind::JobRunning
+        );
+    }
+
+    #[test]
+    fn agent_activity_outranks_attachment_and_sleep_state() {
+        assert_eq!(
+            session_glyph(SessionState::Detached, true, AgentActivity::Working),
+            StatusKind::AgentWorking
+        );
+        assert_eq!(
+            session_glyph(SessionState::Attached, false, AgentActivity::Idle),
+            StatusKind::AgentFinished
+        );
+        assert_eq!(
+            session_glyph(SessionState::Detached, true, AgentActivity::Unknown),
             StatusKind::Sleeping
         );
         assert_eq!(
-            row_glyph(SessionState::Detached, false, false, false, false),
+            session_glyph(SessionState::Detached, false, AgentActivity::Unknown),
             StatusKind::DetachedAwake
         );
         assert_eq!(
-            row_glyph(SessionState::None, false, false, false, false),
+            session_glyph(SessionState::None, false, AgentActivity::Unknown),
             StatusKind::NoSession
         );
         assert_eq!(
-            row_glyph(SessionState::Unknown, false, false, false, false),
+            session_glyph(SessionState::Unknown, false, AgentActivity::Unknown),
             StatusKind::Unknown
         );
     }
@@ -786,6 +844,8 @@ mod tests {
             session: SessionState::Attached,
             windows: Vec::new(),
             running: vec!["claude".to_owned()],
+            agent_activity: fleet_core::sessions::AgentActivity::Unknown,
+            agent_activity_changed_at: None,
         }];
         let cache = HashMap::new();
         let rows = build_rows(&inputs(vec![&worktree], &statuses, &cache, &[]));

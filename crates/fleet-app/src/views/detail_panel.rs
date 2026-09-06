@@ -16,7 +16,7 @@ use fleet_core::{
     ids::WorktreeId,
     inspection::WorktreeInspection,
     model::{CloneJob, CloneStatus, Repo, Worktree},
-    sessions::{SessionState, WorktreeStatus},
+    sessions::{AgentActivity, SessionState, WorktreeStatus},
 };
 use fleet_proto::snapshot::PoolStatus;
 use fleet_ui_kit::{
@@ -159,6 +159,7 @@ pub fn worktree(props: WorktreeProps<'_>, cx: &App) -> AnyElement {
     let glyph = row_glyph(
         session_state,
         slept,
+        status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
         worktree.degraded.is_some(),
         host_unreachable,
         false,
@@ -623,6 +624,7 @@ pub fn pull_request(props: PrProps<'_>, cx: &App) -> AnyElement {
             let glyph = row_glyph(
                 status.map_or(SessionState::None, |status| status.session),
                 false,
+                status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                 worktree.degraded.is_some(),
                 false,
                 false,

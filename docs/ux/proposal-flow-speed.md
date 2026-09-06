@@ -589,7 +589,7 @@ Edit mode: same dialog, title `⧉ Edit context buk`, id read-only if repos exis
         │ Pool         1 slot · fresh 60 s · refresh 300 s     │
         │ GitHub       ssh · repos 3600 s · PRs 90 s           │
         │ Hosts        devbox → ssh danny@devbox               │
-        │ Home         ~/.fleet   protocol 3   fleet 0.1.0+ab1 │
+        │ Home         ~/.fleet   protocol 4   fleet 0.1.0+ab1 │
         │──────────────────────────────────────────────────────│
         │ Enter save · e edit config.json · Esc                │
         └──────────────────────────────────────────────────────┘
@@ -620,7 +620,7 @@ Full-screen overlay at 88% width, **three columns** so the whole keymap fits wit
 
 ```
  ┌──────────────────────────────────────────────────────────────────────────┐
- │ ⌨ Fleet 0.1.0+ab12cd   ·  protocol 3  ·  fleetd running 4h              │
+ │ ⌨ Fleet 0.1.0+ab12cd   ·  protocol 4  ·  fleetd running 4h              │
  │ GLOBAL             HUB · WORKTREES        WORKSPACE  (after ^S)          │
  │ j k  move          Enter o  open          s   hub                        │
  │ …                  …                      …                              │
