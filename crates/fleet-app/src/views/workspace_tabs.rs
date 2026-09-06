@@ -3,8 +3,8 @@
 //! The tab strip is the legend for `ctrl-s 1`–`9`, so the index a tab shows **is** the argument
 //! of that binding: it is the terminal's position in `Session.terminals`, never its
 //! [`TerminalId`]. Everything else on a tab is derived from the daemon's terminal record, and
-//! all of it is pure — the strip is rebuilt from the snapshot on every frame and this module is
-//! the only place that decides what it says.
+//! its matching per-window status. All of it is pure — the strip is rebuilt from the snapshot on
+//! every frame and this module is the only place that decides what it says.
 //!
 //! `Terminal.foreground_command` is deliberately **not** rendered: §3.6 lists it under
 //! "intentionally omitted", and the kit's `TerminalTab` has no slot for it.
@@ -13,9 +13,9 @@ use std::collections::HashSet;
 
 use fleet_core::{
     ids::TerminalId,
-    sessions::{Session, Terminal, TerminalStatus},
+    sessions::{AgentActivity, Session, Terminal, TerminalStatus, WorktreeStatus},
 };
-use fleet_ui_kit::{Icon, TerminalTab, TerminalTabKind};
+use fleet_ui_kit::{Icon, StatusKind, TerminalTab, TerminalTabKind};
 
 /// The glyph that names a keep-alive label's kind (§3.6: `bot` / `server` / `file-pen`).
 ///
@@ -75,6 +75,7 @@ pub fn tab_label(terminal: &Terminal, renamed: &HashSet<TerminalId>) -> String {
 #[must_use]
 pub fn tabs(
     session: &Session,
+    status: Option<&WorktreeStatus>,
     active: Option<TerminalId>,
     renamed: &HashSet<TerminalId>,
 ) -> Vec<TerminalTab> {
@@ -93,6 +94,18 @@ pub fn tabs(
                 });
             if let Some(icon) = terminal_keep_alive_icon(terminal) {
                 tab = tab.keep_alive(icon);
+            }
+            if let Some(window) = status.and_then(|status| {
+                status
+                    .windows
+                    .iter()
+                    .find(|window| window.index == position as u32 && window.agent.is_some())
+            }) {
+                tab = match window.agent_activity {
+                    AgentActivity::Working => tab.agent_status(StatusKind::AgentWorking),
+                    AgentActivity::Idle => tab.agent_status(StatusKind::AgentFinished),
+                    AgentActivity::Unknown => tab,
+                };
             }
             if let TerminalStatus::Exited { code } = terminal.status {
                 tab = tab.exited(code);
@@ -174,7 +187,7 @@ mod tests {
     use fleet_core::{
         config::Agent,
         ids::SessionId,
-        sessions::{SessionKind, TerminalStatus},
+        sessions::{SessionKind, TerminalStatus, WorktreeWindowStatus},
     };
 
     use super::*;
@@ -235,7 +248,7 @@ mod tests {
     fn a_native_tab_is_marked_but_keeps_its_number() {
         let mut session = session(&["nvim", "cc", "lg"]);
         session.terminals[2].kind = fleet_core::sessions::TerminalKind::Native;
-        let tabs = tabs(&session, Some(TerminalId(3)), &HashSet::new());
+        let tabs = tabs(&session, None, Some(TerminalId(3)), &HashSet::new());
         assert_eq!(
             tabs.iter().map(|tab| tab.kind).collect::<Vec<_>>(),
             vec![
@@ -253,7 +266,7 @@ mod tests {
     fn tab_indexes_are_positions_not_identifiers() {
         let mut session = session(&["nvim", "cc", "lg"]);
         session.terminals[0].id = TerminalId(41);
-        let tabs = tabs(&session, Some(TerminalId(41)), &HashSet::new());
+        let tabs = tabs(&session, None, Some(TerminalId(41)), &HashSet::new());
         assert_eq!(
             tabs.iter().map(|tab| tab.index).collect::<Vec<_>>(),
             vec![1, 2, 3]
@@ -265,7 +278,7 @@ mod tests {
         let mut session = session(&["nvim", "cc"]);
         session.terminals[0].has_unseen_output = true;
         session.terminals[1].has_unseen_output = true;
-        let tabs = tabs(&session, Some(TerminalId(1)), &HashSet::new());
+        let tabs = tabs(&session, None, Some(TerminalId(1)), &HashSet::new());
         assert!(!tabs[0].activity);
         assert!(tabs[1].activity);
     }
@@ -275,7 +288,7 @@ mod tests {
         let mut session = session(&["test"]);
         session.terminals[0].status = TerminalStatus::Exited { code: Some(1) };
         assert_eq!(
-            tabs(&session, None, &HashSet::new())[0].exited,
+            tabs(&session, None, None, &HashSet::new())[0].exited,
             Some(Some(1))
         );
     }
@@ -297,6 +310,33 @@ mod tests {
             terminal_keep_alive_icon(&session.terminals[0]),
             Some(Icon::Bot)
         );
+    }
+
+    #[test]
+    fn recognized_agents_carry_their_per_terminal_activity_glyph() {
+        let session = session(&["cc", "shell"]);
+        let status = WorktreeStatus {
+            worktree_id: "buk/payroll#feat"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+            session: fleet_core::sessions::SessionState::Detached,
+            windows: vec![WorktreeWindowStatus {
+                index: 0,
+                name: "cc".to_owned(),
+                command: "claude".to_owned(),
+                keep_alive: vec!["claude".to_owned()],
+                agent: Some("claude".to_owned()),
+                agent_activity: AgentActivity::Working,
+                agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
+            }],
+            running: vec!["claude".to_owned()],
+            agent_activity: AgentActivity::Working,
+            agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
+        };
+
+        let tabs = tabs(&session, Some(&status), None, &HashSet::new());
+        assert_eq!(tabs[0].agent_status, Some(StatusKind::AgentWorking));
+        assert_eq!(tabs[1].agent_status, None);
     }
 
     #[test]

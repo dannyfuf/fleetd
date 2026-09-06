@@ -62,6 +62,8 @@ pub enum Command {
     Sleep(SleepArgs),
     /// Ensure a repository-level coding-agent session exists.
     Agent(AgentArgs),
+    /// Report coding-agent lifecycle activity for the current Fleet terminal.
+    AgentStatus(AgentStatusArgs),
     /// Run environment diagnostics.
     Doctor,
     /// Import compatible swarm configuration and state.
@@ -287,6 +289,32 @@ pub struct AgentArgs {
     pub agent: Option<AgentChoice>,
 }
 
+/// Activity values accepted by `fleet agent-status`.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum AgentStatusChoice {
+    /// The agent started or resumed work.
+    Working,
+    /// The agent finished its turn and is waiting for the user.
+    Finished,
+}
+
+/// Arguments accepted by `fleet agent-status`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct AgentStatusArgs {
+    /// Activity reported by the agent hook.
+    #[arg(value_enum)]
+    pub activity: AgentStatusChoice,
+    /// Owning session; defaults to FLEET_SESSION.
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Numeric terminal id; defaults to FLEET_TERMINAL_ID.
+    #[arg(long)]
+    pub terminal_id: Option<u64>,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Arguments accepted by `fleet import`.
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct ImportArgs {
@@ -358,6 +386,7 @@ mod tests {
             vec!["fleet", "path", "acme/api#feature"],
             vec!["fleet", "sleep", "api/feature", "--json"],
             vec!["fleet", "agent", "opencode"],
+            vec!["fleet", "agent-status", "finished", "--json"],
             vec!["fleet", "doctor"],
             vec!["fleet", "import", "--from-swarm"],
             vec!["fleet", "update"],

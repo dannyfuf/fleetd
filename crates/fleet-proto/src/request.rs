@@ -5,6 +5,7 @@ use fleet_core::{
     github::PrTab,
     ids::{ContextId, HostId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
     model::RepoHooks,
+    sessions::AgentActivity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -249,6 +250,15 @@ pub enum RequestBody {
     RefreshStatuses {
         /// Optional repository scope; none refreshes every repository.
         repo: Option<RepoId>,
+    },
+    /// Set one terminal's coding-agent activity from an explicit lifecycle hook.
+    SetAgentActivity {
+        /// Owning session.
+        session: SessionId,
+        /// Target terminal within the session.
+        terminal_id: TerminalId,
+        /// Explicit working or idle activity.
+        activity: AgentActivity,
     },
 
     /// List pull requests scoped to a repository or context.
@@ -523,6 +533,11 @@ mod tests {
             },
             RequestBody::RefreshStatuses {
                 repo: Some(repo.clone()),
+            },
+            RequestBody::SetAgentActivity {
+                session: SessionId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
+                terminal_id: TerminalId(8),
+                activity: AgentActivity::Idle,
             },
             RequestBody::RestartTerminal {
                 terminal: TerminalId(8),

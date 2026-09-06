@@ -13,7 +13,7 @@ use fleet_core::{
     github::{PrState, PrTab, PullRequest, derive_pr_state, worktree_matches_pr},
     ids::{RepoId, WorktreeId},
     model::Worktree,
-    sessions::{Session, SessionKind, SessionState, WorktreeStatus},
+    sessions::{AgentActivity, Session, SessionKind, SessionState, WorktreeStatus},
 };
 use fleet_proto::response::PrSlice;
 use fleet_ui_kit::{
@@ -23,7 +23,7 @@ use fleet_ui_kit::{
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
-use crate::screens::hub::age_secs;
+use crate::{screens::hub::age_secs, views::worktrees_list::session_glyph};
 
 /// The `All` scope cap of §3.5 [D-7]: never a refusal, always a final "narrow me" row.
 pub const ALL_SCOPE_CAP: usize = 100;
@@ -93,21 +93,19 @@ pub fn presence(
         return (StatusKind::NoSession, None);
     };
     // A worktree exists but its status has not landed yet: `unknown`, never `none` (§1.3).
-    let session = statuses
+    let status = statuses
         .iter()
-        .find(|status| status.worktree_id == worktree.id)
-        .map_or(SessionState::Unknown, |status| status.session);
+        .find(|status| status.worktree_id == worktree.id);
+    let session = status.map_or(SessionState::Unknown, |status| status.session);
     let slept = sessions.iter().any(|session| {
         matches!(&session.kind, SessionKind::Worktree(id) if id == &worktree.id)
             && session.slept_at.is_some()
     });
-    let kind = match session {
-        SessionState::Attached => StatusKind::Attached,
-        SessionState::Detached if slept => StatusKind::Sleeping,
-        SessionState::Detached => StatusKind::DetachedAwake,
-        SessionState::Unknown => StatusKind::Unknown,
-        SessionState::None => StatusKind::NoSession,
-    };
+    let kind = session_glyph(
+        session,
+        slept,
+        status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
+    );
     (kind, Some(worktree.id.clone()))
 }
 

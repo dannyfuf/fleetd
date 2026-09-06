@@ -9,6 +9,7 @@ use std::{
 
 use fleet_core::{ids::RepoId, paths::slot_path, sessions::WorktreeStatus};
 use fleet_proto::{
+    event::Event,
     request::RequestBody,
     response::ResponseBody,
     snapshot::{DaemonInfo, PoolStatus, Snapshot},
@@ -24,6 +25,7 @@ use crate::{
     stores::{config::ConfigStore, state::StateStore},
 };
 
+pub mod agent_activity;
 pub mod contexts;
 pub mod doctor;
 pub mod github;
@@ -547,6 +549,21 @@ impl Services {
                 }
                 Ok(ResponseBody::Statuses(statuses))
             }
+            RequestBody::SetAgentActivity {
+                session,
+                terminal_id,
+                activity,
+            } => {
+                let transition = self.sessions.set_agent_activity(
+                    &session,
+                    terminal_id,
+                    activity,
+                    std::time::Instant::now(),
+                )?;
+                self.apply_agent_activity_transitions(transition.into_iter().collect())
+                    .await?;
+                Ok(ResponseBody::Ack)
+            }
             RequestBody::ListPullRequests {
                 repo,
                 context,
@@ -757,6 +774,10 @@ impl Services {
             shutdown.clone(),
             status_every,
         )));
+        handles.push(tokio::spawn(run_agent_activity_refresh(
+            Arc::clone(self),
+            shutdown.clone(),
+        )));
 
         if !config.hosts.is_empty() {
             handles.push(tokio::spawn(run_host_refresh(
@@ -791,6 +812,28 @@ impl Services {
                 tracing::warn!(%error, "failed to stop session during daemon shutdown");
             }
         }
+    }
+
+    async fn apply_agent_activity_transitions(
+        &self,
+        transitions: Vec<sessions::AgentActivityTransition>,
+    ) -> DaemonResult<()> {
+        if transitions.is_empty() {
+            return Ok(());
+        }
+        let statuses = self.sessions.refresh_statuses(None).await?;
+        *self.statuses.write().await = Some(statuses);
+        for transition in transitions {
+            self.events.publish(Event::AgentActivityChanged {
+                session: transition.session,
+                terminal_id: transition.terminal,
+                agent: transition.agent,
+                activity: transition.activity,
+                changed_at: transition.changed_at,
+            });
+        }
+        self.events.request_snapshot_current();
+        Ok(())
     }
 
     async fn reject_remote_request(&self, body: &RequestBody) -> DaemonResult<()> {
@@ -927,6 +970,24 @@ async fn run_status_refresh(
                     }
                     Err(DaemonError::Unimplemented(_)) => {}
                     Err(error) => tracing::warn!(%error, "periodic status refresh failed"),
+                }
+            }
+        }
+    }
+}
+
+async fn run_agent_activity_refresh(services: Arc<Services>, shutdown: CancellationToken) {
+    let mut interval = tokio::time::interval(agent_activity::TRACK_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            _ = interval.tick() => {
+                let transitions = services
+                    .sessions
+                    .observe_agent_activities(std::time::Instant::now());
+                if let Err(error) = services.apply_agent_activity_transitions(transitions).await {
+                    tracing::warn!(%error, "agent activity refresh failed");
                 }
             }
         }

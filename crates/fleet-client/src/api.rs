@@ -7,7 +7,7 @@ use fleet_core::{
     ids::{ContextId, HostId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
     inspection::WorktreeInspection,
     model::{Context, Repo, RepoHooks, Worktree},
-    sessions::{Session, Terminal, WorktreeStatus},
+    sessions::{AgentActivity, Session, Terminal, WorktreeStatus},
 };
 use fleet_proto::{
     PROTOCOL_VERSION,
@@ -380,6 +380,24 @@ impl Client {
             ResponseBody::Statuses(statuses) => Ok(statuses),
             response => Err(unexpected("refresh_statuses", response)),
         }
+    }
+
+    /// Sets one terminal's coding-agent activity from an explicit lifecycle hook.
+    pub async fn set_agent_activity(
+        &self,
+        session: SessionId,
+        terminal_id: TerminalId,
+        activity: AgentActivity,
+    ) -> Result<()> {
+        expect_ack(
+            "set_agent_activity",
+            self.request(RequestBody::SetAgentActivity {
+                session,
+                terminal_id,
+                activity,
+            })
+            .await?,
+        )
     }
 
     /// Lists pull requests for a repository or context.

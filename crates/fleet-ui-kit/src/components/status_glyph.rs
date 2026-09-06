@@ -31,6 +31,10 @@ pub enum StatusKind {
     NoSession,
     /// Status could not be determined. `circle-help`, amber.
     Unknown,
+    /// A recognized coding agent is actively working. `loader-circle`, amber, spinning.
+    AgentWorking,
+    /// A recognized coding agent finished and is waiting. `circle-check`, green.
+    AgentFinished,
     /// Post-create hooks failed but the worktree exists. `triangle-alert`, amber.
     Degraded,
     /// A job is running on this row. `loader-circle`, amber, spinning.
@@ -53,7 +57,10 @@ impl StatusKind {
             StatusKind::NoSession => Icon::Dot,
             StatusKind::Unknown => Icon::CircleQuestionMark,
             StatusKind::Degraded => Icon::TriangleAlert,
-            StatusKind::JobRunning | StatusKind::Cloning => Icon::LoaderCircle,
+            StatusKind::AgentWorking | StatusKind::JobRunning | StatusKind::Cloning => {
+                Icon::LoaderCircle
+            }
+            StatusKind::AgentFinished => Icon::CircleCheck,
             StatusKind::CloneFailed => Icon::CircleX,
             StatusKind::HostUnreachable => Icon::CloudOff,
         }
@@ -62,11 +69,12 @@ impl StatusKind {
     /// The tone for this state.
     pub fn tone(self) -> Tone {
         match self {
-            StatusKind::Attached => Tone::Success,
+            StatusKind::Attached | StatusKind::AgentFinished => Tone::Success,
             StatusKind::DetachedAwake => Tone::Default,
             StatusKind::Sleeping => Tone::Secondary,
             StatusKind::NoSession => Tone::Muted,
             StatusKind::Unknown
+            | StatusKind::AgentWorking
             | StatusKind::Degraded
             | StatusKind::JobRunning
             | StatusKind::Cloning
@@ -85,7 +93,10 @@ impl StatusKind {
 
     /// Whether the glyph spins.
     pub fn spins(self) -> bool {
-        matches!(self, StatusKind::JobRunning | StatusKind::Cloning)
+        matches!(
+            self,
+            StatusKind::AgentWorking | StatusKind::JobRunning | StatusKind::Cloning
+        )
     }
 
     /// The state a pane whose data is frozen forces every session glyph to (§2.6, last row of
@@ -103,6 +114,8 @@ impl StatusKind {
             StatusKind::Sleeping => "sleeping",
             StatusKind::NoSession => "no session",
             StatusKind::Unknown => "unknown",
+            StatusKind::AgentWorking => "Agent working",
+            StatusKind::AgentFinished => "Agent finished — waiting for you",
             StatusKind::Degraded => "post-create hooks failed",
             StatusKind::JobRunning => "job running",
             StatusKind::Cloning => "cloning\u{2026}",
@@ -178,5 +191,26 @@ impl RenderOnce for StatusGlyph {
             .id(self.id.unwrap_or_else(|| {
                 ElementId::from(SharedString::new_static(self.kind.icon().name()))
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_statuses_use_the_job_and_success_visual_languages() {
+        assert_eq!(StatusKind::AgentWorking.icon(), Icon::LoaderCircle);
+        assert_eq!(StatusKind::AgentWorking.tone(), Tone::Warning);
+        assert!(StatusKind::AgentWorking.spins());
+        assert_eq!(StatusKind::AgentWorking.detail_word(), "Agent working");
+
+        assert_eq!(StatusKind::AgentFinished.icon(), Icon::CircleCheck);
+        assert_eq!(StatusKind::AgentFinished.tone(), Tone::Success);
+        assert!(!StatusKind::AgentFinished.spins());
+        assert_eq!(
+            StatusKind::AgentFinished.detail_word(),
+            "Agent finished — waiting for you"
+        );
     }
 }

@@ -59,6 +59,7 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet watch tail <id> [--follow]` | Print retained text on its original stdout/stderr channel; `--follow` polls every 250 ms until exit. | Raw retained stdout/stderr text |
 | `fleet exec [--watch] [--label TEXT] -- CMD [ARGS...]` | Run a child with byte-exact passthrough; optionally publish a read-only subagent watch using `FLEET_SESSION` and numeric `FLEET_TERMINAL_ID` (`FLEET_TERMINAL` remains the human name). | Raw child stdout/stderr; child exit status |
 | `fleet agent [claude\|opencode]` | Ensure a repository-level agent session exists; defaults to `config.agent`. | — |
+| `fleet agent-status <working\|finished> [--session <SESSION>] [--terminal-id <ID>] [--json]` | Report agent lifecycle activity; target flags default to `FLEET_SESSION` and `FLEET_TERMINAL_ID`. Silent on non-JSON success. | `protocol`, `ok`, `session`, `terminalId`, `activity` |
 | `fleet doctor` | Run environment diagnostics; exits unsuccessfully when any check fails. | — |
 | `fleet import --from-swarm` | Start an import of compatible `~/.swarm/config.json` and `state.json`. | — |
 | `fleet update` | Run self-update, wait for completion, then exit with restart code 75. | — |
@@ -67,6 +68,35 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 Commands that accept `--json` emit one compact line using swarm-compatible protocol 1 envelopes.
 Their errors use `{"protocol":1,"error":{"kind":"<kind>","message":"<message>"}}`; other
 commands use human-readable output.
+
+### Agent hooks
+
+Fleet detects Claude Code, OpenCode, and Codex activity from terminal output by default. Explicit
+agent hooks are faster and avoid ambiguity during quiet work. Fleet injects `FLEET_SESSION` and
+`FLEET_TERMINAL_ID` into every managed PTY, so Claude Code can report transitions with:
+
+```json
+{ "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "fleet agent-status working" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "fleet agent-status finished" }] }]
+} }
+```
+
+Without hooks, Fleet falls back to daemon-side output-activity detection.
+
+Agent-finished notifications use an in-app toast and the macOS Glass sound by default. Either
+channel can be disabled independently in `~/.fleet/config.json` (or `$FLEET_HOME/config.json`):
+
+```json
+{
+  "ui": {
+    "notifications": {
+      "toast": true,
+      "sound": true
+    }
+  }
+}
+```
 
 ## Keyboard basics
 

@@ -3,7 +3,7 @@
 use fleet_core::{
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
-    sessions::WorktreeStatus,
+    sessions::{AgentActivity, WorktreeStatus},
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
@@ -76,6 +76,17 @@ pub struct OkEnvelope {
 pub struct StatusEnvelope<'a> {
     pub protocol: u32,
     pub statuses: &'a [WorktreeStatus],
+}
+
+/// A successful explicit agent-activity signal.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatusEnvelope<'a> {
+    pub protocol: u32,
+    pub ok: bool,
+    pub session: &'a fleet_core::ids::SessionId,
+    pub terminal_id: fleet_core::ids::TerminalId,
+    pub activity: AgentActivity,
 }
 
 /// A sleep result compatible with swarm protocol one.

@@ -321,6 +321,8 @@ the same shape in the palette, in a confirm and in the Workspace header.
 | `Sleeping` | `moon` | secondary | 1.0 | `sleeping` |
 | `NoSession` | `dot` | muted | **0.30** | `no session` |
 | `Unknown` | `circle-question-mark` | **warning** | 1.0 | `unknown` |
+| `AgentWorking` | `loader-circle` (spins) | warning | 1.0 | `Agent working` |
+| `AgentFinished` | `circle-check` | success | 1.0 | `Agent finished — waiting for you` |
 | `Degraded` | `triangle-alert` | warning | 1.0 | `post-create hooks failed` |
 | `JobRunning` | `loader-circle` (spins) | warning | 1.0 | `job running` |
 | `Cloning` | `loader-circle` (spins) | warning | 1.0 | `cloning…` |
@@ -902,20 +904,21 @@ Scroll mode and would otherwise look exactly like a live one — which is how "m
 printing" bug reports are born. Zero-suppressed at `offset == 0` and in alt-screen.
 
 #### `TerminalTabStrip`
-**Purpose.** Numbered tabs, 84–200 px, with activity, keep-alive and exit marks.
+**Purpose.** Numbered tabs, 84–200 px, with activity, keep-alive, agent-status and exit marks.
 **API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").activity(bool).starting(bool)
-.keep_alive(Icon).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
+.keep_alive(Icon).agent_status(StatusKind).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
 .on_select(Fn(position, ..)).on_new(Fn(..))`.
 **States.** active (accent underline + `ui_strong`) · inactive · activity (6 px amber dot) ·
-starting (per-tab `loader-circle`) · exited (faint label + `circle-x` + code, or `—` when the
-process was killed by a signal and has no code).
+starting (per-tab `loader-circle`) · agent working (`loader-circle`) · agent finished
+(`circle-check`) · exited (faint label + `circle-x` + code, or `—` when the process was killed
+by a signal and has no code).
 **Usage rule (`starting`).** §3.6's "Waking a slept session" rebuilds the strip and spawns one
 PTY per tab; without a per-tab spinner the strip claims six live terminals that do not exist
 yet. **Usage rule (`exited`).** `.exited(1)` and `.exited(None)` both compile: exit codes are
 `Option<i32>` end-to-end (`fleet-core::TerminalStatus`, `Event::TerminalExited`), because a
 `SIGKILL` from `^s x` produces none.
 **Usage rule.** The index is the argument to `ctrl-s 1`–`9`, so the strip is the legend for that
-binding. The activity dot is the only background-activity signal in the app.
+binding. Agent activity appears only on terminals with a recognized agent.
 
 #### `ScrollPill`
 **Purpose.** `SCROLL <offset>/<len>` while in scroll mode.

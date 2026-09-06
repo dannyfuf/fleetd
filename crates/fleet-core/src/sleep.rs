@@ -3,6 +3,8 @@
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
+use crate::agents::RECOGNIZED_AGENTS;
+
 /// Kind of process fact inspected by a keep-alive rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -34,18 +36,17 @@ pub struct KeepAliveRule {
 /// Returns swarm's four default keep-alive rules.
 #[must_use]
 pub fn default_keep_alive_rules() -> Vec<KeepAliveRule> {
-    vec![
-        process_rule("claude", "claude", "(^|/)claude( |$)"),
-        process_rule("opencode", "opencode", "(^|/)opencode( |$)"),
-        process_rule("codex", "codex", "(^|/)codex( |$)"),
-        KeepAliveRule {
+    RECOGNIZED_AGENTS
+        .into_iter()
+        .map(|agent| process_rule(agent, agent, &format!(r"(^|/){agent}( |$)")))
+        .chain(std::iter::once(KeepAliveRule {
             id: "servers".to_owned(),
             label: "server".to_owned(),
             kind: KeepAliveKind::ListeningPort,
             pattern: String::new(),
             enabled: true,
-        },
-    ]
+        }))
+        .collect()
 }
 
 /// Matches one terminal's process command lines and listening ports against sleep rules.

@@ -8,6 +8,7 @@ use fleet_core::{
     config::Agent,
     ids::{HostId, JobId, RepoId, SessionId, WorktreeId},
     model::{CloneStatus, Repo, RepoHooks, Worktree},
+    sessions::AgentActivity,
     validate::{validate_branch, validate_slug},
     watches::{WatchStatus, WatchStream},
 };
@@ -19,14 +20,14 @@ use fleet_proto::{
 
 use crate::{
     args::{
-        AgentChoice, Cli, Command, CreateArgs, DaemonCommand, DeleteArgs, InspectArgs, JsonArgs,
-        KillArgs, OpenArgs, PathArgs, PruneArgs, SleepArgs, VERSION_DISPLAY, WatchArgs,
-        WatchCommand, WatchListArgs, WatchTailArgs,
+        AgentChoice, AgentStatusArgs, AgentStatusChoice, Cli, Command, CreateArgs, DaemonCommand,
+        DeleteArgs, InspectArgs, JsonArgs, KillArgs, OpenArgs, PathArgs, PruneArgs, SleepArgs,
+        VERSION_DISPLAY, WatchArgs, WatchCommand, WatchListArgs, WatchTailArgs,
     },
     envelope::{
-        CreateEnvelope, DeleteEnvelope, InspectEnvelope, ListEnvelope, OkEnvelope, PROTOCOL,
-        PruneEnvelope, SleepEnvelope, StatusEnvelope, WatchesEnvelope, error_json, single_line,
-        to_json,
+        AgentStatusEnvelope, CreateEnvelope, DeleteEnvelope, InspectEnvelope, ListEnvelope,
+        OkEnvelope, PROTOCOL, PruneEnvelope, SleepEnvelope, StatusEnvelope, WatchesEnvelope,
+        error_json, single_line, to_json,
     },
     human,
 };
@@ -167,6 +168,7 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
         Command::Path(arguments) => path(client, arguments).await,
         Command::Sleep(arguments) => sleep(client, arguments).await,
         Command::Agent(arguments) => agent(client, arguments.agent).await,
+        Command::AgentStatus(arguments) => agent_status(client, arguments).await,
         Command::Doctor => doctor(client).await,
         Command::Import(_) => import_from_swarm(client).await,
         Command::Update => update(client).await,
@@ -531,6 +533,61 @@ async fn agent(
     )))
 }
 
+async fn agent_status(
+    client: &Client,
+    arguments: AgentStatusArgs,
+) -> Result<CommandOutput, ProtoError> {
+    let (session, terminal_id) =
+        resolve_agent_status_target(&arguments, |name| std::env::var_os(name))?;
+    let activity = match arguments.activity {
+        AgentStatusChoice::Working => AgentActivity::Working,
+        AgentStatusChoice::Finished => AgentActivity::Idle,
+    };
+    client
+        .set_agent_activity(session.clone(), terminal_id, activity)
+        .await?;
+    let text = if arguments.json {
+        to_json(&AgentStatusEnvelope {
+            protocol: PROTOCOL,
+            ok: true,
+            session: &session,
+            terminal_id,
+            activity,
+        })?
+    } else {
+        String::new()
+    };
+    Ok(CommandOutput::success(text))
+}
+
+fn resolve_agent_status_target(
+    arguments: &AgentStatusArgs,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Result<(SessionId, fleet_core::ids::TerminalId), ProtoError> {
+    let session = match &arguments.session {
+        Some(session) => session.clone(),
+        None => env("FLEET_SESSION")
+            .ok_or_else(|| validation("--session is required when FLEET_SESSION is not set"))?
+            .into_string()
+            .map_err(|_| validation("FLEET_SESSION is not valid UTF-8"))?,
+    };
+    let terminal_id = match arguments.terminal_id {
+        Some(terminal_id) => terminal_id,
+        None => env("FLEET_TERMINAL_ID")
+            .ok_or_else(|| {
+                validation("--terminal-id is required when FLEET_TERMINAL_ID is not set")
+            })?
+            .into_string()
+            .map_err(|_| validation("FLEET_TERMINAL_ID is not valid UTF-8"))?
+            .parse::<u64>()
+            .map_err(|_| validation("FLEET_TERMINAL_ID must be numeric"))?,
+    };
+    Ok((
+        parse_id(&session)?,
+        fleet_core::ids::TerminalId(terminal_id),
+    ))
+}
+
 async fn doctor(client: &Client) -> Result<CommandOutput, ProtoError> {
     let checks = client.doctor().await?;
     let ok = checks
@@ -678,6 +735,7 @@ fn command_requests_json(command: &Command) -> bool {
         Command::Prune(arguments) => arguments.json,
         Command::Kill(arguments) => arguments.json,
         Command::Sleep(arguments) => arguments.json,
+        Command::AgentStatus(arguments) => arguments.json,
         Command::Exec(_)
         | Command::WatchChild(_)
         | Command::Open(_)
@@ -1042,6 +1100,47 @@ mod tests {
 
         let hooks_error = parse_hooks(r#"{"prepare":[],"unexpected":true}"#).unwrap_err();
         assert_eq!(hooks_error.kind, ErrorKind::Validation);
+    }
+
+    #[test]
+    fn agent_status_resolves_flags_before_fleet_environment() {
+        let arguments = AgentStatusArgs {
+            activity: AgentStatusChoice::Working,
+            session: Some("acme/api".to_owned()),
+            terminal_id: Some(9),
+            json: false,
+        };
+        let resolved = resolve_agent_status_target(&arguments, |_| None)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(resolved.0.as_str(), "acme/api");
+        assert_eq!(resolved.1, fleet_core::ids::TerminalId(9));
+
+        let arguments = AgentStatusArgs {
+            activity: AgentStatusChoice::Finished,
+            session: None,
+            terminal_id: None,
+            json: false,
+        };
+        let resolved = resolve_agent_status_target(&arguments, |name| match name {
+            "FLEET_SESSION" => Some(OsString::from("repo/feature")),
+            "FLEET_TERMINAL_ID" => Some(OsString::from("42")),
+            _ => None,
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(resolved.0.as_str(), "repo/feature");
+        assert_eq!(resolved.1, fleet_core::ids::TerminalId(42));
+    }
+
+    #[test]
+    fn agent_status_reports_missing_environment() {
+        let arguments = AgentStatusArgs {
+            activity: AgentStatusChoice::Finished,
+            session: None,
+            terminal_id: None,
+            json: false,
+        };
+        let error = resolve_agent_status_target(&arguments, |_| None).unwrap_err();
+        assert!(error.message.contains("FLEET_SESSION"));
     }
 
     #[tokio::test]

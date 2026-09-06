@@ -32,7 +32,7 @@ use fleet_core::{
     ids::{ContextId, RepoId, WorktreeId},
     inspection::WorktreeInspection,
     model::{CloneJob, Repo, Worktree},
-    sessions::SessionState,
+    sessions::{AgentActivity, SessionState},
 };
 use fleet_proto::{
     error::ProtoError,
@@ -407,11 +407,11 @@ fn repo_glyphs(snapshot: &Snapshot, repo: &RepoId) -> Vec<StatusKind> {
         .map(|worktree| {
             // §3.3 cold load: a worktree the daemon has not reported a status for yet is
             // `unknown`, never `none` — absence of knowledge is never good news (§1.3).
-            let session = snapshot
+            let status = snapshot
                 .statuses
                 .iter()
-                .find(|status| status.worktree_id == worktree.id)
-                .map_or(SessionState::Unknown, |status| status.session);
+                .find(|status| status.worktree_id == worktree.id);
+            let session = status.map_or(SessionState::Unknown, |status| status.session);
             let unreachable = worktree.host.as_ref().is_some_and(|host| {
                 snapshot
                     .hosts
@@ -424,7 +424,14 @@ fn repo_glyphs(snapshot: &Snapshot, repo: &RepoId) -> Vec<StatusKind> {
                     fleet_core::sessions::SessionKind::Worktree(id) if id == &worktree.id
                 ) && candidate.slept_at.is_some()
             });
-            worktrees_list::row_glyph(session, slept, false, unreachable, false)
+            worktrees_list::row_glyph(
+                session,
+                slept,
+                status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
+                worktree.degraded.is_some(),
+                unreachable,
+                worktrees_list::has_running_job(&worktree.id, &snapshot.jobs),
+            )
         })
         .collect()
 }

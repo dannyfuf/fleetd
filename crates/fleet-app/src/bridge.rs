@@ -82,6 +82,8 @@ pub enum BridgeEvent {
     },
     /// Effective terminal settings loaded on connection or a config response.
     TerminalConfig(fleet_core::config::TerminalConfig),
+    /// Effective agent-finished notification settings.
+    NotificationConfig(fleet_core::config::NotificationsConfig),
     /// An ordinary daemon event.
     Daemon(Box<Event>),
     /// The client's broadcast buffer overflowed and events were dropped.
@@ -439,6 +441,11 @@ fn dispatch(
             let _ = events
                 .send(BridgeEvent::TerminalConfig(config.terminal.clone()))
                 .await;
+            let _ = events
+                .send(BridgeEvent::NotificationConfig(
+                    config.ui.notifications.clone(),
+                ))
+                .await;
         }
         let _ignored = reply.send(result).await;
     });
@@ -467,7 +474,10 @@ async fn open(home: &Path, events: &Sender<BridgeEvent>) -> Result<(Link, Snapsh
     let forwarder = spawn_forwarder(client.events(), events.clone());
     if let Ok(config) = client.get_config().await {
         let _ = events
-            .send(BridgeEvent::TerminalConfig(config.terminal))
+            .send(BridgeEvent::TerminalConfig(config.terminal.clone()))
+            .await;
+        let _ = events
+            .send(BridgeEvent::NotificationConfig(config.ui.notifications))
             .await;
     }
     match client.get_snapshot().await {

@@ -1,7 +1,7 @@
-//! `TerminalTabStrip` — numbered tabs 84-200 px with activity, keep-alive and exit marks.
+//! `TerminalTabStrip` — numbered tabs with activity, keep-alive, agent and exit marks.
 //!
 //! §3.6: the index is the argument to `ctrl-s 1`-`9`, so the strip is the legend for that
-//! binding. The 6 px amber activity dot is the only background-activity signal in the app.
+//! binding. The amber activity dot marks unseen output; agent glyphs show working or finished.
 //!
 //! The strip is a **legend**, not a control surface: every tab is reachable from the keyboard
 //! without it. The click handlers ([`TerminalTabStrip::on_select`],
@@ -12,7 +12,7 @@
 use gpui::{App, ElementId, SharedString, Window, div, prelude::*, px};
 
 use crate::{
-    components::{Spinner, StatusDot},
+    components::{Spinner, StatusDot, StatusGlyph, StatusKind},
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -54,6 +54,8 @@ pub struct TerminalTab {
     pub starting: bool,
     /// The keep-alive kind glyph: `bot`, `server`, `file-pen`.
     pub keep_alive: Option<Icon>,
+    /// Recognized agent activity, limited to `AgentWorking` or `AgentFinished`.
+    pub agent_status: Option<StatusKind>,
     /// The command exited. `Some(None)` is a signal-killed process, which has **no** exit
     /// code; the strip renders `—` rather than inventing one.
     pub exited: Option<Option<i32>>,
@@ -70,6 +72,7 @@ impl TerminalTab {
             activity: false,
             starting: false,
             keep_alive: None,
+            agent_status: None,
             exited: None,
             kind: TerminalTabKind::default(),
         }
@@ -96,6 +99,16 @@ impl TerminalTab {
     /// Mark a keep-alive process.
     pub fn keep_alive(mut self, icon: Icon) -> Self {
         self.keep_alive = Some(icon);
+        self
+    }
+
+    /// Mark recognized agent activity on this terminal.
+    pub fn agent_status(mut self, status: StatusKind) -> Self {
+        debug_assert!(matches!(
+            status,
+            StatusKind::AgentWorking | StatusKind::AgentFinished
+        ));
+        self.agent_status = Some(status);
         self
     }
 
@@ -256,6 +269,14 @@ impl RenderOnce for TerminalTabStrip {
                                 icon.el()
                                     .size(IconSize::Small)
                                     .color(theme.colors.text_secondary)
+                            }))
+                            .children(tab.agent_status.map(|status| {
+                                StatusGlyph::new(status).size(IconSize::Small).id(
+                                    ElementId::NamedChild(
+                                        std::sync::Arc::new(strip_id.clone()),
+                                        SharedString::from(format!("tab-{pos}-agent")),
+                                    ),
+                                )
                             }))
                             .children(exited.map(|code| {
                                 div()
