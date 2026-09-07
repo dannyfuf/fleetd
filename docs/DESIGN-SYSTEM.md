@@ -1060,7 +1060,8 @@ information), so the ladder still reads in grayscale. `None` is dashed and hollo
 
 #### `CardTile`
 **Purpose.** One card on the board — the list row of the kanban world.
-**Anatomy.** key (muted data face) · title (`UiStrong`, clipped at `CARD_TITLE_LINES` = 2) ·
+**Anatomy.** key (muted data face) · title (`UiStrong`, wrapped to `CARD_TITLE_LINES` = 2 with an
+ellipsis on the last line) ·
 a zero-suppressed meta row: priority glyph · label chips · assignee initials chip · estimate
 (`n pt`) · due date behind a `clock` glyph · `git-branch` glyph when a worktree is linked ·
 amber dirty dot · red conflict dot · `show_on_card` extras.

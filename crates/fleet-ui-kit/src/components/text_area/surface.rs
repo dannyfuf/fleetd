@@ -176,6 +176,7 @@ impl RenderOnce for TextArea {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_shrink_0()
                     .items_center()
                     .w_full()
                     .min_h(line_height)

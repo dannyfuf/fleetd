@@ -21,7 +21,7 @@ use crate::{
     tone::Tone,
 };
 
-/// How many lines of the title a tile shows before it clips.
+/// How many lines of the title a tile wraps to before the last one ends in an ellipsis.
 pub const CARD_TITLE_LINES: usize = 2;
 
 /// How many characters an assignee chip shows.
@@ -273,11 +273,14 @@ impl RenderOnce for CardTile {
             .child(Text::data_small(self.key).faint())
             .child(
                 // The title is the only thing on a tile allowed two lines; anything longer is
-                // a description, and a board that grows its cards stops being scannable.
+                // a description, and a board that grows its cards stops being scannable. The
+                // ellipsis is what tells the eye the clamp cut something: `line_clamp` alone
+                // hides the tail mid-word, which reads as a title that simply ends there.
                 styled_with(div(), TextRole::UiStrong.style(theme), theme)
                     .w_full()
                     .min_w_0()
                     .line_clamp(CARD_TITLE_LINES)
+                    .text_ellipsis()
                     .text_color(theme.colors.text)
                     .child(self.title),
             )

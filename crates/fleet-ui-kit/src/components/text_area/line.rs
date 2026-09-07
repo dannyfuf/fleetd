@@ -62,12 +62,19 @@ pub(super) fn caret_bar(theme: &Theme, role: TextRole) -> Div {
 }
 
 /// One rendered line: its chunks, with the caret spliced in when it lands on this line.
+///
+/// `min_h` is the *floor* for an empty line, not the height: an explicit minimum replaces the
+/// content-derived automatic minimum a column flex item would otherwise get, so a row that wrapped
+/// to three visual rows would let the column shrink it back to one and paint its tail over the next
+/// line. `flex_shrink_0` is what keeps a wrapped line as tall as the wrapping made it; the box
+/// scrolls or clips instead of squeezing its lines.
 pub(super) fn line_row(theme: &Theme, role: TextRole, line: &str, caret: Option<usize>) -> Div {
     let line_height = role.style(theme).line_height;
     let row = div()
         .flex()
         .flex_row()
         .flex_wrap()
+        .flex_shrink_0()
         .items_center()
         .w_full()
         .min_h(line_height);

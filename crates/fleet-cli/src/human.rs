@@ -168,28 +168,80 @@ pub fn doctor(checks: &[DoctorCheck]) -> String {
     lines.join("\n")
 }
 
-/// Formats board summaries as a compact table.
+/// Formats board summaries as a column-aligned table.
 #[must_use]
 pub fn boards(boards: &[fleet_core::board::BoardSummary]) -> String {
-    let mut lines = vec!["BOARD  CONTEXT  NAME  BACKEND  CARDS  OPEN  DIRTY  CONFLICTS".to_owned()];
-    lines.extend(boards.iter().map(|board| {
-        let mut row = format!(
-            "{}  {}  {}  {}  {}  {}  {}  {}",
-            board.id,
-            board.context_id,
+    let header = [
+        "BOARD",
+        "CONTEXT",
+        "NAME",
+        "BACKEND",
+        "CARDS",
+        "OPEN",
+        "DIRTY",
+        "CONFLICTS",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let mut rows = vec![header];
+    rows.extend(boards.iter().map(|board| {
+        let mut row = vec![
+            board.id.to_string(),
+            board.context_id.to_string(),
             crate::envelope::single_line(&board.name),
             crate::envelope::single_line(&board.backend_kind),
-            board.card_count,
-            board.open_count,
-            board.dirty_count,
-            board.conflict_count,
-        );
+            board.card_count.to_string(),
+            board.open_count.to_string(),
+            board.dirty_count.to_string(),
+            board.conflict_count.to_string(),
+        ];
+        // A failing sync is a per-board fact, not a column every clean board pays a dash for, so
+        // it rides along as an extra trailing cell that only an unhealthy board grows.
         if let Some(error) = &board.last_error {
-            row.push_str(&format!("  error: {}", crate::envelope::single_line(error)));
+            row.push(format!("error: {}", crate::envelope::single_line(error)));
         }
         row
     }));
-    lines.join("\n")
+    columns(&rows).join("\n")
+}
+
+/// The gutter between two columns of a `human` table.
+const GUTTER: &str = "  ";
+
+/// Pads `rows` into columns two spaces apart, so a header and its values line up.
+///
+/// A width is the widest cell that column carries, counted in `char`s: the names these tables
+/// print are already single-lined, and the alternative is a display-width dependency. Each row's
+/// own last cell is left unpadded, so a table never ends in trailing blanks and a row that grows
+/// an extra trailing cell still finds it at the column the padded row above put it.
+fn columns(rows: &[Vec<String>]) -> Vec<String> {
+    let mut widths: Vec<usize> = Vec::new();
+    for row in rows {
+        for (index, cell) in row.iter().enumerate() {
+            let width = cell.chars().count();
+            match widths.get_mut(index) {
+                Some(current) => *current = (*current).max(width),
+                None => widths.push(width),
+            }
+        }
+    }
+    rows.iter()
+        .map(|row| {
+            let last = row.len().saturating_sub(1);
+            row.iter()
+                .enumerate()
+                .map(|(index, cell)| {
+                    if index == last {
+                        return cell.clone();
+                    }
+                    let width = widths.get(index).copied().unwrap_or_default();
+                    let padding = width.saturating_sub(cell.chars().count());
+                    format!("{cell}{:padding$}", "")
+                })
+                .collect::<Vec<_>>()
+                .join(GUTTER)
+        })
+        .collect()
 }
 
 /// Formats columns in board order and cards in their stored column order.

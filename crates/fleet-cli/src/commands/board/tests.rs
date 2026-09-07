@@ -713,6 +713,37 @@ mod parsing {
     }
 
     #[test]
+    fn board_list_pads_every_column_to_the_widest_cell() {
+        let view = view();
+        let mut short = summarize(&view.board, &view.cards);
+        short.id = "ops".parse().unwrap();
+        short.name = "Ops".into();
+        let mut long = short.clone();
+        long.id = "platform-migration".parse().unwrap();
+        long.name = "Platform migration".into();
+        long.last_error = Some("acli timed out".into());
+
+        let text = human::boards(&[short, long]);
+        let lines: Vec<&str> = text.lines().collect();
+        // Header, then one row per board, each starting its second column at the same offset.
+        assert_eq!(lines.len(), 3);
+        let context = lines[0].find("CONTEXT").unwrap();
+        for line in &lines[1..] {
+            assert_eq!(line.find("work"), Some(context), "{line:?}");
+        }
+        // The trailing error cell lands past the last counter column, not glued to it.
+        assert!(
+            lines[2].ends_with("  error: acli timed out"),
+            "{:?}",
+            lines[2]
+        );
+        // Padding never leaks past the last cell a row carries.
+        for line in &lines {
+            assert_eq!(*line, line.trim_end(), "{line:?}");
+        }
+    }
+
+    #[test]
     fn card_header_stays_one_line_and_an_author_less_comment_names_nobody() {
         let mut view = view();
         view.cards[0].title = "Fix login\nand logout".into();
