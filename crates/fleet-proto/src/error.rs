@@ -52,14 +52,14 @@ impl std::error::Error for ProtoError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_round_trip;
 
     #[test]
     fn error_kind_round_trips_with_swarm_names() {
-        let json =
-            serde_json::to_string(&ErrorKind::Tmux).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(json, "\"tmux\"");
-        let value: ErrorKind =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(value, ErrorKind::Tmux);
+        assert_eq!(
+            serde_json::to_string(&ErrorKind::Tmux).unwrap_or_else(|error| panic!("{error}")),
+            "\"tmux\""
+        );
+        assert_round_trip(ErrorKind::Tmux);
     }
 }

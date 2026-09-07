@@ -44,6 +44,7 @@ pub mod assets;
 pub mod components;
 pub mod focus;
 pub mod icons;
+mod paint_error;
 pub mod text;
 pub mod theme;
 pub mod tone;
@@ -55,7 +56,7 @@ pub use icons::{Icon, IconElement, IconSize};
 pub use text::{Text, TextRole, styled_with};
 pub use theme::{ActiveTheme, Theme, ThemeMode};
 pub use tone::Tone;
-pub use truncate::{ELLIPSIS, Truncate, truncate};
+pub use truncate::{ELLIPSIS, Truncate, truncate, truncate_shared};
 
 /// Everything a view needs in one `use`.
 pub mod prelude {
@@ -66,4 +67,8 @@ pub mod prelude {
     pub use crate::tone::Tone;
     pub use crate::truncate::{Truncate, truncate};
     pub use gpui::prelude::*;
+    pub use gpui::{
+        AnyElement, App, Context, Div, ElementId, IntoElement, ParentElement, Pixels, Render,
+        RenderOnce, SharedString, Styled, Window, div, px,
+    };
 }

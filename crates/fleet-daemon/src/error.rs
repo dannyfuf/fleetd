@@ -64,6 +64,14 @@ pub enum DaemonError {
     Join(String),
 }
 
+/// The single wording every remote-host refusal reports to clients.
+pub(crate) const REMOTE_UNSUPPORTED: &str = "remote hosts are not supported yet";
+
+/// Builds the refusal returned wherever a request names a host Fleet cannot drive yet.
+pub(crate) fn remote_unsupported() -> DaemonError {
+    DaemonError::Unsupported(REMOTE_UNSUPPORTED.to_owned())
+}
+
 impl DaemonError {
     /// Constructs a filesystem error while retaining its path context.
     #[must_use]
@@ -109,11 +117,9 @@ mod tests {
 
     #[test]
     fn unsupported_protocol_errors_preserve_the_requested_message() {
-        let error = ProtoError::from(DaemonError::Unsupported(
-            "remote hosts are not supported yet".to_owned(),
-        ));
+        let error = ProtoError::from(remote_unsupported());
 
         assert_eq!(error.kind, ErrorKind::Unsupported);
-        assert_eq!(error.message, "remote hosts are not supported yet");
+        assert_eq!(error.message, REMOTE_UNSUPPORTED);
     }
 }

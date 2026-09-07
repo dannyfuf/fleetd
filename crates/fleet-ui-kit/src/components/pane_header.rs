@@ -13,7 +13,7 @@
 //! ## The filter must pass *through* the header
 //!
 //! §3.10 replaces the left side with the filter bar **in place**, in the same 30 px row, with
-//! zero layout shift. Pass a [`super::FilterBar`] to [`PaneHeader::filter`] rather than
+//! zero layout shift. Pass [`super::FilterBar::query_slot`] to [`PaneHeader::query_slot`] rather than
 //! swapping the header element for one, or the row shifts by a pixel and the illusion that
 //! "the list did not move" — the whole point of filtering in the header — breaks.
 //!
@@ -23,7 +23,7 @@
 //! (`· stale · 2m`, amber, §1.3 / §3.12). There is no focused, disabled or error state: the
 //! header describes a pane, and the pane owns the focus ring.
 
-use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use crate::{
     icons::{Icon, IconSize},
@@ -101,9 +101,9 @@ impl PaneHeader {
         self
     }
 
-    /// Replace the header's left side with a live [`super::FilterBar`], in place.
-    pub fn filter(mut self, filter: impl IntoElement) -> Self {
-        self.filter = Some(filter.into_any_element());
+    /// Replace the left side with an unframed query, such as `FilterBar::query_slot()`.
+    pub fn query_slot(mut self, query: impl IntoElement) -> Self {
+        self.filter = Some(query.into_any_element());
         self
     }
 
@@ -175,7 +175,7 @@ impl RenderOnce for PaneHeader {
             .size_full()
             .px(theme.space.lg)
             .gap(theme.space.md)
-            .border_b(px(1.0))
+            .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(left)
             .child(

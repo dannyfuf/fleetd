@@ -157,7 +157,7 @@ async fn request_lifecycle_and_terminal_session_cleanup() {
 }
 
 #[tokio::test]
-async fn dropping_starter_socket_interrupts_running_watch_and_flushes_output() {
+async fn disconnect_does_not_invent_sigkill_and_flushes_output() {
     let temp = tempfile::tempdir().unwrap();
     let services = services(temp.path()).await;
     let session = services
@@ -240,7 +240,7 @@ async fn dropping_starter_socket_interrupts_running_watch_and_flushes_output() {
         services.watches.tail(id, None).unwrap().watch.status,
         WatchStatus::Exited {
             code: None,
-            signal: Some(9)
+            signal: None
         }
     );
     assert!(matches!(

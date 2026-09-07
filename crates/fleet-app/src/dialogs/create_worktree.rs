@@ -1,10 +1,13 @@
 //! §3.8.1 Create worktree — *name a branch, pick a base, go*.
-//!
-//! The dialog never blocks: `Enter` closes it inside one frame, the daemon answers as an
-//! event, and the base-ref fetch keeps running after the dialog is gone (§3.8.1 "closed while
-//! a base fetch is running").
 
-use std::time::{Duration, Instant};
+use std::{
+    cell::Cell,
+    future::{Future, poll_fn},
+    pin::pin,
+    rc::Rc,
+    task::Poll,
+    time::{Duration, Instant},
+};
 
 use fleet_core::{
     ids::{HostId, RepoId, WorktreeId},
@@ -19,16 +22,32 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{create_worktree as create_actions, dialog},
     bridge::Bridge,
-    dialogs::{TextInput, notify, root, step, type_into, with_host},
-    state::{AppState, Screen},
+    dialogs::{DialogHost, field, notify, open_session, root, step, type_into, with_host},
+    presentation::FuzzyQuery,
+    state::{AppState, Cursors, HubPane, RepoScope, Screen},
 };
 
 /// How many base rows the list shows (§3.8.1: "6 is swarm's number").
 pub const BASE_ROWS: usize = 6;
-/// How often the dialog re-asks the daemon while a base fetch is still running.
-const FETCH_POLL: Duration = Duration::from_millis(700);
-/// How many times it re-asks before giving up on the indicator.
-const FETCH_POLL_LIMIT: u32 = 30;
+/// Maximum time either base-ref request may leave the dialog's spinner active.
+const BASE_REF_TIMEOUT: Duration = Duration::from_secs(15);
+
+type Reply = async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>>;
+
+trait CreateTransport: Clone + 'static {
+    fn send(&self, body: RequestBody);
+    fn request(&self, body: RequestBody) -> Reply;
+}
+
+impl CreateTransport for Bridge {
+    fn send(&self, body: RequestBody) {
+        Bridge::send(self, body);
+    }
+
+    fn request(&self, body: RequestBody) -> Reply {
+        Bridge::request(self, body)
+    }
+}
 
 /// Which field owns the keyboard.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -43,36 +62,38 @@ pub enum Field {
 }
 
 /// The Create dialog's draft.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct CreateState {
     /// The repository the worktree is created in.
-    pub repo: Option<RepoId>,
+    pub(crate) repo: Option<RepoId>,
     /// `origin/<defaultBranch>`, always the first and preselected base row.
-    pub default_base: String,
+    pub(crate) default_base: String,
     /// The base of the most recently created worktree in this repo, when there is one.
-    pub previous_base: Option<String>,
+    pub(crate) previous_base: Option<String>,
     /// `prepare` then `postCreate`, as the footer previews them.
-    pub hooks: Vec<String>,
+    pub(crate) hooks: Vec<String>,
     /// Whether the pool has a prepared copy ready for this repo.
-    pub prepared_ready: bool,
+    pub(crate) prepared_ready: bool,
     /// `local` plus every configured host; empty when no host is configured.
-    pub hosts: Vec<String>,
+    pub(crate) hosts: Vec<String>,
     /// Which host the cycler shows.
-    pub host_index: usize,
+    pub(crate) host_index: usize,
     /// The branch input.
-    pub branch: TextInput,
+    pub(crate) branch: TextFieldState,
     /// Which field owns the keyboard.
-    pub field: Field,
+    pub(crate) field: Field,
     /// Which base row carries the cursor.
-    pub base_cursor: usize,
+    pub(crate) base_cursor: usize,
     /// `origin/*` candidates, as last reported by the daemon.
-    pub base_refs: Vec<String>,
+    pub(crate) base_refs: Vec<String>,
     /// Whether a fetch is still updating the candidates.
-    pub fetching: bool,
+    pub(crate) fetching: bool,
     /// The exact conflict message from a refused create.
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
+    /// The exact failure from refreshing base refs.
+    pub(crate) base_error: Option<String>,
     /// Bumps on every seed; a late answer to a superseded dialog is dropped.
-    pub seq: u64,
+    pub(crate) seq: u64,
 }
 
 impl CreateState {
@@ -94,23 +115,23 @@ impl CreateState {
         {
             rows.push(previous.clone());
         }
-        let query = self.branch.value().to_ascii_lowercase();
-        let rest: Vec<&String> = self
+        let query = FuzzyQuery::new(self.branch.text());
+        let remaining = BASE_ROWS.saturating_sub(rows.len());
+        let is_tail = |candidate: &&String| !rows.contains(candidate);
+        let has_matches = self
             .base_refs
             .iter()
-            .filter(|candidate| !rows.contains(candidate))
-            .collect();
-        let matching: Vec<&&String> = rest
+            .filter(is_tail)
+            .any(|candidate| query.matches(candidate));
+        let tail: Vec<_> = self
+            .base_refs
             .iter()
-            .filter(|candidate| subsequence(&candidate.to_ascii_lowercase(), &query))
+            .filter(is_tail)
+            .filter(|candidate| !has_matches || query.matches(candidate))
+            .take(remaining)
+            .cloned()
             .collect();
-        let tail: Vec<String> = if matching.is_empty() {
-            rest.iter().map(|value| (*value).clone()).collect()
-        } else {
-            matching.iter().map(|value| (**value).clone()).collect()
-        };
         rows.extend(tail);
-        rows.truncate(BASE_ROWS);
         rows
     }
 
@@ -131,7 +152,7 @@ impl CreateState {
     #[must_use]
     pub fn preview_id(&self) -> Option<String> {
         let repo = self.repo.as_ref()?;
-        let slug = slugify(self.branch.value());
+        let slug = slugify(self.branch.text());
         if slug.is_empty() {
             return None;
         }
@@ -144,7 +165,7 @@ impl CreateState {
         if self.branch.is_empty() {
             return None;
         }
-        match validate_branch(self.branch.value()) {
+        match validate_branch(self.branch.text()) {
             Ok(()) => None,
             Err(error) => Some(reason(&error)),
         }
@@ -156,7 +177,73 @@ impl CreateState {
         self.repo.is_some()
             && !self.branch.is_empty()
             && self.branch_error().is_none()
-            && !slugify(self.branch.value()).is_empty()
+            && !slugify(self.branch.text()).is_empty()
+    }
+
+    fn start_base_ref_fetch(&mut self) {
+        self.fetching = true;
+        self.base_error = None;
+    }
+
+    fn fail_base_ref_fetch(&mut self, message: String) {
+        self.fetching = false;
+        self.base_error = Some(message);
+    }
+
+    fn should_retry_base_refs(&self) -> bool {
+        self.base_error.is_some() && (self.field == Field::Base || !self.can_submit())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NavigationIntent {
+    screen: Screen,
+    hub_pane: HubPane,
+    scope: RepoScope,
+    cursors: Cursors,
+}
+
+struct NavigationGuard {
+    intent: NavigationIntent,
+    valid: Rc<Cell<bool>>,
+    _subscription: gpui::Subscription,
+}
+
+impl NavigationGuard {
+    fn new(state: &Entity<AppState>, cx: &mut App) -> Self {
+        let intent = NavigationIntent::capture(state.read(cx));
+        let observed_intent = intent.clone();
+        let valid = Rc::new(Cell::new(true));
+        let observed_valid = Rc::clone(&valid);
+        let subscription = cx.observe(state, move |state, cx| {
+            if !observed_intent.matches(state.read(cx)) {
+                observed_valid.set(false);
+            }
+        });
+        Self {
+            intent,
+            valid,
+            _subscription: subscription,
+        }
+    }
+
+    fn is_current(&self, state: &AppState) -> bool {
+        self.valid.get() && self.intent.matches(state)
+    }
+}
+
+impl NavigationIntent {
+    fn capture(state: &AppState) -> Self {
+        Self {
+            screen: state.screen.clone(),
+            hub_pane: state.hub_pane,
+            scope: state.scope.clone(),
+            cursors: state.cursors.clone(),
+        }
+    }
+
+    fn matches(&self, state: &AppState) -> bool {
+        state.overlay.is_none() && self == &Self::capture(state)
     }
 }
 
@@ -169,19 +256,12 @@ fn reason(error: &ValidationError) -> String {
     }
 }
 
-/// Whether `query`'s characters appear in `candidate`, in order.
-fn subsequence(candidate: &str, query: &str) -> bool {
-    let mut chars = candidate.chars();
-    query
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .all(|wanted| chars.any(|actual| actual == wanted))
-}
-
-// ---------------------------------------------------------------------------- seeding
-
 /// Fills the draft from the snapshot and asks the daemon for the base refs.
 pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
+    seed_with_transport(state, bridge, cx);
+}
+
+fn seed_with_transport<T: CreateTransport>(state: &Entity<AppState>, transport: &T, cx: &mut App) {
     let mut draft = CreateState::default();
     {
         let app = state.read(cx);
@@ -218,102 +298,184 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         }
     }
     let repo = draft.repo.clone();
-    draft.fetching = repo.is_some();
-    let seq = with_host(cx, |host| {
+    if repo.is_some() {
+        draft.start_base_ref_fetch();
+    }
+    let seq = with_host(state, cx, |host| {
         let seq = host.create.seq.wrapping_add(1);
         draft.seq = seq;
         host.create = draft;
         seq
     });
     if let Some(repo) = repo {
-        poll_base_refs(repo, seq, state, bridge, cx);
+        poll_base_refs(repo, seq, state, transport, cx);
     }
 }
 
-/// Asks for the base refs and keeps asking while the daemon reports a running fetch.
-fn poll_base_refs(repo: RepoId, seq: u64, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let state = state.clone();
-    let bridge = bridge.clone();
-    cx.spawn(async move |cx| {
-        for attempt in 0..FETCH_POLL_LIMIT {
-            if attempt > 0 {
-                cx.background_executor().timer(FETCH_POLL).await;
-            }
-            let reply = bridge.request(RequestBody::ListBaseRefs {
-                repo: repo.clone(),
-                force: false,
-            });
-            let Ok(answer) = reply.recv().await else {
-                return;
-            };
-            let refs = match answer {
-                Ok(ResponseBody::BaseRefs(refs)) => refs,
-                _ => return,
-            };
-            let keep_polling = cx.update(|cx| {
-                let live = with_host(cx, |host| {
-                    if host.create.seq != seq {
-                        return false;
-                    }
-                    host.create.base_refs = refs.refs.clone();
-                    host.create.fetching = refs.fetching;
-                    host.create.base_cursor = host
-                        .create
-                        .base_cursor
-                        .min(host.create.base_candidates().len().saturating_sub(1));
-                    true
-                });
-                if live {
-                    notify(&state, cx);
-                }
-                live && refs.fetching
-            });
-            if !keep_polling {
+/// Shows cached base refs first, then replaces them with one bounded forced refresh.
+fn poll_base_refs<T: CreateTransport>(
+    repo: RepoId,
+    seq: u64,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    let weak_state = state.downgrade();
+    let transport = transport.clone();
+    let task = cx.spawn(async move |cx| {
+        let cached = transport.request(RequestBody::ListBaseRefs {
+            repo: repo.clone(),
+            force: false,
+        });
+        let Some(answer) = before_timeout(
+            cached.recv(),
+            cx.background_executor().timer(BASE_REF_TIMEOUT),
+        )
+        .await
+        else {
+            finish_base_ref_failure(&weak_state, seq, "base-ref cache timed out".to_owned(), cx);
+            return;
+        };
+        let refs = match base_refs_from(answer) {
+            Ok(refs) => refs,
+            Err(message) => {
+                finish_base_ref_failure(&weak_state, seq, message, cx);
                 return;
             }
+        };
+        if !apply_base_refs(&weak_state, seq, refs.refs, true, cx) {
+            return;
         }
-    })
-    .detach();
+
+        let refreshed = transport.request(RequestBody::ListBaseRefs { repo, force: true });
+        let Some(answer) = before_timeout(
+            refreshed.recv(),
+            cx.background_executor().timer(BASE_REF_TIMEOUT),
+        )
+        .await
+        else {
+            finish_base_ref_failure(
+                &weak_state,
+                seq,
+                "base-ref refresh timed out".to_owned(),
+                cx,
+            );
+            return;
+        };
+        match base_refs_from(answer) {
+            Ok(refs) => {
+                apply_base_refs(&weak_state, seq, refs.refs, false, cx);
+            }
+            Err(message) => finish_base_ref_failure(&weak_state, seq, message, cx),
+        }
+    });
+    crate::dialogs::retain_task(state, cx, "create-refs", task);
 }
 
-// ---------------------------------------------------------------------------- rendering
+async fn before_timeout<T>(
+    future: impl Future<Output = T>,
+    timeout: impl Future<Output = ()>,
+) -> Option<T> {
+    let mut future = pin!(future);
+    let mut timeout = pin!(timeout);
+    poll_fn(|cx| {
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        if timeout.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}
 
-/// Renders the dialog (§3.8.1).
-pub(crate) fn render(
-    state: &Entity<AppState>,
-    bridge: &Bridge,
-    focus: &FocusHandle,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let (gap, tight, hair) = {
-        let theme = cx.theme();
-        (theme.space.md, theme.space.xs, theme.space.xxs)
-    };
-    let draft = with_host(cx, |host| host.create.clone());
+fn base_refs_from(
+    answer: Result<Result<ResponseBody, fleet_proto::error::ProtoError>, async_channel::RecvError>,
+) -> Result<fleet_proto::response::BaseRefs, String> {
+    match answer {
+        Ok(Ok(ResponseBody::BaseRefs(refs))) => Ok(refs),
+        Ok(Err(failure)) => Err(failure.message),
+        Ok(Ok(_)) => Err("unexpected base-ref response".to_owned()),
+        Err(_) => Err("fleetd disconnected during base-ref refresh".to_owned()),
+    }
+}
+
+fn apply_base_refs(
+    state: &gpui::WeakEntity<AppState>,
+    seq: u64,
+    refs: Vec<String>,
+    fetching: bool,
+    cx: &mut gpui::AsyncApp,
+) -> bool {
+    cx.update(|cx| {
+        let Some(state) = state.upgrade() else {
+            return false;
+        };
+        let live = with_host(&state, cx, |host| {
+            if host.create.seq != seq {
+                return false;
+            }
+            host.create.base_refs = refs;
+            host.create.fetching = fetching;
+            host.create.base_cursor = host
+                .create
+                .base_cursor
+                .min(host.create.base_candidates().len().saturating_sub(1));
+            true
+        });
+        if live {
+            notify(&state, cx);
+        }
+        live
+    })
+}
+
+fn finish_base_ref_failure(
+    state: &gpui::WeakEntity<AppState>,
+    seq: u64,
+    message: String,
+    cx: &mut gpui::AsyncApp,
+) {
+    cx.update(|cx| {
+        let Some(state) = state.upgrade() else {
+            return;
+        };
+        let live = with_host(&state, cx, |host| {
+            if host.create.seq != seq {
+                return false;
+            }
+            host.create.fail_base_ref_fetch(message);
+            true
+        });
+        if live {
+            notify(&state, cx);
+        }
+    });
+}
+
+/// The branch input, carrying the first of validity, collision and id preview that applies.
+fn branch_field(draft: &CreateState, duplicate: Option<&str>) -> TextField {
     let preview = draft.preview_id();
-    let duplicate = preview
-        .as_ref()
-        .filter(|id| existing_worktree(state.read(cx), id).is_some())
-        .cloned();
     let invalid = draft.branch_error();
-    let candidates = draft.base_candidates();
-
-    let mut branch_field = TextField::new(draft.branch.value().to_owned())
+    let input = field(&draft.branch)
         .label("Branch")
         .placeholder("feat/rut-validator")
         .mono(true)
-        .caret(draft.branch.caret())
         .focused(draft.field == Field::Branch);
-    branch_field = match (&invalid, &duplicate, &preview) {
-        (Some(message), _, _) => branch_field.invalid(message.clone()),
+    match (&invalid, duplicate, &preview) {
+        (Some(message), _, _) => input.invalid(message.clone()),
         (None, Some(id), _) => {
-            branch_field.preview(format!("{id} already exists \u{2014} \u{23ce} opens it"))
+            input.preview(format!("{id} already exists \u{2014} \u{23ce} opens it"))
         }
-        (None, None, Some(id)) => branch_field.preview(format!("\u{2192} {id}")),
-        (None, None, None) => branch_field,
-    };
+        (None, None, Some(id)) => input.preview(format!("\u{2192} {id}")),
+        (None, None, None) => input,
+    }
+}
 
+/// The `Base` label with its fetch spinner, over the ref candidates.
+fn base_section(draft: &CreateState, tight: gpui::Pixels) -> Div {
+    let candidates = draft.base_candidates();
     let base_header = div()
         .flex()
         .items_center()
@@ -339,6 +501,25 @@ pub(crate) fn render(
     .under_text_field(true)
     .empty(Text::ui("No base refs yet.").muted());
 
+    div()
+        .flex()
+        .flex_col()
+        .gap(tight)
+        .child(base_header)
+        .children(draft.base_error.as_ref().map(|error| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(Text::ui(error.clone()).tone(Tone::Danger).ellipsize())
+                .child(KeyHintRow::new().key("enter", "retry"))
+        }))
+        .child(base_list)
+}
+
+/// The two lines under the fields: how long a create will take, and what runs after it.
+fn expectation(draft: &CreateState, cx: &App) -> Div {
+    let hair = cx.theme().space.xxs;
     // §3.8.1 Icons: `zap` and `hourglass`, both 16 px Lucide strokes. A colour emoji here was
     // the one glyph on the screen that was not part of the icon set (§0), and §1.4 keeps amber
     // for "in flight / needs attention" rather than for decoration.
@@ -364,19 +545,50 @@ pub(crate) fn render(
         )
     };
 
+    div()
+        .flex()
+        .flex_col()
+        .gap(hair)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(hair)
+                .child(
+                    expectation_icon
+                        .el()
+                        .size(IconSize::Medium)
+                        .color(expectation_tone.color(cx.theme())),
+                )
+                .child(Text::ui(expectation).muted()),
+        )
+        .child(Text::hint(hooks_line))
+}
+
+/// Renders the dialog (§3.8.1).
+pub(crate) fn render(
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    focus: &FocusHandle,
+    host: &Entity<DialogHost>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let (gap, tight) = {
+        let theme = cx.theme();
+        (theme.space.md, theme.space.xs)
+    };
+    let draft = &host.read(cx).create;
+    let duplicate = draft
+        .preview_id()
+        .filter(|id| existing_worktree(state.read(cx), id).is_some());
+
     let body = div()
         .flex()
         .flex_col()
         .gap(gap)
-        .child(branch_field)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(tight)
-                .child(base_header)
-                .child(base_list),
-        )
+        .child(branch_field(draft, duplicate.as_deref()))
+        .child(base_section(draft, tight))
         .children((!draft.hosts.is_empty()).then(|| {
             Cycler::labeled(
                 "Host",
@@ -390,30 +602,11 @@ pub(crate) fn render(
             .has_next(draft.host_index + 1 < draft.hosts.len())
             .focused(draft.field == Field::Host)
         }))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(hair)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(hair)
-                        .child(
-                            expectation_icon
-                                .el()
-                                .size(IconSize::Medium)
-                                .color(expectation_tone.color(cx.theme())),
-                        )
-                        .child(Text::ui(expectation).muted()),
-                )
-                .child(Text::hint(hooks_line)),
-        );
+        .child(expectation(draft, cx));
 
     let mut card = Dialog::new("New worktree")
         .icon(Icon::GitBranchPlus)
-        .width(super::Dialogs::CreateWorktree.width())
+        .width(super::Dialogs::CreateWorktree.width(cx))
         .body(body)
         .hint_row(
             KeyHintRow::new()
@@ -439,24 +632,54 @@ pub(crate) fn render(
     let alt_bridge = bridge.clone();
     let cancel_state = state.clone();
 
+    // `left` / `right` cycle the host in this dialog; edit actions only mutate Branch while it
+    // owns focus.
     root(focus)
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::Backspace, _, cx| {
+                edit_branch(&state, TextFieldState::backspace, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::DeleteWord, _, cx| {
+                edit_branch(&state, TextFieldState::delete_word_before, cx);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::ClearInput, _, cx| {
+                edit_branch(
+                    &state,
+                    |input| {
+                        if input.is_empty() {
+                            false
+                        } else {
+                            input.clear();
+                            true
+                        }
+                    },
+                    cx,
+                );
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineStart, _, cx| {
+                move_branch_caret(&state, cx, TextFieldState::move_to_start);
+            }
+        })
+        .on_action({
+            let state = state.clone();
+            move |_: &dialog::LineEnd, _, cx| {
+                move_branch_caret(&state, cx, TextFieldState::move_to_end);
+            }
+        })
         .on_key_down({
             let state = state.clone();
             move |event, _window, cx| {
-                let changed = with_host(cx, |host| {
-                    if host.create.field != Field::Branch {
-                        return false;
-                    }
-                    let typed = type_into(&mut host.create.branch, event);
-                    if typed {
-                        host.create.error = None;
-                        host.create.base_cursor = 0;
-                    }
-                    typed
-                });
-                if changed {
-                    notify(&state, cx);
-                }
+                edit_branch(&state, |input| type_into(input, event), cx);
             }
         })
         .on_action({
@@ -475,13 +698,10 @@ pub(crate) fn render(
             let state = state.clone();
             move |_: &dialog::CursorUp, _window, cx| move_base(&state, -1, cx)
         })
-        // §KEYMAP "Dialogs and text inputs" gives `←` / `→` to the caret, and §3.8.1 gives
-        // them to the host cycler. The branch field is a text input, so the cycler only claims
-        // the keys while something other than the branch has focus.
         .on_action({
             let state = state.clone();
             move |_: &create_actions::HostPrev, _window, cx| {
-                if move_branch_caret(&state, cx, TextInput::left) {
+                if move_branch_caret(&state, cx, TextFieldState::move_left) {
                     return;
                 }
                 cycle_host(&state, -1, cx);
@@ -490,48 +710,10 @@ pub(crate) fn render(
         .on_action({
             let state = state.clone();
             move |_: &create_actions::HostNext, _window, cx| {
-                if move_branch_caret(&state, cx, TextInput::right) {
+                if move_branch_caret(&state, cx, TextFieldState::move_right) {
                     return;
                 }
                 cycle_host(&state, 1, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::Backspace, _window, cx| {
-                if with_host(cx, |host| host.create.branch.backspace()) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::DeleteWord, _window, cx| {
-                if with_host(cx, |host| host.create.branch.delete_word()) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::ClearInput, _window, cx| {
-                if with_host(cx, |host| host.create.branch.clear()) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| {
-                with_host(cx, |host| host.create.branch.home());
-                notify(&state, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| {
-                with_host(cx, |host| host.create.branch.end());
-                notify(&state, cx);
             }
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
@@ -544,7 +726,7 @@ pub(crate) fn render(
         )
         .on_action(move |_: &dialog::Cancel, _window, cx| {
             // §3.8.1: closing the dialog never cancels a running base fetch; it says so.
-            if with_host(cx, |host| host.create.fetching) {
+            if with_host(&cancel_state, cx, |host| host.create.fetching) {
                 cancel_state.update(cx, |state, cx| {
                     state.toast_short(
                         "\u{27f3} base fetch still running \u{00b7} J",
@@ -561,9 +743,37 @@ pub(crate) fn render(
         .into_any_element()
 }
 
+fn edit_branch(
+    state: &Entity<AppState>,
+    edit: impl FnOnce(&mut TextFieldState) -> bool,
+    cx: &mut App,
+) -> bool {
+    let changed = with_host(state, cx, |host| edit_focused_field(&mut host.create, edit));
+    if changed {
+        notify(state, cx);
+    }
+    changed
+}
+
+fn edit_focused_field(
+    draft: &mut CreateState,
+    edit: impl FnOnce(&mut TextFieldState) -> bool,
+) -> bool {
+    if draft.field != Field::Branch || !edit(&mut draft.branch) {
+        return false;
+    }
+    draft.error = None;
+    draft.base_cursor = 0;
+    true
+}
+
 /// Moves the branch caret when the branch field owns the keyboard. Returns whether it did.
-fn move_branch_caret(state: &Entity<AppState>, cx: &mut App, move_to: fn(&mut TextInput)) -> bool {
-    let moved = with_host(cx, |host| {
+fn move_branch_caret(
+    state: &Entity<AppState>,
+    cx: &mut App,
+    move_to: fn(&mut TextFieldState) -> bool,
+) -> bool {
+    let moved = with_host(state, cx, |host| {
         if host.create.field != Field::Branch {
             return false;
         }
@@ -577,7 +787,7 @@ fn move_branch_caret(state: &Entity<AppState>, cx: &mut App, move_to: fn(&mut Te
 }
 
 fn move_field(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let has_hosts = !host.create.hosts.is_empty();
         let order: &[Field] = if has_hosts {
             &[Field::Branch, Field::Base, Field::Host]
@@ -595,7 +805,7 @@ fn move_field(state: &Entity<AppState>, delta: isize, cx: &mut App) {
 }
 
 fn move_base(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let len = host.create.base_candidates().len();
         host.create.base_cursor = step(host.create.base_cursor, delta, len);
         host.create.field = Field::Base;
@@ -604,7 +814,7 @@ fn move_base(state: &Entity<AppState>, delta: isize, cx: &mut App) {
 }
 
 fn cycle_host(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let len = host.create.hosts.len();
         host.create.host_index = step(host.create.host_index, delta, len);
         if len > 0 {
@@ -627,14 +837,27 @@ fn existing_worktree(state: &AppState, id: &str) -> Option<WorktreeId> {
 
 /// `Enter` (`open_after`) and `⌥Enter`: create, then close inside the same frame.
 fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let Some((repo, branch, base, host)) = with_host(cx, |host| {
+    submit_with_transport(open_after, state, bridge, cx);
+}
+
+fn submit_with_transport<T: CreateTransport>(
+    open_after: bool,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    if with_host(state, cx, |host| host.create.should_retry_base_refs()) {
+        retry_base_refs(state, transport, cx);
+        return;
+    }
+    let Some((repo, branch, base, host)) = with_host(state, cx, |host| {
         let draft = &host.create;
         if !draft.can_submit() {
             return None;
         }
         Some((
             draft.repo.clone()?,
-            draft.branch.value().to_owned(),
+            draft.branch.text().to_owned(),
             draft.selected_base(),
             draft.selected_host(),
         ))
@@ -644,8 +867,11 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
     let slug = slugify(&branch);
     let id = format!("{}#{slug}", repo.as_str());
     if let Some(existing) = existing_worktree(state.read(cx), &id) {
-        open_worktree(existing, state, bridge, cx);
         close(state, cx);
+        if open_after {
+            let guard = NavigationGuard::new(state, cx);
+            open_worktree_if_intended(existing, guard, state, transport, cx);
+        }
         return;
     }
 
@@ -655,7 +881,9 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
         .as_ref()
         .and_then(|snapshot| snapshot.repos.iter().find(|entry| entry.id == repo))
         .map_or_else(RepoHooks::default, |entry| entry.hooks.clone());
-    let reply = bridge.request(RequestBody::CreateWorktree {
+    close(state, cx);
+    let guard = NavigationGuard::new(state, cx);
+    let reply = transport.request(RequestBody::CreateWorktree {
         repo,
         slug,
         branch: Some(branch),
@@ -663,58 +891,82 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
         host,
         hooks,
     });
-    let state_handle = state.clone();
-    let bridge_handle = bridge.clone();
-    cx.spawn(async move |cx| {
+    let transport_handle = transport.clone();
+    super::host::complete_request(state, cx, async move |state_handle, cx| {
         let Ok(answer) = reply.recv().await else {
             return;
         };
-        cx.update(|cx| match answer {
-            Ok(ResponseBody::Worktree { worktree, .. }) => {
-                if open_after {
-                    open_worktree(worktree.id, &state_handle, &bridge_handle, cx);
+        cx.update(|cx| {
+            let Some(state_handle) = state_handle.upgrade() else {
+                return;
+            };
+            match answer {
+                Ok(ResponseBody::Worktree { worktree, .. }) => {
+                    if open_after && guard.is_current(state_handle.read(cx)) {
+                        open_worktree_if_intended(
+                            worktree.id,
+                            guard,
+                            &state_handle,
+                            &transport_handle,
+                            cx,
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    state_handle.update(cx, |state, cx| {
+                        state.sticky_error = Some(crate::state::StickyError {
+                            text: error.message.clone(),
+                            job: None,
+                            retryable: false,
+                        });
+                        cx.notify();
+                    });
                 }
             }
-            Ok(_) => {}
-            Err(error) => {
-                state_handle.update(cx, |state, cx| {
-                    state.sticky_error = Some(crate::state::StickyError {
-                        text: error.message.clone(),
-                        job: None,
-                        retryable: false,
-                    });
-                    cx.notify();
-                });
-            }
         });
-    })
-    .detach();
-    close(state, cx);
+    });
 }
 
-/// Opens a worktree's session and routes the app to it.
-fn open_worktree(id: WorktreeId, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let reply = bridge.request(RequestBody::EnsureSession {
+fn retry_base_refs<T: CreateTransport>(state: &Entity<AppState>, transport: &T, cx: &mut App) {
+    let next = with_host(state, cx, |host| {
+        let repo = host.create.repo.clone()?;
+        host.create.seq = host.create.seq.wrapping_add(1);
+        host.create.start_base_ref_fetch();
+        Some((repo, host.create.seq))
+    });
+    let Some((repo, seq)) = next else { return };
+    notify(state, cx);
+    poll_base_refs(repo, seq, state, transport, cx);
+}
+
+fn open_worktree_if_intended<T: CreateTransport>(
+    id: WorktreeId,
+    guard: NavigationGuard,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    if !guard.is_current(state.read(cx)) {
+        return;
+    }
+    transport.send(RequestBody::TouchWorktreeOpened { id: id.clone() });
+    let reply = transport.request(RequestBody::EnsureSession {
         worktree: Some(id),
         agent: None,
         sleep_previous: true,
     });
-    let state = state.clone();
-    cx.spawn(async move |cx| {
+    super::host::complete_request(state, cx, async move |state, cx| {
         let Ok(Ok(ResponseBody::Session(session))) = reply.recv().await else {
             return;
         };
         cx.update(|cx| {
-            state.update(cx, |app, cx| {
-                app.touch_session(session.id.clone());
-                app.screen = Screen::Workspace {
-                    session: session.id.clone(),
-                };
-                cx.notify();
-            });
+            let Some(state) = state.upgrade() else { return };
+            if guard.is_current(state.read(cx)) {
+                open_session(session.id, &state, cx);
+            }
         });
-    })
-    .detach();
+    });
 }
 
 fn close(state: &Entity<AppState>, cx: &mut App) {
@@ -726,7 +978,76 @@ fn close(state: &Entity<AppState>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, collections::VecDeque};
+
     use super::*;
+
+    enum RecordedRequest {
+        Sent(RequestBody),
+        Requested(RequestBody),
+    }
+
+    type TestReplySender =
+        async_channel::Sender<Result<ResponseBody, fleet_proto::error::ProtoError>>;
+
+    #[derive(Clone, Default)]
+    struct FakeTransport {
+        requests: Rc<RefCell<Vec<RecordedRequest>>>,
+        replies: Rc<RefCell<VecDeque<TestReplySender>>>,
+    }
+
+    impl CreateTransport for FakeTransport {
+        fn send(&self, body: RequestBody) {
+            self.requests.borrow_mut().push(RecordedRequest::Sent(body));
+        }
+
+        fn request(&self, body: RequestBody) -> Reply {
+            let (sender, receiver) = async_channel::bounded(1);
+            self.requests
+                .borrow_mut()
+                .push(RecordedRequest::Requested(body));
+            self.replies.borrow_mut().push_back(sender);
+            receiver
+        }
+    }
+
+    fn worktree() -> fleet_core::model::Worktree {
+        fleet_core::model::Worktree {
+            id: WorktreeId::try_from("buk/payroll#feature").unwrap(),
+            repo_id: RepoId::try_from("buk/payroll").unwrap(),
+            slug: "feature".to_owned(),
+            branch: "feature".to_owned(),
+            base_ref: "origin/main".to_owned(),
+            path: "/tmp/feature".to_owned(),
+            session: "buk/payroll#feature".to_owned(),
+            host: None,
+            created_at: String::new(),
+            last_opened_at: None,
+            degraded: None,
+        }
+    }
+
+    fn snapshot_with_worktree() -> fleet_proto::snapshot::Snapshot {
+        fleet_proto::snapshot::Snapshot {
+            generated_at: String::new(),
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: vec![worktree()],
+            active_context: None,
+            sessions: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: fleet_proto::snapshot::DaemonInfo {
+                version: String::new(),
+                pid: 1,
+                started_at: String::new(),
+                home: String::new(),
+            },
+        }
+    }
 
     fn draft() -> CreateState {
         CreateState {
@@ -743,6 +1064,19 @@ mod tests {
     }
 
     #[test]
+    fn large_base_ref_lists_keep_default_previous_and_matching_cap() {
+        let mut draft = draft();
+        draft.base_refs = (0..10_000).map(|i| format!("origin/feature-{i}")).collect();
+        draft.branch = TextFieldState::from_text("feature-99");
+        let rows = draft.base_candidates();
+        assert_eq!(rows.len(), BASE_ROWS);
+        assert_eq!(&rows[..2], &["origin/main", "pull/412/head"]);
+        assert_eq!(rows[2], "origin/feature-99");
+        draft.branch = TextFieldState::from_text("no-match-at-all");
+        assert_eq!(draft.base_candidates()[2], "origin/feature-0");
+    }
+
+    #[test]
     fn default_base_is_first_and_previous_base_second() {
         let rows = draft().base_candidates();
         assert_eq!(rows[0], "origin/main");
@@ -754,10 +1088,10 @@ mod tests {
     #[test]
     fn base_rows_are_filtered_by_the_typed_branch_but_never_emptied() {
         let mut state = draft();
-        state.branch = TextInput::new("import");
+        state.branch = TextFieldState::from_text("import");
         let rows = state.base_candidates();
         assert_eq!(rows[2], "origin/feat/payroll-import");
-        state.branch = TextInput::new("zzzz");
+        state.branch = TextFieldState::from_text("zzzz");
         let rows = state.base_candidates();
         assert!(
             rows.len() > 2,
@@ -768,7 +1102,7 @@ mod tests {
     #[test]
     fn the_preview_is_the_worktree_id_the_create_will_produce() {
         let mut state = draft();
-        state.branch = TextInput::new("feat/RUT validator");
+        state.branch = TextFieldState::from_text("feat/RUT validator");
         assert_eq!(
             state.preview_id().as_deref(),
             Some("buk/payroll#feat-rut-validator")
@@ -778,13 +1112,13 @@ mod tests {
     #[test]
     fn validation_states_the_failing_rule_and_blocks_enter() {
         let mut state = draft();
-        state.branch = TextInput::new("feat/..bad");
+        state.branch = TextFieldState::from_text("feat/..bad");
         assert_eq!(
             state.branch_error().as_deref(),
             Some("branch must not contain `..`")
         );
         assert!(!state.can_submit());
-        state.branch = TextInput::new("feat/ok");
+        state.branch = TextFieldState::from_text("feat/ok");
         assert_eq!(state.branch_error(), None);
         assert!(state.can_submit());
     }
@@ -810,9 +1144,233 @@ mod tests {
 
     #[test]
     fn subsequence_matches_in_order_only() {
-        assert!(subsequence("origin/feat/payroll-import", "import"));
-        assert!(subsequence("origin/main", ""));
-        assert!(!subsequence("origin/main", "z"));
-        assert!(!subsequence("abc", "cb"));
+        assert!(FuzzyQuery::new("import").matches("origin/feat/payroll-import"));
+        assert!(FuzzyQuery::new("").matches("origin/main"));
+        assert!(!FuzzyQuery::new("z").matches("origin/main"));
+        assert!(!FuzzyQuery::new("cb").matches("abc"));
+    }
+
+    #[gpui::test]
+    fn opening_initiates_base_ref_fetch(cx: &mut gpui::TestAppContext) {
+        let repo = RepoId::try_from("buk/payroll").unwrap();
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.scope = RepoScope::Repo(repo.clone());
+            state
+        });
+        let transport = FakeTransport::default();
+        cx.update(|cx| seed_with_transport(&state, &transport, cx));
+        cx.run_until_parked();
+        {
+            let requests = transport.requests.borrow();
+            assert!(matches!(
+                requests.as_slice(),
+                [RecordedRequest::Requested(RequestBody::ListBaseRefs {
+                    force: false,
+                    ..
+                })]
+            ));
+        }
+
+        transport
+            .replies
+            .borrow_mut()
+            .pop_front()
+            .unwrap()
+            .try_send(Ok(ResponseBody::BaseRefs(
+                fleet_proto::response::BaseRefs {
+                    refs: vec!["origin/main".to_owned()],
+                    fetching: false,
+                    fetched_at: String::new(),
+                },
+            )))
+            .unwrap();
+        cx.run_until_parked();
+        {
+            let requests = transport.requests.borrow();
+            assert!(matches!(
+                requests.as_slice(),
+                [
+                    RecordedRequest::Requested(RequestBody::ListBaseRefs { force: false, .. }),
+                    RecordedRequest::Requested(RequestBody::ListBaseRefs { force: true, .. })
+                ]
+            ));
+        }
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                assert_eq!(host.create.base_refs, ["origin/main"]);
+                assert!(host.create.fetching);
+            })
+        });
+        transport
+            .replies
+            .borrow_mut()
+            .pop_front()
+            .unwrap()
+            .try_send(Ok(ResponseBody::BaseRefs(
+                fleet_proto::response::BaseRefs {
+                    refs: vec!["origin/main".to_owned(), "origin/release".to_owned()],
+                    fetching: false,
+                    fetched_at: String::new(),
+                },
+            )))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                assert_eq!(host.create.base_refs, ["origin/main", "origin/release"]);
+                assert!(!host.create.fetching);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn base_ref_failure_stops_spinner_and_retries(cx: &mut gpui::TestAppContext) {
+        let repo = RepoId::try_from("buk/payroll").unwrap();
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.scope = RepoScope::Repo(repo.clone());
+            state
+        });
+        let transport = FakeTransport::default();
+        cx.update(|cx| seed_with_transport(&state, &transport, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(BASE_REF_TIMEOUT);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                assert!(!host.create.fetching);
+                assert_eq!(
+                    host.create.base_error.as_deref(),
+                    Some("base-ref cache timed out")
+                );
+                assert!(host.create.should_retry_base_refs());
+            });
+            submit_with_transport(false, &state, &transport, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                assert!(host.create.fetching);
+                assert_eq!(host.create.base_error, None);
+            })
+        });
+        assert_eq!(transport.requests.borrow().len(), 2);
+    }
+
+    #[test]
+    fn edits_follow_focused_field_and_clear_error() {
+        let mut state = draft();
+        state.branch = TextFieldState::from_text("feature");
+        state.error = Some("already exists".to_owned());
+        state.base_cursor = 3;
+        state.field = Field::Base;
+        assert!(!edit_focused_field(&mut state, TextFieldState::backspace));
+        assert_eq!(state.branch.text(), "feature");
+        assert!(state.error.is_some());
+
+        state.field = Field::Branch;
+        assert!(edit_focused_field(&mut state, TextFieldState::backspace));
+        assert_eq!(state.branch.text(), "featur");
+        assert_eq!(state.error, None);
+        assert_eq!(state.base_cursor, 0);
+    }
+
+    struct CreateWithoutOpeningView {
+        state: Entity<AppState>,
+        transport: FakeTransport,
+        focus: FocusHandle,
+    }
+
+    impl gpui::Render for CreateWithoutOpeningView {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let state = self.state.clone();
+            let transport = self.transport.clone();
+            root(&self.focus).on_action(
+                move |_: &create_actions::CreateWithoutOpening, _window, cx| {
+                    submit_with_transport(false, &state, &transport, cx);
+                },
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn duplicate_without_opening_stays_in_hub(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.snapshot = Some(snapshot_with_worktree());
+            state.overlay = Some(crate::state::Overlay::Dialog(
+                crate::dialogs::Dialogs::CreateWorktree,
+            ));
+            state
+        });
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.create = draft();
+                host.create.branch = TextFieldState::from_text("feature");
+            })
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, cx| CreateWithoutOpeningView {
+            state: state.clone(),
+            transport: transport.clone(),
+            focus: cx.focus_handle(),
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut visual, |view, window, cx| {
+                window.focus(&view.focus, cx);
+                window.dispatch_action(Box::new(create_actions::CreateWithoutOpening), cx);
+            })
+            .unwrap();
+        visual.update(|_, cx| {
+            let app = state.read(cx);
+            assert!(app.overlay.is_none());
+            assert!(matches!(app.screen, Screen::Hub { .. }));
+        });
+        assert!(transport.requests.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn opening_touches_worktree_before_ensuring_session(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.snapshot = Some(snapshot_with_worktree());
+            state.overlay = Some(crate::state::Overlay::Dialog(
+                crate::dialogs::Dialogs::CreateWorktree,
+            ));
+            state
+        });
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.create = draft();
+                host.create.branch = TextFieldState::from_text("feature");
+            })
+        });
+        let transport = FakeTransport::default();
+        cx.update(|cx| submit_with_transport(true, &state, &transport, cx));
+        let requests = transport.requests.borrow();
+        assert!(matches!(
+            requests.as_slice(),
+            [
+                RecordedRequest::Sent(RequestBody::TouchWorktreeOpened { id }),
+                RecordedRequest::Requested(RequestBody::EnsureSession {
+                    worktree: Some(ensured),
+                    ..
+                })
+            ] if id == ensured
+        ));
+    }
+
+    #[test]
+    fn late_creation_does_not_override_navigation() {
+        let mut state = AppState::new("/tmp/fleet", Instant::now());
+        let intent = NavigationIntent::capture(&state);
+        state.cursors.worktrees = 4;
+        assert!(!intent.matches(&state));
     }
 }

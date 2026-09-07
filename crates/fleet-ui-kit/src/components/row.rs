@@ -120,6 +120,7 @@ impl RowColumn {
 pub struct Row {
     id: Option<ElementId>,
     leading: Option<AnyElement>,
+    reserve_leading: bool,
     columns: Vec<RowColumn>,
     second_line: Option<AnyElement>,
     height: Option<Pixels>,
@@ -136,6 +137,7 @@ impl Row {
         Self {
             id: None,
             leading: None,
+            reserve_leading: false,
             columns: Vec::new(),
             second_line: None,
             height: None,
@@ -164,6 +166,14 @@ impl Row {
     /// row" — and is not the same as [`super::StatusKind::NoSession`], which is a dim dot.
     pub fn leading(mut self, leading: impl IntoElement) -> Self {
         self.leading = Some(leading.into_any_element());
+        self
+    }
+
+    /// Reserve the glyph column even when this row has no glyph, so a list whose rows
+    /// disagree about the leading slot still aligns its text. Off by default: a list where
+    /// no row ever carries a glyph must not pay for the column.
+    pub fn reserve_leading(mut self, reserve: bool) -> Self {
+        self.reserve_leading = reserve;
         self
     }
 
@@ -256,14 +266,14 @@ impl RenderOnce for Row {
             .w_full()
             .gap(gap)
             .px(pad)
-            .children(self.leading.map(|glyph| {
+            .children((self.reserve_leading || self.leading.is_some()).then(|| {
                 div()
                     .flex_none()
                     .w(ch(GLYPH_COLUMN_CH))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(glyph)
+                    .children(self.leading)
             }))
             .children(self.columns.into_iter().map(|column| {
                 div()
@@ -307,7 +317,7 @@ impl RenderOnce for Row {
             .when(self.dimmed || self.disabled, |el| {
                 el.opacity(theme.metrics.dimmed_opacity)
             });
-        let ring = FocusRing::cursor_row(self.cursor).child(body);
+        let ring = FocusRing::cursor_row(self.cursor).content(body);
 
         match self.id {
             Some(id) => base

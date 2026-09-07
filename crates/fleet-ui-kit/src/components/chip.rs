@@ -3,7 +3,7 @@
 //! Zero-suppression (§1.2) is built in: a chip whose count is `Some(0)` renders nothing at all
 //! when [`Chip::zero_suppress`] is on, which is the default.
 
-use gpui::{App, Hsla, SharedString, Window, div, prelude::*};
+use gpui::{App, ElementId, Hsla, SharedString, Window, div, prelude::*};
 
 use crate::{
     icons::{Icon, IconSize},
@@ -23,11 +23,12 @@ pub struct Chip {
     filled: bool,
     spinning: bool,
     zero_suppress: bool,
-    id: Option<SharedString>,
+    id: ElementId,
 }
 
 impl Chip {
     /// An empty chip. Add an icon and/or text.
+    #[track_caller]
     pub fn new() -> Self {
         Self {
             icon: None,
@@ -38,16 +39,18 @@ impl Chip {
             filled: false,
             spinning: false,
             zero_suppress: true,
-            id: None,
+            id: std::panic::Location::caller().into(),
         }
     }
 
     /// A chip that is just a glyph and a count: the context-bar chips.
+    #[track_caller]
     pub fn counter(icon: Icon, count: usize) -> Self {
         Self::new().icon(icon).count(count)
     }
 
     /// A chip that is a glyph and a word: the host chip, the degraded chip.
+    #[track_caller]
     pub fn labeled(icon: Icon, text: impl Into<SharedString>) -> Self {
         Self::new().icon(icon).text(text)
     }
@@ -95,8 +98,8 @@ impl Chip {
     }
 
     /// Stable id for the spin animation.
-    pub fn id(mut self, id: impl Into<SharedString>) -> Self {
-        self.id = Some(id.into());
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = id.into();
         self
     }
 
@@ -128,12 +131,12 @@ impl Default for Chip {
 impl RenderOnce for Chip {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         if !self.is_visible() {
-            return div().into_any_element();
+            return div().hidden().into_any_element();
         }
         let theme = cx.theme();
         let color = self.color.unwrap_or_else(|| self.tone.color(theme));
         let fill = self.tone.fill(theme);
-        let id = self.id.clone();
+        let id = self.id;
         div()
             .flex()
             .flex_none()
@@ -150,9 +153,7 @@ impl RenderOnce for Chip {
                     .size(IconSize::Medium)
                     .color(color)
                     .spinning(self.spinning)
-                    .id(gpui::ElementId::from(
-                        id.unwrap_or_else(|| SharedString::new_static("chip")),
-                    ))
+                    .id(id)
             }))
             .children(self.text.map(|text| Text::ui(text).color(color)))
             // Counts are the `label` role (§2.3), which is the same 11 px the context bar and

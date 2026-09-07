@@ -43,7 +43,7 @@ impl Hosts {
     }
 
     /// Returns cached results, pruning removed hosts and marking unprobed hosts pending.
-    pub async fn snapshot(&self, config: &Config, generated_at: &str) -> Vec<HostStatus> {
+    pub(super) async fn snapshot(&self, config: &Config, generated_at: &str) -> Vec<HostStatus> {
         let mut statuses = self.statuses.write().await;
         statuses.retain(|id, _| config.hosts.contains_key(id));
         config
@@ -61,7 +61,7 @@ impl Hosts {
     }
 
     /// Probes hosts concurrently and replaces the cache with exactly the configured hosts.
-    pub async fn probe_all(&self, config: &Config) -> BTreeMap<HostId, HostStatus> {
+    pub(super) async fn probe_all(&self, config: &Config) -> BTreeMap<HostId, HostStatus> {
         self.statuses
             .write()
             .await
@@ -80,10 +80,11 @@ impl Hosts {
     }
 
     /// Checks SSH connectivity and remote swarm protocol compatibility.
-    pub async fn probe(&self, id: &HostId, entry: &HostConfigEntry) -> HostStatus {
+    async fn probe(&self, id: &HostId, entry: &HostConfigEntry) -> HostStatus {
         self.probe_with_version(id, entry).await.0
     }
 
+    /// Probes one host and also reports the remote swarm version doctor displays.
     pub(super) async fn probe_with_version(
         &self,
         id: &HostId,

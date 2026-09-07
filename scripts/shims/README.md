@@ -1,26 +1,34 @@
 # Cooperative subagent watches
 
-Prepend this directory in the shell profile read by Fleet's login shells:
+`codex` and `claude` are one shim (`claude` is a symlink to `codex`). It puts a
+subagent's output under `fleet exec --watch` without changing how the agent runs.
+
+## Install
+
+Prepend this directory in the shell profile that Fleet's login shells read:
 
 ```sh
 export PATH="/absolute/path/to/fleetd/scripts/shims:$PATH"
-# Optional when fleet is not on PATH:
+# Only when fleet is not already on PATH:
 export FLEET_BIN="/absolute/path/to/fleetd/target/debug/fleet"
 ```
 
-The `codex` and `claude` shims find the real executable by scanning PATH outside
-this directory. They preserve every argument and invoke `fleet exec --watch`
-only when `FLEET_TERMINAL_ID` is set, `FLEET_WATCH` is unset, and stdout is not a tty.
-The tty check keeps the user's interactive top-level agent unchanged; a piped
-subagent gets a read-only output watch. Watched children cannot nest watches.
-Fleet login shells receive `FLEET_SESSION` (session ID), `FLEET_TERMINAL` (human
-terminal name, preserved for existing scripts), and `FLEET_TERMINAL_ID` (numeric,
-daemon-local terminal ID). The wrapper associates watches using `FLEET_TERMINAL_ID`;
-both it and `FLEET_SESSION` must be valid to register. Shims remain transparent
-under older daemons that only supply the terminal name.
+## Contract
 
-Daemon connection failure silently runs the command with inherited stdio.
-Set `FLEET_DEBUG=1` for a one-line reason for any passthrough decision, including
-missing or invalid environment variables. Output to the invoking agent remains raw
-bytes; only the daemon's display copy is decoded as lossy UTF-8. Fleet does not
-allocate a PTY for the child. Closing a watch never kills the child.
+- The real executable is the first `codex`/`claude` on `PATH` outside this
+  directory; every argument is passed through unchanged.
+- A watch is registered only when `FLEET_TERMINAL_ID` is set, `FLEET_WATCH` is
+  unset, and stdout is not a tty. The tty check leaves the user's interactive
+  top-level agent alone; a piped subagent gets a read-only output watch, and
+  `FLEET_WATCH` keeps watched children from nesting watches.
+- Fleet login shells supply `FLEET_SESSION` (session ID), `FLEET_TERMINAL_ID`
+  (daemon-local numeric terminal ID) and `FLEET_TERMINAL` (human terminal name,
+  kept for existing scripts). Watches associate by `FLEET_TERMINAL_ID`; both it
+  and `FLEET_SESSION` must be valid. Under older daemons that supply only the
+  name, the shim is transparent.
+- An unavailable Fleet executable or a daemon connection failure runs the
+  command with inherited stdio. `FLEET_DEBUG=1` prints a one-line reason for
+  each passthrough decision, including missing or invalid environment variables.
+- The invoking agent receives raw bytes; only the daemon's display copy is
+  decoded as lossy UTF-8. The child gets no PTY, and closing a watch never kills
+  it.

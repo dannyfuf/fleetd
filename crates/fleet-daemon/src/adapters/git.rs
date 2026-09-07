@@ -1,4 +1,4 @@
-//! Typed Git command-line operations matching swarm inventory section 7.
+//! Typed Git command-line operations for repository and worktree services.
 
 use std::{path::Path, sync::Arc};
 
@@ -18,6 +18,7 @@ pub trait Git: Send + Sync {
         url: &str,
         staging: &Path,
         log: &Path,
+        pid_file: &Path,
     ) -> DaemonResult<DetachedProcess>;
     /// Fetches `origin`, optionally pruning removed refs.
     async fn fetch(&self, cwd: &Path, prune: bool) -> DaemonResult<()>;
@@ -58,8 +59,6 @@ pub trait Git: Send + Sync {
     async fn upstream(&self, cwd: &Path, branch: &str) -> DaemonResult<String>;
     /// Returns left/right commit divergence for `<upstream>...HEAD`.
     async fn divergence(&self, cwd: &Path, upstream: &str) -> DaemonResult<(u64, u64)>;
-    /// Counts commits in `<target>..HEAD`.
-    async fn unique_commits(&self, cwd: &Path, target: &str) -> DaemonResult<u64>;
     /// Counts commits in `<target>..<head>` using explicit revisions.
     async fn unique_commits_from(&self, cwd: &Path, target: &str, head: &str) -> DaemonResult<u64>;
     /// Checks whether one revision is an ancestor of another.
@@ -78,22 +77,34 @@ pub trait Git: Send + Sync {
 }
 
 /// Git adapter implemented entirely through an injected [`Shell`].
-#[derive(Clone)]
-pub struct ShellGit {
-    shell: Arc<dyn Shell>,
+pub struct ShellGit<S: ?Sized = dyn Shell> {
+    shell: Arc<S>,
 }
 
-impl ShellGit {
+impl<S: ?Sized> Clone for ShellGit<S> {
+    fn clone(&self) -> Self {
+        Self {
+            shell: Arc::clone(&self.shell),
+        }
+    }
+}
+
+impl<S: Shell + ?Sized> ShellGit<S> {
     /// Creates a Git adapter backed by `shell`.
     #[must_use]
-    pub fn new(shell: Arc<dyn Shell>) -> Self {
+    pub fn new(shell: Arc<S>) -> Self {
         Self { shell }
     }
 
-    async fn checked(&self, cwd: &Path, args: &[String], operation: &str) -> DaemonResult<String> {
+    async fn checked<A: Into<String>>(
+        &self,
+        cwd: &Path,
+        args: impl IntoIterator<Item = A> + Send,
+        operation: &str,
+    ) -> DaemonResult<String> {
         let result = self
             .shell
-            .run(ShellCommand::new("git").args(args.iter().cloned()).cwd(cwd))
+            .run(ShellCommand::new("git").args(args).cwd(cwd))
             .await?;
         if !result.success() {
             return Err(DaemonError::Git(format!(
@@ -107,50 +118,71 @@ impl ShellGit {
 }
 
 #[async_trait]
-impl Git for ShellGit {
+impl<S: Shell + ?Sized> Git for ShellGit<S> {
     async fn clone_repo(
         &self,
         url: &str,
         staging: &Path,
         log: &Path,
+        pid_file: &Path,
     ) -> DaemonResult<DetachedProcess> {
-        self.shell
+        let pid_file_text = pid_file.to_string_lossy().into_owned();
+        let process = self
+            .shell
             .run_detached(
-                ShellCommand::new("git").args([
-                    "clone".to_owned(),
-                    "--progress".to_owned(),
+                ShellCommand::new("sh").args([
+                    "-c".to_owned(),
+                    concat!(
+                        "set -eu\n",
+                        "pid_file=$1\n",
+                        "temporary=${pid_file}.tmp\n",
+                        "umask 077\n",
+                        "printf '%s\\n' \"$$\" > \"$temporary\"\n",
+                        "mv \"$temporary\" \"$pid_file\"\n",
+                        "exec git clone --progress -- \"$2\" \"$3\"",
+                    )
+                    .to_owned(),
+                    "fleet-clone".to_owned(),
+                    pid_file_text,
                     url.to_owned(),
                     staging.to_string_lossy().into_owned(),
                 ]),
                 log,
             )
-            .await
+            .await?;
+        if let Some(parent) = pid_file.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| DaemonError::fs(parent, error))?;
+        }
+        if !pid_file.exists() {
+            tokio::fs::write(pid_file, format!("{}\n", process.pid))
+                .await
+                .map_err(|error| DaemonError::fs(pid_file, error))?;
+        }
+        Ok(process)
     }
 
     async fn fetch(&self, cwd: &Path, prune: bool) -> DaemonResult<()> {
-        let mut args = vec!["fetch".to_owned()];
+        let mut args = vec!["fetch"];
         if prune {
-            args.push("--prune".to_owned());
+            args.push("--prune");
         }
-        args.push("origin".to_owned());
-        self.checked(cwd, &args, "fetch").await.map(drop)
+        args.push("origin");
+        self.checked(cwd, args, "fetch").await.map(drop)
     }
 
     async fn fetch_refs(&self, cwd: &Path, remote: &str, refs: &[String]) -> DaemonResult<()> {
-        let args = std::iter::once("fetch".to_owned())
-            .chain(std::iter::once(remote.to_owned()))
-            .chain(refs.iter().cloned())
-            .collect::<Vec<_>>();
-        self.checked(cwd, &args, "fetch refs").await.map(drop)
+        let args = ["fetch", remote]
+            .into_iter()
+            .chain(refs.iter().map(String::as_str));
+        self.checked(cwd, args, "fetch refs").await.map(drop)
     }
 
     async fn origin_head(&self, cwd: &Path) -> DaemonResult<String> {
         self.checked(
             cwd,
-            &[
-                "symbolic-ref".to_owned(),
-                "refs/remotes/origin/HEAD".to_owned(),
-            ],
+            ["symbolic-ref", "refs/remotes/origin/HEAD"],
             "read origin HEAD",
         )
         .await
@@ -159,12 +191,7 @@ impl Git for ShellGit {
     async fn repair_origin_head(&self, cwd: &Path) -> DaemonResult<()> {
         self.checked(
             cwd,
-            &[
-                "remote".to_owned(),
-                "set-head".to_owned(),
-                "origin".to_owned(),
-                "--auto".to_owned(),
-            ],
+            ["remote", "set-head", "origin", "--auto"],
             "repair origin HEAD",
         )
         .await
@@ -174,11 +201,7 @@ impl Git for ShellGit {
     async fn symbolic_head(&self, cwd: &Path) -> DaemonResult<String> {
         self.checked(
             cwd,
-            &[
-                "symbolic-ref".to_owned(),
-                "--short".to_owned(),
-                "HEAD".to_owned(),
-            ],
+            ["symbolic-ref", "--short", "HEAD"],
             "read local symbolic HEAD",
         )
         .await
@@ -190,10 +213,10 @@ impl Git for ShellGit {
             .run(
                 ShellCommand::new("git")
                     .args([
-                        "show-ref".to_owned(),
-                        "--verify".to_owned(),
-                        "--quiet".to_owned(),
-                        format!("refs/remotes/origin/{branch}"),
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/remotes/origin/{branch}"),
                     ])
                     .cwd(cwd),
             )
@@ -211,10 +234,10 @@ impl Git for ShellGit {
     async fn remote_branches(&self, cwd: &Path) -> DaemonResult<Vec<String>> {
         self.checked(
             cwd,
-            &[
-                "for-each-ref".to_owned(),
-                "--format=%(refname:short)".to_owned(),
-                "refs/remotes/origin".to_owned(),
+            [
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/remotes/origin",
             ],
             "list remote branches",
         )
@@ -225,12 +248,7 @@ impl Git for ShellGit {
     async fn checkout_reset(&self, cwd: &Path, branch: &str) -> DaemonResult<()> {
         self.checked(
             cwd,
-            &[
-                "checkout".into(),
-                "-B".into(),
-                branch.into(),
-                format!("origin/{branch}"),
-            ],
+            ["checkout", "-B", branch, &format!("origin/{branch}")],
             "checkout reset",
         )
         .await
@@ -240,7 +258,7 @@ impl Git for ShellGit {
     async fn hard_reset(&self, cwd: &Path, branch: &str) -> DaemonResult<()> {
         self.checked(
             cwd,
-            &["reset".into(), "--hard".into(), format!("origin/{branch}")],
+            ["reset", "--hard", &format!("origin/{branch}")],
             "hard reset",
         )
         .await
@@ -248,19 +266,13 @@ impl Git for ShellGit {
     }
 
     async fn clean(&self, cwd: &Path) -> DaemonResult<()> {
-        self.checked(cwd, &["clean".into(), "-fd".into()], "clean")
-            .await
-            .map(drop)
+        self.checked(cwd, ["clean", "-fd"], "clean").await.map(drop)
     }
 
     async fn checkout_new_branch(&self, cwd: &Path, branch: &str, from: &str) -> DaemonResult<()> {
-        self.checked(
-            cwd,
-            &["checkout".into(), "-b".into(), branch.into(), from.into()],
-            "checkout new branch",
-        )
-        .await
-        .map(drop)
+        self.checked(cwd, ["checkout", "-b", branch, from], "checkout new branch")
+            .await
+            .map(drop)
     }
 
     async fn checkout_force_branch(
@@ -271,7 +283,7 @@ impl Git for ShellGit {
     ) -> DaemonResult<()> {
         self.checked(
             cwd,
-            &["checkout".into(), "-B".into(), branch.into(), from.into()],
+            ["checkout", "-B", branch, from],
             "checkout force branch",
         )
         .await
@@ -279,7 +291,7 @@ impl Git for ShellGit {
     }
 
     async fn checkout_branch(&self, cwd: &Path, branch: &str) -> DaemonResult<()> {
-        self.checked(cwd, &["checkout".into(), branch.into()], "checkout branch")
+        self.checked(cwd, ["checkout", branch], "checkout branch")
             .await
             .map(drop)
     }
@@ -287,10 +299,10 @@ impl Git for ShellGit {
     async fn fetch_pull_request(&self, cwd: &Path, number: u64) -> DaemonResult<()> {
         self.checked(
             cwd,
-            &[
-                "fetch".into(),
-                "origin".into(),
-                format!("+refs/pull/{number}/head:refs/swarm/pulls/{number}/head"),
+            [
+                "fetch",
+                "origin",
+                &format!("+refs/pull/{number}/head:refs/swarm/pulls/{number}/head"),
             ],
             "fetch pull request",
         )
@@ -299,12 +311,8 @@ impl Git for ShellGit {
     }
 
     async fn revision(&self, cwd: &Path, revision: &str) -> DaemonResult<String> {
-        self.checked(
-            cwd,
-            &["rev-parse".into(), "--verify".into(), revision.into()],
-            "resolve revision",
-        )
-        .await
+        self.checked(cwd, ["rev-parse", "--verify", revision], "resolve revision")
+            .await
     }
 
     async fn revision_exists(&self, cwd: &Path, revision: &str) -> DaemonResult<bool> {
@@ -327,21 +335,17 @@ impl Git for ShellGit {
     }
 
     async fn current_branch(&self, cwd: &Path) -> DaemonResult<String> {
-        self.checked(
-            cwd,
-            &["branch".into(), "--show-current".into()],
-            "current branch",
-        )
-        .await
+        self.checked(cwd, ["branch", "--show-current"], "current branch")
+            .await
     }
 
     async fn upstream(&self, cwd: &Path, branch: &str) -> DaemonResult<String> {
         self.checked(
             cwd,
-            &[
-                "for-each-ref".into(),
-                "--format=%(upstream:short)%00%(upstream:track)".into(),
-                format!("refs/heads/{branch}"),
+            [
+                "for-each-ref",
+                "--format=%(upstream:short)%00%(upstream:track)",
+                &format!("refs/heads/{branch}"),
             ],
             "upstream",
         )
@@ -352,11 +356,11 @@ impl Git for ShellGit {
         let output = self
             .checked(
                 cwd,
-                &[
-                    "rev-list".into(),
-                    "--left-right".into(),
-                    "--count".into(),
-                    format!("{upstream}...HEAD"),
+                [
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    &format!("{upstream}...HEAD"),
                 ],
                 "divergence",
             )
@@ -373,19 +377,11 @@ impl Git for ShellGit {
         Ok((left, right))
     }
 
-    async fn unique_commits(&self, cwd: &Path, target: &str) -> DaemonResult<u64> {
-        self.unique_commits_from(cwd, target, "HEAD").await
-    }
-
     async fn unique_commits_from(&self, cwd: &Path, target: &str, head: &str) -> DaemonResult<u64> {
         let output = self
             .checked(
                 cwd,
-                &[
-                    "rev-list".into(),
-                    "--count".into(),
-                    format!("{target}..{head}"),
-                ],
+                ["rev-list", "--count", &format!("{target}..{head}")],
                 "count unique commits",
             )
             .await?;
@@ -421,23 +417,15 @@ impl Git for ShellGit {
     async fn status_porcelain(&self, cwd: &Path) -> DaemonResult<String> {
         self.checked(
             cwd,
-            &[
-                "status".into(),
-                "--porcelain".into(),
-                "--untracked-files=normal".into(),
-            ],
+            ["status", "--porcelain", "--untracked-files=normal"],
             "status",
         )
         .await
     }
 
     async fn update_status(&self, cwd: &Path) -> DaemonResult<String> {
-        self.checked(
-            cwd,
-            &["status".into(), "--porcelain".into()],
-            "update status",
-        )
-        .await
+        self.checked(cwd, ["status", "--porcelain"], "update status")
+            .await
     }
 
     async fn is_inside_work_tree(&self, cwd: &Path) -> DaemonResult<bool> {
@@ -453,27 +441,14 @@ impl Git for ShellGit {
     }
 
     async fn pull_main(&self, cwd: &Path) -> DaemonResult<()> {
-        self.checked(
-            cwd,
-            &[
-                "pull".into(),
-                "--ff-only".into(),
-                "origin".into(),
-                "main".into(),
-            ],
-            "pull main",
-        )
-        .await
-        .map(drop)
+        self.checked(cwd, ["pull", "--ff-only", "origin", "main"], "pull main")
+            .await
+            .map(drop)
     }
 
     async fn short_head(&self, cwd: &Path) -> DaemonResult<String> {
-        self.checked(
-            cwd,
-            &["rev-parse".into(), "--short".into(), "HEAD".into()],
-            "short HEAD",
-        )
-        .await
+        self.checked(cwd, ["rev-parse", "--short", "HEAD"], "short HEAD")
+            .await
     }
 }
 

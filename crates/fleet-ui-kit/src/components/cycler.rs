@@ -10,7 +10,6 @@
 use gpui::{App, SharedString, Window, div, prelude::*};
 
 use crate::{
-    components::FocusRing,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -118,7 +117,11 @@ impl RenderOnce for Cycler {
                 })
                 // A dead arrow stays in place at low contrast: the control must not resize
                 // when the value reaches an end of the set.
-                .opacity(if enabled && !disabled { 1.0 } else { 0.4 })
+                .opacity(if enabled && !disabled {
+                    1.0
+                } else {
+                    theme.metrics.dimmed_opacity
+                })
         };
 
         let value_tone = if disabled { Tone::Muted } else { Tone::Default };
@@ -151,14 +154,7 @@ impl RenderOnce for Cycler {
                     .child(arrow(self.off_grid || self.has_next, Icon::ChevronRight)),
             );
 
-        div()
-            .w_full()
-            .h(theme.metrics.row_h)
-            .when(self.focused && !disabled, |el| {
-                el.bg(theme.colors.row_selected)
-            })
-            .when(disabled, |el| el.opacity(0.4))
-            .child(FocusRing::cursor_row(self.focused && !disabled).child(body))
+        super::control::cursor_row(theme, self.focused && !disabled, disabled, body)
             .into_any_element()
     }
 }

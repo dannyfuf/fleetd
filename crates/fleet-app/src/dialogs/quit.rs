@@ -1,9 +1,4 @@
 //! §3.8.8 Quit (`ctrl-q`) and §3.8.9 Quit and stop the daemon (`ctrl-shift-q`).
-//!
-//! Both dialogs are pure renderings of the snapshot: the shell decides whether they appear
-//! ([`crate::shell::quit`]) and owns every key on them, because quitting is its business.
-//! The tone inverts between the two, and that inversion is the whole point — `ctrl-q` lists
-//! what **survives**, `ctrl-shift-q` lists what **dies**, and says `ctrl-q` is the way out.
 
 use fleet_core::sessions::Session;
 use fleet_proto::job::{JobRecord, JobStatus};
@@ -17,64 +12,84 @@ use crate::{
 
 /// One line of the "keeps running" or "cancelled now" list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JobLine {
+struct JobLine {
     /// `clone`, `hooks`, … — the job kind as the ticker words it.
-    pub kind: String,
+    kind: String,
     /// What it is working on.
-    pub target: String,
+    target: String,
     /// The most recent progress line, when there is one.
-    pub progress: Option<String>,
-    /// Whether `ctrl-shift-q` can cancel it.
-    pub cancellable: bool,
+    progress: Option<String>,
+    /// Whether an explicit cancel can still be requested.
+    can_cancel: bool,
+    /// Whether the underlying detached process outlives fleetd.
+    survives_shutdown: bool,
+    /// Whether the operation can be started again after it stops.
+    restartable: bool,
 }
 
 /// The job kind, in the short word the ticker and both quit dialogs use.
 #[must_use]
-pub fn kind_word(job: &JobRecord) -> String {
+pub(super) fn kind_word(job: &JobRecord) -> String {
     use fleet_proto::job::JobKind;
     match &job.kind {
-        JobKind::Clone => "clone".to_owned(),
-        JobKind::PoolBuild | JobKind::PoolRefresh => "pool".to_owned(),
-        JobKind::CreateWorktree => "create".to_owned(),
-        JobKind::DeleteWorktree => "delete".to_owned(),
-        JobKind::DeleteRepo => "delete repo".to_owned(),
-        JobKind::Prune => "prune".to_owned(),
-        JobKind::Inspect => "inspect".to_owned(),
-        JobKind::PostCreateHooks => "hooks".to_owned(),
-        JobKind::PrFetch => "prs".to_owned(),
-        JobKind::RepoFetch => "fetch".to_owned(),
-        JobKind::RepoDiscovery => "discovery".to_owned(),
-        JobKind::Update => "update".to_owned(),
-        JobKind::Import => "import".to_owned(),
-        JobKind::Custom(name) => name.clone(),
+        JobKind::PoolRefresh => "pool",
+        JobKind::RepoDiscovery => "discovery",
+        kind => crate::presentation::job_kind_label(kind),
     }
+    .to_owned()
 }
 
 /// Every running job, as the lines both dialogs draw.
 #[must_use]
-pub fn job_lines(jobs: &[JobRecord]) -> Vec<JobLine> {
+fn job_lines(jobs: &[JobRecord]) -> Vec<JobLine> {
     running_jobs(jobs)
         .into_iter()
-        .map(|job| JobLine {
-            kind: kind_word(job),
-            target: if job.target.is_empty() {
-                job.title.clone()
-            } else {
-                job.target.clone()
-            },
-            progress: job.progress.clone(),
-            cancellable: job.cancellable && !matches!(job.status, JobStatus::Cancelling),
+        .map(|job| {
+            let can_cancel = job.cancellable && !matches!(job.status, JobStatus::Cancelling);
+            let survives_shutdown = matches!(job.kind, fleet_proto::job::JobKind::PostCreateHooks)
+                && !job.cancellable
+                && matches!(job.status, JobStatus::Running);
+            JobLine {
+                kind: kind_word(job),
+                target: if job.target.is_empty() {
+                    job.title.clone()
+                } else {
+                    job.target.clone()
+                },
+                progress: job.progress.clone(),
+                can_cancel,
+                survives_shutdown,
+                restartable: job.retryable,
+            }
         })
         .collect()
 }
 
 /// How many terminals the given sessions own.
 #[must_use]
-pub fn terminal_count(sessions: &[Session]) -> usize {
+fn terminal_count(sessions: &[Session]) -> usize {
     sessions.iter().map(|session| session.terminals.len()).sum()
 }
 
-// ---------------------------------------------------------------------------- §3.8.8
+fn restart_word(line: &JobLine) -> &'static str {
+    if line.restartable {
+        "restartable"
+    } else {
+        "not restartable"
+    }
+}
+
+fn detached_jobs_fact(lines: &[&JobLine]) -> String {
+    format!(
+        "{} job(s) keep running: {}",
+        lines.len(),
+        lines
+            .iter()
+            .map(|line| format!("{} ({})", line.kind, restart_word(line)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
 
 /// Renders the `ctrl-q` confirm: everything listed **survives** in fleetd.
 pub(crate) fn render_quit(
@@ -121,7 +136,7 @@ pub(crate) fn render_quit(
         .child(
             Dialog::new("Quit Fleet?")
                 .icon(Icon::CircleQuestionMark)
-                .width(super::Dialogs::Quit.width())
+                .width(super::Dialogs::Quit.width(cx))
                 .body(body)
                 .hint_row(
                     KeyHintRow::new()
@@ -134,8 +149,6 @@ pub(crate) fn render_quit(
         .into_any_element()
 }
 
-// ---------------------------------------------------------------------------- §3.8.9
-
 /// Renders the `ctrl-shift-q` confirm: everything listed **dies**, and `ctrl-q` is the way out.
 pub(crate) fn render_quit_daemon(
     state: &Entity<AppState>,
@@ -146,19 +159,19 @@ pub(crate) fn render_quit_daemon(
     let gap = cx.theme().space.sm;
     let app = state.read(cx);
     let (lines, sessions) = app.snapshot.as_ref().map_or_else(
-        || (Vec::new(), Vec::new()),
-        |snapshot| (job_lines(&snapshot.jobs), snapshot.sessions.clone()),
+        || (Vec::new(), &[][..]),
+        |snapshot| (job_lines(&snapshot.jobs), snapshot.sessions.as_slice()),
     );
-    let (cancellable, detached): (Vec<&JobLine>, Vec<&JobLine>) =
-        lines.iter().partition(|line| line.cancellable);
+    let (detached, stopping): (Vec<&JobLine>, Vec<&JobLine>) =
+        lines.iter().partition(|line| line.survives_shutdown);
 
     let mut killed = FactList::new();
-    for session in &sessions {
-        let running: Vec<String> = session
+    for session in sessions {
+        let running: Vec<&str> = session
             .terminals
             .iter()
             .filter(|terminal| !terminal.keep_alive.is_empty())
-            .map(|terminal| terminal.name.clone())
+            .map(|terminal| terminal.name.as_str())
             .collect();
         let detail = if running.is_empty() {
             format!("{} terminals", session.terminals.len())
@@ -169,10 +182,19 @@ pub(crate) fn render_quit_daemon(
     }
 
     let mut cancelled = FactList::new();
-    for line in &cancellable {
+    for line in &stopping {
+        let restart = restart_word(line);
+        let action = if line.can_cancel {
+            "cancelled"
+        } else {
+            "stops with fleetd"
+        };
         cancelled = cancelled.fact(Fact::risk(match &line.progress {
-            Some(progress) => format!("{} {}   {progress}   (restartable)", line.kind, line.target),
-            None => format!("{} {}   (restartable)", line.kind, line.target),
+            Some(progress) => format!(
+                "{} {}   {progress}   ({action}; {restart})",
+                line.kind, line.target
+            ),
+            None => format!("{} {}   ({action}; {restart})", line.kind, line.target),
         }));
     }
 
@@ -180,7 +202,7 @@ pub(crate) fn render_quit_daemon(
     if !sessions.is_empty() {
         body = body.child(SectionHeader::new("KILLED NOW")).child(killed);
     }
-    if !cancellable.is_empty() {
+    if !stopping.is_empty() {
         body = body
             .child(SectionHeader::new("CANCELLED NOW"))
             .child(cancelled);
@@ -188,15 +210,7 @@ pub(crate) fn render_quit_daemon(
     if !detached.is_empty() {
         // §6: a detached post-create runner has no cancel token; the dialog says so rather
         // than pretending it can stop it.
-        body = body.child(Text::ui(format!(
-            "{} job(s) keep running: {} (not restartable)",
-            detached.len(),
-            detached
-                .iter()
-                .map(|line| line.kind.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        body = body.child(Text::ui(detached_jobs_fact(&detached)));
     }
     let body = body
         .child(Text::ui("Worktrees, repos and state on disk are untouched.").muted())
@@ -206,7 +220,7 @@ pub(crate) fn render_quit_daemon(
         .child(
             Dialog::new("Stop fleetd and quit?")
                 .icon(Icon::Power)
-                .width(super::Dialogs::QuitDaemon.width())
+                .width(super::Dialogs::QuitDaemon.width(cx))
                 .tone(Tone::Warning)
                 .body(body)
                 .hint_row(KeyHintRow::new().key("n", "cancel"))
@@ -247,7 +261,7 @@ mod tests {
         let lines = job_lines(&jobs);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].kind, "clone");
-        assert!(lines[0].cancellable);
+        assert!(lines[0].can_cancel);
     }
 
     #[test]
@@ -255,7 +269,27 @@ mod tests {
         let jobs = vec![job(JobKind::PostCreateHooks, JobStatus::Cancelling, true)];
         let lines = job_lines(&jobs);
         assert_eq!(lines[0].kind, "hooks");
-        assert!(!lines[0].cancellable);
+        assert!(!lines[0].can_cancel);
+    }
+
+    #[test]
+    fn shutdown_job_facts_use_independent_capabilities() {
+        let mut cancelling = job(JobKind::Clone, JobStatus::Cancelling, true);
+        cancelling.retryable = false;
+        let mut detached = job(JobKind::PostCreateHooks, JobStatus::Running, false);
+        detached.retryable = true;
+        let lines = job_lines(&[cancelling, detached]);
+
+        assert!(!lines[0].can_cancel);
+        assert!(!lines[0].survives_shutdown);
+        assert!(!lines[0].restartable);
+        assert!(!lines[1].can_cancel);
+        assert!(lines[1].survives_shutdown);
+        assert!(lines[1].restartable);
+        assert_eq!(
+            detached_jobs_fact(&[&lines[1]]),
+            "1 job(s) keep running: hooks (restartable)"
+        );
     }
 
     #[test]

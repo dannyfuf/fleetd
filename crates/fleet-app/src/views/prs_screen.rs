@@ -1,51 +1,33 @@
-//! The Hub's pull-requests screen (UX-SPEC §3.5).
-//!
-//! *What am I waiting on, what is waiting on me, and can I start on it in one key?* The screen
-//! replaces the worktrees list in place (`p`), keeps the repos rail, and adds one thing the
-//! worktrees list cannot have: the **local-presence glyph**, which decides whether `Enter`
-//! opens an existing worktree or creates one.
-//!
-//! The fetch is cached in the daemon (`github.prTtlSeconds: 90`), so every rendering here is a
-//! function of a [`PrSlice`] plus its age; stale rows stay listed and never disappear behind a
-//! spinner (§3.5 *Loading with cache*).
+//! Prepared pull-request rows and tab/list composition.
+
+use std::collections::{HashMap, HashSet};
 
 use fleet_core::{
-    github::{PrState, PrTab, PullRequest, derive_pr_state, worktree_matches_pr},
+    github::{PrTab, PullRequest, derive_pr_state},
     ids::{RepoId, WorktreeId},
     model::Worktree,
-    sessions::{AgentActivity, Session, SessionKind, SessionState, WorktreeStatus},
 };
 use fleet_proto::response::PrSlice;
 use fleet_ui_kit::{
-    ActiveTheme, ColumnLadder, Icon, IconSize, ListView, Pane, PaneBorder, PrBadge, PrBadgeState,
-    ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows, StatusGlyph,
-    StatusKind, Text, Tone, Truncate, format_age, truncate,
+    ActiveTheme, AgeLabel, ColumnLadder, Icon, IconSize, ListView, Pane, PaneBorder, PrBadge,
+    PrBadgeState, ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows,
+    StatusGlyph, StatusKind, Text, Tone, Truncate, format_age, truncate,
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
-use crate::{screens::hub::age_secs, views::worktrees_list::session_glyph};
+use crate::{
+    presentation::{SnapshotIndex, age_secs, contains_folded, pr_badge_state},
+    views::{detail::resolved_worktree_status, first_run::EmptySurface},
+};
 
 /// The `All` scope cap of §3.5 [D-7]: never a refusal, always a final "narrow me" row.
-pub const ALL_SCOPE_CAP: usize = 100;
+const ALL_SCOPE_CAP: usize = 100;
 /// Character budget of the `headRefName` column (§2.9 column 5).
 const HEAD_BUDGET: usize = 12;
 /// Character budget of the `owner/name` column (§2.9 column 6).
 const REPO_BUDGET: usize = 10;
 /// How many skeleton rows a cold load shows (§3.5).
 const SKELETON_ROWS: usize = 6;
-
-/// Maps the domain's `PrState` onto the kit's badge, which knows nothing about GitHub.
-#[must_use]
-pub fn pr_badge_state(state: PrState) -> PrBadgeState {
-    match state {
-        PrState::Draft => PrBadgeState::Draft,
-        PrState::CiFail => PrBadgeState::CiFail,
-        PrState::Changes => PrBadgeState::Changes,
-        PrState::CiPending => PrBadgeState::CiPending,
-        PrState::Approved => PrBadgeState::Approved,
-        PrState::Review => PrBadgeState::Review,
-    }
-}
 
 /// One PR row, resolved against the local worktrees.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,51 +56,12 @@ pub struct PrRow {
     pub url: SharedString,
 }
 
-/// The local-presence glyph and worktree of one PR (§3.5, match rule §1).
-#[must_use]
-pub fn presence(
-    pr: &PullRequest,
-    worktrees: &[Worktree],
-    statuses: &[WorktreeStatus],
-    sessions: &[Session],
-    creating: bool,
-) -> (StatusKind, Option<WorktreeId>) {
-    if creating {
-        return (StatusKind::JobRunning, None);
-    }
-    let Some(worktree) = worktrees
-        .iter()
-        .find(|worktree| worktree_matches_pr(worktree, pr))
-    else {
-        return (StatusKind::NoSession, None);
-    };
-    // A worktree exists but its status has not landed yet: `unknown`, never `none` (§1.3).
-    let status = statuses
-        .iter()
-        .find(|status| status.worktree_id == worktree.id);
-    let session = status.map_or(SessionState::Unknown, |status| status.session);
-    let slept = sessions.iter().any(|session| {
-        matches!(&session.kind, SessionKind::Worktree(id) if id == &worktree.id)
-            && session.slept_at.is_some()
-    });
-    let kind = session_glyph(
-        session,
-        slept,
-        status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
-    );
-    (kind, Some(worktree.id.clone()))
-}
-
 /// Everything the model needs to turn a slice into rows.
 pub struct PrInputs<'a> {
     /// The daemon's slice for the active tab.
     pub slice: Option<&'a PrSlice>,
-    /// Every local worktree in scope.
+    /// Every local worktree in scope, in snapshot order.
     pub worktrees: &'a [Worktree],
-    /// Their runtime statuses.
-    pub statuses: &'a [WorktreeStatus],
-    /// Daemon sessions, for the awake / slept distinction.
-    pub sessions: &'a [Session],
     /// PRs whose worktree is being created right now.
     pub creating: &'a [(RepoId, u64)],
     /// The current epoch second.
@@ -127,26 +70,71 @@ pub struct PrInputs<'a> {
 
 /// Builds the rows of one tab, sorted by `updatedAt` desc and capped at [`ALL_SCOPE_CAP`].
 #[must_use]
-pub fn build_rows(inputs: &PrInputs<'_>) -> Vec<PrRow> {
+pub fn build_rows(inputs: &PrInputs<'_>, index: &SnapshotIndex<'_>) -> Vec<PrRow> {
     let Some(slice) = inputs.slice else {
         return Vec::new();
     };
+    // Preserve the first matching worktree in snapshot order when both the head branch and the
+    // `pull/<n>/head` base ref name a local worktree.
+    let mut branches = HashMap::new();
+    let mut bases = HashMap::new();
+    for (position, worktree) in inputs.worktrees.iter().enumerate() {
+        branches
+            .entry((&worktree.repo_id, worktree.branch.as_str()))
+            .or_insert(position);
+        bases
+            .entry((&worktree.repo_id, worktree.base_ref.as_str()))
+            .or_insert(position);
+    }
+    let creating: HashSet<_> = inputs
+        .creating
+        .iter()
+        .map(|(repo, number)| (repo, *number))
+        .collect();
     let mut prs: Vec<&PullRequest> = slice.prs.iter().collect();
     prs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     prs.into_iter()
         .take(ALL_SCOPE_CAP)
         .map(|pr| {
-            let creating = inputs
-                .creating
-                .iter()
-                .any(|(repo, number)| repo == &pr.repo_id && *number == pr.number);
-            let (presence_glyph, local) = presence(
-                pr,
-                inputs.worktrees,
-                inputs.statuses,
-                inputs.sessions,
-                creating,
-            );
+            let branch = (!pr.is_cross_repository)
+                .then(|| branches.get(&(&pr.repo_id, pr.head_ref_name.as_str())))
+                .flatten();
+            let pull_ref = format!("pull/{}/head", pr.number);
+            let base = bases.get(&(&pr.repo_id, pull_ref.as_str()));
+            let local = branch
+                .into_iter()
+                .chain(base)
+                .min()
+                .and_then(|position| inputs.worktrees.get(*position));
+            let (presence_glyph, local) = if creating.contains(&(&pr.repo_id, pr.number)) {
+                (StatusKind::JobRunning, None)
+            } else if let Some(worktree) = local {
+                let status = index.status(&worktree.id);
+                let slept = index
+                    .sessions_for_worktree(&worktree.id)
+                    .iter()
+                    .any(|session| session.slept_at.is_some());
+                let unreachable = worktree
+                    .host
+                    .as_ref()
+                    .is_some_and(|host| index.host(host).is_some_and(|host| !host.reachable));
+                let job_running = index
+                    .jobs_for_target(worktree.id.as_str())
+                    .iter()
+                    .any(|job| crate::views::worktrees_list::owns_row(job));
+                (
+                    resolved_worktree_status(
+                        status,
+                        slept,
+                        worktree.degraded.is_some(),
+                        unreachable,
+                        job_running,
+                    ),
+                    Some(worktree.id.clone()),
+                )
+            } else {
+                (StatusKind::NoSession, None)
+            };
             PrRow {
                 repo: pr.repo_id.clone(),
                 number: pr.number,
@@ -178,17 +166,17 @@ pub fn matches(row: &PrRow, query: &str) -> bool {
     }
     let needle = query.to_lowercase();
     row.number.to_string().contains(&needle)
-        || row.title.to_lowercase().contains(&needle)
-        || row.author.to_lowercase().contains(&needle)
-        || row.head.to_lowercase().contains(&needle)
+        || contains_folded(&row.title, &needle)
+        || contains_folded(&row.author, &needle)
+        || contains_folded(&row.head, &needle)
 }
 
 /// Everything the screen needs to draw itself.
-pub struct PrProps {
+pub struct PrProps<Rows = Vec<PrRow>> {
     /// A live filter editor that replaces the tab header.
     pub header_override: Option<AnyElement>,
     /// The rows of the active tab, already filtered.
-    pub rows: Vec<PrRow>,
+    pub rows: Rows,
     /// Cursor index into `rows`.
     pub cursor: usize,
     /// Whether the list owns the keyboard.
@@ -220,8 +208,16 @@ pub struct PrProps {
 }
 
 /// Renders the tabs, the fetch stamp, the error row and the list.
+///
+/// `age_offset` ages the prepared rows by the seconds elapsed since the projection was built,
+/// so a clock tick re-labels the age column without rebuilding the model.
 #[must_use]
-pub fn render(props: PrProps, scroll: &UniformListScrollHandle, cx: &App) -> AnyElement {
+pub fn render(
+    props: PrProps<impl AsRef<[PrRow]> + 'static>,
+    scroll: &UniformListScrollHandle,
+    age_offset: i64,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let PrProps {
         rows,
@@ -245,22 +241,11 @@ pub fn render(props: PrProps, scroll: &UniformListScrollHandle, cx: &App) -> Any
     let tabs = SegmentedTabs::new([tab_of("Mine", mine_count), tab_of("Review", review_count)])
         .active(usize::from(tab == PrTab::Review));
 
-    let stamp = match (loading, fetched_age) {
-        (true, Some(age)) => Text::ui(format!(
-            "\u{27F3} refreshing · fetched {} ago",
-            format_age(age)
-        ))
-        .muted(),
-        (true, None) => Text::ui("\u{27F3} refreshing").muted(),
-        (false, Some(age)) => {
-            let text = Text::ui(format!("fetched {} ago", format_age(age)));
-            if error.is_some() {
-                text.tone(Tone::Warning)
-            } else {
-                text.muted()
-            }
-        }
-        (false, None) => Text::ui("never fetched").muted(),
+    let stamp = Text::ui(fetch_stamp_text(loading, fetched_age));
+    let stamp = if !loading && fetched_age.is_some() && error.is_some() {
+        stamp.tone(Tone::Warning)
+    } else {
+        stamp.muted()
     };
 
     let header = div()
@@ -274,23 +259,20 @@ pub fn render(props: PrProps, scroll: &UniformListScrollHandle, cx: &App) -> Any
         .child(stamp);
 
     let empty = match (filter.clone(), tab) {
-        (Some(query), _) => crate::views::first_run::empty_state("filter", Some(&query)),
-        (None, PrTab::Mine) => crate::views::first_run::empty_state("prs-mine", Some(&scope)),
-        (None, PrTab::Review) => crate::views::first_run::empty_state("prs-review", Some(&scope)),
+        (Some(query), _) => EmptySurface::Filter.render(Some(&query)),
+        (None, PrTab::Mine) => EmptySurface::PrsMine.render(Some(&scope)),
+        (None, PrTab::Review) => EmptySurface::PrsReview.render(Some(&scope)),
     };
 
-    let ladder = ColumnLadder::pull_requests();
-    let columns: Vec<ResolvedColumn> = ladder
-        .resolve(pane_ch)
-        .into_iter()
-        .filter(|column| column.key.as_ref() != "repo" || multi_repo)
-        .collect();
-    let body_rows = rows.clone();
-    let list = ListView::new("hub-prs", rows.len(), move |index, is_cursor, _w, cx| {
-        let Some(row) = body_rows.get(index) else {
+    let columns =
+        ColumnLadder::pull_requests_for(tab == PrTab::Review, multi_repo).resolve(pane_ch);
+    let row_count = rows.as_ref().len();
+    let body_rows = rows;
+    let list = ListView::new("hub-prs", row_count, move |index, is_cursor, _w, cx| {
+        let Some(row) = body_rows.as_ref().get(index) else {
             return div().into_any_element();
         };
-        pr_row(row, is_cursor, focused, &columns, cx)
+        pr_row(row, is_cursor, focused, &columns, age_offset, cx)
     })
     .cursor(cursor)
     .track_scroll(scroll)
@@ -323,9 +305,21 @@ pub fn render(props: PrProps, scroll: &UniformListScrollHandle, cx: &App) -> Any
 }
 
 fn tab_of(label: &'static str, count: Option<usize>) -> SegmentedTab {
-    match count {
-        Some(count) => SegmentedTab::new(label, count),
-        None => SegmentedTab::bare(label).loading(true),
+    count.map_or_else(
+        || SegmentedTab::bare(label).loading(true),
+        |count| SegmentedTab::new(label, count),
+    )
+}
+
+fn fetch_stamp_text(loading: bool, fetched_age: Option<i64>) -> SharedString {
+    match (loading, fetched_age) {
+        (true, Some(age)) => SharedString::from(format!(
+            "\u{27F3} refreshing · fetched {} ago",
+            format_age(age)
+        )),
+        (true, None) => SharedString::new_static("\u{27F3} refreshing"),
+        (false, Some(age)) => SharedString::from(format!("fetched {} ago", format_age(age))),
+        (false, None) => SharedString::new_static("never fetched"),
     }
 }
 
@@ -356,6 +350,7 @@ fn pr_row(
     is_cursor: bool,
     focused: bool,
     columns: &[ResolvedColumn],
+    age_offset: i64,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -411,20 +406,15 @@ fn pr_row(
             "state" => Some(PrBadge::state_only(row.state).into_any_element()),
             "age" => Some(
                 row.age
-                    .map_or_else(
-                        fleet_ui_kit::AgeLabel::none,
-                        fleet_ui_kit::AgeLabel::from_secs,
-                    )
+                    .map_or_else(AgeLabel::none, |age| {
+                        AgeLabel::from_secs(age.saturating_add(age_offset).max(0))
+                    })
                     .into_any_element(),
             ),
             _ => None,
         };
         let Some(cell) = cell else { continue };
-        let wrapped = match column.width {
-            Some(width) => RowColumn::fixed(width, cell),
-            None => RowColumn::flex(cell),
-        };
-        element = element.column(wrapped.align(column.align));
+        element = element.column(RowColumn::resolved(column, cell));
     }
     element.into_any_element()
 }
@@ -433,10 +423,13 @@ fn pr_row(
 mod tests {
     use fleet_core::{
         github::{PrChecks, PrReviewDecision},
-        ids::WorktreeId,
+        ids::{HostId, WorktreeId},
+        model::Degraded,
     };
 
     use super::*;
+
+    use fleet_proto::snapshot::{HostStatus, Snapshot};
 
     fn pr(number: u64, updated: &str, cross: bool, head: &str) -> PullRequest {
         PullRequest {
@@ -463,8 +456,7 @@ mod tests {
 
     fn worktree(branch: &str, base: &str) -> Worktree {
         Worktree {
-            id: WorktreeId::try_from(format!("buk/payroll#{branch}").replace('/', "-"))
-                .or_else(|_| WorktreeId::try_from("buk/payroll#local"))
+            id: WorktreeId::try_from(format!("buk/payroll#{}", branch.replace('/', "-")))
                 .unwrap_or_else(|error| panic!("{error}")),
             repo_id: RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}")),
             slug: "local".to_owned(),
@@ -490,15 +482,39 @@ mod tests {
         }
     }
 
-    fn inputs<'a>(slice: &'a PrSlice, worktrees: &'a [Worktree]) -> PrInputs<'a> {
-        PrInputs {
-            slice: Some(slice),
+    /// A snapshot carrying only what a PR row build reads through the index.
+    fn snapshot(worktrees: Vec<Worktree>) -> Snapshot {
+        Snapshot {
+            generated_at: String::new(),
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
             worktrees,
-            statuses: &[],
-            sessions: &[],
-            creating: &[],
-            now: 1_788_523_200,
+            active_context: None,
+            sessions: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: fleet_proto::snapshot::DaemonInfo {
+                version: String::new(),
+                pid: 1,
+                started_at: String::new(),
+                home: String::new(),
+            },
         }
+    }
+
+    fn rows(slice: &PrSlice, snapshot: &Snapshot, creating: &[(RepoId, u64)]) -> Vec<PrRow> {
+        build_rows(
+            &PrInputs {
+                slice: Some(slice),
+                worktrees: &snapshot.worktrees,
+                creating,
+                now: 1_788_523_200,
+            },
+            &SnapshotIndex::new(snapshot),
+        )
     }
 
     #[test]
@@ -514,7 +530,7 @@ mod tests {
             })
             .collect();
         let slice = slice(prs, 120);
-        let rows = build_rows(&inputs(&slice, &[]));
+        let rows = rows(&slice, &snapshot(Vec::new()), &[]);
         assert_eq!(rows.len(), ALL_SCOPE_CAP);
         assert_eq!(hidden_rows(Some(&slice)), 20);
         assert!(rows[0].age <= rows[ALL_SCOPE_CAP - 1].age);
@@ -523,7 +539,7 @@ mod tests {
     #[test]
     fn a_pull_request_without_a_local_worktree_shows_the_dim_dot() {
         let slice = slice(vec![pr(1, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
-        let rows = build_rows(&inputs(&slice, &[]));
+        let rows = rows(&slice, &snapshot(Vec::new()), &[]);
         assert_eq!(rows[0].presence, StatusKind::NoSession);
         assert_eq!(rows[0].local, None);
     }
@@ -531,8 +547,11 @@ mod tests {
     #[test]
     fn a_matching_worktree_lights_the_presence_glyph() {
         let slice = slice(vec![pr(1, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
-        let worktrees = vec![worktree("feat/x", "origin/main")];
-        let rows = build_rows(&inputs(&slice, &worktrees));
+        let rows = rows(
+            &slice,
+            &snapshot(vec![worktree("feat/x", "origin/main")]),
+            &[],
+        );
         assert!(rows[0].local.is_some());
         assert_eq!(
             rows[0].presence,
@@ -544,8 +563,11 @@ mod tests {
     #[test]
     fn a_pull_ref_worktree_matches_across_repositories() {
         let slice = slice(vec![pr(412, "2026-09-04T10:00:00Z", true, "feat/x")], 1);
-        let worktrees = vec![worktree("pr/412", "pull/412/head")];
-        let rows = build_rows(&inputs(&slice, &worktrees));
+        let rows = rows(
+            &slice,
+            &snapshot(vec![worktree("pr/412", "pull/412/head")]),
+            &[],
+        );
         assert!(rows[0].local.is_some());
     }
 
@@ -553,17 +575,59 @@ mod tests {
     fn creating_a_worktree_spins_the_presence_glyph_without_moving_the_row() {
         let repo = RepoId::try_from("buk/payroll").unwrap_or_else(|error| panic!("{error}"));
         let slice = slice(vec![pr(7, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
-        let creating = vec![(repo, 7)];
-        let inputs = PrInputs {
-            slice: Some(&slice),
-            worktrees: &[],
-            statuses: &[],
-            sessions: &[],
-            creating: &creating,
-            now: 1_788_523_200,
-        };
-        let rows = build_rows(&inputs);
+        let rows = rows(&slice, &snapshot(Vec::new()), &[(repo, 7)]);
         assert_eq!(rows[0].presence, StatusKind::JobRunning);
+    }
+
+    #[test]
+    fn pr_presence_obeys_worktree_health_precedence() {
+        let pull_requests = slice(vec![pr(1, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
+        let mut degraded = worktree("feat/x", "origin/main");
+        degraded.degraded = Some(Degraded {
+            kind: "post_create_hooks".to_owned(),
+            step: "1".to_owned(),
+            exit_code: Some(1),
+            at: "2026-09-04T11:00:00Z".to_owned(),
+            log_path: "/tmp/hooks.log".to_owned(),
+        });
+        let degraded_snapshot = snapshot(vec![degraded]);
+        assert_eq!(
+            rows(&pull_requests, &degraded_snapshot, &[])[0].presence,
+            StatusKind::Degraded
+        );
+
+        let mut remote = worktree("feat/x", "origin/main");
+        let host = HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}"));
+        remote.host = Some(host.clone());
+        let mut offline_snapshot = snapshot(vec![remote]);
+        offline_snapshot.hosts.push(HostStatus {
+            id: host,
+            reachable: false,
+            checked_at: "2026-09-04T11:59:00Z".to_owned(),
+            error: Some("ssh timed out".to_owned()),
+        });
+        assert_eq!(
+            rows(&pull_requests, &offline_snapshot, &[])[0].presence,
+            StatusKind::HostUnreachable
+        );
+    }
+
+    #[test]
+    fn refreshing_counts_are_consistently_marked() {
+        let cached = tab_of("Mine", Some(7));
+        assert_eq!(cached.count, Some(7));
+        assert!(!cached.loading);
+        assert_eq!(cached.count_text().as_deref(), Some("7"));
+        assert_eq!(
+            fetch_stamp_text(true, Some(120)).as_ref(),
+            "\u{27F3} refreshing · fetched 2m ago"
+        );
+
+        let settled = tab_of("Review", Some(4));
+        assert_eq!(settled.count_text().as_deref(), Some("4"));
+        let cold = tab_of("Review", None);
+        assert!(cold.loading);
+        assert_eq!(cold.count_text().as_deref(), Some("\u{2026}"));
     }
 
     #[test]
@@ -597,7 +661,7 @@ mod tests {
     #[test]
     fn the_filter_matches_number_title_author_and_branch() {
         let slice = slice(vec![pr(412, "2026-09-04T10:00:00Z", false, "feat/rut")], 1);
-        let rows = build_rows(&inputs(&slice, &[]));
+        let rows = rows(&slice, &snapshot(Vec::new()), &[]);
         assert!(matches(&rows[0], "412"));
         assert!(matches(&rows[0], "pr 412"));
         assert!(matches(&rows[0], "danny"));

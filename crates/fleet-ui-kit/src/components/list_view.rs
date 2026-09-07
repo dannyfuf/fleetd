@@ -104,7 +104,7 @@ pub fn list_key_bindings(context: Option<&str>) -> Vec<KeyBinding> {
 }
 
 /// Row renderer: `(index, is_cursor, window, cx) -> element`.
-pub type RenderRow = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement>;
+type RenderRow = Rc<dyn Fn(usize, bool, &mut Window, &mut App) -> AnyElement>;
 
 /// The scrolloff every Fleet list uses (§3.3).
 pub const SCROLLOFF: usize = 2;
@@ -119,12 +119,18 @@ pub const SKELETON_ROWS: usize = 6;
 ///
 /// Pure logic: no gpui types, fully unit-testable, and owned by the view's entity rather than
 /// by the element.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ListCursor {
     index: usize,
     len: usize,
     scrolloff: usize,
     page: usize,
+}
+
+impl Default for ListCursor {
+    fn default() -> Self {
+        Self::new(0)
+    }
 }
 
 impl ListCursor {
@@ -374,7 +380,7 @@ impl RenderOnce for ListView {
                 .into_any_element();
         }
 
-        let render_row = self.render_row.clone();
+        let render_row = self.render_row;
         let cursor = self.cursor;
         let list = uniform_list(self.id, self.item_count, move |range, window, cx| {
             range
@@ -393,6 +399,15 @@ impl RenderOnce for ListView {
 #[cfg(test)]
 mod tests {
     use super::{ListCursor, ListMotion};
+
+    #[test]
+    fn default_cursor_can_page_after_population() {
+        let mut cursor = ListCursor::default();
+        cursor.set_len(100);
+        cursor.page_down();
+        assert_eq!(cursor.index(), super::DEFAULT_PAGE);
+        assert_eq!(cursor.scrolloff_rows(), super::SCROLLOFF);
+    }
 
     #[test]
     fn moves_and_clamps() {

@@ -1,6 +1,10 @@
 //! Fleet source-checkout update and release-build job.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use fleet_proto::job::{JobKind, JobRecord};
 
@@ -95,33 +99,140 @@ impl Update {
             },
         );
         self.jobs
-            .list()
-            .into_iter()
-            .find(|record| record.id == id)
+            .record(&id)
             .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))
     }
+
+    #[cfg(test)]
+    pub(crate) fn checkout(&self) -> &Path {
+        &self.checkout
+    }
+}
+
+pub(crate) fn runtime_checkout() -> PathBuf {
+    let executable = std::env::current_exe().ok();
+    select_checkout(
+        std::env::var_os("FLEET_INSTALL_ROOT"),
+        executable.as_deref(),
+    )
+}
+
+fn select_checkout(install_root: Option<OsString>, executable: Option<&Path>) -> PathBuf {
+    install_root
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| executable.and_then(enclosing_work_tree))
+        .or_else(|| executable.and_then(Path::parent).map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn enclosing_work_tree(executable: &Path) -> Option<PathBuf> {
+    executable
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
+    use super::*;
     use crate::{
-        adapters::shell::{ShellCommand, ShellResult},
+        adapters::shell::ShellResult,
         testing::fakes::{FakeGit, FakeShell, FakeShellCall},
     };
+    use fleet_proto::job::JobStatus;
 
-    use super::Update;
+    #[test]
+    fn runtime_root_selects_update_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("fleet");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let executable = checkout.join("target/release/fleetd");
+
+        assert_eq!(
+            select_checkout(Some(OsString::from("/installed/fleet")), Some(&executable)),
+            Path::new("/installed/fleet")
+        );
+        assert_eq!(select_checkout(None, Some(&executable)), checkout);
+        assert_eq!(
+            select_checkout(None, Some(Path::new("/opt/fleet/bin/fleetd"))),
+            Path::new("/opt/fleet/bin")
+        );
+    }
 
     #[tokio::test]
-    async fn submits_update_as_a_job() {
-        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    async fn update_reports_verbose_build_success_and_failure() {
+        for status in [0, 7] {
+            let temp = tempfile::tempdir().unwrap();
+            let shell = update_shell(status);
+            let jobs = Arc::new(JobManager::new(temp.path()));
+            let record = Update::new(
+                jobs.clone(),
+                Arc::new(FakeGit::new(shell.clone())),
+                shell.clone(),
+                temp.path(),
+            )
+            .start()
+            .await
+            .unwrap();
+            assert_eq!(record.kind, JobKind::Update);
+            let completed =
+                tokio::time::timeout(std::time::Duration::from_secs(5), jobs.wait(&record.id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            if status == 0 {
+                assert_eq!(completed.status, JobStatus::Succeeded);
+            } else {
+                assert!(
+                    matches!(completed.status, JobStatus::Failed { error } if error.contains("cargo build --release"))
+                );
+            }
+            assert!(shell.calls().iter().any(|call| matches!(call,
+                FakeShellCall::Streaming(command) if command == &ShellCommand::new("cargo").args(["build", "--release"]).cwd(temp.path())
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_update_never_starts_build_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = update_shell(0);
+        let jobs = Arc::new(JobManager::new(temp.path()));
+        let record = Update::new(
+            jobs.clone(),
+            Arc::new(FakeGit::new(shell.clone())),
+            shell.clone(),
+            temp.path(),
+        )
+        .start()
+        .await
+        .unwrap();
+        jobs.cancel(&record.id).unwrap();
+        let completed =
+            tokio::time::timeout(std::time::Duration::from_secs(5), jobs.wait(&record.id))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(completed.status, JobStatus::Cancelled);
+        assert!(shell.calls().iter().all(|call| match call {
+            FakeShellCall::Run(command) =>
+                command.program == "git"
+                    && command.args.first().is_some_and(|argument| matches!(
+                        argument.as_str(),
+                        "rev-parse" | "branch" | "status"
+                    )),
+            FakeShellCall::Detached { .. } | FakeShellCall::Streaming(_) => false,
+        }));
+    }
+
+    fn update_shell(build_status: i32) -> Arc<FakeShell> {
         let shell = Arc::new(FakeShell::new());
         shell.when(
             |command| command.args == ["rev-parse", "--is-inside-work-tree"],
             ShellResult {
                 status: 0,
-                stdout: "true\n".to_owned(),
+                stdout: "true\n".into(),
                 stderr: String::new(),
             },
         );
@@ -129,34 +240,26 @@ mod tests {
             |command| command.args == ["branch", "--show-current"],
             ShellResult {
                 status: 0,
-                stdout: "main\n".to_owned(),
+                stdout: "main\n".into(),
                 stderr: String::new(),
             },
         );
         shell.when(
-            |_command| true,
+            |command| command.program == "cargo",
+            ShellResult {
+                status: build_status,
+                stdout: "compiling dependency\n".repeat(1000),
+                stderr: "build diagnostic\n".repeat(1000),
+            },
+        );
+        shell.when(
+            |_| true,
             ShellResult {
                 status: 0,
                 stdout: String::new(),
                 stderr: String::new(),
             },
         );
-        let git = Arc::new(FakeGit::new(Arc::clone(&shell)));
-        let jobs = Arc::new(crate::jobs::JobManager::new(temp.path()));
-        let record = Update::new(jobs, git, shell.clone(), temp.path())
-            .start()
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(record.kind, fleet_proto::job::JobKind::Update);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(shell.calls().iter().any(|call| {
-            matches!(
-                call,
-                FakeShellCall::Streaming(command)
-                    if command == &ShellCommand::new("cargo")
-                        .args(["build", "--release"])
-                        .cwd(temp.path())
-            )
-        }));
+        shell
     }
 }

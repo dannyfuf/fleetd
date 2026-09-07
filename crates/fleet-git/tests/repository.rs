@@ -1,104 +1,15 @@
 use std::{
     path::{Path, PathBuf},
-    process::Command,
-    sync::Arc,
     time::Duration,
 };
 
 use fleet_git::{
     CommitOptions, ConflictChoice, DiffSide, FetchRequest, GitError, HunkSelection, MergeOptions,
     MoveDirection, ObjectId, PatchAction, PatchSelection, PullRequest, PushRequest, Ref,
-    Repository, ResetMode, Runner, SnapshotOptions, StashOptions, watch::RepoWatcher,
+    Repository, ResetMode, SnapshotOptions, StashOptions, watch::RepoWatcher,
 };
-use tempfile::TempDir;
-
-struct TestRepo {
-    directory: TempDir,
-    repository: Repository,
-}
-
-impl TestRepo {
-    async fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        git(directory.path(), &["init", "-b", "main"]);
-        git(directory.path(), &["config", "user.name", "Fleet Test"]);
-        git(
-            directory.path(),
-            &["config", "user.email", "fleet@example.test"],
-        );
-        git(directory.path(), &["config", "commit.gpgsign", "false"]);
-        let repository = Repository::discover_with_runner(directory.path(), test_runner())
-            .await
-            .unwrap();
-        Self {
-            directory,
-            repository,
-        }
-    }
-
-    fn path(&self) -> &Path {
-        self.directory.path()
-    }
-
-    fn write(&self, path: &str, content: &str) {
-        let path = self.path().join(path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(path, content).unwrap();
-    }
-
-    fn commit(&self, message: &str) -> ObjectId {
-        git(self.path(), &["add", "-A"]);
-        git(self.path(), &["commit", "-m", message]);
-        ObjectId(
-            git_output(self.path(), &["rev-parse", "HEAD"])
-                .trim()
-                .to_owned(),
-        )
-    }
-}
-
-fn test_runner() -> Arc<Runner> {
-    Arc::new(
-        Runner::default()
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1"),
-    )
-}
-
-fn git(directory: &Path, arguments: &[&str]) {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn git_output(directory: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
+mod support;
+use support::{TestRepo, git, git_output, test_runner};
 
 #[tokio::test]
 async fn snapshot_stage_lines_commit_amend_and_discard() {
@@ -533,7 +444,7 @@ async fn diff_context_widens_and_narrows_every_read() {
     let repo = TestRepo::new().await;
     let body: String = (1..=40).map(|line| format!("line{line}\n")).collect();
     repo.write("wide.txt", &body);
-    let base = repo.commit("base");
+    repo.commit("base");
     repo.write("wide.txt", &body.replace("line20\n", "line20 CHANGED\n"));
 
     let count = |diff: &fleet_git::Diff| diff.files[0].hunks[0].lines.len();
@@ -566,9 +477,9 @@ async fn diff_context_widens_and_narrows_every_read() {
     assert_eq!(count(&wide), 22);
 
     // The commit reads share the same width, so a patch built from a displayed hunk lines up.
-    let head = repo.repository.diff_commit(&base, &[]).await;
-    assert!(head.is_ok());
-    assert_eq!(repo.repository.diff_context(), 10);
+    let changed = repo.commit("changed");
+    let head = repo.repository.diff_commit(&changed, &[]).await.unwrap();
+    assert_eq!(count(&head), 22);
 
     // And it is clamped rather than trusted.
     repo.repository.set_diff_context(u32::MAX);
@@ -787,17 +698,6 @@ async fn reads_commit_diffs_ranges_messages_and_blobs() {
         .unwrap();
     assert_eq!(range.files.len(), 2);
 
-    let message = repo.repository.show_commit_message(&second).await.unwrap();
-    assert!(message.starts_with("second"));
-    assert!(message.contains("longer body"));
-
-    let blob = repo
-        .repository
-        .file_at_ref(&Ref(first.0.clone()), Path::new("one.txt"))
-        .await
-        .unwrap();
-    assert_eq!(blob, b"one\n");
-
     // A branch diff is measured against its merge base with HEAD.
     repo.repository
         .checkout_new_branch("side", Some(&Ref(first.0.clone())))
@@ -852,13 +752,12 @@ async fn reports_a_rebase_conflict_and_supports_abort() {
         .snapshot(SnapshotOptions::default())
         .await
         .unwrap();
-    let fleet_git::OperationState::Rebasing { total, .. } = snapshot.operation else {
+    let fleet_git::OperationState::Rebasing { .. } = snapshot.operation else {
         panic!(
             "expected a rebase in progress, got {:?}",
             snapshot.operation
         );
     };
-    assert!(total.is_none() || total.is_some_and(|total| total >= 1));
     assert!(snapshot.files.iter().any(|file| file.conflict.is_some()));
 
     repo.repository.rebase_abort().await.unwrap();
@@ -984,7 +883,7 @@ async fn tracks_remote_branches_upstreams_and_pushed_state() {
     assert_eq!((upstream.ahead, upstream.behind), (1, 0));
     assert!(!snapshot.reflog.is_empty());
 
-    let remotes = repo.repository.remotes().await.unwrap();
+    let remotes = repo.remotes().await;
     assert_eq!(remotes.len(), 1);
     assert!(remotes[0].fetch_url.is_some());
 

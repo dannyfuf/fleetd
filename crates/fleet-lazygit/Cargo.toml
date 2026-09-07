@@ -3,21 +3,29 @@ name = "fleet-lazygit"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "fleet-lazygit"
 path = "src/main.rs"
 
 [dependencies]
+unicode-segmentation.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
-fleet-git = { path = "../fleet-git" }
-fleet-ui-kit = { path = "../fleet-ui-kit" }
+fleet-git.workspace = true
+fleet-ui-kit.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 similar.workspace = true
 syntect.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 two-face.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

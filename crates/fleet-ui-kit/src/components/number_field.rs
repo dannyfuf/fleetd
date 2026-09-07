@@ -11,7 +11,7 @@
 
 use gpui::{App, Pixels, SharedString, Window, div, prelude::*};
 
-use crate::{components::FocusRing, text::Text, theme::ActiveTheme, tone::Tone};
+use crate::{text::Text, theme::ActiveTheme, tone::Tone};
 
 /// An integer input.
 #[derive(IntoElement)]
@@ -96,13 +96,13 @@ impl NumberField {
     }
 
     /// Whether the current value is inside the range.
-    pub fn is_valid(&self) -> bool {
+    pub fn is_in_range(&self) -> bool {
         self.clamp(self.value) == self.value
     }
 
     /// The rule the value broke, stated exactly.
     pub fn range_message(&self) -> Option<SharedString> {
-        if self.is_valid() {
+        if self.is_in_range() {
             return None;
         }
         let unit = self
@@ -163,7 +163,7 @@ impl RenderOnce for NumberField {
                     .px(theme.space.sm)
                     .rounded(theme.radii.sm)
                     .bg(theme.colors.bg)
-                    .border_1()
+                    .border(theme.metrics.hairline)
                     .border_color(border)
                     .child(Text::data(self.value.to_string()).tone(if valid {
                         Tone::Default
@@ -175,11 +175,7 @@ impl RenderOnce for NumberField {
             )
             .children(message.map(|message| Text::hint(message).tone(Tone::Danger).ellipsize()));
 
-        div()
-            .w_full()
-            .h(theme.metrics.row_h)
-            .when(focused, |el| el.bg(theme.colors.row_selected))
-            .child(FocusRing::cursor_row(focused).child(body))
+        super::control::cursor_row(theme, focused, false, body)
     }
 }
 
@@ -198,7 +194,6 @@ mod tests {
     #[test]
     fn an_out_of_range_value_states_the_rule() {
         let field = NumberField::new(100).range(500, 5_000).unit("ms");
-        assert!(!field.is_valid());
         assert_eq!(
             field.message().as_deref(),
             Some("must be between 500 and 5000 ms")

@@ -6,15 +6,15 @@ use fleet_core::sessions::AgentActivity;
 use fleet_term::TerminalActivity;
 
 /// Output this soon after input is treated as terminal echo or prompt redraw.
-pub const ECHO_WINDOW: Duration = Duration::from_millis(400);
+const ECHO_WINDOW: Duration = Duration::from_millis(400);
 /// A recognized agent becomes idle after this much quiet.
-pub const IDLE_DEBOUNCE: Duration = Duration::from_millis(2_500);
+const IDLE_DEBOUNCE: Duration = Duration::from_millis(2_500);
 /// The daemon samples host activity independently of the configurable status refresh.
-pub const TRACK_INTERVAL: Duration = Duration::from_millis(500);
+pub(super) const TRACK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Stateful, clock-injected activity detector for one terminal.
 #[derive(Debug, Default)]
-pub struct AgentActivityTracker {
+pub(super) struct AgentActivityTracker {
     activity: AgentActivity,
     agent: Option<String>,
     output_bytes_total: Option<u64>,
@@ -23,7 +23,7 @@ pub struct AgentActivityTracker {
 
 impl AgentActivityTracker {
     /// Evaluates one terminal observation and returns only an activity transition.
-    pub fn observe(
+    pub(super) fn observe(
         &mut self,
         now: Instant,
         input: TerminalActivity,
@@ -68,7 +68,7 @@ impl AgentActivityTracker {
     }
 
     /// Applies an authoritative hook signal and resets the quiet-time reference.
-    pub fn set_explicit(
+    pub(super) fn set_explicit(
         &mut self,
         activity: AgentActivity,
         now: Instant,
@@ -85,14 +85,8 @@ impl AgentActivityTracker {
 
     /// Current activity state.
     #[must_use]
-    pub const fn activity(&self) -> AgentActivity {
+    pub(super) const fn activity(&self) -> AgentActivity {
         self.activity
-    }
-
-    /// Current recognized agent name.
-    #[must_use]
-    pub fn agent(&self) -> Option<&str> {
-        self.agent.as_deref()
     }
 }
 

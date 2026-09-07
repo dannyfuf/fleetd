@@ -1,31 +1,15 @@
-//! The Hub's half of the context bar (UX-SPEC §3.1).
-//!
-//! # Who draws the bar
-//!
-//! The 36 px context bar is **persistent chrome**: `docs/APP-CONTRACTS.md` §2 rule 4 gives the
-//! shell sole ownership of it, and [`crate::shell::chrome::context_bar`] already implements
-//! §3.1 in full — the numbered tabs, the 2 px blue active underline, the `+n` overflow chip,
-//! the zero-suppressed status chips of §2.3 in their fixed order, and the daemon dot. A screen
-//! that drew a second bar would double the row.
-//!
-//! What is left of §3.1, and what lives here, is the **keyboard half**: `1`–`9`, `gt` / `gT`
-//! and the `flag` chip's count. Those are Hub actions (`Fleet > Hub` key context), the shell
-//! does not listen for them, and every one of them is a pure function of the context list, so
-//! they are unit-tested here and merely dispatched from [`crate::screens::hub`].
-//!
-//! Zero-suppression is not re-implemented either: [`fleet_ui_kit::Chip`] suppresses a zero
-//! count itself, which is why the chips never need a caller-side `if count > 0`.
+//! Context keyboard navigation. The shell owns context-bar composition.
 
 use fleet_core::{ids::ContextId, model::Context as FleetContext};
 
 /// How many context tabs the bar can address by digit (`1`–`9`, §2.2).
-pub const ADDRESSABLE_TABS: usize = 9;
+const ADDRESSABLE_TABS: usize = 9;
 
 /// The index of the active context, or `0` when nothing is active.
 ///
 /// The bar underlines this tab, and `gt` / `gT` step from it.
 #[must_use]
-pub fn active_index(contexts: &[FleetContext], active: Option<&ContextId>) -> usize {
+fn active_index(contexts: &[FleetContext], active: Option<&ContextId>) -> usize {
     active
         .and_then(|active| contexts.iter().position(|context| &context.id == active))
         .unwrap_or(0)
@@ -61,12 +45,6 @@ pub fn cycle<'a>(
     let current = active_index(contexts, active) as isize;
     let next = (current + delta).rem_euclid(len) as usize;
     contexts.get(next).map(|context| &context.id)
-}
-
-/// How many contexts the `+n` overflow chip stands for.
-#[must_use]
-pub fn overflow(contexts: &[FleetContext]) -> usize {
-    contexts.len().saturating_sub(ADDRESSABLE_TABS)
 }
 
 #[cfg(test)]
@@ -107,7 +85,6 @@ mod tests {
         let contexts = contexts(&refs);
         assert!(context_for_digit(&contexts, 9).is_some());
         assert_eq!(context_for_digit(&contexts, 10), None);
-        assert_eq!(overflow(&contexts), 2);
     }
 
     #[test]
@@ -129,6 +106,5 @@ mod tests {
     fn an_empty_context_list_has_nothing_to_cycle_to() {
         assert_eq!(cycle(&[], None, 1), None);
         assert_eq!(active_index(&[], None), 0);
-        assert_eq!(overflow(&[]), 0);
     }
 }

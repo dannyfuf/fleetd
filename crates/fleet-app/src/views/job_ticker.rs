@@ -1,26 +1,21 @@
-//! The status bar's job ticker, and the rule that decides who owns that slot.
-//!
-//! §2.2 gives the status bar four slots and one arbitration: the **sticky error slot replaces
-//! the ticker when present**. That single sentence is the whole content rule of §3.11's
-//! neighbourhood, and it is the thing a status bar gets wrong if every screen re-derives it.
-//! [`status_slot`] decides it once; [`crate::views::sticky_error`] owns the other half.
+//! Active-job ticker and sticky-error precedence.
 
-use fleet_proto::job::{JobKind, JobRecord, JobStatus};
-use fleet_ui_kit::{JobTicker, Tone};
+use fleet_proto::job::JobRecord;
+use fleet_ui_kit::JobTicker;
 use gpui::{AnyElement, IntoElement, SharedString};
 
 use crate::{
-    shell::{domain_target, job_kind_label, job_target},
-    state::{StickyError, parse_percent, running_jobs},
+    presentation::{active_job_summary, job_kind_label, job_target, parse_percent},
+    state::StickyError,
 };
 
 /// What the ticker says: `⟳ <kind> <target> <pct>` with `+n` when more jobs run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickerContent {
     /// The fixed job-kind slug.
-    pub kind: String,
+    pub kind: SharedString,
     /// The real domain id the job is about — never a synthetic key.
-    pub target: String,
+    pub target: SharedString,
     /// The percent, when the last progress line contains one.
     pub percent: Option<u8>,
     /// How many other jobs are running. Rendered `+n`, zero-suppressed.
@@ -32,16 +27,13 @@ pub struct TickerContent {
 /// "Newest" is by `started_at`, which is the only ordering the wire guarantees; ties keep the
 /// daemon's own order, so the ticker never flickers between two jobs started in one tick.
 #[must_use]
-pub fn ticker_content(jobs: &[JobRecord]) -> Option<TickerContent> {
-    let running = running_jobs(jobs);
-    let newest = running
-        .iter()
-        .max_by(|left, right| left.started_at.cmp(&right.started_at))?;
+fn ticker_content(jobs: &[JobRecord]) -> Option<TickerContent> {
+    let (newest, count) = active_job_summary(jobs)?;
     Some(TickerContent {
-        kind: job_kind_label(&newest.kind).to_owned(),
-        target: job_target(&newest.kind, &newest.target).to_owned(),
+        kind: SharedString::new(job_kind_label(&newest.kind)),
+        target: SharedString::new(job_target(&newest.kind, &newest.target)),
         percent: newest.progress.as_deref().and_then(parse_percent),
-        extra: running.len() - 1,
+        extra: count - 1,
     })
 }
 
@@ -65,45 +57,6 @@ pub fn status_slot(jobs: &[JobRecord], sticky: Option<&StickyError>) -> StatusSl
     }
 }
 
-/// Whether the toast law (§2.7) allows announcing a job outcome as a toast.
-///
-/// The law is *"a toast is allowed only when there is no row and no pill that already shows the
-/// outcome"*, and §2.7's "never a toast" list names *"job succeeded when its row is on screen"*
-/// outright. Two things follow, and both are conditions here:
-///
-/// 1. The Jobs panel must be closed, so the row really is off screen.
-/// 2. The job must be one the **user** started. The daemon's own cadence — PR fetches every
-///    `github.prTtlSeconds`, pool builds, status refreshes, inspects — has no news in it, and
-///    toasting it turned entering the PR screen into two toasts every 90 seconds.
-///
-/// A failure is never a toast: it is sticky (§1.8).
-#[must_use]
-pub fn job_outcome_toast(job: &JobRecord, jobs_panel_open: bool) -> Option<String> {
-    if jobs_panel_open || !matches!(job.status, JobStatus::Succeeded) {
-        return None;
-    }
-    let target = domain_target(&job.target);
-    match &job.kind {
-        JobKind::Clone => Some(format!("Cloned {target} \u{00b7} J")),
-        JobKind::CreateWorktree => Some(format!("Created {target} \u{00b7} J")),
-        JobKind::DeleteRepo | JobKind::DeleteWorktree => {
-            Some(format!("Deleted {target} \u{00b7} J"))
-        }
-        JobKind::Import => Some("Imported from ~/.swarm \u{00b7} J".to_owned()),
-        JobKind::Update => Some("Fleet updated \u{00b7} J".to_owned()),
-        // Background cadence: the ticker and the Jobs panel already say all there is to say.
-        JobKind::PoolBuild
-        | JobKind::PoolRefresh
-        | JobKind::Prune
-        | JobKind::Inspect
-        | JobKind::PostCreateHooks
-        | JobKind::PrFetch
-        | JobKind::RepoFetch
-        | JobKind::RepoDiscovery
-        | JobKind::Custom(_) => None,
-    }
-}
-
 /// Renders the ticker.
 #[must_use]
 pub fn render(content: &TickerContent) -> AnyElement {
@@ -115,27 +68,11 @@ pub fn render(content: &TickerContent) -> AnyElement {
     ticker.into_any_element()
 }
 
-/// The one-line summary a dialog or a quit confirm uses to name in-flight work.
-#[must_use]
-pub fn running_summary(jobs: &[JobRecord]) -> Option<SharedString> {
-    let content = ticker_content(jobs)?;
-    let text = if content.extra == 0 {
-        format!("{} {}", content.kind, content.target)
-    } else {
-        format!("{} {} +{}", content.kind, content.target, content.extra)
-    };
-    Some(SharedString::from(text))
-}
-
-/// The tone of a ticker line. Always amber: in flight is "needs attention", never "done".
-#[must_use]
-pub const fn ticker_tone() -> Tone {
-    Tone::Warning
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::job_outcome_toast;
+    use fleet_proto::job::{JobKind, JobStatus};
 
     fn job(id: &str, status: JobStatus, started: &str, progress: Option<&str>) -> JobRecord {
         JobRecord {
@@ -279,18 +216,5 @@ mod tests {
             job_outcome_toast(&succeeded, false),
             Some("Created acme/widgets#feature-one \u{00b7} J".to_owned())
         );
-    }
-
-    #[test]
-    fn the_running_summary_counts_the_rest() {
-        let jobs = vec![
-            job("job-a", JobStatus::Running, "2026-09-04T12:00:00Z", None),
-            job("job-b", JobStatus::Running, "2026-09-04T12:01:00Z", None),
-        ];
-        assert_eq!(
-            running_summary(&jobs).map(|s| s.to_string()),
-            Some("clone nixos +1".to_owned())
-        );
-        assert_eq!(running_summary(&[]), None);
     }
 }

@@ -18,17 +18,18 @@ FLEET := $(BIN_DIR)/fleet
 FLEETD := $(BIN_DIR)/fleetd
 RUNTIME_ENV := FLEET_HOME="$(FLEET_HOME)" FLEET_DAEMON="$(FLEETD)"
 
-.PHONY: run run-release daemon build check test fmt fmt-check clippy lint ci clean bootstrap doctor help
+.PHONY: run run-release restart daemon build check test test-scripts fmt fmt-check clippy lint ci clean bootstrap doctor help
 
-run: build ## Build, restart fleetd, and open Fleet (ARGS="..." supported)
-	$(RUNTIME_ENV) "$(FLEET)" daemon restart
+run: restart ## Build, restart fleetd, and open Fleet (ARGS="..." supported)
 	$(RUNTIME_ENV) "$(FLEET)" $(ARGS)
 
 run-release: ## Build and run Fleet with the release profile
 	$(MAKE) run RELEASE=1 ARGS="$(ARGS)"
 
-daemon: build ## Restart fleetd from this build and follow its log
+restart: build ## Restart fleetd from this build (run it after changing daemon code)
 	$(RUNTIME_ENV) "$(FLEET)" daemon restart
+
+daemon: restart ## Restart fleetd from this build and follow its log
 	@echo "Following $(FLEET_HOME)/logs/fleetd.log (Ctrl-C stops following logs)."
 	tail -n 100 -F "$(FLEET_HOME)/logs/fleetd.log"
 
@@ -36,10 +37,17 @@ build: ## Build the workspace (set RELEASE=1 for release)
 	cargo build --workspace $(CARGO_PROFILE_FLAG)
 
 check: ## Check the workspace
-	cargo check --workspace
+	cargo check --workspace --all-targets
 
 test: ## Run workspace tests
 	cargo test --workspace
+
+test-scripts: ## Run platform-specific shell-script tests
+ifeq ($(shell uname -s),Darwin)
+	./scripts/tests/bootstrap-zig-test.sh
+else
+	@echo "Skipping script tests: bootstrap-zig is only supported on Darwin."
+endif
 
 fmt: ## Format all Rust code
 	cargo fmt --all
@@ -52,7 +60,7 @@ clippy: ## Run Clippy with warnings denied
 
 lint: fmt-check clippy ## Run formatting and Clippy checks
 
-ci: lint test ## Run lint and test targets
+ci: lint test test-scripts ## Run lint and test targets
 
 clean: ## Remove Cargo build artifacts
 	cargo clean

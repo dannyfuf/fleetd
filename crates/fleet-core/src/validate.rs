@@ -25,53 +25,25 @@ pub enum ValidationError {
     },
 }
 
-impl ValidationError {
-    fn new(field: &'static str, value: &str, reason: &'static str) -> Self {
-        match field {
-            "slug" => Self::Slug {
-                value: value.to_owned(),
-                reason,
-            },
-            _ => Self::Branch {
-                value: value.to_owned(),
-                reason,
-            },
-        }
-    }
-}
-
 /// Validates that a slug is canonical and safe as a worktree path component.
 pub fn validate_slug(slug: &str) -> Result<(), ValidationError> {
     if slug.is_empty() {
-        return Err(ValidationError::new("slug", slug, "must not be empty"));
+        return Err(slug_error(slug, "must not be empty"));
     }
     if matches!(slug, "." | "..") {
-        return Err(ValidationError::new(
-            "slug",
-            slug,
-            "must not be `.` or `..`",
-        ));
+        return Err(slug_error(slug, "must not be `.` or `..`"));
     }
     if slug.starts_with(".hot") {
-        return Err(ValidationError::new(
-            "slug",
-            slug,
-            "the `.hot` prefix is reserved",
-        ));
+        return Err(slug_error(slug, "the `.hot` prefix is reserved"));
     }
     if !matches!(slug.as_bytes().first(), Some(b'a'..=b'z' | b'0'..=b'9')) {
-        return Err(ValidationError::new(
-            "slug",
+        return Err(slug_error(
             slug,
             "must start with an ASCII lowercase letter or digit",
         ));
     }
     if slugify(slug) != slug {
-        return Err(ValidationError::new(
-            "slug",
-            slug,
-            "must already be in canonical slug form",
-        ));
+        return Err(slug_error(slug, "must already be in canonical slug form"));
     }
     Ok(())
 }
@@ -116,8 +88,18 @@ pub fn validate_branch(branch: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn slug_error(value: &str, reason: &'static str) -> ValidationError {
+    ValidationError::Slug {
+        value: value.to_owned(),
+        reason,
+    }
+}
+
 fn branch_error(value: &str, reason: &'static str) -> ValidationError {
-    ValidationError::new("branch", value, reason)
+    ValidationError::Branch {
+        value: value.to_owned(),
+        reason,
+    }
 }
 
 #[cfg(test)]

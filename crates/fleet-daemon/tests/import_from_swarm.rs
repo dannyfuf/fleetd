@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -6,12 +7,18 @@ use std::sync::{
 use async_trait::async_trait;
 use fleet_daemon::{
     DaemonError, DaemonResult,
+    adapters::{Adapters, files::Files},
     jobs::JobManager,
-    services::import::{Import, ImportNotifier},
+    server::BroadcastBus,
+    services::{
+        Services,
+        import::{Import, ImportNotifier},
+    },
     stores::{config::ConfigStore, state::StateStore},
-    testing::fakes::{FakeFiles, FixedClock},
+    testing::fakes::{FakeFiles, FakeFilesCall, FixedClock},
 };
 use fleet_proto::job::{JobRecord, JobStatus};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 struct CountingNotifier(AtomicUsize);
@@ -173,6 +180,288 @@ async fn import_validates_and_preserves_legacy_clone_directories() {
     assert_eq!(imported_state.repos.len(), 1);
     assert_eq!(imported_state.worktrees.len(), 1);
     assert_eq!(notifier.0.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn partial_commit_recovers_both_or_neither() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet_home = temp.path().join(".fleet");
+    let swarm_home = temp.path().join(".swarm");
+    let files = Arc::new(FakeFiles::new(
+        fleet_home.join("trash"),
+        vec![fleet_home.join("repos"), fleet_home.join("worktrees")],
+    ));
+    files.insert_text(
+        swarm_home.join("config.json"),
+        serde_json::json!({"version": 1, "hotPoolSize": 3}).to_string(),
+    );
+    let imported_state = serde_json::from_value::<fleet_core::state::State>(serde_json::json!({
+        "version": 1,
+        "contexts": [{
+            "id": "team",
+            "name": "Team",
+            "owners": [],
+            "createdAt": "2026-09-06T00:00:00Z"
+        }],
+        "repos": [],
+        "clones": [],
+        "worktrees": [],
+        "activeContextId": "team"
+    }))
+    .unwrap();
+    files.insert_text(
+        swarm_home.join("state.json"),
+        serde_json::to_string(&imported_state).unwrap(),
+    );
+    let config = Arc::new(ConfigStore::new(&fleet_home, files.clone()));
+    config.load().await.unwrap();
+    let original_config = files.text(config.path()).unwrap();
+    let clock = Arc::new(FixedClock::new(chrono::Utc::now()));
+    let state = Arc::new(StateStore::new(&fleet_home, files.clone(), clock.clone()));
+    let jobs = Arc::new(JobManager::with_clock(&fleet_home, clock));
+    let importer = Import::new(
+        &fleet_home,
+        &swarm_home,
+        config.clone(),
+        state.clone(),
+        jobs.clone(),
+        files.clone(),
+    );
+    let mut state_text = serde_json::to_string_pretty(&imported_state).unwrap();
+    state_text.push('\n');
+    files.fail_next(
+        FakeFilesCall::Write(state.path().to_path_buf(), state_text),
+        io::ErrorKind::Other,
+    );
+
+    let failed = importer.start().await.unwrap();
+    assert!(matches!(
+        wait_finished(&jobs, &failed).await.status,
+        JobStatus::Failed { .. }
+    ));
+    assert_eq!(
+        files.text(config.path()).as_deref(),
+        Some(original_config.as_str())
+    );
+    assert!(!files.exists(state.path()));
+    assert!(!files.exists(&fleet_home.join("import-transaction.json")));
+
+    let retried = importer.start().await.unwrap();
+    assert_eq!(
+        wait_finished(&jobs, &retried).await.status,
+        JobStatus::Succeeded
+    );
+    assert_eq!(config.load().await.unwrap().hot_pool_size, 3);
+    assert_eq!(state.load().await.unwrap(), imported_state);
+}
+
+#[tokio::test]
+async fn import_rearms_runtime_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet_home = temp.path().join(".fleet");
+    let swarm_home = temp.path().join(".swarm");
+    let old_repos = fleet_home.join("repos");
+    let old_worktrees = fleet_home.join("worktrees");
+    let new_repos = temp.path().join("imported-repos");
+    let new_worktrees = temp.path().join("imported-worktrees");
+    let files = Arc::new(FakeFiles::new(
+        fleet_home.join("trash"),
+        vec![old_repos.clone(), old_worktrees],
+    ));
+    files.insert_text(
+        swarm_home.join("config.json"),
+        serde_json::json!({
+            "version": 1,
+            "reposDir": new_repos,
+            "worktreesDir": new_worktrees,
+            "jobs": {"keepFinishedFor": 0}
+        })
+        .to_string(),
+    );
+    files.insert_text(
+        swarm_home.join("state.json"),
+        serde_json::to_string(&fleet_core::state::default_state()).unwrap(),
+    );
+    let clock = Arc::new(FixedClock::new(chrono::Utc::now()));
+    let config = Arc::new(ConfigStore::new(&fleet_home, files.clone()));
+    let state = Arc::new(StateStore::new(&fleet_home, files.clone(), clock.clone()));
+    let jobs = Arc::new(JobManager::with_clock(&fleet_home, clock.clone()));
+    let stale = jobs.submit(
+        fleet_proto::job::JobKind::Custom("stale".into()),
+        "old-policy",
+        "Old completed job",
+        false,
+        false,
+        |_| async { Ok(()) },
+    );
+    jobs.wait(&stale).await.unwrap();
+    clock.set(chrono::Utc::now() + chrono::Duration::seconds(1));
+    let importer = Import::new(
+        &fleet_home,
+        &swarm_home,
+        config,
+        state,
+        jobs.clone(),
+        files.clone(),
+    );
+
+    let record = importer.start().await.unwrap();
+    assert_eq!(
+        wait_finished(&jobs, &record).await.status,
+        JobStatus::Succeeded
+    );
+
+    assert!(jobs.record(&stale).is_none());
+    assert!(
+        files
+            .guard_strict_descendant(&new_repos.join("owner/repo"))
+            .is_err()
+    );
+    files.create_dir_all(&new_repos.join("owner")).unwrap();
+    files
+        .create_dir_all(&new_worktrees.join("owner/repo"))
+        .unwrap();
+    assert!(
+        files
+            .guard_strict_descendant(&new_repos.join("owner/repo"))
+            .is_ok()
+    );
+    assert!(
+        files
+            .guard_strict_descendant(&new_worktrees.join("owner/repo/main"))
+            .is_ok()
+    );
+    assert!(
+        files
+            .guard_strict_descendant(&old_repos.join("owner/repo"))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn committed_import_recovery_never_rolls_config_back_after_state_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet_home = temp.path().join(".fleet");
+    let swarm_home = temp.path().join(".swarm");
+    let files = Arc::new(FakeFiles::new(
+        fleet_home.join("trash"),
+        vec![fleet_home.join("repos"), fleet_home.join("worktrees")],
+    ));
+    let clock = Arc::new(FixedClock::new(chrono::Utc::now()));
+    let config = Arc::new(ConfigStore::new(&fleet_home, files.clone()));
+    let original_config = config.load().await.unwrap();
+    let original_text = files.text(config.path()).unwrap();
+    let mut imported_config = original_config;
+    imported_config.hot_pool_size = 7;
+    let state = Arc::new(StateStore::new(&fleet_home, files.clone(), clock.clone()));
+    let mut imported_state = fleet_core::state::default_state();
+    imported_state.contexts.push(fleet_core::model::Context {
+        id: "team".parse().unwrap(),
+        name: "Team".into(),
+        owners: Vec::new(),
+        created_at: "2026-09-06T00:00:00Z".into(),
+    });
+    state.save(imported_state.clone()).await.unwrap();
+    state
+        .transaction(|state| {
+            state.contexts[0].name = "Changed after restart".into();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    files.insert_text(
+        fleet_home.join("import-transaction.json"),
+        serde_json::json!({
+            "originalConfig": original_text,
+            "importedConfig": imported_config,
+            "importedState": imported_state,
+            "stateCommitted": true
+        })
+        .to_string(),
+    );
+    let jobs = Arc::new(JobManager::with_clock(&fleet_home, clock));
+    let importer = Import::new(
+        &fleet_home,
+        swarm_home,
+        config.clone(),
+        state.clone(),
+        jobs,
+        files.clone(),
+    );
+
+    assert!(matches!(
+        importer.start().await,
+        Err(DaemonError::Conflict(_))
+    ));
+
+    assert_eq!(config.load().await.unwrap().hot_pool_size, 7);
+    assert_eq!(
+        state.load().await.unwrap().contexts[0].name,
+        "Changed after restart"
+    );
+    assert!(!files.exists(&fleet_home.join("import-transaction.json")));
+}
+
+#[tokio::test]
+async fn startup_replays_a_half_applied_import_without_an_import_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let fleet_home = temp.path().join(".fleet");
+    let files = Arc::new(FakeFiles::new(
+        fleet_home.join("trash"),
+        vec![fleet_home.join("repos"), fleet_home.join("worktrees")],
+    ));
+    let clock = Arc::new(FixedClock::new(chrono::Utc::now()));
+    let config = Arc::new(ConfigStore::new(&fleet_home, files.clone()));
+    let original_config = config.load().await.unwrap();
+    let original_text = files.text(config.path()).unwrap();
+    let mut imported_config = original_config.clone();
+    imported_config.hot_pool_size = 9;
+    config.save(imported_config.clone()).await.unwrap();
+    let state = Arc::new(StateStore::new(&fleet_home, files.clone(), clock));
+    let imported_state = serde_json::from_value::<fleet_core::state::State>(serde_json::json!({
+        "version": 1,
+        "contexts": [{
+            "id": "team", "name": "Team", "owners": [],
+            "createdAt": "2026-09-06T00:00:00Z"
+        }],
+        "repos": [], "clones": [], "worktrees": [], "activeContextId": "team"
+    }))
+    .unwrap();
+    state
+        .save(fleet_core::state::default_state())
+        .await
+        .unwrap();
+    files.insert_text(
+        fleet_home.join("import-transaction.json"),
+        serde_json::json!({
+            "originalConfig": original_text,
+            "importedConfig": imported_config,
+            "importedState": imported_state,
+            "stateCommitted": false
+        })
+        .to_string(),
+    );
+    let services = Arc::new(Services::new(
+        &fleet_home,
+        config.clone(),
+        state.clone(),
+        Arc::new(JobManager::new(&fleet_home)),
+        Adapters::system(files.clone()),
+    ));
+    let shutdown = CancellationToken::new();
+    let tasks = services
+        .start_periodic_tasks(BroadcastBus::default(), shutdown.clone())
+        .await
+        .unwrap();
+    shutdown.cancel();
+    tasks.join().await;
+
+    assert_eq!(config.load().await.unwrap(), original_config);
+    assert_eq!(
+        state.load().await.unwrap(),
+        fleet_core::state::default_state()
+    );
+    assert!(!files.exists(&fleet_home.join("import-transaction.json")));
 }
 
 async fn wait_finished(jobs: &JobManager, initial: &JobRecord) -> JobRecord {

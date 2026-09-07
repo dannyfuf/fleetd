@@ -69,6 +69,9 @@ pub trait VtEngine: Send {
     /// Takes changed rows, or the complete viewport when `full` is true.
     fn take_frame(&mut self, full: bool) -> FrameUpdate;
 
+    /// Tries to take changed rows without hiding backend snapshot failures.
+    fn try_take_frame(&mut self, full: bool) -> Result<FrameUpdate, EngineError>;
+
     /// Returns the current viewport-relative cursor state.
     fn cursor(&self) -> CursorState;
 
@@ -84,8 +87,14 @@ pub trait VtEngine: Send {
     /// Routes wheel input using live terminal modes and Ghostty encoders.
     fn wheel(&mut self, event: &WheelEvent) -> WheelAction;
 
+    /// Routes wheel input while exposing event-construction and encoding failures.
+    fn try_wheel(&mut self, event: &WheelEvent) -> Result<WheelAction, EngineError>;
+
     /// Performs one bounded incremental history-compression step while idle.
     fn compress_idle(&mut self);
+
+    /// Tries one history-compression step without treating failure as completion.
+    fn try_compress_idle(&mut self) -> Result<(), EngineError>;
 
     /// Returns history bounds for coalescing viewport commands.
     fn viewport(&self) -> ViewportInfo;
@@ -99,11 +108,20 @@ pub trait VtEngine: Send {
     /// Encodes a semantic keyboard event according to current terminal modes.
     fn encode_key(&mut self, event: &KeyEvent) -> Vec<u8>;
 
+    /// Encodes a keyboard event while exposing construction and backend failures.
+    fn try_encode_key(&mut self, event: &KeyEvent) -> Result<Vec<u8>, EngineError>;
+
     /// Encodes a semantic mouse event according to current reporting modes.
     fn encode_mouse(&mut self, event: &MouseEvent) -> Vec<u8>;
 
+    /// Encodes a mouse event while exposing construction and backend failures.
+    fn try_encode_mouse(&mut self, event: &MouseEvent) -> Result<Vec<u8>, EngineError>;
+
     /// Encodes pasted text, using bracketed paste when enabled.
     fn encode_paste(&self, text: &str) -> Vec<u8>;
+
+    /// Encodes pasted text while exposing backend failures.
+    fn try_encode_paste(&self, text: &str) -> Result<Vec<u8>, EngineError>;
 
     /// Drains side effects collected since the preceding call.
     fn take_events(&mut self) -> Vec<EngineEvent>;

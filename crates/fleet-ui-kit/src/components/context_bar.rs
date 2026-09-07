@@ -22,18 +22,15 @@
 //! ## Keyboard
 //!
 //! `1`–`9` jump, `gt` / `gT` cycle, `N` new, `E` edit. The **screen** binds them, not the bar:
-//! the digits are visible here so they can be pressed, but a `RenderOnce` owns no key context.
+//! the digits are visible here to explain the screen's bindings.
 
-use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*, px, transparent_black};
+use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*, transparent_black};
 
 use crate::{
     components::{DaemonDot, DaemonState},
     text::Text,
     theme::ActiveTheme,
 };
-
-/// The macOS inset that clears the traffic lights (12–72 px of the unified titlebar).
-pub const TRAFFIC_LIGHT_INSET: Pixels = px(84.0);
 
 /// One context tab: a name and the digit that jumps to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,14 +51,6 @@ impl ContextTab {
                 .then(|| SharedString::from(index.to_string())),
         }
     }
-
-    /// A tab with no digit.
-    pub fn unnumbered(label: impl Into<SharedString>) -> Self {
-        Self {
-            label: label.into(),
-            index_hint: None,
-        }
-    }
 }
 
 /// The top bar.
@@ -73,7 +62,7 @@ pub struct ContextBar {
     chips: Vec<AnyElement>,
     daemon: DaemonState,
     daemon_label: Option<SharedString>,
-    leading_inset: Pixels,
+    leading_inset: Option<Pixels>,
     empty_message: Option<(SharedString, SharedString)>,
 }
 
@@ -87,7 +76,7 @@ impl ContextBar {
             chips: Vec::new(),
             daemon: DaemonState::Healthy,
             daemon_label: None,
-            leading_inset: TRAFFIC_LIGHT_INSET,
+            leading_inset: None,
             empty_message: None,
         }
     }
@@ -126,7 +115,7 @@ impl ContextBar {
 
     /// Left inset. 84 px on macOS to clear the traffic lights; 12 px elsewhere.
     pub fn leading_inset(mut self, inset: Pixels) -> Self {
-        self.leading_inset = inset;
+        self.leading_inset = Some(inset);
         self
     }
 
@@ -207,11 +196,13 @@ impl RenderOnce for ContextBar {
             .items_center()
             .justify_between()
             .size_full()
-            .pl(self.leading_inset)
+            .pl(self
+                .leading_inset
+                .unwrap_or(theme.metrics.traffic_light_inset))
             .pr(theme.space.md)
             .gap(theme.space.md)
             .bg(theme.colors.bg)
-            .border_b(px(1.0))
+            .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(left)
             .child(

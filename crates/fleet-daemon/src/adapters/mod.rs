@@ -6,10 +6,10 @@ pub mod clock;
 pub mod files;
 pub mod git;
 pub mod github;
+pub mod logs;
 pub mod process;
 pub mod shell;
 
-use clock::{Clock, SystemClock};
 use files::Files;
 use git::{Git, ShellGit};
 use github::{GhCli, Github};
@@ -29,31 +29,9 @@ pub struct Adapters {
     pub files: Arc<dyn Files>,
     /// General external-command boundary.
     pub shell: Arc<dyn Shell>,
-    /// Wall-clock boundary.
-    pub clock: Arc<dyn Clock>,
 }
 
 impl Adapters {
-    /// Creates a bundle from independently supplied adapter implementations.
-    #[must_use]
-    pub fn new(
-        git: Arc<dyn Git>,
-        github: Arc<dyn Github>,
-        process: Arc<dyn Process>,
-        files: Arc<dyn Files>,
-        shell: Arc<dyn Shell>,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
-        Self {
-            git,
-            github,
-            process,
-            files,
-            shell,
-            clock,
-        }
-    }
-
     /// Creates the production command adapters around a configured filesystem boundary.
     #[must_use]
     pub fn system(files: Arc<dyn Files>) -> Self {
@@ -64,7 +42,6 @@ impl Adapters {
             process: Arc::new(RealProcess::new(Arc::clone(&shell))),
             files,
             shell,
-            clock: Arc::new(SystemClock),
         }
     }
 }

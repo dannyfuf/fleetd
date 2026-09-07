@@ -27,13 +27,13 @@ use similar::{Algorithm, ChangeTag, TextDiff};
 /// How many lines a block may hold and still be paired by index. Zed's cap
 /// (`buffer_diff.rs:20`): past a handful of lines, index pairing stops being *correct* often
 /// enough to be worth drawing.
-pub const MAX_BLOCK_LINES: usize = 5;
+pub(crate) const MAX_BLOCK_LINES: usize = 5;
 
 /// How long a line may be and still be word-diffed. Zed's `MAX_WORD_DIFF_LEN`.
-pub const MAX_LINE_LEN: usize = 512;
+pub(crate) const MAX_LINE_LEN: usize = 512;
 
 /// How similar two lines must be before their words are compared at all.
-pub const MIN_RATIO: f32 = 0.5;
+pub(crate) const MIN_RATIO: f32 = 0.5;
 
 /// The wall-clock budget handed to `similar`.
 ///
@@ -41,45 +41,40 @@ pub const MIN_RATIO: f32 = 0.5;
 /// thirty-frame stall, so every diff started here is configured with an explicit
 /// [`similar::TextDiffConfig::timeout`] instead. Past it the algorithm returns a coarser but
 /// still correct answer.
-pub const DEADLINE: Duration = Duration::from_millis(10);
+pub(crate) const DEADLINE: Duration = Duration::from_millis(10);
 
 /// How many tokens one side may have before word diffing is skipped. A minified line reaches
 /// this long before it reaches [`MAX_LINE_LEN`].
-pub const MAX_TOKENS: usize = 400;
+pub(crate) const MAX_TOKENS: usize = 400;
 
 /// One removed run paired with the added run that immediately follows it.
 ///
 /// Indices are into [`Hunk::lines`], so they are the same coordinates the staging selection
 /// uses.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ChangeBlock {
+pub(crate) struct ChangeBlock {
     /// The removed lines, in order.
-    pub removed: Vec<usize>,
+    pub(crate) removed: Vec<usize>,
     /// The added lines, in order.
-    pub added: Vec<usize>,
+    pub(crate) added: Vec<usize>,
 }
 
 impl ChangeBlock {
     /// The index pairs this block contributes: `removed[i]` with `added[i]`.
-    #[must_use]
-    pub fn pairs(&self) -> Vec<(usize, usize)> {
-        self.removed
-            .iter()
-            .copied()
-            .zip(self.added.iter().copied())
-            .collect()
+    pub(crate) fn pairs(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.removed.iter().copied().zip(self.added.iter().copied())
     }
 
     /// Whether the block is small enough for index pairing to be trustworthy.
     #[must_use]
-    pub fn pairable(&self) -> bool {
+    pub(crate) fn pairable(&self) -> bool {
         self.removed.len().max(self.added.len()) <= MAX_BLOCK_LINES
     }
 }
 
 /// Groups a hunk's lines into removed/added blocks.
 #[must_use]
-pub fn change_blocks(hunk: &Hunk) -> Vec<ChangeBlock> {
+pub(crate) fn change_blocks(hunk: &Hunk) -> Vec<ChangeBlock> {
     let mut blocks: Vec<ChangeBlock> = Vec::new();
     let mut current = ChangeBlock::default();
     for (index, line) in hunk.lines.iter().enumerate() {
@@ -107,7 +102,7 @@ pub fn change_blocks(hunk: &Hunk) -> Vec<ChangeBlock> {
 
 /// The changed-word spans of a paired line: byte ranges into the removed line, then into the
 /// added one.
-pub type WordSpans = (Vec<Range<usize>>, Vec<Range<usize>>);
+pub(crate) type WordSpans = (Vec<Range<usize>>, Vec<Range<usize>>);
 
 /// The changed words of one paired removed/added line, as byte ranges into each line's text.
 ///
@@ -115,7 +110,7 @@ pub type WordSpans = (Vec<Range<usize>>, Vec<Range<usize>>);
 /// anything, or when every word changed — the row tint already says "this whole line differs",
 /// and marking it twice is noise.
 #[must_use]
-pub fn word_spans(old: &str, new: &str) -> Option<WordSpans> {
+pub(crate) fn word_spans(old: &str, new: &str) -> Option<WordSpans> {
     if old == new || old.len() > MAX_LINE_LEN || new.len() > MAX_LINE_LEN {
         return None;
     }
@@ -170,7 +165,7 @@ pub fn word_spans(old: &str, new: &str) -> Option<WordSpans> {
 /// and mark the whole call changed; unicode word segmentation folds `foo.bar` into one word for
 /// the same reason it folds `e.g.`. Neither is right for code.
 #[must_use]
-pub fn tokenize(text: &str) -> Vec<&str> {
+pub(crate) fn tokenize(text: &str) -> Vec<&str> {
     #[derive(PartialEq, Eq, Clone, Copy)]
     enum Kind {
         Word,
@@ -275,7 +270,7 @@ mod tests {
             "diff --git a/a b/a\n",
             "--- a/a\n",
             "+++ b/a\n",
-            "@@ -1,6 +1,6 @@\n",
+            "@@ -1,5 +1,4 @@\n",
             " keep\n",
             "-one\n",
             "-two\n",
@@ -288,10 +283,10 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].removed, vec![1, 2]);
         assert_eq!(blocks[0].added, vec![3, 4]);
-        assert_eq!(blocks[0].pairs(), vec![(1, 3), (2, 4)]);
+        assert_eq!(blocks[0].pairs().collect::<Vec<_>>(), vec![(1, 3), (2, 4)]);
         assert_eq!(blocks[1].removed, vec![6]);
         assert!(blocks[1].added.is_empty());
-        assert!(blocks[1].pairs().is_empty());
+        assert!(blocks[1].pairs().next().is_none());
         assert!(blocks[0].pairable());
     }
 
@@ -301,7 +296,7 @@ mod tests {
             "diff --git a/a b/a\n",
             "--- a/a\n",
             "+++ b/a\n",
-            "@@ -1,3 +1,3 @@\n",
+            "@@ -1,2 +1,2 @@\n",
             "-one\n",
             "+ONE\n",
             "-two\n",
@@ -309,8 +304,8 @@ mod tests {
         ));
         let blocks = change_blocks(&hunk);
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].pairs(), vec![(0, 1)]);
-        assert_eq!(blocks[1].pairs(), vec![(2, 3)]);
+        assert_eq!(blocks[0].pairs().collect::<Vec<_>>(), vec![(0, 1)]);
+        assert_eq!(blocks[1].pairs().collect::<Vec<_>>(), vec![(2, 3)]);
     }
 
     #[test]

@@ -158,7 +158,7 @@ pub mod branches {
             UpstreamMenu,
             /// `T` — create a tag at the selected branch.
             Tag,
-            /// `enter` — show the branch's diff in the main panel.
+            /// Show the branch's commits in the main panel.
             Enter,
         ]
     );
@@ -171,7 +171,7 @@ pub mod remotes {
     actions!(
         remotes,
         [
-            /// `enter` — list the remote's branches, or show a branch's diff.
+            /// List the remote's branches, or show a branch's commits.
             Enter,
             /// `space` — check out a local tracking branch for the selected remote branch.
             Checkout,
@@ -370,9 +370,9 @@ pub mod prompt {
             Left,
             /// `right` — move the caret right.
             Right,
-            /// `ctrl-a` / `home` — move the caret to the start.
+            /// `ctrl-a` — move the caret to the start.
             Home,
-            /// `ctrl-e` / `end` — move the caret to the end.
+            /// `ctrl-e` — move the caret to the end.
             End,
             /// `cmd-v` / `ctrl-v` — paste the clipboard.
             Paste,

@@ -17,8 +17,15 @@ use fleet_daemon::{
     services::Services,
     stores::{config::ConfigStore, state::StateStore},
 };
-use fleet_proto::{event::Event, request::RequestBody, response::ResponseBody};
-use tokio_util::sync::CancellationToken;
+use fleet_proto::{
+    PROTOCOL_VERSION,
+    codec::FleetCodec,
+    event::{Event, EventKind},
+    request::{Request, RequestBody},
+    response::{Response, ResponseBody},
+};
+use futures_util::{SinkExt, StreamExt};
+use tokio_util::{codec::Framed, sync::CancellationToken};
 
 #[tokio::test]
 async fn server_snapshot_requests_are_coalesced() {
@@ -153,6 +160,159 @@ async fn server_pid_guard_rejects_a_second_instance_even_without_socket_path() {
     )
     .await;
     assert!(matches!(second, Err(DaemonError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn simultaneous_binds_never_unlink_winner() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let home = temp.path().join("fleet");
+    let services = services(&home);
+    let first = Listener::bind(
+        &home,
+        Arc::clone(&services),
+        BroadcastBus::default(),
+        CancellationToken::new(),
+    );
+    let second = Listener::bind(
+        &home,
+        services,
+        BroadcastBus::default(),
+        CancellationToken::new(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let winner = match (first, second) {
+        (Ok(winner), Err(DaemonError::Conflict(_)))
+        | (Err(DaemonError::Conflict(_)), Ok(winner)) => winner,
+        _ => panic!("expected exactly one bind winner"),
+    };
+    let socket = winner.socket_path().to_path_buf();
+    assert!(socket.exists());
+
+    std::fs::remove_file(&socket).expect("unlink winner pathname");
+    let replacement = std::os::unix::net::UnixListener::bind(&socket)
+        .expect("bind replacement socket at same pathname");
+    drop(winner);
+    assert!(socket.exists(), "old owner removed replacement socket");
+    drop(replacement);
+    std::fs::remove_file(socket).expect("remove replacement socket");
+}
+
+#[tokio::test]
+async fn socket_session_mutations_publish_one_transition() {
+    for separate_bus in [false, true] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let home = temp.path().join("fleet");
+        let events = BroadcastBus::default();
+        let (services, session_id, terminal) = services_with_session(&home, events.clone()).await;
+        let shutdown = CancellationToken::new();
+        let _cancel_on_drop = shutdown.clone().drop_guard();
+        let listener_events = if separate_bus {
+            BroadcastBus::default()
+        } else {
+            events
+        };
+        let listener = Listener::bind(&home, services.clone(), listener_events, shutdown.clone())
+            .await
+            .expect("bind");
+        let socket = listener.socket_path().to_path_buf();
+        let task = tokio::spawn(listener.run());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let stream = tokio::net::UnixStream::connect(socket)
+                .await
+                .expect("connect");
+            let mut client = Framed::new(stream, FleetCodec::<Request, serde_json::Value>::new());
+            for (id, body) in [
+                (
+                    1,
+                    RequestBody::Hello {
+                        protocol: PROTOCOL_VERSION,
+                        client: "event-test".into(),
+                    },
+                ),
+                (
+                    2,
+                    RequestBody::Subscribe {
+                        events: vec![EventKind::SessionChanged],
+                    },
+                ),
+            ] {
+                client
+                    .send(Request { id, body })
+                    .await
+                    .expect("send setup request");
+                let value = client
+                    .next()
+                    .await
+                    .expect("setup response")
+                    .expect("decode");
+                let response: Response = serde_json::from_value(value).expect("response envelope");
+                assert_eq!(response.id, id);
+                assert!(response.result.is_ok());
+            }
+            client
+                .send(Request {
+                    id: 3,
+                    body: RequestBody::RenameTerminal {
+                        terminal,
+                        name: "renamed".into(),
+                    },
+                })
+                .await
+                .expect("rename");
+            let mut transitions = Vec::new();
+            loop {
+                let value = client
+                    .next()
+                    .await
+                    .expect("rename response/event")
+                    .expect("decode");
+                if value.get("id").is_some() {
+                    let response: Response = serde_json::from_value(value).expect("response");
+                    assert_eq!(response.id, 3);
+                    assert!(response.result.is_ok());
+                    break;
+                }
+                transitions.push(serde_json::from_value::<Event>(value).expect("event"));
+            }
+            while let Ok(Some(value)) =
+                tokio::time::timeout(Duration::from_millis(150), client.next()).await
+            {
+                transitions
+                    .push(serde_json::from_value::<Event>(value.expect("decode")).expect("event"));
+            }
+            assert_eq!(
+                transitions.len(),
+                1,
+                "one mutation must publish one session transition"
+            );
+            let Event::SessionChanged(session) = &transitions[0] else {
+                panic!("session transition");
+            };
+            assert_eq!(session.id, session_id);
+            assert_eq!(
+                session
+                    .terminals
+                    .iter()
+                    .find(|entry| entry.id == terminal)
+                    .expect("terminal")
+                    .name,
+                "renamed"
+            );
+        })
+        .await
+        .expect("socket scenario deadline");
+        services
+            .sessions
+            .kill(session_id)
+            .await
+            .expect("stop session");
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("listener deadline")
+            .expect("listener task")
+            .expect("listener shutdown");
+    }
 }
 
 fn services(home: &std::path::Path) -> Arc<Services> {

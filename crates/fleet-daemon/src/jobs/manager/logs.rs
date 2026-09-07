@@ -1,0 +1,70 @@
+//! Buffered progress logs and bounded tail reads.
+
+use super::*;
+
+impl JobManager {
+    /// Reads at most the last `lines` lines from a job's persistent log.
+    pub async fn tail(&self, id: &JobId, lines: usize) -> DaemonResult<Vec<String>> {
+        let path = PathBuf::from(&lock(&self.inner.state).job(id)?.record.log_path);
+        self.flush_log(id)?;
+        tokio::task::spawn_blocking(move || {
+            crate::adapters::logs::tail(&path, lines).map_err(|error| DaemonError::fs(&path, error))
+        })
+        .await
+        .map_err(|error| DaemonError::Join(error.to_string()))?
+    }
+
+    /// Returns the persistent log path for a job identifier.
+    #[must_use]
+    pub fn log_path(&self, id: &JobId) -> PathBuf {
+        self.inner.logs_dir.join(format!("{id}.log"))
+    }
+
+    pub(crate) fn record_progress(&self, id: &JobId, line: String) -> DaemonResult<()> {
+        let mut state = lock(&self.inner.state);
+        let job = state.job_mut(id)?;
+        self.write_log(job, Some(&line))?;
+        if job.record.progress.as_ref() != Some(&line) {
+            job.record.progress = Some(line);
+            let _receivers = self.inner.updates.send(job.record.clone());
+        }
+        Ok(())
+    }
+
+    fn write_log(&self, job: &mut ManagedJob, line: Option<&str>) -> DaemonResult<()> {
+        let path = std::path::Path::new(&job.record.log_path);
+        let file = match &mut job.log {
+            Some(file) => file,
+            slot @ None => {
+                std::fs::create_dir_all(&self.inner.logs_dir)
+                    .map_err(|error| DaemonError::fs(&self.inner.logs_dir, error))?;
+                let file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|error| DaemonError::fs(path, error))?;
+                slot.insert(BufWriter::new(file))
+            }
+        };
+        if let Some(line) = line {
+            writeln!(file, "{line}").map_err(|error| DaemonError::fs(path, error))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn append_log_line(&self, id: &JobId, line: Option<&str>) -> DaemonResult<()> {
+        let mut state = lock(&self.inner.state);
+        let job = state.job_mut(id)?;
+        self.write_log(job, line)
+    }
+
+    pub(crate) fn flush_log(&self, id: &JobId) -> DaemonResult<()> {
+        let mut state = lock(&self.inner.state);
+        let job = state.job_mut(id)?;
+        if let Some(log) = &mut job.log {
+            log.flush()
+                .map_err(|error| DaemonError::fs(&job.record.log_path, error))?;
+        }
+        Ok(())
+    }
+}

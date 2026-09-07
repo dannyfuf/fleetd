@@ -35,6 +35,7 @@ impl Client {
             other => Err(unexpected("start_watch", other)),
         }
     }
+
     /// Appends a display copy; original child bytes should be forwarded independently.
     pub async fn append_watch_output(
         &self,
@@ -52,6 +53,7 @@ impl Client {
             .await?,
         )
     }
+
     /// Reports normal or signalled completion.
     pub async fn finish_watch(
         &self,
@@ -69,6 +71,7 @@ impl Client {
             .await?,
         )
     }
+
     /// Lists a session's watches; subscribe before listing to avoid missing new watches.
     pub async fn list_watches(&self, session: SessionId) -> Result<Vec<Watch>> {
         match self.request(RequestBody::ListWatches { session }).await? {
@@ -76,6 +79,7 @@ impl Client {
             other => Err(unexpected("list_watches", other)),
         }
     }
+
     /// Returns retained chunks at or after an inclusive cursor and current metadata.
     pub async fn tail_watch(&self, watch: WatchId, from_seq: Option<u64>) -> Result<WatchTail> {
         match self
@@ -86,6 +90,7 @@ impl Client {
             other => Err(unexpected("tail_watch", other)),
         }
     }
+
     /// Removes a completed watch; running watches return Conflict. Never kills a child.
     pub async fn dismiss_watch(&self, watch: WatchId) -> Result<()> {
         expect_ack(

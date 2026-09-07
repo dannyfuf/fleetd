@@ -1,31 +1,48 @@
 //! Repository registration, discovery, caching, and clone orchestration.
 
+use super::{
+    awaited::{JobDelivery, git_error, github_error},
+    cache::{cache_is_fresh, fleet_home, read_cache, write_cache},
+};
+
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use fleet_core::{
     cache::RepoCache,
-    ids::{ContextId, JobId, RepoId},
+    ids::{ContextId, RepoId},
     model::{CloneJob, CloneStatus, Repo, RepoHooks},
-    paths::FleetHome,
+    paths::clone_publish_marker_path,
 };
 use fleet_proto::{
     job::{JobKind, JobRecord},
     response::BaseRefs,
 };
-use tokio::sync::oneshot;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::{files::Files, git::Git, github::Github, process::Process},
-    jobs::{JobCtx, JobManager},
+    adapters::{
+        files::Files,
+        git::Git,
+        github::Github,
+        process::{Process, pid_is_alive},
+    },
+    error::remote_unsupported,
+    jobs::{JobCtx, JobManager, JobPolicy},
     stores::{config::ConfigStore, state::StateStore},
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClonePublishIntent {
+    repo: Repo,
+}
 
 /// Repository domain service with durable state, configuration, and job scheduling handles.
 #[derive(Clone)]
@@ -36,7 +53,8 @@ pub struct Repos {
     git: Arc<dyn Git>,
     github: Arc<dyn Github>,
     files: Arc<dyn Files>,
-    process: Option<Arc<dyn Process>>,
+    process: Arc<dyn Process>,
+    context_lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Repos {
@@ -49,6 +67,7 @@ impl Repos {
         git: Arc<dyn Git>,
         github: Arc<dyn Github>,
         files: Arc<dyn Files>,
+        process: Arc<dyn Process>,
     ) -> Self {
         Self {
             config,
@@ -57,15 +76,13 @@ impl Repos {
             git,
             github,
             files,
-            process: None,
+            process,
+            context_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
-    /// Adds process liveness for daemon-startup clone reconciliation.
-    #[must_use]
-    pub fn with_process(mut self, process: Arc<dyn Process>) -> Self {
-        self.process = Some(process);
-        self
+    pub(super) fn context_lifecycle(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.context_lifecycle)
     }
 
     /// Resumes reconciliation for detached clones recorded before a daemon restart.
@@ -76,60 +93,87 @@ impl Repos {
             .await?
             .clones
             .into_iter()
-            .filter(|clone| clone.status != CloneStatus::Failed)
+            .filter(|clone| {
+                clone.status != CloneStatus::Failed
+                    || self
+                        .files
+                        .exists(&clone_publish_marker_path(Path::new(&clone.path)))
+            })
             .collect::<Vec<_>>();
         for clone in clones {
-            let Some(pid) = clone.pid else {
-                let repo = clone.id.clone();
+            let pid_file = clone_pid_path(&clone);
+            let publication_pending = self
+                .files
+                .exists(&clone_publish_marker_path(Path::new(&clone.path)));
+            let recovered_pid = clone
+                .pid
+                .or_else(|| read_clone_pid(self.files.as_ref(), &pid_file));
+            if publication_pending {
+                let _ignored = self.files.remove_file(&pid_file);
+            }
+            if !publication_pending && recovered_pid.is_none() {
+                mark_clone_interrupted_before_launch(&self.state, &clone.id).await?;
+                continue;
+            }
+            if clone.pid.is_none()
+                && let Some(pid) = recovered_pid
+            {
+                let clone_id = clone.id.clone();
                 self.state
                     .transaction(move |state| {
-                        if let Some(clone) = state.clones.iter_mut().find(|item| item.id == repo) {
-                            clone.status = CloneStatus::Failed;
-                            clone.error =
-                                Some("clone was interrupted before its process started".to_owned());
-                        }
+                        let record = state
+                            .clones
+                            .iter_mut()
+                            .find(|record| record.id == clone_id)
+                            .ok_or(DaemonError::Cancelled)?;
+                        record.pid = Some(pid);
+                        record.status = CloneStatus::Cloning;
                         Ok(())
                     })
                     .await?;
-                continue;
+                let _ignored = self.files.remove_file(&pid_file);
+            }
+            let pid_to_wait = if publication_pending {
+                None
+            } else {
+                recovered_pid
             };
             let state = Arc::clone(&self.state);
             let git = Arc::clone(&self.git);
             let files = Arc::clone(&self.files);
-            let process = self.process.clone();
-            self.jobs.submit(
+            let process = Arc::clone(&self.process);
+            self.jobs.submit_for_repo(
+                clone.id.clone(),
                 JobKind::Clone,
                 format!("{}:startup-reconcile", clone.id),
                 format!("Reconcile clone {}", clone.id),
-                true,
-                false,
+                JobPolicy::new(true, false),
                 move |context| async move {
-                    while process
-                        .as_ref()
-                        .map_or_else(|| process_is_alive(pid), |process| process.is_alive(pid))
-                    {
-                        tokio::select! {
-                            () = context.cancel.cancelled() => {
-                                terminate_process_group(pid).await;
-                                return fail_clone(
-                                    &state,
-                                    &clone.id,
-                                    Path::new(&clone.staging_path),
-                                    files.as_ref(),
-                                    DaemonError::Cancelled,
-                                ).await;
+                    if let Some(pid) = pid_to_wait {
+                        while process.is_alive(pid) {
+                            tokio::select! {
+                                () = context.cancel.cancelled() => {
+                                    terminate_process_group(pid).await;
+                                    return fail_clone(
+                                        &state,
+                                        &clone.id,
+                                        Path::new(&clone.staging_path),
+                                        files.as_ref(),
+                                        DaemonError::Cancelled,
+                                    ).await;
+                                }
+                                () = tokio::time::sleep(Duration::from_millis(100)) => {}
                             }
-                            () = tokio::time::sleep(Duration::from_millis(100)) => {}
                         }
                     }
                     reconcile_clone(context, clone, state, git, files).await
                 },
-            );
+            )?;
         }
         Ok(())
     }
 
-    /// Starts detached `git clone --progress` and reconciliation (inventory sections 2, 6, and 7).
+    /// Starts detached `git clone --progress` and reconciliation.
     pub async fn clone_repo(
         &self,
         owner: String,
@@ -138,6 +182,7 @@ impl Repos {
         context: ContextId,
         default_branch: Option<String>,
     ) -> DaemonResult<JobRecord> {
+        let _context_lifecycle = self.context_lifecycle.lock().await;
         let id = RepoId::try_from(format!("{owner}/{name}"))
             .map_err(|error| DaemonError::Validation(error.to_string()))?;
         self.jobs.ensure_repo_available(&id)?;
@@ -215,25 +260,22 @@ impl Repos {
         let git = Arc::clone(&self.git);
         let files = Arc::clone(&self.files);
         let operation_id = clone.id.clone();
-        let job_id = self.jobs.submit(
+        let job_id = self.jobs.submit_for_repo(
+            id.clone(),
             JobKind::Clone,
             clone.id.to_string(),
             format!("Clone {}", clone.id),
-            true,
-            true,
+            JobPolicy::new(true, true),
             move |context| async move { clone_operation(context, clone, state, git, files).await },
-        );
-        job_record(&self.jobs, &job_id).ok_or_else(|| {
+        )?;
+        self.jobs.record(&job_id).ok_or_else(|| {
             DaemonError::NotFound(format!("clone job for repository {operation_id}"))
         })
     }
 
-    /// Cascades repository deletion through registered children and recoverable trash.
-    pub async fn delete(&self, repo: RepoId) -> DaemonResult<()> {
-        let _deleting = self.jobs.begin_repo_deletion(&repo)?;
-        self.delete_guarded(repo).await
-    }
-
+    /// Deletes one repository's registry entries and trashes its directories. Callers
+    /// hold the deletion guard and have already removed the repository's worktrees; the
+    /// whole cascade lives in `Services::delete_repo_cascade`.
     pub(crate) async fn delete_guarded(&self, repo: RepoId) -> DaemonResult<()> {
         let snapshot = self.state.load().await?;
         if snapshot
@@ -241,9 +283,7 @@ impl Repos {
             .iter()
             .any(|worktree| worktree.repo_id == repo && worktree.host.is_some())
         {
-            return Err(DaemonError::Unsupported(
-                "remote hosts are not supported yet".to_owned(),
-            ));
+            return Err(remote_unsupported());
         }
         let registered = snapshot.repos.iter().find(|item| item.id == repo).cloned();
         let clone = snapshot.clones.iter().find(|item| item.id == repo).cloned();
@@ -281,9 +321,7 @@ impl Repos {
                 if state.worktrees.iter().any(|worktree| {
                     worktree.repo_id == repo_in_transaction && worktree.host.is_some()
                 }) {
-                    return Err(DaemonError::Unsupported(
-                        "remote hosts are not supported yet".to_owned(),
-                    ));
+                    return Err(remote_unsupported());
                 }
                 for path in &paths {
                     if files.exists(path) {
@@ -321,8 +359,9 @@ impl Repos {
         Ok(())
     }
 
-    /// Moves a repository to an existing context in one state transaction (inventory sections 1 and 6).
+    /// Moves a repository to an existing context in one state transaction.
     pub async fn move_to_context(&self, repo: RepoId, context: ContextId) -> DaemonResult<Repo> {
+        let _context_lifecycle = self.context_lifecycle.lock().await;
         self.state
             .transaction(move |state| {
                 if !state.contexts.iter().any(|item| item.id == context) {
@@ -374,8 +413,7 @@ impl Repos {
         let semaphore = self.jobs.github_semaphore();
         let owner_for_job = owner.clone();
         let target = format!("{owner}:{}", Uuid::new_v4());
-        let (sender, receiver) = oneshot::channel::<Result<RepoCache, String>>();
-        let sender = Arc::new(Mutex::new(Some(sender)));
+        let (delivery, awaited) = JobDelivery::caller_gets_copy(github_error);
         self.jobs.submit(
             JobKind::RepoDiscovery,
             target,
@@ -383,53 +421,31 @@ impl Repos {
             true,
             true,
             move |context| async move {
-                let result: DaemonResult<RepoCache> = async {
-                    let _permit = semaphore
-                        .acquire_owned()
-                        .await
-                        .map_err(|error| DaemonError::Join(error.to_string()))?;
-                    context.progress(format!("listing repositories for {owner_for_job}"))?;
-                    let repos = github.list_repositories(&owner_for_job).await?;
-                    let cache = RepoCache {
-                        fetched_at: Utc::now().to_rfc3339(),
-                        repos,
-                    };
-                    write_cache(files.as_ref(), &cache_path, &cache)?;
-                    Ok(cache)
-                }
-                .await;
-                match result {
-                    Ok(cache) => {
-                        if let Some(sender) = sender
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ignored = sender.send(Ok(cache));
-                        }
-                        Ok(())
+                delivery.finish(
+                    async {
+                        let _permit = semaphore
+                            .acquire_owned()
+                            .await
+                            .map_err(|error| DaemonError::Join(error.to_string()))?;
+                        context.progress(format!("listing repositories for {owner_for_job}"))?;
+                        let repos = github.list_repositories(&owner_for_job).await?;
+                        let cache = RepoCache {
+                            fetched_at: Utc::now().to_rfc3339(),
+                            repos,
+                        };
+                        write_cache(files.as_ref(), &cache_path, &cache)?;
+                        Ok(cache)
                     }
-                    Err(error) => {
-                        let message = error.to_string();
-                        if let Some(sender) = sender
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ignored = sender.send(Err(message));
-                        }
-                        Err(error)
-                    }
-                }
+                    .await,
+                )
             },
         );
-        match receiver.await {
-            Ok(Ok(cache)) => Ok(cache),
-            Ok(Err(_error)) if cached.is_some() => {
-                cached.ok_or_else(|| DaemonError::NotFound("repository cache".to_owned()))
-            }
-            Ok(Err(error)) => Err(DaemonError::Github(error)),
-            Err(_) => Err(DaemonError::Cancelled),
+        match awaited.wait().await {
+            Ok(cache) => Ok(cache),
+            // Every delivered failure arrives in the GitHub category; a bare cancellation
+            // means the job was dropped before it delivered anything.
+            Err(DaemonError::Cancelled) => Err(DaemonError::Cancelled),
+            Err(error) => cached.ok_or(error),
         }
     }
 
@@ -446,47 +462,24 @@ impl Repos {
         if force {
             let git = Arc::clone(&self.git);
             let path_for_job = path.clone();
-            let (sender, receiver) = oneshot::channel::<Result<(), String>>();
-            let sender = Arc::new(Mutex::new(Some(sender)));
-            self.jobs.submit(
+            let (delivery, awaited) = JobDelivery::caller_gets_copy(git_error);
+            self.jobs.submit_for_repo(
+                repo.clone(),
                 JobKind::RepoFetch,
                 format!("{repo}:{}", Uuid::new_v4()),
                 format!("Fetch {repo}"),
-                true,
-                true,
+                JobPolicy::new(true, true),
                 move |context| async move {
-                    context.progress("fetching origin")?;
-                    let result = git.fetch(&path_for_job, true).await;
-                    match result {
-                        Ok(()) => {
-                            if let Some(sender) = sender
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .take()
-                            {
-                                let _ignored = sender.send(Ok(()));
-                            }
-                            Ok(())
+                    delivery.finish(
+                        async {
+                            context.progress("fetching origin")?;
+                            git.fetch(&path_for_job, true).await
                         }
-                        Err(error) => {
-                            let message = error.to_string();
-                            if let Some(sender) = sender
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .take()
-                            {
-                                let _ignored = sender.send(Err(message));
-                            }
-                            Err(error)
-                        }
-                    }
+                        .await,
+                    )
                 },
-            );
-            match receiver.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(DaemonError::Git(error)),
-                Err(_) => return Err(DaemonError::Cancelled),
-            }
+            )?;
+            awaited.wait().await?;
         }
         let mut refs = self
             .git
@@ -538,11 +531,6 @@ impl Repos {
             })
             .await
     }
-
-    /// Starts a non-destructive import from the default swarm home.
-    pub async fn import_from_swarm(&self) -> DaemonResult<JobRecord> {
-        Err(DaemonError::Unimplemented("repos::import_from_swarm"))
-    }
 }
 
 async fn clone_operation(
@@ -552,20 +540,22 @@ async fn clone_operation(
     git: Arc<dyn Git>,
     files: Arc<dyn Files>,
 ) -> DaemonResult<()> {
+    let clone = begin_clone_attempt(&state, clone).await?;
     context.progress("starting detached clone")?;
     let staging = PathBuf::from(&clone.staging_path);
     let log = PathBuf::from(&clone.log_path);
+    let pid_file = clone_pid_path(&clone);
     if let Some(parent) = staging.parent()
         && let Err(error) = files.create_dir_all(parent)
     {
         return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
     }
-    let process = match git.clone_repo(&clone.url, &staging, &log).await {
+    let process = match git.clone_repo(&clone.url, &staging, &log, &pid_file).await {
         Ok(process) => process,
         Err(error) => return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await,
     };
     let clone_id = clone.id.clone();
-    state
+    if let Err(error) = state
         .transaction(move |state| {
             let record = state
                 .clones
@@ -576,10 +566,16 @@ async fn clone_operation(
             record.status = CloneStatus::Cloning;
             Ok(())
         })
-        .await?;
+        .await
+    {
+        terminate_process_group(process.pid).await;
+        let _ignored = files.remove_file(&pid_file);
+        return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
+    }
+    let _ignored = files.remove_file(&pid_file);
     context.progress(format!("clone running as pid {}", process.pid))?;
 
-    while process_is_alive(process.pid) {
+    while pid_is_alive(process.pid) {
         tokio::select! {
             () = context.cancel.cancelled() => {
                 terminate_process_group(process.pid).await;
@@ -606,28 +602,15 @@ async fn reconcile_clone(
 ) -> DaemonResult<()> {
     let staging = PathBuf::from(&clone.staging_path);
     let final_path = PathBuf::from(&clone.path);
+    if files.exists(&final_path) {
+        return recover_published_clone(context, clone, state, git, files).await;
+    }
     if let Err(error) = git.revision(&staging, "HEAD").await {
         return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
     }
     context.progress("reconciling clone")?;
     let default_branch =
         resolve_default_branch(git.as_ref(), &staging, &clone.default_branch).await;
-    if files.exists(&final_path) {
-        return fail_clone(
-            &state,
-            &clone.id,
-            &staging,
-            files.as_ref(),
-            DaemonError::Conflict(format!(
-                "repository path already exists: {}",
-                final_path.display()
-            )),
-        )
-        .await;
-    }
-    if let Err(error) = files.rename(&staging, &final_path) {
-        return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
-    }
     let repo = Repo {
         id: clone.id.clone(),
         owner: clone.owner.clone(),
@@ -639,7 +622,16 @@ async fn reconcile_clone(
         cloned_at: Utc::now().to_rfc3339(),
         hooks: RepoHooks::default(),
     };
+    let intent = ClonePublishIntent { repo: repo.clone() };
+    let mut intent_text = serde_json::to_string_pretty(&intent)?;
+    intent_text.push('\n');
     let clone_id = clone.id.clone();
+    let published = Arc::new(Mutex::new(false));
+    let published_in_transaction = Arc::clone(&published);
+    let files_in_transaction = Arc::clone(&files);
+    let staging_in_transaction = staging.clone();
+    let final_in_transaction = final_path.clone();
+    let marker_in_transaction = clone_publish_marker_path(&staging);
     let result = state
         .transaction(move |state| {
             if !state.clones.iter().any(|record| record.id == clone_id) {
@@ -648,15 +640,106 @@ async fn reconcile_clone(
             if state.repos.iter().any(|record| record.id == clone_id) {
                 return Err(DaemonError::Conflict(format!("repository {clone_id}")));
             }
+            if files_in_transaction.exists(&final_in_transaction) {
+                return Err(DaemonError::Conflict(format!(
+                    "repository path already exists: {}",
+                    final_in_transaction.display()
+                )));
+            }
+            files_in_transaction.atomic_write_text(&marker_in_transaction, &intent_text)?;
+            files_in_transaction.rename(&staging_in_transaction, &final_in_transaction)?;
+            *published_in_transaction
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
             state.clones.retain(|record| record.id != clone_id);
             state.repos.push(repo);
             Ok(())
         })
         .await;
     if let Err(error) = result {
-        let _ignored = files.rename(&final_path, &staging);
+        if *published
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let error = DaemonError::Join(format!(
+                "clone publication state save failed: {error}; published repository preserved at {}",
+                final_path.display()
+            ));
+            return record_clone_failure(&state, &clone.id, error).await;
+        }
         return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
     }
+    files.remove_file(&clone_publish_marker_path(&final_path))?;
+    context.progress("clone registered")?;
+    Ok(())
+}
+
+async fn begin_clone_attempt(state: &StateStore, clone: CloneJob) -> DaemonResult<CloneJob> {
+    let fresh_staging = clone_staging_attempt(&clone)?;
+    let clone_id = clone.id.clone();
+    state
+        .transaction(move |state| {
+            let record = state
+                .clones
+                .iter_mut()
+                .find(|record| record.id == clone_id)
+                .ok_or(DaemonError::Cancelled)?;
+            if record.status == CloneStatus::Failed {
+                record.staging_path = fresh_staging.to_string_lossy().into_owned();
+                record.pid = None;
+                record.status = CloneStatus::Starting;
+                record.error = None;
+            }
+            Ok(record.clone())
+        })
+        .await
+}
+
+async fn recover_published_clone(
+    context: JobCtx,
+    clone: CloneJob,
+    state: Arc<StateStore>,
+    git: Arc<dyn Git>,
+    files: Arc<dyn Files>,
+) -> DaemonResult<()> {
+    let final_path = PathBuf::from(&clone.path);
+    let marker = clone_publish_marker_path(&final_path);
+    let intent = files
+        .read_text(&marker)
+        .ok()
+        .and_then(|text| serde_json::from_str::<ClonePublishIntent>(&text).ok())
+        .filter(|intent| valid_clone_publish_intent(intent, &clone, &final_path));
+    let Some(intent) = intent else {
+        return record_clone_failure(
+            &state,
+            &clone.id,
+            DaemonError::Conflict(format!(
+                "repository destination exists without a valid clone publish intent: {}; completed clone preserved at {}",
+                final_path.display(),
+                clone.staging_path
+            )),
+        )
+        .await;
+    };
+    if let Err(error) = git.revision(&final_path, "HEAD").await {
+        return record_clone_failure(&state, &clone.id, error).await;
+    }
+    context.progress("recovering published clone")?;
+    let clone_id = clone.id.clone();
+    state
+        .transaction(move |state| {
+            if !state.clones.iter().any(|record| record.id == clone_id) {
+                return Err(DaemonError::Cancelled);
+            }
+            if state.repos.iter().any(|record| record.id == clone_id) {
+                return Err(DaemonError::Conflict(format!("repository {clone_id}")));
+            }
+            state.clones.retain(|record| record.id != clone_id);
+            state.repos.push(intent.repo);
+            Ok(())
+        })
+        .await?;
+    files.remove_file(&marker)?;
     context.progress("clone registered")?;
     Ok(())
 }
@@ -666,6 +749,25 @@ async fn fail_clone(
     repo: &RepoId,
     staging: &Path,
     files: &dyn Files,
+    error: DaemonError,
+) -> DaemonResult<()> {
+    let error = if files.exists(staging) {
+        match files.remove_detached(staging) {
+            Ok(()) => error,
+            Err(cleanup) => DaemonError::Join(format!(
+                "clone failed: {error}; cleanup failed for {}: {cleanup}",
+                staging.display()
+            )),
+        }
+    } else {
+        error
+    };
+    record_clone_failure(state, repo, error).await
+}
+
+async fn record_clone_failure(
+    state: &StateStore,
+    repo: &RepoId,
     error: DaemonError,
 ) -> DaemonResult<()> {
     let persisted_message = error.to_string();
@@ -680,10 +782,58 @@ async fn fail_clone(
             Ok(())
         })
         .await?;
-    if files.exists(staging) {
-        let _ignored = files.remove_detached(staging);
-    }
     Err(error)
+}
+
+async fn mark_clone_interrupted_before_launch(
+    state: &StateStore,
+    repo: &RepoId,
+) -> DaemonResult<()> {
+    let repo = repo.clone();
+    state
+        .transaction(move |state| {
+            if let Some(clone) = state.clones.iter_mut().find(|item| item.id == repo) {
+                clone.status = CloneStatus::Failed;
+                clone.error = Some("clone was interrupted before its process started".to_owned());
+            }
+            Ok(())
+        })
+        .await
+}
+
+fn clone_staging_attempt(clone: &CloneJob) -> DaemonResult<PathBuf> {
+    let parent = Path::new(&clone.staging_path)
+        .parent()
+        .ok_or_else(|| DaemonError::Validation("clone staging path has no parent".to_owned()))?;
+    Ok(parent.join(format!(
+        "{}.staging-{}-{}",
+        clone.name,
+        std::process::id(),
+        Uuid::new_v4()
+    )))
+}
+
+fn clone_pid_path(clone: &CloneJob) -> PathBuf {
+    PathBuf::from(format!("{}.pid", clone.log_path))
+}
+
+fn read_clone_pid(files: &dyn Files, path: &Path) -> Option<u32> {
+    files.read_text(path).ok()?.trim().parse().ok()
+}
+
+fn valid_clone_publish_intent(
+    intent: &ClonePublishIntent,
+    clone: &CloneJob,
+    final_path: &Path,
+) -> bool {
+    let repo = &intent.repo;
+    repo.id == clone.id
+        && repo.owner == clone.owner
+        && repo.name == clone.name
+        && repo.url == clone.url
+        && repo.context_id == clone.context_id
+        && Path::new(&repo.path) == final_path
+        && !repo.default_branch.is_empty()
 }
 
 async fn resolve_default_branch(git: &dyn Git, path: &Path, hint: &str) -> String {
@@ -728,25 +878,16 @@ async fn resolve_default_branch(git: &dyn Git, path: &Path, hint: &str) -> Strin
     "main".to_owned()
 }
 
-fn process_is_alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal zero performs an existence/permission check and does not modify the process.
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
 async fn terminate_process_group(pid: u32) {
     let Ok(pid) = i32::try_from(pid) else {
         return;
     };
     signal_process_group(pid, libc::SIGTERM);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while process_is_alive(pid.cast_unsigned()) && tokio::time::Instant::now() < deadline {
+    while pid_is_alive(pid.cast_unsigned()) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    if process_is_alive(pid.cast_unsigned()) {
+    if pid_is_alive(pid.cast_unsigned()) {
         signal_process_group(pid, libc::SIGKILL);
     }
 }
@@ -774,39 +915,4 @@ fn validate_owner(owner: &str) -> DaemonResult<()> {
     } else {
         Ok(())
     }
-}
-
-fn cache_is_fresh(fetched_at: &str, ttl_seconds: i64) -> bool {
-    if ttl_seconds < 0 {
-        return false;
-    }
-    DateTime::parse_from_rfc3339(fetched_at)
-        .ok()
-        .map(|fetched| Utc::now().signed_duration_since(fetched.with_timezone(&Utc)))
-        .is_some_and(|age| age.num_milliseconds() >= 0 && age.num_seconds() < ttl_seconds)
-}
-
-fn read_cache<T: serde::de::DeserializeOwned>(files: &dyn Files, path: &Path) -> Option<T> {
-    files
-        .read_text(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-}
-
-fn write_cache<T: serde::Serialize>(files: &dyn Files, path: &Path, cache: &T) -> DaemonResult<()> {
-    let mut text = serde_json::to_string(cache)?;
-    text.push('\n');
-    files.atomic_write_text(path, &text)
-}
-
-fn fleet_home(state: &StateStore) -> DaemonResult<FleetHome> {
-    state
-        .path()
-        .parent()
-        .map(|path| FleetHome::new(path.to_path_buf()))
-        .ok_or_else(|| DaemonError::Validation("state path has no parent".to_owned()))
-}
-
-fn job_record(jobs: &JobManager, id: &JobId) -> Option<JobRecord> {
-    jobs.list().into_iter().find(|record| &record.id == id)
 }

@@ -19,7 +19,7 @@ impl Contexts {
         Self { state }
     }
 
-    /// Creates a normalized context and persists it transactionally (inventory sections 1 and 2).
+    /// Creates a normalized context and persists it transactionally.
     pub async fn create(&self, name: String, owners: Vec<String>) -> DaemonResult<Context> {
         let normalized = normalize_context_id(&name);
         if normalized.is_empty() {
@@ -46,7 +46,7 @@ impl Contexts {
             .await
     }
 
-    /// Updates context display fields while preserving referential integrity (inventory section 1).
+    /// Updates context display fields while preserving referential integrity.
     pub async fn update(
         &self,
         id: ContextId,
@@ -71,7 +71,7 @@ impl Contexts {
             .await
     }
 
-    /// Deletes a context and cascades repositories, worktrees, and sessions (inventory section 1).
+    /// Deletes an empty context after the facade has completed its resource cascade.
     pub async fn delete(&self, id: ContextId) -> DaemonResult<()> {
         self.state
             .transaction(move |state| {
@@ -79,26 +79,13 @@ impl Contexts {
                     return Err(DaemonError::NotFound(format!("context {id}")));
                 }
 
-                let repo_ids = state
-                    .repos
-                    .iter()
-                    .filter(|repo| repo.context_id == id)
-                    .map(|repo| repo.id.clone())
-                    .collect::<std::collections::HashSet<_>>();
-                if state
-                    .worktrees
-                    .iter()
-                    .any(|worktree| repo_ids.contains(&worktree.repo_id) && worktree.host.is_some())
+                if state.repos.iter().any(|repo| repo.context_id == id)
+                    || state.clones.iter().any(|clone| clone.context_id == id)
                 {
-                    return Err(DaemonError::Unsupported(
-                        "remote hosts are not supported yet".to_owned(),
-                    ));
+                    return Err(DaemonError::Conflict(format!(
+                        "context {id} still owns repositories"
+                    )));
                 }
-                state
-                    .worktrees
-                    .retain(|worktree| !repo_ids.contains(&worktree.repo_id));
-                state.repos.retain(|repo| repo.context_id != id);
-                state.clones.retain(|clone| clone.context_id != id);
                 state.contexts.retain(|context| context.id != id);
                 if state.active_context_id.as_ref() == Some(&id) {
                     state.active_context_id = None;
@@ -108,7 +95,7 @@ impl Contexts {
             .await
     }
 
-    /// Changes or clears the active context in one state transaction (inventory sections 1 and 6).
+    /// Changes or clears the active context in one state transaction.
     pub async fn set_active(&self, id: Option<ContextId>) -> DaemonResult<()> {
         self.state
             .transaction(move |state| {

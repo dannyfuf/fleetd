@@ -73,17 +73,15 @@ pub const CONFIG_VERSION: u32 = 1;
 /// The scheme that marks a `windows[].command` as a Fleet-provided surface rather than a
 /// program to run in a PTY.
 ///
-/// A reserved scheme is what keeps the window list one flat array: the third tab is still a
-/// tab, still counted by `ctrl-s 3`, still named in `config.json` — it is only the *provider*
-/// of its content that changes. Anything after the scheme must be a name Fleet knows, because
-/// a typo that silently fell back to a PTY would be a tab that does nothing.
+/// Reserved commands retain their position in the configured tab list. Unknown commands
+/// using this scheme are rejected instead of being launched in a PTY.
 pub const NATIVE_SCHEME: &str = "fleet://";
 
 /// The reserved command of the native git pane (`crates/fleet-lazygit`).
 pub const NATIVE_LAZYGIT: &str = "fleet://lazygit";
 
-/// Every reserved command Fleet answers, in the order the settings dialog lists them.
-pub const NATIVE_COMMANDS: &[&str] = &[NATIVE_LAZYGIT];
+/// Every reserved command Fleet answers; any other `fleet://` command is rejected.
+const NATIVE_COMMANDS: &[&str] = &[NATIVE_LAZYGIT];
 
 /// Whether a `windows[].command` names a Fleet-provided surface instead of a program.
 #[must_use]
@@ -419,14 +417,14 @@ pub fn deep_merge_json(base: &mut Value, patch: Value) {
 }
 
 /// Applies runtime minimums that are intentionally looser in the persisted schema.
-pub fn apply_runtime_clamps(config: &mut Config) {
+fn apply_runtime_clamps(config: &mut Config) {
     config.sleep.grace_ms = config.sleep.grace_ms.max(0);
     config.ui.status_refresh_ms = config.ui.status_refresh_ms.max(500);
     config.ui.remote_status_refresh_ms = config.ui.remote_status_refresh_ms.max(500);
 }
 
 /// Converts the first legacy agent window command when no `{agent}` placeholder exists.
-pub fn normalize_legacy_agent_window(windows: &mut [WindowConfig]) {
+fn normalize_legacy_agent_window(windows: &mut [WindowConfig]) {
     if windows
         .iter()
         .any(|window| window.command.contains("{agent}"))
@@ -443,10 +441,8 @@ pub fn normalize_legacy_agent_window(windows: &mut [WindowConfig]) {
 
 /// Upgrades an *imported* window list to Fleet's own surfaces.
 ///
-/// Only [`crate::config`]'s import path calls this: a `lazygit` window in a swarm config means
-/// "the git UI lives in this tab", and Fleet has its own, so the tab keeps its name and
-/// position and changes provider. A `lazygit` written by hand into Fleet's own `config.json` is
-/// left alone — that is the documented opt-out for anyone who wants the real binary in a PTY.
+/// Import preserves tab names and positions. Ordinary configuration loading does not call
+/// this: an explicit `lazygit` command in Fleet's config remains a PTY command.
 pub fn normalize_imported_windows(windows: &mut [WindowConfig]) {
     for window in windows {
         if is_legacy_lazygit_command(&window.command) {
@@ -495,16 +491,12 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             "agent commands must be non-empty".to_owned(),
         ));
     }
-    if config
-        .windows
-        .iter()
-        .any(|window| window.name.is_empty() || window.command.is_empty())
-    {
-        return Err(ConfigError::Validation(
-            "window names and commands must be non-empty".to_owned(),
-        ));
-    }
     for window in &config.windows {
+        if window.name.is_empty() || window.command.is_empty() {
+            return Err(ConfigError::Validation(
+                "window names and commands must be non-empty".to_owned(),
+            ));
+        }
         if is_native_command(&window.command) && !NATIVE_COMMANDS.contains(&window.command.as_str())
         {
             return Err(ConfigError::Validation(format!(
@@ -555,61 +547,35 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn terminal_defaults_and_positive_byte_budget() {
-        let home = "/tmp/fleet";
-        let defaults = merge_config(home, serde_json::json!({})).unwrap();
-        assert_eq!(defaults.terminal.scrollback_bytes, 1_073_741_824);
-        assert_eq!(defaults.terminal.scroll_lines_per_step, 3);
-        for value in [1, 50] {
-            assert!(
-                merge_config(
-                    home,
-                    serde_json::json!({"terminal": {"scrollLinesPerStep": value}})
-                )
-                .is_ok()
-            );
-        }
-        for value in [51, u32::MAX] {
-            assert!(
-                merge_config(
-                    home,
-                    serde_json::json!({"terminal": {"scrollLinesPerStep": value}})
-                )
-                .is_err()
-            );
-        }
-        let custom = merge_config(
-            home,
-            serde_json::json!({"terminal": {"scrollbackBytes": 65536, "scrollLinesPerStep": 5}}),
-        )
-        .unwrap();
-        assert_eq!(custom.terminal.scrollback_bytes, 65536);
-        assert_eq!(custom.terminal.scroll_lines_per_step, 5);
-        assert!(
-            merge_config(
-                home,
-                serde_json::json!({"terminal": {"scrollbackBytes": 0}})
-            )
-            .is_err()
-        );
-        assert!(
-            merge_config(
-                home,
-                serde_json::json!({"terminal": {"scrollLinesPerStep": 0}})
-            )
-            .is_err()
-        );
-    }
-
     use serde_json::json;
 
     use super::*;
 
-    /// The defaults still mirror swarm's `config.json` field for field, with one deliberate
-    /// differences: the third window is Fleet's own git pane and Fleet adds notification and
-    /// terminal settings. See [`normalize_imported_windows`] for the import path that upgrades
-    /// the old value, and `docs/SWARM-INVENTORY.md` for the divergence note.
+    #[test]
+    fn terminal_defaults_and_positive_byte_budget() {
+        let home = "/tmp/fleet";
+        let defaults = merge_config(home, json!({})).unwrap();
+        assert_eq!(defaults.terminal.scrollback_bytes, 1_073_741_824);
+        assert_eq!(defaults.terminal.scroll_lines_per_step, 3);
+        for value in [1, 50] {
+            assert!(merge_config(home, json!({"terminal": {"scrollLinesPerStep": value}})).is_ok());
+        }
+        for value in [51, u32::MAX] {
+            assert!(
+                merge_config(home, json!({"terminal": {"scrollLinesPerStep": value}})).is_err()
+            );
+        }
+        let custom = merge_config(
+            home,
+            json!({"terminal": {"scrollbackBytes": 65536, "scrollLinesPerStep": 5}}),
+        )
+        .unwrap();
+        assert_eq!(custom.terminal.scrollback_bytes, 65536);
+        assert_eq!(custom.terminal.scroll_lines_per_step, 5);
+        assert!(merge_config(home, json!({"terminal": {"scrollbackBytes": 0}})).is_err());
+        assert!(merge_config(home, json!({"terminal": {"scrollLinesPerStep": 0}})).is_err());
+    }
+
     #[test]
     fn defaults_match_swarm_json_with_fleet_terminal_settings() {
         let actual = serde_json::to_value(default_config("/home/me/.fleet"))
@@ -668,9 +634,6 @@ mod tests {
         let mut config = default_config("/home/me/.fleet");
         assert!(validate_config(&config).is_ok());
 
-        config.windows[2].command = "fleet://lazygit".to_owned();
-        assert!(validate_config(&config).is_ok());
-
         config.windows[2].command = "fleet://gitui".to_owned();
         let error = validate_config(&config)
             .err()
@@ -711,7 +674,10 @@ mod tests {
         assert_eq!(windows[3].command, "my-lazygit", "only `lazygit` upgrades");
         // The names and the order — which `ctrl-s <n>` counts — never move.
         assert_eq!(
-            windows.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(),
+            windows
+                .iter()
+                .map(|window| window.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["nvim", "lg", "lg2", "wrapper"]
         );
     }

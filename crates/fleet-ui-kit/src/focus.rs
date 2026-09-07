@@ -45,7 +45,7 @@ impl FocusRing {
     }
 
     /// The element the ring wraps.
-    pub fn child(mut self, child: impl IntoElement) -> Self {
+    pub fn content(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
         self
     }

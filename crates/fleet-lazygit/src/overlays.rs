@@ -8,7 +8,7 @@ use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::{
     ConfirmDialog, Dialog, Fact, FactList, FuzzyItem, FuzzyList, KeyHintRow, TextField,
 };
-use gpui::{AnyElement, Context, div, px};
+use gpui::{AnyElement, Context, div};
 
 use crate::keymap;
 use crate::root::Lazygit;
@@ -18,26 +18,24 @@ use crate::state::{Buffer, Overlay};
 const HELP_ROWS: usize = 18;
 
 /// The chain the panels *would* have while the help overlay owns the real one.
-fn help_chain(view: &Lazygit) -> Vec<&'static str> {
-    let mut chain = view.state.context_chain();
-    if chain.first() == Some(&"LgDialog") {
-        chain = vec!["Panels"];
-    }
-    chain
+pub(crate) fn help_chain(view: &Lazygit) -> Vec<&'static str> {
+    view.help_context
+        .clone()
+        .unwrap_or_else(|| view.state.context_chain())
 }
 
 /// The largest scroll offset the `?` overlay may take: the last row stays on screen.
 ///
 /// Without this clamp `j` scrolls forever past the end of the table and leaves the dialog blank.
 #[must_use]
-pub fn help_last_top(view: &Lazygit) -> usize {
+pub(crate) fn help_last_top(view: &Lazygit) -> usize {
     keymap::bindings_for_chain(&help_chain(view))
         .len()
         .saturating_sub(HELP_ROWS)
 }
 
 /// Renders the top overlay, if any.
-pub fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyElement> {
+pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyElement> {
     match view.state.overlay()? {
         Overlay::Confirm(confirm) => {
             let facts = FactList::from_facts(confirm.facts.iter().map(|fact| {
@@ -60,7 +58,9 @@ pub fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyElement> {
         }
         Overlay::Prompt(prompt) => {
             let body = if prompt.buffer.is_multiline() {
-                multiline_body(&prompt.buffer, cx)
+                multiline_body(&prompt.buffer, &view.scroll_editor, cx)
+            } else if let Some(input) = &view.prompt_input {
+                input.clone().into_any_element()
             } else {
                 TextField::new(prompt.buffer.value().to_owned())
                     .caret(prompt.buffer.caret())
@@ -83,7 +83,11 @@ pub fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyElement> {
                 .icon(Icon::FilePen)
                 .body(body)
                 .hint_row(hints)
-                .primary("\u{23ce} Confirm");
+                .primary(if prompt.buffer.is_multiline() {
+                    "\u{2318}\u{23ce} Confirm"
+                } else {
+                    "\u{23ce} Confirm"
+                });
             if let Some(subtitle) = &prompt.subtitle {
                 dialog = dialog.subtitle(subtitle.clone());
             }
@@ -136,41 +140,62 @@ pub fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyElement> {
 }
 
 /// A multi-line editor: one row per line, with a caret bar in the active line.
-fn multiline_body(buffer: &Buffer, cx: &mut Context<Lazygit>) -> AnyElement {
+fn multiline_body(
+    buffer: &Buffer,
+    scroll: &gpui::UniformListScrollHandle,
+    cx: &mut Context<Lazygit>,
+) -> AnyElement {
     let theme = cx.theme();
     let (lines, caret_line, caret_column) = buffer.lines_with_caret();
-    let mut column = div()
-        .flex()
-        .flex_col()
+    let list = gpui::uniform_list(
+        "lazygit-prompt-lines",
+        lines.len(),
+        move |visible, _, cx| {
+            let theme = cx.theme();
+            visible
+                .map(|index| {
+                    let line = &lines[index];
+                    let mut element = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .h(theme.metrics.diff_row_h);
+                    if index == caret_line {
+                        let at = line
+                            .char_indices()
+                            .nth(caret_column)
+                            .map_or(line.len(), |(at, _)| at);
+                        element = element
+                            .child(Text::data(gpui::SharedString::new(&line[..at])).flex_none())
+                            .child(
+                                div()
+                                    .w(theme.metrics.focus_ring_w)
+                                    .h(theme.metrics.diff_caret_h)
+                                    .flex_none()
+                                    .bg(theme.colors.accent),
+                            )
+                            .child(Text::data(gpui::SharedString::new(&line[at..])).flex_none());
+                    } else {
+                        element = element.child(Text::data(line.clone()).flex_none());
+                    }
+                    element.into_any_element()
+                })
+                .collect()
+        },
+    )
+    .size_full()
+    .track_scroll(scroll);
+    div()
         .w_full()
-        .h(px(160.0))
+        .h(theme.metrics.editor_box_h)
         .p(theme.space.sm)
         .rounded(theme.radii.sm)
         .bg(theme.colors.bg)
         .border_1()
         .border_color(theme.colors.focus_ring)
-        .overflow_hidden();
-    for (index, line) in lines.iter().enumerate() {
-        let mut element = div().flex().flex_row().items_center().h(px(18.0));
-        if index == caret_line {
-            let head: String = line.chars().take(caret_column).collect();
-            let tail: String = line.chars().skip(caret_column).collect();
-            element = element
-                .child(Text::data(head).flex_none())
-                .child(
-                    div()
-                        .w(px(2.0))
-                        .h(px(14.0))
-                        .flex_none()
-                        .bg(theme.colors.accent),
-                )
-                .child(Text::data(tail).flex_none());
-        } else {
-            element = element.child(Text::data(line.clone()).flex_none());
-        }
-        column = column.child(element);
-    }
-    column.into_any_element()
+        .overflow_hidden()
+        .child(list)
+        .into_any_element()
 }
 
 /// The `?` overlay, generated from the binding table so keys and documentation cannot drift.
@@ -215,7 +240,7 @@ fn help_dialog(view: &Lazygit, top: usize, cx: &mut Context<Lazygit>) -> AnyElem
     }
     Dialog::new("Keybindings")
         .icon(Icon::Command)
-        .width(px(640.0))
+        .width(theme.metrics.overlay_help_w)
         .body(column)
         .hint_row(KeyHintRow::new().key("j/k", "scroll").key("esc", "close"))
         .primary("esc Close")

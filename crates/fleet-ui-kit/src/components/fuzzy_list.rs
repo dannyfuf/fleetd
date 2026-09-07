@@ -22,7 +22,6 @@ use crate::{
     icons::{Icon, IconSize},
     text::{Text, TextRole},
     theme::{ActiveTheme, Theme, ch},
-    tone::Tone,
 };
 
 /// The `ch` budget of the right-aligned key column, wide enough for `S-⏎`.
@@ -116,45 +115,108 @@ impl FuzzyItem {
     }
 }
 
-/// Split `text` into `(segment, is_match)` runs, merging adjacent runs of the same kind.
-fn match_runs(text: &str, matches: &[usize]) -> Vec<(String, bool)> {
-    let mut runs: Vec<(String, bool)> = Vec::new();
-    for (index, ch) in text.chars().enumerate() {
-        let hit = matches.binary_search(&index).is_ok();
-        match runs.last_mut() {
-            Some((run, run_hit)) if *run_hit == hit => run.push(ch),
-            _ => runs.push((ch.to_string(), hit)),
-        }
+/// The rows cursor motion may traverse.
+///
+/// A plain length keeps the original all-selectable API, while a slice of items lets lists with
+/// unavailable rows skip them without maintaining a second index map.
+pub trait FuzzyCursorSource {
+    /// Number of rows in the navigation set.
+    fn len(&self) -> usize;
+
+    /// Whether there are no rows in the navigation set.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
     }
-    runs
+
+    /// Whether the row at `index` may carry the cursor.
+    fn is_selectable(&self, index: usize) -> bool;
 }
 
-/// Render `text` with its matched characters raised to full contrast and medium weight.
-fn highlighted(
-    role: TextRole,
-    text: &SharedString,
-    matches: &[usize],
-    theme: &Theme,
-) -> AnyElement {
-    if matches.is_empty() {
-        return Text::new(role, text.clone()).ellipsize().into_any_element();
+impl FuzzyCursorSource for usize {
+    fn len(&self) -> usize {
+        *self
     }
-    div()
-        .flex()
-        .flex_row()
+
+    fn is_selectable(&self, index: usize) -> bool {
+        index < *self
+    }
+}
+
+impl FuzzyCursorSource for &[FuzzyItem] {
+    fn len(&self) -> usize {
+        <[FuzzyItem]>::len(self)
+    }
+
+    fn is_selectable(&self, index: usize) -> bool {
+        self.get(index).is_some_and(|item| !item.disabled)
+    }
+}
+
+fn move_cursor(
+    cursor: usize,
+    source: &impl FuzzyCursorSource,
+    step: impl Fn(usize, usize) -> usize,
+) -> usize {
+    let len = source.len();
+    if source.is_empty() {
+        return 0;
+    }
+    let mut candidate = cursor.min(len - 1);
+    for _ in 0..len {
+        candidate = step(candidate, len);
+        if source.is_selectable(candidate) {
+            return candidate;
+        }
+    }
+    0
+}
+
+/// Coalesce matched character indices into UTF-8 ranges without copying the label.
+fn match_ranges(text: &str, matches: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut hits = matches.iter().copied().peekable();
+    for (index, (byte, ch)) in text.char_indices().enumerate() {
+        while hits.peek().is_some_and(|hit| *hit < index) {
+            hits.next();
+        }
+        if hits.peek() != Some(&index) {
+            continue;
+        }
+        hits.next();
+        if let Some(range) = ranges.last_mut()
+            && range.end == byte
+        {
+            range.end += ch.len_utf8();
+        } else {
+            ranges.push(byte..byte + ch.len_utf8());
+        }
+    }
+    ranges
+}
+
+fn highlighted(role: TextRole, text: SharedString, matches: &[usize], theme: &Theme) -> AnyElement {
+    if matches.is_empty() {
+        return Text::new(role, text).ellipsize().into_any_element();
+    }
+    let ranges = match_ranges(&text, matches);
+    crate::styled_with(div(), role.style(theme), theme)
         .min_w_0()
         .overflow_hidden()
-        .children(
-            match_runs(text.as_ref(), matches)
-                .into_iter()
-                .map(move |(segment, hit)| {
-                    let run = Text::new(role, segment);
-                    if hit {
-                        run.tone(Tone::Default).weight(theme.text.ui_strong.weight)
-                    } else {
-                        run.tone(Tone::Secondary).weight(FontWeight::NORMAL)
-                    }
-                }),
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.colors.text_secondary)
+        .font_weight(FontWeight::NORMAL)
+        .child(
+            gpui::StyledText::new(text).with_highlights(ranges.into_iter().map(|range| {
+                (
+                    range,
+                    gpui::HighlightStyle {
+                        color: Some(theme.colors.text),
+                        font_weight: Some(theme.text.ui_strong.weight),
+                        ..Default::default()
+                    },
+                )
+            })),
         )
         .into_any_element()
 }
@@ -228,25 +290,19 @@ impl FuzzyList {
     ///
     /// A fuzzy list wraps where a pane list clamps: the set is short, capped and re-ranked on
     /// every keystroke, so there is no scroll position for the user to lose.
-    pub fn next_cursor(cursor: usize, len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        if cursor + 1 >= len { 0 } else { cursor + 1 }
+    pub fn next_cursor(cursor: usize, source: impl FuzzyCursorSource) -> usize {
+        move_cursor(cursor, &source, super::navigation::next)
     }
 
     /// `ctrl-p` / `↑` (and `k` when [`FuzzyList::binds_jk`]): the previous row, wrapping.
-    pub fn prev_cursor(cursor: usize, len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        if cursor == 0 { len - 1 } else { cursor - 1 }
+    pub fn prev_cursor(cursor: usize, source: impl FuzzyCursorSource) -> usize {
+        move_cursor(cursor, &source, super::navigation::previous)
     }
 }
 
 impl RenderOnce for FuzzyList {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
         if self.items.is_empty() {
             return div()
                 .flex()
@@ -275,6 +331,9 @@ impl RenderOnce for FuzzyList {
                         let selected = ix == cursor && !item.disabled;
                         let has_secondary = item.secondary.is_some();
                         let mut row = Row::new()
+                            // Only some items carry a glyph; the column is reserved so the
+                            // primary text of every row starts at the same x.
+                            .reserve_leading(true)
                             .selected(selected)
                             .cursor(selected)
                             .disabled(item.disabled)
@@ -297,9 +356,9 @@ impl RenderOnce for FuzzyList {
 
                         row = row.column(RowColumn::flex(highlighted(
                             TextRole::Ui,
-                            &item.primary,
+                            item.primary,
                             &item.matches,
-                            &theme,
+                            theme,
                         )));
 
                         if let Some(detail) = item.detail {
@@ -332,34 +391,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runs_merge_adjacent_characters_of_the_same_kind() {
-        let runs = match_runs("payroll", &[0, 1, 2]);
-        assert_eq!(
-            runs,
-            vec![("pay".to_string(), true), ("roll".to_string(), false)]
-        );
-    }
-
-    #[test]
-    fn runs_ignore_out_of_range_matches() {
-        let runs = match_runs("ab", &[0, 9]);
-        assert_eq!(
-            runs,
-            vec![("a".to_string(), true), ("b".to_string(), false)]
-        );
-    }
-
-    #[test]
-    fn runs_handle_multibyte_characters_by_char_index() {
-        let runs = match_runs("héllo", &[1]);
-        assert_eq!(
-            runs,
-            vec![
-                ("h".to_string(), false),
-                ("é".to_string(), true),
-                ("llo".to_string(), false),
-            ]
-        );
+    fn ranges_merge_adjacent_matches_and_keep_utf8_boundaries() {
+        assert_eq!(match_ranges("payroll", &[0, 1, 2]), vec![0..3]);
+        assert_eq!(match_ranges("ab", &[0, 9]), vec![0..1]);
+        assert_eq!(match_ranges("héllo", &[1]), vec![1..3]);
     }
 
     #[test]
@@ -374,6 +409,27 @@ mod tests {
     fn cursor_motion_on_an_empty_list_stays_at_zero() {
         assert_eq!(FuzzyList::next_cursor(0, 0), 0);
         assert_eq!(FuzzyList::prev_cursor(0, 0), 0);
+    }
+
+    #[test]
+    fn cursor_motion_skips_disabled_rows() {
+        let items = [
+            FuzzyItem::new("first"),
+            FuzzyItem::new("disabled").disabled(true),
+            FuzzyItem::new("third"),
+        ];
+
+        assert_eq!(FuzzyList::next_cursor(0, items.as_slice()), 2);
+        assert_eq!(FuzzyList::next_cursor(2, items.as_slice()), 0);
+        assert_eq!(FuzzyList::prev_cursor(2, items.as_slice()), 0);
+        assert_eq!(FuzzyList::prev_cursor(0, items.as_slice()), 2);
+
+        let disabled = [
+            FuzzyItem::new("one").disabled(true),
+            FuzzyItem::new("two").disabled(true),
+        ];
+        assert_eq!(FuzzyList::next_cursor(0, disabled.as_slice()), 0);
+        assert_eq!(FuzzyList::prev_cursor(1, disabled.as_slice()), 0);
     }
 
     #[test]

@@ -1,10 +1,14 @@
 //! Configuration loading, default merging, and atomic persistence.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use fleet_core::{
     config::{Config, merge_config, validate_config},
     paths::FleetHome,
+    sleep::CompiledSleepPolicy,
 };
 use serde_json::Value;
 
@@ -17,6 +21,7 @@ pub struct ConfigStore {
     path: PathBuf,
     files: Arc<dyn Files>,
     gate: Arc<tokio::sync::Mutex<()>>,
+    sleep_policy: Arc<Mutex<Arc<CompiledSleepPolicy>>>,
 }
 
 impl ConfigStore {
@@ -30,37 +35,59 @@ impl ConfigStore {
             path,
             files,
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            sleep_policy: Arc::new(Mutex::new(Arc::new(CompiledSleepPolicy::new(&[])))),
         }
     }
 
     /// Loads the effective configuration, deep-merging defaults and creating a missing file.
     pub async fn load(&self) -> DaemonResult<Config> {
-        let _guard = self.gate.lock().await;
-        let home = self.home.clone();
-        let path = self.path.clone();
-        let files = Arc::clone(&self.files);
-        tokio::task::spawn_blocking(move || load_sync(&home, &path, files.as_ref()))
-            .await
-            .map_err(|error| DaemonError::Join(error.to_string()))?
-    }
-
-    /// Validates and atomically saves a complete configuration.
-    pub async fn save(&self, config: Config) -> DaemonResult<()> {
-        let _guard = self.gate.lock().await;
-        let path = self.path.clone();
-        let files = Arc::clone(&self.files);
-        tokio::task::spawn_blocking(move || save_sync(&path, files.as_ref(), &config))
-            .await
-            .map_err(|error| DaemonError::Join(error.to_string()))?
-    }
-
-    /// Deep-merges and persists a partial JSON configuration patch.
-    pub async fn update(&self, patch: Value) -> DaemonResult<Config> {
-        let _guard = self.gate.lock().await;
+        let guard = Arc::clone(&self.gate).lock_owned().await;
         let home = self.home.clone();
         let path = self.path.clone();
         let files = Arc::clone(&self.files);
         tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            load_sync(&home, &path, files.as_ref())
+        })
+        .await
+        .map_err(|error| DaemonError::Join(error.to_string()))?
+    }
+
+    /// Loads rules and retains their compiled matcher across sleep requests and polls.
+    /// Each caller keeps an immutable snapshot while process observation is in flight.
+    pub(crate) async fn load_with_sleep_policy(
+        &self,
+    ) -> DaemonResult<(Config, Arc<CompiledSleepPolicy>)> {
+        let config = self.load().await?;
+        let mut policy = self
+            .sleep_policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::make_mut(&mut policy).update(&config.sleep.keep_alive);
+        Ok((config, Arc::clone(&policy)))
+    }
+
+    /// Validates and atomically saves a complete configuration.
+    pub async fn save(&self, config: Config) -> DaemonResult<()> {
+        let guard = Arc::clone(&self.gate).lock_owned().await;
+        let path = self.path.clone();
+        let files = Arc::clone(&self.files);
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            save_sync(&path, files.as_ref(), &config)
+        })
+        .await
+        .map_err(|error| DaemonError::Join(error.to_string()))?
+    }
+
+    /// Deep-merges and persists a partial JSON configuration patch.
+    pub async fn update(&self, patch: Value) -> DaemonResult<Config> {
+        let guard = Arc::clone(&self.gate).lock_owned().await;
+        let home = self.home.clone();
+        let path = self.path.clone();
+        let files = Arc::clone(&self.files);
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
             let current = if files.exists(&path) {
                 serde_json::from_str(&files.read_text(&path)?)?
             } else {
@@ -112,7 +139,10 @@ fn save_sync(path: &std::path::Path, files: &dyn Files, config: &Config) -> Daem
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        path::{Path, PathBuf},
+        sync::{Arc, Condvar},
+    };
 
     use crate::adapters::files::RealFiles;
 
@@ -147,5 +177,158 @@ mod tests {
         let config = store.load().await.unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.github.pr_ttl_seconds, 12);
         assert_eq!(config.github.cache_ttl_seconds, 3_600);
+    }
+
+    struct BlockingWriteFiles {
+        inner: RealFiles,
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: (Mutex<bool>, Condvar),
+    }
+
+    impl BlockingWriteFiles {
+        fn new(inner: RealFiles) -> Self {
+            Self {
+                inner,
+                started: Mutex::new(None),
+                release: (Mutex::new(false), Condvar::new()),
+            }
+        }
+
+        fn block_next_write(&self) -> tokio::sync::oneshot::Receiver<()> {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            *self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sender);
+            receiver
+        }
+
+        fn release_write(&self) {
+            *self
+                .release
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            self.release.1.notify_all();
+        }
+    }
+
+    impl Files for BlockingWriteFiles {
+        fn read_text(&self, path: &Path) -> DaemonResult<String> {
+            self.inner.read_text(path)
+        }
+
+        fn create_dir_all(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn clone_dir(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
+            self.inner.clone_dir(source, destination)
+        }
+
+        fn atomic_write_text(&self, path: &Path, text: &str) -> DaemonResult<()> {
+            let sender = self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(sender) = sender {
+                let _ignored = sender.send(());
+                let (released, ready) = &self.release;
+                let released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                drop(
+                    ready
+                        .wait_while(released, |released| !*released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+            }
+            self.inner.atomic_write_text(path, text)
+        }
+
+        fn rename(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
+            self.inner.rename(source, destination)
+        }
+
+        fn trash(&self, path: &Path) -> DaemonResult<PathBuf> {
+            self.inner.trash(path)
+        }
+
+        fn remove_detached(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.remove_detached(path)
+        }
+
+        fn remove_file(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path)
+        }
+
+        fn list(&self, path: &Path) -> DaemonResult<Vec<PathBuf>> {
+            self.inner.list(path)
+        }
+
+        fn guard_strict_descendant(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.guard_strict_descendant(path)
+        }
+
+        fn set_removable_roots(&self, roots: Vec<PathBuf>) {
+            self.inner.set_removable_roots(roots);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_write_retains_serialization() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let home = temp.path().join(".fleet");
+        let real = RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        );
+        let files = Arc::new(BlockingWriteFiles::new(real));
+        let store = ConfigStore::new(&home, files.clone());
+        let config = store.load().await.unwrap_or_else(|error| panic!("{error}"));
+        let started = files.block_next_write();
+        let writer = store.clone();
+        let write = tokio::spawn(async move { writer.save(config).await });
+        started
+            .await
+            .unwrap_or_else(|error| panic!("write did not start: {error}"));
+        write.abort();
+        let _cancelled = write.await;
+
+        assert!(store.gate.try_lock().is_err());
+        files.release_write();
+        store.load().await.unwrap_or_else(|error| panic!("{error}"));
+        assert!(store.gate.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn sleep_policy_reuses_rules_and_preserves_in_flight_snapshots() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let store = store(&temp);
+        let (_, initial) = store.load_with_sleep_policy().await.unwrap();
+        let initial_address = Arc::as_ptr(&initial);
+        drop(initial);
+        let (_, initial) = store.clone().load_with_sleep_policy().await.unwrap();
+        assert_eq!(initial_address, Arc::as_ptr(&initial));
+
+        store
+            .update(serde_json::json!({"sleep": {"keepAlive": []}}))
+            .await
+            .unwrap();
+        let (_, updated) = store.load_with_sleep_policy().await.unwrap();
+        let commands = vec!["claude".to_owned()];
+        assert!(updated.match_keep_alive(&commands, &[]).is_empty());
+        assert_eq!(initial.match_keep_alive(&commands, &[]), ["claude"]);
+
+        // Reloads also pick up edits made outside ConfigStore.
+        std::fs::write(store.path(), r#"{"sleep":{"keepAlive":[{"id":"broken","label":"broken","kind":"process","pattern":"\\q"}]}}"#).unwrap();
+        let (_, invalid) = store.load_with_sleep_policy().await.unwrap();
+        assert_eq!(invalid.diagnostics().len(), 1);
+        assert!(updated.diagnostics().is_empty());
     }
 }

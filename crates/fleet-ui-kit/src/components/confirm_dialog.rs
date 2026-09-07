@@ -16,7 +16,7 @@
 //! whatever the caller adds through [`ConfirmDialog::hints`] (`I` re-check, `s` toggle the KEEP
 //! list). Nothing else is bound, so muscle memory cannot misfire.
 
-use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*};
 
 use crate::{
     components::{ConfirmKey, Dialog, FactList, FreshnessStamp, KeyHint, KeyHintRow},
@@ -25,12 +25,6 @@ use crate::{
     theme::{ActiveTheme, Theme},
     tone::Tone,
 };
-
-/// The compact card width (§3.8): every decisive fact known and benign.
-const COMPACT_W: Pixels = px(480.0);
-
-/// The expanded card width: a risk is true or a decisive fact is unknown.
-const EXPANDED_W: Pixels = px(560.0);
 
 /// A destructive confirm.
 #[derive(IntoElement)]
@@ -141,12 +135,13 @@ impl ConfirmDialog {
             .unwrap_or_else(|| self.facts.confirm_key())
     }
 
-    /// The width this confirm will render at.
-    pub fn resolved_width(&self) -> Pixels {
+    /// The width this confirm resolves to, given a theme: compact (§3.8) while every decisive
+    /// fact is known and benign, expanded once a risk is true or a fact is unknown.
+    pub fn resolved_width(&self, theme: &Theme) -> Pixels {
         self.width_override.unwrap_or(if self.is_compact() {
-            COMPACT_W
+            theme.metrics.confirm_compact_w
         } else {
-            EXPANDED_W
+            theme.metrics.dialog_w
         })
     }
 }
@@ -180,10 +175,10 @@ fn compact_facts(facts: &FactList, theme: &Theme) -> AnyElement {
 
 impl RenderOnce for ConfirmDialog {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
         let compact = self.is_compact();
         let key = self.confirm_key();
-        let width = self.resolved_width();
+        let width = self.resolved_width(theme);
         let icon = self.icon.unwrap_or(if compact {
             Icon::Trash
         } else {
@@ -205,8 +200,8 @@ impl RenderOnce for ConfirmDialog {
 
         let facts_block: AnyElement = match self.body_override {
             Some(body) => body,
-            None if compact => compact_facts(&self.facts, &theme),
-            None => self.facts.clone().into_any_element(),
+            None if compact => compact_facts(&self.facts, theme),
+            None => self.facts.into_any_element(),
         };
 
         let body = div()
@@ -252,9 +247,11 @@ mod tests {
     use crate::components::Fact;
 
     use super::*;
+    use gpui::px;
 
     #[test]
     fn all_safe_facts_give_the_compact_form_and_the_lower_key() {
+        let theme = Theme::default();
         let confirm = ConfirmDialog::new(
             "Delete buk/payroll#fix-rut-validator?",
             FactList::from_facts([Fact::safe("clean"), Fact::safe("no session")]),
@@ -262,18 +259,22 @@ mod tests {
         assert!(confirm.is_compact());
         assert_eq!(confirm.confirm_key(), ConfirmKey::Lower);
         assert!(confirm.confirm_key().accepts_enter());
-        assert_eq!(confirm.resolved_width(), COMPACT_W);
+        assert_eq!(
+            confirm.resolved_width(&theme),
+            theme.metrics.confirm_compact_w
+        );
     }
 
     #[test]
     fn a_risk_expands_the_card_but_keeps_the_lower_key() {
+        let theme = Theme::default();
         let confirm = ConfirmDialog::new(
             "Delete worktree",
             FactList::from_facts([Fact::risk("12 uncommitted files")]),
         );
         assert!(!confirm.is_compact());
         assert_eq!(confirm.confirm_key(), ConfirmKey::Lower);
-        assert_eq!(confirm.resolved_width(), EXPANDED_W);
+        assert_eq!(confirm.resolved_width(&theme), theme.metrics.dialog_w);
     }
 
     #[test]
@@ -306,6 +307,6 @@ mod tests {
         .body(gpui::div())
         .width(px(720.0));
         assert!(!confirm.is_compact());
-        assert_eq!(confirm.resolved_width(), px(720.0));
+        assert_eq!(confirm.resolved_width(&Theme::default()), px(720.0));
     }
 }

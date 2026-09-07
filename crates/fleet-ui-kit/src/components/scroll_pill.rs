@@ -12,7 +12,7 @@
 //! mode and would otherwise look exactly like a live one — which is how "my agent stopped
 //! printing" bug reports are born.
 
-use gpui::{App, Window, div, prelude::*, px};
+use gpui::{App, Window, div, prelude::*};
 
 use crate::{
     components::KeyHintRow,
@@ -21,12 +21,6 @@ use crate::{
     theme::ActiveTheme,
     tone::Tone,
 };
-
-/// The pill's fixed width (§3.6). Fixed, so the number changing does not resize the overlay
-/// under the reader's eye.
-const PILL_W: f32 = 176.0;
-/// The amber left bar that marks the pill as a mode.
-const MODE_BAR_W: f32 = 2.0;
 
 /// The scroll-mode overlay.
 #[derive(IntoElement)]
@@ -82,7 +76,7 @@ impl RenderOnce for ScrollPill {
             .flex_col()
             .justify_center()
             .gap(theme.space.xxs)
-            .w(px(PILL_W))
+            .w(theme.metrics.scroll_pill_w)
             .min_h(theme.metrics.strip_h)
             .px(theme.space.sm)
             .py(theme.space.xxs)
@@ -91,7 +85,7 @@ impl RenderOnce for ScrollPill {
             // to stay legible on top of whatever the shell just painted.
             .bg(theme.colors.elevated)
             .shadow(theme.sheet_shadow())
-            .border_l(px(MODE_BAR_W))
+            .border_l(theme.metrics.focus_ring_w)
             .border_color(theme.colors.warning)
             .child(
                 div()

@@ -97,7 +97,7 @@ impl RenderOnce for PrefixHint {
             // and has to be readable on top of any color the shell just painted.
             .bg(theme.colors.elevated)
             .shadow(theme.sheet_shadow())
-            .border_1()
+            .border(theme.metrics.hairline)
             .border_color(theme.colors.border_strong)
             .child(
                 div()

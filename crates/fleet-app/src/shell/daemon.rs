@@ -1,42 +1,43 @@
 //! The daemon surfaces of UX-SPEC §3.12: the cold-start splash, the "will not start" window
 //! and the 28 px banner, plus the wording each of them is allowed to use.
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use fleet_ui_kit::{Banner, DaemonSplash, DaemonState, Icon, KeyHintRow, Tone};
-use gpui::{AnyElement, App, IntoElement, SharedString};
+use fleet_core::paths::FleetHome;
+use fleet_ui_kit::{Banner, DaemonSplash, DaemonState, Icon, KeyHintRow};
+use gpui::{AnyElement, Entity, IntoElement, SharedString, prelude::*};
 
 use crate::state::{
     AppState, DaemonLink, RECONNECT_BANNER_DWELL, RESTART_BANNER_DWELL, SPLASH_DETAIL_DELAY,
     reconnect_backoff,
 };
 
-/// The one sentence a reconnect after a daemon **restart** must say, verbatim (§3.12 D-17).
-///
-/// A warm banner that implies the agents came back is the single most damaging false
-/// reassurance in the app: `ARCHITECTURE.md` is explicit that PTYs do not survive fleetd.
-pub const RESTART_SENTENCE: &str =
+/// PTYs do not survive a daemon restart; the recovery banner must say so explicitly.
+const RESTART_SENTENCE: &str =
     "fleetd restarted. Terminal sessions did not survive; worktrees, jobs and state are intact.";
 /// The connected process predates the fleetd binary currently on disk.
-pub const OUTDATED_SENTENCE: &str = "fleetd is outdated, restart with `fleet daemon restart`";
+const OUTDATED_SENTENCE: &str = "fleetd is outdated, restart with `fleet daemon restart`";
 
 /// What the 28 px banner under the context bar says right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BannerSpec {
+struct BannerSpec {
     /// The sentence.
-    pub text: String,
+    text: &'static str,
     /// The reconnect countdown, when one is running.
-    pub countdown: Option<String>,
-    /// Amber while reconnecting or after a restart; the dot carries the red.
-    pub tone: Tone,
+    countdown: Option<String>,
     /// The keys this banner owns while it is showing.
-    pub hints: &'static [(&'static str, &'static str)],
+    hints: &'static [(&'static str, &'static str)],
 }
 
-/// The reconnect countdown of §3.12 C, cycling `3s → reconnecting… → 6s`.
+/// The reconnect countdown of §3.12 C, derived from the absolute retry deadline.
 #[must_use]
-pub fn countdown_label(attempt: u32) -> String {
-    format!("reconnecting in {}s", reconnect_backoff(attempt).as_secs())
+fn countdown_label(retry_at: Instant, now: Instant) -> String {
+    let remaining = retry_at.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return "reconnecting…".to_owned();
+    }
+    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+    format!("reconnecting in {seconds}s")
 }
 
 /// The banner for the current daemon state, or `None` when there is nothing to say.
@@ -44,15 +45,22 @@ pub fn countdown_label(attempt: u32) -> String {
 /// A dismissed `Lost` banner returns `None`; the daemon dot stays red, which is exactly what
 /// §3.12 asks for.
 #[must_use]
-pub fn banner_spec(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<BannerSpec> {
+fn banner_spec(
+    daemon: &DaemonLink,
+    daemon_since: Instant,
+    outdated: bool,
+    now: Instant,
+) -> Option<BannerSpec> {
     match daemon {
         DaemonLink::Lost {
             attempt,
             dismissed: false,
         } => Some(BannerSpec {
-            text: "fleetd stopped".to_owned(),
-            countdown: Some(countdown_label(*attempt)),
-            tone: Tone::Warning,
+            text: "fleetd stopped",
+            countdown: Some(countdown_label(
+                daemon_since + reconnect_backoff(*attempt),
+                now,
+            )),
             hints: &[
                 ("r", "reconnect now"),
                 ("l", "open the log"),
@@ -60,9 +68,8 @@ pub fn banner_spec(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<
             ],
         }),
         DaemonLink::Connected if outdated => Some(BannerSpec {
-            text: OUTDATED_SENTENCE.to_owned(),
+            text: OUTDATED_SENTENCE,
             countdown: None,
-            tone: Tone::Warning,
             hints: &[],
         }),
         DaemonLink::Reconnected { restarted, since } => {
@@ -76,12 +83,11 @@ pub fn banner_spec(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<
             }
             Some(BannerSpec {
                 text: if *restarted {
-                    RESTART_SENTENCE.to_owned()
+                    RESTART_SENTENCE
                 } else {
-                    "reconnected".to_owned()
+                    "reconnected"
                 },
                 countdown: None,
-                tone: Tone::Warning,
                 hints: &[],
             })
         }
@@ -96,7 +102,7 @@ pub fn banner_spec(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<
 
 /// The daemon dot's state (§2.2). Healthy is a bare dot; anything else grows a word.
 #[must_use]
-pub const fn dot_state(daemon: &DaemonLink) -> DaemonState {
+pub(super) const fn dot_state(daemon: &DaemonLink) -> DaemonState {
     match daemon {
         DaemonLink::Connected | DaemonLink::Reconnected { .. } => DaemonState::Healthy,
         DaemonLink::Starting => DaemonState::Degraded,
@@ -106,7 +112,7 @@ pub const fn dot_state(daemon: &DaemonLink) -> DaemonState {
 
 /// The word beside a degraded or lost dot.
 #[must_use]
-pub const fn dot_label(daemon: &DaemonLink) -> Option<&'static str> {
+pub(super) const fn dot_label(daemon: &DaemonLink) -> Option<&'static str> {
     match daemon {
         DaemonLink::Starting => Some("starting"),
         DaemonLink::Lost { .. } => Some("stopped"),
@@ -117,8 +123,13 @@ pub const fn dot_label(daemon: &DaemonLink) -> Option<&'static str> {
 
 /// Renders the banner, or nothing.
 #[must_use]
-pub fn banner(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<AnyElement> {
-    let spec = banner_spec(daemon, outdated, now)?;
+pub(super) fn banner(
+    daemon: &DaemonLink,
+    daemon_since: Instant,
+    outdated: bool,
+    now: Instant,
+) -> Option<AnyElement> {
+    let spec = banner_spec(daemon, daemon_since, outdated, now)?;
     let mut banner = Banner::warning(spec.text).icon(Icon::Unplug);
     if let Some(countdown) = spec.countdown {
         banner = banner.countdown(countdown);
@@ -133,57 +144,32 @@ pub fn banner(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<AnyEl
     Some(banner.into_any_element())
 }
 
-/// Whether the fleetd binary the app would spawn was written after this daemon started.
-#[must_use]
-pub fn daemon_binary_is_newer(started_at: &str) -> bool {
-    let Ok(path) = fleet_client::resolve_daemon_path() else {
-        return false;
-    };
-    let Ok(modified) = std::fs::metadata(path).and_then(|metadata| metadata.modified()) else {
-        return false;
-    };
-    modified_after_start(modified, started_at)
-}
-
-fn modified_after_start(modified: SystemTime, started_at: &str) -> bool {
-    let Ok(started) = chrono::DateTime::parse_from_rfc3339(started_at) else {
-        return false;
-    };
-    let Ok(modified) = modified.duration_since(UNIX_EPOCH) else {
-        return false;
-    };
-    let started_millis = started.timestamp_millis();
-    started_millis >= 0 && modified.as_millis() > started_millis as u128
-}
-
 /// The full-window daemon surface of §3.12 A and B, or `None` when the daemon is reachable.
 #[must_use]
-pub fn splash(state: &AppState, now: Instant, cx: &App) -> Option<AnyElement> {
+pub(super) fn splash(
+    state: &AppState,
+    now: Instant,
+    diagnostics: &Entity<crate::views::doctor_view::DiagnosticView>,
+) -> Option<AnyElement> {
     match &state.daemon {
         DaemonLink::Starting => {
             let mut splash = DaemonSplash::starting("Starting fleetd…");
             if now.saturating_duration_since(state.daemon_since) >= SPLASH_DETAIL_DELAY {
                 splash = splash.detail(SharedString::from(
-                    fleet_proto::paths::socket_path(&state.home)
+                    FleetHome::new(&state.home)
+                        .socket_path()
                         .display()
                         .to_string(),
                 ));
             }
             Some(splash.into_any_element())
         }
-        DaemonLink::Failed {
-            message,
-            log_tail,
-            stale_socket,
-        } => Some(crate::views::doctor_view::failure_view(
-            crate::views::doctor_view::DaemonFailure::classify(message, *stale_socket),
-            message,
-            &fleet_proto::paths::socket_path(&state.home)
-                .display()
-                .to_string(),
-            log_tail,
-            cx,
-        )),
+        DaemonLink::Failed { .. } => Some(
+            diagnostics
+                .clone()
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element(),
+        ),
         DaemonLink::Connected | DaemonLink::Lost { .. } | DaemonLink::Reconnected { .. } => None,
     }
 }
@@ -201,16 +187,23 @@ mod tests {
             attempt: 0,
             dismissed: true,
         };
-        assert_eq!(banner_spec(&lost, false, now), None);
+        assert_eq!(banner_spec(&lost, now, false, now), None);
         assert_eq!(dot_state(&lost), DaemonState::Lost);
     }
 
     #[test]
-    fn the_countdown_follows_the_backoff() {
-        assert_eq!(countdown_label(0), "reconnecting in 1s");
-        assert_eq!(countdown_label(1), "reconnecting in 2s");
-        assert_eq!(countdown_label(2), "reconnecting in 4s");
-        assert_eq!(countdown_label(9), "reconnecting in 8s");
+    fn countdown_tracks_retry_deadline() {
+        let now = Instant::now();
+        let retry_at = now + Duration::from_millis(2_250);
+        assert_eq!(countdown_label(retry_at, now), "reconnecting in 3s");
+        assert_eq!(
+            countdown_label(retry_at, now + Duration::from_millis(1_251)),
+            "reconnecting in 1s"
+        );
+        assert_eq!(
+            countdown_label(retry_at, now + Duration::from_millis(2_250)),
+            "reconnecting…"
+        );
     }
 
     #[test]
@@ -221,13 +214,13 @@ mod tests {
             since: now,
         };
         let spec =
-            banner_spec(&restarted, false, now).unwrap_or_else(|| panic!("expected a banner"));
+            banner_spec(&restarted, now, false, now).unwrap_or_else(|| panic!("expected a banner"));
         assert_eq!(spec.text, RESTART_SENTENCE);
         assert!(spec.text.contains("did not survive"));
 
         // It stays for the full six seconds, not 800 ms.
-        assert!(banner_spec(&restarted, false, now + Duration::from_secs(5)).is_some());
-        assert!(banner_spec(&restarted, false, now + Duration::from_secs(7)).is_none());
+        assert!(banner_spec(&restarted, now, false, now + Duration::from_secs(5)).is_some());
+        assert!(banner_spec(&restarted, now, false, now + Duration::from_secs(7)).is_none());
     }
 
     #[test]
@@ -237,9 +230,10 @@ mod tests {
             restarted: false,
             since: now,
         };
-        let spec = banner_spec(&warm, false, now).unwrap_or_else(|| panic!("expected a banner"));
+        let spec =
+            banner_spec(&warm, now, false, now).unwrap_or_else(|| panic!("expected a banner"));
         assert_eq!(spec.text, "reconnected");
-        assert!(banner_spec(&warm, false, now + Duration::from_millis(900)).is_none());
+        assert!(banner_spec(&warm, now, false, now + Duration::from_millis(900)).is_none());
     }
 
     #[test]
@@ -252,12 +246,8 @@ mod tests {
 
     #[test]
     fn a_newer_binary_uses_the_existing_daemon_banner_surface() {
-        let modified = UNIX_EPOCH + Duration::from_secs(10);
-        assert!(modified_after_start(modified, "1970-01-01T00:00:05Z"));
-        assert!(!modified_after_start(modified, "1970-01-01T00:00:15Z"));
-        assert!(!modified_after_start(modified, "not-a-date"));
-
-        let spec = banner_spec(&DaemonLink::Connected, true, Instant::now())
+        let now = Instant::now();
+        let spec = banner_spec(&DaemonLink::Connected, now, true, now)
             .unwrap_or_else(|| panic!("expected the existing banner"));
         assert_eq!(spec.text, OUTDATED_SENTENCE);
         assert!(spec.hints.is_empty());

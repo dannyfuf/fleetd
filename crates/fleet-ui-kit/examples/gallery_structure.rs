@@ -25,11 +25,16 @@
 //! | `f` | which demo pane owns the focus ring |
 //! | `q` | quit |
 
-use fleet_ui_kit::KitAssets;
+pub mod support;
+const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
+    label_width: 0.0,
+    column: false,
+    divided: false,
+    compact: false,
+};
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Menu, MenuItem,
-    Pixels, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, px, size,
+    AnyElement, App, Context, FocusHandle, Focusable, KeyBinding, Pixels, Window, actions, div, px,
 };
 
 actions!(
@@ -156,27 +161,6 @@ impl Focusable for StructureGallery {
     }
 }
 
-// ------------------------------------------------------------------ layout helpers
-
-fn section(title: &str, t: &Theme, children: Vec<AnyElement>) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .gap(t.space.md)
-        .pb(t.space.xl)
-        .child(SectionHeader::new(title.to_string()))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .gap(t.space.md)
-                .children(children),
-        )
-        .into_any_element()
-}
-
 /// A caption above a specimen, so a state can be named instead of guessed at.
 fn specimen(label: &str, t: &Theme, child: impl IntoElement) -> AnyElement {
     div()
@@ -199,7 +183,7 @@ fn stage(t: &Theme, height: Pixels, child: impl IntoElement) -> AnyElement {
         .h(height)
         .rounded(t.radii.sm)
         .bg(t.colors.bg)
-        .border_1()
+        .border(t.metrics.hairline)
         .border_color(t.colors.border)
         .overflow_hidden()
         .child(child)
@@ -247,8 +231,6 @@ fn fake_terminal(t: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-// ------------------------------------------------------------------ sections
-
 fn app_frame_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let mini = |banner: bool| {
@@ -286,7 +268,7 @@ fn app_frame_section(cx: &mut App) -> AnyElement {
         }
     };
 
-    section(
+    LAYOUT.section(
         "AppFrame — 36 context bar · 28 banner · flex body · 26 status bar",
         &t,
         vec![
@@ -312,7 +294,7 @@ fn split_section(cx: &mut App) -> AnyElement {
             .header(PaneHeader::new(label.to_string()).total(6))
             .body(filler(&t, 4))
     };
-    section(
+    LAYOUT.section(
         "SplitLayout — fix the rail and the detail panel, never the list",
         &t,
         vec![
@@ -399,7 +381,7 @@ fn context_bar_section(cx: &mut App) -> AnyElement {
         .chip(Chip::counter(Icon::CircleQuestionMark, 1).tone(Tone::Warning))
         .chip(Chip::labeled(Icon::CircleArrowUp, "0.2.0"))
     };
-    section(
+    LAYOUT.section(
         "ContextBar — 84 px inset · numbered tabs · 2 px accent underline · chips · daemon dot",
         &t,
         vec![
@@ -452,7 +434,7 @@ fn context_bar_section(cx: &mut App) -> AnyElement {
 fn status_bar_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let bar_stage = |bar: StatusBar| stage(&t, t.metrics.status_bar_h, bar);
-    section(
+    LAYOUT.section(
         "StatusBar — breadcrumb · mode word (84 px, fixed) · ticker · sticky error",
         &t,
         vec![
@@ -515,7 +497,7 @@ fn status_bar_section(cx: &mut App) -> AnyElement {
 
 fn pane_section(cx: &mut App, focused_pane: usize) -> AnyElement {
     let t = cx.theme().clone();
-    section(
+    LAYOUT.section(
         "Pane / PaneHeader — the focus ring, the scroll thumb and the header in place",
         &t,
         vec![
@@ -636,7 +618,7 @@ fn pane_section(cx: &mut App, focused_pane: usize) -> AnyElement {
                         PaneHeader::new("worktrees")
                             .shown(2)
                             .total(12)
-                            .filter(FilterBar::new("rut", 2, 12).focused(true)),
+                            .query_slot(FilterBar::new("rut", 2, 12).focused(true).query_slot()),
                     ))
                     .child(stage(
                         &t,
@@ -722,7 +704,7 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
         })
         .collect::<Vec<_>>();
 
-    section(
+    LAYOUT.section(
         "ModeWord · DaemonDot",
         &t,
         vec![
@@ -753,7 +735,7 @@ fn mode_and_daemon_section(cx: &mut App) -> AnyElement {
 fn banner_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let banner_stage = |banner: Banner| stage(&t, t.metrics.banner_h, banner);
-    section(
+    LAYOUT.section(
         "Banner — §3.12 case C only",
         &t,
         vec![
@@ -805,7 +787,7 @@ fn banner_section(cx: &mut App) -> AnyElement {
 
 fn veil_section(cx: &mut App, veiled: bool) -> AnyElement {
     let t = cx.theme().clone();
-    section(
+    LAYOUT.section(
         "Veil — 55 % over terminal grids only, and keys are dropped, not buffered",
         &t,
         vec![specimen(
@@ -834,7 +816,7 @@ fn veil_section(cx: &mut App, veiled: bool) -> AnyElement {
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .child(Veil::new(veiled).child(fake_terminal(&t))),
+                            .child(Veil::new(veiled).content(fake_terminal(&t))),
                     ),
             ),
         )],
@@ -843,7 +825,7 @@ fn veil_section(cx: &mut App, veiled: bool) -> AnyElement {
 
 fn sheet_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    section(
+    LAYOUT.section(
         "Sheet — right-docked, non-blocking, 440 / 640",
         &t,
         vec![
@@ -955,7 +937,7 @@ fn sheet_footer(t: &Theme) -> AnyElement {
 
 fn dialog_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    section(
+    LAYOUT.section(
         "Dialog — scrim + card + 44 header + 44 footer, and never a button pair",
         &t,
         vec![
@@ -1014,7 +996,7 @@ fn dialog_section(cx: &mut App) -> AnyElement {
 
 fn layers_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
-    section(
+    LAYOUT.section(
         "Floating layers — live on this window",
         &t,
         vec![specimen(
@@ -1028,7 +1010,7 @@ fn layers_section(cx: &mut App) -> AnyElement {
                 .p(t.space.lg)
                 .rounded(t.radii.sm)
                 .bg(t.colors.surface)
-                .border_1()
+                .border(t.metrics.hairline)
                 .border_color(t.colors.border)
                 .child(
                     KeyHintRow::new()
@@ -1055,8 +1037,6 @@ fn layers_section(cx: &mut App) -> AnyElement {
         )],
     )
 }
-
-// ------------------------------------------------------------------ live layers
 
 fn palette_card(t: &Theme) -> AnyElement {
     let row = |label: &str, detail: &str, key: &str| {
@@ -1088,7 +1068,7 @@ fn palette_card(t: &Theme) -> AnyElement {
                 .h(t.metrics.dialog_header_h)
                 .px(t.space.lg)
                 .gap(t.space.sm)
-                .border_b(px(1.0))
+                .border_b(t.metrics.hairline)
                 .border_color(t.colors.border)
                 .child(Text::hint(":"))
                 .child(Text::ui("pay fix")),
@@ -1118,7 +1098,7 @@ fn palette_card(t: &Theme) -> AnyElement {
                 .items_center()
                 .h(px(24.0))
                 .px(t.space.lg)
-                .border_t(px(1.0))
+                .border_t(t.metrics.hairline)
                 .border_color(t.colors.border)
                 .child(
                     KeyHintRow::new()
@@ -1267,7 +1247,7 @@ impl Render for StructureGallery {
             frame = frame.body_overlay(ToastStack::new(live_toasts()));
         }
         if self.palette {
-            frame = frame.overlay(Overlay::new().child(palette_card(&t)));
+            frame = frame.overlay(Overlay::new().content(palette_card(&t)));
         }
         if self.dialog {
             let mut dialog = Dialog::new("New worktree")
@@ -1303,10 +1283,11 @@ impl Render for StructureGallery {
 }
 
 fn main() {
-    gpui_platform::application()
-        .with_assets(KitAssets)
-        .run(|cx: &mut App| {
-            Theme::init(ThemeMode::Dark, cx);
+    support::runtime::run(
+        "fleet-ui-kit · structure",
+        (1280.0, 860.0),
+        Quit,
+        |cx| {
             cx.bind_keys([
                 KeyBinding::new("t", ToggleTheme, None),
                 KeyBinding::new("b", ToggleBanner, None),
@@ -1321,48 +1302,7 @@ fn main() {
                 KeyBinding::new("q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
-            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.set_menus(vec![Menu {
-                name: "fleet-ui-kit".into(),
-                items: vec![MenuItem::action("Quit", Quit)],
-                disabled: false,
-            }]);
-            cx.on_window_closed(|cx: &mut App, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            let bounds = Bounds::centered(None, size(px(1280.0), px(860.0)), cx);
-            let opened = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("fleet-ui-kit · structure".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    let view: Entity<StructureGallery> = cx.new(StructureGallery::new);
-                    view
-                },
-            );
-
-            match opened {
-                Ok(window) => {
-                    window
-                        .update(cx, |view, window, cx| {
-                            window.focus(&view.focus_handle(cx), cx);
-                        })
-                        .ok();
-                    cx.activate(true);
-                }
-                Err(error) => {
-                    eprintln!("failed to open the structure gallery window: {error}");
-                    cx.quit();
-                }
-            }
-        });
+        },
+        StructureGallery::new,
+    );
 }

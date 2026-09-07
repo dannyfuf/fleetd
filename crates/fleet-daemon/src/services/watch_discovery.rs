@@ -1,8 +1,8 @@
 //! Cheap, read-only discovery and log tailing for agent subprocesses.
 
 use crate::{
-    DaemonResult,
-    adapters::process::{Process, ProcessInfo},
+    DaemonError, DaemonResult,
+    adapters::process::{Process, ProcessIdentity, ProcessInfo},
     stores::config::ConfigStore,
 };
 use fleet_core::{
@@ -24,7 +24,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{sessions::Sessions, watches::Watches};
+use super::{maintenance, sessions::Sessions, watches::Watches};
 
 const LOG_POLL: Duration = Duration::from_millis(500);
 const INITIAL_LOG_BYTES: u64 = 64 * 1024;
@@ -38,13 +38,19 @@ const HELPER_PATTERNS: &[&str] = &[
 
 #[derive(Default)]
 struct DiscoveryState {
-    environments: BTreeMap<u32, Vec<(String, String)>>,
-    tracked: BTreeMap<u32, Tracked>,
+    environments: BTreeMap<ProcessIdentity, Vec<(String, String)>>,
+    rules: Vec<DiscoveredWatchRule>,
+    patterns: Arc<[Regex]>,
+    tracked: BTreeMap<ProcessIdentity, Tracked>,
+    retained: BTreeMap<ProcessIdentity, WatchId>,
 }
 
 struct Tracked {
     watch: WatchId,
+    session: SessionId,
+    terminal: TerminalId,
     companion: Option<Companion>,
+    environment_loaded: bool,
 }
 
 struct Companion {
@@ -52,6 +58,7 @@ struct Companion {
     json_file: PathBuf,
     log_file: PathBuf,
     offset: u64,
+    pending_utf8: Vec<u8>,
     identity: Option<(u64, u64)>,
 }
 
@@ -73,12 +80,13 @@ struct CompanionJob {
 /// Observes candidate processes and mirrors their metadata into [`Watches`].
 #[derive(Clone)]
 pub(crate) struct WatchDiscovery {
-    config: Arc<ConfigStore>,
     sessions: Sessions,
     process: Arc<dyn Process>,
     watches: Watches,
+    runtime_config: tokio::sync::watch::Receiver<Option<Arc<Config>>>,
     temp_dir: PathBuf,
     state: Arc<Mutex<DiscoveryState>>,
+    helpers: Arc<[Regex]>,
 }
 
 impl WatchDiscovery {
@@ -88,13 +96,18 @@ impl WatchDiscovery {
         process: Arc<dyn Process>,
         watches: Watches,
     ) -> Self {
+        let runtime_config = maintenance::runtime_config_receiver(&config);
         Self {
-            config,
             sessions,
             process,
             watches,
+            runtime_config,
             temp_dir: std::env::temp_dir(),
             state: Arc::new(Mutex::new(DiscoveryState::default())),
+            helpers: HELPER_PATTERNS
+                .iter()
+                .filter_map(|pattern| Regex::new(pattern).ok())
+                .collect(),
         }
     }
 
@@ -104,14 +117,16 @@ impl WatchDiscovery {
         self
     }
 
-    pub(crate) async fn discover_once(&self) -> DaemonResult<()> {
-        let config = self.config.load().await?;
+    async fn discover_config(&self, config: &Config) -> DaemonResult<()> {
         if !config.discovered_watches.enabled {
             return Ok(());
         }
+        let sessions = self.sessions.snapshot();
+        if sessions.is_empty() {
+            return Ok(());
+        }
         let snapshot = self.process.snapshot().await?;
-        self.discover(&config, &self.sessions.snapshot(), &snapshot)
-            .await
+        self.discover(config, &sessions, &snapshot).await
     }
 
     async fn discover(
@@ -120,18 +135,26 @@ impl WatchDiscovery {
         sessions: &[Session],
         snapshot: &[ProcessInfo],
     ) -> DaemonResult<()> {
-        let live_pids = snapshot
+        let live_identities = snapshot
             .iter()
-            .map(|process| process.pid)
+            .map(ProcessInfo::identity)
             .collect::<BTreeSet<_>>();
         self.lock()
             .environments
-            .retain(|pid, _| live_pids.contains(pid));
-        let patterns = enabled_patterns(&config.discovered_watches.processes);
-        let helpers = HELPER_PATTERNS
+            .retain(|identity, _| live_identities.contains(identity));
+        self.reconcile_tracked(&live_identities);
+        let patterns = {
+            let mut state = self.lock();
+            if state.rules != config.discovered_watches.processes {
+                state.patterns = enabled_patterns(&config.discovered_watches.processes).into();
+                state.rules.clone_from(&config.discovered_watches.processes);
+            }
+            Arc::clone(&state.patterns)
+        };
+        let parents = snapshot
             .iter()
-            .filter_map(|pattern| Regex::new(pattern).ok())
-            .collect::<Vec<_>>();
+            .map(|process| (process.pid, process.parent_pid))
+            .collect::<BTreeMap<_, _>>();
         let candidates = snapshot
             .iter()
             .filter(|process| {
@@ -140,7 +163,8 @@ impl WatchDiscovery {
                     .any(|pattern| pattern.is_match(&process.command))
             })
             .filter(|process| {
-                !helpers
+                !self
+                    .helpers
                     .iter()
                     .any(|pattern| pattern.is_match(&process.command))
             })
@@ -154,23 +178,62 @@ impl WatchDiscovery {
             .collect::<BTreeSet<_>>();
 
         for candidate in candidates {
-            if has_matching_ancestor(candidate.pid, &candidate_pids, snapshot) {
+            if has_matching_ancestor(candidate.pid, &candidate_pids, &parents) {
                 continue;
             }
-            if self.watches.watch_for_pid(candidate.pid).is_some() {
+            let identity = candidate.identity();
+            self.release_reused_retained(&identity);
+            if self.retained_watch_is_current(&identity) {
                 continue;
             }
-            let environment = self.environment(candidate.pid).await;
-            let Some((session, terminal)) =
-                resolve_ownership(&candidate, &environment, sessions, snapshot, config)
-            else {
+            let mut retry = self.lock().tracked.get(&identity).map(|tracked| {
+                (
+                    tracked.watch,
+                    tracked.session.clone(),
+                    tracked.terminal,
+                    tracked.environment_loaded,
+                )
+            });
+            if retry.as_ref().is_some_and(|(_, _, _, loaded)| *loaded) {
+                continue;
+            }
+            if retry.is_none() && self.watches.watch_for_pid(candidate.pid).is_some() {
+                continue;
+            }
+            let (environment, environment_loaded) = self.environment(&candidate).await;
+            let ownership = resolve_ownership(&candidate, &environment, sessions, &parents, config);
+            let Some((session, terminal)) = ownership else {
+                if environment_loaded && let Some((watch, _, _, _)) = retry {
+                    self.watches.replace_discovered(watch)?;
+                    self.lock().tracked.remove(&identity);
+                }
                 continue;
             };
-            let companion =
-                companion_from_command(&candidate.command, &environment, &self.temp_dir);
-            let job = companion
-                .as_ref()
-                .and_then(|companion| read_job(&companion.json_file));
+            if let Some((watch, tracked_session, tracked_terminal, _)) = &retry
+                && (*tracked_session != session.id || *tracked_terminal != terminal.id)
+            {
+                self.watches.replace_discovered(*watch)?;
+                self.lock().tracked.remove(&identity);
+                retry = None;
+            }
+            let command = candidate.command.clone();
+            let temp_dir = self.temp_dir.clone();
+            let (companion, job) = tokio::task::spawn_blocking(move || {
+                let mut companion = companion_from_command(&command, &environment, &temp_dir);
+                let job = companion
+                    .as_ref()
+                    .and_then(|companion| read_job(&companion.json_file));
+                if let Some(companion) = &mut companion {
+                    if let Some(log_file) = job.as_ref().and_then(|job| job.log_file.as_ref()) {
+                        companion.log_file = log_file.clone();
+                    }
+                    companion.offset = initial_offset(&companion.log_file);
+                    companion.identity = file_identity(&companion.log_file);
+                }
+                (companion, job)
+            })
+            .await
+            .map_err(|error| DaemonError::Join(error.to_string()))?;
             let label = companion.as_ref().map_or_else(
                 || command_basename(&candidate.command),
                 |companion| companion_label(&companion.job_id, job.as_ref()),
@@ -205,47 +268,148 @@ impl WatchDiscovery {
                     candidate.pid, candidate.command
                 )
             });
+            let owner_is_live = self.sessions.snapshot().iter().any(|live_session| {
+                live_session.id == session.id
+                    && live_session
+                        .terminals
+                        .iter()
+                        .any(|live_terminal| live_terminal.id == terminal.id)
+            });
+            if !owner_is_live {
+                continue;
+            }
+            if let Some((watch_id, _, _, _)) = retry {
+                self.watches
+                    .update_discovered(watch_id, watch.label, watch.log_file)?;
+                if let Some(tracked) = self.lock().tracked.get_mut(&identity) {
+                    tracked.companion = companion;
+                    tracked.environment_loaded = environment_loaded;
+                }
+                continue;
+            }
             let Some(watch_id) = self.watches.start_discovered(watch, initial_output) else {
                 continue;
             };
-            let companion = companion.map(|mut companion| {
-                if let Some(job) = &job
-                    && let Some(log_file) = &job.log_file
-                {
-                    companion.log_file = log_file.clone();
-                }
-                companion.offset = initial_offset(&companion.log_file);
-                companion.identity = file_identity(&companion.log_file);
-                companion
-            });
             self.lock().tracked.insert(
-                candidate.pid,
+                identity,
                 Tracked {
                     watch: watch_id,
+                    session: session.id.clone(),
+                    terminal: terminal.id,
                     companion,
+                    environment_loaded,
                 },
             );
         }
         Ok(())
     }
 
-    async fn environment(&self, pid: u32) -> Vec<(String, String)> {
-        if let Some(environment) = self.lock().environments.get(&pid).cloned() {
-            return environment;
+    fn reconcile_tracked(&self, live_identities: &BTreeSet<ProcessIdentity>) {
+        let live_pids = live_identities
+            .iter()
+            .map(|identity| identity.pid)
+            .collect::<BTreeSet<_>>();
+        let retired = {
+            let mut state = self.lock();
+            let stale = state
+                .tracked
+                .keys()
+                .filter(|identity| !live_identities.contains(*identity))
+                .cloned()
+                .collect::<Vec<_>>();
+            stale
+                .into_iter()
+                .filter_map(|identity| {
+                    state
+                        .tracked
+                        .remove(&identity)
+                        .map(|tracked| (identity, tracked))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (identity, tracked) in retired {
+            if live_pids.contains(&identity.pid) {
+                let _ = self.watches.replace_discovered(tracked.watch);
+                continue;
+            }
+            if self.watches.finish_discovered(tracked.watch, None).is_err() {
+                continue;
+            }
+            self.lock().retained.insert(identity, tracked.watch);
         }
-        let environment = self.process.environment(pid).await.unwrap_or_default();
-        self.lock().environments.insert(pid, environment.clone());
-        environment
     }
 
-    pub(crate) fn poll_once(&self) {
-        let pids = self.lock().tracked.keys().copied().collect::<Vec<_>>();
-        for pid in pids {
-            let mut tracked = match self.lock().tracked.remove(&pid) {
+    fn release_reused_retained(&self, current: &ProcessIdentity) {
+        let stale = {
+            let mut state = self.lock();
+            let identities = state
+                .retained
+                .keys()
+                .filter(|identity| identity.pid == current.pid && *identity != current)
+                .cloned()
+                .collect::<Vec<_>>();
+            identities
+                .into_iter()
+                .filter_map(|identity| state.retained.remove(&identity))
+                .collect::<Vec<_>>()
+        };
+        for watch in stale {
+            let _ = self.watches.dismiss(watch);
+        }
+    }
+
+    fn retained_watch_is_current(&self, identity: &ProcessIdentity) -> bool {
+        let Some(watch) = self.lock().retained.get(identity).copied() else {
+            return false;
+        };
+        if self
+            .watches
+            .watch_for_pid(identity.pid)
+            .is_some_and(|current| current.id == watch)
+        {
+            return true;
+        }
+        self.lock().retained.remove(identity);
+        false
+    }
+
+    async fn environment(&self, process: &ProcessInfo) -> (Vec<(String, String)>, bool) {
+        let identity = process.identity();
+        if let Some(environment) = self.lock().environments.get(&identity).cloned() {
+            return (environment, true);
+        }
+        let Ok(environment) = self.process.environment(process.pid).await else {
+            return (Vec::new(), false);
+        };
+        self.lock()
+            .environments
+            .insert(identity, environment.clone());
+        (environment, true)
+    }
+
+    pub(crate) async fn poll_once(&self) -> DaemonResult<()> {
+        let snapshot = self.process.snapshot().await?;
+        let discovery = self.clone();
+        tokio::task::spawn_blocking(move || discovery.poll_snapshot(&snapshot))
+            .await
+            .map_err(|error| DaemonError::Join(error.to_string()))?;
+        Ok(())
+    }
+
+    fn poll_snapshot(&self, snapshot: &[ProcessInfo]) {
+        let live_identities = snapshot
+            .iter()
+            .map(ProcessInfo::identity)
+            .collect::<BTreeSet<_>>();
+        let identities = self.lock().tracked.keys().cloned().collect::<Vec<_>>();
+        for identity in identities {
+            let mut tracked = match self.lock().tracked.remove(&identity) {
                 Some(tracked) => tracked,
                 None => continue,
             };
             let mut terminal_code = None;
+            let alive = live_identities.contains(&identity);
+            let mut has_more = false;
             if let Some(companion) = &mut tracked.companion {
                 let job = read_job(&companion.json_file);
                 if let Some(job) = &job {
@@ -254,6 +418,7 @@ impl WatchDiscovery {
                     {
                         companion.log_file = log_file.clone();
                         companion.offset = initial_offset(log_file);
+                        companion.pending_utf8.clear();
                         companion.identity = file_identity(log_file);
                     }
                     let _ = self.watches.update_discovered(
@@ -266,41 +431,75 @@ impl WatchDiscovery {
                 let identity = file_identity(&companion.log_file);
                 if companion.identity.is_some() && identity != companion.identity {
                     companion.offset = 0;
+                    companion.pending_utf8.clear();
                 }
                 companion.identity = identity;
-                if let Some(text) = read_appended(&companion.log_file, &mut companion.offset) {
-                    let _ = self.watches.append_discovered(tracked.watch, text);
+                if let Some((text, remaining)) = read_appended(
+                    &companion.log_file,
+                    &mut companion.offset,
+                    &mut companion.pending_utf8,
+                    terminal_code.is_some() || !alive,
+                ) {
+                    has_more = remaining;
+                    if !text.is_empty() {
+                        let _ = self.watches.append_discovered(tracked.watch, text);
+                    }
                 }
             }
-            let alive = self.process.is_alive(pid);
+            if has_more {
+                self.lock().tracked.insert(identity, tracked);
+                continue;
+            }
             if let Some(code) = terminal_code {
-                let _ = self.watches.finish_discovered(tracked.watch, Some(code));
-                self.lock().environments.remove(&pid);
+                if self
+                    .watches
+                    .finish_discovered(tracked.watch, Some(code))
+                    .is_ok()
+                {
+                    self.lock().retained.insert(identity.clone(), tracked.watch);
+                }
+                self.lock().environments.remove(&identity);
             } else if !alive {
-                let _ = self.watches.finish_discovered(tracked.watch, None);
-                self.lock().environments.remove(&pid);
+                if self.watches.finish_discovered(tracked.watch, None).is_ok() {
+                    self.lock().retained.insert(identity.clone(), tracked.watch);
+                }
+                self.lock().environments.remove(&identity);
             } else {
-                self.lock().tracked.insert(pid, tracked);
+                self.lock().tracked.insert(identity, tracked);
             }
         }
     }
 
-    pub(crate) async fn run(self, shutdown: CancellationToken, scan_every: Duration) {
+    pub(crate) async fn run(self, shutdown: CancellationToken) {
         let mut poll = tokio::time::interval(LOG_POLL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut elapsed = Duration::MAX;
+        let mut policy = self.runtime_config.clone();
+        let mut next_scan = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => return,
+                changed = policy.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    next_scan = tokio::time::Instant::now();
+                }
                 _ = poll.tick() => {
-                    if elapsed >= scan_every {
-                        if let Err(error) = self.discover_once().await {
+                    let config = policy.borrow().clone();
+                    if let Some(config) = config
+                        && tokio::time::Instant::now() >= next_scan
+                    {
+                        let scan_every = Duration::from_millis(
+                            config.discovered_watches.interval_ms.max(500),
+                        );
+                        if let Err(error) = self.discover_config(&config).await {
                             tracing::warn!(%error, "discovered watch scan failed");
                         }
-                        elapsed = Duration::ZERO;
+                        next_scan = tokio::time::Instant::now() + scan_every;
                     }
-                    self.poll_once();
-                    elapsed = elapsed.saturating_add(LOG_POLL);
+                    if let Err(error) = self.poll_once().await {
+                        tracing::warn!(%error, "discovered watch log polling failed");
+                    }
                 }
             }
         }
@@ -325,7 +524,7 @@ fn resolve_ownership<'a>(
     candidate: &ProcessInfo,
     environment: &[(String, String)],
     sessions: &'a [Session],
-    snapshot: &[ProcessInfo],
+    parents: &BTreeMap<u32, u32>,
     config: &Config,
 ) -> Option<(&'a Session, &'a Terminal)> {
     if let Some(session_id) =
@@ -340,7 +539,7 @@ fn resolve_ownership<'a>(
         }
         return select_terminal(session, config).map(|terminal| (session, terminal));
     }
-    terminal_ancestor(candidate, sessions, snapshot)
+    terminal_ancestor(candidate, sessions, parents)
 }
 
 fn select_terminal<'a>(session: &'a Session, config: &Config) -> Option<&'a Terminal> {
@@ -355,12 +554,8 @@ fn select_terminal<'a>(session: &'a Session, config: &Config) -> Option<&'a Term
 fn terminal_ancestor<'a>(
     candidate: &ProcessInfo,
     sessions: &'a [Session],
-    snapshot: &[ProcessInfo],
+    parents: &BTreeMap<u32, u32>,
 ) -> Option<(&'a Session, &'a Terminal)> {
-    let parents = snapshot
-        .iter()
-        .map(|process| (process.pid, process.parent_pid))
-        .collect::<BTreeMap<_, _>>();
     let mut pid = candidate.parent_pid;
     while pid != 0 {
         for session in sessions {
@@ -383,11 +578,11 @@ fn terminal_ancestor<'a>(
     None
 }
 
-fn has_matching_ancestor(pid: u32, candidates: &BTreeSet<u32>, snapshot: &[ProcessInfo]) -> bool {
-    let parents = snapshot
-        .iter()
-        .map(|process| (process.pid, process.parent_pid))
-        .collect::<BTreeMap<_, _>>();
+fn has_matching_ancestor(
+    pid: u32,
+    candidates: &BTreeSet<u32>,
+    parents: &BTreeMap<u32, u32>,
+) -> bool {
     let mut current = pid;
     while let Some(parent) = parents.get(&current) {
         if candidates.contains(parent) {
@@ -466,6 +661,7 @@ fn companion_from_command(
         log_file: jobs.join(format!("{job_id}.log")),
         job_id,
         offset: 0,
+        pending_utf8: Vec::new(),
         identity: None,
     })
 }
@@ -526,11 +722,26 @@ fn hex_prefix(bytes: &[u8], digits: usize) -> String {
 }
 
 fn read_job(path: &Path) -> Option<CompanionJob> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    let file = File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(INITIAL_LOG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > INITIAL_LOG_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn companion_label(job_id: &str, job: Option<&CompanionJob>) -> String {
     let short_id = job_id.rsplit_once('-').map_or(job_id, |(prefix, _)| prefix);
+    if !short_id.contains('-')
+        && let Some(job) = job
+        && !job.kind_label.trim().is_empty()
+        && !job.title.trim().is_empty()
+    {
+        return format!("{} · {}", job.kind_label.trim(), job.title.trim());
+    }
     if let Some(kind) = job
         .map(|job| job.kind_label.trim())
         .filter(|value| !value.is_empty())
@@ -576,17 +787,40 @@ fn file_identity(_path: &Path) -> Option<(u64, u64)> {
     None
 }
 
-fn read_appended(path: &Path, offset: &mut u64) -> Option<String> {
+fn read_appended(
+    path: &Path,
+    offset: &mut u64,
+    pending: &mut Vec<u8>,
+    finished: bool,
+) -> Option<(String, bool)> {
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     if length < *offset {
         *offset = 0;
+        pending.clear();
     }
     file.seek(SeekFrom::Start(*offset)).ok()?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    *offset = length;
-    (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned())
+    file.take(INITIAL_LOG_BYTES).read_to_end(&mut bytes).ok()?;
+    *offset = offset.saturating_add(bytes.len() as u64);
+    let has_more = *offset < length;
+    pending.extend_from_slice(&bytes);
+    let mut consumed = pending.len();
+    let mut rest = pending.as_slice();
+    while let Err(error) = std::str::from_utf8(rest) {
+        match error.error_len() {
+            Some(invalid) => rest = &rest[error.valid_up_to() + invalid..],
+            None => {
+                if !finished || has_more {
+                    consumed -= rest.len() - error.valid_up_to();
+                }
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&pending[..consumed]).into_owned();
+    pending.drain(..consumed);
+    Some((text, has_more))
 }
 
 #[cfg(test)]
@@ -598,19 +832,67 @@ mod tests {
         testing::fakes::FakeProcess,
     };
     use fleet_core::{
-        config::default_config,
-        sessions::{SessionKind, TerminalKind, TerminalStatus},
+        config::{NATIVE_LAZYGIT, WindowConfig, default_config},
+        ids::{ContextId, RepoId, WorktreeId},
+        model::{Context, Repo, RepoHooks, Worktree},
+        state::default_state,
         watches::WatchStream,
     };
     use std::{fs::OpenOptions, io::Write};
     use tempfile::TempDir;
 
+    #[test]
+    fn log_reads_are_bounded_and_keep_split_utf8_until_completed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("output.log");
+        let prefix = "x".repeat(INITIAL_LOG_BYTES as usize - 1);
+        std::fs::write(&path, format!("{prefix}€tail")).unwrap();
+        let mut offset = 0;
+        let mut pending = Vec::new();
+        let (first, more) = read_appended(&path, &mut offset, &mut pending, true).unwrap();
+        assert_eq!(first, prefix);
+        assert!(more);
+        assert_eq!(offset, INITIAL_LOG_BYTES);
+        let (second, more) = read_appended(&path, &mut offset, &mut pending, true).unwrap();
+        assert_eq!(second, "€tail");
+        assert!(!more);
+        assert!(pending.is_empty());
+        let (empty, _) = read_appended(&path, &mut offset, &mut pending, false).unwrap();
+        assert!(empty.is_empty());
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0xe2])
+            .unwrap();
+        assert!(
+            read_appended(&path, &mut offset, &mut pending, false)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0x82, 0xac])
+            .unwrap();
+        assert_eq!(
+            read_appended(&path, &mut offset, &mut pending, false)
+                .unwrap()
+                .0,
+            "€"
+        );
+    }
+
     struct Harness {
         _temp: TempDir,
+        config_store: Arc<ConfigStore>,
         discovery: WatchDiscovery,
         process: Arc<FakeProcess>,
         watches: Watches,
         config: Config,
+        sessions: Sessions,
         session: Session,
     }
 
@@ -621,59 +903,162 @@ mod tests {
             [temp.path().join("repos"), temp.path().join("worktrees")],
         ));
         let config_store = Arc::new(ConfigStore::new(temp.path(), files.clone()));
+        let mut config = default_config(temp.path());
+        config.windows = vec![
+            WindowConfig {
+                name: "nvim".into(),
+                command: NATIVE_LAZYGIT.into(),
+            },
+            WindowConfig {
+                name: "cc".into(),
+                command: NATIVE_LAZYGIT.into(),
+            },
+        ];
+        config_store.save(config.clone()).await.unwrap();
         let state = Arc::new(StateStore::new(temp.path(), files, Arc::new(SystemClock)));
+        let context = ContextId::try_from("team").unwrap();
+        let repo = RepoId::try_from("owner/repo").unwrap();
+        let worktree = WorktreeId::try_from("owner/repo#main").unwrap();
+        let mut persisted = default_state();
+        persisted.contexts.push(Context {
+            id: context.clone(),
+            name: "Team".into(),
+            owners: vec!["owner".into()],
+            created_at: "2026-09-06T00:00:00Z".into(),
+        });
+        persisted.repos.push(Repo {
+            id: repo.clone(),
+            owner: "owner".into(),
+            name: "repo".into(),
+            url: "https://example.invalid/owner/repo".into(),
+            context_id: context,
+            default_branch: "main".into(),
+            path: temp.path().join("repos/owner/repo").display().to_string(),
+            cloned_at: "2026-09-06T00:00:00Z".into(),
+            hooks: RepoHooks::default(),
+        });
+        persisted.worktrees.push(Worktree {
+            id: worktree.clone(),
+            repo_id: repo,
+            slug: "main".into(),
+            branch: "main".into(),
+            base_ref: "origin/main".into(),
+            path: temp
+                .path()
+                .join("worktrees/owner/repo/main")
+                .display()
+                .to_string(),
+            session: "repo/main".into(),
+            host: None,
+            created_at: "2026-09-06T00:00:00Z".into(),
+            last_opened_at: None,
+            degraded: None,
+        });
+        state.save(persisted).await.unwrap();
         let sessions = Sessions::new(config_store.clone(), state);
+        let mut session = sessions.ensure(Some(worktree), None, false).await.unwrap();
+        session.terminals[0].command = "nvim .".into();
+        session.terminals[0].shell_pid = Some(100);
+        session.terminals[1].command = "claude".into();
+        session.terminals[1].shell_pid = Some(200);
         let process = Arc::new(FakeProcess::default());
         let watches = Watches::default();
-        let discovery =
-            WatchDiscovery::new(config_store, sessions, process.clone(), watches.clone())
-                .with_temp_dir(temp.path().to_path_buf());
-        let session = session(temp.path());
+        let discovery = WatchDiscovery::new(
+            config_store.clone(),
+            sessions.clone(),
+            process.clone(),
+            watches.clone(),
+        )
+        .with_temp_dir(temp.path().to_path_buf());
         Harness {
-            config: default_config(temp.path()),
+            config,
             _temp: temp,
+            config_store,
             discovery,
             process,
             watches,
+            sessions,
             session,
         }
     }
 
-    fn session(root: &Path) -> Session {
-        Session {
-            id: "repo/main".parse().unwrap(),
-            kind: SessionKind::Worktree("owner/repo#main".parse().unwrap()),
-            cwd: root.to_string_lossy().into_owned(),
-            terminals: vec![
-                terminal(1, "nvim", "nvim .", 100, root),
-                terminal(2, "cc", "claude", 200, root),
-            ],
-            active_terminal: Some(TerminalId(2)),
-            slept_at: None,
-            kept_terminals: Vec::new(),
+    struct FailingEnvironmentProcess {
+        inner: Arc<FakeProcess>,
+        failures: Mutex<BTreeSet<u32>>,
+        calls: Mutex<Vec<u32>>,
+    }
+
+    impl FailingEnvironmentProcess {
+        fn new(inner: Arc<FakeProcess>) -> Self {
+            Self {
+                inner,
+                failures: Mutex::new(BTreeSet::new()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn fail_once(&self, pid: u32) {
+            self.failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(pid);
+        }
+
+        fn environment_calls(&self) -> Vec<u32> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
     }
 
-    fn terminal(id: u64, name: &str, command: &str, shell_pid: u32, root: &Path) -> Terminal {
-        Terminal {
-            id: TerminalId(id),
-            name: name.into(),
-            command: command.into(),
-            cwd: root.to_string_lossy().into_owned(),
-            shell_pid: Some(shell_pid),
-            foreground_command: None,
-            status: TerminalStatus::Running,
-            title: None,
-            keep_alive: Vec::new(),
-            has_unseen_output: false,
-            kind: TerminalKind::Pty,
+    #[async_trait::async_trait]
+    impl Process for FailingEnvironmentProcess {
+        async fn snapshot(&self) -> DaemonResult<Vec<ProcessInfo>> {
+            self.inner.snapshot().await
+        }
+
+        async fn listening_ports(
+            &self,
+            pids: &[u32],
+        ) -> DaemonResult<Vec<crate::adapters::process::ListeningPort>> {
+            self.inner.listening_ports(pids).await
+        }
+
+        async fn environment(&self, pid: u32) -> DaemonResult<Vec<(String, String)>> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(pid);
+            if self
+                .failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&pid)
+            {
+                return Err(DaemonError::Process(
+                    "temporary environment read failure".to_owned(),
+                ));
+            }
+            self.inner.environment(pid).await
+        }
+
+        fn is_alive(&self, pid: u32) -> bool {
+            self.inner.is_alive(pid)
         }
     }
 
     fn process(pid: u32, parent_pid: u32, command: &str) -> ProcessInfo {
+        process_at(pid, parent_pid, command, &format!("start-{pid}"))
+    }
+
+    fn process_at(pid: u32, parent_pid: u32, command: &str, start_identity: &str) -> ProcessInfo {
         ProcessInfo {
             pid,
             parent_pid,
+            process_group_id: pid,
+            terminal_foreground_process_group_id: Some(pid),
+            start_identity: start_identity.to_owned(),
             command: command.into(),
         }
     }
@@ -719,6 +1104,214 @@ mod tests {
                 .contains("output is not captured")
         );
         assert_eq!(h.process.environment_calls(), vec![400]);
+    }
+
+    #[tokio::test]
+    async fn closed_terminal_cannot_gain_watch() {
+        let h = harness().await;
+        h.process
+            .set_snapshot(vec![process(450, 1, "/usr/bin/codex exec stale")]);
+        h.process.set_environment(450, fleet_environment(Some(2)));
+        let process_snapshot = h.process.snapshot().await.unwrap();
+        h.sessions.close_terminal(TerminalId(2)).await.unwrap();
+
+        h.discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &process_snapshot,
+            )
+            .await
+            .unwrap();
+
+        assert!(h.watches.watch_for_pid(450).is_none());
+    }
+
+    #[tokio::test]
+    async fn pid_reuse_does_not_reuse_environment() {
+        let h = harness().await;
+        h.process.set_snapshot(vec![process_at(
+            451,
+            1,
+            "/usr/bin/codex exec reused",
+            "first-start",
+        )]);
+        h.process
+            .set_environment(451, vec![("FLEET_SESSION".into(), "repo/missing".into())]);
+        h.discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &h.process.snapshot().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(h.watches.watch_for_pid(451).is_none());
+
+        h.process.set_snapshot(vec![process_at(
+            451,
+            1,
+            "/usr/bin/codex exec reused",
+            "second-start",
+        )]);
+        h.process.set_environment(451, fleet_environment(Some(2)));
+        h.discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &h.process.snapshot().await.unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            h.watches.watch_for_pid(451).unwrap().terminal,
+            TerminalId(2)
+        );
+        assert_eq!(h.process.environment_calls(), vec![451, 451]);
+    }
+
+    #[tokio::test]
+    async fn pid_reuse_finishes_old_watch_and_creates_new_watch() {
+        let h = harness().await;
+        let events = crate::server::BroadcastBus::default();
+        let mut receiver = events.subscribe();
+        h.watches.with_events(events);
+        h.process.set_snapshot(vec![process_at(
+            452,
+            1,
+            "/usr/bin/codex exec first",
+            "first-start",
+        )]);
+        h.process.set_environment(452, fleet_environment(Some(1)));
+        h.discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &h.process.snapshot().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        let old = h.watches.watch_for_pid(452).unwrap();
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            fleet_proto::event::Event::WatchStarted(watch) if watch.id == old.id
+        ));
+
+        h.process.set_snapshot(vec![process_at(
+            452,
+            1,
+            "/usr/bin/codex exec second",
+            "second-start",
+        )]);
+        h.process.set_environment(452, fleet_environment(Some(2)));
+        h.discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &h.process.snapshot().await.unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let new = h.watches.watch_for_pid(452).unwrap();
+        assert_ne!(new.id, old.id);
+        assert_eq!(new.terminal, TerminalId(2));
+        let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            fleet_proto::event::Event::WatchExited(watch)
+                if watch.id == old.id
+                    && watch.status == (WatchStatus::Exited { code: None, signal: None })
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            fleet_proto::event::Event::WatchDismissed(id) if *id == old.id
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            fleet_proto::event::Event::WatchStarted(watch) if watch.id == new.id
+        )));
+    }
+
+    #[tokio::test]
+    async fn environment_failure_is_retried_and_repairs_companion() {
+        let h = harness().await;
+        let workspace = h._temp.path().join("retry-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let plugin_data = h._temp.path().join("plugin-data");
+        let job_id = "task-retry";
+        let jobs = plugin_data
+            .join("state")
+            .join(workspace_state_name(&workspace))
+            .join("jobs");
+        std::fs::create_dir_all(&jobs).unwrap();
+        let json_file = jobs.join(format!("{job_id}.json"));
+        let log_file = jobs.join(format!("{job_id}.log"));
+        std::fs::write(&log_file, "correct log\n").unwrap();
+        std::fs::write(
+            &json_file,
+            serde_json::to_vec(&serde_json::json!({
+                "id": job_id,
+                "kindLabel": "corrected",
+                "title": "Retried Task",
+                "status": "running",
+                "phase": "running",
+                "logFile": log_file,
+                "startedAt": "2026-09-06T00:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let command = format!(
+            "node /plugin/codex-companion.mjs task-worker --cwd {} --job-id {job_id}",
+            workspace.display()
+        );
+        h.process.set_snapshot(vec![
+            process(250, 200, "runner"),
+            process_at(453, 250, &command, "retry-start"),
+        ]);
+        let mut environment = fleet_environment(Some(2));
+        environment.push((
+            "CLAUDE_PLUGIN_DATA".to_owned(),
+            plugin_data.display().to_string(),
+        ));
+        h.process.set_environment(453, environment);
+        let process = Arc::new(FailingEnvironmentProcess::new(Arc::clone(&h.process)));
+        process.fail_once(453);
+        let discovery = WatchDiscovery::new(
+            Arc::clone(&h.config_store),
+            h.sessions.clone(),
+            process.clone(),
+            h.watches.clone(),
+        )
+        .with_temp_dir(h._temp.path().to_path_buf());
+
+        discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &h.process.snapshot().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        let provisional = h.watches.watch_for_pid(453).unwrap();
+        assert_ne!(provisional.log_file.as_deref(), Some(log_file.as_path()));
+
+        discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &h.process.snapshot().await.unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let repaired = h.watches.watch_for_pid(453).unwrap();
+        assert_eq!(repaired.id, provisional.id);
+        assert_eq!(repaired.label, "corrected · Retried Task");
+        assert_eq!(repaired.log_file.as_deref(), Some(log_file.as_path()));
+        assert_eq!(process.environment_calls(), vec![453, 453]);
     }
 
     #[tokio::test]
@@ -826,8 +1419,8 @@ mod tests {
             )
             .await
             .unwrap();
-        h.process.set_alive(700, false);
-        h.discovery.poll_once();
+        h.process.set_snapshot(Vec::new());
+        h.discovery.poll_once().await.unwrap();
         assert_eq!(
             h.watches.watch_for_pid(700).unwrap().status,
             WatchStatus::Exited {
@@ -874,7 +1467,7 @@ mod tests {
             )
             .await
             .unwrap();
-        h.discovery.poll_once();
+        h.discovery.poll_once().await.unwrap();
         let watch = h.watches.watch_for_pid(800).unwrap();
         assert_eq!(watch.label, "codex rescue task-mtp0uppa");
         assert_eq!(watch.log_file.as_deref(), Some(log_file.as_path()));
@@ -888,7 +1481,7 @@ mod tests {
             .unwrap()
             .write_all(b"append\n")
             .unwrap();
-        h.discovery.poll_once();
+        h.discovery.poll_once().await.unwrap();
         assert!(
             h.watches
                 .tail(watch.id, None)
@@ -899,7 +1492,7 @@ mod tests {
         );
 
         std::fs::write(&log_file, "after truncate\n").unwrap();
-        h.discovery.poll_once();
+        h.discovery.poll_once().await.unwrap();
         assert!(
             h.watches
                 .tail(watch.id, None)
@@ -911,7 +1504,7 @@ mod tests {
 
         std::fs::rename(&log_file, jobs.join("rotated.log")).unwrap();
         std::fs::write(&log_file, "after rotation\n").unwrap();
-        h.discovery.poll_once();
+        h.discovery.poll_once().await.unwrap();
         assert!(
             h.watches
                 .tail(watch.id, None)
@@ -921,8 +1514,27 @@ mod tests {
                 .any(|chunk| chunk.text == "after rotation\n")
         );
 
+        OpenOptions::new()
+            .append(true)
+            .open(&log_file)
+            .unwrap()
+            .write_all(&vec![b'x'; INITIAL_LOG_BYTES as usize + 10])
+            .unwrap();
         write_job(&json_file, &log_file, "failed", "rescue");
-        h.discovery.poll_once();
+        h.discovery.poll_once().await.unwrap();
+        assert_eq!(
+            h.watches.watch_for_pid(800).unwrap().status,
+            WatchStatus::Running
+        );
+        h.discovery.poll_once().await.unwrap();
+        assert!(
+            h.watches
+                .tail(watch.id, None)
+                .unwrap()
+                .chunks
+                .iter()
+                .any(|chunk| chunk.text == "x".repeat(10))
+        );
         assert_eq!(
             h.watches.watch_for_pid(800).unwrap().status,
             WatchStatus::Exited {
