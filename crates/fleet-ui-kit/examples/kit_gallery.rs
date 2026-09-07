@@ -1387,6 +1387,195 @@ fn overlays_section(cx: &mut App) -> AnyElement {
     section("overlays", &t, children)
 }
 
+// ---------------------------------------------------------------- board
+
+/// The document the markdown panel renders: every construct the parser knows, in one card.
+const MARKDOWN_SAMPLE: &str = "\
+# Board sync
+The reconciler is **pure**: it takes the local card, the remote card and the policy, and
+returns ops. A bare URL such as https://fleet.dev/docs/board renders in the accent color.
+
+## Steps
+1. `fleet board sync` fetches the remote cards.
+2. A conflict stops at the card, never at the board.
+
+- Unknown syntax such as ~~strike~~ stays text.
+- An unclosed **bold survives as two asterisks.
+
+```sh
+fleet board sync --board work
+```";
+
+/// The width one card panel is measured at; a real column is `COLUMN_WIDTH_CH` wide.
+const TILE_W: f32 = 260.0;
+
+fn board_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+
+    let board = KanbanBoard::new("gallery-board").columns([
+        KanbanColumn::new("col-backlog", "Backlog")
+            .count(2)
+            .accent(Some(t.colors.text_muted))
+            .empty_hint("Nothing queued.")
+            .children([
+                CardTile::new("bl-1", "FLT-31", "Board backend adapter for Jira")
+                    .priority(PriorityLevel::Medium)
+                    .labels(vec![("backend".into(), Some("info".into()))])
+                    .estimate(Some(5))
+                    .into_any_element(),
+                CardTile::new("bl-2", "FLT-32", "Decide the conflict policy defaults")
+                    .labels(vec![("spec".into(), None)])
+                    .into_any_element(),
+            ])
+            .into_any_element(),
+        KanbanColumn::new("col-progress", "In progress")
+            .count(2)
+            .accent(Some(t.colors.warning))
+            .focused(true)
+            .children([
+                CardTile::new("ip-1", "FLT-12", "Kanban column and card tile in the kit")
+                    .priority(PriorityLevel::Urgent)
+                    .labels(vec![
+                        ("ui-kit".into(), Some("accent".into())),
+                        ("board".into(), Some("success".into())),
+                    ])
+                    .assignee(Some("Danny Fuentes".into()))
+                    .estimate(Some(3))
+                    .due(Some("Mar 4".into()))
+                    .worktree(true)
+                    .dirty(true)
+                    .selected(true)
+                    .focused(true)
+                    .into_any_element(),
+                CardTile::new("ip-2", "FLT-13", "Markdown read mode for card descriptions")
+                    .priority(PriorityLevel::High)
+                    .assignee(Some("ana.perez".into()))
+                    .worktree(true)
+                    .conflict(true)
+                    .into_any_element(),
+            ])
+            .into_any_element(),
+        KanbanColumn::new("col-done", "Done")
+            .count(0)
+            .accent(Some(t.colors.success))
+            .empty_hint("Nothing shipped yet.")
+            .children([])
+            .into_any_element(),
+    ]);
+
+    let tiles = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(t.space.md)
+        .child(div().w(px(TILE_W)).child(CardTile::new(
+            "tile-bare",
+            "FLT-40",
+            "A bare card: key and title, no meta row at all",
+        )))
+        .child(
+            div().w(px(TILE_W)).child(
+                CardTile::new(
+                    "tile-full",
+                    "FLT-41",
+                    "Every meta slot at once, with a title long enough to clip at two lines",
+                )
+                .priority(PriorityLevel::High)
+                .labels(vec![
+                    ("bug".into(), Some("danger".into())),
+                    ("infra".into(), Some("warning".into())),
+                ])
+                .assignee(Some("Danny Fuentes".into()))
+                .estimate(Some(8))
+                .due(Some("2026-03-04".into()))
+                .worktree(true)
+                .dirty(true)
+                .conflict(true)
+                .extras(vec!["QA: pending".into()]),
+            ),
+        )
+        .child(
+            div().w(px(TILE_W)).child(
+                CardTile::new("tile-selected", "FLT-42", "Selected, keyboard elsewhere")
+                    .priority(PriorityLevel::Low)
+                    .selected(true),
+            ),
+        )
+        .child(
+            div().w(px(TILE_W)).child(
+                CardTile::new("tile-focused", "FLT-43", "Selected and focused")
+                    .priority(PriorityLevel::Urgent)
+                    .selected(true)
+                    .focused(true),
+            ),
+        );
+
+    let priorities = strip(
+        &t,
+        PriorityLevel::ALL
+            .into_iter()
+            .map(|level| {
+                PriorityGlyph::new(level)
+                    .with_label(true)
+                    .into_any_element()
+            })
+            .collect(),
+    );
+
+    let markdown = div()
+        .w_full()
+        .p(t.space.md)
+        .rounded(t.radii.sm)
+        .bg(t.colors.surface)
+        .border_1()
+        .border_color(t.colors.border)
+        .child(MarkdownText::new(MARKDOWN_SAMPLE));
+
+    let text_areas = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(t.space.md)
+        .child(
+            div().w(px(320.0)).child(
+                TextArea::new(
+                    "Reproduce with `fleet board sync`.\nThe second line wraps as soon as the box is narrower than the sentence it holds.",
+                )
+                .label("description")
+                .cursor(34)
+                .focused(true)
+                .rows(5),
+            ),
+        )
+        .child(
+            div().w(px(320.0)).child(
+                TextArea::new("")
+                    .label("comment")
+                    .placeholder("Leave a comment. ctrl-s saves, esc cancels.")
+                    .focused(true)
+                    .rows(3),
+            ),
+        )
+        .child(
+            div().w(px(320.0)).child(
+                TextArea::new("fleet board move FLT-12 done\nfleet worktree new --card FLT-12")
+                    .label("mono · invalid")
+                    .mono(true)
+                    .invalid(true)
+                    .rows(3),
+            ),
+        );
+
+    let children = vec![
+        labeled("kanban board", &t, box_of(&t, px(360.0), board)),
+        labeled("card tiles", &t, tiles),
+        labeled("priority glyphs", &t, priorities),
+        labeled("markdown", &t, markdown),
+        labeled("text areas", &t, text_areas),
+    ];
+    section("board", &t, children)
+}
+
 impl Render for Gallery {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = cx.theme().mode;
@@ -1404,6 +1593,7 @@ impl Render for Gallery {
             structure_section(cx),
             terminal_section(cx),
             input_section(cx),
+            board_section(cx),
             overlays_section(cx),
         ];
 
