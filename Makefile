@@ -39,7 +39,9 @@ check: ## Check the workspace
 	cargo check --workspace
 
 test: ## Run workspace tests
-	cargo test --workspace
+	# App socket tests launch target/debug/fleetd; cargo test only builds its test harness.
+	cargo build -p fleet-daemon
+	FLEET_DAEMON="$(abspath $(CARGO_TARGET_DIR))/debug/fleetd" cargo test --workspace
 
 fmt: ## Format all Rust code
 	cargo fmt --all
