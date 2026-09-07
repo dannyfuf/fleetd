@@ -291,7 +291,7 @@ impl Lazygit {
                 };
                 // Green means "merged into a main branch", which requires the commit to be on
                 // the upstream at all; without an upstream every commit is red.
-                let merged = commit.pushed && merged_from.is_some_and(|first| index >= first);
+                let merged = commit.pushed && merged_from.contains(&commit.oid);
                 rows::commit_row(
                     commit,
                     now,

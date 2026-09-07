@@ -16,13 +16,22 @@ use gpui::{App, Entity, Keystroke, ScrollWheelEvent, Task};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
+    future::{Future, poll_fn},
+    pin::pin,
     rc::Rc,
+    task::Poll,
     time::{Duration, Instant},
 };
 
 pub(crate) const FALLBACK_GRID: (u16, u16) = (80, 24);
 const MOUSE_ROW_CACHE_CAP: usize = 5_000;
-const SELECTION_LINE_CAP: usize = 100_000;
+const SELECTION_LINE_CAP: usize = MOUSE_ROW_CACHE_CAP;
+pub(crate) const PENDING_INPUT_EVENT_CAP: usize = 1_024;
+pub(crate) const PENDING_INPUT_BYTE_CAP: usize = 1024 * 1024;
+const INPUT_REJECTION_NOTICE_INTERVAL: Duration = Duration::from_secs(1);
+const INPUT_REJECTION_NOTICE: &str = "input dropped while attaching";
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(6);
+const ATTACH_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MouseSelection {
@@ -77,6 +86,13 @@ impl PendingInput {
             Self::Paste(text) => RequestBody::PasteTerminal { terminal, text },
         }
     }
+
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Key(key) => key.text.as_ref().map_or(1, String::len),
+            Self::Paste(text) => text.len(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -84,6 +100,8 @@ pub(crate) struct TerminalSurface<S> {
     pub(crate) state: S,
     pub(crate) attached: Option<TerminalId>,
     pub(crate) attached_generation: u64,
+    attachment_attempt: u64,
+    attach_retry_at: Option<Instant>,
     pub(crate) sizes: HashMap<TerminalId, (u16, u16)>,
     pub(crate) area: Bounds<Pixels>,
     pub(crate) padding: Option<Pixels>,
@@ -95,7 +113,7 @@ pub(crate) struct TerminalSurface<S> {
     pub(crate) anchor_history_epoch: Option<u64>,
     pub(crate) anchor_cols: Option<u16>,
     pub(crate) anchor_alt_screen: Option<bool>,
-    pub(crate) history: BTreeMap<u64, String>,
+    pub(crate) history: BTreeMap<u64, CachedGridRow>,
     pub(crate) history_frame: Option<(u64, u64, u64, u16, u16)>,
     pub(crate) mouse_selection: Option<MouseSelection>,
     pub(crate) row_caches: HashMap<TerminalId, TerminalRowCache>,
@@ -279,35 +297,9 @@ impl<S> TerminalSurface<S> {
         true
     }
 
-    /// The caller supplies the other surface's retained attachment because daemon attachments
-    /// are set-valued. A reconnect already released the previous connection's attachment.
-    pub(crate) fn attach(
-        &mut self,
-        target: Option<TerminalId>,
-        generation: u64,
-        preserve: Option<TerminalId>,
-        size: (u16, u16),
-        bridge: &Bridge,
-    ) {
-        let relinked = self.attached_generation != generation;
-        if self.attached == target && !relinked {
-            return;
-        }
-        if !relinked {
-            self.detach(bridge, preserve);
-        }
-        if let Some(terminal) = target {
-            bridge.send(RequestBody::AttachTerminal {
-                terminal,
-                cols: size.0,
-                rows: size.1,
-            });
-        }
-        self.attached = target;
-        self.attached_generation = generation;
-    }
-
     pub(crate) fn detach(&mut self, bridge: &Bridge, preserve: Option<TerminalId>) {
+        self.attachment_attempt = self.attachment_attempt.wrapping_add(1);
+        self.attach_retry_at = None;
         if let Some(terminal) = self.attached.take()
             && Some(terminal) != preserve
         {
@@ -315,18 +307,41 @@ impl<S> TerminalSurface<S> {
         }
     }
 
+    #[must_use = "rejected input must be surfaced to the user"]
     pub(crate) fn send_or_queue(
         &mut self,
         bridge: &Bridge,
         terminal: Option<TerminalId>,
         primed: bool,
         input: PendingInput,
-    ) {
+    ) -> bool {
         if primed && let Some(terminal) = terminal {
             bridge.send(input.into_request(terminal));
+            true
         } else {
-            self.pending.push(input);
+            self.queue_pending(input)
         }
+    }
+
+    /// Retains pre-frame input up to fixed event and byte bounds.
+    ///
+    /// Once either bound would be exceeded, the newest event is rejected. Earlier input stays in
+    /// order so attachment can still flush a coherent prefix instead of an arbitrary suffix.
+    #[must_use = "rejected input must be surfaced to the user"]
+    pub(crate) fn queue_pending(&mut self, input: PendingInput) -> bool {
+        if self.pending.len() >= PENDING_INPUT_EVENT_CAP {
+            return false;
+        }
+        let retained = self
+            .pending
+            .iter()
+            .map(PendingInput::retained_bytes)
+            .sum::<usize>();
+        if retained.saturating_add(input.retained_bytes()) > PENDING_INPUT_BYTE_CAP {
+            return false;
+        }
+        self.pending.push(input);
+        true
     }
 
     /// The wheel request a scroll over a live, primed terminal produces.
@@ -445,9 +460,9 @@ impl<S> TerminalSurface<S> {
                 && line <= last
                 && self.history.len() < SELECTION_LINE_CAP
                 && (changed || !self.history.contains_key(&line))
+                && let Some(row) = cached_grid_row(grid, usize::from(row))
             {
-                self.history
-                    .insert(line, grid.row_text(row).trim_end().to_owned());
+                self.history.insert(line, row);
             }
         }
     }
@@ -471,7 +486,8 @@ impl<S> TerminalSurface<S> {
             .map_or(CurrentSelectionText::Missing, CurrentSelectionText::Text);
         }
         self.anchor.map_or(CurrentSelectionText::None, |anchor| {
-            CurrentSelectionText::Text(selection_text(&self.history, anchor, self.caret))
+            try_selection_text(&self.history, anchor, self.caret)
+                .map_or(CurrentSelectionText::Missing, CurrentSelectionText::Text)
         })
     }
     /// The selected text of `terminal`, or `None` when it has no mirror or no selection.
@@ -488,6 +504,162 @@ impl<S> TerminalSurface<S> {
         };
         self.selection_text(terminal, grid)
     }
+}
+
+/// Reconciles a surface attachment through a correlated reply.
+///
+/// The caller supplies the other surface's retained attachment because daemon attachments are
+/// set-valued. A reconnect already released the previous connection's attachment.
+pub(crate) struct AttachmentSpec {
+    pub(crate) target: Option<TerminalId>,
+    pub(crate) generation: u64,
+    pub(crate) preserve: Option<TerminalId>,
+    pub(crate) size: (u16, u16),
+}
+
+pub(crate) fn reconcile_attachment<S: 'static>(
+    surface: &Rc<RefCell<TerminalSurface<S>>>,
+    attachment: AttachmentSpec,
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    let AttachmentSpec {
+        target,
+        generation,
+        preserve,
+        size,
+    } = attachment;
+    let mut local = surface.borrow_mut();
+    let relinked = local.attached_generation != generation;
+    if local.attached == target && !relinked {
+        return;
+    }
+    if local
+        .attach_retry_at
+        .is_some_and(|retry_at| retry_at > Instant::now())
+    {
+        return;
+    }
+    if !relinked {
+        local.detach(bridge, preserve);
+    } else {
+        local.attachment_attempt = local.attachment_attempt.wrapping_add(1);
+        local.attach_retry_at = None;
+    }
+    local.attached = target;
+    local.attached_generation = generation;
+    let Some(terminal) = target else {
+        return;
+    };
+    local.attachment_attempt = local.attachment_attempt.wrapping_add(1);
+    let attempt = local.attachment_attempt;
+    drop(local);
+
+    let reply = bridge.request(RequestBody::AttachTerminal {
+        terminal,
+        cols: size.0,
+        rows: size.1,
+    });
+    monitor_attachment(surface, state, terminal, generation, attempt, reply, cx);
+}
+
+fn monitor_attachment<S: 'static>(
+    surface: &Rc<RefCell<TerminalSurface<S>>>,
+    state: &Entity<AppState>,
+    terminal: TerminalId,
+    generation: u64,
+    attempt: u64,
+    reply: async_channel::Receiver<
+        Result<fleet_proto::response::ResponseBody, fleet_proto::error::ProtoError>,
+    >,
+    cx: &mut App,
+) {
+    let surface = Rc::clone(surface);
+    let state = state.downgrade();
+    cx.spawn(async move |cx| {
+        let answer =
+            before_timeout(reply.recv(), cx.background_executor().timer(ATTACH_TIMEOUT)).await;
+        let failure = match answer {
+            Some(Ok(Ok(fleet_proto::response::ResponseBody::Ack))) => None,
+            Some(Ok(Ok(_))) => Some("daemon returned an unexpected response".to_owned()),
+            Some(Ok(Err(error))) => Some(error.message),
+            Some(Err(_)) => Some("daemon reply was lost".to_owned()),
+            None => Some("request timed out".to_owned()),
+        };
+        let Some(failure) = failure else {
+            return;
+        };
+        let retry_at = Instant::now() + ATTACH_RETRY_DELAY;
+        {
+            let mut local = surface.borrow_mut();
+            if local.attachment_attempt != attempt
+                || local.attached != Some(terminal)
+                || local.attached_generation != generation
+            {
+                return;
+            }
+            local.attached = None;
+            local.attached_generation = 0;
+            local.attach_retry_at = Some(retry_at);
+        }
+        let Some(state) = state.upgrade() else {
+            return;
+        };
+        let message = format!(
+            "could not attach terminal: {failure}; retrying. Reconnect Fleet if it persists"
+        );
+        state.update(cx, |app, cx| {
+            app.sticky_error = Some(crate::state::StickyError {
+                text: message,
+                job: None,
+                retryable: false,
+            });
+            cx.notify();
+        });
+        cx.background_executor().timer(ATTACH_RETRY_DELAY).await;
+        if surface.borrow().attach_retry_at == Some(retry_at) {
+            surface.borrow_mut().attach_retry_at = None;
+            state.update(cx, |_, cx| cx.notify());
+        }
+    })
+    .detach();
+}
+
+async fn before_timeout<T>(
+    future: impl Future<Output = T>,
+    timeout: impl Future<Output = ()>,
+) -> Option<T> {
+    let mut future = pin!(future);
+    let mut timeout = pin!(timeout);
+    poll_fn(|cx| {
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        if timeout.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+pub(crate) fn report_input_delivery(accepted: bool, state: &Entity<AppState>, cx: &mut App) {
+    if accepted {
+        return;
+    }
+    let now = Instant::now();
+    let recently_notified = state.read(cx).toasts.iter().any(|live| {
+        live.toast.text.as_ref() == INPUT_REJECTION_NOTICE
+            && now.saturating_duration_since(live.shown_at) < INPUT_REJECTION_NOTICE_INTERVAL
+    });
+    if recently_notified {
+        return;
+    }
+    state.update(cx, |app, cx| {
+        app.toast_short(INPUT_REJECTION_NOTICE, Icon::Info, now);
+        cx.notify();
+    });
 }
 
 pub(crate) enum CurrentSelectionText {

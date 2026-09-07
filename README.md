@@ -67,7 +67,8 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 
 Commands that accept `--json` emit one compact line using swarm-compatible protocol 1 envelopes.
 Their errors use `{"protocol":1,"error":{"kind":"<kind>","message":"<message>"}}`; other
-commands use human-readable output.
+commands use human-readable output. This public envelope is separate from daemon IPC version 4;
+the bug-fix program did not change CLI envelope version 1.
 
 ### Agent hooks
 

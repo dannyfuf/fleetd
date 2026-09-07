@@ -1,10 +1,11 @@
 //! Unix socket connection lifecycle and protocol transport.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -15,29 +16,33 @@ use fleet_proto::{
     PROTOCOL_VERSION,
     codec::FleetCodec,
     error::{ErrorKind, ProtoError},
-    event::{Event, EventKind},
+    event::{Event, EventKind, ToastLevel},
     request::{Request, RequestBody},
-    response::{Response, ResponseBody},
+    response::{DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody},
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::{
     net::UnixStream,
     runtime::Handle,
     sync::{broadcast, mpsc, oneshot},
-    time::{Instant, timeout, timeout_at},
+    time::{Instant, sleep_until, timeout_at},
 };
 use tokio_util::codec::Framed;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_BUDGET: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
 const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 1_024;
+const HANDSHAKE_EVENT_CAPACITY: usize = 1_024;
 
 type Transport = Framed<UnixStream, FleetCodec<Request, Value>>;
+type TransportWriter = SplitSink<Transport, Request>;
+type TransportReader = SplitStream<Transport>;
 
 #[derive(Debug)]
 struct Established {
@@ -76,6 +81,7 @@ pub(crate) struct ClientInner {
     commands: mpsc::Sender<Command>,
     events: broadcast::Sender<Event>,
     next_id: AtomicU64,
+    metadata: Arc<RwLock<ConnectionMetadata>>,
 }
 
 #[derive(Debug)]
@@ -97,10 +103,19 @@ struct Attachment {
     rows: u16,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ConnectionMetadata {
+    capabilities: HashSet<String>,
+    daemon_identity: Option<DaemonIdentity>,
+}
+
 #[derive(Debug)]
 struct ConnectionState {
     subscriptions: Vec<EventKind>,
     attachments: HashMap<TerminalId, Attachment>,
+    capabilities: HashSet<String>,
+    daemon_identity: Option<DaemonIdentity>,
+    daemon_identity_initialized: bool,
 }
 
 impl Default for ConnectionState {
@@ -108,6 +123,9 @@ impl Default for ConnectionState {
         Self {
             subscriptions: all_event_kinds(),
             attachments: HashMap::new(),
+            capabilities: HashSet::new(),
+            daemon_identity: None,
+            daemon_identity_initialized: false,
         }
     }
 }
@@ -116,16 +134,28 @@ impl Client {
     /// Connects to `home/fleetd.sock`, negotiates Fleet's current protocol, and starts the actor.
     pub async fn connect(home: impl AsRef<Path>) -> Result<Self, ConnectError> {
         let home = home.as_ref().to_path_buf();
-        let state = ConnectionState::default();
-        let established = establish(&home, &state).await?;
+        let mut state = ConnectionState::default();
+        let established = establish(&home, &mut state).await?;
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let events = broadcast::Sender::new(EVENT_CAPACITY);
         let inner = Arc::new(ClientInner {
             commands,
             events: events.clone(),
             next_id: AtomicU64::new(2),
+            metadata: Arc::new(RwLock::new(ConnectionMetadata {
+                capabilities: state.capabilities.clone(),
+                daemon_identity: None,
+            })),
         });
-        tokio::spawn(run_connection(home, established, state, command_rx, events));
+        let metadata = Arc::clone(&inner.metadata);
+        tokio::spawn(run_connection(
+            home,
+            established,
+            state,
+            command_rx,
+            events,
+            metadata,
+        ));
         Ok(Self { inner })
     }
 
@@ -181,6 +211,45 @@ impl Client {
         self.inner.events.subscribe()
     }
 
+    /// Capabilities advertised by the daemon during the most recent Hello exchange.
+    #[must_use]
+    pub fn capabilities(&self) -> Vec<String> {
+        let mut capabilities = self
+            .inner
+            .metadata
+            .read()
+            .map(|metadata| metadata.capabilities.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        capabilities.sort_unstable();
+        capabilities
+    }
+
+    /// Whether the most recently negotiated daemon advertised `capability`.
+    #[must_use]
+    pub fn supports_capability(&self, capability: &str) -> bool {
+        self.inner
+            .metadata
+            .read()
+            .is_ok_and(|metadata| metadata.capabilities.contains(capability))
+    }
+
+    /// PID reported by the most recent identity-bearing Pong.
+    #[must_use]
+    pub fn daemon_pid(&self) -> Option<u32> {
+        self.daemon_identity().map(|(pid, _)| pid)
+    }
+
+    /// PID and per-process boot identity reported by the most recent Pong.
+    #[must_use]
+    pub fn daemon_identity(&self) -> Option<(u32, String)> {
+        self.inner
+            .metadata
+            .read()
+            .ok()
+            .and_then(|metadata| metadata.daemon_identity.clone())
+            .map(|identity| (identity.pid, identity.boot_id))
+    }
+
     pub(crate) fn send_background(&self, body: RequestBody) {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let command = Command {
@@ -210,8 +279,9 @@ async fn run_connection(
     mut state: ConnectionState,
     mut commands: mpsc::Receiver<Command>,
     events: broadcast::Sender<Event>,
+    metadata: Arc<RwLock<ConnectionMetadata>>,
 ) {
-    let mut transport = established.transport;
+    let (mut writer, mut reader) = established.transport.split();
     let mut pending = HashMap::<u64, Pending>::new();
     let mut queued = VecDeque::<Command>::new();
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
@@ -223,13 +293,23 @@ async fn run_connection(
     loop {
         'connected: loop {
             if let Some(command) = queued.pop_front() {
-                if command_is_expired(&command) {
-                    fail_command(command, "Fleet daemon request timed out while reconnecting");
-                    continue;
-                }
-                if let Err(error) = send_command(&mut transport, command, &mut pending).await {
-                    tracing::debug!(%error, "Fleet daemon connection was lost while sending");
-                    break 'connected;
+                match send_command(
+                    &mut writer,
+                    &mut reader,
+                    command,
+                    &mut pending,
+                    &mut state,
+                    &events,
+                    &metadata,
+                )
+                .await
+                {
+                    DispatchOutcome::Sent => {}
+                    DispatchOutcome::Disconnected => break 'connected,
+                    DispatchOutcome::ShuttingDown => {
+                        fail_pending(&mut pending, "Fleet daemon is shutting down");
+                        return;
+                    }
                 }
                 continue;
             }
@@ -240,15 +320,27 @@ async fn run_connection(
                         fail_pending(&mut pending, "Fleet client was dropped");
                         return;
                     };
-                    if let Err(error) = send_command(&mut transport, command, &mut pending).await {
-                        tracing::debug!(%error, "Fleet daemon connection was lost while sending");
-                        break 'connected;
+                    match send_command(
+                        &mut writer,
+                        &mut reader,
+                        command,
+                        &mut pending,
+                        &mut state,
+                        &events,
+                        &metadata,
+                    ).await {
+                        DispatchOutcome::Sent => {}
+                        DispatchOutcome::Disconnected => break 'connected,
+                        DispatchOutcome::ShuttingDown => {
+                            fail_pending(&mut pending, "Fleet daemon is shutting down");
+                            return;
+                        }
                     }
                 }
-                incoming = transport.next() => {
+                incoming = reader.next() => {
                     match incoming {
                         Some(Ok(value)) => {
-                            if handle_incoming(value, &mut pending, &mut state, &events) {
+                            if handle_incoming(value, &mut pending, &mut state, &events, &metadata) {
                                 fail_pending(&mut pending, "Fleet daemon is shutting down");
                                 return;
                             }
@@ -266,27 +358,43 @@ async fn run_connection(
         fail_pending(&mut pending, "Fleet daemon connection was lost");
         match reconnect(
             &home,
-            &state,
+            &mut state,
             &mut commands,
             &mut queued,
             &mut backoff,
             &events,
+            &metadata,
         )
         .await
         {
-            Some(new_transport) => transport = new_transport,
+            Some(new_transport) => (writer, reader) = new_transport.split(),
             None => return,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOutcome {
+    Sent,
+    Disconnected,
+    ShuttingDown,
+}
+
 async fn send_command(
-    transport: &mut Transport,
+    writer: &mut TransportWriter,
+    reader: &mut TransportReader,
     command: Command,
     pending: &mut HashMap<u64, Pending>,
-) -> Result<(), fleet_proto::codec::CodecError> {
+    state: &mut ConnectionState,
+    events: &broadcast::Sender<Event>,
+    metadata: &RwLock<ConnectionMetadata>,
+) -> DispatchOutcome {
+    let Some(command) = command_for_dispatch(command) else {
+        return DispatchOutcome::Sent;
+    };
     let id = command.request.id;
     let effect = ConnectionEffect::from(&command.request.body);
+    let write_deadline = socket_write_deadline();
     pending.insert(
         id,
         Pending {
@@ -294,7 +402,43 @@ async fn send_command(
             response: command.response,
         },
     );
-    transport.send(command.request).await
+    let write = writer.send(command.request);
+    tokio::pin!(write);
+    let deadline = sleep_until(write_deadline);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            result = &mut write => {
+                if let Err(error) = result {
+                    tracing::debug!(%error, "Fleet daemon connection was lost while sending");
+                    return DispatchOutcome::Disconnected;
+                }
+                return DispatchOutcome::Sent;
+            }
+            incoming = reader.next() => {
+                match incoming {
+                    Some(Ok(value)) => {
+                        if handle_incoming(value, pending, state, events, metadata) {
+                            return DispatchOutcome::ShuttingDown;
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::debug!(%error, "Fleet daemon connection decoding failed");
+                        return DispatchOutcome::Disconnected;
+                    }
+                    None => return DispatchOutcome::Disconnected,
+                }
+            }
+            () = &mut deadline => {
+                tracing::debug!(request_id = id, "Fleet daemon socket write timed out");
+                return DispatchOutcome::Disconnected;
+            }
+        }
+    }
+}
+
+fn socket_write_deadline() -> Instant {
+    Instant::now() + WRITE_BUDGET
 }
 
 fn handle_incoming(
@@ -302,17 +446,34 @@ fn handle_incoming(
     pending: &mut HashMap<u64, Pending>,
     state: &mut ConnectionState,
     events: &broadcast::Sender<Event>,
+    metadata: &RwLock<ConnectionMetadata>,
 ) -> bool {
     if value.get("id").is_some() {
+        let pong_identity = serde_json::from_value::<PongResponse>(value.clone())
+            .ok()
+            .and_then(|pong| pong.daemon);
         match serde_json::from_value::<Response>(value) {
             Ok(response) => {
                 if let Some(request) = pending.remove(&response.id) {
                     if response.result.is_ok() {
                         request.effect.apply(state);
                     }
-                    let shutting_down = matches!(response.result, Ok(ResponseBody::ShuttingDown));
-                    if let Some(sender) = request.response {
-                        let _ = sender.send(response.result);
+                    if matches!(&response.result, Ok(ResponseBody::Pong))
+                        && let Some(identity) = pong_identity
+                    {
+                        reconcile_daemon_identity(state, Some(identity));
+                        retain_pong_identity(metadata, state.daemon_identity.clone());
+                    }
+                    let shutting_down = matches!(&response.result, Ok(ResponseBody::ShuttingDown));
+                    match request.response {
+                        Some(sender) => {
+                            let _ = sender.send(response.result);
+                        }
+                        None => {
+                            if let Err(error) = response.result {
+                                publish_background_error(events, error);
+                            }
+                        }
                     }
                     return shutting_down;
                 }
@@ -329,6 +490,20 @@ fn handle_incoming(
             false
         }
     }
+}
+
+fn publish_background_error(events: &broadcast::Sender<Event>, error: ProtoError) {
+    if matches!(error.kind, ErrorKind::NotFound | ErrorKind::Cancelled) {
+        tracing::debug!(kind = ?error.kind, message = %error.message, "ignored non-actionable background failure");
+        return;
+    }
+    publish(
+        events,
+        Event::Toast {
+            level: ToastLevel::Error,
+            message: error.message,
+        },
+    );
 }
 
 #[derive(Debug)]
@@ -410,19 +585,21 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
 
 async fn reconnect(
     home: &Path,
-    state: &ConnectionState,
+    state: &mut ConnectionState,
     commands: &mut mpsc::Receiver<Command>,
     queued: &mut VecDeque<Command>,
     backoff: &mut Duration,
     events: &broadcast::Sender<Event>,
+    metadata: &RwLock<ConnectionMetadata>,
 ) -> Option<Transport> {
     loop {
+        discard_obsolete_commands(queued);
         let sleep = tokio::time::sleep(*backoff);
         tokio::pin!(sleep);
         loop {
             tokio::select! {
-                command = commands.recv() => match command {
-                    Some(command) => queued.push_back(command),
+                command = commands.recv(), if queued.len() < COMMAND_CAPACITY => match command {
+                    Some(command) => queue_disconnected_command(queued, command),
                     None => return None,
                 },
                 () = &mut sleep => break,
@@ -432,6 +609,7 @@ async fn reconnect(
         match establish(home, state).await {
             Ok(established) => {
                 *backoff = INITIAL_RECONNECT_BACKOFF;
+                synchronize_metadata(metadata, state);
                 if publish_events(established.buffered_events, events) {
                     return None;
                 }
@@ -440,25 +618,52 @@ async fn reconnect(
             Err(error) => {
                 tracing::debug!(%error, "Fleet daemon reconnect attempt failed");
                 *backoff = (*backoff * 2).min(MAX_RECONNECT_BACKOFF);
-                let mut active = VecDeque::with_capacity(queued.len());
-                while let Some(command) = queued.pop_front() {
-                    if command_is_expired(&command) {
-                        fail_command(command, "Fleet daemon request timed out while reconnecting");
-                    } else {
-                        active.push_back(command);
-                    }
-                }
-                *queued = active;
+                discard_obsolete_commands(queued);
             }
         }
     }
 }
 
-async fn establish(home: &Path, state: &ConnectionState) -> Result<Established, ConnectError> {
+fn queue_disconnected_command(queued: &mut VecDeque<Command>, command: Command) {
+    if command_is_expired(&command) {
+        fail_command(command, "Fleet daemon request timed out while reconnecting");
+        return;
+    }
+    if command.response.is_none()
+        && let RequestBody::ResizeTerminal { terminal, .. } = &command.request.body
+        && let Some(index) = queued.iter().position(|queued| {
+            queued.response.is_none()
+                && matches!(
+                    &queued.request.body,
+                    RequestBody::ResizeTerminal {
+                        terminal: queued_terminal,
+                        ..
+                    } if queued_terminal == terminal
+                )
+        })
+    {
+        queued.remove(index);
+    }
+    queued.push_back(command);
+}
+
+fn discard_obsolete_commands(queued: &mut VecDeque<Command>) {
+    let mut active = VecDeque::with_capacity(queued.len());
+    while let Some(command) = queued.pop_front() {
+        if command_is_expired(&command) {
+            fail_command(command, "Fleet daemon request timed out while reconnecting");
+        } else {
+            active.push_back(command);
+        }
+    }
+    *queued = active;
+}
+
+async fn establish(home: &Path, state: &mut ConnectionState) -> Result<Established, ConnectError> {
     let socket = UnixStream::connect(FleetHome::new(home).socket_path()).await?;
     let mut transport = Framed::new(socket, FleetCodec::new());
     let mut buffered_events = Vec::new();
-    exchange(
+    let capabilities = exchange(
         &mut transport,
         &mut buffered_events,
         Request {
@@ -468,12 +673,12 @@ async fn establish(home: &Path, state: &ConnectionState) -> Result<Established, 
                 client: format!("fleet-client/{}", env!("CARGO_PKG_VERSION")),
             },
         },
-        |body| match body {
-            ResponseBody::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(()),
-            other => Err(ConnectError::InvalidHandshake(format!("{other:?}"))),
-        },
+        negotiated_capabilities,
     )
     .await?;
+    state.capabilities = capabilities.into_iter().collect();
+
+    reconcile_daemon_identity(state, read_daemon_identity(home));
 
     exchange(
         &mut transport,
@@ -488,22 +693,34 @@ async fn establish(home: &Path, state: &ConnectionState) -> Result<Established, 
     )
     .await?;
 
-    for (offset, (terminal, attachment)) in state.attachments.iter().enumerate() {
+    let attachments = state
+        .attachments
+        .iter()
+        .map(|(terminal, attachment)| (*terminal, *attachment))
+        .collect::<Vec<_>>();
+    for (offset, (terminal, attachment)) in attachments.into_iter().enumerate() {
         let id = u64::try_from(offset).map_or(u64::MAX, |value| value.saturating_add(2));
-        exchange(
+        let result = exchange(
             &mut transport,
             &mut buffered_events,
             Request {
                 id,
                 body: RequestBody::AttachTerminal {
-                    terminal: *terminal,
+                    terminal,
                     cols: attachment.cols,
                     rows: attachment.rows,
                 },
             },
             expect_ack,
         )
-        .await?;
+        .await;
+        match result {
+            Ok(()) => {}
+            Err(ConnectError::Protocol(error)) if error.kind == ErrorKind::NotFound => {
+                state.attachments.remove(&terminal);
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(Established {
         transport,
@@ -511,28 +728,126 @@ async fn establish(home: &Path, state: &ConnectionState) -> Result<Established, 
     })
 }
 
-async fn exchange(
+fn reconcile_daemon_identity(state: &mut ConnectionState, identity: Option<DaemonIdentity>) {
+    if state.daemon_identity_initialized && state.daemon_identity != identity {
+        state.attachments.clear();
+    }
+    state.daemon_identity = identity;
+    state.daemon_identity_initialized = true;
+}
+
+fn read_daemon_identity(home: &Path) -> Option<DaemonIdentity> {
+    let contents = fs::read_to_string(FleetHome::new(home).pid_path()).ok()?;
+    let pid = contents
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid != 0)?;
+    Some(DaemonIdentity {
+        pid,
+        boot_id: process_started_at(pid).map_or_else(
+            || format!("legacy-pid-{pid}"),
+            |(seconds, fraction)| format!("process-start-{seconds}-{fraction}"),
+        ),
+    })
+}
+
+fn synchronize_metadata(metadata: &RwLock<ConnectionMetadata>, state: &ConnectionState) {
+    let Ok(mut metadata) = metadata.write() else {
+        return;
+    };
+    metadata.capabilities.clone_from(&state.capabilities);
+    metadata.daemon_identity = None;
+}
+
+fn retain_pong_identity(metadata: &RwLock<ConnectionMetadata>, identity: Option<DaemonIdentity>) {
+    if let Ok(mut metadata) = metadata.write() {
+        metadata.daemon_identity = identity;
+    }
+}
+
+fn negotiated_capabilities(body: ResponseBody, value: &Value) -> Result<Vec<String>, ConnectError> {
+    match body {
+        ResponseBody::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => {
+            serde_json::from_value::<HelloResponse>(value.clone())
+                .map(|hello| hello.capabilities)
+                .map_err(|error| ConnectError::InvalidHandshake(error.to_string()))
+        }
+        other => Err(ConnectError::InvalidHandshake(format!("{other:?}"))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_started_at(pid: u32) -> Option<(u64, u64)> {
+    use std::mem::MaybeUninit;
+
+    let raw_pid = libc::pid_t::try_from(pid).ok()?;
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let info_size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: proc_pidinfo receives a correctly sized writable proc_bsdinfo buffer.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            raw_pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            info_size,
+        )
+    };
+    if read != info_size {
+        return None;
+    }
+    // SAFETY: a full proc_bsdinfo was initialized when proc_pidinfo returned its size.
+    let info = unsafe { info.assume_init() };
+    Some((info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
+#[cfg(target_os = "linux")]
+fn process_started_at(pid: u32) -> Option<(u64, u64)> {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()?
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse::<u64>()
+        .ok()
+        .map(|ticks| (ticks, 0))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_started_at(_pid: u32) -> Option<(u64, u64)> {
+    None
+}
+
+async fn exchange<T>(
     transport: &mut Transport,
     buffered_events: &mut Vec<Event>,
     request: Request,
-    validate: impl FnOnce(ResponseBody) -> Result<(), ConnectError>,
-) -> Result<(), ConnectError> {
+    validate: impl FnOnce(ResponseBody, &Value) -> Result<T, ConnectError>,
+) -> Result<T, ConnectError> {
     let expected_id = request.id;
-    timeout(HANDSHAKE_TIMEOUT, transport.send(request))
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    timeout_at(deadline, transport.send(request))
         .await
         .map_err(|_| ConnectError::Timeout)??;
     loop {
-        let value = timeout(HANDSHAKE_TIMEOUT, transport.next())
+        let value = timeout_at(deadline, transport.next())
             .await
             .map_err(|_| ConnectError::Timeout)?
             .ok_or_else(|| ConnectError::InvalidHandshake("connection closed".to_owned()))??;
         if value.get("id").is_none() {
             let event = serde_json::from_value(value)
                 .map_err(|error| ConnectError::InvalidHandshake(error.to_string()))?;
+            if buffered_events.len() >= HANDSHAKE_EVENT_CAPACITY {
+                return Err(ConnectError::InvalidHandshake(
+                    "too many events arrived during handshake".to_owned(),
+                ));
+            }
             buffered_events.push(event);
             continue;
         }
-        let response: Response = serde_json::from_value(value)
+        let response: Response = serde_json::from_value(value.clone())
             .map_err(|error| ConnectError::InvalidHandshake(error.to_string()))?;
         if response.id != expected_id {
             return Err(ConnectError::InvalidHandshake(format!(
@@ -540,7 +855,7 @@ async fn exchange(
                 response.id
             )));
         }
-        return validate(response.result?);
+        return validate(response.result?, &value);
     }
 }
 
@@ -559,7 +874,7 @@ fn publish(events: &broadcast::Sender<Event>, event: Event) -> bool {
     shutting_down
 }
 
-fn expect_ack(body: ResponseBody) -> Result<(), ConnectError> {
+fn expect_ack(body: ResponseBody, _value: &Value) -> Result<(), ConnectError> {
     match body {
         ResponseBody::Ack => Ok(()),
         other => Err(ConnectError::InvalidHandshake(format!(
@@ -594,6 +909,15 @@ fn command_is_expired(command: &Command) -> bool {
             .response
             .as_ref()
             .is_some_and(oneshot::Sender::is_closed)
+}
+
+fn command_for_dispatch(command: Command) -> Option<Command> {
+    if command_is_expired(&command) {
+        fail_command(command, "Fleet daemon request timed out before dispatch");
+        None
+    } else {
+        Some(command)
+    }
 }
 
 fn fail_command(command: Command, message: &str) {
@@ -641,5 +965,93 @@ mod tests {
             request_timeout(&RequestBody::DaemonPing),
             Some(REQUEST_TIMEOUT)
         );
+    }
+
+    #[test]
+    fn expired_request_never_dispatches() {
+        let (response, mut receiver) = oneshot::channel();
+        let command = Command {
+            request: Request {
+                id: 42,
+                body: RequestBody::DaemonPing,
+            },
+            response: Some(response),
+            expires_at: Some(Instant::now() - Duration::from_millis(1)),
+        };
+
+        assert!(command_for_dispatch(command).is_none());
+        let error = receiver
+            .try_recv()
+            .expect("expired command reports its failure")
+            .expect_err("expired command cannot succeed");
+        assert!(error.message.contains("before dispatch"));
+    }
+
+    #[test]
+    fn nearly_expired_command_retains_connection_write_budget() {
+        let request_expiry = Instant::now() + Duration::from_millis(1);
+        let write_deadline = socket_write_deadline();
+
+        assert!(write_deadline > request_expiry + WRITE_BUDGET / 2);
+    }
+
+    #[test]
+    fn hello_capabilities_and_pong_identity_are_retained() {
+        let hello = serde_json::json!({
+            "id": 0,
+            "result": {"Ok": {"type": "hello", "data": {
+                "protocol": PROTOCOL_VERSION,
+                "server": "fleetd test"
+            }}},
+            "capabilities": ["prune.reviewed_ids"]
+        });
+        let body = serde_json::from_value::<Response>(hello.clone())
+            .expect("Hello response")
+            .result
+            .expect("successful Hello");
+        let capabilities = negotiated_capabilities(body, &hello).expect("capabilities");
+        assert_eq!(capabilities, ["prune.reviewed_ids"]);
+
+        let (commands, _command_rx) = mpsc::channel(1);
+        let events = broadcast::Sender::new(1);
+        let inner = Arc::new(ClientInner {
+            commands,
+            events: events.clone(),
+            next_id: AtomicU64::new(1),
+            metadata: Arc::new(RwLock::new(ConnectionMetadata {
+                capabilities: capabilities.into_iter().collect(),
+                daemon_identity: None,
+            })),
+        });
+        let client = Client {
+            inner: Arc::clone(&inner),
+        };
+        let (reply, _answer) = oneshot::channel();
+        let mut pending = HashMap::from([(
+            7,
+            Pending {
+                effect: ConnectionEffect::None,
+                response: Some(reply),
+            },
+        )]);
+        let mut state = ConnectionState {
+            capabilities: client.capabilities().into_iter().collect(),
+            ..ConnectionState::default()
+        };
+        let pong = serde_json::json!({
+            "id": 7,
+            "result": {"Ok": {"type": "pong"}},
+            "daemon": {"pid": 42, "bootId": "boot-42"}
+        });
+
+        assert!(!handle_incoming(
+            pong,
+            &mut pending,
+            &mut state,
+            &events,
+            &inner.metadata,
+        ));
+        assert!(client.supports_capability("prune.reviewed_ids"));
+        assert_eq!(client.daemon_pid(), Some(42));
     }
 }

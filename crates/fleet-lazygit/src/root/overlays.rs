@@ -1,4 +1,16 @@
 use super::*;
+use gpui::EntityInputHandler;
+
+enum PromptEdit<'a> {
+    Backspace,
+    DeleteWord,
+    DeleteToStart,
+    Left,
+    Right,
+    Home,
+    End,
+    Insert(&'a str),
+}
 
 impl Lazygit {
     pub(super) fn toast(&mut self, text: impl Into<gpui::SharedString>, icon: Icon) {
@@ -10,8 +22,22 @@ impl Lazygit {
         self.state.push_overlay(Overlay::Confirm(confirm));
     }
 
-    pub(super) fn open_prompt(&mut self, prompt: Prompt) {
+    pub(super) fn open_prompt(
+        &mut self,
+        prompt: Prompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_prompt = None;
+        self.prompt_input = (!prompt.buffer.is_multiline()).then(|| {
+            cx.new(|cx| {
+                TextInput::new(cx)
+                    .with_mono(true)
+                    .with_text(prompt.buffer.value())
+            })
+        });
         self.state.push_overlay(Overlay::Prompt(prompt));
+        window.focus(&self.wanted_focus(cx), cx);
     }
 
     pub(super) fn open_menu(&mut self, menu: Menu) {
@@ -24,6 +50,7 @@ impl Lazygit {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.help_context = Some(self.state.context_chain());
         self.state.push_overlay(Overlay::Help { top: 0 });
         cx.notify();
     }
@@ -46,10 +73,13 @@ impl Lazygit {
                 request => self.send(request),
             },
             ConfirmOutcome::RequestOrEscalate { request, escalate } => {
-                if let GitRequest::Mutate { label, .. } = request.as_ref() {
-                    self.state.escalation = Some((label.clone(), escalate));
+                let mut request = *request;
+                if let GitRequest::Mutate { label, .. } = &mut request {
+                    let tracked = self.tracked_label(label);
+                    *label = tracked.clone();
+                    self.state.escalation = Some((tracked, escalate));
                 }
-                self.send(*request);
+                self.send(request);
             }
         }
         cx.notify();
@@ -68,7 +98,7 @@ impl Lazygit {
     pub(super) fn prompt_accept(
         &mut self,
         _: &prompt::Accept,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let multiline = matches!(self.state.overlay(), Some(Overlay::Prompt(prompt)) if prompt.buffer.is_multiline());
@@ -79,29 +109,36 @@ impl Lazygit {
             cx.notify();
             return;
         }
-        self.submit_prompt(cx);
+        self.submit_prompt(window, cx);
     }
 
     pub(super) fn prompt_submit(
         &mut self,
         _: &prompt::Submit,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.submit_prompt(cx);
+        self.submit_prompt(window, cx);
     }
 
-    pub(super) fn submit_prompt(&mut self, cx: &mut Context<Self>) {
-        let Some(Overlay::Prompt(prompt)) = self.state.overlays.pop() else {
+    pub(super) fn submit_prompt(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Overlay::Prompt(prompt)) = self.state.overlay().cloned() else {
             return;
         };
-        let value = prompt.buffer.value().trim().to_owned();
+        if self.pending_prompt.is_some() {
+            return;
+        }
+        let value = if let Some(input) = &self.prompt_input {
+            input.read(cx).text().trim().to_owned()
+        } else {
+            prompt.buffer.value().trim().to_owned()
+        };
         match prompt.kind {
             PromptKind::Commit { amend } => {
                 if value.is_empty() {
                     self.toast("A commit needs a message.", Icon::TriangleAlert);
                 } else {
-                    self.mutate(
+                    self.submit_prompt_mutation(
                         "commit",
                         Mutation::Commit {
                             message: value,
@@ -115,7 +152,7 @@ impl Lazygit {
             }
             PromptKind::NewBranch { start_point } => {
                 if !value.is_empty() {
-                    self.mutate(
+                    self.submit_prompt_mutation(
                         "new branch",
                         Mutation::CheckoutNewBranch {
                             name: value,
@@ -126,12 +163,15 @@ impl Lazygit {
             }
             PromptKind::RenameBranch(old) => {
                 if !value.is_empty() && value != old {
-                    self.mutate("rename branch", Mutation::RenameBranch { old, new: value });
+                    self.submit_prompt_mutation(
+                        "rename branch",
+                        Mutation::RenameBranch { old, new: value },
+                    );
                 }
             }
             PromptKind::NewTag(target) => {
                 if !value.is_empty() {
-                    self.mutate(
+                    self.submit_prompt_mutation(
                         "new tag",
                         Mutation::CreateTag {
                             name: value,
@@ -143,7 +183,7 @@ impl Lazygit {
             }
             PromptKind::Reword(oid) => {
                 if !value.is_empty() {
-                    self.mutate(
+                    self.submit_prompt_mutation(
                         "reword",
                         Mutation::Reword {
                             oid,
@@ -153,7 +193,7 @@ impl Lazygit {
                 }
             }
             PromptKind::SetUpstream(branch) => match value.split_once('/') {
-                Some((remote, remote_branch)) => self.mutate(
+                Some((remote, remote_branch)) => self.submit_prompt_mutation(
                     "set upstream",
                     Mutation::SetUpstream {
                         branch,
@@ -165,20 +205,23 @@ impl Lazygit {
             },
             PromptKind::Stash(options) => {
                 let message = (!value.is_empty()).then_some(value);
-                self.mutate(
+                self.submit_prompt_mutation(
                     "stash",
                     Mutation::StashPush(StashOptions { message, ..options }),
                 );
             }
             PromptKind::BranchFromStash(index) => {
                 if !value.is_empty() {
-                    self.mutate("stash branch", Mutation::StashBranch { name: value, index });
+                    self.submit_prompt_mutation(
+                        "stash branch",
+                        Mutation::StashBranch { name: value, index },
+                    );
                 }
             }
             PromptKind::PushSetUpstream => {
                 let branch = self.state.head_branch().map(str::to_owned);
                 if let Some(branch) = branch {
-                    self.mutate(
+                    self.submit_prompt_mutation(
                         "push",
                         Mutation::Push(PushRequest {
                             remote: Some(if value.is_empty() {
@@ -197,13 +240,27 @@ impl Lazygit {
         cx.notify();
     }
 
+    fn submit_prompt_mutation(&mut self, label: &str, mutation: Mutation) {
+        let tracked = self.tracked_label(label);
+        self.pending_prompt = Some(tracked.clone());
+        self.send(GitRequest::Mutate {
+            label: tracked,
+            mutation: Box::new(mutation),
+        });
+    }
+
     pub(super) fn prompt_cancel(
         &mut self,
         _: &prompt::Cancel,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.state.pop_overlay();
+        self.pending_prompt = None;
+        self.prompt_input = None;
+        if self.active {
+            window.focus(&self.focus, cx);
+        }
         cx.notify();
     }
 
@@ -220,71 +277,132 @@ impl Lazygit {
         }
     }
 
+    fn edit_prompt(&mut self, edit: PromptEdit<'_>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = self.prompt_input.clone() {
+            input.update(cx, |input, cx| {
+                let mut state = input.state().clone();
+                match edit {
+                    PromptEdit::Backspace => {
+                        state.backspace();
+                    }
+                    PromptEdit::DeleteWord => {
+                        state.delete_word_before();
+                    }
+                    PromptEdit::DeleteToStart => {
+                        state.delete_to_start();
+                    }
+                    PromptEdit::Left => {
+                        state.move_left();
+                    }
+                    PromptEdit::Right => {
+                        state.move_right();
+                    }
+                    PromptEdit::Home => {
+                        state.move_to_start();
+                    }
+                    PromptEdit::End => {
+                        state.move_to_end();
+                    }
+                    PromptEdit::Insert(text) => state.insert(text),
+                }
+                let caret = state.offset_to_utf16(state.cursor());
+                input.set_text(state.text().to_owned(), cx);
+                input.set_selected_text_range(caret..caret, window, cx);
+            });
+            return;
+        }
+        self.with_buffer(|buffer| match edit {
+            PromptEdit::Backspace => {
+                buffer.backspace();
+            }
+            PromptEdit::DeleteWord => {
+                buffer.delete_word();
+            }
+            PromptEdit::DeleteToStart => {
+                buffer.delete_to_line_start();
+            }
+            PromptEdit::Left => buffer.left(),
+            PromptEdit::Right => buffer.right(),
+            PromptEdit::Home => buffer.home(),
+            PromptEdit::End => buffer.end(),
+            PromptEdit::Insert(text) => buffer.insert(text),
+        });
+    }
+
     pub(super) fn prompt_backspace(
         &mut self,
         _: &prompt::Backspace,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_buffer(|buffer| {
-            buffer.backspace();
-        });
+        self.edit_prompt(PromptEdit::Backspace, window, cx);
         cx.notify();
     }
 
     pub(super) fn prompt_delete_word(
         &mut self,
         _: &prompt::DeleteWord,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_buffer(|buffer| {
-            buffer.delete_word();
-        });
+        self.edit_prompt(PromptEdit::DeleteWord, window, cx);
         cx.notify();
     }
 
     pub(super) fn prompt_delete_to_start(
         &mut self,
         _: &prompt::DeleteToStart,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_buffer(|buffer| {
-            buffer.delete_to_line_start();
-        });
+        self.edit_prompt(PromptEdit::DeleteToStart, window, cx);
         cx.notify();
     }
 
-    pub(super) fn prompt_left(&mut self, _: &prompt::Left, _: &mut Window, cx: &mut Context<Self>) {
-        self.with_buffer(crate::state::Buffer::left);
+    pub(super) fn prompt_left(
+        &mut self,
+        _: &prompt::Left,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_prompt(PromptEdit::Left, window, cx);
         cx.notify();
     }
 
     pub(super) fn prompt_right(
         &mut self,
         _: &prompt::Right,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_buffer(crate::state::Buffer::right);
+        self.edit_prompt(PromptEdit::Right, window, cx);
         cx.notify();
     }
 
-    pub(super) fn prompt_home(&mut self, _: &prompt::Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.with_buffer(crate::state::Buffer::home);
+    pub(super) fn prompt_home(
+        &mut self,
+        _: &prompt::Home,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_prompt(PromptEdit::Home, window, cx);
         cx.notify();
     }
 
-    pub(super) fn prompt_end(&mut self, _: &prompt::End, _: &mut Window, cx: &mut Context<Self>) {
-        self.with_buffer(crate::state::Buffer::end);
+    pub(super) fn prompt_end(
+        &mut self,
+        _: &prompt::End,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_prompt(PromptEdit::End, window, cx);
         cx.notify();
     }
 
     pub(super) fn prompt_paste(
         &mut self,
         _: &prompt::Paste,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let text = cx
@@ -292,28 +410,38 @@ impl Lazygit {
             .and_then(|item| item.text())
             .unwrap_or_default();
         if !text.is_empty() {
-            self.with_buffer(|buffer| buffer.insert(&text));
+            self.edit_prompt(PromptEdit::Insert(&text), window, cx);
         }
         cx.notify();
     }
 
-    pub(super) fn menu_accept(&mut self, _: &menu::Accept, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn menu_accept(
+        &mut self,
+        _: &menu::Accept,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(Overlay::Menu(menu)) = self.state.overlay() else {
             return;
         };
         let Some(action) = menu.selected().map(|item| item.action.clone()) else {
             return;
         };
-        self.run_menu_action(action, cx);
+        self.run_menu_action(action, window, cx);
     }
 
     /// Closes the menu and performs one row's action.
-    pub(super) fn run_menu_action(&mut self, action: MenuAction, cx: &mut Context<Self>) {
+    pub(super) fn run_menu_action(
+        &mut self,
+        action: MenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.state.pop_overlay();
         match action {
             MenuAction::Request(request) => self.send(*request),
             MenuAction::Confirm(confirm) => self.open_confirm(*confirm),
-            MenuAction::Prompt(prompt) => self.open_prompt(*prompt),
+            MenuAction::Prompt(prompt) => self.open_prompt(*prompt, window, cx),
         }
         cx.notify();
     }
@@ -371,6 +499,7 @@ impl Lazygit {
         cx: &mut Context<Self>,
     ) {
         self.state.pop_overlay();
+        self.help_context = None;
         cx.notify();
     }
 
@@ -394,7 +523,12 @@ impl Lazygit {
     ///
     /// gpui dispatches key **bindings** before `on_key_down`, and no text context binds a
     /// single-character key, so exactly the printable set reaches here.
-    pub(super) fn typed(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    pub(super) fn typed(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let modifiers = event.keystroke.modifiers;
         if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
             return;
@@ -411,16 +545,18 @@ impl Lazygit {
             && menu.filter.is_none()
             && let Some(action) = menu.item_for_key(text).map(|item| item.action.clone())
         {
-            self.run_menu_action(action, cx);
+            self.run_menu_action(action, window, cx);
             return;
         }
         let typing = matches!(
             self.state.overlay(),
-            Some(Overlay::Prompt(_))
-                | Some(Overlay::Menu(Menu {
-                    filter: Some(_),
-                    ..
-                }))
+            Some(Overlay::Prompt(prompt)) if prompt.buffer.is_multiline()
+        ) || matches!(
+            self.state.overlay(),
+            Some(Overlay::Menu(Menu {
+                filter: Some(_),
+                ..
+            }))
         );
         if !typing {
             return;

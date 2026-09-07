@@ -1,13 +1,18 @@
 use super::*;
 
+const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl Sessions {
     /// Attaches a client, makes its size authoritative, and emits a full frame.
     pub async fn attach(&self, terminal: TerminalId, cols: u16, rows: u16) -> DaemonResult<()> {
         let host = self.host_or_not_found(terminal)?;
-        let frame = tokio::task::spawn_blocking(move || host.attach(cols, rows))
-            .await
-            .map_err(|error| DaemonError::Join(error.to_string()))?
-            .map_err(|error| terminal_error(terminal, error))?;
+        let deadline = tokio::time::Instant::now() + ATTACH_TIMEOUT;
+        let frame = await_attach(
+            terminal,
+            deadline,
+            host.attach(cols, rows, deadline.into_std()),
+        )
+        .await?;
         let mut registry = self
             .runtime
             .registry
@@ -136,6 +141,17 @@ impl Sessions {
     }
 }
 
+pub(super) async fn await_attach(
+    terminal: TerminalId,
+    deadline: tokio::time::Instant,
+    attach: impl std::future::Future<Output = Result<FrameUpdate, fleet_term::HostError>>,
+) -> DaemonResult<FrameUpdate> {
+    tokio::time::timeout_at(deadline, attach)
+        .await
+        .map_err(|_| DaemonError::Timeout(format!("terminal {terminal} attachment")))?
+        .map_err(|error| terminal_error(terminal, error))
+}
+
 impl SessionRuntime {
     pub(super) fn notify_session(&self, id: &SessionId) {
         let session = self.session(id);
@@ -244,22 +260,39 @@ pub(super) async fn spawn_terminal(
     .map_err(|error| DaemonError::Join(error.to_string()))?
 }
 
-pub(super) fn forward_host_events(
+pub(super) struct HostEventForwarder {
+    start: std::sync::mpsc::SyncSender<()>,
+}
+
+impl HostEventForwarder {
+    pub(super) fn start(self) -> DaemonResult<()> {
+        self.start.send(()).map_err(|_| {
+            DaemonError::Process("terminal event thread stopped before registration".to_owned())
+        })
+    }
+}
+
+pub(super) fn prepare_host_events(
     runtime: Arc<SessionRuntime>,
     terminal: TerminalId,
-    host: &TerminalHost,
-) -> DaemonResult<()> {
+    host: Arc<TerminalHost>,
+) -> DaemonResult<HostEventForwarder> {
     let receiver = host.event_receiver();
     let runtime = Arc::downgrade(&runtime);
+    let (start, registered) = std::sync::mpsc::sync_channel(0);
     thread::Builder::new()
         .name(format!("fleet-terminal-events-{terminal}"))
         .spawn(move || {
+            if registered.recv().is_err() {
+                return;
+            }
             while let Ok(event) = receiver.recv_blocking() {
                 let Some(runtime) = runtime.upgrade() else {
                     break;
                 };
                 match event {
                     HostEvent::Frame(frame) => {
+                        let output_bytes = host.activity().output_bytes_total;
                         let mut registry = runtime
                             .registry
                             .lock()
@@ -269,19 +302,8 @@ pub(super) fn forward_host_events(
                         }
                         let next = registry.next_sequences.entry(terminal).or_insert(1);
                         *next = (*next).max(frame.seq.saturating_add(1));
-                        let mut became_unseen = None;
-                        if let Some(session_id) = registry.terminal_sessions.get(&terminal).cloned()
-                            && let Some(session) = registry.sessions.get_mut(&session_id)
-                            && session.active_terminal != Some(terminal)
-                            && let Some(entry) = session
-                                .terminals
-                                .iter_mut()
-                                .find(|entry| entry.id == terminal)
-                            && !entry.has_unseen_output
-                        {
-                            entry.has_unseen_output = true;
-                            became_unseen = Some(session_id);
-                        }
+                        let became_unseen =
+                            record_frame_activity(&mut registry, terminal, output_bytes);
                         drop(registry);
                         let _ = runtime.frames.send(frame);
                         // One notification per background terminal, when its unseen-output
@@ -307,8 +329,36 @@ pub(super) fn forward_host_events(
                 }
             }
         })
-        .map(|_| ())
-        .map_err(|error| DaemonError::Process(format!("terminal event thread: {error}")))
+        .map_err(|error| DaemonError::Process(format!("terminal event thread: {error}")))?;
+    Ok(HostEventForwarder { start })
+}
+
+pub(super) fn record_frame_activity(
+    registry: &mut Registry,
+    terminal: TerminalId,
+    output_bytes: u64,
+) -> Option<SessionId> {
+    let previous_output = registry
+        .observed_output_bytes
+        .insert(terminal, output_bytes)
+        .unwrap_or(0);
+    if output_bytes <= previous_output {
+        return None;
+    }
+    let session_id = registry.terminal_sessions.get(&terminal)?.clone();
+    let session = registry.sessions.get_mut(&session_id)?;
+    if session.active_terminal == Some(terminal) {
+        return None;
+    }
+    let entry = session
+        .terminals
+        .iter_mut()
+        .find(|entry| entry.id == terminal)?;
+    if entry.has_unseen_output {
+        return None;
+    }
+    entry.has_unseen_output = true;
+    Some(session_id)
 }
 
 fn update_terminal(

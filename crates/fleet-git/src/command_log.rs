@@ -31,6 +31,10 @@ pub enum CommandOutcome {
     },
     /// The process exceeded its deadline.
     TimedOut,
+    /// The caller stopped waiting and the child was killed and reaped.
+    Cancelled,
+    /// The child produced more output than the runner is allowed to retain.
+    OutputLimitExceeded,
     /// The child could not be spawned or communicated with.
     SpawnFailed(String),
 }
@@ -124,23 +128,37 @@ impl CommandLog {
 }
 
 pub(crate) fn preview(bytes: &[u8], limit: usize) -> Vec<u8> {
-    bytes[..bytes.len().min(limit)].to_vec()
+    let visible = String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]);
+    let redacted = redact_arg(&visible);
+    redacted.as_bytes()[..redacted.len().min(limit)].to_vec()
 }
 
 pub(crate) fn redact_arg(argument: &str) -> String {
-    if let Some(scheme) = argument.find("://") {
-        let authority = scheme + 3;
-        if let Some(at) = argument[authority..].find('@') {
-            let suffix = &argument[authority + at..];
-            return format!("{}://[REDACTED]{}", &argument[..scheme], suffix);
-        }
+    let mut redacted = String::with_capacity(argument.len());
+    let mut cursor = 0;
+    while let Some(relative_scheme) = argument[cursor..].find("://") {
+        let authority_start = cursor + relative_scheme + 3;
+        let authority_end = argument[authority_start..]
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, '/' | '?' | '#')
+            })
+            .map_or(argument.len(), |end| authority_start + end);
+        let Some(relative_at) = argument[authority_start..authority_end].rfind('@') else {
+            redacted.push_str(&argument[cursor..authority_end]);
+            cursor = authority_end;
+            continue;
+        };
+        redacted.push_str(&argument[cursor..authority_start]);
+        redacted.push_str("[REDACTED]");
+        cursor = authority_start + relative_at;
     }
-    argument.to_owned()
+    redacted.push_str(&argument[cursor..]);
+    redacted
 }
 
 #[cfg(test)]
 mod tests {
-    use super::redact_arg;
+    use super::{preview, redact_arg};
 
     #[test]
     fn redacts_url_userinfo() {
@@ -151,6 +169,26 @@ mod tests {
         assert_eq!(
             redact_arg("git@example.com:org/repo"),
             "git@example.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn preview_redacts_without_mutating_output() {
+        let output = b"remote: https://user:secret@example.com/org/repo\n\
+                       mirror: ssh://token@git.example.test/org/repo\n"
+            .to_vec();
+
+        let displayed = preview(&output, 1024);
+
+        assert_eq!(
+            displayed,
+            b"remote: https://[REDACTED]@example.com/org/repo\n\
+              mirror: ssh://[REDACTED]@git.example.test/org/repo\n"
+        );
+        assert_eq!(
+            output,
+            b"remote: https://user:secret@example.com/org/repo\n\
+              mirror: ssh://token@git.example.test/org/repo\n"
         );
     }
 }

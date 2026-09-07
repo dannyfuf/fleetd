@@ -30,8 +30,7 @@ impl Lazygit {
         for hint in keymap::hints_for_chain(chain, 8).iter() {
             hints = hints.key(hint.keys.clone(), hint.label.clone());
         }
-        let operation = self.state.operation();
-        let mode = mode_word(&operation);
+        let (mode, mode_tone) = status_input_mode(chain);
 
         let mut bar = div()
             .flex()
@@ -55,15 +54,36 @@ impl Lazygit {
         if self.state.refreshing {
             bar = bar.child(Text::hint("…").flex_none());
         }
-        match mode {
-            Some(word) => {
-                bar = bar.child(ModeWord::word(word).tone(Tone::Warning));
-            }
-            None => {
-                bar = bar.child(ModeWord::word("NORMAL").tone(Tone::Secondary));
-            }
-        }
+        bar = bar.child(ModeWord::word(mode).tone(mode_tone));
         bar.child(Text::hint(format!("fleet-lazygit {}", env!("CARGO_PKG_VERSION"))).flex_none())
             .into_any_element()
+    }
+}
+
+/// The status word follows the key owner, not the repository operation shown in the banner.
+fn status_input_mode(chain: &[&str]) -> (&'static str, Tone) {
+    if chain.contains(&"Staging") {
+        ("STAGING", Tone::Secondary)
+    } else if chain.contains(&"LgDialog") {
+        ("DIALOG", Tone::Secondary)
+    } else {
+        ("NORMAL", Tone::Secondary)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_matches_input_context() {
+        assert_eq!(status_input_mode(&["Panels", "Files"]).0, "NORMAL");
+        assert_eq!(
+            status_input_mode(&["Panels", "Main", "Staging"]).0,
+            "STAGING"
+        );
+        for overlay in ["Prompt", "Menu", "MenuFilter", "LgConfirm", "LgHelp"] {
+            assert_eq!(status_input_mode(&["LgDialog", overlay]).0, "DIALOG");
+        }
     }
 }

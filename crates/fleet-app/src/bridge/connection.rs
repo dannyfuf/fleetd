@@ -1,16 +1,46 @@
 use super::*;
+use fleet_client::{ConnectError, SpawnError};
 use tokio::sync::broadcast;
 
 /// One connected daemon plus the task forwarding its events.
 pub(super) struct Link {
     pub(super) client: Client,
     pub(super) pid: u32,
-    forwarder: tokio::task::JoinHandle<()>,
+    pub(super) boot_id: Option<String>,
+    forwarder: Forwarder,
 }
 
-impl Drop for Link {
+pub(super) struct Forwarder {
+    pending: Option<broadcast::Receiver<Event>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Forwarder {
     fn drop(&mut self) {
-        self.forwarder.abort();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Forwarder {
+    pub(super) fn pending(source: broadcast::Receiver<Event>) -> Self {
+        Self {
+            pending: Some(source),
+            task: None,
+        }
+    }
+
+    pub(super) fn start(&mut self, events: Sender<BridgeEvent>) {
+        if let Some(source) = self.pending.take() {
+            self.task = Some(spawn_forwarder(source, events));
+        }
+    }
+}
+
+impl Link {
+    pub(super) fn start_forwarding(&mut self, events: Sender<BridgeEvent>) {
+        self.forwarder.start(events);
     }
 }
 
@@ -19,15 +49,39 @@ pub(super) struct Failure {
     message: String,
     log_tail: Vec<String>,
     stale_socket: bool,
+    cause: FailureCause,
+}
+
+#[derive(Clone, Copy)]
+enum FailureCause {
+    Unavailable,
+    ProtocolMismatch,
 }
 
 impl Failure {
     pub(super) fn into_event(self) -> BridgeEvent {
-        BridgeEvent::ConnectFailed {
-            message: self.message,
-            log_tail: self.log_tail,
-            stale_socket: self.stale_socket,
+        match self.cause {
+            FailureCause::Unavailable => BridgeEvent::ConnectFailed {
+                message: self.message,
+                log_tail: self.log_tail,
+                stale_socket: self.stale_socket,
+            },
+            FailureCause::ProtocolMismatch => BridgeEvent::ProtocolMismatch {
+                message: self.message,
+                log_tail: self.log_tail,
+            },
         }
+    }
+}
+
+fn spawn_failure_cause(error: &SpawnError) -> FailureCause {
+    match error {
+        SpawnError::Connect(ConnectError::Protocol(error))
+            if error.kind == ErrorKind::Unsupported =>
+        {
+            FailureCause::ProtocolMismatch
+        }
+        _ => FailureCause::Unavailable,
     }
 }
 
@@ -38,6 +92,11 @@ pub(super) async fn is_alive(client: &Client) -> bool {
     )
 }
 
+pub(super) async fn daemon_identity(client: &Client) -> Option<(u32, String)> {
+    client.daemon_ping().await.ok()?;
+    client.daemon_identity()
+}
+
 /// Connects, spawning fleetd when the socket is dead, and reads the first snapshot.
 pub(super) async fn open(
     home: &Path,
@@ -46,21 +105,33 @@ pub(super) async fn open(
     let client = match ensure_daemon(home, None).await {
         Ok(client) => client,
         Err(error) => {
+            let cause = spawn_failure_cause(&error);
             return Err(Failure {
                 message: error.to_string(),
                 log_tail: log_tail(home).await,
                 stale_socket: FleetHome::new(home).socket_path().exists(),
+                cause,
             });
         }
     };
-    let _ignored = client.hello(CLIENT_NAME).await;
-    let forwarder = spawn_forwarder(client.events(), events.clone());
+    if events
+        .send(BridgeEvent::Capabilities(client.capabilities()))
+        .await
+        .is_err()
+    {
+        return Err(Failure {
+            message: "the app stopped receiving daemon connection metadata".to_owned(),
+            log_tail: Vec::new(),
+            stale_socket: false,
+            cause: FailureCause::Unavailable,
+        });
+    }
+    let forwarder = Forwarder::pending(client.events());
     if let Ok(config) = client.get_config().await {
         let _ = events
-            .send(BridgeEvent::TerminalConfig(config.terminal.clone()))
-            .await;
-        let _ = events
-            .send(BridgeEvent::NotificationConfig(config.ui.notifications))
+            .send(BridgeEvent::EffectiveConfig(EffectiveConfig::from_config(
+                &config,
+            )))
             .await;
     }
     match client.get_snapshot().await {
@@ -70,19 +141,22 @@ pub(super) async fn open(
                 Link {
                     client,
                     pid,
+                    boot_id: None,
                     forwarder,
                 },
                 snapshot,
             ))
         }
-        Err(error) => {
-            forwarder.abort();
-            Err(Failure {
-                message: error.message,
-                log_tail: log_tail(home).await,
-                stale_socket: false,
-            })
-        }
+        Err(error) => Err(Failure {
+            message: error.message,
+            log_tail: log_tail(home).await,
+            stale_socket: false,
+            cause: if error.kind == ErrorKind::Unsupported {
+                FailureCause::ProtocolMismatch
+            } else {
+                FailureCause::Unavailable
+            },
+        }),
     }
 }
 

@@ -31,11 +31,18 @@ impl AgentPopup {
 }
 
 pub(super) fn header_status_tone(model: &Model) -> Tone {
-    if !model.reachable || model.exit_code.is_some() || model.terminal.is_none() {
+    if !model.reachable || model.terminal_state == AgentTerminalState::Exited {
         return Tone::Danger;
     }
-    match model.activity {
-        AgentActivity::Working => Tone::Warning,
-        AgentActivity::Idle | AgentActivity::Unknown => Tone::Success,
+    match (model.terminal_state, model.activity) {
+        (AgentTerminalState::Running, AgentActivity::Idle | AgentActivity::Unknown) => {
+            Tone::Success
+        }
+        (
+            AgentTerminalState::Unknown | AgentTerminalState::Starting,
+            AgentActivity::Unknown | AgentActivity::Working | AgentActivity::Idle,
+        )
+        | (AgentTerminalState::Running, AgentActivity::Working) => Tone::Warning,
+        (AgentTerminalState::Exited, _) => Tone::Danger,
     }
 }

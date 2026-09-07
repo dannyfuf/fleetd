@@ -41,11 +41,14 @@ impl StateStore {
     pub async fn load(&self) -> DaemonResult<State> {
         let _guard = self.gate.lock().await;
         let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
         let files = Arc::clone(&self.files);
         let epoch = self.clock.epoch_millis();
-        tokio::task::spawn_blocking(move || load_sync(&path, files.as_ref(), epoch))
-            .await
-            .map_err(|error| DaemonError::Join(error.to_string()))?
+        tokio::task::spawn_blocking(move || {
+            load_for_read_sync(&path, &lock_path, files.as_ref(), epoch)
+        })
+        .await
+        .map_err(|error| DaemonError::Join(error.to_string()))?
     }
 
     /// Validates and atomically saves complete state under the cross-process lock.
@@ -84,6 +87,30 @@ impl StateStore {
         .map_err(|error| DaemonError::Join(error.to_string()))?
     }
 
+    /// Replaces a quarantined state with the validated default while retaining the broken file.
+    pub async fn reset_quarantined(&self) -> DaemonResult<PathBuf> {
+        let _guard = self.gate.lock().await;
+        let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
+        let files = Arc::clone(&self.files);
+        tokio::task::spawn_blocking(move || {
+            let _lock = StateLock::acquire(lock_path)?;
+            let broken = broken_state_path(&path, files.as_ref())?.ok_or_else(|| {
+                DaemonError::Conflict(format!("state is not quarantined: {}", path.display()))
+            })?;
+            if files.exists(&path) {
+                return Err(DaemonError::Conflict(format!(
+                    "state already exists: {}",
+                    path.display()
+                )));
+            }
+            save_sync(&path, files.as_ref(), &default_state())?;
+            Ok(broken)
+        })
+        .await
+        .map_err(|error| DaemonError::Join(error.to_string()))?
+    }
+
     /// Returns the backing `state.json` path.
     #[must_use]
     pub fn path(&self) -> &std::path::Path {
@@ -92,25 +119,95 @@ impl StateStore {
 }
 
 fn load_sync(path: &std::path::Path, files: &dyn Files, epoch: i64) -> DaemonResult<State> {
+    match inspect_state(path, files)? {
+        StateObservation::Missing => {
+            if let Some(broken) = broken_state_path(path, files)? {
+                return Err(DaemonError::Validation(format!(
+                    "state is quarantined at {}; an explicit state reset is required",
+                    broken.display()
+                )));
+            }
+            Ok(default_state())
+        }
+        StateObservation::Valid(state) => Ok(state),
+        StateObservation::Invalid(error) => {
+            quarantine(path, files, epoch)?;
+            Err(DaemonError::Validation(error))
+        }
+    }
+}
+
+fn load_for_read_sync(
+    path: &std::path::Path,
+    lock_path: &std::path::Path,
+    files: &dyn Files,
+    epoch: i64,
+) -> DaemonResult<State> {
+    load_for_read_sync_after_observation(path, lock_path, files, epoch, || {})
+}
+
+fn load_for_read_sync_after_observation<F>(
+    path: &std::path::Path,
+    lock_path: &std::path::Path,
+    files: &dyn Files,
+    epoch: i64,
+    before_lock: F,
+) -> DaemonResult<State>
+where
+    F: FnOnce(),
+{
+    if let StateObservation::Valid(state) = inspect_state(path, files)? {
+        return Ok(state);
+    }
+    before_lock();
+    let _lock = StateLock::acquire(lock_path)?;
+    load_sync(path, files, epoch)
+}
+
+enum StateObservation {
+    Missing,
+    Valid(State),
+    Invalid(String),
+}
+
+fn inspect_state(path: &std::path::Path, files: &dyn Files) -> DaemonResult<StateObservation> {
     if !files.exists(path) {
-        return Ok(default_state());
+        return Ok(StateObservation::Missing);
     }
     let text = files.read_text(path)?;
-    let parsed = serde_json::from_str::<State>(&text);
-    let state = match parsed {
+    let state = match serde_json::from_str::<State>(&text) {
         Ok(state) => state,
         Err(error) => {
-            quarantine(path, files, epoch)?;
-            return Err(DaemonError::Validation(format!(
+            return Ok(StateObservation::Invalid(format!(
                 "invalid state JSON: {error}"
             )));
         }
     };
-    if let Err(error) = validate_state(&state) {
-        quarantine(path, files, epoch)?;
-        return Err(DaemonError::Validation(error.to_string()));
+    match validate_state(&state) {
+        Ok(()) => Ok(StateObservation::Valid(state)),
+        Err(error) => Ok(StateObservation::Invalid(error.to_string())),
     }
-    Ok(state)
+}
+
+fn broken_state_path(path: &std::path::Path, files: &dyn Files) -> DaemonResult<Option<PathBuf>> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    if !files.exists(parent) {
+        return Ok(None);
+    }
+    let prefix = format!(
+        "{}.broken-",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state.json")
+    );
+    Ok(files.list(parent)?.into_iter().find(|candidate| {
+        candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&prefix))
+    }))
 }
 
 fn save_sync(path: &std::path::Path, files: &dyn Files, state: &State) -> DaemonResult<()> {
@@ -157,6 +254,73 @@ mod tests {
         assert!(!store.path().exists());
         assert!(
             store
+                .path()
+                .with_file_name("state.json.broken-1700000000123")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantined_state_never_falls_back() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let store = store(&temp);
+        std::fs::create_dir_all(store.path().parent().unwrap_or(temp.path()))
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(store.path(), "not json").unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(store.load().await.is_err());
+        let second = store.load().await;
+        assert!(
+            matches!(second, Err(DaemonError::Validation(message)) if message.contains("quarantined"))
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_reset_preserves_quarantine_and_writes_default_state() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let store = store(&temp);
+        std::fs::create_dir_all(store.path().parent().unwrap_or(temp.path()))
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(store.path(), "not json").unwrap_or_else(|error| panic!("{error}"));
+        assert!(store.load().await.is_err());
+
+        let broken = store
+            .reset_quarantined()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(broken.exists());
+        assert_eq!(
+            store.load().await.unwrap_or_else(|error| panic!("{error}")),
+            default_state()
+        );
+    }
+
+    #[test]
+    fn load_does_not_quarantine_replacement() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let store = store(&temp);
+        std::fs::create_dir_all(store.path().parent().unwrap_or(temp.path()))
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(store.path(), "not json").unwrap_or_else(|error| panic!("{error}"));
+        let replacement =
+            serde_json::to_string(&default_state()).unwrap_or_else(|error| panic!("{error}"));
+
+        let loaded = load_for_read_sync_after_observation(
+            &store.path,
+            &store.lock_path,
+            store.files.as_ref(),
+            1_700_000_000_123,
+            || {
+                std::fs::write(store.path(), replacement).unwrap_or_else(|error| panic!("{error}"));
+            },
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(loaded, default_state());
+        assert!(store.path().exists());
+        assert!(
+            !store
                 .path()
                 .with_file_name("state.json.broken-1700000000123")
                 .exists()

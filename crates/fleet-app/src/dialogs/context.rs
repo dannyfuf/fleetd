@@ -1,6 +1,11 @@
 //! §3.8.4 New / Edit context.
 
-use fleet_core::{ids::ContextId, slug::normalize_context_id};
+use fleet_core::{
+    ids::ContextId,
+    model::{Repo, Worktree},
+    sessions::{Session, SessionKind},
+    slug::normalize_context_id,
+};
 use fleet_proto::request::RequestBody;
 use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
@@ -30,8 +35,6 @@ pub enum Field {
 pub struct ContextState {
     /// The context being edited, or `None` when creating one.
     pub(crate) editing: Option<ContextId>,
-    /// Whether the id is read-only because repositories already live in this context.
-    pub(crate) id_locked: bool,
     /// The display name.
     pub(crate) name: TextFieldState,
     /// The comma-separated owner list.
@@ -48,7 +51,10 @@ impl ContextState {
     /// The `ContextId` the typed name produces (§1 slugify rules).
     #[must_use]
     pub fn preview_id(&self) -> String {
-        normalize_context_id(self.name.text())
+        self.editing.as_ref().map_or_else(
+            || normalize_context_id(self.name.text()),
+            |id| id.as_str().to_owned(),
+        )
     }
 
     /// The owners, split and trimmed the way the daemon stores them.
@@ -86,10 +92,37 @@ impl ContextState {
     /// Whether `Enter` may create or save.
     #[must_use]
     pub fn can_submit(&self) -> bool {
-        !self.preview_id().is_empty()
+        !self.name.text().trim().is_empty()
+            && !self.preview_id().is_empty()
             && self.duplicate().is_none()
             && ContextId::try_from(self.preview_id()).is_ok()
     }
+}
+
+fn cascade_counts(
+    context: &ContextId,
+    repos: &[Repo],
+    worktrees: &[Worktree],
+    sessions: &[Session],
+) -> (usize, usize, usize) {
+    let context_repos = repos
+        .iter()
+        .filter(|repo| &repo.context_id == context)
+        .collect::<Vec<_>>();
+    let context_worktrees = worktrees
+        .iter()
+        .filter(|worktree| context_repos.iter().any(|repo| repo.id == worktree.repo_id))
+        .collect::<Vec<_>>();
+    let session_count = sessions
+        .iter()
+        .filter(|session| {
+            let SessionKind::Worktree(id) = &session.kind else {
+                return false;
+            };
+            context_worktrees.iter().any(|worktree| worktree.id == *id)
+        })
+        .count();
+    (context_repos.len(), context_worktrees.len(), session_count)
 }
 
 /// Fills the draft: empty for `N`, the active context's values for `E`.
@@ -112,18 +145,12 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
                 draft.editing = Some(context.id.clone());
                 draft.name = TextFieldState::from_text(context.name.clone());
                 draft.owners = TextFieldState::from_text(context.owners.join(", "));
-                let repos: Vec<_> = snapshot
-                    .repos
-                    .iter()
-                    .filter(|repo| repo.context_id == context.id)
-                    .collect();
-                let worktrees = snapshot
-                    .worktrees
-                    .iter()
-                    .filter(|worktree| repos.iter().any(|repo| repo.id == worktree.repo_id))
-                    .count();
-                draft.id_locked = !repos.is_empty();
-                draft.cascade = (repos.len(), worktrees, snapshot.sessions.len());
+                draft.cascade = cascade_counts(
+                    &context.id,
+                    &snapshot.repos,
+                    &snapshot.worktrees,
+                    &snapshot.sessions,
+                );
             }
         }
     }
@@ -137,16 +164,14 @@ fn name_field(draft: &ContextState, duplicate: Option<&str>) -> TextField {
         .placeholder("Buk HR")
         .focused(draft.field == Field::Name);
     let preview_id = draft.preview_id();
-    match (duplicate, draft.id_locked, preview_id.is_empty()) {
+    match (duplicate, draft.editing.is_some(), preview_id.is_empty()) {
         (Some(message), _, _) => input.invalid(message.to_owned()),
         // §1.2 zero-suppression: with no name there is no id to preview, and a bare `→` with
         // nothing after it is a dangling arrow, not information.
         (None, _, true) => input,
         // §3.8.4: once repos exist the id is read-only outright, and saying so beats a
         // disabled-looking input.
-        (None, true, false) => input.preview(format!(
-            "\u{2192} {preview_id} (id is fixed once repos exist)"
-        )),
+        (None, true, false) => input.preview(format!("\u{2192} {preview_id} (id is fixed)")),
         (None, false, false) => input.preview(format!("\u{2192} {preview_id}")),
     }
 }
@@ -366,5 +391,89 @@ mod tests {
         };
         assert!(draft.owner_list().is_empty());
         assert!(draft.can_submit());
+    }
+
+    #[test]
+    fn editing_keeps_persisted_context_id() {
+        let draft = ContextState {
+            editing: ContextId::try_from("buk-hr").ok(),
+            name: TextFieldState::from_text("People Operations"),
+            existing: vec!["buk-hr".to_owned(), "people-operations".to_owned()],
+            ..ContextState::default()
+        };
+        assert_eq!(draft.preview_id(), "buk-hr");
+        assert_eq!(draft.duplicate(), None);
+        assert!(draft.can_submit());
+    }
+
+    #[test]
+    fn cascade_counts_only_context_sessions() {
+        use fleet_core::{
+            config::Agent,
+            ids::{RepoId, SessionId, WorktreeId},
+            sessions::agent_session_id,
+        };
+
+        let context = ContextId::try_from("one").unwrap();
+        let other_context = ContextId::try_from("two").unwrap();
+        let repo = |id: &str, context_id: ContextId| Repo {
+            id: RepoId::try_from(id).unwrap(),
+            owner: "acme".to_owned(),
+            name: id.rsplit('/').next().unwrap_or(id).to_owned(),
+            url: String::new(),
+            context_id,
+            default_branch: "main".to_owned(),
+            path: String::new(),
+            cloned_at: String::new(),
+            hooks: Default::default(),
+        };
+        let repos = vec![
+            repo("acme/one", context.clone()),
+            repo("acme/two", other_context),
+        ];
+        let worktree = |id: &str, repo_id: &str| Worktree {
+            id: WorktreeId::try_from(id).unwrap(),
+            repo_id: RepoId::try_from(repo_id).unwrap(),
+            slug: "feature".to_owned(),
+            branch: "feature".to_owned(),
+            base_ref: "origin/main".to_owned(),
+            path: String::new(),
+            session: id.to_owned(),
+            host: None,
+            created_at: String::new(),
+            last_opened_at: None,
+            degraded: None,
+        };
+        let worktrees = vec![
+            worktree("acme/one#feature", "acme/one"),
+            worktree("acme/two#feature", "acme/two"),
+        ];
+        let session = |id: &str, kind| Session {
+            id: SessionId::try_from(id).unwrap(),
+            kind,
+            cwd: String::new(),
+            terminals: Vec::new(),
+            active_terminal: None,
+            slept_at: None,
+            kept_terminals: Vec::new(),
+        };
+        let sessions = vec![
+            session(
+                "acme/one#feature",
+                SessionKind::Worktree(worktrees[0].id.clone()),
+            ),
+            session(
+                "acme/two#feature",
+                SessionKind::Worktree(worktrees[1].id.clone()),
+            ),
+            session(
+                agent_session_id(Agent::Claude).unwrap().as_str(),
+                SessionKind::Agent(Agent::Claude),
+            ),
+        ];
+        assert_eq!(
+            cascade_counts(&context, &repos, &worktrees, &sessions),
+            (1, 1, 1)
+        );
     }
 }

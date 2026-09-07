@@ -9,22 +9,23 @@ pub fn local_branches(input: &[u8]) -> Result<Vec<Branch>> {
     records(input, 7, "local branches")?
         .into_iter()
         .map(|fields| {
-            let tracking = text(fields[2]);
-            let (ahead, behind) = parse_tracking(text(fields[3]));
+            let tracking = crate::parse::text(fields[2]);
+            let tracking_status = if tracking.is_empty() {
+                None
+            } else {
+                Some(parse_tracking(&crate::parse::text(fields[3])))
+            };
             Ok(Branch {
-                is_head: text(fields[0]) == "*",
-                name: text(fields[1]).to_owned(),
-                upstream: if tracking.is_empty() {
-                    None
-                } else {
-                    Some(Upstream {
-                        name: tracking.to_owned(),
-                        ahead,
-                        behind,
-                    })
-                },
-                subject: text(fields[4]).to_owned(),
-                oid: ObjectId(text(fields[5]).to_owned()),
+                is_head: crate::parse::text(fields[0]) == "*",
+                name: crate::parse::text(fields[1]).into_owned(),
+                upstream: tracking_status.map(|status| Upstream {
+                    name: tracking.into_owned(),
+                    gone: status.gone,
+                    ahead: status.ahead,
+                    behind: status.behind,
+                }),
+                subject: crate::parse::text(fields[4]).into_owned(),
+                oid: ObjectId(crate::parse::text(fields[5]).into_owned()),
                 committed_at: number(fields[6], "branch timestamp")?,
                 checked_out_at: None,
             })
@@ -36,7 +37,7 @@ pub fn local_branches(input: &[u8]) -> Result<Vec<Branch>> {
 pub fn remote_branches(input: &[u8]) -> Result<Vec<RemoteBranchGroup>> {
     let mut groups: BTreeMap<String, Vec<RemoteBranch>> = BTreeMap::new();
     for fields in records(input, 5, "remote branches")? {
-        let name = text(fields[0]);
+        let name = crate::parse::text(fields[0]).into_owned();
         if name.ends_with("/HEAD") {
             continue;
         }
@@ -49,8 +50,8 @@ pub fn remote_branches(input: &[u8]) -> Result<Vec<RemoteBranchGroup>> {
             .push(RemoteBranch {
                 name: name.to_owned(),
                 branch: branch.to_owned(),
-                oid: ObjectId(text(fields[1]).to_owned()),
-                subject: text(fields[2]).to_owned(),
+                oid: ObjectId(crate::parse::text(fields[1]).into_owned()),
+                subject: crate::parse::text(fields[2]).into_owned(),
                 committed_at: number(fields[3], "remote branch timestamp")?,
             });
     }
@@ -66,10 +67,10 @@ pub fn tags(input: &[u8]) -> Result<Vec<Tag>> {
         .into_iter()
         .map(|fields| {
             Ok(Tag {
-                name: text(fields[0]).to_owned(),
-                oid: ObjectId(text(fields[1]).to_owned()),
+                name: crate::parse::text(fields[0]).into_owned(),
+                oid: ObjectId(crate::parse::text(fields[1]).into_owned()),
                 created_at: number_or_zero(fields[2]),
-                subject: text(fields[3]).to_owned(),
+                subject: crate::parse::text(fields[3]).into_owned(),
             })
         })
         .collect()
@@ -101,7 +102,18 @@ fn records<'a>(input: &'a [u8], width: usize, context: &'static str) -> Result<V
     Ok(records)
 }
 
-fn parse_tracking(value: &str) -> (usize, usize) {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TrackingStatus {
+    ahead: usize,
+    behind: usize,
+    gone: bool,
+}
+
+fn parse_tracking(value: &str) -> TrackingStatus {
+    let gone = value
+        .trim_matches(['[', ']'])
+        .split(',')
+        .any(|part| part.trim() == "gone");
     let mut ahead = 0;
     let mut behind = 0;
     for component in value.trim_matches(['[', ']']).split(',') {
@@ -112,26 +124,46 @@ fn parse_tracking(value: &str) -> (usize, usize) {
             behind = value.parse().unwrap_or(0);
         }
     }
-    (ahead, behind)
-}
-
-fn text(bytes: &[u8]) -> &str {
-    std::str::from_utf8(bytes).unwrap_or_default()
+    TrackingStatus {
+        ahead,
+        behind,
+        gone,
+    }
 }
 
 fn number(bytes: &[u8], context: &'static str) -> Result<i64> {
-    text(bytes)
-        .parse()
-        .map_err(|error| GitError::parse(context, format!("{}: {error}", text(bytes))))
+    let text = crate::parse::text(bytes);
+    text.parse()
+        .map_err(|error| GitError::parse(context, format!("{text}: {error}")))
 }
 
 fn number_or_zero(bytes: &[u8]) -> i64 {
-    text(bytes).parse().unwrap_or(0)
+    crate::parse::text(bytes).parse().unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{local_branches, remote_branches, tags};
+
+    #[test]
+    fn gone_is_not_synchronized() {
+        let input: &[u8] = b" \x00gone\x00origin/gone\x00[gone]\x00subject\x00aaaaaaa\x001\x00\n";
+        let branches = local_branches(input).expect("parse gone upstream");
+
+        let upstream = branches[0].upstream.as_ref().unwrap();
+        assert_eq!(upstream.name, "origin/gone");
+        assert!(upstream.gone);
+        assert_eq!((upstream.ahead, upstream.behind), (0, 0));
+    }
+
+    #[test]
+    fn invalid_utf8_identity_not_erased() {
+        let input: &[u8] = b" \x00topic-\xff\x00\x00\x00subject\x00aaaaaaa\x001\x00\n";
+        let branches = local_branches(input).expect("parse invalid UTF-8 ref name");
+
+        assert!(!branches[0].name.is_empty());
+        assert!(branches[0].name.contains("\\xff"));
+    }
 
     #[test]
     fn parses_local_branches_with_and_without_tracking() {
@@ -143,6 +175,7 @@ mod tests {
         assert_eq!(branches[0].name, "main");
         let upstream = branches[0].upstream.as_ref().unwrap();
         assert_eq!(upstream.name, "origin/main");
+        assert!(!upstream.gone);
         assert_eq!((upstream.ahead, upstream.behind), (2, 1));
         assert_eq!(branches[0].subject, "tip subject");
         assert_eq!(branches[0].committed_at, 1_700_000_000);
@@ -151,7 +184,8 @@ mod tests {
         assert!(branches[1].upstream.is_none());
 
         let gone = branches[2].upstream.as_ref().unwrap();
-        assert_eq!((gone.ahead, gone.behind), (0, 0));
+        assert_eq!(gone.name, "origin/gone");
+        assert!(gone.gone);
     }
 
     #[test]

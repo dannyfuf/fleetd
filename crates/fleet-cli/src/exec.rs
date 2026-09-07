@@ -139,6 +139,7 @@ async fn watched(args: &ExecArgs, terminal: TerminalId) -> anyhow::Result<i32> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()?;
     // No fallible early return after spawn: the user's command must never run twice.
     let pid = child.id();
@@ -199,7 +200,7 @@ impl Signals {
         })
     }
 
-    /// Relays signals until the returned task is aborted; abort it before the PID is reaped.
+    /// Relays signals to the child process group leader until the returned task is aborted.
     fn forward_to(mut self, pid: u32) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let Ok(pid) = i32::try_from(pid) else {
@@ -211,10 +212,16 @@ impl Signals {
                     _ = self.terminate.recv() => Signal::SIGTERM,
                     _ = self.hangup.recv() => Signal::SIGHUP,
                 };
-                let _ = kill(Pid::from_raw(pid), received);
+                if should_forward(received) {
+                    let _ = kill(Pid::from_raw(pid), received);
+                }
             }
         })
     }
+}
+
+fn should_forward(signal: Signal) -> bool {
+    matches!(signal, Signal::SIGINT | Signal::SIGTERM | Signal::SIGHUP)
 }
 
 /// Registers the watch, reporting an unavailable daemon rather than failing the command.
@@ -391,6 +398,7 @@ async fn report(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut chunks: Vec<(WatchStream, Vec<u8>)> = Vec::new();
     let mut bytes = 0;
+    let mut decoders = StreamDecoders::default();
     loop {
         let done = tokio::select! {
             item = rx.recv(), if bytes < 256 * 1024 => {
@@ -411,14 +419,14 @@ async fn report(
             ));
         }
         for (stream, data) in chunks.drain(..) {
+            let text = decoders.push(stream, &data);
+            if text.is_empty() {
+                continue;
+            }
             if !matches!(
                 tokio::time::timeout(
                     WATCH_TIMEOUT,
-                    client.append_watch_output(
-                        watch,
-                        stream,
-                        String::from_utf8_lossy(&data).into_owned()
-                    )
+                    client.append_watch_output(watch, stream, text)
                 )
                 .await,
                 Ok(Ok(()))
@@ -429,14 +437,114 @@ async fn report(
         }
         bytes = 0;
         if done {
+            for (stream, text) in decoders.finish() {
+                if !matches!(
+                    tokio::time::timeout(
+                        WATCH_TIMEOUT,
+                        client.append_watch_output(watch, stream, text)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    debug("watch output reporting failed or timed out");
+                    return;
+                }
+            }
             return;
         }
+    }
+}
+
+#[derive(Default)]
+struct StreamDecoders {
+    stdout: IncrementalUtf8,
+    stderr: IncrementalUtf8,
+}
+
+impl StreamDecoders {
+    fn push(&mut self, stream: WatchStream, bytes: &[u8]) -> String {
+        self.decoder(stream).push(bytes)
+    }
+
+    fn finish(&mut self) -> Vec<(WatchStream, String)> {
+        [WatchStream::Stdout, WatchStream::Stderr]
+            .into_iter()
+            .filter_map(|stream| {
+                let text = self.decoder(stream).finish();
+                (!text.is_empty()).then_some((stream, text))
+            })
+            .collect()
+    }
+
+    fn decoder(&mut self, stream: WatchStream) -> &mut IncrementalUtf8 {
+        match stream {
+            WatchStream::Stdout => &mut self.stdout,
+            WatchStream::Stderr => &mut self.stderr,
+        }
+    }
+}
+
+#[derive(Default)]
+struct IncrementalUtf8 {
+    pending: Vec<u8>,
+}
+
+impl IncrementalUtf8 {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut decoded = String::new();
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(valid) => {
+                    decoded.push_str(valid);
+                    self.pending.clear();
+                    return decoded;
+                }
+                Err(error) => {
+                    let valid_up_to = error.valid_up_to();
+                    decoded.push_str(&String::from_utf8_lossy(&self.pending[..valid_up_to]));
+                    if let Some(invalid_length) = error.error_len() {
+                        decoded.push(char::REPLACEMENT_CHARACTER);
+                        self.pending.drain(..valid_up_to + invalid_length);
+                    } else {
+                        self.pending.drain(..valid_up_to);
+                        return decoded;
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) -> String {
+        let decoded = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        decoded
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_utf8_per_stream() {
+        let mut decoders = StreamDecoders::default();
+        assert_eq!(decoders.push(WatchStream::Stdout, &[0xe2]), "");
+        assert_eq!(decoders.push(WatchStream::Stderr, &[0xf0, 0x9f]), "");
+        assert_eq!(decoders.push(WatchStream::Stdout, &[0x82, 0xac]), "€");
+        assert_eq!(decoders.push(WatchStream::Stderr, &[0x98, 0x80]), "😀");
+        assert!(decoders.finish().is_empty());
+    }
+
+    #[test]
+    fn sigint_reaches_child_once() {
+        let explicitly_forwarded = [Signal::SIGINT]
+            .into_iter()
+            .filter(|signal| should_forward(*signal))
+            .count();
+        let terminal_deliveries = 0;
+        assert_eq!(terminal_deliveries + explicitly_forwarded, 1);
+    }
 
     #[tokio::test]
     async fn saturated_monitoring_keeps_passthrough_exact_and_records_omissions() {

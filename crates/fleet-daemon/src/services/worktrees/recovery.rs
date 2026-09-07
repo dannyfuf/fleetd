@@ -4,6 +4,7 @@ impl Worktrees {
     /// Reconciles publish intents and removes abandoned private attempts.
     pub async fn recover_startup(&self) -> DaemonResult<()> {
         let config = self.config.load().await?;
+        self.reconcile_trash_expiries(&config)?;
         let state = self.state.load().await?;
         for repo in state.repos {
             let root = repo_worktrees_dir(&config, &repo.id);
@@ -55,22 +56,34 @@ impl Worktrees {
         }
     }
 
-    async fn recover_attempt(
+    pub(super) async fn recover_attempt(
         &self,
         config: &Config,
         repo: &Repo,
         slug: &str,
         attempt: &Path,
     ) -> DaemonResult<()> {
-        let marker = self.read_creating_marker(attempt);
-        let Ok(marker) = marker else {
-            return self.trash_attempt(attempt);
+        let id = worktree_id(&repo.id, slug)?;
+        let _lifecycle = self.sessions.claim_worktree_lifecycle(id).await;
+        let marker = match self.read_creating_marker(attempt) {
+            Ok(marker) => marker,
+            Err(error) => {
+                self.quarantine_attempt(config, repo, slug, attempt, None)?;
+                tracing::warn!(%error, path = %attempt.display(), "quarantined worktree attempt with unavailable marker evidence");
+                return Ok(());
+            }
         };
-        if !self
-            .valid_recovery_marker(repo, slug, attempt, &marker)
+        match self
+            .recovery_marker_validity(repo, slug, attempt, &marker)
             .await
         {
-            return self.trash_attempt(attempt);
+            RecoveryValidity::Valid => {}
+            RecoveryValidity::Invalid => return self.trash_attempt(attempt),
+            RecoveryValidity::Unavailable(error) => {
+                self.quarantine_attempt(config, repo, slug, attempt, Some(&marker))?;
+                tracing::warn!(%error, path = %attempt.display(), "quarantined worktree attempt after observation failure");
+                return Ok(());
+            }
         }
         let canonical = repo_worktrees_dir(config, &repo.id).join(slug);
         if self.files.exists(&canonical) {
@@ -89,6 +102,11 @@ impl Worktrees {
     }
 
     async fn recover_published(&self, repo: &Repo, slug: &str, path: &Path) -> DaemonResult<()> {
+        let expected_id = worktree_id(&repo.id, slug)?;
+        let _lifecycle = self
+            .sessions
+            .claim_worktree_lifecycle(expected_id.clone())
+            .await;
         let marker = match self.read_creating_marker(path) {
             Ok(marker) => marker,
             Err(_) => return Ok(()),
@@ -102,23 +120,27 @@ impl Worktrees {
             self.files.remove_file(&creating_marker_path(path))?;
             return Ok(());
         }
-        let expected_id = worktree_id(&repo.id, slug)?;
         if state.worktrees.iter().any(|item| item.id == expected_id) {
             return self.trash_attempt(path);
         }
-        if !self.valid_recovery_marker(repo, slug, path, &marker).await {
-            return self.trash_attempt(path);
+        match self
+            .recovery_marker_validity(repo, slug, path, &marker)
+            .await
+        {
+            RecoveryValidity::Valid => {}
+            RecoveryValidity::Invalid => return self.trash_attempt(path),
+            RecoveryValidity::Unavailable(error) => return Err(error),
         }
         self.register_recovered(repo, slug, path, marker).await
     }
 
-    async fn valid_recovery_marker(
+    async fn recovery_marker_validity(
         &self,
         repo: &Repo,
         slug: &str,
         path: &Path,
         marker: &CreatingMarker,
-    ) -> bool {
+    ) -> RecoveryValidity {
         let expected_id = worktree_id(&repo.id, slug).ok();
         if marker.repo_id != repo.id
             || expected_id
@@ -127,15 +149,16 @@ impl Worktrees {
             || marker.base_ref.is_empty()
             || marker.branch.is_empty()
         {
-            return false;
+            return RecoveryValidity::Invalid;
         }
         if marker.worktree_id(slug).is_err() {
-            return false;
+            return RecoveryValidity::Invalid;
         }
-        self.git
-            .current_branch(path)
-            .await
-            .is_ok_and(|branch| branch == marker.branch)
+        match self.git.current_branch(path).await {
+            Ok(branch) if branch == marker.branch => RecoveryValidity::Valid,
+            Ok(_) => RecoveryValidity::Invalid,
+            Err(error) => RecoveryValidity::Unavailable(error),
+        }
     }
 
     async fn register_recovered(
@@ -184,4 +207,59 @@ impl Worktrees {
             &self.files.read_text(&creating_marker_path(path))?,
         )?)
     }
+
+    fn quarantine_attempt(
+        &self,
+        config: &Config,
+        repo: &Repo,
+        slug: &str,
+        path: &Path,
+        creating: Option<&CreatingMarker>,
+    ) -> DaemonResult<()> {
+        if !self.files.exists(path) {
+            return Ok(());
+        }
+
+        let worktree = Worktree {
+            id: worktree_id(&repo.id, slug)?,
+            repo_id: repo.id.clone(),
+            slug: slug.to_owned(),
+            branch: creating.map_or_else(|| slug.to_owned(), |marker| marker.branch.clone()),
+            base_ref: creating.map_or_else(
+                || format!("origin/{}", repo.default_branch),
+                |marker| marker.base_ref.clone(),
+            ),
+            path: path.to_string_lossy().into_owned(),
+            session: SessionId::local(&repo.name, slug)
+                .map_err(|error| DaemonError::Validation(error.to_string()))?
+                .to_string(),
+            host: None,
+            created_at: creating.map_or_else(
+                || Utc::now().to_rfc3339(),
+                |marker| marker.created_at.clone(),
+            ),
+            last_opened_at: None,
+            degraded: None,
+        };
+        let worktree_id = worktree.id.clone();
+        let expires_at = super::trash::trash_expiry(config.trash.retention_ms);
+        let marker = TrashMarker {
+            original_path: worktree.path.clone(),
+            worktree,
+            expires_at: Some(expires_at.to_rfc3339()),
+        };
+        let mut text = serde_json::to_string_pretty(&marker)?;
+        text.push('\n');
+        self.files
+            .atomic_write_text(&trash_marker_path(path), &text)?;
+        let trash = self.files.trash(path)?;
+        self.schedule_trash_cleanup(trash, worktree_id, expires_at);
+        Ok(())
+    }
+}
+
+enum RecoveryValidity {
+    Valid,
+    Invalid,
+    Unavailable(DaemonError),
 }

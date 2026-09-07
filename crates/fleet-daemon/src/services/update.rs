@@ -1,6 +1,10 @@
 //! Fleet source-checkout update and release-build job.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use fleet_proto::job::{JobKind, JobRecord};
 
@@ -98,6 +102,35 @@ impl Update {
             .record(&id)
             .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))
     }
+
+    #[cfg(test)]
+    pub(crate) fn checkout(&self) -> &Path {
+        &self.checkout
+    }
+}
+
+pub(crate) fn runtime_checkout() -> PathBuf {
+    let executable = std::env::current_exe().ok();
+    select_checkout(
+        std::env::var_os("FLEET_INSTALL_ROOT"),
+        executable.as_deref(),
+    )
+}
+
+fn select_checkout(install_root: Option<OsString>, executable: Option<&Path>) -> PathBuf {
+    install_root
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| executable.and_then(enclosing_work_tree))
+        .or_else(|| executable.and_then(Path::parent).map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn enclosing_work_tree(executable: &Path) -> Option<PathBuf> {
+    executable
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -108,6 +141,24 @@ mod tests {
         testing::fakes::{FakeGit, FakeShell, FakeShellCall},
     };
     use fleet_proto::job::JobStatus;
+
+    #[test]
+    fn runtime_root_selects_update_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("fleet");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        let executable = checkout.join("target/release/fleetd");
+
+        assert_eq!(
+            select_checkout(Some(OsString::from("/installed/fleet")), Some(&executable)),
+            Path::new("/installed/fleet")
+        );
+        assert_eq!(select_checkout(None, Some(&executable)), checkout);
+        assert_eq!(
+            select_checkout(None, Some(Path::new("/opt/fleet/bin/fleetd"))),
+            Path::new("/opt/fleet/bin")
+        );
+    }
 
     #[tokio::test]
     async fn update_reports_verbose_build_success_and_failure() {

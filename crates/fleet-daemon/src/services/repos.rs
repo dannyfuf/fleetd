@@ -16,11 +16,13 @@ use fleet_core::{
     cache::RepoCache,
     ids::{ContextId, RepoId},
     model::{CloneJob, CloneStatus, Repo, RepoHooks},
+    paths::clone_publish_marker_path,
 };
 use fleet_proto::{
     job::{JobKind, JobRecord},
     response::BaseRefs,
 };
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -32,9 +34,15 @@ use crate::{
         process::{Process, pid_is_alive},
     },
     error::remote_unsupported,
-    jobs::{JobCtx, JobManager},
+    jobs::{JobCtx, JobManager, JobPolicy},
     stores::{config::ConfigStore, state::StateStore},
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClonePublishIntent {
+    repo: Repo,
+}
 
 /// Repository domain service with durable state, configuration, and job scheduling handles.
 #[derive(Clone)]
@@ -46,6 +54,7 @@ pub struct Repos {
     github: Arc<dyn Github>,
     files: Arc<dyn Files>,
     process: Arc<dyn Process>,
+    context_lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Repos {
@@ -68,7 +77,12 @@ impl Repos {
             github,
             files,
             process,
+            context_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    pub(super) fn context_lifecycle(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.context_lifecycle)
     }
 
     /// Resumes reconciliation for detached clones recorded before a daemon restart.
@@ -79,52 +93,82 @@ impl Repos {
             .await?
             .clones
             .into_iter()
-            .filter(|clone| clone.status != CloneStatus::Failed)
+            .filter(|clone| {
+                clone.status != CloneStatus::Failed
+                    || self
+                        .files
+                        .exists(&clone_publish_marker_path(Path::new(&clone.path)))
+            })
             .collect::<Vec<_>>();
         for clone in clones {
-            let Some(pid) = clone.pid else {
-                let repo = clone.id.clone();
+            let pid_file = clone_pid_path(&clone);
+            let publication_pending = self
+                .files
+                .exists(&clone_publish_marker_path(Path::new(&clone.path)));
+            let recovered_pid = clone
+                .pid
+                .or_else(|| read_clone_pid(self.files.as_ref(), &pid_file));
+            if publication_pending {
+                let _ignored = self.files.remove_file(&pid_file);
+            }
+            if !publication_pending && recovered_pid.is_none() {
+                mark_clone_interrupted_before_launch(&self.state, &clone.id).await?;
+                continue;
+            }
+            if clone.pid.is_none()
+                && let Some(pid) = recovered_pid
+            {
+                let clone_id = clone.id.clone();
                 self.state
                     .transaction(move |state| {
-                        if let Some(clone) = state.clones.iter_mut().find(|item| item.id == repo) {
-                            clone.status = CloneStatus::Failed;
-                            clone.error =
-                                Some("clone was interrupted before its process started".to_owned());
-                        }
+                        let record = state
+                            .clones
+                            .iter_mut()
+                            .find(|record| record.id == clone_id)
+                            .ok_or(DaemonError::Cancelled)?;
+                        record.pid = Some(pid);
+                        record.status = CloneStatus::Cloning;
                         Ok(())
                     })
                     .await?;
-                continue;
+                let _ignored = self.files.remove_file(&pid_file);
+            }
+            let pid_to_wait = if publication_pending {
+                None
+            } else {
+                recovered_pid
             };
             let state = Arc::clone(&self.state);
             let git = Arc::clone(&self.git);
             let files = Arc::clone(&self.files);
             let process = Arc::clone(&self.process);
-            self.jobs.submit(
+            self.jobs.submit_for_repo(
+                clone.id.clone(),
                 JobKind::Clone,
                 format!("{}:startup-reconcile", clone.id),
                 format!("Reconcile clone {}", clone.id),
-                true,
-                false,
+                JobPolicy::new(true, false),
                 move |context| async move {
-                    while process.is_alive(pid) {
-                        tokio::select! {
-                            () = context.cancel.cancelled() => {
-                                terminate_process_group(pid).await;
-                                return fail_clone(
-                                    &state,
-                                    &clone.id,
-                                    Path::new(&clone.staging_path),
-                                    files.as_ref(),
-                                    DaemonError::Cancelled,
-                                ).await;
+                    if let Some(pid) = pid_to_wait {
+                        while process.is_alive(pid) {
+                            tokio::select! {
+                                () = context.cancel.cancelled() => {
+                                    terminate_process_group(pid).await;
+                                    return fail_clone(
+                                        &state,
+                                        &clone.id,
+                                        Path::new(&clone.staging_path),
+                                        files.as_ref(),
+                                        DaemonError::Cancelled,
+                                    ).await;
+                                }
+                                () = tokio::time::sleep(Duration::from_millis(100)) => {}
                             }
-                            () = tokio::time::sleep(Duration::from_millis(100)) => {}
                         }
                     }
                     reconcile_clone(context, clone, state, git, files).await
                 },
-            );
+            )?;
         }
         Ok(())
     }
@@ -138,6 +182,7 @@ impl Repos {
         context: ContextId,
         default_branch: Option<String>,
     ) -> DaemonResult<JobRecord> {
+        let _context_lifecycle = self.context_lifecycle.lock().await;
         let id = RepoId::try_from(format!("{owner}/{name}"))
             .map_err(|error| DaemonError::Validation(error.to_string()))?;
         self.jobs.ensure_repo_available(&id)?;
@@ -215,14 +260,14 @@ impl Repos {
         let git = Arc::clone(&self.git);
         let files = Arc::clone(&self.files);
         let operation_id = clone.id.clone();
-        let job_id = self.jobs.submit(
+        let job_id = self.jobs.submit_for_repo(
+            id.clone(),
             JobKind::Clone,
             clone.id.to_string(),
             format!("Clone {}", clone.id),
-            true,
-            true,
+            JobPolicy::new(true, true),
             move |context| async move { clone_operation(context, clone, state, git, files).await },
-        );
+        )?;
         self.jobs.record(&job_id).ok_or_else(|| {
             DaemonError::NotFound(format!("clone job for repository {operation_id}"))
         })
@@ -316,6 +361,7 @@ impl Repos {
 
     /// Moves a repository to an existing context in one state transaction.
     pub async fn move_to_context(&self, repo: RepoId, context: ContextId) -> DaemonResult<Repo> {
+        let _context_lifecycle = self.context_lifecycle.lock().await;
         self.state
             .transaction(move |state| {
                 if !state.contexts.iter().any(|item| item.id == context) {
@@ -417,12 +463,12 @@ impl Repos {
             let git = Arc::clone(&self.git);
             let path_for_job = path.clone();
             let (delivery, awaited) = JobDelivery::caller_gets_copy(git_error);
-            self.jobs.submit(
+            self.jobs.submit_for_repo(
+                repo.clone(),
                 JobKind::RepoFetch,
                 format!("{repo}:{}", Uuid::new_v4()),
                 format!("Fetch {repo}"),
-                true,
-                true,
+                JobPolicy::new(true, true),
                 move |context| async move {
                     delivery.finish(
                         async {
@@ -432,7 +478,7 @@ impl Repos {
                         .await,
                     )
                 },
-            );
+            )?;
             awaited.wait().await?;
         }
         let mut refs = self
@@ -494,20 +540,22 @@ async fn clone_operation(
     git: Arc<dyn Git>,
     files: Arc<dyn Files>,
 ) -> DaemonResult<()> {
+    let clone = begin_clone_attempt(&state, clone).await?;
     context.progress("starting detached clone")?;
     let staging = PathBuf::from(&clone.staging_path);
     let log = PathBuf::from(&clone.log_path);
+    let pid_file = clone_pid_path(&clone);
     if let Some(parent) = staging.parent()
         && let Err(error) = files.create_dir_all(parent)
     {
         return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
     }
-    let process = match git.clone_repo(&clone.url, &staging, &log).await {
+    let process = match git.clone_repo(&clone.url, &staging, &log, &pid_file).await {
         Ok(process) => process,
         Err(error) => return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await,
     };
     let clone_id = clone.id.clone();
-    state
+    if let Err(error) = state
         .transaction(move |state| {
             let record = state
                 .clones
@@ -518,7 +566,13 @@ async fn clone_operation(
             record.status = CloneStatus::Cloning;
             Ok(())
         })
-        .await?;
+        .await
+    {
+        terminate_process_group(process.pid).await;
+        let _ignored = files.remove_file(&pid_file);
+        return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
+    }
+    let _ignored = files.remove_file(&pid_file);
     context.progress(format!("clone running as pid {}", process.pid))?;
 
     while pid_is_alive(process.pid) {
@@ -548,28 +602,15 @@ async fn reconcile_clone(
 ) -> DaemonResult<()> {
     let staging = PathBuf::from(&clone.staging_path);
     let final_path = PathBuf::from(&clone.path);
+    if files.exists(&final_path) {
+        return recover_published_clone(context, clone, state, git, files).await;
+    }
     if let Err(error) = git.revision(&staging, "HEAD").await {
         return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
     }
     context.progress("reconciling clone")?;
     let default_branch =
         resolve_default_branch(git.as_ref(), &staging, &clone.default_branch).await;
-    if files.exists(&final_path) {
-        return fail_clone(
-            &state,
-            &clone.id,
-            &staging,
-            files.as_ref(),
-            DaemonError::Conflict(format!(
-                "repository path already exists: {}",
-                final_path.display()
-            )),
-        )
-        .await;
-    }
-    if let Err(error) = files.rename(&staging, &final_path) {
-        return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
-    }
     let repo = Repo {
         id: clone.id.clone(),
         owner: clone.owner.clone(),
@@ -581,7 +622,16 @@ async fn reconcile_clone(
         cloned_at: Utc::now().to_rfc3339(),
         hooks: RepoHooks::default(),
     };
+    let intent = ClonePublishIntent { repo: repo.clone() };
+    let mut intent_text = serde_json::to_string_pretty(&intent)?;
+    intent_text.push('\n');
     let clone_id = clone.id.clone();
+    let published = Arc::new(Mutex::new(false));
+    let published_in_transaction = Arc::clone(&published);
+    let files_in_transaction = Arc::clone(&files);
+    let staging_in_transaction = staging.clone();
+    let final_in_transaction = final_path.clone();
+    let marker_in_transaction = clone_publish_marker_path(&staging);
     let result = state
         .transaction(move |state| {
             if !state.clones.iter().any(|record| record.id == clone_id) {
@@ -590,15 +640,106 @@ async fn reconcile_clone(
             if state.repos.iter().any(|record| record.id == clone_id) {
                 return Err(DaemonError::Conflict(format!("repository {clone_id}")));
             }
+            if files_in_transaction.exists(&final_in_transaction) {
+                return Err(DaemonError::Conflict(format!(
+                    "repository path already exists: {}",
+                    final_in_transaction.display()
+                )));
+            }
+            files_in_transaction.atomic_write_text(&marker_in_transaction, &intent_text)?;
+            files_in_transaction.rename(&staging_in_transaction, &final_in_transaction)?;
+            *published_in_transaction
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
             state.clones.retain(|record| record.id != clone_id);
             state.repos.push(repo);
             Ok(())
         })
         .await;
     if let Err(error) = result {
-        let _ignored = files.rename(&final_path, &staging);
+        if *published
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            let error = DaemonError::Join(format!(
+                "clone publication state save failed: {error}; published repository preserved at {}",
+                final_path.display()
+            ));
+            return record_clone_failure(&state, &clone.id, error).await;
+        }
         return fail_clone(&state, &clone.id, &staging, files.as_ref(), error).await;
     }
+    files.remove_file(&clone_publish_marker_path(&final_path))?;
+    context.progress("clone registered")?;
+    Ok(())
+}
+
+async fn begin_clone_attempt(state: &StateStore, clone: CloneJob) -> DaemonResult<CloneJob> {
+    let fresh_staging = clone_staging_attempt(&clone)?;
+    let clone_id = clone.id.clone();
+    state
+        .transaction(move |state| {
+            let record = state
+                .clones
+                .iter_mut()
+                .find(|record| record.id == clone_id)
+                .ok_or(DaemonError::Cancelled)?;
+            if record.status == CloneStatus::Failed {
+                record.staging_path = fresh_staging.to_string_lossy().into_owned();
+                record.pid = None;
+                record.status = CloneStatus::Starting;
+                record.error = None;
+            }
+            Ok(record.clone())
+        })
+        .await
+}
+
+async fn recover_published_clone(
+    context: JobCtx,
+    clone: CloneJob,
+    state: Arc<StateStore>,
+    git: Arc<dyn Git>,
+    files: Arc<dyn Files>,
+) -> DaemonResult<()> {
+    let final_path = PathBuf::from(&clone.path);
+    let marker = clone_publish_marker_path(&final_path);
+    let intent = files
+        .read_text(&marker)
+        .ok()
+        .and_then(|text| serde_json::from_str::<ClonePublishIntent>(&text).ok())
+        .filter(|intent| valid_clone_publish_intent(intent, &clone, &final_path));
+    let Some(intent) = intent else {
+        return record_clone_failure(
+            &state,
+            &clone.id,
+            DaemonError::Conflict(format!(
+                "repository destination exists without a valid clone publish intent: {}; completed clone preserved at {}",
+                final_path.display(),
+                clone.staging_path
+            )),
+        )
+        .await;
+    };
+    if let Err(error) = git.revision(&final_path, "HEAD").await {
+        return record_clone_failure(&state, &clone.id, error).await;
+    }
+    context.progress("recovering published clone")?;
+    let clone_id = clone.id.clone();
+    state
+        .transaction(move |state| {
+            if !state.clones.iter().any(|record| record.id == clone_id) {
+                return Err(DaemonError::Cancelled);
+            }
+            if state.repos.iter().any(|record| record.id == clone_id) {
+                return Err(DaemonError::Conflict(format!("repository {clone_id}")));
+            }
+            state.clones.retain(|record| record.id != clone_id);
+            state.repos.push(intent.repo);
+            Ok(())
+        })
+        .await?;
+    files.remove_file(&marker)?;
     context.progress("clone registered")?;
     Ok(())
 }
@@ -608,6 +749,25 @@ async fn fail_clone(
     repo: &RepoId,
     staging: &Path,
     files: &dyn Files,
+    error: DaemonError,
+) -> DaemonResult<()> {
+    let error = if files.exists(staging) {
+        match files.remove_detached(staging) {
+            Ok(()) => error,
+            Err(cleanup) => DaemonError::Join(format!(
+                "clone failed: {error}; cleanup failed for {}: {cleanup}",
+                staging.display()
+            )),
+        }
+    } else {
+        error
+    };
+    record_clone_failure(state, repo, error).await
+}
+
+async fn record_clone_failure(
+    state: &StateStore,
+    repo: &RepoId,
     error: DaemonError,
 ) -> DaemonResult<()> {
     let persisted_message = error.to_string();
@@ -622,10 +782,58 @@ async fn fail_clone(
             Ok(())
         })
         .await?;
-    if files.exists(staging) {
-        let _ignored = files.remove_detached(staging);
-    }
     Err(error)
+}
+
+async fn mark_clone_interrupted_before_launch(
+    state: &StateStore,
+    repo: &RepoId,
+) -> DaemonResult<()> {
+    let repo = repo.clone();
+    state
+        .transaction(move |state| {
+            if let Some(clone) = state.clones.iter_mut().find(|item| item.id == repo) {
+                clone.status = CloneStatus::Failed;
+                clone.error = Some("clone was interrupted before its process started".to_owned());
+            }
+            Ok(())
+        })
+        .await
+}
+
+fn clone_staging_attempt(clone: &CloneJob) -> DaemonResult<PathBuf> {
+    let parent = Path::new(&clone.staging_path)
+        .parent()
+        .ok_or_else(|| DaemonError::Validation("clone staging path has no parent".to_owned()))?;
+    Ok(parent.join(format!(
+        "{}.staging-{}-{}",
+        clone.name,
+        std::process::id(),
+        Uuid::new_v4()
+    )))
+}
+
+fn clone_pid_path(clone: &CloneJob) -> PathBuf {
+    PathBuf::from(format!("{}.pid", clone.log_path))
+}
+
+fn read_clone_pid(files: &dyn Files, path: &Path) -> Option<u32> {
+    files.read_text(path).ok()?.trim().parse().ok()
+}
+
+fn valid_clone_publish_intent(
+    intent: &ClonePublishIntent,
+    clone: &CloneJob,
+    final_path: &Path,
+) -> bool {
+    let repo = &intent.repo;
+    repo.id == clone.id
+        && repo.owner == clone.owner
+        && repo.name == clone.name
+        && repo.url == clone.url
+        && repo.context_id == clone.context_id
+        && Path::new(&repo.path) == final_path
+        && !repo.default_branch.is_empty()
 }
 
 async fn resolve_default_branch(git: &dyn Git, path: &Path, hint: &str) -> String {

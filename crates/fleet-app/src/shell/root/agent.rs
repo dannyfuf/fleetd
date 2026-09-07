@@ -57,7 +57,7 @@ impl AgentEnsureFlights {
     }
 
     /// Finishes an exact flight and reports whether its response still owns the agent claim.
-    fn finish(&mut self, claim: AgentEnsureClaim) -> bool {
+    fn finish(&mut self, claim: AgentEnsureClaim, current_generation: u64) -> bool {
         if self.in_flight.get(&claim.key) != Some(&claim.nonce) {
             return false;
         }
@@ -67,7 +67,7 @@ impl AgentEnsureFlights {
             return false;
         }
         *current = None;
-        true
+        claim.key.generation == current_generation
     }
 }
 
@@ -141,7 +141,8 @@ impl Shell {
         cx.spawn(async move |shell, cx| {
             let answer = reply.recv().await;
             let _ = shell.update(cx, |shell, cx| {
-                if !shell.agent_ensures.finish(claim) {
+                let generation = shell.state.read(cx).link_generation;
+                if !shell.agent_ensures.finish(claim, generation) {
                     return;
                 }
                 match answer {
@@ -201,7 +202,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_ensure_is_single_flight_and_late_generations_cannot_claim_response() {
+    fn agent_ensure_ignores_previous_link_generation() {
         let mut flights = AgentEnsureFlights::default();
         let old_key = AgentEnsureKey {
             agent: Agent::Claude,
@@ -213,6 +214,14 @@ mod tests {
             "same key stays single-flight"
         );
 
+        assert!(
+            !flights.finish(old, 4),
+            "a reply from the previous link is stale even before a replacement claim exists"
+        );
+
+        let superseded = flights
+            .claim(old_key)
+            .expect("the completed old flight may be retried");
         let current = flights
             .claim(AgentEnsureKey {
                 agent: Agent::Claude,
@@ -220,9 +229,9 @@ mod tests {
             })
             .expect("new link generation gets a distinct flight");
         assert!(
-            !flights.finish(old),
-            "late old response has lost its nonce claim"
+            !flights.finish(superseded, 4),
+            "a newer flight supersedes the old nonce before its reply arrives"
         );
-        assert!(flights.finish(current));
+        assert!(flights.finish(current, 4));
     }
 }

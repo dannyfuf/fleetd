@@ -1,7 +1,7 @@
 use super::Shell;
 use crate::{
     actions::{hub, prefix, scroll, workspace},
-    state::{HubPane, HubTab, Screen, TerminalMode},
+    state::{AppState, FilterState, HubPane, HubTab, Screen, TerminalMode},
 };
 use fleet_ui_kit::Icon;
 use gpui::{Context, Window};
@@ -37,18 +37,14 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            state.screen = Screen::Hub {
-                tab: HubTab::Worktrees,
-            };
-            state.hub_pane = HubPane::List;
+            go_worktrees_state(state);
             cx.notify();
         });
     }
 
     pub(super) fn go_prs(&mut self, _: &hub::GoPrs, _: &mut Window, cx: &mut Context<Self>) {
         self.state.update(cx, |state, cx| {
-            state.screen = Screen::Hub { tab: HubTab::Prs };
-            state.hub_pane = HubPane::List;
+            go_prs_state(state);
             cx.notify();
         });
     }
@@ -60,14 +56,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            if let Screen::Hub { tab } = &state.screen {
-                let next = match tab {
-                    HubTab::Worktrees => HubTab::Prs,
-                    HubTab::Prs => HubTab::Worktrees,
-                };
-                state.screen = Screen::Hub { tab: next };
-                // §3.10: a filter does not survive a screen change.
-                state.filter = crate::state::FilterState::default();
+            if toggle_pr_screen_state(state) {
                 cx.notify();
             }
         });
@@ -137,11 +126,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            state.leave_prefix();
-            state.screen = Screen::Hub {
-                tab: HubTab::Worktrees,
-            };
-            state.hub_pane = HubPane::List;
+            prefix_go_hub_state(state);
             cx.notify();
         });
     }
@@ -218,5 +203,113 @@ impl Shell {
                 cx.notify();
             }
         });
+    }
+}
+
+fn go_worktrees_state(state: &mut AppState) {
+    route_to_hub(state, HubTab::Worktrees);
+}
+
+fn go_prs_state(state: &mut AppState) {
+    route_to_hub(state, HubTab::Prs);
+}
+
+fn toggle_pr_screen_state(state: &mut AppState) -> bool {
+    let Screen::Hub { tab } = &state.screen else {
+        return false;
+    };
+    let next = match tab {
+        HubTab::Worktrees => HubTab::Prs,
+        HubTab::Prs => HubTab::Worktrees,
+    };
+    route_to_hub(state, next);
+    true
+}
+
+fn prefix_go_hub_state(state: &mut AppState) {
+    state.leave_prefix();
+    route_to_hub(state, HubTab::Worktrees);
+}
+
+/// Routes every equivalent Hub action through the same §3.10 filter policy.
+fn route_to_hub(state: &mut AppState, tab: HubTab) {
+    let destination = Screen::Hub { tab };
+    if state.screen != destination {
+        state.filter = FilterState::default();
+    }
+    state.screen = destination;
+    state.hub_pane = HubPane::List;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type RouteCase = (&'static str, fn(&mut AppState), HubTab, HubTab);
+
+    #[test]
+    fn equivalent_hub_routes_apply_identical_filter_policy() {
+        let routes: [RouteCase; 4] = [
+            (
+                "go_worktrees",
+                go_worktrees_state,
+                HubTab::Prs,
+                HubTab::Worktrees,
+            ),
+            ("go_prs", go_prs_state, HubTab::Worktrees, HubTab::Prs),
+            (
+                "toggle_pr_screen",
+                |state| {
+                    assert!(toggle_pr_screen_state(state));
+                },
+                HubTab::Worktrees,
+                HubTab::Prs,
+            ),
+            (
+                "prefix_go_hub",
+                prefix_go_hub_state,
+                HubTab::Prs,
+                HubTab::Worktrees,
+            ),
+        ];
+
+        for (name, route, from, to) in routes {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.screen = Screen::Hub { tab: from };
+            state.filter.query = "payroll".to_owned();
+            route(&mut state);
+            assert_eq!(state.screen, Screen::Hub { tab: to }, "{name}");
+            assert_eq!(state.filter, FilterState::default(), "{name}");
+        }
+
+        for (name, route, tab) in [
+            (
+                "go_worktrees",
+                go_worktrees_state as fn(&mut AppState),
+                HubTab::Worktrees,
+            ),
+            ("go_prs", go_prs_state as fn(&mut AppState), HubTab::Prs),
+            (
+                "prefix_go_hub",
+                prefix_go_hub_state as fn(&mut AppState),
+                HubTab::Worktrees,
+            ),
+        ] {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.screen = Screen::Hub { tab };
+            state.filter.query = "review".to_owned();
+            route(&mut state);
+            assert_eq!(state.filter.query, "review", "{name}");
+        }
+
+        let mut outside_hub = AppState::new("/tmp/fleet", Instant::now());
+        outside_hub.screen = Screen::Workspace {
+            session: "owner/repo"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        outside_hub.filter.query = "review".to_owned();
+        assert!(!toggle_pr_screen_state(&mut outside_hub));
+        assert_eq!(outside_hub.filter.query, "review");
     }
 }

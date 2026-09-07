@@ -3,40 +3,7 @@
 
 use super::*;
 
-impl Worktrees {
-    /// Schedules the detached post-create runner, or nothing when a repository has no hooks.
-    pub(super) fn schedule_post_create(
-        &self,
-        worktree: Worktree,
-        hooks: Vec<String>,
-    ) -> Option<JobRecord> {
-        if hooks.is_empty() {
-            return None;
-        }
-        let service = self.clone();
-        let target = worktree.id.to_string();
-        let id = self.jobs.submit(
-            JobKind::PostCreateHooks,
-            target,
-            format!("Run hooks for {}", worktree.id),
-            false,
-            true,
-            move |context| async move {
-                service
-                    .run_detached_post_create(worktree, hooks, &context)
-                    .await
-            },
-        );
-        self.jobs.record(&id)
-    }
-
-    async fn run_detached_post_create(
-        &self,
-        worktree: Worktree,
-        hooks: Vec<String>,
-        context: &JobCtx,
-    ) -> DaemonResult<()> {
-        const RUNNER: &str = r#"status=0
+const RUNNER: &str = r#"status=0
 failed=0
 index=0
 for hook do
@@ -54,50 +21,101 @@ printf '%s %s\n' "$failed" "$status" > "$tmp"
 mv "$tmp" "$FLEET_STATUS_PATH"
 exit "$status""#;
 
+impl Worktrees {
+    /// Schedules the detached post-create runner, or nothing when a repository has no hooks.
+    pub(super) fn schedule_post_create(
+        &self,
+        worktree: Worktree,
+        hooks: Vec<String>,
+    ) -> DaemonResult<Option<JobRecord>> {
+        if hooks.is_empty() {
+            return Ok(None);
+        }
+        let service = self.clone();
+        let target = worktree.id.to_string();
+        let repo = worktree.repo_id.clone();
+        let id = self.jobs.submit_for_repo(
+            repo,
+            JobKind::PostCreateHooks,
+            target,
+            format!("Run hooks for {}", worktree.id),
+            JobPolicy::new(false, true),
+            move |context| async move {
+                service
+                    .run_detached_post_create(worktree, hooks, &context)
+                    .await
+            },
+        )?;
+        Ok(self.jobs.record(&id))
+    }
+
+    async fn run_detached_post_create(
+        &self,
+        worktree: Worktree,
+        hooks: Vec<String>,
+        context: &JobCtx,
+    ) -> DaemonResult<()> {
         let log_path = self.jobs.log_path(&context.id);
         let status_path = log_path.with_extension("post-create.status");
-        let command = ShellCommand::new("sh")
-            .args(
-                [
-                    "-c".to_owned(),
-                    RUNNER.to_owned(),
-                    "fleet-post-create".to_owned(),
-                ]
-                .into_iter()
-                .chain(hooks.iter().cloned()),
-            )
-            .cwd(Path::new(&worktree.path))
-            .env(
-                "FLEET_STATUS_PATH",
-                status_path.to_string_lossy().into_owned(),
-            );
-        context.progress("post-create runner detached")?;
-        let process = context
-            .spawn_detached_child(Arc::clone(&self.shell), command, &log_path)
-            .await?;
         let intent_path = self
             .post_create_intents_dir()?
             .join(format!("{}.json", context.id));
         let intent = PostCreateIntent {
             worktree,
             hooks,
-            pid: process.pid,
+            pid: None,
             status_path,
             log_path,
             intent_path,
         };
         self.write_post_create_intent(&intent)?;
+        self.launch_detached_post_create(intent, context, RUNNER)
+            .await
+    }
+
+    async fn launch_detached_post_create(
+        &self,
+        mut intent: PostCreateIntent,
+        context: &JobCtx,
+        runner: &str,
+    ) -> DaemonResult<()> {
+        let command = ShellCommand::new("sh")
+            .args(
+                [
+                    "-c".to_owned(),
+                    runner.to_owned(),
+                    "fleet-post-create".to_owned(),
+                ]
+                .into_iter()
+                .chain(intent.hooks.iter().cloned()),
+            )
+            .cwd(Path::new(&intent.worktree.path))
+            .env(
+                "FLEET_STATUS_PATH",
+                intent.status_path.to_string_lossy().into_owned(),
+            );
+        context.progress("post-create runner detached")?;
+        let process = context
+            .spawn_detached_child(Arc::clone(&self.shell), command, &intent.log_path)
+            .await?;
+        intent.pid = Some(process.pid);
+        self.write_post_create_intent(&intent)?;
         self.finish_detached_post_create(intent).await
     }
 
-    async fn finish_detached_post_create(&self, intent: PostCreateIntent) -> DaemonResult<()> {
-        while pid_is_alive(intent.pid) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    pub(super) async fn finish_detached_post_create(
+        &self,
+        intent: PostCreateIntent,
+    ) -> DaemonResult<()> {
+        if let Some(pid) = intent.pid {
+            while pid_is_alive(pid) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
         let status = match self.files.read_text(&intent.status_path) {
             Ok(status) => status,
             Err(error) => {
-                let _ignored = self
+                let recorded = self
                     .record_post_create_failure(
                         &intent.worktree,
                         "detached hook runner did not record completion".to_owned(),
@@ -105,12 +123,12 @@ exit "$status""#;
                         intent.log_path.clone(),
                     )
                     .await;
-                let _ignored = self.files.remove_file(&intent.intent_path);
+                if recorded.is_ok() {
+                    self.cleanup_post_create_intent(&intent);
+                }
                 return Err(error);
             }
         };
-        let _ignored = self.files.remove_file(&intent.status_path);
-        let _ignored = self.files.remove_file(&intent.intent_path);
         let mut fields = status.split_whitespace();
         let failed = fields
             .next()
@@ -121,7 +139,9 @@ exit "$status""#;
             .and_then(|value| value.parse::<i32>().ok())
             .unwrap_or(-1);
         if exit_code == 0 {
-            return Ok(());
+            let cleared = self.clear_post_create_failure(&intent.worktree).await;
+            self.cleanup_post_create_intent(&intent);
+            return cleared;
         }
         let command = intent
             .hooks
@@ -131,12 +151,22 @@ exit "$status""#;
             &intent.worktree,
             format!("hook {failed}: {command}"),
             Some(exit_code),
-            intent.log_path,
+            intent.log_path.clone(),
         )
         .await?;
+        self.cleanup_post_create_intent(&intent);
         Err(DaemonError::Shell(
             "one or more post-create hooks failed".to_owned(),
         ))
+    }
+
+    fn cleanup_post_create_intent(&self, intent: &PostCreateIntent) {
+        if let Err(error) = self.files.remove_file(&intent.status_path) {
+            tracing::warn!(%error, path = %intent.status_path.display(), "failed to remove completed hook status");
+        }
+        if let Err(error) = self.files.remove_file(&intent.intent_path) {
+            tracing::warn!(%error, path = %intent.intent_path.display(), "failed to remove completed hook intent");
+        }
     }
 
     fn write_post_create_intent(&self, intent: &PostCreateIntent) -> DaemonResult<()> {
@@ -175,14 +205,23 @@ exit "$status""#;
             }
             let service = self.clone();
             let target = intent.worktree.id.to_string();
-            self.jobs.submit(
+            let repo = intent.worktree.repo_id.clone();
+            self.jobs.submit_for_repo(
+                repo,
                 JobKind::PostCreateHooks,
                 target,
                 format!("Reconcile hooks for {}", intent.worktree.id),
-                false,
-                false,
-                move |_context| async move { service.finish_detached_post_create(intent).await },
-            );
+                JobPolicy::new(false, false),
+                move |context| async move {
+                    if intent.pid.is_some() || service.files.exists(&intent.status_path) {
+                        service.finish_detached_post_create(intent).await
+                    } else {
+                        service
+                            .launch_detached_post_create(intent, &context, RUNNER)
+                            .await
+                    }
+                },
+            )?;
         }
         Ok(())
     }
@@ -218,6 +257,23 @@ exit "$status""#;
                     .find(|item| item.id == id)
                     .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
                 item.degraded = Some(degraded);
+                Ok(())
+            })
+            .await
+    }
+
+    async fn clear_post_create_failure(&self, worktree: &Worktree) -> DaemonResult<()> {
+        let id = worktree.id.clone();
+        self.state
+            .transaction(move |state| {
+                if let Some(item) = state.worktrees.iter_mut().find(|item| item.id == id)
+                    && item
+                        .degraded
+                        .as_ref()
+                        .is_some_and(|degraded| degraded.kind == "post_create_hooks")
+                {
+                    item.degraded = None;
+                }
                 Ok(())
             })
             .await

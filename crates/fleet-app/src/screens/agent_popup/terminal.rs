@@ -247,9 +247,6 @@ impl AgentPopup {
 }
 
 /// Ends a popup drag and copies its selection, reporting whether the release was consumed.
-///
-/// A retained selection claims the release whether or not a drag is still in progress, which is
-/// the popup's current v1 behavior.
 fn finish_mouse_selection(
     local: &Rc<RefCell<Local>>,
     state: &Entity<AppState>,
@@ -259,14 +256,16 @@ fn finish_mouse_selection(
     let Some(terminal) = local
         .borrow()
         .mouse_selection
+        .filter(|selection| selection.dragging)
         .and_then(|_| local.borrow().attached)
     else {
         return false;
     };
     if !agent_terminal_is_live_owner(state.read(cx), owner, Some(terminal)) {
+        local.borrow_mut().cancel_drag();
         return true;
     }
-    let Some(selected) = local.borrow_mut().settle_selection() else {
+    let Some(selected) = end_mouse_drag(&mut local.borrow_mut()) else {
         return false;
     };
     if selected {
@@ -285,6 +284,14 @@ fn finish_mouse_selection(
     }
     state.update(cx, |_, cx| cx.notify());
     true
+}
+
+/// Claims a release only while a terminal drag is active.
+pub(super) fn end_mouse_drag(local: &mut Local) -> Option<bool> {
+    local
+        .mouse_selection
+        .filter(|selection| selection.dragging)?;
+    local.settle_selection()
 }
 
 /// The popup's terminal, while the popup is the surface a key or scroll may reach.
@@ -358,9 +365,14 @@ pub(super) fn forward_terminal_key(
     let Some(target) = target else {
         return false;
     };
-    surface::route_key(local, state, keystroke, is_held, cx, |input| {
-        send_or_queue(local, bridge, target, input);
-    })
+    let accepted = Cell::new(true);
+    let handled = surface::route_key(local, state, keystroke, is_held, cx, |input| {
+        accepted.set(send_or_queue(local, bridge, target, input));
+    });
+    if handled {
+        surface::report_input_delivery(accepted.get(), state, cx);
+    }
+    handled
 }
 
 pub(super) fn popup_grid<'a>(
@@ -374,17 +386,18 @@ pub(super) fn popup_rows(app: &AppState) -> i32 {
     i32::from(app.agent_popup_grid().map_or(0, |grid| grid.rows))
 }
 
+#[must_use = "rejected input must be surfaced to the user"]
 pub(super) fn send_or_queue(
     local: &Rc<RefCell<Local>>,
     bridge: &Bridge,
     target: PopupInputTarget,
     input: PendingInput,
-) {
+) -> bool {
     let mut local = local.borrow_mut();
     if target.primed && target.terminal.is_some() {
-        local.send_or_queue(bridge, target.terminal, true, input);
+        local.send_or_queue(bridge, target.terminal, true, input)
     } else {
-        local.queue_input(target.owner, input);
+        local.queue_input(target.owner, input)
     }
 }
 
@@ -397,9 +410,11 @@ pub(super) fn paste(
     let Some(target) = popup_input_target(state.read(cx)) else {
         return;
     };
+    let accepted = Cell::new(true);
     surface::route_paste(local, state, cx, |input| {
-        send_or_queue(local, bridge, target, input);
+        accepted.set(send_or_queue(local, bridge, target, input));
     });
+    surface::report_input_delivery(accepted.get(), state, cx);
 }
 
 pub(super) fn copy_selection(
@@ -411,9 +426,17 @@ pub(super) fn copy_selection(
     if surface::route_copy(local, state, selected_terminal(state.read(cx)), cx) {
         return;
     }
-    if let Some(target) = popup_input_target(state.read(cx)) {
-        send_or_queue(local, bridge, target, PendingInput::Key(copy_keystroke()));
+    let app = state.read(cx);
+    if copy_reaches_pty(app.agent_popup.map(|popup| popup.mode))
+        && let Some(target) = popup_input_target(app)
+    {
+        let accepted = send_or_queue(local, bridge, target, PendingInput::Key(copy_keystroke()));
+        surface::report_input_delivery(accepted, state, cx);
     }
+}
+
+pub(super) fn copy_reaches_pty(mode: Option<AgentPopupMode>) -> bool {
+    mode == Some(AgentPopupMode::Terminal)
 }
 
 /// The terminal a popup selection belongs to, whatever mode the surface is in.
@@ -436,13 +459,17 @@ pub(super) fn mouse_cell(
         .borrow()
         .geometry
         .filter(|(id, _, _)| *id == terminal)?;
-    MouseCell::at(
-        grid,
-        bounds,
-        position,
-        metrics,
-        local.borrow().grid_padding(),
-    )
+    popup_mouse_cell_at(grid, bounds, position, metrics)
+}
+
+/// Popup geometry comes from `TerminalGrid::on_geometry`, whose bounds are already inset.
+pub(super) fn popup_mouse_cell_at(
+    grid: &crate::state::MirrorGrid,
+    bounds: gpui::Bounds<Pixels>,
+    position: gpui::Point<Pixels>,
+    metrics: fleet_ui_kit::CellMetrics,
+) -> Option<MouseCell> {
+    MouseCell::at(grid, bounds, position, metrics, px(0.0))
 }
 
 #[derive(Clone, Copy, Debug)]

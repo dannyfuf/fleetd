@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use fleet_core::{config::Config, ids::RepoId, paths::slot_path, sessions::WorktreeStatus};
+use fleet_core::{config::Config, ids::RepoId, paths::slot_path};
 use fleet_proto::{
     event::Event,
     request::RequestBody,
@@ -54,7 +54,6 @@ use prune::Prune;
 use repos::Repos;
 use sessions::Sessions;
 use sleep::Sleep;
-use snapshots::merge_observed_statuses;
 use update::Update;
 use worktrees::Worktrees;
 
@@ -93,7 +92,6 @@ pub struct Services {
     pub update: Update,
     home: PathBuf,
     started_at: String,
-    statuses: Arc<RwLock<Option<Vec<WorktreeStatus>>>>,
     inventory: Arc<tokio::sync::Mutex<snapshots::InventoryCache>>,
     pool_refreshed_at: Arc<RwLock<BTreeMap<RepoId, String>>>,
     /// Daemon-wide event bus shared by every service integration.

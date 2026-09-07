@@ -4,7 +4,7 @@ use fleet_ui_kit::{ActiveTheme, KitAssets, Theme, ThemeMode};
 use gpui::{
     App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size,
 };
-use std::path::PathBuf;
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 const DEFAULT_SIZE: (f32, f32) = (1280.0, 800.0);
 const MIN_SIZE: (f32, f32) = (900.0, 560.0);
@@ -36,6 +36,8 @@ fn init_tracing() {
 pub fn run() -> anyhow::Result<()> {
     init_tracing();
     let home = fleet_home();
+    let window_error = Rc::new(RefCell::new(None));
+    let reported_window_error = Rc::clone(&window_error);
     tracing::info!(home = %home.display(), "fleet: starting");
     gpui_platform::application()
         .with_assets(KitAssets)
@@ -93,9 +95,31 @@ pub fn run() -> anyhow::Result<()> {
                 Err(error) => {
                     tracing::error!(%error, "fleet: could not open the window");
                     eprintln!("fleet: could not open the window: {error}");
+                    *reported_window_error.borrow_mut() = Some(error.to_string());
                     cx.quit();
                 }
             }
         });
-    Ok(())
+    let error = window_error.borrow_mut().take();
+    finish_run(error)
+}
+
+fn finish_run(window_error: Option<String>) -> anyhow::Result<()> {
+    match window_error {
+        Some(error) => Err(anyhow::anyhow!("could not open the Fleet window: {error}")),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_open_failure_returns_error() {
+        let error = finish_run(Some("display unavailable".to_owned()))
+            .expect_err("a window failure must reach main");
+        assert!(error.to_string().contains("display unavailable"));
+        assert!(finish_run(None).is_ok());
+    }
 }

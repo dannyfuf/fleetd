@@ -1,7 +1,11 @@
 //! The terminal host thread that owns PTYs and virtual-terminal engines.
 
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     thread,
     time::Instant,
 };
@@ -14,12 +18,21 @@ use thiserror::Error;
 use crate::{
     GhosttyEngine,
     engine::EngineError,
-    pty::{Pty, PtyError, PtyOptions},
+    pty::{Pty, PtyError, PtyOptions, PtyWritePermit},
 };
 
 mod owner;
+#[cfg(test)]
+mod tests;
 
 use owner::{OwnerEvent, TerminalOwner};
+
+pub(super) type CommandReservation = PtyWritePermit;
+
+const COMMAND_QUEUE_BYTES: usize = 4 * 1024 * 1024;
+const COMMAND_OVERHEAD: usize = 64;
+pub(super) const HOST_EVENT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const HOST_EVENT_QUEUE_BYTES: usize = 2 * HOST_EVENT_MAX_BYTES;
 
 /// Construction settings for one daemon-owned terminal host.
 #[derive(Debug, Clone)]
@@ -71,6 +84,8 @@ pub enum HostCommand {
         cols: u16,
         /// Attaching client's row count.
         rows: u16,
+        /// Absolute cutoff after which the owner must discard the request.
+        deadline: Instant,
         /// One-shot response channel for the full frame.
         reply: Sender<Result<FrameUpdate, String>>,
     },
@@ -125,6 +140,18 @@ pub enum HostError {
     /// The terminal thread is no longer accepting commands.
     #[error("terminal host command channel is closed")]
     Closed,
+    /// The terminal owner is not keeping up with queued commands.
+    #[error(
+        "terminal host command queue is full ({queued} queued bytes, {attempted} requested, {limit} limit)"
+    )]
+    QueueFull {
+        /// Bytes already reserved by queued commands.
+        queued: usize,
+        /// Bytes requested by this command, including queue overhead.
+        attempted: usize,
+        /// Configured queue byte limit.
+        limit: usize,
+    },
     /// The terminal thread stopped before answering an attachment request.
     #[error("terminal host did not return an attachment frame: {0}")]
     AttachFailed(String),
@@ -137,6 +164,7 @@ pub enum HostError {
 pub struct TerminalHost {
     child_pid: Option<u32>,
     commands: mpsc::Sender<OwnerEvent>,
+    command_bytes: Arc<AtomicUsize>,
     events: Receiver<HostEvent>,
     activity: Arc<Mutex<TerminalActivity>>,
     join: Option<thread::JoinHandle<()>>,
@@ -148,11 +176,15 @@ impl TerminalHost {
         let engine =
             GhosttyEngine::new(options.pty.cols, options.pty.rows, options.scrollback_bytes)?;
         let (commands, inbox) = mpsc::channel();
+        let command_bytes = Arc::new(AtomicUsize::new(0));
         let wakeup = owner::PtyWakeup::new(commands.clone());
         let notify = Arc::clone(&wakeup);
         let pty = Pty::spawn_notifying(options.pty, Arc::new(move || notify.notify()))?;
         let child_pid = pty.child_pid();
-        let (event_sender, event_receiver) = async_channel::unbounded();
+        // Every event is capped at the IPC frame limit, so two slots give this queue an
+        // exact 32 MiB ceiling. The owner coalesces rejected frames into full snapshots.
+        let event_slots = HOST_EVENT_QUEUE_BYTES / HOST_EVENT_MAX_BYTES;
+        let (event_sender, event_receiver) = async_channel::bounded(event_slots);
         let terminal = options.terminal;
         let started_at = Instant::now();
         let activity = Arc::new(Mutex::new(TerminalActivity {
@@ -175,6 +207,7 @@ impl TerminalHost {
         Ok(Self {
             child_pid,
             commands,
+            command_bytes,
             events: event_receiver,
             activity,
             join: Some(join),
@@ -242,17 +275,39 @@ impl TerminalHost {
         self.send(HostCommand::ScrollOrKey { scroll, key })
     }
 
-    /// Attaches at the supplied dimensions and synchronously returns a complete frame.
-    pub fn attach(&self, cols: u16, rows: u16) -> Result<FrameUpdate, HostError> {
+    /// Attaches at the supplied dimensions and asynchronously returns a complete frame.
+    pub async fn attach(
+        &self,
+        cols: u16,
+        rows: u16,
+        deadline: Instant,
+    ) -> Result<FrameUpdate, HostError> {
         if cols == 0 || rows == 0 {
             return Err(EngineError::InvalidSize { cols, rows }.into());
         }
+        if deadline <= Instant::now() {
+            return Err(HostError::AttachFailed(
+                "attachment deadline elapsed".to_owned(),
+            ));
+        }
         let (reply, response) = async_channel::bounded(1);
-        self.send(HostCommand::Attach { cols, rows, reply })?;
-        response
-            .recv_blocking()
+        self.send(HostCommand::Attach {
+            cols,
+            rows,
+            deadline,
+            reply,
+        })?;
+        let frame = response
+            .recv()
+            .await
             .map_err(|_| HostError::AttachFailed("response channel closed".to_owned()))?
-            .map_err(HostError::AttachFailed)
+            .map_err(HostError::AttachFailed)?;
+        if deadline <= Instant::now() {
+            return Err(HostError::AttachFailed(
+                "attachment deadline elapsed".to_owned(),
+            ));
+        }
+        Ok(frame)
     }
 
     /// Requests a complete frame on the event channel.
@@ -276,10 +331,93 @@ impl TerminalHost {
     }
 
     fn send(&self, command: HostCommand) -> Result<(), HostError> {
-        self.commands
-            .send(OwnerEvent::Command(command))
-            .map_err(|_| HostError::Closed)
+        send_command(
+            &self.commands,
+            &self.command_bytes,
+            command,
+            COMMAND_QUEUE_BYTES,
+        )
     }
+}
+
+fn send_command(
+    sender: &mpsc::Sender<OwnerEvent>,
+    queued_bytes: &Arc<AtomicUsize>,
+    command: HostCommand,
+    limit: usize,
+) -> Result<(), HostError> {
+    let reserved = command_bytes(&command);
+    let queued = reserve_command_bytes(queued_bytes, reserved, limit)?;
+    let reservation = CommandReservation::new(Arc::clone(queued_bytes), reserved);
+    if sender
+        .send(OwnerEvent::BudgetedCommand {
+            command,
+            _reservation: reservation,
+        })
+        .is_err()
+    {
+        return Err(HostError::Closed);
+    }
+    debug_assert!(queued.saturating_add(reserved) <= limit);
+    Ok(())
+}
+
+fn reserve_command_bytes(
+    counter: &AtomicUsize,
+    amount: usize,
+    limit: usize,
+) -> Result<usize, HostError> {
+    let mut queued = counter.load(Ordering::Acquire);
+    loop {
+        let Some(next) = queued.checked_add(amount).filter(|next| *next <= limit) else {
+            return Err(HostError::QueueFull {
+                queued,
+                attempted: amount,
+                limit,
+            });
+        };
+        match counter.compare_exchange_weak(queued, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(queued),
+            Err(actual) => queued = actual,
+        }
+    }
+}
+
+fn command_bytes(command: &HostCommand) -> usize {
+    let payload = match command {
+        HostCommand::Write(bytes) => bytes.len(),
+        HostCommand::Paste(text) => text.len(),
+        HostCommand::Key(event) | HostCommand::ScrollOrKey { key: event, .. } => {
+            event.text.as_ref().map_or(0, String::len)
+        }
+        HostCommand::Attach { .. }
+        | HostCommand::Mouse(_)
+        | HostCommand::Resize { .. }
+        | HostCommand::Scroll(_)
+        | HostCommand::Wheel(_)
+        | HostCommand::RequestFull
+        | HostCommand::Kill => 0,
+    };
+    payload.saturating_add(COMMAND_OVERHEAD)
+}
+
+pub(super) fn host_event_bytes(event: &HostEvent) -> usize {
+    let payload = match event {
+        HostEvent::Frame(frame) => frame.rows_changed.iter().fold(0_usize, |total, row| {
+            row.cells.iter().fold(
+                total.saturating_add(std::mem::size_of_val(row)),
+                |total, cell| {
+                    total
+                        .saturating_add(std::mem::size_of_val(cell))
+                        .saturating_add(cell.text.len())
+                },
+            )
+        }),
+        HostEvent::Title(title) | HostEvent::Cwd(title) => title.len(),
+        HostEvent::ClipboardWrite { mime, data } => mime.len().saturating_add(data.len()),
+        HostEvent::Exited(_) | HostEvent::Bell => 0,
+    };
+    payload.saturating_add(std::mem::size_of::<HostEvent>())
 }
 
 impl Drop for TerminalHost {

@@ -11,7 +11,7 @@ use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::{
     Divider, EmptyState, KeyHintRow, ListView, ModeWord, Pane, PaneBorder, PaneHeader,
 };
-use gpui::{AnyElement, App, Context, Window, div};
+use gpui::{AnyElement, App, Context, Window, div, relative};
 
 use crate::keymap;
 use crate::root::Lazygit;
@@ -35,7 +35,7 @@ pub(crate) fn side_ratio(mode: ScreenMode, focused: PanelId) -> f32 {
 
 impl Lazygit {
     /// The body band: the side column beside the main area.
-    pub(crate) fn body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn body(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(fatal) = &self.state.fatal {
             return div()
                 .size_full()
@@ -47,7 +47,6 @@ impl Lazygit {
         }
 
         let ratio = side_ratio(self.state.screen_mode, self.state.focused);
-        let width = window.viewport_size().width * ratio;
 
         let mut body = div().flex().flex_row().size_full().min_h_0();
         if ratio > 0.0 {
@@ -57,8 +56,9 @@ impl Lazygit {
                     .flex_col()
                     .h_full()
                     .min_h_0()
-                    .w(width)
+                    .w(relative(ratio))
                     .flex_none()
+                    .debug_selector(|| "lazygit-side-column".to_owned())
                     .children(self.side_panels(cx)),
             );
         }
@@ -183,22 +183,41 @@ impl Lazygit {
     }
 }
 
-/// The index of the first commit that is reachable from a main branch, which is where lazygit's
-/// green "merged" colouring starts. `None` when no main branch is decorated in the log.
+/// Commit identities reachable from decorated main-branch tips in the bounded snapshot graph.
 #[must_use]
-pub(crate) fn merged_from(commits: &[fleet_git::Commit]) -> Option<usize> {
+pub(crate) fn merged_from(
+    commits: &[fleet_git::Commit],
+) -> std::collections::HashSet<fleet_git::ObjectId> {
     const MAIN: [&str; 4] = ["main", "master", "develop", "trunk"];
-    commits.iter().position(|commit| {
-        commit.decorations.iter().any(|decoration| {
-            decoration
-                .split(&[' ', ',', '>'][..])
-                .filter(|part| !part.is_empty())
-                .any(|part| {
-                    let part = part.trim_start_matches("origin/");
-                    MAIN.contains(&part)
-                })
+    let by_oid = commits
+        .iter()
+        .map(|commit| (&commit.oid, commit))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut pending = commits
+        .iter()
+        .filter(|commit| {
+            commit.decorations.iter().any(|decoration| {
+                decoration
+                    .split(&[' ', ',', '>'][..])
+                    .filter(|part| !part.is_empty())
+                    .any(|part| {
+                        let part = part.trim_start_matches("origin/");
+                        MAIN.contains(&part)
+                    })
+            })
         })
-    })
+        .map(|commit| commit.oid.clone())
+        .collect::<Vec<_>>();
+    let mut reachable = std::collections::HashSet::new();
+    while let Some(oid) = pending.pop() {
+        if !reachable.insert(oid.clone()) {
+            continue;
+        }
+        if let Some(commit) = by_oid.get(&oid) {
+            pending.extend(commit.parents.iter().cloned());
+        }
+    }
+    reachable
 }
 
 /// Wall-clock seconds, for the age columns.
@@ -214,11 +233,30 @@ pub(crate) fn now_seconds() -> i64 {
 mod tests {
     use super::*;
     use fleet_git::{Commit, ObjectId};
+    use gpui::{Entity, IntoElement, Render, TestAppContext, VisualTestContext, px, size};
 
-    fn commit(decorations: &[&str]) -> Commit {
+    const EMBEDDED_WIDTH: f32 = 600.0;
+
+    struct EmbeddedHarness {
+        pane: Entity<Lazygit>,
+    }
+
+    impl Render for EmbeddedHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(EMBEDDED_WIDTH))
+                .h_full()
+                .child(self.pane.clone())
+        }
+    }
+
+    fn commit(oid: &str, parents: &[&str], decorations: &[&str]) -> Commit {
         Commit {
-            oid: ObjectId::from("a"),
-            parents: Vec::new(),
+            oid: ObjectId::from(oid),
+            parents: parents
+                .iter()
+                .map(|parent| ObjectId::from(*parent))
+                .collect(),
             author_name: String::new(),
             author_email: String::new(),
             authored_at: 0,
@@ -231,14 +269,48 @@ mod tests {
     }
 
     #[test]
-    fn merged_starts_at_the_first_main_branch_decoration() {
+    fn merged_status_uses_reachability() {
         let commits = vec![
-            commit(&[]),
-            commit(&["HEAD -> feature"]),
-            commit(&["origin/main", "main"]),
-            commit(&[]),
+            commit("main-tip", &["base"], &["origin/main", "main"]),
+            commit("old-unmerged", &["base"], &["HEAD -> feature"]),
+            commit("base", &[], &[]),
         ];
-        assert_eq!(merged_from(&commits), Some(2));
-        assert_eq!(merged_from(&[commit(&[])]), None);
+        let merged = merged_from(&commits);
+        assert!(merged.contains(&ObjectId::from("main-tip")));
+        assert!(merged.contains(&ObjectId::from("base")));
+        assert!(!merged.contains(&ObjectId::from("old-unmerged")));
+        assert!(merged_from(&[commit("feature", &[], &[])]).is_empty());
+    }
+
+    #[gpui::test]
+    fn embedded_body_uses_pane_width(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+        let pane = cx.new(|cx| {
+            Lazygit::embedded("/fleet-lazygit-embedded-width-test-nonexistent".into(), cx)
+        });
+        let window = cx.add_window(|_, _| EmbeddedHarness { pane: pane.clone() });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(size(px(1_200.0), px(800.0)));
+        pane.update(&mut visual, |_, cx| cx.notify());
+        visual.run_until_parked();
+
+        let side = visual
+            .debug_bounds("lazygit-side-column")
+            .expect("side column was rendered");
+        assert!((f32::from(side.size.width) - EMBEDDED_WIDTH * SIDE_RATIO).abs() < 0.1);
+
+        pane.read_with(&visual, |pane, _| {
+            let one_ch = f32::from(fleet_ui_kit::theme::ch(1.0)).max(1.0);
+            let measured_side = pane.side_ch as f32 * one_ch;
+            assert!(measured_side <= f32::from(side.size.width));
+            assert!(f32::from(side.size.width) - measured_side < one_ch);
+
+            let gutter =
+                crate::views::diff::gutter_width(&crate::views::diff_model::DiffModel::empty(
+                    crate::views::diff_model::DiffViewMode::Unified,
+                ));
+            let expected_main = (EMBEDDED_WIDTH - f32::from(side.size.width) - gutter).max(80.0);
+            assert!((pane.main_px_w - expected_main).abs() < 0.1);
+        });
     }
 }

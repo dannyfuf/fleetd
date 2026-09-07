@@ -15,10 +15,11 @@ use fleet_proto::{
 
 use crate::{
     DaemonError, DaemonResult,
-    jobs::{JobCtx, JobManager},
+    jobs::{JobCtx, JobManager, JobPolicy},
     services::{
-        awaited::{JobDelivery, git_error},
+        awaited::{JobDelivery, copy_error},
         inspect::Inspect,
+        sessions::{Sessions, TransitionLockClaim},
         worktrees::Worktrees,
     },
 };
@@ -27,23 +28,21 @@ use crate::{
 #[async_trait]
 pub trait WorktreeDeleter: Send + Sync {
     /// Deletes one worktree, including its runtime session and on-disk copy.
-    async fn delete(&self, id: WorktreeId) -> DaemonResult<()>;
+    async fn delete(
+        &self,
+        id: WorktreeId,
+        lifecycle: Option<TransitionLockClaim>,
+    ) -> DaemonResult<()>;
 }
 
 #[async_trait]
 impl WorktreeDeleter for Worktrees {
-    async fn delete(&self, id: WorktreeId) -> DaemonResult<()> {
-        let mut results = self.delete(vec![id.clone()]).await?;
-        let result = results
-            .pop()
-            .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
-        if result.ok {
-            Ok(())
-        } else {
-            Err(DaemonError::Conflict(result.reason.unwrap_or_else(|| {
-                format!("worktree {id} was not deleted")
-            })))
-        }
+    async fn delete(
+        &self,
+        id: WorktreeId,
+        lifecycle: Option<TransitionLockClaim>,
+    ) -> DaemonResult<()> {
+        self.delete_one(id, None, lifecycle).await.map(|_| ())
     }
 }
 
@@ -52,16 +51,23 @@ impl WorktreeDeleter for Worktrees {
 pub struct Prune {
     jobs: Arc<JobManager>,
     inspect: Inspect,
+    sessions: Sessions,
     deleter: Arc<dyn WorktreeDeleter>,
 }
 
 impl Prune {
     /// Creates the prune service over the deletion boundary it drives.
     #[must_use]
-    pub fn new(jobs: Arc<JobManager>, inspect: Inspect, deleter: Arc<dyn WorktreeDeleter>) -> Self {
+    pub fn new(
+        jobs: Arc<JobManager>,
+        inspect: Inspect,
+        sessions: Sessions,
+        deleter: Arc<dyn WorktreeDeleter>,
+    ) -> Self {
         Self {
             jobs,
             inspect,
+            sessions,
             deleter,
         }
     }
@@ -73,23 +79,65 @@ impl Prune {
         fetch: bool,
         kill_sessions: bool,
         repo: Option<RepoId>,
+        reviewed_ids: Option<Vec<WorktreeId>>,
     ) -> DaemonResult<PruneResult> {
+        let repos = repo
+            .iter()
+            .cloned()
+            .chain(
+                reviewed_ids
+                    .iter()
+                    .flatten()
+                    .filter_map(|id| RepoId::try_from(id.repo()).ok()),
+            )
+            .collect::<Vec<_>>();
         let service = self.clone();
-        let (delivery, awaited) = JobDelivery::job_gets_copy(git_error);
-        self.jobs.submit(
-            JobKind::Prune,
-            format!("prune-{}", uuid::Uuid::new_v4()),
-            "Prune worktrees",
-            true,
-            true,
-            move |context| async move {
-                delivery.finish(
-                    service
-                        .prune_inner(dry_run, fetch, kill_sessions, repo, &context)
-                        .await,
-                )
-            },
-        );
+        let (delivery, awaited) = JobDelivery::job_gets_copy(copy_error);
+        let target = format!("prune-{}", uuid::Uuid::new_v4());
+        if repos.is_empty() {
+            self.jobs.submit_for_all_repos(
+                JobKind::Prune,
+                target,
+                "Prune worktrees",
+                JobPolicy::new(true, true),
+                move |context| async move {
+                    delivery.finish(
+                        service
+                            .prune_inner(
+                                dry_run,
+                                fetch,
+                                kill_sessions,
+                                repo,
+                                reviewed_ids,
+                                &context,
+                            )
+                            .await,
+                    )
+                },
+            )?;
+        } else {
+            self.jobs.submit_for_repos(
+                repos,
+                JobKind::Prune,
+                target,
+                "Prune worktrees",
+                JobPolicy::new(true, true),
+                move |context| async move {
+                    delivery.finish(
+                        service
+                            .prune_inner(
+                                dry_run,
+                                fetch,
+                                kill_sessions,
+                                repo,
+                                reviewed_ids,
+                                &context,
+                            )
+                            .await,
+                    )
+                },
+            )?;
+        }
         awaited.wait().await
     }
 
@@ -99,12 +147,20 @@ impl Prune {
         fetch: bool,
         kill_sessions: bool,
         repo: Option<RepoId>,
+        reviewed_ids: Option<Vec<WorktreeId>>,
         context: &JobCtx,
     ) -> DaemonResult<PruneResult> {
         context.progress("inspecting prune candidates")?;
+        if reviewed_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(PruneResult {
+                dry_run,
+                deleted: Vec::new(),
+                skipped: Vec::new(),
+            });
+        }
         let inspections = self
             .inspect
-            .inspect_inner(Vec::new(), repo, fetch, context)
+            .inspect_inner(reviewed_ids.unwrap_or_default(), repo, fetch, context)
             .await?;
         let mut eligible = Vec::new();
         let mut skipped = Vec::new();
@@ -134,10 +190,47 @@ impl Prune {
             if context.cancel.is_cancelled() {
                 return Err(DaemonError::Cancelled);
             }
-            context.progress(format!("deleting {}", inspection.worktree_id))?;
-            match self.deleter.delete(inspection.worktree_id.clone()).await {
-                Ok(()) => deleted.push(inspection.worktree_id),
-                Err(error) => skipped.push(skipped_result(inspection, error.to_string())),
+            let lock = self.jobs.repo_lock(&inspection.repo_id);
+            let _guard = lock.lock().await;
+            let lifecycle = self
+                .sessions
+                .claim_worktree_lifecycle(inspection.worktree_id.clone())
+                .await;
+            context.progress(format!("revalidating {}", inspection.worktree_id))?;
+            let fresh = self
+                .inspect
+                .inspect_inner(
+                    vec![inspection.worktree_id.clone()],
+                    Some(inspection.repo_id.clone()),
+                    false,
+                    context,
+                )
+                .await;
+            let fresh = match fresh {
+                Ok(mut inspections) => inspections.pop().ok_or_else(|| {
+                    DaemonError::NotFound(format!("worktree {}", inspection.worktree_id))
+                }),
+                Err(error) => Err(error),
+            };
+            let fresh = match fresh {
+                Ok(fresh) => fresh,
+                Err(error) => {
+                    skipped.push(skipped_result(inspection, error.to_string()));
+                    continue;
+                }
+            };
+            if let Some(reason) = skip_reason(&fresh, kill_sessions) {
+                skipped.push(skipped_result(fresh, reason));
+                continue;
+            }
+            context.progress(format!("deleting {}", fresh.worktree_id))?;
+            match self
+                .deleter
+                .delete(fresh.worktree_id.clone(), Some(lifecycle))
+                .await
+            {
+                Ok(()) => deleted.push(fresh.worktree_id),
+                Err(error) => skipped.push(skipped_result(fresh, error.to_string())),
             }
         }
         context.progress(format!("deleted {} worktrees", deleted.len()))?;

@@ -1,11 +1,11 @@
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
 
-/// A single-line or multi-line text buffer with a character caret.
-///
-/// The caret counts Unicode scalar values; byte ranges are resolved only when editing.
+/// A single-line or multi-line text buffer with a grapheme-aware caret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Buffer {
     value: String,
+    /// Byte offset kept on an extended grapheme-cluster boundary.
     caret: usize,
     multiline: bool,
     lines: Arc<[gpui::SharedString]>,
@@ -44,7 +44,7 @@ impl Buffer {
     #[must_use]
     pub(crate) fn with_text(mut self, text: impl Into<String>) -> Self {
         self.value = text.into();
-        self.caret = self.value.chars().count();
+        self.caret = self.value.len();
         self.rebuild_lines();
         self
     }
@@ -55,10 +55,10 @@ impl Buffer {
         &self.value
     }
 
-    /// The caret, as a character index.
+    /// The caret, as a character index for the text-field renderer.
     #[must_use]
     pub(crate) fn caret(&self) -> usize {
-        self.caret
+        self.value[..self.caret].chars().count()
     }
 
     /// Whether the buffer accepts newlines.
@@ -67,11 +67,18 @@ impl Buffer {
         self.multiline
     }
 
-    fn byte_of(&self, caret: usize) -> usize {
-        self.value
-            .char_indices()
-            .nth(caret)
-            .map_or(self.value.len(), |(index, _)| index)
+    fn previous_boundary(&self) -> usize {
+        self.value[..self.caret]
+            .grapheme_indices(true)
+            .next_back()
+            .map_or(0, |(index, _)| index)
+    }
+
+    fn next_boundary(&self) -> usize {
+        self.value[self.caret..]
+            .graphemes(true)
+            .next()
+            .map_or(self.caret, |grapheme| self.caret + grapheme.len())
     }
 
     /// Inserts text at the caret, dropping newlines in a single-line buffer.
@@ -89,9 +96,8 @@ impl Buffer {
         if filtered.is_empty() {
             return;
         }
-        let at = self.byte_of(self.caret);
-        self.value.insert_str(at, &filtered);
-        self.caret += filtered.chars().count();
+        self.value.insert_str(self.caret, &filtered);
+        self.caret += filtered.len();
         self.rebuild_lines();
     }
 
@@ -100,17 +106,16 @@ impl Buffer {
         if self.caret == 0 {
             return false;
         }
-        let start = self.byte_of(self.caret - 1);
-        let end = self.byte_of(self.caret);
-        self.value.replace_range(start..end, "");
-        self.caret -= 1;
+        let start = self.previous_boundary();
+        self.value.replace_range(start..self.caret, "");
+        self.caret = start;
         self.rebuild_lines();
         true
     }
 
     /// Deletes the word before the caret (`ctrl-w`).
     pub(crate) fn delete_word(&mut self) -> bool {
-        let end = self.byte_of(self.caret);
+        let end = self.caret;
         let prefix = &self.value[..end];
         let trimmed = prefix.trim_end_matches(char::is_whitespace);
         let start = trimmed.rfind(char::is_whitespace).map_or(0, |index| {
@@ -121,7 +126,7 @@ impl Buffer {
 
     /// Deletes from the start of the line to the caret (`ctrl-u`).
     pub(crate) fn delete_to_line_start(&mut self) -> bool {
-        let end = self.byte_of(self.caret);
+        let end = self.caret;
         let start = self.value[..end].rfind('\n').map_or(0, |index| index + 1);
         self.delete_before(start, end)
     }
@@ -130,20 +135,20 @@ impl Buffer {
         if start == end {
             return false;
         }
-        self.caret -= self.value[start..end].chars().count();
         self.value.replace_range(start..end, "");
+        self.caret = start;
         self.rebuild_lines();
         true
     }
 
-    /// Moves the caret one character left.
+    /// Moves the caret one grapheme left.
     pub(crate) fn left(&mut self) {
-        self.caret = self.caret.saturating_sub(1);
+        self.caret = self.previous_boundary();
     }
 
-    /// Moves the caret one character right.
+    /// Moves the caret one grapheme right.
     pub(crate) fn right(&mut self) {
-        self.caret = (self.caret + 1).min(self.value.chars().count());
+        self.caret = self.next_boundary();
     }
 
     /// Moves the caret to the start of the buffer.
@@ -153,7 +158,7 @@ impl Buffer {
 
     /// Moves the caret to the end of the buffer.
     pub(crate) fn end(&mut self) {
-        self.caret = self.value.chars().count();
+        self.caret = self.value.len();
     }
 
     /// The lines of the buffer plus the caret's (line, column), for rendering.
@@ -166,7 +171,9 @@ impl Buffer {
         (
             self.lines.clone(),
             line,
-            self.caret - self.line_starts[line],
+            self.value[self.line_starts[line]..self.caret]
+                .chars()
+                .count(),
         )
     }
 
@@ -178,7 +185,7 @@ impl Buffer {
             .collect();
         self.line_starts.clear();
         self.line_starts.push(0);
-        for (index, character) in self.value.chars().enumerate() {
+        for (index, character) in self.value.char_indices() {
             if character == '\n' {
                 self.line_starts.push(index + 1);
             }

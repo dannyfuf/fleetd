@@ -1,13 +1,59 @@
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum MainIdentity {
+    Summary,
+    File(PathBuf),
+    Commit(fleet_git::ObjectId),
+    Branch(String),
+    Stash(usize),
+    SubCommits(String),
+    CommitFiles(fleet_git::ObjectId),
+    Remote(String),
+    Tag(String),
+    Conflict(PathBuf),
+    Empty,
+}
+
+fn main_identity(content: &MainContent) -> MainIdentity {
+    match content {
+        MainContent::Summary => MainIdentity::Summary,
+        MainContent::FileDiff { path, .. } => MainIdentity::File(path.clone()),
+        MainContent::CommitDiff { oid, .. } => MainIdentity::Commit(oid.clone()),
+        MainContent::BranchDiff { name, .. } => MainIdentity::Branch(name.clone()),
+        MainContent::StashDiff { index, .. } => MainIdentity::Stash(*index),
+        MainContent::SubCommits { reference, .. } => MainIdentity::SubCommits(reference.clone()),
+        MainContent::CommitFiles { oid, .. } => MainIdentity::CommitFiles(oid.clone()),
+        MainContent::RemoteInfo { name } => MainIdentity::Remote(name.clone()),
+        MainContent::TagInfo { name } => MainIdentity::Tag(name.clone()),
+        MainContent::Conflict { path, .. } => MainIdentity::Conflict(path.clone()),
+        MainContent::Empty(_) => MainIdentity::Empty,
+    }
+}
+
 impl Lazygit {
+    pub(super) fn current_main_identity(&self) -> MainIdentity {
+        main_identity(&self.state.main)
+    }
+
+    pub(super) fn reset_main_scroll_if_changed(&self, previous: &MainIdentity) {
+        if &self.current_main_identity() != previous {
+            self.scroll_main
+                .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
+            self.scroll_secondary
+                .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
+        }
+    }
+
     pub(super) fn refresh_main(&mut self) {
+        let previous = self.current_main_identity();
         for request in self.state.refresh_main() {
             self.send(request);
         }
         self.state.cursors.main.set(0);
         self.state.main_h_scroll = 0.0;
         self.sync_main_len();
+        self.reset_main_scroll_if_changed(&previous);
     }
 
     pub(super) fn scroll_handle(&self) -> &UniformListScrollHandle {
@@ -93,6 +139,7 @@ impl Lazygit {
             return;
         }
         if self.state.last_error.take().is_some() {
+            self.last_error_label = None;
             cx.notify();
         }
     }
@@ -304,10 +351,19 @@ impl Lazygit {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.main_h_scroll = (self.state.main_h_scroll
-            - f32::from(cx.theme().metrics.diff_horizontal_step))
-        .max(0.0);
-        cx.notify();
+        let slot = self.focused_pan_slot();
+        self.pan_diff_slot(slot, f32::from(cx.theme().metrics.diff_horizontal_step), cx);
+    }
+
+    fn focused_pan_slot(&self) -> &'static str {
+        if matches!(
+            self.state.main,
+            MainContent::SubCommits { .. } | MainContent::CommitFiles { .. }
+        ) {
+            SLOT_PATCH
+        } else {
+            SLOT_MAIN
+        }
     }
 
     /// `L`: pan right, clamped to the widest line, so panning never reaches blank rows.
@@ -317,11 +373,12 @@ impl Lazygit {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let limit = crate::views::diff::max_h_scroll(&self.main_model(), self.main_px_w);
-        self.state.main_h_scroll = (self.state.main_h_scroll
-            + f32::from(cx.theme().metrics.diff_horizontal_step))
-        .min(limit);
-        cx.notify();
+        let slot = self.focused_pan_slot();
+        self.pan_diff_slot(
+            slot,
+            -f32::from(cx.theme().metrics.diff_horizontal_step),
+            cx,
+        );
     }
 
     /// Pans the diff payload sideways by a wheel delta, clamped to the longest line.
@@ -330,11 +387,16 @@ impl Lazygit {
     /// two-finger sideways swipe, or `shift` plus a wheel on a platform that swaps the axis —
     /// reaches the list and is dropped. Handling it here is purely additive: nothing else in the
     /// chain consumes `delta.x`, so there is no double-scroll to guard against.
-    pub(crate) fn pan_diff(&mut self, delta_x: f32, cx: &mut Context<Self>) {
+    pub(crate) fn pan_diff_slot(
+        &mut self,
+        slot: &'static str,
+        delta_x: f32,
+        cx: &mut Context<Self>,
+    ) {
         if delta_x == 0.0 {
             return;
         }
-        let limit = crate::views::diff::max_h_scroll(&self.main_model(), self.main_px_w);
+        let limit = crate::views::diff::max_h_scroll(&self.pan_model(slot), self.main_px_w);
         let next = (self.state.main_h_scroll - delta_x).clamp(0.0, limit);
         if next != self.state.main_h_scroll {
             self.state.main_h_scroll = next;
@@ -368,11 +430,47 @@ impl Lazygit {
             return;
         }
         self.state.diff_context = context;
-        if let MainContent::CommitDiff { diff, .. } = &mut self.state.main {
-            *diff = None;
-        }
+        let drill_down = match &mut self.state.main {
+            MainContent::CommitDiff { diff, .. } => {
+                *diff = None;
+                None
+            }
+            MainContent::SubCommits {
+                shown: Some(oid),
+                diff,
+                ..
+            } => {
+                *diff = None;
+                Some(vec![GitRequest::CommitDiff(oid.clone())])
+            }
+            MainContent::CommitFiles {
+                oid,
+                shown,
+                whole,
+                diff,
+                ..
+            } => {
+                *whole = None;
+                *diff = None;
+                let mut requests = vec![GitRequest::CommitDiff(oid.clone())];
+                if let Some(path) = shown {
+                    requests.push(GitRequest::CommitFileDiff {
+                        oid: oid.clone(),
+                        path: path.clone(),
+                    });
+                }
+                Some(requests)
+            }
+            _ => None,
+        };
         self.send(GitRequest::SetDiffContext(context));
-        self.refresh_main();
+        if let Some(requests) = drill_down {
+            for request in requests {
+                self.send(request);
+            }
+        } else {
+            self.refresh_main();
+        }
         self.toast(format!("Diff context: {context}"), Icon::FileDiff);
         cx.notify();
     }

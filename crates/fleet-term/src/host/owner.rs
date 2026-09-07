@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -8,16 +9,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_channel::Sender;
+use async_channel::{Sender, TrySendError};
 use fleet_core::ids::TerminalId;
 use fleet_proto::terminal::{FrameUpdate, ScrollCommand};
 use tracing::warn;
 
-use super::{HostCommand, HostEvent, TerminalActivity};
+use super::{
+    CommandReservation, HOST_EVENT_MAX_BYTES, HostCommand, HostEvent, TerminalActivity,
+    host_event_bytes,
+};
 use crate::{
     GhosttyEngine,
-    engine::{EngineEvent, VtEngine, WheelAction},
-    pty::Pty,
+    engine::{EngineError, EngineEvent, VtEngine, WheelAction},
+    pty::{Pty, PtyError},
 };
 
 mod commands;
@@ -33,9 +37,16 @@ const COMPRESSION_INTERVAL: Duration = Duration::from_millis(16);
 const OUTPUT_BATCH_BYTES: usize = 256 * 1024;
 const OUTPUT_BATCH_TIME: Duration = Duration::from_millis(2);
 const COMMAND_BATCH_LIMIT: usize = 1024;
+const EVENT_RETRY_INTERVAL: Duration = Duration::from_millis(16);
+const PENDING_EVENT_BYTES: usize = 1024 * 1024;
 
 pub(super) enum OwnerEvent {
+    #[cfg(test)]
     Command(HostCommand),
+    BudgetedCommand {
+        command: HostCommand,
+        _reservation: CommandReservation,
+    },
     CommandsClosed,
     PtyReady,
 }
@@ -81,6 +92,8 @@ pub(super) struct TerminalOwner {
     compression_at: Option<Instant>,
     exit: Option<(Option<i32>, Instant)>,
     commands_closed: bool,
+    pending_events: VecDeque<HostEvent>,
+    pending_event_bytes: usize,
     #[cfg(test)]
     iterations: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -117,6 +130,8 @@ impl TerminalOwner {
             compression_at: Some(spawned_at + COMPRESSION_IDLE),
             exit: None,
             commands_closed: false,
+            pending_events: VecDeque::new(),
+            pending_event_bytes: 0,
             #[cfg(test)]
             iterations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -183,6 +198,7 @@ impl TerminalOwner {
                 Ok(None) => break,
                 Err(error) => {
                     warn!(%error, terminal = %self.terminal, "terminal PTY reader failed");
+                    self.kill();
                     break;
                 }
             }
@@ -196,6 +212,7 @@ impl TerminalOwner {
             .chain(self.compression_at)
             .chain(self.dirty.then_some(self.last_frame_at + FRAME_INTERVAL))
             .chain(self.exit.map(|(_, observed)| observed + EXIT_DRAIN_GRACE))
+            .chain((!self.pending_events.is_empty()).then(|| Instant::now() + EVENT_RETRY_INTERVAL))
             .min()
     }
 
@@ -224,26 +241,37 @@ impl TerminalOwner {
             .compression_at
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            self.engine.compress_idle();
-            self.compression_at = self
-                .engine
-                .compression_pending()
-                .then(|| Instant::now() + COMPRESSION_INTERVAL);
+            match self.engine.try_compress_idle() {
+                Ok(()) => {
+                    self.compression_at = self
+                        .engine
+                        .compression_pending()
+                        .then(|| Instant::now() + COMPRESSION_INTERVAL);
+                }
+                Err(error) => {
+                    warn!(%error, terminal = %self.terminal, "failed to compress terminal history");
+                    self.compression_at = Some(Instant::now() + COMPRESSION_INTERVAL);
+                }
+            }
         }
     }
 
-    fn take_frame(&mut self, full: bool) -> FrameUpdate {
+    fn take_frame(&mut self, full: bool) -> Result<FrameUpdate, EngineError> {
         #[cfg(test)]
         {
             self.frames_taken += 1;
         }
-        let mut frame = self.engine.take_frame(full);
+        let mut frame = self.engine.try_take_frame(full)?;
         self.compression_at
             .get_or_insert(Instant::now() + COMPRESSION_INTERVAL);
         frame.terminal = self.terminal;
         frame.seq = self.sequence;
+        Ok(frame)
+    }
+
+    fn frame_sent(&mut self) {
         self.sequence = self.sequence.saturating_add(1);
-        frame
+        self.frame_delivered();
     }
 
     fn frame_delivered(&mut self) {
@@ -258,12 +286,27 @@ impl TerminalOwner {
             || self.viewport_moved
             || (self.dirty && self.last_frame_at.elapsed() >= FRAME_INTERVAL)
         {
-            let frame = self.take_frame(self.force_full);
-            if self.events.send_blocking(HostEvent::Frame(frame)).is_err() {
-                self.kill();
-                return false;
+            let frame = match self.take_frame(self.force_full) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    warn!(%error, terminal = %self.terminal, "failed to snapshot terminal frame");
+                    self.dirty = true;
+                    self.force_full = true;
+                    self.last_frame_at = Instant::now();
+                    return true;
+                }
+            };
+            if self.try_send_event(HostEvent::Frame(frame)).is_err() {
+                if self.events.is_closed() {
+                    self.kill();
+                    return false;
+                }
+                self.dirty = true;
+                self.force_full = true;
+                self.last_frame_at = Instant::now();
+                return true;
             }
-            self.frame_delivered();
+            self.frame_sent();
         }
         true
     }
@@ -288,18 +331,61 @@ impl TerminalOwner {
         if self.dirty || self.force_full || self.viewport_moved {
             let remaining = FRAME_INTERVAL.saturating_sub(self.last_frame_at.elapsed());
             thread::sleep(remaining);
-            let frame = self.take_frame(self.force_full);
-            let _ = self.events.send_blocking(HostEvent::Frame(frame));
+            match self.take_frame(self.force_full) {
+                Ok(frame) => {
+                    if self.try_send_event(HostEvent::Frame(frame)).is_err() {
+                        let frame = match self.take_frame(true) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                warn!(%error, terminal = %self.terminal, "failed to recover final terminal frame");
+                                self.force_send_event(HostEvent::Exited(code));
+                                return true;
+                            }
+                        };
+                        if self.force_send_event(HostEvent::Frame(frame)) {
+                            self.frame_sent();
+                        }
+                    } else {
+                        self.frame_sent();
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, terminal = %self.terminal, "failed to take final terminal frame");
+                    self.dirty = true;
+                    self.force_full = true;
+                    self.exit = Some((code, Instant::now()));
+                    return false;
+                }
+            }
         }
-        let _ = self.events.send_blocking(HostEvent::Exited(code));
+        if self.events.is_closed() {
+            return true;
+        }
+        if self.try_send_event(HostEvent::Exited(code)).is_err() {
+            self.force_send_event(HostEvent::Exited(code));
+        }
         true
     }
 
     fn forward_engine_events(&mut self) {
+        while let Some(event) = self.pending_events.pop_front() {
+            self.pending_event_bytes = self
+                .pending_event_bytes
+                .saturating_sub(host_event_bytes(&event));
+            if let Err(event) = self.try_send_event(event) {
+                self.pending_event_bytes = self
+                    .pending_event_bytes
+                    .saturating_add(host_event_bytes(&event));
+                self.pending_events.push_front(event);
+                break;
+            }
+        }
         for event in self.engine.take_events() {
             let event = match event {
                 EngineEvent::PtyWrite(bytes) => {
-                    self.write(&bytes);
+                    if let Err(error) = self.write(&bytes, None) {
+                        warn!(%error, terminal = %self.terminal, "failed to write terminal PTY reply");
+                    }
                     continue;
                 }
                 EngineEvent::Title(title) => HostEvent::Title(title),
@@ -309,8 +395,57 @@ impl TerminalOwner {
                     HostEvent::ClipboardWrite { mime, data }
                 }
             };
-            let _ = self.events.send_blocking(event);
+            if !self.pending_events.is_empty() {
+                self.queue_pending_event(event);
+            } else if let Err(event) = self.try_send_event(event) {
+                self.queue_pending_event(event);
+            }
         }
+    }
+
+    fn try_send_event(&self, event: HostEvent) -> Result<(), HostEvent> {
+        if host_event_bytes(&event) > HOST_EVENT_MAX_BYTES {
+            warn!(terminal = %self.terminal, "terminal event exceeded the queue byte budget");
+            return Err(event);
+        }
+        self.events.try_send(event).map_err(|error| match error {
+            TrySendError::Full(event) | TrySendError::Closed(event) => event,
+        })
+    }
+
+    fn force_send_event(&self, event: HostEvent) -> bool {
+        if host_event_bytes(&event) > HOST_EVENT_MAX_BYTES {
+            warn!(terminal = %self.terminal, "terminal event exceeded the queue byte budget");
+            return false;
+        }
+        self.events.force_send(event).is_ok()
+    }
+
+    fn queue_pending_event(&mut self, event: HostEvent) {
+        let same_kind = |queued: &HostEvent| {
+            matches!(
+                (queued, &event),
+                (HostEvent::Title(_), HostEvent::Title(_))
+                    | (HostEvent::Cwd(_), HostEvent::Cwd(_))
+                    | (HostEvent::Bell, HostEvent::Bell)
+            )
+        };
+        if let Some(index) = self.pending_events.iter().position(same_kind)
+            && let Some(removed) = self.pending_events.remove(index)
+        {
+            self.pending_event_bytes = self
+                .pending_event_bytes
+                .saturating_sub(host_event_bytes(&removed));
+        }
+        let bytes = host_event_bytes(&event);
+        if bytes > PENDING_EVENT_BYTES
+            || self.pending_event_bytes.saturating_add(bytes) > PENDING_EVENT_BYTES
+        {
+            warn!(terminal = %self.terminal, "terminal side effect exceeded the pending-event budget");
+            return;
+        }
+        self.pending_event_bytes = self.pending_event_bytes.saturating_add(bytes);
+        self.pending_events.push_back(event);
     }
 
     fn record_input(&mut self) {
@@ -322,11 +457,14 @@ impl TerminalOwner {
         self.compression_at = Some(now + COMPRESSION_IDLE);
     }
 
-    fn write(&mut self, bytes: &[u8]) {
-        if !bytes.is_empty()
-            && let Err(error) = self.pty.write(bytes)
-        {
-            warn!(%error, terminal = %self.terminal, "failed to write terminal PTY");
+    fn write(
+        &mut self,
+        bytes: &[u8],
+        reservation: Option<CommandReservation>,
+    ) -> Result<(), PtyError> {
+        match reservation {
+            Some(reservation) => self.pty.write_permitted(bytes, reservation),
+            None => self.pty.write(bytes),
         }
     }
 

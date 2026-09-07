@@ -77,6 +77,7 @@ impl Client {
                 fetch,
                 kill_sessions,
                 repo,
+                ids: None,
             })
             .await?
         {

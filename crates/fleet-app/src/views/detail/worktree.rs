@@ -3,6 +3,7 @@ use super::*;
 use fleet_core::github::InspectionPrState;
 
 /// Everything the worktree variant needs.
+#[derive(Clone, Copy)]
 pub struct WorktreeProps<'a> {
     /// The worktree under the cursor.
     pub worktree: &'a Worktree,
@@ -23,11 +24,24 @@ pub struct WorktreeProps<'a> {
 /// §3.4's worktree panel: head, `path`, SESSION, SAFETY, times, freshness footer.
 #[must_use]
 pub fn worktree(props: WorktreeProps<'_>, cx: &App) -> AnyElement {
+    let glyph = resolved_worktree_status(
+        props.status,
+        props.slept,
+        props.worktree.degraded.is_some(),
+        props.host_unreachable,
+        false,
+    );
+    worktree_with_status(props, glyph, cx)
+}
+
+/// Renders worktree detail with the exact status already resolved for its list row.
+#[must_use]
+pub fn worktree_with_status(props: WorktreeProps<'_>, glyph: StatusKind, cx: &App) -> AnyElement {
     let WorktreeProps {
         worktree,
         status,
-        slept,
-        host_unreachable,
+        slept: _,
+        host_unreachable: _,
         inspected,
         home,
         now,
@@ -38,16 +52,6 @@ pub fn worktree(props: WorktreeProps<'_>, cx: &App) -> AnyElement {
         .as_ref()
         .map_or_else(|| "local".to_owned(), |host| format!("@{host}"));
     let subtitle = format!("{} · {} · {host}", worktree.repo_id, worktree.base_ref);
-
-    let session_state = status.map_or(SessionState::None, |status| status.session);
-    let glyph = row_glyph(
-        session_state,
-        slept,
-        status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
-        worktree.degraded.is_some(),
-        host_unreachable,
-        false,
-    );
 
     let mut children = vec![
         head(
@@ -149,9 +153,15 @@ fn safety_block(inspected: Option<&Inspected>, now: i64, cx: &App) -> AnyElement
         );
     };
 
-    let age = age_secs(&data.inspected_at, now).unwrap_or_default();
+    let freshness = inspection_freshness(&data.inspected_at, now);
+    let trailing = match freshness {
+        InspectionFreshness::Known(age) => FreshnessStamp::new("checked", age).into_any_element(),
+        InspectionFreshness::Unknown => Text::ui("checked unknown")
+            .tone(Tone::Warning)
+            .into_any_element(),
+    };
     let mut list = KeyValueList::titled("Safety")
-        .trailing(FreshnessStamp::new("checked", age))
+        .trailing(trailing)
         .row("dirty", dirty_value(data))
         .row(
             "ahead / behind",
@@ -234,15 +244,44 @@ fn times_block(worktree: &Worktree, now: i64, cx: &App) -> AnyElement {
 /// `inspected <age> · I refresh`, shown only past 60 s (§2.6) so fresh facts stay quiet.
 fn freshness_footer(inspected: Option<&Inspected>, now: i64, cx: &App) -> Option<AnyElement> {
     let data = inspected?.data.as_ref()?;
-    let age = age_secs(&data.inspected_at, now)?;
-    if age <= 60 {
-        return None;
+    match inspection_freshness(&data.inspected_at, now) {
+        InspectionFreshness::Known(age) if age <= 60 => None,
+        InspectionFreshness::Known(age) => Some(
+            div()
+                .px(cx.theme().space.md)
+                .pt(cx.theme().space.sm)
+                .child(FreshnessStamp::new("inspected", age).action("I", "refresh"))
+                .into_any_element(),
+        ),
+        InspectionFreshness::Unknown => Some(
+            div()
+                .px(cx.theme().space.md)
+                .pt(cx.theme().space.sm)
+                .child(Text::ui("inspected unknown · I refresh").tone(Tone::Warning))
+                .into_any_element(),
+        ),
     }
-    Some(
-        div()
-            .px(cx.theme().space.md)
-            .pt(cx.theme().space.sm)
-            .child(FreshnessStamp::new("inspected", age).action("I", "refresh"))
-            .into_any_element(),
-    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectionFreshness {
+    Known(i64),
+    Unknown,
+}
+
+fn inspection_freshness(inspected_at: &str, now: i64) -> InspectionFreshness {
+    age_secs(inspected_at, now).map_or(InspectionFreshness::Unknown, InspectionFreshness::Known)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_inspection_timestamp_has_unknown_freshness() {
+        assert_eq!(
+            inspection_freshness("not-an-rfc3339-timestamp", 1_788_523_200),
+            InspectionFreshness::Unknown
+        );
+    }
 }

@@ -1,24 +1,14 @@
 //! Context and status bars with independent state/theme invalidation.
 
-use fleet_core::model::Context;
 use fleet_ui_kit::{ActiveTheme, Chip, ContextBar, ContextTab, Icon, StatusBar, Theme, Tone};
 use gpui::{AnyElement, App, Entity, IntoElement, Render, SharedString, Subscription, Window};
 
 use crate::{
+    screens::hub::effective_context,
     shell::daemon::{dot_label, dot_state},
     state::{AppState, ChipCounts, RepoScope, breadcrumb},
     views::{job_ticker, sticky_error},
 };
-
-/// An unset daemon selection falls back to the first tab.
-#[must_use]
-fn resolved_context(state: &AppState) -> Option<&Context> {
-    let contexts = state.snapshot.as_ref()?.contexts.as_slice();
-    state
-        .active_context()
-        .and_then(|active| contexts.iter().find(|context| &context.id == active))
-        .or_else(|| contexts.first())
-}
 
 /// The 36 px context bar (§2.1, §2.3, §3.1).
 #[must_use]
@@ -28,7 +18,7 @@ fn context_bar(state: &AppState, cx: &App) -> AnyElement {
         .as_ref()
         .map(|snapshot| snapshot.contexts.as_slice())
         .unwrap_or_default();
-    let active = resolved_context(state)
+    let active = effective_context(state)
         .and_then(|active| contexts.iter().position(|context| context.id == active.id))
         .unwrap_or(0);
     let tabs = contexts.iter().take(9).enumerate().map(|(index, context)| {
@@ -89,7 +79,7 @@ fn context_bar(state: &AppState, cx: &App) -> AnyElement {
 /// The status-bar breadcrumb `context › repo › row` (§2.2).
 #[must_use]
 fn breadcrumb_text(state: &AppState) -> String {
-    let context = resolved_context(state)
+    let context = effective_context(state)
         .map(|context| context.name.as_str())
         .unwrap_or_default();
     let repo = match &state.scope {
@@ -168,6 +158,7 @@ impl Render for Chrome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_core::model::Context;
 
     fn one_context_snapshot(active: bool) -> fleet_proto::snapshot::Snapshot {
         let id: fleet_core::ids::ContextId =

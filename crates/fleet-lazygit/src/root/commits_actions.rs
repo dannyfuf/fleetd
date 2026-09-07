@@ -60,6 +60,7 @@ impl Lazygit {
                 oid: current,
                 diff,
                 files,
+                ..
             } if *current == oid => (files.clone(), diff.clone()),
             _ => (Arc::default(), None),
         };
@@ -74,6 +75,8 @@ impl Lazygit {
             whole: whole.clone(),
             shown: None,
             diff: whole,
+            whole_error: None,
+            diff_error: None,
         };
         self.state.main_h_scroll = 0.0;
         self.sync_main_len();
@@ -97,10 +100,16 @@ impl Lazygit {
         let index = self.state.cursors.main.index();
         let request = match &mut self.state.main {
             MainContent::CommitFiles {
-                oid, files, shown, ..
+                oid,
+                files,
+                shown,
+                whole_error,
+                diff_error,
+                ..
             } => match index.checked_sub(1).and_then(|row| files.get(row)) {
                 Some(file) => {
                     *shown = Some(file.path.clone());
+                    *diff_error = None;
                     Some(GitRequest::CommitFileDiff {
                         oid: oid.clone(),
                         path: file.path.clone(),
@@ -108,6 +117,7 @@ impl Lazygit {
                 }
                 None => {
                     *shown = None;
+                    *whole_error = None;
                     Some(GitRequest::CommitDiff(oid.clone()))
                 }
             },
@@ -130,6 +140,7 @@ impl Lazygit {
                 whole,
                 shown,
                 diff,
+                diff_error,
                 ..
             } => {
                 // Row 0 is the commit header: it shows the whole patch, every later row one file.
@@ -141,6 +152,7 @@ impl Lazygit {
                         } else {
                             *shown = Some(path.clone());
                             *diff = None;
+                            *diff_error = None;
                             Some(GitRequest::CommitFileDiff {
                                 oid: oid.clone(),
                                 path,
@@ -150,6 +162,7 @@ impl Lazygit {
                     None => {
                         *shown = None;
                         *diff = whole.clone();
+                        *diff_error = None;
                         None
                     }
                 }
@@ -186,18 +199,22 @@ impl Lazygit {
     pub(super) fn reword_commit(
         &mut self,
         _: &commits::Reword,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(commit) = self.state.selected_commit().cloned() else {
             return;
         };
-        self.open_prompt(Prompt {
-            title: "Reword commit".to_owned(),
-            subtitle: Some("⌘⏎ rewords, ⏎ starts a new line".to_owned()),
-            buffer: crate::state::Buffer::multi_line().with_text(commit.subject.clone()),
-            kind: PromptKind::Reword(commit.oid),
-        });
+        self.open_prompt(
+            Prompt {
+                title: "Reword commit".to_owned(),
+                subtitle: Some("⌘⏎ rewords, ⏎ starts a new line".to_owned()),
+                buffer: crate::state::Buffer::multi_line().with_text(commit_message(&commit)),
+                kind: PromptKind::Reword(commit.oid),
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -451,16 +468,25 @@ impl Lazygit {
         cx.notify();
     }
 
-    pub(super) fn tag_commit(&mut self, _: &commits::Tag, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn tag_commit(
+        &mut self,
+        _: &commits::Tag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(oid) = self.selected_oid() else {
             return;
         };
-        self.open_prompt(Prompt {
-            title: "Tag commit".to_owned(),
-            subtitle: Some(format!("Tag name for {}", crate::state::short_oid(&oid))),
-            buffer: crate::state::Buffer::single_line(),
-            kind: PromptKind::NewTag(oid.0),
-        });
+        self.open_prompt(
+            Prompt {
+                title: "Tag commit".to_owned(),
+                subtitle: Some(format!("Tag name for {}", crate::state::short_oid(&oid))),
+                buffer: crate::state::Buffer::single_line(),
+                kind: PromptKind::NewTag(oid.0),
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -477,20 +503,33 @@ impl Lazygit {
     pub(super) fn branch_from_commit(
         &mut self,
         _: &commits::NewBranch,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(oid) = self.selected_oid() else {
             return;
         };
-        self.open_prompt(Prompt {
-            title: "New branch".to_owned(),
-            subtitle: Some(format!("Starting at {}", crate::state::short_oid(&oid))),
-            buffer: crate::state::Buffer::single_line(),
-            kind: PromptKind::NewBranch {
-                start_point: Some(oid.0),
+        self.open_prompt(
+            Prompt {
+                title: "New branch".to_owned(),
+                subtitle: Some(format!("Starting at {}", crate::state::short_oid(&oid))),
+                buffer: crate::state::Buffer::single_line(),
+                kind: PromptKind::NewBranch {
+                    start_point: Some(oid.0),
+                },
             },
-        });
+            window,
+            cx,
+        );
         cx.notify();
+    }
+}
+
+pub(super) fn commit_message(commit: &fleet_git::Commit) -> String {
+    let body = commit.body.trim_end_matches('\n');
+    if body.is_empty() {
+        commit.subject.clone()
+    } else {
+        format!("{}\n\n{body}", commit.subject)
     }
 }

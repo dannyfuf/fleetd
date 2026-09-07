@@ -58,7 +58,7 @@ fn a_new_start_still_opens_when_its_list_response_arrived_first() {
     let mut state = Watches::default();
     let now = Instant::now();
     let w = watch(1);
-    state.listed(&w.session, vec![], vec![w.clone()], now);
+    state.listed(&w.session, 0, vec![], vec![w.clone()], now);
     state.hide(&w.session);
     state.started(w.clone(), now);
     assert!(state.panes[&w.session].visible);
@@ -186,7 +186,7 @@ fn hiding_survives_duplicates_output_exit_and_list_until_a_new_start() {
         signal: None,
     };
     state.exited(exited.clone(), now + Duration::from_secs(3));
-    state.listed(&session, vec![w.id], vec![exited], now);
+    state.listed(&session, 0, vec![w.id], vec![exited], now);
     assert!(!state.panes[&session].visible);
     let elapsed = state.entries[&w.id].elapsed(now + Duration::from_secs(10));
     assert!(elapsed >= Duration::from_secs(3) && elapsed < Duration::from_secs(4));
@@ -223,7 +223,7 @@ fn dismissal_selects_next_closes_last_and_stale_replies_cannot_resurrect() {
         },
         now,
     );
-    state.listed(&session, vec![], vec![w], now);
+    state.listed(&session, 0, vec![], vec![w], now);
     assert!(state.entries.is_empty());
     assert_eq!(state.panes[&session].selected, None);
 }
@@ -232,7 +232,7 @@ fn list_reconciles_known_ids_but_preserves_concurrent_starts_and_local_hiding() 
     let now = Instant::now();
     let mut state = Watches::default();
     let session = watch(1).session;
-    state.listed(&session, vec![], vec![watch(1), watch(2)], now);
+    state.listed(&session, 0, vec![], vec![watch(1), watch(2)], now);
     assert_eq!(state.panes[&session].selected, Some(WatchId(2)));
     assert_eq!(
         state.take_tails(),
@@ -241,7 +241,13 @@ fn list_reconciles_known_ids_but_preserves_concurrent_starts_and_local_hiding() 
     state.hide(&session);
     state.started(watch(3), now);
     state.hide(&session);
-    state.listed(&session, vec![WatchId(1), WatchId(2)], vec![watch(2)], now);
+    state.listed(
+        &session,
+        0,
+        vec![WatchId(1), WatchId(2)],
+        vec![watch(2)],
+        now,
+    );
     assert!(!state.entries.contains_key(&WatchId(1)));
     assert!(state.entries.contains_key(&WatchId(3)));
     assert_eq!(state.panes[&session].selected, Some(WatchId(3)));
@@ -255,9 +261,39 @@ fn session_entry_reconnect_and_lag_request_fresh_lists() {
     assert_eq!(state.enter(Some(session.clone()), 1), None);
     assert_eq!(state.enter(None, 1), None);
     assert_eq!(state.enter(Some(session.clone()), 1), Some(session.clone()));
+    state.listed(&session, 1, vec![], vec![], Instant::now());
+    assert_eq!(state.enter(Some(session.clone()), 1), None);
     assert_eq!(state.enter(Some(session.clone()), 2), Some(session.clone()));
     state.invalidate();
     assert_eq!(state.enter(Some(session.clone()), 2), Some(session));
+}
+
+#[test]
+fn failed_list_and_tail_remain_retryable() {
+    let mut state = Watches::default();
+    let now = Instant::now();
+    let watch = watch(1);
+    let session = watch.session.clone();
+
+    assert_eq!(state.enter(Some(session.clone()), 7), Some(session.clone()));
+    assert_eq!(state.list_failed(&session, 7), Some(1));
+    assert_eq!(state.enter(Some(session.clone()), 7), None);
+    assert!(state.list_retry_ready(&session, 7));
+    assert_eq!(state.enter(Some(session.clone()), 7), Some(session));
+
+    state.started(watch.clone(), now);
+    state.output(
+        watch.id,
+        vec![
+            chunk(0, WatchStream::Stdout, "one\n"),
+            chunk(2, WatchStream::Stdout, "three\n"),
+        ],
+    );
+    assert_eq!(state.take_tails(), vec![(watch.id, Some(1))]);
+    assert_eq!(state.tail_failed(watch.id, Some(1)), Some(1));
+    assert!(state.take_tails().is_empty());
+    assert!(state.tail_retry_ready(watch.id));
+    assert_eq!(state.take_tails(), vec![(watch.id, Some(1))]);
 }
 
 #[test]
@@ -305,7 +341,7 @@ fn bookkeeping_compaction_keeps_stale_replies_rejected() {
     state.reconnect();
     let old = watch(1);
     state.started(old.clone(), now);
-    state.listed(&old.session, vec![], vec![old.clone()], now);
+    state.listed(&old.session, 0, vec![], vec![old.clone()], now);
     state.tailed(
         WatchTail {
             watch: old,

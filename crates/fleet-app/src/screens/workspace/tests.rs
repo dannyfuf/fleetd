@@ -3,14 +3,35 @@ use crate::{
     state::MirrorGrid,
     terminal::{AbsoluteCellPoint, AbsoluteCellSelection, cached_grid_row, grid_size},
 };
-use gpui::{Bounds, Keystroke};
-use std::collections::BTreeMap;
+use gpui::{AppContext, Bounds, Keystroke};
+use std::{cell::RefCell, collections::BTreeMap};
 
-use fleet_core::ids::JobId;
-use fleet_proto::job::JobKind;
+use fleet_core::{
+    ids::JobId,
+    sessions::{TerminalKind, TerminalStatus},
+};
+use fleet_proto::{
+    error::{ErrorKind, ProtoError},
+    job::JobKind,
+};
 use gpui::Modifiers as GpuiModifiers;
 
 use super::*;
+
+#[gpui::test]
+fn rejected_workspace_input_is_visible(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/fleet-workspace-input", Instant::now()));
+
+    cx.update(|cx| surface::report_input_delivery(false, &state, cx));
+
+    state.read_with(cx, |app, _| {
+        assert!(
+            app.toasts
+                .iter()
+                .any(|live| { live.toast.text.as_ref() == "input dropped while attaching" })
+        );
+    });
+}
 
 fn keystroke(key: &str, key_char: Option<&str>, mods: GpuiModifiers) -> Keystroke {
     Keystroke {
@@ -36,9 +57,70 @@ fn job(target: &str, status: JobStatus) -> JobRecord {
     }
 }
 
+fn terminal(id: u64, kind: TerminalKind) -> Terminal {
+    Terminal {
+        id: TerminalId(id),
+        name: format!("terminal-{id}"),
+        command: "shell".to_owned(),
+        cwd: "/tmp".to_owned(),
+        shell_pid: None,
+        foreground_command: None,
+        status: TerminalStatus::Running,
+        title: None,
+        keep_alive: Vec::new(),
+        has_unseen_output: false,
+        kind,
+    }
+}
+
+fn session(id: &str, terminal: Terminal) -> Session {
+    Session {
+        id: SessionId::try_from(id).unwrap_or_else(|error| panic!("{error}")),
+        kind: SessionKind::Agent(fleet_core::config::Agent::Claude),
+        cwd: "/tmp".to_owned(),
+        active_terminal: Some(terminal.id),
+        terminals: vec![terminal],
+        slept_at: None,
+        kept_terminals: Vec::new(),
+    }
+}
+
+fn app_with_session(session: Session) -> AppState {
+    let mut app = AppState::new("/tmp/fleet-workspace-test", Instant::now());
+    app.screen = Screen::Workspace {
+        session: session.id.clone(),
+    };
+    app.snapshot = Some(fleet_proto::snapshot::Snapshot {
+        generated_at: "2026-09-04T12:00:00Z".to_owned(),
+        contexts: Vec::new(),
+        repos: Vec::new(),
+        clones: Vec::new(),
+        worktrees: Vec::new(),
+        active_context: None,
+        sessions: vec![session],
+        statuses: Vec::new(),
+        pools: Vec::new(),
+        hosts: Vec::new(),
+        jobs: Vec::new(),
+        daemon: fleet_proto::snapshot::DaemonInfo {
+            version: "0.1.0".to_owned(),
+            pid: 42,
+            started_at: "2026-09-04T09:00:00Z".to_owned(),
+            home: "/tmp/fleet".to_owned(),
+        },
+    });
+    app
+}
+
 fn encoded(key: &str, key_char: Option<&str>, mods: GpuiModifiers) -> KeyEvent {
     key_event(&keystroke(key, key_char, mods), false)
         .unwrap_or_else(|| panic!("`{key}` must encode"))
+}
+
+fn local_with(configure: impl FnOnce(&mut Local)) -> Local {
+    let mut local = Local::default();
+    configure(&mut local);
+    local
 }
 
 #[test]
@@ -47,13 +129,12 @@ fn watch_split_scales_and_the_terminal_uses_its_reduced_measured_area() {
     assert_eq!(watch_width(1200.0), 480.0);
     assert_eq!(watch_width(2000.0), 640.0);
     let cell = gpui::size(px(10.0), px(20.0));
-    let mut local = Local {
-        area: Bounds::new(
+    let mut local = local_with(|local| {
+        local.area = Bounds::new(
             gpui::point(px(0.0), px(0.0)),
             gpui::size(px(1200.0), px(600.0)),
-        ),
-        ..Local::default()
-    };
+        );
+    });
     let full = local.size_for(TerminalId(1), cell);
     local.area.size.width -= px(watch_width(1200.0) + 1.0);
     let split = local.size_for(TerminalId(1), cell);
@@ -230,6 +311,171 @@ fn a_queued_job_already_counts_as_running() {
 }
 
 #[test]
+fn uuid_target_and_cancelling_job_count_as_active() {
+    let jobs = vec![job(
+        "acme/api#feature:123e4567-e89b-12d3-a456-426614174000",
+        JobStatus::Cancelling,
+    )];
+    assert_eq!(job_counts(&jobs, &["acme/api#feature".to_owned()]), (1, 0));
+}
+
+#[test]
+fn missing_status_and_host_remain_unknown() {
+    assert_eq!(
+        workspace_status(None, false, false, None),
+        StatusKind::Unknown
+    );
+    assert_eq!(
+        workspace_status(
+            Some((SessionState::Attached, AgentActivity::Unknown)),
+            false,
+            false,
+            Some(HostReachability::Unknown),
+        ),
+        StatusKind::Unknown
+    );
+    assert!(!HostReachability::Unknown.is_reachable());
+    assert_eq!(
+        workspace_status(
+            Some((SessionState::Attached, AgentActivity::Unknown)),
+            false,
+            false,
+            Some(HostReachability::Unreachable),
+        ),
+        StatusKind::HostUnreachable
+    );
+}
+
+#[test]
+fn late_new_terminal_does_not_cross_sessions() {
+    let origin = SessionId::try_from("session/one").unwrap_or_else(|error| panic!("{error}"));
+    let other = SessionId::try_from("session/two").unwrap_or_else(|error| panic!("{error}"));
+    let response = ResponseBody::Terminal(terminal(7, TerminalKind::Pty));
+    assert_eq!(
+        new_terminal_reply_target(&origin, Some(&other), &response),
+        None
+    );
+    assert_eq!(new_terminal_reply_target(&origin, None, &response), None);
+    assert_eq!(
+        new_terminal_reply_target(&origin, Some(&origin), &response),
+        Some(TerminalId(7))
+    );
+}
+
+#[test]
+fn native_tabs_reject_pty_paste_and_restart() {
+    let native = session("native/session", terminal(7, TerminalKind::Native));
+    let pty = session("pty/session", terminal(8, TerminalKind::Pty));
+    let native_app = app_with_session(native.clone());
+    assert_eq!(terminal_input_target_of(&native_app), None);
+    assert!(MutationRequest::restart(&native).is_none());
+
+    let mut pty_app = app_with_session(pty.clone());
+    let mut grid = MirrorGrid::new(80, 24);
+    grid.primed = true;
+    pty_app.grids.insert(TerminalId(8), grid);
+    assert_eq!(
+        terminal_input_target_of(&pty_app),
+        Some((TerminalId(8), true))
+    );
+    assert!(matches!(
+        MutationRequest::restart(&pty),
+        Some(MutationRequest {
+            body: RequestBody::RestartTerminal {
+                terminal: TerminalId(8)
+            },
+            expected: ExpectedResponse::Terminal,
+            operation: "restart terminal",
+        })
+    ));
+}
+
+#[test]
+fn selection_motion_waits_for_scrolled_frame() {
+    let terminal = TerminalId(9);
+    let mut grid = MirrorGrid::new(80, 24);
+    grid.primed = true;
+    grid.seq = 10;
+    grid.viewport.scrollback_len = 100;
+    grid.viewport.offset = 20;
+    grid.viewport.history_epoch = 4;
+    let mut pending = None;
+
+    PendingSelectionScroll::queue(&mut pending, terminal, &grid, -3);
+    let mut pending = pending.unwrap_or_else(|| panic!("scroll motion must be retained"));
+    assert_eq!(pending.reconcile(terminal, &grid), None);
+
+    grid.seq = 11;
+    assert_eq!(pending.reconcile(terminal, &grid), None);
+    grid.viewport.offset = 23;
+    assert_eq!(pending.reconcile(terminal, &grid), Some(-3));
+}
+
+#[test]
+fn selection_motion_resolves_on_unrelated_viewport_frame() {
+    let terminal = TerminalId(10);
+    let mut grid = MirrorGrid::new(80, 24);
+    grid.primed = true;
+    grid.seq = 20;
+    grid.viewport.scrollback_len = 100;
+    grid.viewport.offset = 20;
+    grid.viewport.history_epoch = 5;
+    let mut pending = None;
+
+    PendingSelectionScroll::queue(&mut pending, terminal, &grid, -3);
+    let mut pending = pending.unwrap_or_else(|| panic!("scroll motion must be retained"));
+    grid.seq = 21;
+    grid.viewport.offset = 10;
+    assert_eq!(pending.reconcile(terminal, &grid), Some(10));
+}
+
+#[derive(Default)]
+struct RejectingMutationRequester {
+    requests: RefCell<Vec<RequestBody>>,
+}
+
+impl MutationRequester for RejectingMutationRequester {
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, ProtoError>> {
+        self.requests.borrow_mut().push(body);
+        let (reply, answer) = async_channel::bounded(1);
+        reply
+            .try_send(Err(ProtoError {
+                kind: ErrorKind::Conflict,
+                message: "terminal is busy".to_owned(),
+            }))
+            .unwrap_or_else(|error| panic!("test reply must be accepted: {error}"));
+        answer
+    }
+}
+
+#[gpui::test]
+fn terminal_mutation_refusals_are_sticky(cx: &mut gpui::TestAppContext) {
+    let requester = RejectingMutationRequester::default();
+    let state = cx.new(|_| AppState::new("/tmp/fleet-workspace-test", Instant::now()));
+    let request = MutationRequest::restart(&session("pty/session", terminal(8, TerminalKind::Pty)))
+        .unwrap_or_else(|| panic!("PTY restart must produce a mutation request"));
+
+    cx.update(|cx| request_mutation(&requester, request, state.clone(), cx));
+    cx.run_until_parked();
+
+    assert!(matches!(
+        requester.requests.borrow().as_slice(),
+        [RequestBody::RestartTerminal {
+            terminal: TerminalId(8)
+        }]
+    ));
+    state.read_with(cx, |app, _| {
+        assert_eq!(
+            app.sticky_error.as_ref().map(|error| error.text.as_str()),
+            Some("terminal is busy")
+        );
+    });
+}
+
+#[test]
 fn the_status_glyph_matches_the_hub_row() {
     assert_eq!(
         status_kind(SessionState::Attached, false, AgentActivity::Unknown, false,),
@@ -296,10 +542,8 @@ fn the_scroll_caret_stops_at_both_edges() {
     // confines it to 900..=902, and the edges are where `j` / `k` start scrolling instead.
     // `track_selection` clamps the caret into the viewport every frame, so a key only ever
     // sees one that is already in range; `move_caret_within` normalizes as a safety net.
-    let local = Rc::new(RefCell::new(Local {
-        caret: 900,
-        ..Local::default()
-    }));
+    let surface = local_with(|local| local.caret = 900);
+    let local = Rc::new(RefCell::new(surface));
     assert!(local.borrow_mut().move_caret_within(1, 900, 3));
     assert_eq!(local.borrow().caret, 901);
     assert!(local.borrow_mut().move_caret_within(5, 900, 3));
@@ -325,13 +569,12 @@ fn an_unmeasured_area_falls_back_to_a_conventional_grid() {
 
 #[test]
 fn a_measured_area_decides_the_grid() {
-    let local = Local {
-        area: Bounds::new(
+    let local = local_with(|local| {
+        local.area = Bounds::new(
             gpui::point(px(0.0), px(0.0)),
             gpui::size(px(216.0), px(416.0)),
-        ),
-        ..Local::default()
-    };
+        );
+    });
     let cell = gpui::size(px(10.0), px(20.0));
     assert_eq!(local.size_for(TerminalId(1), cell), (20, 20));
 }
@@ -424,10 +667,10 @@ fn mouse_release_only_consumes_an_active_terminal_drag() {
 #[test]
 fn history_epoch_change_clears_selections_and_the_row_cache() {
     let point = AbsoluteCellPoint::new(3, 1);
-    let mut local = Local {
-        anchor: Some(3),
-        anchor_history_epoch: Some(7),
-        mouse_selection: Some(MouseSelection {
+    let mut local = local_with(|local| {
+        local.anchor = Some(3);
+        local.anchor_history_epoch = Some(7);
+        local.mouse_selection = Some(MouseSelection {
             anchor: point,
             head: point,
             initial: AbsoluteCellSelection::new(point, point),
@@ -438,9 +681,8 @@ fn history_epoch_change_clears_selections_and_the_row_cache() {
             alt_screen: false,
             dragging: false,
             selected: true,
-        }),
-        ..Local::default()
-    };
+        });
+    });
     local.row_caches.insert(
         TerminalId(1),
         TerminalRowCache {
@@ -462,8 +704,8 @@ fn history_epoch_change_clears_selections_and_the_row_cache() {
 #[test]
 fn unchanged_history_epoch_keeps_selections_and_the_row_cache() {
     let point = AbsoluteCellPoint::new(3, 1);
-    let mut local = Local {
-        mouse_selection: Some(MouseSelection {
+    let mut local = local_with(|local| {
+        local.mouse_selection = Some(MouseSelection {
             anchor: point,
             head: point,
             initial: AbsoluteCellSelection::new(point, point),
@@ -474,9 +716,8 @@ fn unchanged_history_epoch_keeps_selections_and_the_row_cache() {
             alt_screen: false,
             dragging: false,
             selected: true,
-        }),
-        ..Local::default()
-    };
+        });
+    });
     local.row_caches.insert(
         TerminalId(1),
         TerminalRowCache {

@@ -375,6 +375,9 @@ impl GitUiState {
                 }
                 BranchTab::Remotes => {
                     if self.remote_drill.is_some() {
+                        self.sel_remote_branch = self
+                            .selected_remote_branch()
+                            .map(|branch| branch.name.clone());
                     } else {
                         self.sel_remote = self.selected_remote().map(|remote| remote.name.clone());
                     }
@@ -388,11 +391,11 @@ impl GitUiState {
                     self.sel_commit = self.selected_commit().map(|commit| commit.oid.clone());
                 }
                 CommitTab::Reflog => {
-                    self.sel_reflog = self.selected_reflog().map(|entry| entry.selector.clone());
+                    self.sel_reflog = self.selected_reflog().map(ReflogIdentity::from);
                 }
             },
             PanelId::Stash => {
-                self.sel_stash = self.selected_stash().map(|entry| entry.index);
+                self.sel_stash = self.selected_stash().map(|entry| entry.oid.clone());
             }
             PanelId::Status | PanelId::Main => {}
         }

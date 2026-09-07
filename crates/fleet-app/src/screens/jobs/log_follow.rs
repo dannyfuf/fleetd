@@ -7,6 +7,9 @@ impl PanelState {
         lines: Vec<String>,
         scroll: &UniformListScrollHandle,
     ) -> bool {
+        if !self.following {
+            return false;
+        }
         if self.log.len() == lines.len()
             && self
                 .log
@@ -17,10 +20,8 @@ impl PanelState {
             return false;
         }
         self.log = lines.into_iter().map(SharedString::from).collect();
-        if self.following {
-            self.log_offset = self.log.len().saturating_sub(1);
-            scroll.scroll_to_item(self.log_offset, ScrollStrategy::Bottom);
-        }
+        self.log_offset = self.log.len().saturating_sub(1);
+        scroll.scroll_to_item(self.log_offset, ScrollStrategy::Bottom);
         true
     }
 }

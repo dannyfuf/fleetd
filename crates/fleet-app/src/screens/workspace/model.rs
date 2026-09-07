@@ -17,7 +17,7 @@ pub(super) struct Model {
     pub(super) title: SharedString,
     pub(super) branch_key: Option<String>,
     pub(super) repo: Option<RepoId>,
-    pub(super) host: Option<(SharedString, bool)>,
+    pub(super) host: Option<(SharedString, HostReachability)>,
     pub(super) status: StatusKind,
     pub(super) keep_alive: Vec<SharedString>,
     pub(super) running_jobs: usize,
@@ -35,6 +35,27 @@ pub(super) struct Model {
     pub(super) popup_owns_terminal: bool,
     /// The popup terminal that must remain attached if this Workspace switches away from it.
     pub(super) popup_terminal: Option<TerminalId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostReachability {
+    Unknown,
+    Reachable,
+    Unreachable,
+}
+
+impl HostReachability {
+    const fn from_observation(reachable: Option<bool>) -> Self {
+        match reachable {
+            Some(true) => Self::Reachable,
+            Some(false) => Self::Unreachable,
+            None => Self::Unknown,
+        }
+    }
+
+    pub(super) const fn is_reachable(self) -> bool {
+        matches!(self, Self::Reachable)
+    }
 }
 
 impl Model {
@@ -58,14 +79,17 @@ impl Model {
                 Some(worktree.branch.clone()),
                 Some(worktree.repo_id.clone()),
                 worktree.host.as_ref().map(|host| {
-                    let reachable = app.snapshot.as_ref().is_none_or(|snapshot| {
+                    let reachable = app.snapshot.as_ref().and_then(|snapshot| {
                         snapshot
                             .hosts
                             .iter()
                             .find(|candidate| &candidate.id == host)
-                            .is_none_or(|candidate| candidate.reachable)
+                            .map(|candidate| candidate.reachable)
                     });
-                    (SharedString::from(host.to_string()), reachable)
+                    (
+                        SharedString::from(host.to_string()),
+                        HostReachability::from_observation(reachable),
+                    )
                 }),
             ),
             // An agent session has no worktree: its own name is the only identity it has.
@@ -79,11 +103,11 @@ impl Model {
                     .iter()
                     .find(|status| status.worktree_id == worktree.id)
             });
-            status_kind(
-                runtime_status.map_or(SessionState::Attached, |status| status.session),
+            workspace_status(
+                runtime_status.map(|status| (status.session, status.agent_activity)),
                 session.slept_at.is_some(),
-                runtime_status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                 worktree.degraded.is_some(),
+                host.as_ref().map(|(_, reachability)| *reachability),
             )
         });
 
@@ -172,14 +196,33 @@ pub(super) fn badge_state(
 pub(super) fn job_counts(jobs: &[JobRecord], targets: &[String]) -> (usize, usize) {
     let mut running = 0;
     let mut failed = 0;
-    for job in jobs.iter().filter(|job| targets.contains(&job.target)) {
+    for job in jobs.iter().filter(|job| {
+        let target = crate::presentation::job_target(&job.kind, &job.target);
+        targets.iter().any(|candidate| candidate == target)
+    }) {
         match job.status {
-            JobStatus::Queued | JobStatus::Running => running += 1,
+            JobStatus::Queued | JobStatus::Running | JobStatus::Cancelling => running += 1,
             JobStatus::Failed { .. } => failed += 1,
-            JobStatus::Cancelling | JobStatus::Succeeded | JobStatus::Cancelled => {}
+            JobStatus::Succeeded | JobStatus::Cancelled => {}
         }
     }
     (running, failed)
+}
+
+#[must_use]
+pub(super) fn workspace_status(
+    runtime: Option<(SessionState, AgentActivity)>,
+    sleeping: bool,
+    degraded: bool,
+    host: Option<HostReachability>,
+) -> StatusKind {
+    match host {
+        Some(HostReachability::Unreachable) => return StatusKind::HostUnreachable,
+        Some(HostReachability::Unknown) => return StatusKind::Unknown,
+        Some(HostReachability::Reachable) | None => {}
+    }
+    let (session, activity) = runtime.unwrap_or((SessionState::Unknown, AgentActivity::Unknown));
+    status_kind(session, sleeping, activity, degraded)
 }
 
 /// The status glyph a session shows, identical to the Hub's for the same worktree (§2.5).

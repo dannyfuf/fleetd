@@ -198,4 +198,45 @@ mod tests {
         assert_eq!(display_label(WatchSource::Discovered, "codex"), "◦ codex");
         assert_eq!(display_label(WatchSource::Cooperative, "codex"), "codex");
     }
+
+    #[test]
+    fn dismiss_failure_is_persistent() {
+        use fleet_core::watches::{Watch, WatchStatus};
+        use fleet_proto::error::ProtoError;
+
+        let watch = Watch {
+            id: WatchId(7),
+            session: "acme/api#fix".parse().expect("session id"),
+            terminal: fleet_core::ids::TerminalId(1),
+            label: "codex".into(),
+            command: vec!["codex".into()],
+            cwd: None,
+            pid: Some(123),
+            started_at: "2026-09-04T12:00:00Z".into(),
+            status: WatchStatus::Exited {
+                code: Some(0),
+                signal: None,
+            },
+            source: WatchSource::Cooperative,
+            log_file: None,
+        };
+        let mut app = AppState::new("/tmp/fleet-watch-dismiss", Instant::now());
+        app.watches.started(watch.clone(), Instant::now());
+
+        controller::apply_dismiss_reply(
+            &mut app,
+            watch.id,
+            Ok(Err(ProtoError {
+                kind: ErrorKind::Conflict,
+                message: "watch dismissal refused".into(),
+            })),
+        );
+
+        assert!(app.watches.entries.contains_key(&watch.id));
+        assert_eq!(
+            app.sticky_error.as_ref().map(|error| error.text.as_str()),
+            Some("watch dismissal refused")
+        );
+        assert!(app.toasts.is_empty());
+    }
 }

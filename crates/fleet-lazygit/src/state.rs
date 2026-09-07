@@ -42,6 +42,27 @@ use crate::views::file_tree::{FileRow, FileTree};
 /// How many command-log records to keep.
 pub(crate) const COMMAND_LOG_CAP: usize = 400;
 
+/// Stable identity for a reflog record. Selectors such as `HEAD@{1}` are positions and shift
+/// whenever Git prepends a record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReflogIdentity {
+    oid: ObjectId,
+    parents: Vec<ObjectId>,
+    subject: String,
+    committed_at: i64,
+}
+
+impl From<&ReflogEntry> for ReflogIdentity {
+    fn from(entry: &ReflogEntry) -> Self {
+        Self {
+            oid: entry.oid.clone(),
+            parents: entry.parents.clone(),
+            subject: entry.subject.clone(),
+            committed_at: entry.committed_at,
+        }
+    }
+}
+
 /// The whole UI state.
 pub(crate) struct GitUiState {
     /// The path the app was launched with; replaced by the worktree root once discovered.
@@ -79,14 +100,16 @@ pub(crate) struct GitUiState {
     pub(crate) sel_branch: Option<String>,
     /// Selected remote.
     pub(crate) sel_remote: Option<String>,
+    /// Selected remote-tracking branch.
+    pub(crate) sel_remote_branch: Option<String>,
     /// Selected tag.
     pub(crate) sel_tag: Option<String>,
     /// Selected commit.
     pub(crate) sel_commit: Option<ObjectId>,
-    /// Selected reflog entry.
-    pub(crate) sel_reflog: Option<String>,
-    /// Selected stash index.
-    pub(crate) sel_stash: Option<usize>,
+    /// Selected reflog record.
+    pub(crate) sel_reflog: Option<ReflogIdentity>,
+    /// Selected stash commit.
+    pub(crate) sel_stash: Option<ObjectId>,
     /// Every list cursor.
     pub(crate) cursors: Cursors,
     /// The Files pane's row model: lazygit's file tree, its collapse set and its flat/tree flag.
@@ -148,6 +171,7 @@ impl GitUiState {
             sel_file: None,
             sel_branch: None,
             sel_remote: None,
+            sel_remote_branch: None,
             sel_tag: None,
             sel_commit: None,
             sel_reflog: None,

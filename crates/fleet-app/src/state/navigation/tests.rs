@@ -195,6 +195,7 @@ fn context_chain_follows_the_screen_the_overlay_and_the_daemon() {
         message: "no socket".to_owned(),
         log_tail: Vec::new(),
         stale_socket: true,
+        protocol_mismatch: false,
     };
     assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
 }

@@ -81,4 +81,15 @@ impl ConfirmState {
             }
         }
     }
+
+    fn begin_recheck(&mut self) {
+        self.seq = self.seq.wrapping_add(1);
+        self.loading = true;
+        self.error = None;
+        self.checked_at = None;
+        if matches!(self.request, Some(ConfirmRequest::Prune { .. })) {
+            self.prune = None;
+            self.update_list();
+        }
+    }
 }

@@ -5,7 +5,7 @@
 //! monospace-grid trick that locks every base glyph onto its column regardless of the advance
 //! the shaper would otherwise pick — and finally the cursor.
 
-use gpui::{App, Bounds, ContentMask, Pixels, TextAlign, Window, fill, outline, point, px, size};
+use gpui::{App, Bounds, ContentMask, Pixels, TextAlign, Window, fill, outline, point, size};
 
 use super::{CellMetrics, CellRect, CursorLayout, CursorShape, GridLayout};
 use crate::theme::ActiveTheme;
@@ -19,22 +19,19 @@ pub(super) fn paint_grid(
 ) {
     let metrics = layout.metrics;
     let origin = bounds.origin;
-    // `floor` the left edge and `ceil` the width so two horizontally adjacent quads overlap by
-    // a sub-pixel instead of leaving a hairline of background between them.
-    let rect_bounds = |rect: &CellRect| {
-        let x = (f32::from(origin.x) + rect.col as f32 * f32::from(metrics.width)).floor();
-        let y = f32::from(origin.y) + rect.row as f32 * f32::from(metrics.height);
-        let w = (rect.cols as f32 * f32::from(metrics.width)).ceil();
-        let h = rect.rows as f32 * f32::from(metrics.height);
-        Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
-    };
 
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         for rect in &layout.content.backgrounds {
-            window.paint_quad(fill(rect_bounds(rect), rect.color));
+            window.paint_quad(fill(
+                cell_rect_bounds(rect, origin, metrics, window),
+                rect.color,
+            ));
         }
         for rect in &layout.selection {
-            window.paint_quad(fill(rect_bounds(rect), rect.color));
+            window.paint_quad(fill(
+                cell_rect_bounds(rect, origin, metrics, window),
+                rect.color,
+            ));
         }
         for batch in &layout.content.text {
             let position = point(
@@ -59,6 +56,20 @@ pub(super) fn paint_grid(
             paint_cursor(cursor, origin, metrics, layout.font_size, window, cx);
         }
     });
+}
+
+/// Resolve cell coordinates by snapping their shared edges, not each rectangle's width.
+pub(super) fn cell_rect_bounds(
+    rect: &CellRect,
+    origin: gpui::Point<Pixels>,
+    metrics: CellMetrics,
+    window: &Window,
+) -> Bounds<Pixels> {
+    let left = window.pixel_snap(origin.x + metrics.width * rect.col as f32);
+    let top = window.pixel_snap(origin.y + metrics.height * rect.row as f32);
+    let right = window.pixel_snap(origin.x + metrics.width * (rect.col + rect.cols) as f32);
+    let bottom = window.pixel_snap(origin.y + metrics.height * (rect.row + rect.rows) as f32);
+    Bounds::from_corners(point(left, top), point(right, bottom))
 }
 
 /// Paint the cursor quad and, under a filled block, the glyph it covers.

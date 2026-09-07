@@ -17,22 +17,45 @@ pub fn parse(input: &[u8]) -> Result<Diff> {
     let mut file: Option<DiffFile> = None;
     let mut hunk: Option<Hunk> = None;
     let mut remaining = Remaining::default();
+    let mut skipping_combined = false;
+    let mut saw_combined = false;
     for line in input.split_inclusive(|byte| *byte == b'\n') {
         let line = line.strip_suffix(b"\n").unwrap_or(line);
-        if let Some(current_hunk) = hunk.as_mut()
-            && remaining.accepts(line)
-        {
-            parse_hunk_line(current_hunk, line, &mut remaining);
-            continue;
+        if let Some(current_hunk) = hunk.as_mut() {
+            if remaining.accepts(line) {
+                parse_hunk_line(current_hunk, line, &mut remaining);
+                continue;
+            }
+            if !remaining.is_empty() {
+                return Err(GitError::parse(
+                    "diff hunk",
+                    format!(
+                        "hunk ended with {} old and {} new lines missing",
+                        remaining.old, remaining.new
+                    ),
+                ));
+            }
         }
         finish_hunk(&mut file, &mut hunk);
+        if line.starts_with(b"diff --cc ") || line.starts_with(b"diff --combined ") {
+            finish_file(&mut files, &mut file)?;
+            skipping_combined = true;
+            saw_combined = true;
+            continue;
+        }
+        if skipping_combined && !line.starts_with(b"diff --git ") {
+            continue;
+        }
+        if line.starts_with(b"@@@ ") {
+            return Err(GitError::parse("diff", "combined diffs are not supported"));
+        }
         if line.starts_with(b"diff --git ") {
-            if let Some(previous) = file.take() {
-                files.push(previous);
-            }
+            skipping_combined = false;
+            finish_file(&mut files, &mut file)?;
+            let paths = crate::parse::path::diff_git_paths(&line[b"diff --git ".len()..]).ok();
             file = Some(DiffFile {
-                old_path: None,
-                new_path: None,
+                old_path: paths.as_ref().map(|(old, _)| old.clone()),
+                new_path: paths.map(|(_, new)| new),
                 kind: DiffKind::Modified,
                 binary: false,
                 mode: None,
@@ -55,25 +78,25 @@ pub fn parse(input: &[u8]) -> Result<Diff> {
         };
         current.headers.push(line.to_vec());
         if let Some(path) = line.strip_prefix(b"--- ") {
-            current.old_path = parse_header_path(path);
+            current.old_path = parse_header_path(path)?;
             if current.old_path.is_none() {
                 current.kind = DiffKind::Added;
             }
         } else if let Some(path) = line.strip_prefix(b"+++ ") {
-            current.new_path = parse_header_path(path);
+            current.new_path = parse_header_path(path)?;
             if current.new_path.is_none() {
                 current.kind = DiffKind::Deleted;
             }
         } else if let Some(path) = line.strip_prefix(b"rename from ") {
-            current.old_path = Some(crate::parse::status::bytes_to_path(path));
+            current.old_path = Some(crate::parse::path::extended_header_path(path)?);
             current.kind = DiffKind::Renamed;
         } else if let Some(path) = line.strip_prefix(b"rename to ") {
-            current.new_path = Some(crate::parse::status::bytes_to_path(path));
+            current.new_path = Some(crate::parse::path::extended_header_path(path)?);
         } else if let Some(path) = line.strip_prefix(b"copy from ") {
-            current.old_path = Some(crate::parse::status::bytes_to_path(path));
+            current.old_path = Some(crate::parse::path::extended_header_path(path)?);
             current.kind = DiffKind::Copied;
         } else if let Some(path) = line.strip_prefix(b"copy to ") {
-            current.new_path = Some(crate::parse::status::bytes_to_path(path));
+            current.new_path = Some(crate::parse::path::extended_header_path(path)?);
         } else if line.starts_with(b"Binary files ") || line.starts_with(b"GIT binary patch") {
             current.binary = true;
         } else if let Some(mode) = line.strip_prefix(b"old mode ") {
@@ -92,15 +115,35 @@ pub fn parse(input: &[u8]) -> Result<Diff> {
                     new: None,
                 })
                 .new = Some(String::from_utf8_lossy(mode).into_owned());
-        } else if line.starts_with(b"new file mode ") {
+        } else if let Some(mode) = line.strip_prefix(b"new file mode ") {
             current.kind = DiffKind::Added;
-        } else if line.starts_with(b"deleted file mode ") {
+            current.old_path = None;
+            current.mode = Some(ModeChange {
+                old: None,
+                new: Some(String::from_utf8_lossy(mode).into_owned()),
+            });
+        } else if let Some(mode) = line.strip_prefix(b"deleted file mode ") {
             current.kind = DiffKind::Deleted;
+            current.new_path = None;
+            current.mode = Some(ModeChange {
+                old: Some(String::from_utf8_lossy(mode).into_owned()),
+                new: None,
+            });
         }
     }
+    if hunk.is_some() && !remaining.is_empty() {
+        return Err(GitError::parse(
+            "diff hunk",
+            format!(
+                "hunk ended with {} old and {} new lines missing",
+                remaining.old, remaining.new
+            ),
+        ));
+    }
     finish_hunk(&mut file, &mut hunk);
-    if let Some(file) = file {
-        files.push(file);
+    finish_file(&mut files, &mut file)?;
+    if files.is_empty() && saw_combined {
+        return Err(GitError::parse("diff", "combined diffs are not supported"));
     }
     Ok(Diff { files })
 }
@@ -185,6 +228,20 @@ fn finish_hunk(file: &mut Option<DiffFile>, hunk: &mut Option<Hunk>) {
     }
 }
 
+fn finish_file(files: &mut Vec<DiffFile>, file: &mut Option<DiffFile>) -> Result<()> {
+    let Some(file) = file.take() else {
+        return Ok(());
+    };
+    if file.old_path.is_none() && file.new_path.is_none() {
+        return Err(GitError::parse(
+            "diff path",
+            "missing paths in diff headers",
+        ));
+    }
+    files.push(file);
+    Ok(())
+}
+
 fn parse_hunk_header(line: &[u8]) -> Result<Hunk> {
     let after = &line[3..];
     let end = find_bytes(after, b" @@")
@@ -230,6 +287,10 @@ struct Remaining {
 }
 
 impl Remaining {
+    fn is_empty(&self) -> bool {
+        self.old == 0 && self.new == 0
+    }
+
     /// Reports whether `line` still belongs to the open hunk.
     fn accepts(&self, line: &[u8]) -> bool {
         // The no-newline marker annotates the preceding line and consumes no budget.
@@ -288,16 +349,8 @@ fn parse_hunk_line(hunk: &mut Hunk, line: &[u8], remaining: &mut Remaining) {
     });
 }
 
-fn parse_header_path(value: &[u8]) -> Option<PathBuf> {
-    let value = value.split(|byte| *byte == b'\t').next().unwrap_or(value);
-    if value == b"/dev/null" {
-        return None;
-    }
-    let value = value
-        .strip_prefix(b"a/")
-        .or_else(|| value.strip_prefix(b"b/"))
-        .unwrap_or(value);
-    Some(crate::parse::status::bytes_to_path(value))
+fn parse_header_path(value: &[u8]) -> Result<Option<PathBuf>> {
+    crate::parse::path::header_path(value)
 }
 
 fn status_kind(code: u8) -> DiffKind {
@@ -323,6 +376,49 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::{commit_files, parse, render};
     use crate::{DiffKind, LineKind};
+
+    #[test]
+    fn binary_mode_only_retains_metadata() {
+        let fixture = b"diff --git a/script b/script\nnew file mode 100755\nBinary files /dev/null and b/script differ\ndiff --git a/config b/config\nold mode 100644\nnew mode 100755\n";
+        let diff = parse(fixture).expect("parse binary mode-only diff");
+        let file = &diff.files[0];
+
+        assert!(file.old_path.is_none());
+        assert_eq!(
+            file.new_path.as_deref(),
+            Some(std::path::Path::new("script"))
+        );
+        assert_eq!(file.kind, DiffKind::Added);
+        assert!(file.binary);
+        assert_eq!(
+            file.mode.as_ref().and_then(|mode| mode.new.as_deref()),
+            Some("100755")
+        );
+
+        let mode_only = &diff.files[1];
+        assert_eq!(
+            mode_only.old_path.as_deref(),
+            Some(std::path::Path::new("config"))
+        );
+        assert_eq!(mode_only.new_path, mode_only.old_path);
+        assert_eq!(
+            mode_only.mode.as_ref().and_then(|mode| mode.old.as_deref()),
+            Some("100644")
+        );
+        assert_eq!(
+            mode_only.mode.as_ref().and_then(|mode| mode.new.as_deref()),
+            Some("100755")
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_combined_diff() {
+        let truncated = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,2 +1,2 @@\n-one\n+ONE\n";
+        assert!(parse(truncated).is_err());
+
+        let combined = b"diff --cc a\nindex 111,222..333\n--- a/a\n+++ b/a\n@@@ -1,1 -1,1 +1,1 @@@\n- one\n -two\n++three\n";
+        assert!(parse(combined).is_err());
+    }
 
     #[test]
     fn numbers_and_round_trips_a_large_mixed_hunk() {
@@ -408,7 +504,7 @@ mod tests {
 
     #[test]
     fn numbers_lines_across_multiple_hunks() {
-        let fixture: &[u8] = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,3 +1,4 @@\n one\n+inserted\n two\n three\n@@ -10,2 +11,2 @@\n-ten\n+TEN\n";
+        let fixture: &[u8] = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,3 +1,4 @@\n one\n+inserted\n two\n three\n@@ -10 +11 @@\n-ten\n+TEN\n";
         let diff = parse(fixture).expect("parse diff");
         let first = &diff.files[0].hunks[0];
         assert_eq!(first.lines[0].old_no, Some(1));

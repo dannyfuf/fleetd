@@ -59,18 +59,10 @@ enum DaemonFailure {
 }
 
 impl DaemonFailure {
-    /// Classifies a `fleet-client` failure message.
-    ///
-    /// `Client::connect` reports a rejected handshake as `ConnectError::InvalidHandshake` /
-    /// "rejected the handshake", and the daemon's own refusal reads `unsupported protocol N`.
-    /// Both mean the same thing to the user, and neither is a crash.
+    /// Classifies the bridge's typed failure cause without interpreting human prose.
     #[must_use]
-    fn classify(message: &str, stale_socket: bool) -> Self {
-        let lowered = message.to_lowercase();
-        if lowered.contains("protocol")
-            || lowered.contains("handshake")
-            || lowered.contains("unsupported")
-        {
+    fn classify(protocol_mismatch: bool, stale_socket: bool) -> Self {
+        if protocol_mismatch {
             return Self::VersionMismatch;
         }
         if stale_socket {
@@ -205,6 +197,7 @@ fn failure_view(
     failure: DaemonFailure,
     detail: &SharedString,
     log_tail: &[SharedString],
+    error: Option<&SharedString>,
     scroll: &gpui::ScrollHandle,
     cx: &App,
 ) -> AnyElement {
@@ -234,6 +227,7 @@ fn failure_view(
                 )
                 .child(Text::ui_strong(failure_headline(failure)).tone(Tone::Danger))
                 .child(Text::ui(detail.clone()).muted())
+                .children(error.map(|error| Text::ui(error.clone()).tone(Tone::Danger)))
                 .child(
                     div().flex().flex_col().gap(theme.space.xxs).children(
                         log_tail

@@ -65,7 +65,7 @@ pub enum Command {
     /// Report coding-agent lifecycle activity for the current Fleet terminal.
     AgentStatus(AgentStatusArgs),
     /// Run environment diagnostics.
-    Doctor,
+    Doctor(DoctorArgs),
     /// Import compatible swarm configuration and state.
     Import(ImportArgs),
     /// Start a Fleet self-update job.
@@ -195,6 +195,17 @@ pub struct OpenArgs {
 pub struct JsonArgs {
     /// Emit a protocol-versioned JSON envelope.
     #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments accepted by `fleet doctor`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct DoctorArgs {
+    /// Replace quarantined state with an empty state while retaining its archived file.
+    #[arg(long)]
+    pub reset_state: bool,
+    /// Emit a protocol-versioned JSON envelope for a state reset.
+    #[arg(long, requires = "reset_state")]
     pub json: bool,
 }
 
@@ -388,6 +399,7 @@ mod tests {
             vec!["fleet", "agent", "opencode"],
             vec!["fleet", "agent-status", "finished", "--json"],
             vec!["fleet", "doctor"],
+            vec!["fleet", "doctor", "--reset-state", "--json"],
             vec!["fleet", "import", "--from-swarm"],
             vec!["fleet", "update"],
             vec!["fleet", "daemon", "restart"],

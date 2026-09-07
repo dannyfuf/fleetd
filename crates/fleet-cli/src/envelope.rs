@@ -71,6 +71,14 @@ pub struct OkEnvelope {
     pub ok: bool,
 }
 
+/// A successful quarantined-state reset.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetStateEnvelope<'a> {
+    pub protocol: u32,
+    pub archived_path: &'a str,
+}
+
 /// A refreshed status result compatible with swarm protocol one.
 #[derive(Debug, Serialize)]
 pub struct StatusEnvelope<'a> {

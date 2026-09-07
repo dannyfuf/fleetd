@@ -17,7 +17,13 @@ use fleet_proto::{
 };
 use jobs::{doctor, import_from_swarm, update};
 use sessions::{agent, agent_status, sleep};
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    ffi::OsString,
+    io::{self, Write},
+    path::PathBuf,
+    str::FromStr,
+    time::Duration,
+};
 use tokio::sync::broadcast::{self, error::RecvError};
 use watches::{watch_list, watch_session, watch_tail};
 use worktrees::{create, delete, inspect, kill, list, open, path, prune, status};
@@ -46,7 +52,16 @@ impl CommandOutput {
 /// Runs Fleet's command-line interface and returns the process exit code.
 #[must_use]
 pub fn run() -> i32 {
-    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let mut stdout = io::stdout().lock();
+    let mut stderr = io::stderr().lock();
+    run_from(
+        std::env::args_os().collect::<Vec<_>>(),
+        &mut stdout,
+        &mut stderr,
+    )
+}
+
+fn run_from(arguments: Vec<OsString>, stdout: &mut impl Write, stderr: &mut impl Write) -> i32 {
     let json_requested = arguments.iter().any(|argument| argument == "--json");
     let cli = match Cli::try_parse_from(&arguments) {
         Ok(cli) => cli,
@@ -56,25 +71,27 @@ pub fn run() -> i32 {
                 ClapErrorKind::DisplayHelp | ClapErrorKind::DisplayVersion
             ) =>
         {
-            print!("{error}");
-            return 0;
+            return stdout_result(write!(stdout, "{error}"), 0, stderr);
         }
         Err(error) => {
             let error = clap_error(&error);
-            print_error(&error, json_requested);
-            return FAILURE;
+            return error_result(
+                print_error(&error, json_requested, stdout, stderr),
+                json_requested,
+            );
         }
     };
 
     if cli.version {
-        println!("{VERSION_DISPLAY}");
-        return 0;
+        return stdout_result(writeln!(stdout, "{VERSION_DISPLAY}"), 0, stderr);
     }
 
     let Some(command) = cli.command else {
         let error = validation("a command is required");
-        print_error(&error, json_requested);
-        return FAILURE;
+        return error_result(
+            print_error(&error, json_requested, stdout, stderr),
+            json_requested,
+        );
     };
     let command = match command {
         Command::Exec(args) => return crate::exec::run(args),
@@ -82,8 +99,7 @@ pub fn run() -> i32 {
         other => other,
     };
     if matches!(command, Command::Version) {
-        println!("{VERSION_DISPLAY}");
-        return 0;
+        return stdout_result(writeln!(stdout, "{VERSION_DISPLAY}"), 0, stderr);
     }
     let json_requested = command_requests_json(&command);
 
@@ -94,22 +110,29 @@ pub fn run() -> i32 {
         Ok(runtime) => runtime,
         Err(error) => {
             let error = unknown(format!("could not initialize CLI runtime: {error}"));
-            print_error(&error, json_requested);
-            return FAILURE;
+            return error_result(
+                print_error(&error, json_requested, stdout, stderr),
+                json_requested,
+            );
         }
     };
 
     match runtime.block_on(run_command(command)) {
         Ok(output) => {
-            if !output.text.is_empty() {
-                println!("{}", output.text);
+            if output.text.is_empty() {
+                output.exit_code
+            } else {
+                stdout_result(
+                    writeln!(stdout, "{}", output.text),
+                    output.exit_code,
+                    stderr,
+                )
             }
-            output.exit_code
         }
-        Err(error) => {
-            print_error(&error, json_requested);
-            FAILURE
-        }
+        Err(error) => error_result(
+            print_error(&error, json_requested, stdout, stderr),
+            json_requested,
+        ),
     }
 }
 
@@ -158,7 +181,7 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
         Command::Sleep(arguments) => sleep(client, arguments).await,
         Command::Agent(arguments) => agent(client, arguments.agent).await,
         Command::AgentStatus(arguments) => agent_status(client, arguments).await,
-        Command::Doctor => doctor(client).await,
+        Command::Doctor(arguments) => doctor(client, arguments).await,
         Command::Import(_) => import_from_swarm(client).await,
         Command::Update => update(client).await,
         Command::Daemon(_) => Err(validation("daemon commands must run before connecting")),
@@ -207,12 +230,12 @@ fn command_requests_json(command: &Command) -> bool {
         Command::Kill(arguments) => arguments.json,
         Command::Sleep(arguments) => arguments.json,
         Command::AgentStatus(arguments) => arguments.json,
+        Command::Doctor(arguments) => arguments.json,
         Command::Exec(_)
         | Command::WatchChild(_)
         | Command::Open(_)
         | Command::Path(_)
         | Command::Agent(_)
-        | Command::Doctor
         | Command::Import(_)
         | Command::Update
         | Command::Daemon(_)
@@ -277,11 +300,35 @@ async fn wait_event(
     }
 }
 
-fn print_error(error: &ProtoError, json: bool) {
+fn print_error(
+    error: &ProtoError,
+    json: bool,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<()> {
     if json {
-        println!("{}", error_json(error));
+        writeln!(stdout, "{}", error_json(error))
     } else {
-        eprintln!("fleet: {}", error.message);
+        writeln!(stderr, "fleet: {}", error.message)
+    }
+}
+
+fn stdout_result(result: io::Result<()>, exit_code: i32, stderr: &mut impl Write) -> i32 {
+    match result {
+        Ok(()) => exit_code,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => 0,
+        Err(error) => {
+            let _ = writeln!(stderr, "fleet: could not write output: {error}");
+            FAILURE
+        }
+    }
+}
+
+fn error_result(result: io::Result<()>, written_to_stdout: bool) -> i32 {
+    match result {
+        Ok(()) => FAILURE,
+        Err(error) if written_to_stdout && error.kind() == io::ErrorKind::BrokenPipe => 0,
+        Err(_) => FAILURE,
     }
 }
 

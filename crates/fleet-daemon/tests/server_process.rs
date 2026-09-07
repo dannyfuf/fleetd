@@ -9,6 +9,7 @@ mod infra;
 
 use infra::DaemonProcess;
 
+use fleet_daemon::server::SingletonGuard;
 use fleet_proto::{
     PROTOCOL_VERSION,
     codec::FleetCodec,
@@ -76,6 +77,30 @@ async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
     daemon.wait().await;
     assert!(!socket.exists());
     assert!(!home.join("fleetd.pid").exists());
+}
+
+#[tokio::test]
+async fn singleton_precedes_all_recovery_mutation() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let home = temp.path().join("fleet-home");
+    let _owner = SingletonGuard::acquire(&home)
+        .await
+        .expect("acquire competing singleton");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fleetd"))
+        .arg("--home")
+        .arg(&home)
+        .output()
+        .expect("run rejected fleetd");
+
+    assert!(
+        !output.status.success(),
+        "second daemon unexpectedly started"
+    );
+    assert!(
+        !home.join("logs").exists(),
+        "rejected startup mutated daemon state before singleton acquisition"
+    );
 }
 
 #[test]

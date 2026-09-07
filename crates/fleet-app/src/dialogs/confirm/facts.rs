@@ -22,8 +22,7 @@ pub fn target_ref(target_branch: &str) -> String {
     if branch.is_empty() {
         return "the base ref".to_owned();
     }
-    if branch.contains('/') && !branch.starts_with("refs/") {
-        // Already qualified, e.g. `origin/main` or `upstream/main`.
+    if branch.starts_with("origin/") {
         return branch.to_owned();
     }
     format!("origin/{branch}")

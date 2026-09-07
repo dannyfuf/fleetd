@@ -39,11 +39,11 @@ pub(crate) fn render(
     root(focus)
         .on_action(move |_: &confirm_actions::Accept, _window, cx| {
             if !strong_required(&accept_state, cx) {
-                commit(&accept_state, &accept_bridge, cx);
+                commit(&accept_state, &accept_bridge, ConfirmKey::Lower, cx);
             }
         })
         .on_action(move |_: &confirm_actions::AcceptStrong, _window, cx| {
-            commit(&strong_state, &strong_bridge, cx);
+            commit(&strong_state, &strong_bridge, ConfirmKey::Upper, cx);
         })
         .on_action(move |_: &confirm_actions::Recheck, _window, cx| {
             recheck(&recheck_state, &recheck_bridge, cx);
@@ -104,6 +104,7 @@ pub(super) fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyE
         facts.list = facts.list.fact(Fact::unknown(error.clone()));
     }
     let compact = facts.list.is_compact();
+    let policy = confirmation_policy(draft, now);
 
     let mut hints = KeyHintRow::new();
     if request.rechecks() {
@@ -122,9 +123,7 @@ pub(super) fn facts_card(request: &ConfirmRequest, draft: &ConfirmState) -> AnyE
     if show_target {
         card = card.target(target);
     }
-    if request.always_strong() {
-        card = card.force_confirm_key(ConfirmKey::Upper);
-    }
+    card = card.force_confirm_key(policy.key);
     if let Some(age) = facts.age_secs {
         card = card.stamp(FreshnessStamp::new("checked", age).action("I", "re-check"));
     }
@@ -191,13 +190,34 @@ pub(super) fn prune_card(
     let age = draft
         .checked_at
         .map_or(0, |at| i64::try_from(at.elapsed().as_secs()).unwrap_or(0));
-    let body = body.child(FreshnessStamp::new("dry run · fetched", age));
+    let mut body = body.child(FreshnessStamp::new("dry run · fetched", age));
+    let policy = confirmation_policy(draft, now_unix());
+    let primary = if policy.authorized {
+        format!(
+            "{}  Prune {deleted}",
+            if policy.key == ConfirmKey::Upper {
+                "Y"
+            } else {
+                "y"
+            }
+        )
+    } else {
+        "re-check required".to_owned()
+    };
+    if let Some(error) = draft.error.as_ref() {
+        body = body.child(Text::ui(error.clone()).tone(Tone::Danger));
+    }
     Dialog::new(format!("{} — {deleted} of {total}", request.title(true)))
         .icon(Icon::Scissors)
         .width(crate::dialogs::Dialogs::Settings.width(cx))
         .tone(Tone::Warning)
         .body(body)
-        .hint_row(KeyHintRow::new().key("s", "keep list").key("n", "cancel"))
-        .primary(format!("y  Prune {deleted}"))
+        .hint_row(
+            KeyHintRow::new()
+                .key("I", "re-check")
+                .key("s", "keep list")
+                .key("n", "cancel"),
+        )
+        .primary(primary)
         .into_any_element()
 }

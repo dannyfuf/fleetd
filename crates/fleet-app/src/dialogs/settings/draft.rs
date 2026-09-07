@@ -17,6 +17,18 @@ pub struct SettingsState {
     pub(crate) editing: Option<TextFieldState>,
     /// The exact error from a refused write.
     pub(crate) error: Option<String>,
+    /// Config load failure; `Enter` retries it.
+    pub(crate) config_error: Option<String>,
+    /// A config load is awaiting its reply.
+    pub(crate) config_loading: bool,
+    /// Keep-alive diagnostics load failure; `Enter` retries it.
+    pub(crate) matches_error: Option<String>,
+    /// A diagnostics load is awaiting its reply.
+    pub(crate) matches_loading: bool,
+    /// Prevents duplicate config writes for one opening.
+    pub(crate) save_in_flight: bool,
+    /// Prevents duplicate doctor requests for one opening.
+    pub(crate) doctor_in_flight: bool,
     /// Bumps on every seed; a late answer to a superseded dialog is dropped.
     pub(crate) seq: u64,
     pub(crate) scroll: gpui::ScrollHandle,
@@ -40,6 +52,73 @@ impl SettingsState {
             (Some(config), Some(original)) => config != original,
             _ => false,
         }
+    }
+
+    pub(super) fn load_error(&self) -> Option<String> {
+        match (&self.config_error, &self.matches_error) {
+            (Some(config), Some(matches)) => Some(format!(
+                "{config}; {matches} — Enter to retry configuration"
+            )),
+            (Some(error), None) => Some(format!("{error} — Enter to retry")),
+            (None, Some(error)) => Some(format!("{error} — diagnostics will retry when you save")),
+            (None, None) => None,
+        }
+    }
+
+    pub(super) fn take_failed_loads(&mut self) -> (bool, bool) {
+        let config_failed = self.config_error.take().is_some();
+        let config = config_failed || (self.config.is_none() && !self.config_loading);
+        let matches = self.matches_error.take().is_some();
+        (config, matches)
+    }
+
+    pub(super) fn editing_is_valid(&self) -> bool {
+        let Some(input) = self.editing.as_ref() else {
+            return true;
+        };
+        match self.focused_row().map(|row| row.kind) {
+            Some(RowKind::Text(_)) => true,
+            Some(RowKind::Number { min, .. }) => input
+                .text()
+                .trim()
+                .parse::<i64>()
+                .is_ok_and(|value| value >= min),
+            _ => false,
+        }
+    }
+
+    pub(super) fn begin_save(&mut self) -> Option<u64> {
+        if self.save_in_flight {
+            return None;
+        }
+        self.save_in_flight = true;
+        self.error = None;
+        Some(self.seq)
+    }
+
+    pub(super) fn finish_save(&mut self, seq: u64) -> bool {
+        if self.seq != seq || !self.save_in_flight {
+            return false;
+        }
+        self.save_in_flight = false;
+        true
+    }
+
+    pub(super) fn begin_doctor(&mut self) -> Option<u64> {
+        if self.doctor_in_flight {
+            return None;
+        }
+        self.doctor_in_flight = true;
+        self.error = None;
+        Some(self.seq)
+    }
+
+    pub(super) fn finish_doctor(&mut self, seq: u64) -> bool {
+        if self.seq != seq || !self.doctor_in_flight {
+            return false;
+        }
+        self.doctor_in_flight = false;
+        true
     }
 }
 
@@ -111,25 +190,51 @@ pub(super) fn stepped_duration(current: u64, delta: isize) -> u64 {
         .unwrap_or(current)
 }
 
-/// Writes an edited text or number value back into the draft, clamping to the row's minimum.
-pub fn commit_value(config: &mut Config, id: &RowId, raw: &str) {
-    let number = |min: i64| raw.trim().parse::<i64>().unwrap_or(min).max(min);
+/// Writes a complete, valid edit back into the draft.
+pub fn commit_value(config: &mut Config, id: &RowId, raw: &str) -> bool {
+    let number = |min: i64| raw.trim().parse::<i64>().ok().filter(|value| *value >= min);
     match id {
         RowId::ClaudeCommand => config.agent_commands.claude = raw.to_owned(),
         RowId::OpencodeCommand => config.agent_commands.opencode = raw.to_owned(),
-        RowId::GraceMs => config.sleep.grace_ms = number(0),
+        RowId::GraceMs => {
+            let Some(value) = number(0) else { return false };
+            config.sleep.grace_ms = value;
+        }
         RowId::HotFreshnessMs => {
-            config.hot_freshness_ms = u64::try_from(number(0)).unwrap_or_default();
+            let Some(value) = number(0).and_then(|value| u64::try_from(value).ok()) else {
+                return false;
+            };
+            config.hot_freshness_ms = value;
         }
         RowId::HotRefreshIntervalMs => {
-            config.hot_refresh_interval_ms = u64::try_from(number(0)).unwrap_or_default();
+            let Some(value) = number(0).and_then(|value| u64::try_from(value).ok()) else {
+                return false;
+            };
+            config.hot_refresh_interval_ms = value;
         }
-        RowId::RepoCacheSeconds => config.github.cache_ttl_seconds = number(0),
-        RowId::PrCacheSeconds => config.github.pr_ttl_seconds = number(0),
-        RowId::StatusRefreshMs => config.ui.status_refresh_ms = number(500),
-        RowId::RemoteStatusRefreshMs => config.ui.remote_status_refresh_ms = number(500),
-        _ => {}
+        RowId::RepoCacheSeconds => {
+            let Some(value) = number(0) else { return false };
+            config.github.cache_ttl_seconds = value;
+        }
+        RowId::PrCacheSeconds => {
+            let Some(value) = number(0) else { return false };
+            config.github.pr_ttl_seconds = value;
+        }
+        RowId::StatusRefreshMs => {
+            let Some(value) = number(500) else {
+                return false;
+            };
+            config.ui.status_refresh_ms = value;
+        }
+        RowId::RemoteStatusRefreshMs => {
+            let Some(value) = number(500) else {
+                return false;
+            };
+            config.ui.remote_status_refresh_ms = value;
+        }
+        _ => return false,
     }
+    true
 }
 
 /// The row the cursor is on, if any.
@@ -414,7 +519,7 @@ pub(super) fn flush(state: &Entity<AppState>, cx: &mut App) {
             return;
         };
         if let (Some(config), Some(input)) = (&mut draft.config, &draft.editing) {
-            commit_value(config, &id, input.text());
+            let _valid = commit_value(config, &id, input.text());
         }
         draft.update_selected();
     });

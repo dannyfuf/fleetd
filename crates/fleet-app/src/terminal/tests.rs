@@ -666,16 +666,41 @@ fn yanked_text_spans_every_line_the_selection_covers() {
     // selection that started three pages up still yields all of its lines.
     let mut history = BTreeMap::new();
     for (offset, line) in ["one", "two", "three", "four"].into_iter().enumerate() {
-        history.insert(890 + offset as u64, line.to_owned());
+        history.insert(890 + offset as u64, cache_row(line, false));
     }
-    assert_eq!(selection_text(&history, 890, 893), "one\ntwo\nthree\nfour");
     assert_eq!(
-        selection_text(&history, 893, 890),
-        "one\ntwo\nthree\nfour",
+        try_selection_text(&history, 890, 893).as_deref(),
+        Some("one\ntwo\nthree\nfour")
+    );
+    assert_eq!(
+        try_selection_text(&history, 893, 890).as_deref(),
+        Some("one\ntwo\nthree\nfour"),
         "the range is the same in either direction"
     );
-    assert_eq!(selection_text(&history, 891, 892), "two\nthree");
-    assert_eq!(selection_text(&history, 500, 501), "");
+    assert_eq!(
+        try_selection_text(&history, 891, 892).as_deref(),
+        Some("two\nthree")
+    );
+    assert_eq!(try_selection_text(&history, 500, 501), None);
+}
+
+#[test]
+fn keyboard_copy_rejects_gaps_and_joins_wrapped_lines() {
+    let history = BTreeMap::from([
+        (10, cache_row("soft ", true)),
+        (11, cache_row("wrap", false)),
+        (12, cache_row("next", false)),
+    ]);
+    assert_eq!(
+        try_selection_text(&history, 10, 12),
+        Some("soft wrap\nnext".to_owned())
+    );
+
+    let history_with_gap = BTreeMap::from([
+        (10, cache_row("first", false)),
+        (12, cache_row("third", false)),
+    ]);
+    assert_eq!(try_selection_text(&history_with_gap, 10, 12), None);
 }
 
 #[test]

@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn failed_snapshot_retry_is_full() {
+    let mut engine = GhosttyEngine::new(8, 2, 1024).unwrap();
+    engine.feed(b"recover me");
+    engine.fail_next = Some(TestFailure::Snapshot);
+
+    assert!(engine.try_take_frame(false).is_err());
+    let recovered = engine.try_take_frame(false).unwrap();
+    assert!(recovered.full);
+    assert_eq!(recovered.rows_changed.len(), usize::from(recovered.rows));
+    assert!(
+        recovered.rows_changed[0]
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .contains("recover")
+    );
+}
+
+#[test]
+fn encoding_failures_are_retryable() {
+    let mut engine = GhosttyEngine::new(80, 24, 1024).unwrap();
+    let key = KeyEvent {
+        key: Key::Char('x'),
+        mods: Modifiers::empty(),
+        text: Some("x".to_owned()),
+        action: KeyAction::Press,
+    };
+    engine.fail_next = Some(TestFailure::Key);
+    assert!(engine.try_encode_key(&key).is_err());
+    assert_eq!(engine.try_encode_key(&key).unwrap(), b"x");
+
+    engine.feed(b"\x1b[?1002h\x1b[?1006h");
+    let mouse = MouseEvent {
+        button: MouseButton::Left,
+        kind: MouseEventKind::Press,
+        col: 1,
+        row: 1,
+        mods: Modifiers::empty(),
+    };
+    engine.fail_next = Some(TestFailure::Mouse);
+    assert!(engine.try_encode_mouse(&mouse).is_err());
+    assert!(!engine.mouse_button_down);
+    assert!(!engine.try_encode_mouse(&mouse).unwrap().is_empty());
+    assert!(engine.mouse_button_down);
+
+    engine.fail_next = Some(TestFailure::Mouse);
+    let wheel = WheelEvent {
+        steps: -1,
+        col: 1,
+        row: 1,
+        mods: Modifiers::SHIFT,
+    };
+    assert!(engine.try_wheel(&wheel).is_err());
+    assert!(matches!(
+        engine.try_wheel(&wheel),
+        Ok(WheelAction::Pty(bytes)) if !bytes.is_empty()
+    ));
+
+    engine.fail_next = Some(TestFailure::Compression);
+    assert!(engine.try_compress_idle().is_err());
+    assert!(engine.try_compress_idle().is_ok());
+}
+
+#[test]
 fn wheel_press_does_not_leave_a_held_button() {
     use fleet_proto::terminal::{Modifiers, MouseButton, MouseEventKind};
     let mut engine = GhosttyEngine::new(80, 24, 1024 * 1024).unwrap();

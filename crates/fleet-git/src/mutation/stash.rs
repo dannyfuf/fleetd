@@ -1,4 +1,4 @@
-use crate::{CommandKind, MutationResult, Repository, Result, StashOptions};
+use crate::{CommandKind, GitError, MutationResult, ObjectId, Repository, Result, StashOptions};
 
 impl Repository {
     /// Creates a stash.
@@ -27,6 +27,39 @@ impl Repository {
     /// Drops a stash.
     pub async fn stash_drop(&self, index: usize) -> Result<MutationResult> {
         self.stash_command("drop", index).await
+    }
+
+    /// Drops a stash only while the mutable selector still resolves to the reviewed object.
+    pub async fn stash_drop_verified(
+        &self,
+        index: usize,
+        expected: &ObjectId,
+    ) -> Result<MutationResult> {
+        let _guard = self.mutation_lock.lock().await;
+        let selector = format!("stash@{{{index}}}");
+        let resolved = self
+            .runner
+            .run(
+                self.command(CommandKind::Read)
+                    .args(["rev-parse", "--verify", "--end-of-options"])
+                    .arg(&selector)
+                    .foreground_read(),
+            )
+            .await?;
+        let actual = String::from_utf8_lossy(&resolved.stdout).trim().to_owned();
+        if actual != expected.as_str() {
+            return Err(GitError::parse(
+                "stash drop",
+                "the selected stash moved; refresh and select it again",
+            ));
+        }
+        let output = self
+            .run_one(
+                self.command(CommandKind::Mutation)
+                    .args(["stash", "drop", &selector]),
+            )
+            .await?;
+        Ok(super::result_from_outputs(vec![output]))
     }
 
     /// Creates a branch from a stash and applies it.

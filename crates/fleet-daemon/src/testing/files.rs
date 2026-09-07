@@ -8,7 +8,10 @@ use std::{
 };
 
 use super::lock;
-use crate::{DaemonError, DaemonResult, adapters::files::Files};
+use crate::{
+    DaemonError, DaemonResult,
+    adapters::files::{FileKind, FileMetadata, Files},
+};
 
 /// A captured fake filesystem operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +28,10 @@ pub enum FakeFilesCall {
     Rename(PathBuf, PathBuf),
     /// Removal of one file or tree.
     Remove(PathBuf),
+    /// Metadata inspection of one path.
+    Metadata(PathBuf),
+    /// Listing of one directory.
+    List(PathBuf),
 }
 
 impl FakeFilesCall {
@@ -34,6 +41,8 @@ impl FakeFilesCall {
             | Self::Write(path, _)
             | Self::CreateDir(path)
             | Self::Remove(path)
+            | Self::Metadata(path)
+            | Self::List(path)
             | Self::Clone(path, _)
             | Self::Rename(path, _) => path,
         }
@@ -43,9 +52,12 @@ impl FakeFilesCall {
 #[derive(Default)]
 struct Tree {
     files: BTreeMap<PathBuf, String>,
+    file_identities: BTreeMap<PathBuf, u64>,
     directories: BTreeSet<PathBuf>,
     calls: Vec<FakeFilesCall>,
     failures: VecDeque<(FakeFilesCall, io::ErrorKind)>,
+    replacements_before_conditional_remove: BTreeMap<PathBuf, String>,
+    next_identity: u64,
 }
 
 impl Tree {
@@ -65,6 +77,22 @@ impl Tree {
 
     fn exists(&self, path: &Path) -> bool {
         self.files.contains_key(path) || self.directories.contains(path)
+    }
+
+    fn metadata(&self, path: &Path) -> DaemonResult<FileMetadata> {
+        if let Some(identity) = self.file_identities.get(path) {
+            Ok(FileMetadata::fake(FileKind::File, *identity))
+        } else if self.directories.contains(path) {
+            Ok(FileMetadata::fake(FileKind::Directory, 0))
+        } else {
+            Err(failure(path, io::ErrorKind::NotFound))
+        }
+    }
+
+    fn insert_file(&mut self, path: PathBuf, text: String) {
+        self.next_identity = self.next_identity.saturating_add(1);
+        self.files.insert(path.clone(), text);
+        self.file_identities.insert(path, self.next_identity);
     }
 
     fn create_dirs(&mut self, path: &Path) -> DaemonResult<()> {
@@ -91,14 +119,18 @@ impl Tree {
         Ok(())
     }
 
-    fn copy(&mut self, source: &Path, destination: &Path) {
+    fn copy(&mut self, source: &Path, destination: &Path, preserve_identity: bool) {
         let files = self
             .files
             .iter()
             .filter_map(|(path, text)| {
-                path.strip_prefix(source)
-                    .ok()
-                    .map(|suffix| (destination.join(suffix), text.clone()))
+                path.strip_prefix(source).ok().map(|suffix| {
+                    (
+                        destination.join(suffix),
+                        text.clone(),
+                        self.file_identities.get(path).copied().unwrap_or_default(),
+                    )
+                })
             })
             .collect::<Vec<_>>();
         let directories = self
@@ -110,12 +142,21 @@ impl Tree {
                     .map(|suffix| destination.join(suffix))
             })
             .collect::<Vec<_>>();
-        self.files.extend(files);
+        for (path, text, identity) in files {
+            if preserve_identity {
+                self.files.insert(path.clone(), text);
+                self.file_identities.insert(path, identity);
+            } else {
+                self.insert_file(path, text);
+            }
+        }
         self.directories.extend(directories);
     }
 
     fn remove_tree(&mut self, path: &Path) {
         self.files
+            .retain(|candidate, _| !candidate.starts_with(path));
+        self.file_identities
             .retain(|candidate, _| !candidate.starts_with(path));
         self.directories
             .retain(|candidate| !candidate.starts_with(path));
@@ -127,7 +168,7 @@ impl Tree {
 pub struct FakeFiles {
     tree: Mutex<Tree>,
     trash_root: PathBuf,
-    removable_roots: Vec<PathBuf>,
+    removable_roots: Mutex<Vec<PathBuf>>,
 }
 
 impl FakeFiles {
@@ -136,7 +177,7 @@ impl FakeFiles {
     pub fn new(trash_root: PathBuf, removable_roots: Vec<PathBuf>) -> Self {
         Self {
             trash_root,
-            removable_roots,
+            removable_roots: Mutex::new(removable_roots),
             ..Self::default()
         }
     }
@@ -149,7 +190,18 @@ impl FakeFiles {
             tree.directories
                 .extend(parent.ancestors().map(Path::to_path_buf));
         }
-        tree.files.insert(path, text.into());
+        tree.insert_file(path, text.into());
+    }
+
+    /// Replaces a file immediately before its next identity-checked removal.
+    pub fn replace_before_conditional_remove(
+        &self,
+        path: impl Into<PathBuf>,
+        text: impl Into<String>,
+    ) {
+        lock(&self.tree)
+            .replacements_before_conditional_remove
+            .insert(path.into(), text.into());
     }
 
     /// Fails the next matching operation once, before it mutates the tree.
@@ -208,7 +260,7 @@ impl Files for FakeFiles {
             return Err(failure(source, io::ErrorKind::NotADirectory));
         }
         tree.require_parent(destination)?;
-        tree.copy(source, destination);
+        tree.copy(source, destination, false);
         Ok(())
     }
 
@@ -221,7 +273,7 @@ impl Files for FakeFiles {
         if let Some(parent) = path.parent() {
             tree.create_dirs(parent)?;
         }
-        tree.files.insert(path.to_path_buf(), text.to_owned());
+        tree.insert_file(path.to_path_buf(), text.to_owned());
         Ok(())
     }
 
@@ -256,12 +308,13 @@ impl Files for FakeFiles {
         } else if tree.directories.contains(destination) {
             return Err(failure(destination, io::ErrorKind::IsADirectory));
         }
-        tree.copy(source, destination);
+        tree.copy(source, destination, true);
         tree.remove_tree(source);
         Ok(())
     }
 
     fn trash(&self, path: &Path) -> DaemonResult<PathBuf> {
+        self.guard_strict_descendant(path)?;
         self.create_dir_all(&self.trash_root)?;
         let name = path
             .file_name()
@@ -287,7 +340,28 @@ impl Files for FakeFiles {
             return Err(failure(path, io::ErrorKind::IsADirectory));
         }
         tree.files.remove(path);
+        tree.file_identities.remove(path);
         Ok(())
+    }
+
+    fn metadata(&self, path: &Path) -> DaemonResult<FileMetadata> {
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::Metadata(path.to_path_buf()))?;
+        tree.metadata(path)
+    }
+
+    fn remove_file_if_unchanged(&self, path: &Path, expected: FileMetadata) -> DaemonResult<bool> {
+        let mut tree = lock(&self.tree);
+        if let Some(text) = tree.replacements_before_conditional_remove.remove(path) {
+            tree.insert_file(path.to_path_buf(), text);
+        }
+        if tree.metadata(path).ok() != Some(expected) || expected.kind != FileKind::File {
+            return Ok(false);
+        }
+        tree.record(FakeFilesCall::Remove(path.to_path_buf()))?;
+        tree.files.remove(path);
+        tree.file_identities.remove(path);
+        Ok(true)
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -295,7 +369,8 @@ impl Files for FakeFiles {
     }
 
     fn list(&self, path: &Path) -> DaemonResult<Vec<PathBuf>> {
-        let tree = lock(&self.tree);
+        let mut tree = lock(&self.tree);
+        tree.record(FakeFilesCall::List(path.to_path_buf()))?;
         if tree.files.contains_key(path) {
             return Err(failure(path, io::ErrorKind::NotADirectory));
         }
@@ -315,20 +390,45 @@ impl Files for FakeFiles {
 
     fn guard_strict_descendant(&self, path: &Path) -> DaemonResult<()> {
         let path = crate::adapters::files::absolute_lexical(path);
-        if self
+        let root = self
             .removable_roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .chain(std::iter::once(&self.trash_root))
-            .map(|root| crate::adapters::files::absolute_lexical(root))
-            .any(|root| path != root && path.starts_with(root))
-        {
-            Ok(())
-        } else {
-            Err(DaemonError::Validation(format!(
-                "unsafe removal: {}",
-                path.display()
-            )))
+            .map(|root| (crate::adapters::files::absolute_lexical(root), root.clone()))
+            .filter(|(root, _)| path != *root && path.starts_with(root))
+            .max_by_key(|(root, _)| root.components().count())
+            .ok_or_else(|| {
+                DaemonError::Validation(format!("unsafe removal: {}", path.display()))
+            })?;
+        let tree = lock(&self.tree);
+        if !tree.directories.contains(&root.1) {
+            return Err(failure(&root.1, io::ErrorKind::NotFound));
         }
+        let relative = path
+            .strip_prefix(&root.0)
+            .map_err(|_| DaemonError::Validation(format!("unsafe removal: {}", path.display())))?;
+        let mut parent = root.1;
+        if let Some(relative_parent) = relative.parent() {
+            for component in relative_parent.components() {
+                parent.push(component);
+                if tree.files.contains_key(&parent) {
+                    return Err(failure(&parent, io::ErrorKind::NotADirectory));
+                }
+                if !tree.directories.contains(&parent) {
+                    return Err(failure(&parent, io::ErrorKind::NotFound));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set_removable_roots(&self, roots: Vec<PathBuf>) {
+        *self
+            .removable_roots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
     }
 }
 
@@ -422,5 +522,59 @@ mod tests {
             .rename(Path::new("/data/source"), Path::new("/data/moved"))
             .expect("one-shot failure consumed");
         assert!(!files.exists(Path::new("/data/source")));
+    }
+
+    fn assert_missing_intermediate_is_rejected(files: &dyn Files, root: &Path) {
+        files.create_dir_all(root).expect("root");
+        let error = files
+            .guard_strict_descendant(&root.join("missing/item"))
+            .expect_err("missing parent must be rejected");
+        assert!(
+            matches!(error, DaemonError::Filesystem { source, .. } if source.kind() == io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn fake_and_real_guards_reject_missing_intermediate_directories() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fake_root = temp.path().join("fake");
+        assert_missing_intermediate_is_rejected(
+            &FakeFiles::new(temp.path().join("fake-trash"), vec![fake_root.clone()]),
+            &fake_root,
+        );
+        let real_root = temp.path().join("real");
+        assert_missing_intermediate_is_rejected(
+            &RealFiles::new(temp.path().join("real-trash"), [real_root.clone()]),
+            &real_root,
+        );
+    }
+
+    fn assert_trash_is_confined(files: &dyn Files, outside: &Path) {
+        files
+            .atomic_write_text(outside, "keep")
+            .expect("outside fixture");
+        assert!(files.trash(outside).is_err());
+        assert!(files.exists(outside));
+    }
+
+    #[test]
+    fn fake_and_real_trash_reject_paths_outside_removable_roots() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fake_outside = temp.path().join("fake-outside/item");
+        assert_trash_is_confined(
+            &FakeFiles::new(
+                temp.path().join("fake-trash"),
+                vec![temp.path().join("fake-root")],
+            ),
+            &fake_outside,
+        );
+        let real_outside = temp.path().join("real-outside/item");
+        assert_trash_is_confined(
+            &RealFiles::new(
+                temp.path().join("real-trash"),
+                [temp.path().join("real-root")],
+            ),
+            &real_outside,
+        );
     }
 }

@@ -86,17 +86,13 @@ impl AgentPopup {
         let root = root.on_action(move |_: &scroll::Yank, _, cx| {
             let text = {
                 let local = yank_local.borrow();
-                local
-                    .anchor
-                    .map(|anchor| selection_text(&local.history, anchor, local.caret))
+                local.anchor.map_or(CurrentSelectionText::None, |anchor| {
+                    try_selection_text(&local.history, anchor, local.caret)
+                        .map_or(CurrentSelectionText::Missing, CurrentSelectionText::Text)
+                })
             };
-            if let Some(text) = text {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                yank_local.borrow_mut().clear_selections();
-                yank_state.update(cx, |app, cx| {
-                    app.toast_short("copied", fleet_ui_kit::Icon::ClipboardCheck, Instant::now());
-                    cx.notify();
-                });
+            if copy_to_clipboard(&yank_local, &yank_state, text, cx) {
+                yank_local.borrow_mut().clear_line_selection();
             }
         });
         let exit_local = Rc::clone(&self.local);
@@ -126,10 +122,10 @@ pub(super) fn send_literal(
     local: &Rc<RefCell<Local>>,
     state: &Entity<AppState>,
     bridge: &Bridge,
-    cx: &App,
+    cx: &mut App,
 ) {
     if let Some(target) = popup_input_target(state.read(cx)) {
-        send_or_queue(
+        let accepted = send_or_queue(
             local,
             bridge,
             target,
@@ -140,6 +136,7 @@ pub(super) fn send_literal(
                 action: KeyAction::Press,
             }),
         );
+        surface::report_input_delivery(accepted, state, cx);
     }
 }
 

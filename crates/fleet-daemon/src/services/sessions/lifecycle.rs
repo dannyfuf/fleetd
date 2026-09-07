@@ -8,6 +8,15 @@ impl Sessions {
         agent: Option<Agent>,
         sleep_previous: bool,
     ) -> DaemonResult<Session> {
+        let _worktree_lifecycle = if let Some(worktree) = worktree.as_ref() {
+            Some(
+                self.runtime
+                    .claim_worktree_lifecycle(worktree.clone())
+                    .await,
+            )
+        } else {
+            None
+        };
         let config = self.config.load().await?;
         let (session_id, kind, cwd, specs) = match (worktree, agent) {
             (Some(worktree_id), None) => {
@@ -174,6 +183,10 @@ impl Sessions {
 
     /// Hard-kills a runtime session and all of its terminals.
     pub async fn kill(&self, session: SessionId) -> DaemonResult<()> {
+        let _transition = self
+            .runtime
+            .claim_terminal_transition(session.clone())
+            .await;
         if self.runtime.kill_if_present(&session) {
             Ok(())
         } else if self.is_remote_session(&session).await? {
@@ -194,10 +207,14 @@ impl Sessions {
         command: String,
         cwd: String,
     ) -> DaemonResult<Terminal> {
+        validate_terminal_input(&name, &command)?;
+        let _transition = self
+            .runtime
+            .claim_terminal_transition(session.clone())
+            .await;
         if is_native_command(&command) {
             return self.new_native_terminal(session, name, command, cwd);
         }
-        validate_terminal_input(&name, &command)?;
         let terminal_id = {
             let mut registry = self
                 .runtime
@@ -228,8 +245,12 @@ impl Sessions {
             1,
         )
         .await?;
-        forward_host_events(Arc::clone(&self.runtime), terminal_id, &host)?;
         let host = Arc::new(host);
+        let forwarder = host_bridge::prepare_host_events(
+            Arc::clone(&self.runtime),
+            terminal_id,
+            Arc::clone(&host),
+        )?;
         {
             let mut registry = self
                 .runtime
@@ -246,7 +267,9 @@ impl Sessions {
                 .terminal_sessions
                 .insert(terminal_id, session.clone());
             registry.hosts.insert(terminal_id, host);
+            registry.observed_output_bytes.insert(terminal_id, 0);
         }
+        forwarder.start()?;
         self.runtime.notify_session(&session);
         Ok(terminal)
     }
@@ -309,13 +332,27 @@ impl Sessions {
     /// Closes one terminal without affecting siblings; closing the last removes the session.
     pub async fn close_terminal(&self, terminal: TerminalId) -> DaemonResult<()> {
         self.runtime
-            .close_terminal_if_present(terminal)
+            .close_terminal_gated(terminal)
+            .await
             .map(|_| ())
             .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))
     }
 
     /// Recreates an exited terminal from its retained command and working directory.
     pub async fn restart_terminal(&self, terminal: TerminalId) -> DaemonResult<Terminal> {
+        let session_id = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal_sessions
+            .get(&terminal)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+        let _transition = self
+            .runtime
+            .claim_terminal_transition(session_id.clone())
+            .await;
         let (session_id, old, starting_sequence) = {
             let registry = self
                 .runtime
@@ -359,7 +396,12 @@ impl Sessions {
             starting_sequence,
         )
         .await?;
-        forward_host_events(Arc::clone(&self.runtime), terminal, &host)?;
+        let host = Arc::new(host);
+        let forwarder = host_bridge::prepare_host_events(
+            Arc::clone(&self.runtime),
+            terminal,
+            Arc::clone(&host),
+        )?;
         {
             let mut registry = self
                 .runtime
@@ -376,8 +418,10 @@ impl Sessions {
                 .find(|entry| entry.id == terminal)
                 .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
             *entry = replacement.clone();
-            registry.hosts.insert(terminal, Arc::new(host));
+            registry.hosts.insert(terminal, host);
+            registry.observed_output_bytes.insert(terminal, 0);
         }
+        forwarder.start()?;
         self.runtime.notify_session(&session_id);
         Ok(replacement)
     }
@@ -393,6 +437,16 @@ impl Sessions {
                 "terminal name must not be empty".to_owned(),
             ));
         }
+        let owning_session = self
+            .runtime
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal_sessions
+            .get(&terminal)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+        let _transition = self.runtime.claim_terminal_transition(owning_session).await;
         let mut registry = self
             .runtime
             .registry

@@ -1,6 +1,66 @@
 use super::*;
 
+pub(super) fn copy_path_outcome(
+    result: Result<ResponseBody, ProtoError>,
+) -> Result<String, ProtoError> {
+    match result {
+        Ok(ResponseBody::Path(path)) => Ok(path),
+        Ok(_) => Err(client_error("daemon returned an unexpected path response")),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn restore_acknowledged(
+    result: Result<ResponseBody, ProtoError>,
+) -> Result<(), ProtoError> {
+    match result {
+        Ok(ResponseBody::Ack) => Ok(()),
+        Ok(_) => Err(client_error(
+            "daemon returned an unexpected restore response",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
 impl HubCtx {
+    fn activate_repo(&self, scope: RepoScope, cx: &mut App) {
+        self.state.update(cx, |state, cx| {
+            state.scope = scope;
+            state.cursors.worktrees = 0;
+            state.hub_pane = HubPane::List;
+            cx.notify();
+        });
+        self.hub.update(cx, |hub, _| {
+            hub.selection.worktree = None;
+        });
+        self.schedule_inspection(cx);
+    }
+
+    /// Activates the row captured by the filter using the same Hub-owned state as normal rows.
+    pub(crate) fn activate_filter_target(&self, target: DisplayedTarget, cx: &mut App) {
+        match target {
+            DisplayedTarget::AllRepos => self.activate_repo(RepoScope::All, cx),
+            DisplayedTarget::Repo(repo) => self.activate_repo(RepoScope::Repo(repo), cx),
+            DisplayedTarget::CloneFailed { job, .. } => {
+                self.state.update(cx, |state, cx| {
+                    state.open_overlay(Overlay::Jobs);
+                    state.jobs_focus = job;
+                    cx.notify();
+                });
+            }
+            DisplayedTarget::Worktree(id) => {
+                if !self.refuses(cx) {
+                    self.open_session(id, true, cx);
+                }
+            }
+            DisplayedTarget::PullRequest(row) => {
+                if !self.refuses(cx) {
+                    self.open_pr_row(row.repo, row.number, row.local, true, true, cx);
+                }
+            }
+        }
+    }
+
     pub(super) fn open_repo(&self, cx: &mut App) {
         let Some(row) = self.selected_rail_row(cx) else {
             return;
@@ -9,20 +69,16 @@ impl HubCtx {
             // §3.2: `Enter` on a failed clone opens the Jobs panel focused on that job.
             self.state.update(cx, |state, cx| {
                 state.open_overlay(Overlay::Jobs);
+                state.jobs_focus = row.job;
                 cx.notify();
             });
             return;
         }
-        self.state.update(cx, |state, cx| {
-            state.scope = match &row.repo {
-                Some(repo) if row.kind != RailKind::All => RepoScope::Repo(repo.clone()),
-                _ => RepoScope::All,
-            };
-            state.cursors.worktrees = 0;
-            state.hub_pane = HubPane::List;
-            cx.notify();
-        });
-        self.schedule_inspection(cx);
+        let scope = match &row.repo {
+            Some(repo) if row.kind != RailKind::All => RepoScope::Repo(repo.clone()),
+            _ => RepoScope::All,
+        };
+        self.activate_repo(scope, cx);
     }
 
     pub(super) fn delete_repo(&self, cx: &mut App) {
@@ -102,10 +158,7 @@ impl HubCtx {
         match result {
             Ok(ResponseBody::Session(session)) => {
                 self.state.update(cx, |state, cx| {
-                    state.touch_session(session.id.clone());
-                    state.screen = Screen::Workspace {
-                        session: session.id,
-                    };
+                    crate::presentation::enter_session(state, session.id);
                     cx.notify();
                 });
             }
@@ -142,9 +195,39 @@ impl HubCtx {
         if self.refuses(cx) {
             return;
         }
-        self.bridge.send(RequestBody::RestoreTrash { entry });
-        self.state
-            .update(cx, |state, _| state.last_trash_entry = None);
+        let started = self.hub.update(cx, |hub, _| {
+            if hub.restoring_trash.is_some() {
+                false
+            } else {
+                hub.restoring_trash = Some(entry.clone());
+                true
+            }
+        });
+        if !started {
+            return;
+        }
+        self.ask(
+            RequestBody::RestoreTrash {
+                entry: entry.clone(),
+            },
+            cx,
+            move |result, ctx, cx| {
+                ctx.hub.update(cx, |hub, _| {
+                    if hub.restoring_trash.as_ref() == Some(&entry) {
+                        hub.restoring_trash = None;
+                    }
+                });
+                match restore_acknowledged(result) {
+                    Ok(()) => ctx.state.update(cx, |state, cx| {
+                        if state.last_trash_entry.as_ref() == Some(&entry) {
+                            state.last_trash_entry = None;
+                        }
+                        cx.notify();
+                    }),
+                    Err(error) => ctx.report(error, cx),
+                }
+            },
+        );
     }
 
     /// `x` — the dry run first, then either a refusal toast or the confirm (§3.8.3).
@@ -230,8 +313,8 @@ impl HubCtx {
         self.ask(
             RequestBody::WorktreePath { id: row.id },
             cx,
-            |result, ctx, cx| {
-                if let Ok(ResponseBody::Path(path)) = result {
+            |result, ctx, cx| match copy_path_outcome(result) {
+                Ok(path) => {
                     cx.update(|cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(path));
                     });
@@ -241,6 +324,7 @@ impl HubCtx {
                         cx.notify();
                     });
                 }
+                Err(error) => ctx.report(error, cx),
             },
         );
     }
@@ -280,40 +364,58 @@ impl HubCtx {
         if self.refuses(cx) {
             return;
         }
-        if let Some(id) = row.local.clone() {
+        self.open_pr_row(row.repo, row.number, row.local, open, sleep_previous, cx);
+    }
+
+    fn open_pr_row(
+        &self,
+        repo: RepoId,
+        number: u64,
+        local: Option<WorktreeId>,
+        open: bool,
+        sleep_previous: bool,
+        cx: &mut App,
+    ) {
+        if let Some(id) = local {
             if open {
                 self.open_session(id, sleep_previous, cx);
             }
             return;
         }
-        let key = (row.repo.clone(), row.number);
-        self.hub.update(cx, |hub, _| {
-            hub.invalidate();
-            hub.creating.push(key.clone());
+        let key = (repo.clone(), number);
+        let started = self.hub.update(cx, |hub, _| {
+            hub.begin_pr_creation(key.clone(), open, sleep_previous)
         });
+        if !started {
+            return;
+        }
         // `HubState` is its own entity and the shell only observes `AppState`, so a mutation
         // here repaints nothing on its own — and `creating` is what makes the §3.5 glyph spin
         // for the length of the `gh` round trip.
         self.state.update(cx, |_, cx| cx.notify());
         self.ask(
-            RequestBody::CreateWorktreeFromPr {
-                repo: row.repo.clone(),
-                number: row.number,
-            },
+            RequestBody::CreateWorktreeFromPr { repo, number },
             cx,
             move |result, ctx, cx| {
-                ctx.hub.update(cx, |hub, _| {
-                    hub.invalidate();
-                    hub.creating.retain(|candidate| candidate != &key);
-                });
+                let intent = ctx.hub.update(cx, |hub, _| hub.finish_pr_creation(&key));
                 // Same reason as above: the spinner has to stop even when the branch below
                 // repaints nothing of its own.
                 ctx.state.update(cx, |_, cx| cx.notify());
                 match result {
-                    Ok(ResponseBody::Worktree { worktree, .. }) if open => {
-                        ctx.ask_from_async(worktree.id, sleep_previous, cx);
+                    Ok(ResponseBody::Worktree { worktree, .. }) => {
+                        let navigate = intent.is_some_and(|intent| intent.open)
+                            && cx.update(|cx| ctx.pr_navigation_is_current(&key, cx));
+                        if navigate {
+                            let sleep_previous = intent
+                                .map(|intent| intent.sleep_previous)
+                                .unwrap_or_default();
+                            ctx.ask_from_async(worktree.id, sleep_previous, cx);
+                        }
                     }
-                    Ok(_) => {}
+                    Ok(_) => ctx.report(
+                        client_error("daemon returned an unexpected PR worktree response"),
+                        cx,
+                    ),
                     Err(error) => ctx.report(error, cx),
                 }
             },
@@ -334,9 +436,11 @@ impl HubCtx {
         });
         let ctx = self.clone();
         cx.spawn(async move |cx| {
-            if let Ok(result) = reply.recv().await {
-                ctx.enter_session(result, cx);
-            }
+            let result = reply
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(client_error("the Fleet daemon reply channel closed")));
+            ctx.enter_session(result, cx);
         })
         .detach();
     }

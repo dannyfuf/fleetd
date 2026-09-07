@@ -1,13 +1,19 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::Duration;
 
+use async_trait::async_trait;
 use fleet_core::{
     cache::PrCache,
-    github::{PrChecks, PrReviewDecision, PrTab, PullRequest},
+    github::{InspectionPullRequest, PrChecks, PrReviewDecision, PrTab, PullRequest, RemoteRepo},
     ids::{ContextId, RepoId},
     model::{Context, Repo, RepoHooks},
     paths::FleetHome,
 };
 use fleet_daemon::{
+    DaemonResult,
     adapters::{
         clock::SystemClock,
         files::{Files, RealFiles},
@@ -19,10 +25,19 @@ use fleet_daemon::{
     stores::{config::ConfigStore, state::StateStore},
     testing::fakes::{FakeGithub, FakeShell},
 };
+use tokio::sync::Barrier;
 
 async fn service(
     temp: &tempfile::TempDir,
     shell: Arc<FakeShell>,
+) -> (Github, Arc<StateStore>, RepoId, ContextId) {
+    let adapter: Arc<dyn GithubAdapter> = Arc::new(FakeGithub::new(shell));
+    service_with_adapter(temp, adapter).await
+}
+
+async fn service_with_adapter(
+    temp: &tempfile::TempDir,
+    adapter: Arc<dyn GithubAdapter>,
 ) -> (Github, Arc<StateStore>, RepoId, ContextId) {
     let home = temp.path().join(".fleet");
     let files: Arc<dyn Files> = Arc::new(RealFiles::new(
@@ -68,7 +83,6 @@ async fn service(
         .await
         .unwrap();
     let jobs = Arc::new(JobManager::new(&home));
-    let adapter: Arc<dyn GithubAdapter> = Arc::new(FakeGithub::new(shell));
     (
         Github::new(config, Arc::clone(&state), jobs, adapter, files),
         state,
@@ -77,12 +91,114 @@ async fn service(
     )
 }
 
+struct ControlledGithub {
+    calls: AtomicUsize,
+    first_entered: Arc<Barrier>,
+    release_first: Arc<Barrier>,
+}
+
+impl ControlledGithub {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            first_entered: Arc::new(Barrier::new(2)),
+            release_first: Arc::new(Barrier::new(2)),
+        }
+    }
+}
+
+#[async_trait]
+impl GithubAdapter for ControlledGithub {
+    async fn list_repositories(&self, _owner: &str) -> DaemonResult<Vec<RemoteRepo>> {
+        Ok(Vec::new())
+    }
+
+    async fn open_pull_request(
+        &self,
+        _repo: &RepoId,
+        _branch: &str,
+    ) -> DaemonResult<Option<PullRequest>> {
+        Ok(None)
+    }
+
+    async fn latest_inspection_pull_request(
+        &self,
+        _repo: &RepoId,
+        _branch: &str,
+    ) -> DaemonResult<Option<InspectionPullRequest>> {
+        Ok(None)
+    }
+
+    async fn list_pull_requests(
+        &self,
+        repo: &RepoId,
+        _tab: PrTab,
+    ) -> DaemonResult<Vec<PullRequest>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.first_entered.wait().await;
+            self.release_first.wait().await;
+        }
+        Ok(vec![pull_request_number(repo.clone(), (call + 1) as u64)])
+    }
+
+    async fn auth_status(&self) -> DaemonResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct PanicsOnceGithub {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl GithubAdapter for PanicsOnceGithub {
+    async fn list_repositories(&self, _owner: &str) -> DaemonResult<Vec<RemoteRepo>> {
+        Ok(Vec::new())
+    }
+
+    async fn open_pull_request(
+        &self,
+        _repo: &RepoId,
+        _branch: &str,
+    ) -> DaemonResult<Option<PullRequest>> {
+        Ok(None)
+    }
+
+    async fn latest_inspection_pull_request(
+        &self,
+        _repo: &RepoId,
+        _branch: &str,
+    ) -> DaemonResult<Option<InspectionPullRequest>> {
+        Ok(None)
+    }
+
+    async fn list_pull_requests(
+        &self,
+        repo: &RepoId,
+        _tab: PrTab,
+    ) -> DaemonResult<Vec<PullRequest>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_ne!(call, 0, "first GitHub fetch panics");
+        Ok(vec![pull_request_number(repo.clone(), (call + 1) as u64)])
+    }
+
+    async fn auth_status(&self) -> DaemonResult<()> {
+        Ok(())
+    }
+}
+
 fn pull_request(repo: RepoId) -> PullRequest {
+    pull_request_number(repo, 42)
+}
+
+fn pull_request_number(repo: RepoId, number: u64) -> PullRequest {
     PullRequest {
         repo_id: repo,
-        number: 42,
+        number,
         title: "Fix API".to_owned(),
-        url: "https://github.com/acme/api/pull/42".to_owned(),
+        url: format!("https://github.com/acme/api/pull/{number}"),
         author: "octocat".to_owned(),
         head_ref_name: "fix-api".to_owned(),
         base_ref_name: "main".to_owned(),
@@ -98,6 +214,103 @@ fn pull_request(repo: RepoId) -> PullRequest {
         labels: vec!["ready".to_owned()],
         updated_at: "2026-09-04T00:00:00Z".to_owned(),
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_misses_share_fetch() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let adapter = Arc::new(ControlledGithub::new());
+    let (github, _state, repo, _context) = service_with_adapter(&temp, adapter.clone()).await;
+    let first = {
+        let github = github.clone();
+        let repo = repo.clone();
+        tokio::spawn(async move {
+            github
+                .list_pull_requests(Some(repo), None, PrTab::Mine, true)
+                .await
+        })
+    };
+    adapter.first_entered.wait().await;
+    let second_started = Arc::new(Barrier::new(2));
+    let second = {
+        let github = github.clone();
+        let repo = repo.clone();
+        let second_started = Arc::clone(&second_started);
+        tokio::spawn(async move {
+            second_started.wait().await;
+            github
+                .list_pull_requests(Some(repo), None, PrTab::Mine, true)
+                .await
+        })
+    };
+    second_started.wait().await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    adapter.release_first.wait().await;
+
+    let first = first.await.unwrap_or_else(|error| panic!("{error}"));
+    let second = second.await.unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(first.unwrap()[0].prs[0].number, 1);
+    assert_eq!(second.unwrap()[0].prs[0].number, 1);
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn superseded_fetch_cannot_publish_over_newer_generation() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let adapter = Arc::new(ControlledGithub::new());
+    let (github, _state, repo, _context) = service_with_adapter(&temp, adapter.clone()).await;
+    let first = {
+        let github = github.clone();
+        let repo = repo.clone();
+        tokio::spawn(async move {
+            github
+                .list_pull_requests(Some(repo), None, PrTab::Mine, false)
+                .await
+        })
+    };
+    adapter.first_entered.wait().await;
+    let newer = github
+        .list_pull_requests(Some(repo.clone()), None, PrTab::Mine, true)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(newer[0].prs[0].number, 2);
+    adapter.release_first.wait().await;
+    let _older = first.await.unwrap_or_else(|error| panic!("{error}"));
+
+    let cached = github
+        .list_pull_requests(Some(repo), None, PrTab::Mine, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(cached[0].prs[0].number, 2);
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn panicked_fetch_does_not_poison_later_request() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let adapter = Arc::new(PanicsOnceGithub::default());
+    let (github, _state, repo, _context) = service_with_adapter(&temp, adapter.clone()).await;
+
+    let first = tokio::time::timeout(
+        Duration::from_secs(1),
+        github.list_pull_requests(Some(repo.clone()), None, PrTab::Mine, true),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("panicked fetch left its caller waiting"))
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(first[0].error.as_deref(), Some("operation cancelled"));
+
+    let second = tokio::time::timeout(
+        Duration::from_secs(1),
+        github.list_pull_requests(Some(repo), None, PrTab::Mine, true),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("stale fetch prevented a replacement"))
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(second[0].prs[0].number, 2);
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

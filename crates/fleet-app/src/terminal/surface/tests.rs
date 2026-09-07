@@ -1,6 +1,136 @@
 use super::*;
+use fleet_proto::error::{ErrorKind, ProtoError};
 use gpui::{AppContext, TestAppContext};
 use std::time::Instant;
+
+fn pending_key(character: char) -> PendingInput {
+    PendingInput::Key(KeyEvent {
+        key: Key::Char(character),
+        mods: Modifiers::empty(),
+        text: Some(character.to_string()),
+        action: KeyAction::Press,
+    })
+}
+
+#[gpui::test]
+fn preframe_input_is_bounded_and_ordered(cx: &mut TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/fleet-input-bound-test", Instant::now()));
+    let mut surface = TerminalSurface::<()>::default();
+    for _ in 0..PENDING_INPUT_EVENT_CAP - 1 {
+        assert!(surface.queue_pending(pending_key('a')));
+    }
+    assert!(surface.queue_pending(pending_key('b')));
+    let accepted = surface.queue_pending(pending_key('c'));
+    assert!(!accepted);
+    cx.update(|cx| report_input_delivery(accepted, &state, cx));
+    assert_eq!(surface.pending.len(), PENDING_INPUT_EVENT_CAP);
+    assert!(
+        matches!(surface.pending.first(), Some(PendingInput::Key(key)) if key.key == Key::Char('a'))
+    );
+    assert!(
+        matches!(surface.pending.last(), Some(PendingInput::Key(key)) if key.key == Key::Char('b'))
+    );
+
+    surface.pending.clear();
+    assert!(surface.queue_pending(PendingInput::Paste("x".repeat(PENDING_INPUT_BYTE_CAP))));
+    let accepted = surface.queue_pending(pending_key('z'));
+    assert!(!accepted);
+    cx.update(|cx| report_input_delivery(accepted, &state, cx));
+    assert_eq!(surface.pending.len(), 1);
+    state.read_with(cx, |app, _| {
+        assert_eq!(app.toasts.len(), 1, "overflow feedback is throttled");
+        assert_eq!(app.toasts[0].toast.text.as_ref(), INPUT_REJECTION_NOTICE);
+        assert_eq!(app.toasts[0].toast.icon, Some(Icon::Info));
+    });
+}
+
+#[gpui::test]
+fn failed_attachment_is_cleared_and_schedules_reconciliation(cx: &mut TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/fleet-attach-test", Instant::now()));
+    let terminal = TerminalId(7);
+    let surface = Rc::new(RefCell::new(TerminalSurface::<()> {
+        attached: Some(terminal),
+        attached_generation: 3,
+        attachment_attempt: 9,
+        ..TerminalSurface::default()
+    }));
+    let (reply, answer) = async_channel::bounded(1);
+    cx.update(|cx| {
+        monitor_attachment(&surface, &state, terminal, 3, 9, answer, cx);
+    });
+    reply
+        .try_send(Err(ProtoError {
+            kind: ErrorKind::Unknown,
+            message: "attach refused".to_owned(),
+        }))
+        .expect("deliver refusal");
+
+    cx.run_until_parked();
+    assert!(surface.borrow().attached.is_none());
+    assert_eq!(surface.borrow().attached_generation, 0);
+    assert!(surface.borrow().attach_retry_at.is_some());
+    state.read_with(cx, |app, _| {
+        assert!(app.sticky_error.as_ref().is_some_and(|error| {
+            error.text.contains("attach refused") && error.text.contains("retrying")
+        }));
+    });
+
+    cx.executor().advance_clock(ATTACH_RETRY_DELAY);
+    cx.run_until_parked();
+    assert!(surface.borrow().attach_retry_at.is_none());
+}
+
+#[gpui::test]
+fn attachment_timeout_does_not_leave_the_surface_attached(cx: &mut TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/fleet-attach-timeout", Instant::now()));
+    let terminal = TerminalId(8);
+    let surface = Rc::new(RefCell::new(TerminalSurface::<()> {
+        attached: Some(terminal),
+        attached_generation: 4,
+        attachment_attempt: 10,
+        ..TerminalSurface::default()
+    }));
+    let (_reply, answer) = async_channel::bounded(1);
+    cx.update(|cx| {
+        monitor_attachment(&surface, &state, terminal, 4, 10, answer, cx);
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(ATTACH_TIMEOUT);
+    cx.run_until_parked();
+
+    assert!(surface.borrow().attached.is_none());
+    assert_eq!(surface.borrow().attached_generation, 0);
+    state.read_with(cx, |app, _| {
+        assert!(
+            app.sticky_error
+                .as_ref()
+                .is_some_and(|error| { error.text.contains("request timed out") })
+        );
+    });
+}
+
+#[test]
+fn long_selection_stops_growing_history() {
+    let mut surface = TerminalSurface::<()> {
+        anchor: Some(0),
+        ..TerminalSurface::default()
+    };
+    let mut grid = MirrorGrid::new(1, 1);
+
+    for line in 0..MOUSE_ROW_CACHE_CAP + 10 {
+        grid.seq = line as u64;
+        grid.viewport.scrollback_len = line;
+        surface.track_selection(&grid, false);
+    }
+
+    assert_eq!(surface.history.len(), MOUSE_ROW_CACHE_CAP);
+    assert!(
+        surface
+            .history
+            .contains_key(&(MOUSE_ROW_CACHE_CAP as u64 - 1))
+    );
+    assert!(!surface.history.contains_key(&(MOUSE_ROW_CACHE_CAP as u64)));
+}
 
 #[test]
 fn clear_removes_mouse_and_keyboard_selections_together() {

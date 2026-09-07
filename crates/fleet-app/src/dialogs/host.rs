@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
-use fleet_core::ids::{SessionId, WorktreeId};
-use fleet_proto::{request::RequestBody, response::ResponseBody};
+use fleet_core::{
+    config::Agent,
+    ids::{SessionId, WorktreeId},
+};
+use fleet_proto::{error::ProtoError, request::RequestBody, response::ResponseBody};
 
 use super::*;
-use crate::state::{Overlay, Screen};
+use crate::state::Overlay;
 use gpui::{
     App, Context, Entity, EntityId, FocusHandle, Global, Render, Subscription, Task, WeakEntity,
     Window,
@@ -45,6 +48,27 @@ struct DialogRegistry {
     pending_hooks_repo: Option<RepoId>,
 }
 impl Global for DialogRegistry {}
+
+pub(crate) trait SessionTransport: Clone + 'static {
+    fn send(&self, body: RequestBody);
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, ProtoError>>;
+}
+
+impl SessionTransport for Bridge {
+    fn send(&self, body: RequestBody) {
+        Bridge::send(self, body);
+    }
+
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, ProtoError>> {
+        Bridge::request(self, body)
+    }
+}
 
 // One AppState per window owns one host: its release listener retains the draft entity
 // until that window closes, so the registry holds only weak lookup handles.
@@ -152,34 +176,88 @@ pub(crate) fn complete_request(
 /// Routes the window to a session, making it the most recently used one.
 pub(crate) fn open_session(session: SessionId, state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |app, cx| {
-        app.touch_session(session.clone());
-        app.screen = Screen::Workspace { session };
+        crate::presentation::enter_session(app, session);
         cx.notify();
     });
 }
 
-/// Ensures a worktree's session exists, then routes the window to it. A refused or dropped
-/// reply leaves the window where it is: the daemon has already reported the failure.
-pub(crate) fn open_worktree(
+/// Ensures a worktree's session exists, then routes the window to it.
+pub(crate) fn open_worktree<T: SessionTransport>(
     id: WorktreeId,
     state: &Entity<AppState>,
-    bridge: &Bridge,
+    transport: &T,
     cx: &mut App,
 ) {
-    let reply = bridge.request(RequestBody::EnsureSession {
+    ensure_worktree_session(id, true, true, state, transport, cx);
+}
+
+pub(crate) fn ensure_worktree_session<T: SessionTransport>(
+    id: WorktreeId,
+    touch: bool,
+    sleep_previous: bool,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    if touch {
+        transport.send(RequestBody::TouchWorktreeOpened { id: id.clone() });
+    }
+    let reply = transport.request(RequestBody::EnsureSession {
         worktree: Some(id),
         agent: None,
+        sleep_previous,
+    });
+    finish_session_request(reply, state, cx);
+}
+
+/// Wakes a fixed agent session, then routes the window to the daemon-confirmed session.
+pub(crate) fn open_agent_session<T: SessionTransport>(
+    agent: Agent,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    let reply = transport.request(RequestBody::EnsureSession {
+        worktree: None,
+        agent: Some(agent),
         sleep_previous: true,
     });
+    finish_session_request(reply, state, cx);
+}
+
+fn finish_session_request(
+    reply: async_channel::Receiver<Result<ResponseBody, ProtoError>>,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
     complete_request(state, cx, async move |state, cx| {
-        let Ok(Ok(ResponseBody::Session(session))) = reply.recv().await else {
-            return;
-        };
+        let result = reply.recv().await;
         cx.update(|cx| {
-            if let Some(state) = state.upgrade() {
-                open_session(session.id, &state, cx);
+            let Some(state) = state.upgrade() else { return };
+            match result {
+                Ok(Ok(ResponseBody::Session(session))) => open_session(session.id, &state, cx),
+                Ok(Ok(_)) => report_session_failure(
+                    &state,
+                    "daemon returned an unexpected ensure-session response",
+                    cx,
+                ),
+                Ok(Err(error)) => report_session_failure(&state, error.message, cx),
+                Err(_) => {
+                    report_session_failure(&state, "the Fleet daemon reply channel closed", cx)
+                }
             }
         });
+    });
+}
+
+fn report_session_failure(state: &Entity<AppState>, message: impl Into<String>, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        app.sticky_error = Some(crate::state::StickyError {
+            text: message.into(),
+            job: None,
+            retryable: false,
+        });
+        cx.notify();
     });
 }
 

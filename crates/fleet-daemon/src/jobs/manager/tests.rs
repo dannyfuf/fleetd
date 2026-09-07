@@ -143,9 +143,9 @@ async fn cancellation_changes_running_job_to_cancelled() {
         "Wait",
         true,
         false,
-        |_context| async move {
-            std::future::pending::<()>().await;
-            Ok(())
+        |context| async move {
+            context.cancel.cancelled().await;
+            Err(DaemonError::Cancelled)
         },
     );
     tokio::task::yield_now().await;
@@ -154,6 +154,240 @@ async fn cancellation_changes_running_job_to_cancelled() {
         .unwrap_or_else(|error| panic!("{error}"));
     let record = wait_finished(&manager, &id).await;
     assert_eq!(record.status, JobStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_waits_for_rollback() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    manager.set_cancellation_grace(StdDuration::ZERO);
+    let (rollback_started, rollback_started_rx) = tokio::sync::oneshot::channel();
+    let (rollback_finished, rollback_finished_rx) = tokio::sync::oneshot::channel();
+    let (operation_ready, operation_ready_rx) = tokio::sync::oneshot::channel();
+    let rollback_started = Arc::new(Mutex::new(Some(rollback_started)));
+    let rollback_finished_rx = Arc::new(Mutex::new(Some(rollback_finished_rx)));
+    let operation_ready = Arc::new(Mutex::new(Some(operation_ready)));
+
+    struct RollbackOnDrop {
+        context: JobCtx,
+        started: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+        finished: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    }
+
+    impl Drop for RollbackOnDrop {
+        fn drop(&mut self) {
+            let started = Arc::clone(&self.started);
+            let finished = Arc::clone(&self.finished);
+            self.context.track_cleanup(async move {
+                if let Some(sender) = lock(&started).take() {
+                    let _ignored = sender.send(());
+                }
+                let receiver = lock(&finished).take().expect("single rollback attempt");
+                let _ignored = receiver.await;
+            });
+        }
+    }
+
+    let id = manager.submit(
+        JobKind::Custom("transaction".to_owned()),
+        "repo",
+        "Transactional mutation",
+        true,
+        false,
+        move |context| {
+            let rollback_started = Arc::clone(&rollback_started);
+            let rollback_finished_rx = Arc::clone(&rollback_finished_rx);
+            let operation_ready = Arc::clone(&operation_ready);
+            async move {
+                let _rollback = RollbackOnDrop {
+                    context,
+                    started: rollback_started,
+                    finished: rollback_finished_rx,
+                };
+                operation_ready
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("operation starts once")
+                    .send(())
+                    .expect("test observes operation start");
+                std::future::pending::<DaemonResult<()>>().await
+            }
+        },
+    );
+    operation_ready_rx.await.expect("operation starts");
+
+    manager.cancel(&id).expect("cancel starts");
+    rollback_started_rx.await.expect("rollback starts");
+    assert_eq!(
+        manager.record(&id).expect("record").status,
+        JobStatus::Cancelling
+    );
+    rollback_finished.send(()).expect("release rollback");
+    assert_eq!(
+        wait_finished(&manager, &id).await.status,
+        JobStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn stalled_rollback_is_bounded_and_visible() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    manager.set_cancellation_grace(StdDuration::ZERO);
+    manager.set_cleanup_grace(StdDuration::ZERO);
+    let (cleanup_registered, cleanup_registered_rx) = tokio::sync::oneshot::channel();
+    let cleanup_registered = Arc::new(Mutex::new(Some(cleanup_registered)));
+    let id = manager.submit(
+        JobKind::Custom("transaction".to_owned()),
+        "repo-with-stalled-rollback",
+        "Transactional mutation",
+        true,
+        false,
+        move |context| {
+            let cleanup_registered = Arc::clone(&cleanup_registered);
+            async move {
+                context.track_cleanup(std::future::pending());
+                cleanup_registered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .expect("cleanup registers once")
+                    .send(())
+                    .expect("test observes cleanup registration");
+                std::future::pending::<DaemonResult<()>>().await
+            }
+        },
+    );
+    cleanup_registered_rx.await.expect("cleanup registers");
+
+    manager.cancel(&id).expect("cancel starts");
+    let record = wait_finished(&manager, &id).await;
+
+    assert_eq!(record.status, JobStatus::Cancelled);
+    assert_eq!(
+        record.progress.as_deref(),
+        Some("warning: cancellation cleanup exceeded its grace period")
+    );
+}
+
+#[tokio::test]
+async fn panicked_cleanup_does_not_wedge_cancellation() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    manager.set_cancellation_grace(StdDuration::ZERO);
+    let (cleanup_started, cleanup_started_rx) = tokio::sync::oneshot::channel();
+    let cleanup_started = Arc::new(Mutex::new(Some(cleanup_started)));
+    let id = manager.submit(
+        JobKind::Custom("transaction".to_owned()),
+        "repo-with-panicking-cleanup",
+        "Transactional mutation",
+        true,
+        false,
+        move |context| {
+            let cleanup_started = Arc::clone(&cleanup_started);
+            async move {
+                context.track_cleanup(async move {
+                    if let Some(sender) = lock(&cleanup_started).take() {
+                        let _ignored = sender.send(());
+                    }
+                    panic!("cleanup exploded");
+                });
+                std::future::pending::<DaemonResult<()>>().await
+            }
+        },
+    );
+
+    cleanup_started_rx.await.expect("cleanup starts");
+    tokio::task::yield_now().await;
+    manager.cancel(&id).expect("cancel starts");
+
+    assert_eq!(
+        wait_finished(&manager, &id).await.status,
+        JobStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn panicked_job_finishes_and_releases_target() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    let first = manager.submit(
+        JobKind::Inspect,
+        "panic-target",
+        "Panics",
+        false,
+        false,
+        |_| async move { panic!("operation exploded") },
+    );
+
+    let failed = wait_finished(&manager, &first).await;
+    assert!(matches!(
+        failed.status,
+        JobStatus::Failed { ref error } if error.contains("job panicked: operation exploded")
+    ));
+
+    let second = manager.submit(
+        JobKind::Inspect,
+        "panic-target",
+        "Succeeds",
+        false,
+        false,
+        |_| async move { Ok(()) },
+    );
+    assert_ne!(second, first);
+    assert_eq!(
+        wait_finished(&manager, &second).await.status,
+        JobStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lagged_waiter_observes_finished_job() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    let id = manager.submit(
+        JobKind::Inspect,
+        "lagged-target",
+        "Target",
+        false,
+        false,
+        |_| async move {
+            std::future::pending::<()>().await;
+            Ok(())
+        },
+    );
+    tokio::task::yield_now().await;
+
+    let waiting_manager = manager.clone();
+    let waiting_id = id.clone();
+    let waiter = tokio::spawn(async move { waiting_manager.wait(&waiting_id).await });
+    tokio::task::yield_now().await;
+
+    manager.finish(&id, Ok(()));
+    let unrelated = manager.submit(
+        JobKind::Custom("noise".to_owned()),
+        "noise",
+        "Noise",
+        false,
+        false,
+        |_| async move {
+            std::future::pending::<()>().await;
+            Ok(())
+        },
+    );
+    for index in 0..300 {
+        manager
+            .record_progress(&unrelated, format!("update {index}"))
+            .expect("record noise");
+    }
+
+    let record = tokio::time::timeout(StdDuration::from_secs(1), waiter)
+        .await
+        .expect("lagged waiter completes")
+        .expect("wait task")
+        .expect("retained target");
+    assert_eq!(record.status, JobStatus::Succeeded);
 }
 
 #[tokio::test]
@@ -224,6 +458,28 @@ async fn retry_starts_a_new_attempt_from_the_retained_factory() {
         JobStatus::Succeeded
     );
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn deletion_rejects_typed_submissions() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    let repo = RepoId::try_from("acme/api").expect("repo id");
+    let _deletion = manager.begin_repo_deletion(&repo).expect("deletion guard");
+
+    let error = manager
+        .submit_for_repo(
+            repo,
+            JobKind::Inspect,
+            "inspect-with-uuid-target",
+            "Inspect",
+            JobPolicy::new(true, false),
+            |_| async { Ok(()) },
+        )
+        .expect_err("typed submission must be rejected");
+
+    assert!(matches!(error, DaemonError::Conflict(message) if message.contains("being deleted")));
+    assert!(manager.list().is_empty());
 }
 
 #[tokio::test]

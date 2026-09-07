@@ -4,7 +4,7 @@ use crate::{
     CommandKind, GitError, MutationResult, Repository, Result,
     command::{GitCommand, GitOutput},
 };
-use std::path::Path;
+use std::sync::atomic::Ordering;
 
 mod index;
 mod network;
@@ -40,6 +40,9 @@ impl Repository {
 
     async fn run_one(&self, command: GitCommand) -> Result<GitOutput> {
         let may_conflict = command.may_conflict;
+        if command.kind != CommandKind::Read {
+            self.snapshot_invalidation.fetch_add(1, Ordering::AcqRel);
+        }
         match self.runner.run(command).await {
             Err(GitError::Exit {
                 status,
@@ -47,57 +50,78 @@ impl Repository {
                 stderr,
                 argv,
                 message,
-            }) if may_conflict
-                && (indicates_conflict(&stdout, &stderr)
-                    || operation_sentinel_exists(&self.paths.git_dir).await) =>
-            {
-                Err(GitError::Conflict {
-                    status,
-                    stdout,
-                    stderr,
-                    argv,
-                    message,
-                })
+            }) if may_conflict => {
+                if self.has_unmerged_entries().await {
+                    Err(GitError::Conflict {
+                        status,
+                        stdout,
+                        stderr,
+                        argv,
+                        message,
+                    })
+                } else {
+                    Err(GitError::Exit {
+                        status,
+                        stdout,
+                        stderr,
+                        argv,
+                        message,
+                    })
+                }
             }
             result => result,
         }
     }
+
+    async fn has_unmerged_entries(&self) -> bool {
+        self.runner
+            .run(
+                self.command(CommandKind::Read)
+                    .args(["ls-files", "--unmerged", "-z"])
+                    .foreground_read(),
+            )
+            .await
+            .is_ok_and(|output| !output.stdout.is_empty())
+    }
 }
 
 fn result_from_outputs(outputs: Vec<GitOutput>) -> MutationResult {
-    let warning = outputs
+    let warnings: Vec<_> = outputs
         .iter()
-        .flat_map(|output| [&output.stderr, &output.stdout])
-        .find(|bytes| !bytes.is_empty())
-        .map(|bytes| String::from_utf8_lossy(bytes).trim().to_owned())
-        .filter(|text| !text.is_empty());
+        .map(|output| String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .collect();
     MutationResult {
         records: outputs.into_iter().map(|output| output.record).collect(),
-        warning,
+        warning: (!warnings.is_empty()).then(|| warnings.join("\n")),
     }
 }
 
-fn indicates_conflict(stdout: &[u8], stderr: &[u8]) -> bool {
-    let text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(stdout),
-        String::from_utf8_lossy(stderr)
-    )
-    .to_ascii_lowercase();
-    text.contains("conflict") || text.contains("resolve all conflicts")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
 
-async fn operation_sentinel_exists(git_dir: &Path) -> bool {
-    for name in [
-        "MERGE_HEAD",
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-        "rebase-merge",
-        "rebase-apply",
-    ] {
-        if tokio::fs::metadata(git_dir.join(name)).await.is_ok() {
-            return true;
-        }
+    #[tokio::test]
+    async fn mutation_invalidates_only_when_execution_acquires_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .arg(temp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let repository = Arc::new(Repository::discover(temp.path()).await.unwrap());
+        let guard = repository.mutation_lock.lock().await;
+        let task = {
+            let repository = Arc::clone(&repository);
+            tokio::spawn(async move { repository.stage_all().await })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(repository.snapshot_invalidation.load(Ordering::Acquire), 0);
+
+        drop(guard);
+        task.await.unwrap().unwrap();
+        assert_eq!(repository.snapshot_invalidation.load(Ordering::Acquire), 1);
     }
-    false
 }

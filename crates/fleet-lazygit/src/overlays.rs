@@ -18,12 +18,10 @@ use crate::state::{Buffer, Overlay};
 const HELP_ROWS: usize = 18;
 
 /// The chain the panels *would* have while the help overlay owns the real one.
-fn help_chain(view: &Lazygit) -> Vec<&'static str> {
-    let mut chain = view.state.context_chain();
-    if chain.first() == Some(&"LgDialog") {
-        chain = vec!["Panels"];
-    }
-    chain
+pub(crate) fn help_chain(view: &Lazygit) -> Vec<&'static str> {
+    view.help_context
+        .clone()
+        .unwrap_or_else(|| view.state.context_chain())
 }
 
 /// The largest scroll offset the `?` overlay may take: the last row stays on screen.
@@ -61,6 +59,8 @@ pub(crate) fn render(view: &Lazygit, cx: &mut Context<Lazygit>) -> Option<AnyEle
         Overlay::Prompt(prompt) => {
             let body = if prompt.buffer.is_multiline() {
                 multiline_body(&prompt.buffer, &view.scroll_editor, cx)
+            } else if let Some(input) = &view.prompt_input {
+                input.clone().into_any_element()
             } else {
                 TextField::new(prompt.buffer.value().to_owned())
                     .caret(prompt.buffer.caret())

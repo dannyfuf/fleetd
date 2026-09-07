@@ -1,15 +1,88 @@
 use crate::{
-    CommandKind, MergeOptions, MutationResult, ObjectId, Ref, Repository, ResetMode, Result,
+    CommandKind, GitError, MergeOptions, MutationResult, ObjectId, Ref, Repository, ResetMode,
+    Result,
 };
 
 impl Repository {
     /// Checks out a branch, tag, or commit quietly.
     pub async fn checkout(&self, reference: &Ref) -> Result<MutationResult> {
-        self.run_commands([self
-            .command(CommandKind::Mutation)
-            .args(["checkout", "-q"])
-            .arg(&reference.0)])
-            .await
+        let _guard = self.mutation_lock.lock().await;
+        let resolved_name = if reference.0.starts_with("refs/") {
+            reference.0.clone()
+        } else {
+            let local = format!("refs/heads/{}", reference.0);
+            if self.exact_ref_exists(&local).await? {
+                local
+            } else {
+                let mut candidates = Vec::new();
+                for namespace in ["refs/tags", "refs/remotes"] {
+                    let candidate = format!("{namespace}/{}", reference.0);
+                    if self.exact_ref_exists(&candidate).await? {
+                        candidates.push(candidate);
+                    }
+                }
+                match candidates.len() {
+                    0 => reference.0.clone(),
+                    1 => candidates.remove(0),
+                    _ => {
+                        return Err(GitError::parse(
+                            "checkout reference",
+                            "short reference is ambiguous",
+                        ));
+                    }
+                }
+            }
+        };
+        let revision = format!("{resolved_name}^{{commit}}");
+        let resolved = self
+            .runner
+            .run(
+                self.command(CommandKind::Read)
+                    .args(["rev-parse", "--verify", "--end-of-options"])
+                    .arg(revision)
+                    .foreground_read(),
+            )
+            .await?;
+        let oid = String::from_utf8_lossy(&resolved.stdout).trim().to_owned();
+        if oid.is_empty() {
+            return Err(GitError::parse(
+                "checkout reference",
+                "reference did not resolve to a commit",
+            ));
+        }
+
+        let local_name = resolved_name.strip_prefix("refs/heads/").map(str::to_owned);
+        let command = if let Some(local_name) = local_name {
+            self.command(CommandKind::Mutation)
+                .args(["switch", "-q", "--no-guess", "--"])
+                .arg(local_name)
+        } else {
+            self.command(CommandKind::Mutation)
+                .args(["switch", "-q", "--detach"])
+                .arg(oid)
+        };
+        let output = self.run_one(command).await?;
+        Ok(super::result_from_outputs(vec![output]))
+    }
+
+    async fn exact_ref_exists(&self, reference: &str) -> Result<bool> {
+        let output = self
+            .runner
+            .run(
+                self.command(CommandKind::Read)
+                    .args(["show-ref", "--verify", "--quiet"])
+                    .arg(reference)
+                    .accept_exit_code(1)
+                    .foreground_read(),
+            )
+            .await?;
+        Ok(matches!(
+            output.record.outcome,
+            crate::CommandOutcome::Success {
+                status: Some(0),
+                ..
+            }
+        ))
     }
 
     /// Creates and checks out a branch from an optional start point.
@@ -99,6 +172,16 @@ impl Repository {
     /// Aborts an active cherry-pick.
     pub async fn cherry_pick_abort(&self) -> Result<MutationResult> {
         self.continue_command("cherry-pick", "--abort").await
+    }
+
+    /// Continues an active revert.
+    pub async fn revert_continue(&self) -> Result<MutationResult> {
+        self.continue_command("revert", "--continue").await
+    }
+
+    /// Aborts an active revert.
+    pub async fn revert_abort(&self) -> Result<MutationResult> {
+        self.continue_command("revert", "--abort").await
     }
 
     /// Reverts a commit, creating a new commit.

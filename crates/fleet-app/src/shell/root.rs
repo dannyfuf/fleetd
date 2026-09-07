@@ -33,6 +33,14 @@ fn first_run_import_allowed(is_first_run: bool, state_file_exists: bool) -> bool
     is_first_run && !state_file_exists
 }
 
+fn record_request_failure(state: &mut AppState, message: String) {
+    state.sticky_error = Some(crate::state::StickyError {
+        text: message,
+        job: None,
+        retryable: false,
+    });
+}
+
 /// The root view: frame, routing, chrome, focus and the quit flow.
 pub struct Shell {
     window: Option<gpui::AnyWindowHandle>,
@@ -124,6 +132,13 @@ impl Shell {
             _subscriptions: subscriptions,
             _tasks: tasks,
         }
+    }
+
+    fn show_request_failure(&mut self, message: String, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, cx| {
+            record_request_failure(state, message);
+            cx.notify();
+        });
     }
 }
 

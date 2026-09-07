@@ -125,3 +125,39 @@ fn acknowledged_failures_are_reconciled_to_snapshot_membership() {
     state.apply_snapshot(crate::state::test_support::snapshot(), now);
     assert!(state.seen_failed.is_empty());
 }
+
+#[test]
+fn snapshot_does_not_erase_explicit_error() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    state.apply_toast_event(ToastLevel::Error, "explicit failure".to_owned(), now);
+
+    state.apply_snapshot(snapshot(), now);
+    state.apply_job(job("done", JobStatus::Succeeded, None), now);
+    state.open_overlay(Overlay::Jobs);
+
+    assert_eq!(
+        state.sticky_error.as_ref().map(|error| error.text.as_str()),
+        Some("explicit failure")
+    );
+}
+
+#[test]
+fn vanished_sessions_leave_session_mru() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let live: SessionId = "payroll/live"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let vanished: SessionId = "payroll/vanished"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    state.session_mru.touch(vanished.clone());
+    state.session_mru.touch(live.clone());
+    let mut current = snapshot();
+    current.sessions = vec![session_with(live.as_str(), &[1])];
+
+    state.apply_snapshot(current, now);
+
+    assert_eq!(state.session_mru.entries(), &[live]);
+}

@@ -1,31 +1,32 @@
 //! Pull-request querying, caching, and assignment workflow orchestration.
 
-use super::{
-    awaited::{JobDelivery, copy_error},
-    cache::{cache_is_fresh, fleet_home, read_cache, write_cache},
-};
+use super::cache::{cache_is_fresh, fleet_home, read_cache, write_cache};
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use chrono::Utc;
 use fleet_core::{
     cache::PrCache,
     github::{PrTab, PullRequest, worktree_matches_pr},
-    ids::{ContextId, JobId, RepoId},
+    ids::{ContextId, RepoId},
     model::Worktree,
     paths::FleetHome,
 };
 use fleet_proto::{job::JobKind, response::PrSlice};
 use futures_util::future::join_all;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
     adapters::{files::Files, github::Github as GithubAdapter},
-    jobs::JobManager,
+    jobs::{JobManager, JobPolicy},
     stores::{config::ConfigStore, state::StateStore},
 };
 
@@ -37,7 +38,9 @@ pub struct Github {
     jobs: Arc<JobManager>,
     github: Arc<dyn GithubAdapter>,
     files: Arc<dyn Files>,
-    in_flight: Arc<Mutex<HashMap<String, JobId>>>,
+    in_flight: Arc<Mutex<HashMap<String, PrFetchFlight>>>,
+    generations: Arc<Mutex<HashMap<String, u64>>>,
+    next_generation: Arc<AtomicU64>,
 }
 
 impl Github {
@@ -57,6 +60,8 @@ impl Github {
             github,
             files,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            generations: Arc::new(Mutex::new(HashMap::new())),
+            next_generation: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -187,79 +192,172 @@ impl Github {
         }
 
         let key = format!("{repo}:{tab}");
-        if let Some(previous) = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&key)
-            .cloned()
-        {
-            let _ignored = self.jobs.cancel(&previous);
-        }
-        let github = Arc::clone(&self.github);
-        let semaphore = self.jobs.github_semaphore();
-        let repo_for_job = repo.clone();
-        let path_for_job = path.clone();
-        let files = Arc::clone(&self.files);
-        let (delivery, awaited) = JobDelivery::job_gets_copy(copy_error);
-        let id = self.jobs.submit(
-            JobKind::PrFetch,
-            format!("{key}:{}", Uuid::new_v4()),
-            format!("Fetch {tab} pull requests for {repo}"),
-            true,
-            true,
-            move |context| async move {
-                delivery.finish(
-                    async {
-                        let _permit = semaphore
-                            .acquire_owned()
-                            .await
-                            .map_err(|error| DaemonError::Join(error.to_string()))?;
-                        context.progress(format!("fetching {tab} pull requests"))?;
-                        let mut prs = github.list_pull_requests(&repo_for_job, tab).await?;
-                        if prs.iter().any(|pull| !pull.has_valid_url()) {
-                            return Err(DaemonError::Github(format!(
-                                "invalid pull-request URL returned for {repo_for_job}"
-                            )));
+        let receiver = {
+            let mut flights = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(flight) = flights.get(&key)
+                && flight.receiver.has_changed().is_ok()
+                && (!force || flight.forced)
+            {
+                flight.receiver.clone()
+            } else {
+                let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+                self.generations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(key.clone(), generation);
+                let (sender, receiver) = watch::channel(None);
+                let github = Arc::clone(&self.github);
+                let semaphore = self.jobs.github_semaphore();
+                let repo_for_job = repo.clone();
+                let path_for_job = path.clone();
+                let files = Arc::clone(&self.files);
+                let generations = Arc::clone(&self.generations);
+                let key_for_job = key.clone();
+                let admission_sender = sender.clone();
+                let delivery = PrFetchDelivery::new(
+                    sender,
+                    Arc::clone(&self.in_flight),
+                    key.clone(),
+                    generation,
+                );
+                flights.insert(
+                    key.clone(),
+                    PrFetchFlight {
+                        forced: force,
+                        generation,
+                        receiver: receiver.clone(),
+                    },
+                );
+                drop(flights);
+                let submission = self.jobs.submit_for_repo(
+                    repo.clone(),
+                    JobKind::PrFetch,
+                    format!("{key}:{}", Uuid::new_v4()),
+                    format!("Fetch {tab} pull requests for {repo}"),
+                    JobPolicy::new(true, true),
+                    move |context| async move {
+                        let mut result: DaemonResult<PrCache> = async {
+                            let _permit = semaphore
+                                .acquire_owned()
+                                .await
+                                .map_err(|error| DaemonError::Join(error.to_string()))?;
+                            context.progress(format!("fetching {tab} pull requests"))?;
+                            let mut prs = github.list_pull_requests(&repo_for_job, tab).await?;
+                            if prs.iter().any(|pull| !pull.has_valid_url()) {
+                                return Err(DaemonError::Github(format!(
+                                    "invalid pull-request URL returned for {repo_for_job}"
+                                )));
+                            }
+                            prs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+                            Ok(PrCache {
+                                fetched_at: Utc::now().to_rfc3339(),
+                                prs,
+                            })
                         }
-                        prs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-                        let cache = PrCache {
-                            fetched_at: Utc::now().to_rfc3339(),
-                            prs,
+                        .await;
+
+                        let generations = generations
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let is_current = generations
+                            .get(&key_for_job)
+                            .is_some_and(|current| *current == generation);
+                        if is_current && let Ok(cache) = &result {
+                            result = write_cache(files.as_ref(), &path_for_job, cache)
+                                .map(|()| cache.clone());
+                        }
+                        drop(generations);
+                        let shared = match &result {
+                            Ok(cache) => SharedFetchOutcome::Success(cache.clone()),
+                            Err(error) => SharedFetchOutcome::Failure(error.to_string()),
                         };
-                        write_cache(files.as_ref(), &path_for_job, &cache)?;
-                        Ok(cache)
-                    }
-                    .await,
-                )
-            },
-        );
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone(), id.clone());
-        let result = awaited.wait().await;
-        let mut in_flight = self
+                        delivery.publish(shared);
+                        result.map(drop)
+                    },
+                );
+                if let Err(error) = submission {
+                    admission_sender
+                        .send_replace(Some(SharedFetchOutcome::Failure(error.to_string())));
+                }
+                receiver
+            }
+        };
+        await_fetch(receiver, cached).await
+    }
+}
+
+#[derive(Clone)]
+struct PrFetchFlight {
+    forced: bool,
+    generation: u64,
+    receiver: watch::Receiver<Option<SharedFetchOutcome>>,
+}
+
+struct PrFetchDelivery {
+    sender: Option<watch::Sender<Option<SharedFetchOutcome>>>,
+    in_flight: Arc<Mutex<HashMap<String, PrFetchFlight>>>,
+    key: String,
+    generation: u64,
+}
+
+impl Clone for PrFetchDelivery {
+    fn clone(&self) -> Self {
+        Self {
+            sender: None,
+            in_flight: Arc::clone(&self.in_flight),
+            key: self.key.clone(),
+            generation: self.generation,
+        }
+    }
+}
+
+impl PrFetchDelivery {
+    fn new(
+        sender: watch::Sender<Option<SharedFetchOutcome>>,
+        in_flight: Arc<Mutex<HashMap<String, PrFetchFlight>>>,
+        key: String,
+        generation: u64,
+    ) -> Self {
+        Self {
+            sender: Some(sender),
+            in_flight,
+            key,
+            generation,
+        }
+    }
+
+    fn publish(&self, outcome: SharedFetchOutcome) {
+        if let Some(sender) = &self.sender {
+            sender.send_replace(Some(outcome));
+        }
+    }
+}
+
+impl Drop for PrFetchDelivery {
+    fn drop(&mut self) {
+        if self.sender.is_none() {
+            return;
+        }
+        let mut flights = self
             .in_flight
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if in_flight.get(&key) == Some(&id) {
-            in_flight.remove(&key);
-        }
-        drop(in_flight);
-
-        match result {
-            Ok(cache) => RepoTabOutcome { cache, error: None },
-            Err(DaemonError::Cancelled) => RepoTabOutcome {
-                cache: cached.unwrap_or_else(empty_cache),
-                error: Some("operation cancelled".to_owned()),
-            },
-            Err(error) => RepoTabOutcome {
-                cache: cached.unwrap_or_else(empty_cache),
-                error: Some(concise(&error.to_string(), 120)),
-            },
+        if flights
+            .get(&self.key)
+            .is_some_and(|flight| flight.generation == self.generation)
+        {
+            flights.remove(&self.key);
         }
     }
+}
+
+#[derive(Clone)]
+enum SharedFetchOutcome {
+    Success(PrCache),
+    Failure(String),
 }
 
 struct RepoTabOutcome {
@@ -271,6 +369,29 @@ fn empty_cache() -> PrCache {
     PrCache {
         fetched_at: String::new(),
         prs: Vec::new(),
+    }
+}
+
+async fn await_fetch(
+    mut receiver: watch::Receiver<Option<SharedFetchOutcome>>,
+    cached: Option<PrCache>,
+) -> RepoTabOutcome {
+    loop {
+        if let Some(outcome) = receiver.borrow().clone() {
+            return match outcome {
+                SharedFetchOutcome::Success(cache) => RepoTabOutcome { cache, error: None },
+                SharedFetchOutcome::Failure(error) => RepoTabOutcome {
+                    cache: cached.unwrap_or_else(empty_cache),
+                    error: Some(concise(&error, 120)),
+                },
+            };
+        }
+        if receiver.changed().await.is_err() {
+            return RepoTabOutcome {
+                cache: cached.unwrap_or_else(empty_cache),
+                error: Some("operation cancelled".to_owned()),
+            };
+        }
     }
 }
 

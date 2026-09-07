@@ -9,6 +9,8 @@ use fleet_ui_kit::{
 };
 use gpui::{AnyElement, App, Context, Pixels, ScrollWheelEvent, div, px};
 
+use crate::actions::{files, global};
+use crate::keymap;
 use crate::root::{Lazygit, SLOT_MAIN, SLOT_PATCH, SLOT_SECONDARY};
 use crate::state::{MainContent, PanelId};
 use crate::views::diff::{ViewState, diff_list};
@@ -17,6 +19,48 @@ use crate::views::rows;
 
 /// How many command-log rows the band shows (lazygit's `commandLogSize`).
 const LOG_ROWS: usize = 8;
+
+fn action_hint(chain: &[&'static str], action: &'static str, label: &str) -> String {
+    keymap::bindings_for_chain(chain)
+        .iter()
+        .find(|binding| binding.action == action)
+        .map_or_else(
+            || label.to_owned(),
+            |binding| format!("{}  {label}", binding.keys),
+        )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffAvailability<'a> {
+    Loading,
+    Failed(&'a str),
+    Empty,
+    Ready,
+}
+
+struct CommitFilesBody<'a> {
+    oid: &'a ObjectId,
+    subject: &'a str,
+    files: &'a Arc<[CommitFile]>,
+    diff: Option<Arc<Diff>>,
+    error: Option<&'a str>,
+}
+
+fn diff_availability<'a>(
+    diff: Option<&Diff>,
+    model_empty: bool,
+    pending_reads: usize,
+    error: Option<&'a str>,
+) -> DiffAvailability<'a> {
+    match (diff, error) {
+        (None, Some(error)) => DiffAvailability::Failed(error),
+        (None, _) if pending_reads > 0 => DiffAvailability::Loading,
+        (None, None) => DiffAvailability::Loading,
+        (Some(diff), _) if diff.files.is_empty() => DiffAvailability::Empty,
+        (Some(_), _) if model_empty => DiffAvailability::Loading,
+        (Some(_), _) => DiffAvailability::Ready,
+    }
+}
 
 /// The height of the command-log band: [`LOG_ROWS`] `data_small` rows under one pane header.
 ///
@@ -101,30 +145,61 @@ impl Lazygit {
                 .into_any_element(),
             MainContent::RemoteInfo { name } => self.remote_body(name, cx),
             MainContent::TagInfo { name } => self.tag_body(name, cx),
-            MainContent::Conflict { file, section, .. } => {
-                self.conflict_body(file.clone(), *section, cx)
-            }
+            MainContent::Conflict {
+                file,
+                section,
+                error,
+                ..
+            } => self.conflict_body(file.clone(), *section, error.as_deref(), cx),
             MainContent::FileDiff {
-                unstaged, staged, ..
-            } => self.file_diff_body(unstaged.clone(), staged.clone(), cx),
-            MainContent::CommitDiff { diff, .. } => self.main_diff_list(diff.clone(), None, cx),
-            MainContent::BranchDiff { diff, .. } | MainContent::StashDiff { diff, .. } => {
-                self.main_diff_list(diff.clone(), None, cx)
+                unstaged,
+                staged,
+                error,
+                ..
+            } => self.file_diff_body(unstaged.clone(), staged.clone(), error.as_deref(), cx),
+            MainContent::CommitDiff { diff, error, .. }
+            | MainContent::BranchDiff { diff, error, .. }
+            | MainContent::StashDiff { diff, error, .. } => {
+                self.main_diff_list(diff.clone(), None, error.as_deref(), cx)
             }
             MainContent::SubCommits {
                 commits,
                 shown,
                 diff,
+                commits_error,
+                diff_error,
                 ..
-            } => self.sub_commits_body(commits, shown.as_ref(), diff.clone(), cx),
+            } => self.sub_commits_body(
+                commits,
+                shown.as_ref(),
+                diff.clone(),
+                commits_error.as_deref(),
+                diff_error.as_deref(),
+                cx,
+            ),
             MainContent::CommitFiles {
                 oid,
                 subject,
                 files,
                 shown,
                 diff,
+                whole_error,
+                diff_error,
                 ..
-            } => self.commit_files_body(oid, subject, files, shown.is_none(), diff.clone(), cx),
+            } => self.commit_files_body(
+                CommitFilesBody {
+                    oid,
+                    subject,
+                    files,
+                    diff: diff.clone(),
+                    error: if shown.is_none() {
+                        whole_error.as_deref()
+                    } else {
+                        diff_error.as_deref()
+                    },
+                },
+                cx,
+            ),
         }
     }
 
@@ -134,6 +209,8 @@ impl Lazygit {
         commits: &Arc<[Commit]>,
         shown: Option<&ObjectId>,
         diff: Option<Arc<Diff>>,
+        commits_error: Option<&str>,
+        diff_error: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let focused = self.state.focused == PanelId::Main;
@@ -168,13 +245,19 @@ impl Lazygit {
         )
         .cursor(cursor)
         .track_scroll(&self.scroll_main)
-        .empty(EmptyState::new("No commits on this ref.").action(""));
+        .empty(match commits_error {
+            Some(error) => {
+                EmptyState::new(format!("Could not load commits: {error}")).action(action_hint(
+                    &self.state.context_chain(),
+                    gpui::Action::name(&global::Refresh),
+                    "retry",
+                ))
+            }
+            None => EmptyState::new("No commits on this ref.").action(""),
+        });
 
         let patch = match (shown, diff) {
-            (Some(_), Some(diff)) => self.patch_list("lazygit-sub-patch", Some(diff), cx),
-            (Some(_), None) => EmptyState::new("Reading the patch…")
-                .action("")
-                .into_any_element(),
+            (Some(_), diff) => self.patch_list("lazygit-sub-patch", diff, diff_error, cx),
             (None, _) => EmptyState::new("⏎ shows the selected commit's patch")
                 .action("esc  back")
                 .into_any_element(),
@@ -184,20 +267,12 @@ impl Lazygit {
 
     /// lazygit's commit-files view: a header row plus the commit's files, over the selected row's
     /// patch. The header row is how the whole-commit patch stays reachable.
-    fn commit_files_body(
-        &self,
-        oid: &ObjectId,
-        subject: &str,
-        files: &Arc<[CommitFile]>,
-        on_header: bool,
-        diff: Option<Arc<Diff>>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn commit_files_body(&self, body: CommitFilesBody<'_>, cx: &mut Context<Self>) -> AnyElement {
         let focused = self.state.focused == PanelId::Main;
         let cursor = self.state.cursors.main.index();
         let budget = self.budget(3);
-        let header = format!("{}  {subject}", crate::state::short_oid(oid));
-        let painted = files.clone();
+        let header = format!("{}  {}", crate::state::short_oid(body.oid), body.subject);
+        let painted = body.files.clone();
         let list = ListView::new(
             "lazygit-commit-files",
             painted.len() + 1,
@@ -213,15 +288,7 @@ impl Lazygit {
         .track_scroll(&self.scroll_main)
         .empty(EmptyState::new("This commit changed nothing.").action(""));
 
-        let patch = match diff {
-            Some(diff) => self.patch_list("lazygit-commit-patch", Some(diff), cx),
-            None if on_header => EmptyState::new("Reading the patch…")
-                .action("")
-                .into_any_element(),
-            None => EmptyState::new("Reading the file's patch…")
-                .action("")
-                .into_any_element(),
-        };
+        let patch = self.patch_list("lazygit-commit-patch", body.diff, body.error, cx);
         self.split(list.into_any_element(), patch)
     }
 
@@ -253,18 +320,20 @@ impl Lazygit {
     }
 
     /// Wraps a diff list so a sideways wheel delta pans its payload.
-    fn with_pan(&self, list: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+    fn with_pan(&self, slot: &'static str, list: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         div()
             .size_full()
             .min_h_0()
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                let delta = event.delta.pixel_delta(cx.theme().metrics.diff_row_h);
-                // Only the dominant axis acts, which is the axis lock trackpads need: without
-                // it diagonal drift makes sideways panning unusable.
-                if delta.x.abs() > delta.y.abs() {
-                    this.pan_diff(f32::from(delta.x), cx);
-                }
-            }))
+            .on_scroll_wheel(
+                cx.listener(move |this, event: &ScrollWheelEvent, _window, cx| {
+                    let delta = event.delta.pixel_delta(cx.theme().metrics.diff_row_h);
+                    // Only the dominant axis acts, which is the axis lock trackpads need: without
+                    // it diagonal drift makes sideways panning unusable.
+                    if delta.x.abs() > delta.y.abs() {
+                        this.pan_diff_slot(slot, f32::from(delta.x), cx);
+                    }
+                }),
+            )
             .child(list)
             .into_any_element()
     }
@@ -274,13 +343,35 @@ impl Lazygit {
         &self,
         id: &'static str,
         diff: Option<Arc<Diff>>,
+        error: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let chain = self.state.context_chain();
+        let retry = action_hint(&chain, gpui::Action::name(&global::Refresh), "retry");
+        let refresh = action_hint(&chain, gpui::Action::name(&global::Refresh), "refresh");
         let model = self.slot_model(SLOT_PATCH, diff.as_ref(), self.state.diff_mode);
-        if model.is_empty() {
-            return EmptyState::new("No changes to show.")
-                .action("")
-                .into_any_element();
+        match diff_availability(
+            diff.as_deref(),
+            model.is_empty(),
+            self.state.pending_reads,
+            error,
+        ) {
+            DiffAvailability::Loading => {
+                return EmptyState::new("Loading changes…")
+                    .action("")
+                    .into_any_element();
+            }
+            DiffAvailability::Failed(error) => {
+                return EmptyState::new(format!("Could not load changes: {error}"))
+                    .action(retry)
+                    .into_any_element();
+            }
+            DiffAvailability::Empty => {
+                return EmptyState::new("No changes to show.")
+                    .action(refresh)
+                    .into_any_element();
+            }
+            DiffAvailability::Ready => {}
         }
         let list = diff_list(
             id,
@@ -295,13 +386,14 @@ impl Lazygit {
             },
             cx,
         );
-        self.with_pan(list, cx)
+        self.with_pan(SLOT_PATCH, list, cx)
     }
 
     fn file_diff_body(
         &self,
         unstaged: Option<Arc<Diff>>,
         staged: Option<Arc<Diff>>,
+        error: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let has_staged = staged.as_ref().is_some_and(|diff| !diff.files.is_empty());
@@ -312,7 +404,7 @@ impl Lazygit {
                     DiffSide::Staged => (staged, unstaged),
                 };
                 let range = self.staging_range();
-                let main = self.main_diff_list(primary, range, cx);
+                let main = self.main_diff_list(primary, range, error, cx);
                 if secondary
                     .as_ref()
                     .map(|diff| diff.files.is_empty())
@@ -324,19 +416,22 @@ impl Lazygit {
                     DiffSide::Unstaged => "Staged changes",
                     DiffSide::Staged => "Unstaged changes",
                 };
-                self.side_by_side(main, self.secondary_list(secondary, label, cx))
+                self.side_by_side(main, self.secondary_list(secondary, label, error, cx))
             }
             None => {
                 let has_unstaged = unstaged.as_ref().is_some_and(|diff| !diff.files.is_empty());
                 if !has_unstaged && has_staged {
                     // Nothing left in the worktree: the panel shows the staged half instead.
-                    return self.main_diff_list(staged, None, cx);
+                    return self.main_diff_list(staged, None, error, cx);
                 }
-                let main = self.main_diff_list(unstaged, None, cx);
+                let main = self.main_diff_list(unstaged, None, error, cx);
                 if !has_staged {
                     return main;
                 }
-                self.side_by_side(main, self.secondary_list(staged, "Staged changes", cx))
+                self.side_by_side(
+                    main,
+                    self.secondary_list(staged, "Staged changes", error, cx),
+                )
             }
         }
     }
@@ -362,13 +457,35 @@ impl Lazygit {
         &self,
         diff: Option<Arc<Diff>>,
         range: Option<(usize, usize)>,
+        error: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let chain = self.state.context_chain();
+        let retry = action_hint(&chain, gpui::Action::name(&global::Refresh), "retry");
+        let refresh = action_hint(&chain, gpui::Action::name(&global::Refresh), "refresh");
         let model = self.slot_model(SLOT_MAIN, diff.as_ref(), self.main_mode());
-        if model.is_empty() {
-            return EmptyState::new("No changes to show.")
-                .action("")
-                .into_any_element();
+        match diff_availability(
+            diff.as_deref(),
+            model.is_empty(),
+            self.state.pending_reads,
+            error,
+        ) {
+            DiffAvailability::Loading => {
+                return EmptyState::new("Loading changes…")
+                    .action("")
+                    .into_any_element();
+            }
+            DiffAvailability::Failed(error) => {
+                return EmptyState::new(format!("Could not load changes: {error}"))
+                    .action(retry)
+                    .into_any_element();
+            }
+            DiffAvailability::Empty => {
+                return EmptyState::new("No changes to show.")
+                    .action(refresh)
+                    .into_any_element();
+            }
+            DiffAvailability::Ready => {}
         }
         let focused = self.state.focused == PanelId::Main;
         let list = diff_list(
@@ -384,7 +501,7 @@ impl Lazygit {
             },
             cx,
         );
-        self.with_pan(list, cx)
+        self.with_pan(SLOT_MAIN, list, cx)
     }
 
     /// The read-only half of a split diff, with its own label so the two sides never blur.
@@ -392,9 +509,21 @@ impl Lazygit {
         &self,
         diff: Option<Arc<Diff>>,
         label: &'static str,
+        error: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let model = self.slot_model(SLOT_SECONDARY, diff.as_ref(), DiffViewMode::Unified);
+        if let Some(error) = error
+            && diff.is_none()
+        {
+            return EmptyState::new(format!("Could not load changes: {error}"))
+                .action(action_hint(
+                    &self.state.context_chain(),
+                    gpui::Action::name(&global::Refresh),
+                    "retry",
+                ))
+                .into_any_element();
+        }
         if model.is_empty() {
             return div().into_any_element();
         }
@@ -422,7 +551,12 @@ impl Lazygit {
                     .flex_none()
                     .child(SectionHeader::new(label)),
             )
-            .child(div().flex_1().min_h_0().child(self.with_pan(list, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.with_pan(SLOT_SECONDARY, list, cx)),
+            )
             .into_any_element()
     }
 
@@ -516,17 +650,33 @@ impl Lazygit {
         &self,
         file: Option<Arc<ConflictFile>>,
         section: usize,
+        error: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
         let Some(file) = file else {
+            if let Some(error) = error {
+                return EmptyState::new(format!("Could not load conflict: {error}"))
+                    .action(action_hint(
+                        &self.state.context_chain(),
+                        gpui::Action::name(&global::Refresh),
+                        "retry",
+                    ))
+                    .into_any_element();
+            }
             return EmptyState::new("Reading the conflict…")
                 .action("")
                 .into_any_element();
         };
         if file.conflicts.is_empty() {
+            let chain = self.state.context_chain();
+            let (action, label) = if self.state.focused == PanelId::Main {
+                (gpui::Action::name(&global::Cancel), "back to files")
+            } else {
+                (gpui::Action::name(&files::ToggleStaged), "stage the file")
+            };
             return EmptyState::new("No conflict markers left in this file.")
-                .action("space  stage the file")
+                .action(action_hint(&chain, action, label))
                 .into_any_element();
         }
         let index = section.min(file.conflicts.len() - 1);
@@ -644,5 +794,86 @@ impl Lazygit {
             .header(PaneHeader::new("Command log").total(total))
             .body(column)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_diff_is_retryable() {
+        assert_eq!(
+            diff_availability(None, true, 1, None),
+            DiffAvailability::Loading
+        );
+        assert_eq!(
+            diff_availability(None, true, 0, Some("git refused")),
+            DiffAvailability::Failed("git refused")
+        );
+        assert_eq!(
+            diff_availability(None, true, 2, Some("git refused")),
+            DiffAvailability::Failed("git refused")
+        );
+        assert_eq!(
+            diff_availability(Some(&Diff::default()), true, 0, None),
+            DiffAvailability::Empty
+        );
+    }
+
+    #[test]
+    fn retry_hint_never_advertises_a_shadowed_binding() {
+        let refresh = gpui::Action::name(&global::Refresh);
+        for chain in [
+            &["Panels", "Files"][..],
+            &["Panels", "Branches"][..],
+            &["Panels", "Commits"][..],
+            &["Panels", "Main"][..],
+        ] {
+            let bindings = keymap::bindings_for_chain(chain);
+            let hint = action_hint(chain, refresh, "retry");
+            if let Some((keys, _)) = hint.split_once("  ") {
+                assert_eq!(
+                    bindings
+                        .iter()
+                        .find(|binding| binding.keys == keys)
+                        .map(|binding| binding.action),
+                    Some(refresh),
+                    "{chain:?} advertised {keys} for the wrong action"
+                );
+            } else {
+                assert_eq!(chain, &["Panels", "Branches"]);
+                assert_eq!(hint, "retry");
+            }
+        }
+    }
+
+    #[test]
+    fn marker_free_hint_is_actionable_in_main_and_files() {
+        for (chain, action, label, expected) in [
+            (
+                &["Panels", "Main", "Conflict"][..],
+                gpui::Action::name(&global::Cancel),
+                "back to files",
+                "escape  back to files",
+            ),
+            (
+                &["Panels", "Files"][..],
+                gpui::Action::name(&files::ToggleStaged),
+                "stage the file",
+                "space  stage the file",
+            ),
+        ] {
+            let hint = action_hint(chain, action, label);
+            assert_eq!(hint, expected);
+            let (keys, _) = hint.split_once("  ").expect("hint has a key");
+            assert_eq!(
+                keymap::bindings_for_chain(chain)
+                    .iter()
+                    .find(|binding| binding.keys == keys)
+                    .map(|binding| binding.action),
+                Some(action)
+            );
+        }
     }
 }

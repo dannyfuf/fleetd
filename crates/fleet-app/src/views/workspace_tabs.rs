@@ -8,7 +8,7 @@ use fleet_core::{
     ids::TerminalId,
     sessions::{AgentActivity, Session, TerminalStatus, WorktreeStatus},
 };
-use fleet_ui_kit::{StatusKind, TerminalTab, TerminalTabKind};
+use fleet_ui_kit::{TerminalAgentState, TerminalTab, TerminalTabKind};
 
 #[derive(Default)]
 pub(crate) struct TabLabels(HashMap<TerminalId, SharedString>);
@@ -57,8 +57,8 @@ impl TabLabels {
                         .find(|window| window.index == position as u32 && window.agent.is_some())
                 }) {
                     tab = match window.agent_activity {
-                        AgentActivity::Working => tab.agent_status(StatusKind::AgentWorking),
-                        AgentActivity::Idle => tab.agent_status(StatusKind::AgentFinished),
+                        AgentActivity::Working => tab.agent_status(TerminalAgentState::Working),
+                        AgentActivity::Idle => tab.agent_status(TerminalAgentState::Finished),
                         AgentActivity::Unknown => tab,
                     };
                 }
@@ -302,7 +302,7 @@ mod tests {
         };
 
         let tabs = TabLabels::default().tabs(&session, Some(&status), None, &HashSet::new());
-        assert_eq!(tabs[0].agent_status, Some(StatusKind::AgentWorking));
+        assert_eq!(tabs[0].agent_status, Some(TerminalAgentState::Working));
         assert_eq!(tabs[1].agent_status, None);
     }
 

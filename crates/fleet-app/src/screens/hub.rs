@@ -10,11 +10,11 @@ use std::{
 use fleet_core::{
     github::{PrTab, PullRequest, worktree_matches_pr},
     ids::{ContextId, RepoId, WorktreeId},
-    model::{CloneJob, Repo, Worktree},
+    model::{CloneJob, Context, Repo, Worktree},
     sessions::{AgentActivity, SessionState},
 };
 use fleet_proto::{
-    error::ProtoError,
+    error::{ErrorKind, ProtoError},
     request::RequestBody,
     response::{PrSlice, ResponseBody},
 };
@@ -28,7 +28,7 @@ use crate::{
     actions::{fleet, hub, prs, repos, worktrees},
     bridge::Bridge,
     dialogs::{self, Dialogs},
-    presentation::{age_secs, now_unix},
+    presentation::{DisplayedTarget, age_secs, now_unix},
     state::{AppState, HubPane, HubTab, Overlay, RepoScope, Screen, dwell_for, move_cursor},
     views::{
         detail::{self, Inspected, PrProps, RepoProps, WorktreeProps},
@@ -48,8 +48,28 @@ mod projection;
 mod tests;
 
 pub use cache::PrCache;
+pub(crate) use cache::PrFreshness;
 use composition::publish_breadcrumb;
 pub use projection::HubModel;
+
+type PrIdentity = (RepoId, u64);
+
+/// The context every Hub and chrome projection uses when the daemon has no explicit selection.
+#[must_use]
+pub(crate) fn effective_context(state: &AppState) -> Option<&Context> {
+    let contexts = state.snapshot.as_ref()?.contexts.as_slice();
+    state
+        .active_context()
+        .and_then(|active| contexts.iter().find(|context| &context.id == active))
+        .or_else(|| contexts.first())
+}
+
+fn client_error(message: impl Into<String>) -> ProtoError {
+    ProtoError {
+        kind: ErrorKind::Unknown,
+        message: message.into(),
+    }
+}
 
 /// How long the cursor must sit still before the selected worktree is re-inspected (§2.6 D-4).
 pub const AUTO_INSPECT_DEBOUNCE: Duration = Duration::from_millis(400);
@@ -107,12 +127,22 @@ pub struct HubState {
     /// Bumped on every cursor move; an older debounce wakes up and does nothing.
     pub inspect_generation: u64,
     inspect_task: Option<Task<()>>,
+    pr_refresh_task: Option<Task<()>>,
     inspect_target: Option<WorktreeId>,
+    inspection_sequence: u64,
+    inspection_requests: HashMap<WorktreeId, u64>,
+    inspection_identities: HashMap<WorktreeId, WorktreeIdentity>,
+    last_reconciled_revision: u64,
+    #[cfg(test)]
+    inspection_reconciliations: usize,
     presentation_revision: u64,
     projection: RefCell<projection::ProjectionCache>,
     prepared: Rc<HubModel>,
+    selection: SelectionAnchors,
     /// Pull requests whose worktree is being created, so their glyph spins in place (§3.5).
     pub creating: Vec<(RepoId, u64)>,
+    creation_intents: HashMap<PrIdentity, PrCreateIntent>,
+    restoring_trash: Option<String>,
 }
 
 impl HubState {
@@ -120,6 +150,164 @@ impl HubState {
     fn invalidate(&mut self) {
         self.presentation_revision = self.presentation_revision.wrapping_add(1);
     }
+
+    fn begin_inspection(&mut self, id: WorktreeId) -> u64 {
+        self.inspection_sequence = self.inspection_sequence.wrapping_add(1);
+        let request = self.inspection_sequence;
+        self.inspection_requests.insert(id.clone(), request);
+        let slot = self.inspections.entry(id).or_default();
+        slot.loading = true;
+        slot.error = None;
+        request
+    }
+
+    fn apply_inspection(
+        &mut self,
+        id: &WorktreeId,
+        request: u64,
+        result: Result<ResponseBody, ProtoError>,
+    ) -> bool {
+        if self.inspection_requests.get(id) != Some(&request) {
+            return false;
+        }
+        self.inspection_requests.remove(id);
+        let slot = self.inspections.entry(id.clone()).or_default();
+        match result {
+            Ok(ResponseBody::Inspections(inspections)) => {
+                if let Some(inspection) = inspections
+                    .into_iter()
+                    .find(|inspection| &inspection.worktree_id == id)
+                {
+                    *slot = Inspected::ready(inspection);
+                } else {
+                    slot.loading = false;
+                    slot.error = None;
+                }
+            }
+            Ok(_) => {
+                slot.loading = false;
+                slot.error = Some("daemon returned an unexpected inspection response".to_owned());
+            }
+            Err(error) => {
+                slot.loading = false;
+                slot.error = Some(error.message);
+            }
+        }
+        self.invalidate();
+        true
+    }
+
+    fn reconcile_inspection_identities(&mut self, worktrees: &[Worktree]) {
+        #[cfg(test)]
+        {
+            self.inspection_reconciliations += 1;
+        }
+        let current: HashMap<_, _> = worktrees
+            .iter()
+            .map(|worktree| (worktree.id.clone(), WorktreeIdentity::from(worktree)))
+            .collect();
+        self.inspections.retain(|id, _| {
+            self.inspection_identities
+                .get(id)
+                .zip(current.get(id))
+                .is_some_and(|(old, new)| old == new)
+        });
+        self.inspection_requests.retain(|id, _| {
+            self.inspection_identities
+                .get(id)
+                .zip(current.get(id))
+                .is_some_and(|(old, new)| old == new)
+        });
+        self.inspection_identities = current;
+    }
+
+    fn begin_pr_creation(&mut self, key: PrIdentity, open: bool, sleep_previous: bool) -> bool {
+        if let Some(intent) = self.creation_intents.get_mut(&key) {
+            if open {
+                intent.open = true;
+                intent.sleep_previous = sleep_previous;
+            }
+            return false;
+        }
+        self.creating.push(key.clone());
+        self.creation_intents.insert(
+            key,
+            PrCreateIntent {
+                open,
+                sleep_previous,
+            },
+        );
+        self.invalidate();
+        true
+    }
+
+    fn finish_pr_creation(&mut self, key: &PrIdentity) -> Option<PrCreateIntent> {
+        self.creating.retain(|candidate| candidate != key);
+        let intent = self.creation_intents.remove(key);
+        self.invalidate();
+        intent
+    }
+}
+
+#[derive(Clone)]
+enum HubBridge {
+    Live(Bridge),
+    #[cfg(test)]
+    Test(Rc<dyn Fn(RequestBody) -> async_channel::Receiver<Result<ResponseBody, ProtoError>>>),
+}
+
+impl HubBridge {
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, ProtoError>> {
+        match self {
+            Self::Live(bridge) => bridge.request(body),
+            #[cfg(test)]
+            Self::Test(request) => request(body),
+        }
+    }
+
+    fn send(&self, body: RequestBody) {
+        match self {
+            Self::Live(bridge) => bridge.send(body),
+            #[cfg(test)]
+            Self::Test(request) => {
+                let _reply = request(body);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorktreeIdentity {
+    repo: RepoId,
+    path: String,
+    created_at: String,
+}
+
+impl From<&Worktree> for WorktreeIdentity {
+    fn from(worktree: &Worktree) -> Self {
+        Self {
+            repo: worktree.repo_id.clone(),
+            path: worktree.path.clone(),
+            created_at: worktree.created_at.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PrCreateIntent {
+    open: bool,
+    sleep_previous: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SelectionAnchors {
+    rail: Option<Option<RepoId>>,
+    worktree: Option<WorktreeId>,
+    prs_mine: Option<PrIdentity>,
+    prs_review: Option<PrIdentity>,
 }
 
 /// The Hub screen.
@@ -159,11 +347,11 @@ impl HubScreen {
         cx.defer(move |cx| ctx.synchronize(cx));
     }
 
-    fn context(&self, state: &Entity<AppState>, bridge: &Bridge) -> HubCtx {
+    pub(crate) fn context(&self, state: &Entity<AppState>, bridge: &Bridge) -> HubCtx {
         HubCtx {
             state: state.clone(),
             hub: self.hub.clone(),
-            bridge: bridge.clone(),
+            bridge: HubBridge::Live(bridge.clone()),
             rail_scroll: self.rail_scroll.clone(),
             list_scroll: self.list_scroll.clone(),
             pr_scroll: self.pr_scroll.clone(),
@@ -195,10 +383,10 @@ fn find_pr<'a>(
 
 /// Everything an `on_action` listener needs, cloned into each closure.
 #[derive(Clone)]
-struct HubCtx {
+pub(crate) struct HubCtx {
     state: Entity<AppState>,
     hub: Entity<HubState>,
-    bridge: Bridge,
+    bridge: HubBridge,
     rail_scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
     pr_scroll: UniformListScrollHandle,

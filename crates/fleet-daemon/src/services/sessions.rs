@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::agent_activity::AgentActivityTracker;
-use host_bridge::{forward_host_events, spawn_terminal};
+use host_bridge::spawn_terminal;
 
 mod host_bridge;
 mod lifecycle;
@@ -51,6 +51,7 @@ struct Registry {
     attachments: HashMap<TerminalId, usize>,
     next_terminal: u64,
     next_sequences: HashMap<TerminalId, u64>,
+    observed_output_bytes: HashMap<TerminalId, u64>,
     active_worktree: Option<SessionId>,
     observed_agents: HashMap<TerminalId, Option<String>>,
     activity_trackers: HashMap<TerminalId, AgentActivityTracker>,
@@ -71,6 +72,8 @@ pub(crate) struct SessionRuntime {
     registry: Mutex<Registry>,
     /// Serializes EnsureSession repair per stable session id.
     ensure_locks: Mutex<HashMap<SessionId, Weak<EnsureLock>>>,
+    terminal_transition_locks: Mutex<HashMap<SessionId, Weak<TransitionLock>>>,
+    worktree_lifecycle_locks: Mutex<HashMap<WorktreeId, Weak<TransitionLock>>>,
     watches: super::watches::Watches,
     frames: broadcast::Sender<FrameUpdate>,
     process: Mutex<Option<Arc<dyn Process>>>,
@@ -88,6 +91,16 @@ struct EnsureLockClaim {
     session: SessionId,
     lock: Arc<EnsureLock>,
     guard: Option<OwnedMutexGuard<()>>,
+}
+
+struct TransitionLock {
+    mutex: Arc<AsyncMutex<()>>,
+}
+
+/// Exclusive ownership of one session transition or worktree lifecycle operation.
+pub struct TransitionLockClaim {
+    _lock: Arc<TransitionLock>,
+    _guard: OwnedMutexGuard<()>,
 }
 
 impl Drop for EnsureLockClaim {
@@ -214,6 +227,13 @@ impl Sessions {
             .values()
             .cloned()
             .collect()
+    }
+
+    pub(super) async fn claim_worktree_lifecycle(
+        &self,
+        worktree: WorktreeId,
+    ) -> TransitionLockClaim {
+        self.runtime.claim_worktree_lifecycle(worktree).await
     }
 }
 

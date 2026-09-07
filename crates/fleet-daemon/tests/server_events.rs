@@ -163,6 +163,41 @@ async fn server_pid_guard_rejects_a_second_instance_even_without_socket_path() {
 }
 
 #[tokio::test]
+async fn simultaneous_binds_never_unlink_winner() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let home = temp.path().join("fleet");
+    let services = services(&home);
+    let first = Listener::bind(
+        &home,
+        Arc::clone(&services),
+        BroadcastBus::default(),
+        CancellationToken::new(),
+    );
+    let second = Listener::bind(
+        &home,
+        services,
+        BroadcastBus::default(),
+        CancellationToken::new(),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let winner = match (first, second) {
+        (Ok(winner), Err(DaemonError::Conflict(_)))
+        | (Err(DaemonError::Conflict(_)), Ok(winner)) => winner,
+        _ => panic!("expected exactly one bind winner"),
+    };
+    let socket = winner.socket_path().to_path_buf();
+    assert!(socket.exists());
+
+    std::fs::remove_file(&socket).expect("unlink winner pathname");
+    let replacement = std::os::unix::net::UnixListener::bind(&socket)
+        .expect("bind replacement socket at same pathname");
+    drop(winner);
+    assert!(socket.exists(), "old owner removed replacement socket");
+    drop(replacement);
+    std::fs::remove_file(socket).expect("remove replacement socket");
+}
+
+#[tokio::test]
 async fn socket_session_mutations_publish_one_transition() {
     for separate_bus in [false, true] {
         let temp = tempfile::tempdir().expect("temp dir");

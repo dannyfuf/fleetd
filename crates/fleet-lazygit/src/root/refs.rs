@@ -14,13 +14,22 @@ impl Lazygit {
         cx.notify();
     }
 
-    pub(super) fn new_branch(&mut self, _: &branches::New, _: &mut Window, cx: &mut Context<Self>) {
-        self.open_prompt(Prompt {
-            title: "New branch".to_owned(),
-            subtitle: Some("Branch name".to_owned()),
-            buffer: crate::state::Buffer::single_line(),
-            kind: PromptKind::NewBranch { start_point: None },
-        });
+    pub(super) fn new_branch(
+        &mut self,
+        _: &branches::New,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_prompt(
+            Prompt {
+                title: "New branch".to_owned(),
+                subtitle: Some("Branch name".to_owned()),
+                buffer: crate::state::Buffer::single_line(),
+                kind: PromptKind::NewBranch { start_point: None },
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -70,18 +79,22 @@ impl Lazygit {
     pub(super) fn rename_branch(
         &mut self,
         _: &branches::Rename,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(branch) = self.state.selected_branch().cloned() else {
             return;
         };
-        self.open_prompt(Prompt {
-            title: "Rename branch".to_owned(),
-            subtitle: Some(format!("Renaming `{}`", branch.name)),
-            buffer: crate::state::Buffer::single_line().with_text(branch.name.clone()),
-            kind: PromptKind::RenameBranch(branch.name),
-        });
+        self.open_prompt(
+            Prompt {
+                title: "Rename branch".to_owned(),
+                subtitle: Some(format!("Renaming `{}`", branch.name)),
+                buffer: crate::state::Buffer::single_line().with_text(branch.name.clone()),
+                kind: PromptKind::RenameBranch(branch.name),
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -165,18 +178,27 @@ impl Lazygit {
         cx.notify();
     }
 
-    pub(super) fn tag_branch(&mut self, _: &branches::Tag, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn tag_branch(
+        &mut self,
+        _: &branches::Tag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let target = self
             .state
             .selected_branch()
             .map(|branch| branch.name.clone())
             .unwrap_or_else(|| "HEAD".to_owned());
-        self.open_prompt(Prompt {
-            title: "New tag".to_owned(),
-            subtitle: Some(format!("Tag name for `{target}`")),
-            buffer: crate::state::Buffer::single_line(),
-            kind: PromptKind::NewTag(target),
-        });
+        self.open_prompt(
+            Prompt {
+                title: "New tag".to_owned(),
+                subtitle: Some(format!("Tag name for `{target}`")),
+                buffer: crate::state::Buffer::single_line(),
+                kind: PromptKind::NewTag(target),
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -213,6 +235,8 @@ impl Lazygit {
             commits: Arc::default(),
             shown: None,
             diff: None,
+            commits_error: None,
+            diff_error: None,
         };
         self.state.cursors.main.set_len(0);
         self.state.main_h_scroll = 0.0;
@@ -240,9 +264,16 @@ impl Lazygit {
         }) else {
             return;
         };
-        if let MainContent::SubCommits { shown, diff, .. } = &mut self.state.main {
+        if let MainContent::SubCommits {
+            shown,
+            diff,
+            diff_error,
+            ..
+        } = &mut self.state.main
+        {
             *shown = Some(oid.clone());
             *diff = None;
+            *diff_error = None;
         }
         self.send(GitRequest::CommitDiff(oid));
         cx.notify();
@@ -265,6 +296,10 @@ impl Lazygit {
         }
         if let Some(remote) = self.state.selected_remote().cloned() {
             self.state.remote_drill = Some(remote.name);
+            self.state
+                .cursors
+                .remote_branches
+                .set_len(self.state.remote_branches().len());
             self.state.cursors.remote_branches.set(0);
             self.refresh_main();
         }
@@ -295,13 +330,17 @@ impl Lazygit {
         cx.notify();
     }
 
-    pub(super) fn new_tag(&mut self, _: &tags::New, _: &mut Window, cx: &mut Context<Self>) {
-        self.open_prompt(Prompt {
-            title: "New tag".to_owned(),
-            subtitle: Some("Tag name for HEAD".to_owned()),
-            buffer: crate::state::Buffer::single_line(),
-            kind: PromptKind::NewTag("HEAD".to_owned()),
-        });
+    pub(super) fn new_tag(&mut self, _: &tags::New, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_prompt(
+            Prompt {
+                title: "New tag".to_owned(),
+                subtitle: Some("Tag name for HEAD".to_owned()),
+                buffer: crate::state::Buffer::single_line(),
+                kind: PromptKind::NewTag("HEAD".to_owned()),
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -362,7 +401,10 @@ impl Lazygit {
             danger: true,
             outcome: ConfirmOutcome::Request(Box::new(GitRequest::Mutate {
                 label: "stash drop".to_owned(),
-                mutation: Box::new(Mutation::StashDrop(entry.index)),
+                mutation: Box::new(Mutation::StashDrop {
+                    index: entry.index,
+                    oid: entry.oid,
+                }),
             })),
         });
         cx.notify();
@@ -371,18 +413,22 @@ impl Lazygit {
     pub(super) fn stash_branch(
         &mut self,
         _: &stash::NewBranch,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self.state.selected_stash().cloned() else {
             return;
         };
-        self.open_prompt(Prompt {
-            title: "Branch from stash".to_owned(),
-            subtitle: Some(format!("Branch name for stash@{{{}}}", entry.index)),
-            buffer: crate::state::Buffer::single_line(),
-            kind: PromptKind::BranchFromStash(entry.index),
-        });
+        self.open_prompt(
+            Prompt {
+                title: "Branch from stash".to_owned(),
+                subtitle: Some(format!("Branch name for stash@{{{}}}", entry.index)),
+                buffer: crate::state::Buffer::single_line(),
+                kind: PromptKind::BranchFromStash(entry.index),
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 

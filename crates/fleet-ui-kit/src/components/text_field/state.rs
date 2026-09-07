@@ -1,19 +1,22 @@
 use std::ops::Range;
 
 use gpui::{Keystroke, SharedString};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A single-line editing model: an owned string plus a byte cursor.
 ///
-/// Every mutation keeps the cursor on a `char` boundary and inside the string, so the state can
-/// never index-panic. `\n` and `\r` are stripped on insert — this is a single-line field.
+/// Every mutation keeps the cursor on a grapheme boundary and inside the string, so the state can
+/// never split a user-perceived character. `\n` and `\r` are stripped on insert — this is a
+/// single-line field.
 ///
-/// The edit set is KEYMAP §3.8's, and nothing else: no selection, no undo, no word motion
-/// beyond `ctrl-w`. Selection is deliberately absent — Fleet's fields are short, and the two
-/// blue affordances of the design system are the focus ring and the caret.
+/// The edit set is KEYMAP §3.8's, and nothing else: no undo and no word motion beyond `ctrl-w`.
+/// Platform selection is retained so native replacement and IME composition operate on the range
+/// selected by the host.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TextFieldState {
     text: String,
     cursor: usize,
+    selected: Range<usize>,
     marked: Option<Range<usize>>,
 }
 
@@ -30,6 +33,7 @@ impl TextFieldState {
         Self {
             text,
             cursor,
+            selected: cursor..cursor,
             marked: None,
         }
     }
@@ -64,10 +68,16 @@ impl TextFieldState {
         self.marked.clone()
     }
 
+    /// The platform selection, as byte offsets.
+    pub fn selected_range(&self) -> Range<usize> {
+        self.selected.clone()
+    }
+
     /// Replace the value; the caret lands at the end.
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = sanitize(&text.into());
         self.cursor = self.text.len();
+        self.selected = self.cursor..self.cursor;
         self.marked = None;
     }
 
@@ -75,12 +85,22 @@ impl TextFieldState {
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.selected = 0..0;
         self.marked = None;
     }
 
-    /// Move the caret to a byte offset, snapped down to a `char` boundary.
+    /// Move the caret to a byte offset, snapped down to a grapheme boundary.
     pub fn set_cursor(&mut self, offset: usize) {
         self.cursor = self.floor_boundary(offset);
+        self.selected = self.cursor..self.cursor;
+    }
+
+    /// Set the platform selection, snapping both ends to valid byte boundaries.
+    pub fn set_selected_range(&mut self, range: Range<usize>) {
+        let start = self.floor_boundary(range.start);
+        let end = self.floor_boundary(range.end);
+        self.selected = start.min(end)..start.max(end);
+        self.cursor = end;
     }
 
     /// Insert `text` at the caret. Newlines are stripped.
@@ -89,30 +109,40 @@ impl TextFieldState {
         if insertion.is_empty() {
             return;
         }
-        self.text.insert_str(self.cursor, &insertion);
-        self.cursor += insertion.len();
-        self.marked = None;
+        self.replace_range(self.selected.clone(), &insertion);
     }
 
     /// Delete the character before the caret. Returns whether anything changed.
     pub fn backspace(&mut self) -> bool {
+        if !self.selected.is_empty() {
+            let selected = self.selected.clone();
+            self.replace_range(selected, "");
+            return true;
+        }
         let start = self.previous_boundary(self.cursor);
         if start == self.cursor {
             return false;
         }
         self.text.replace_range(start..self.cursor, "");
         self.cursor = start;
+        self.selected = start..start;
         self.marked = None;
         true
     }
 
     /// Delete the character after the caret. Returns whether anything changed.
     pub fn delete_forward(&mut self) -> bool {
+        if !self.selected.is_empty() {
+            let selected = self.selected.clone();
+            self.replace_range(selected, "");
+            return true;
+        }
         let end = self.next_boundary(self.cursor);
         if end == self.cursor {
             return false;
         }
         self.text.replace_range(self.cursor..end, "");
+        self.selected = self.cursor..self.cursor;
         self.marked = None;
         true
     }
@@ -141,6 +171,7 @@ impl TextFieldState {
         }
         self.text.replace_range(start..self.cursor, "");
         self.cursor = start;
+        self.selected = start..start;
         self.marked = None;
         true
     }
@@ -152,6 +183,7 @@ impl TextFieldState {
         }
         self.text.replace_range(..self.cursor, "");
         self.cursor = 0;
+        self.selected = 0..0;
         self.marked = None;
         true
     }
@@ -162,43 +194,54 @@ impl TextFieldState {
             return false;
         }
         self.text.truncate(self.cursor);
+        self.selected = self.cursor..self.cursor;
         self.marked = None;
         true
     }
 
     /// `←`: one character left.
     pub fn move_left(&mut self) -> bool {
+        if !self.selected.is_empty() {
+            let target = self.selected.start;
+            self.set_cursor(target);
+            return true;
+        }
         let target = self.previous_boundary(self.cursor);
         let moved = target != self.cursor;
-        self.cursor = target;
+        self.set_cursor(target);
         moved
     }
 
     /// `→`: one character right.
     pub fn move_right(&mut self) -> bool {
+        if !self.selected.is_empty() {
+            let target = self.selected.end;
+            self.set_cursor(target);
+            return true;
+        }
         let target = self.next_boundary(self.cursor);
         let moved = target != self.cursor;
-        self.cursor = target;
+        self.set_cursor(target);
         moved
     }
 
     /// `ctrl-a` / `Home`.
     pub fn move_to_start(&mut self) -> bool {
         let moved = self.cursor != 0;
-        self.cursor = 0;
+        self.set_cursor(0);
         moved
     }
 
     /// `ctrl-e` / `End`.
     pub fn move_to_end(&mut self) -> bool {
         let moved = self.cursor != self.text.len();
-        self.cursor = self.text.len();
+        self.set_cursor(self.text.len());
         moved
     }
 
     /// Replace a byte range with `text` and leave the caret after the insertion.
     ///
-    /// The range is snapped to `char` boundaries, so an IME range that is stale by a frame
+    /// The range is snapped to grapheme boundaries, so an IME range that is stale by a frame
     /// cannot panic the app.
     pub fn replace_range(&mut self, range: Range<usize>, text: &str) {
         let start = self.floor_boundary(range.start);
@@ -206,6 +249,7 @@ impl TextFieldState {
         let insertion = sanitize(text);
         self.text.replace_range(start..end, &insertion);
         self.cursor = start + insertion.len();
+        self.selected = self.cursor..self.cursor;
         self.marked = None;
     }
 
@@ -220,6 +264,7 @@ impl TextFieldState {
     /// Drop the IME marked range without touching the text.
     pub fn unmark(&mut self) {
         self.marked = None;
+        self.selected = self.cursor..self.cursor;
     }
 
     /// Apply one non-printable editing key, reporting what it changed without copying the
@@ -230,14 +275,19 @@ impl TextFieldState {
     /// are consumed here.
     pub fn edit_keystroke(&mut self, keystroke: &Keystroke) -> EditEffect {
         let modifiers = &keystroke.modifiers;
-        let control = modifiers.control && !modifiers.platform && !modifiers.alt;
+        let plain = !modifiers.modified();
+        let control = modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && !modifiers.platform
+            && !modifiers.function;
         let (changed, text) = match keystroke.key.as_str() {
-            "backspace" if !modifiers.control => (self.backspace(), true),
-            "delete" if !modifiers.control => (self.delete_forward(), true),
-            "left" if !modifiers.control => (self.move_left(), false),
-            "right" if !modifiers.control => (self.move_right(), false),
-            "home" => (self.move_to_start(), false),
-            "end" => (self.move_to_end(), false),
+            "backspace" if plain => (self.backspace(), true),
+            "delete" if plain => (self.delete_forward(), true),
+            "left" if plain => (self.move_left(), false),
+            "right" if plain => (self.move_right(), false),
+            "home" if plain => (self.move_to_start(), false),
+            "end" if plain => (self.move_to_end(), false),
             "a" if control => (self.move_to_start(), false),
             "e" if control => (self.move_to_end(), false),
             "b" if control => (self.move_left(), false),
@@ -287,14 +337,7 @@ impl TextFieldState {
 
     /// Convert a UTF-16 offset to a byte offset, for the platform input handler.
     pub fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf16 = 0;
-        for (byte, ch) in self.text.char_indices() {
-            if utf16 >= offset {
-                return byte;
-            }
-            utf16 += ch.len_utf16();
-        }
-        self.text.len()
+        offset_from_utf16(&self.text, offset)
     }
 
     /// The whole value's length in UTF-16 code units.
@@ -312,32 +355,52 @@ impl TextFieldState {
         self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
     }
 
-    /// The nearest `char` boundary at or before `offset`, clamped to the string.
+    /// The nearest grapheme boundary at or before `offset`, clamped to the string.
     fn floor_boundary(&self, offset: usize) -> usize {
-        let mut offset = offset.min(self.text.len());
-        while offset > 0 && !self.text.is_char_boundary(offset) {
-            offset -= 1;
+        let offset = offset.min(self.text.len());
+        if offset == self.text.len() {
+            return offset;
         }
-        offset
+        self.text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= offset)
+            .last()
+            .unwrap_or(0)
     }
 
-    /// The `char` boundary before `offset`.
+    /// The grapheme boundary before `offset`.
     fn previous_boundary(&self, offset: usize) -> usize {
         let offset = self.floor_boundary(offset);
-        self.text[..offset]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(index, _)| index)
+        self.text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .take_while(|index| *index < offset)
+            .last()
+            .unwrap_or(0)
     }
 
-    /// The `char` boundary after `offset`.
+    /// The grapheme boundary after `offset`.
     fn next_boundary(&self, offset: usize) -> usize {
         let offset = self.floor_boundary(offset);
-        match self.text[offset..].chars().next() {
-            Some(ch) => offset + ch.len_utf8(),
-            None => offset,
-        }
+        self.text
+            .grapheme_indices(true)
+            .map(|(index, _)| index)
+            .find(|index| *index > offset)
+            .unwrap_or(self.text.len())
     }
+}
+
+/// Convert a UTF-16 offset relative to `text` into a byte offset in that same text.
+pub(super) fn offset_from_utf16(text: &str, offset: usize) -> usize {
+    let mut utf16 = 0;
+    for (byte, ch) in text.char_indices() {
+        if utf16 >= offset {
+            return byte;
+        }
+        utf16 += ch.len_utf16();
+    }
+    text.len()
 }
 
 /// Strip the characters a single-line field must never hold.

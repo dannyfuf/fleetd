@@ -4,7 +4,9 @@ use std::{rc::Rc, sync::Arc, time::Duration};
 
 use fleet_core::ids::JobId;
 use fleet_proto::{job::JobRecord, request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::{ActiveTheme, Icon, LOG_TAIL_LINES, LogView, Sheet, Tone, prelude::*};
+use fleet_ui_kit::{
+    ActiveTheme, Icon, LOG_TAIL_LINES, LogCommand, LogView, Sheet, Tone, prelude::*,
+};
 use gpui::{
     AnyElement, App, ClipboardItem, Entity, FocusHandle, ListAlignment, ListState, ScrollStrategy,
     SharedString, Subscription, Task, UniformListScrollHandle, Window, div,
@@ -73,6 +75,16 @@ impl PanelState {
             .nth(self.cursor)
     }
 
+    /// The job keyboard actions address. Once a log is expanded, its stable identity wins over
+    /// the mutable list cursor until the log is collapsed.
+    #[must_use]
+    fn action_job<'a>(&self, jobs: &'a [JobRecord]) -> Option<&'a JobRecord> {
+        if let Some(expanded) = &self.expanded {
+            return jobs.iter().find(|job| &job.id == expanded);
+        }
+        self.selected(jobs)
+    }
+
     /// Keeps the cursor inside the list after the data or the filter changed.
     pub fn clamp(&mut self, len: usize) {
         self.cursor = self.cursor.min(len.saturating_sub(1));
@@ -106,6 +118,20 @@ impl PanelState {
         self.log = Arc::default();
         self.log_offset = 0;
         self.expanded.take().is_some()
+    }
+
+    fn apply_log_command(&mut self, command: LogCommand) {
+        match command {
+            LogCommand::ToggleFollow => self.following = !self.following,
+            LogCommand::Follow => {
+                self.following = true;
+                self.log_offset = self.log.len().saturating_sub(1);
+            }
+            LogCommand::ScrollTo(top) => {
+                self.following = false;
+                self.log_offset = top.min(self.log.len().saturating_sub(1));
+            }
+        }
     }
 }
 

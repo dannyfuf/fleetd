@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fleet_core::{ids::ContextId, model::Context, slug::normalize_context_id};
 
-use crate::{DaemonError, DaemonResult, error::remote_unsupported, stores::state::StateStore};
+use crate::{DaemonError, DaemonResult, stores::state::StateStore};
 
 /// Context domain service backed by durable state.
 #[derive(Clone)]
@@ -71,7 +71,7 @@ impl Contexts {
             .await
     }
 
-    /// Deletes a context and its persisted repository and worktree records.
+    /// Deletes an empty context after the facade has completed its resource cascade.
     pub async fn delete(&self, id: ContextId) -> DaemonResult<()> {
         self.state
             .transaction(move |state| {
@@ -79,24 +79,13 @@ impl Contexts {
                     return Err(DaemonError::NotFound(format!("context {id}")));
                 }
 
-                let repo_ids = state
-                    .repos
-                    .iter()
-                    .filter(|repo| repo.context_id == id)
-                    .map(|repo| repo.id.clone())
-                    .collect::<std::collections::HashSet<_>>();
-                if state
-                    .worktrees
-                    .iter()
-                    .any(|worktree| repo_ids.contains(&worktree.repo_id) && worktree.host.is_some())
+                if state.repos.iter().any(|repo| repo.context_id == id)
+                    || state.clones.iter().any(|clone| clone.context_id == id)
                 {
-                    return Err(remote_unsupported());
+                    return Err(DaemonError::Conflict(format!(
+                        "context {id} still owns repositories"
+                    )));
                 }
-                state
-                    .worktrees
-                    .retain(|worktree| !repo_ids.contains(&worktree.repo_id));
-                state.repos.retain(|repo| repo.context_id != id);
-                state.clones.retain(|clone| clone.context_id != id);
                 state.contexts.retain(|context| context.id != id);
                 if state.active_context_id.as_ref() == Some(&id) {
                     state.active_context_id = None;

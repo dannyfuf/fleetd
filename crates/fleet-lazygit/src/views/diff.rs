@@ -27,13 +27,15 @@ use fleet_ui_kit::theme::{CH, ch};
 use fleet_ui_kit::{Theme, ThemeMode};
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Corners, Edges, ElementId, FontFeatures, FontWeight,
-    HighlightStyle, Hsla, Pixels, Point, SharedString, StyledText, TextStyle,
-    UniformListDecoration, UniformListScrollHandle, WhiteSpace, Window, canvas, combine_highlights,
-    div, fill, point, px, quad, size, transparent_black, uniform_list,
+    HighlightStyle, Hsla, Pixels, Point, SharedString, StyledText, TextRun, TextStyle,
+    UniformListDecoration, UniformListScrollHandle, WhiteSpace, Window, WindowTextSystem, canvas,
+    combine_highlights, div, fill, font, point, px, quad, size, transparent_black, uniform_list,
 };
 
 use super::Ansi;
-use super::diff_model::{DiffModel, DiffRow, DiffViewMode, FileMeta, RowKind, marker};
+use super::diff_model::{
+    DiffModel, DiffRow, DiffViewMode, FileMeta, RowKind, is_panned_payload, marker,
+};
 use super::syntax::Bucket;
 
 /// The width of the `+` / `-` sign column, in characters.
@@ -677,6 +679,7 @@ pub(crate) fn diff_list(
     state: ViewState,
     cx: &App,
 ) -> AnyElement {
+    measure_payload_advances(&model, cx);
     let count = model.len();
     if count == 0 {
         return div().into_any_element();
@@ -733,11 +736,67 @@ pub(crate) fn diff_list(
 /// line into blank rows.
 #[must_use]
 pub(crate) fn max_h_scroll(model: &DiffModel, viewport_w: f32) -> f32 {
+    let advances = model
+        .payload_advances
+        .get()
+        .unwrap_or_else(|| model.payload_columns.map(|columns| columns as f32 * CH));
     let column = match model.mode {
         DiffViewMode::Unified => viewport_w,
         DiffViewMode::Split => viewport_w / 2.0,
     };
-    (model.widest as f32 * CH - column).max(0.0)
+    advances
+        .into_iter()
+        .map(|advance| advance - column)
+        .fold(0.0, f32::max)
+}
+
+fn measure_payload_advances(model: &DiffModel, cx: &App) {
+    if model.payload_advances.get().is_some() {
+        return;
+    }
+    let theme = cx.theme();
+    let mut mono_font = font(theme.font_mono.clone());
+    mono_font.features = FontFeatures::disable_ligatures();
+    let text_system = WindowTextSystem::new(cx.text_system().clone());
+    let advances: Vec<f32> = model
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if !is_panned_payload(row.kind) {
+                return 0.0;
+            }
+            if let Some(line) = model.long_lines.get(&index) {
+                return f32::from(line.width());
+            }
+            let run = TextRun {
+                len: row.text.len(),
+                font: mono_font.clone(),
+                color: theme.colors.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            f32::from(
+                text_system
+                    .shape_line(row.text.clone(), theme.text.data.size, &[run], None)
+                    .width(),
+            )
+        })
+        .collect();
+    let width = |row: Option<usize>| row.map_or(0.0, |row| advances[row]);
+    let measured = match model.mode {
+        DiffViewMode::Unified => [advances.into_iter().fold(0.0, f32::max), 0.0],
+        DiffViewMode::Split => model.split.iter().filter(|layout| !layout.full).fold(
+            [0.0_f32; 2],
+            |mut widest, layout| {
+                widest[0] = widest[0].max(width(layout.left));
+                widest[1] = widest[1].max(width(layout.right));
+                widest
+            },
+        ),
+    };
+    model.payload_advances.set(Some(measured));
 }
 
 /// Everything left of the code on a unified payload row, in pixels: both line-number gutters,
@@ -795,13 +854,37 @@ mod tests {
         assert_eq!(max_h_scroll(&model, 900.0), 0.0);
         assert!(max_h_scroll(&model, 10.0) > 0.0);
         // And it never exceeds the content itself.
-        assert!(max_h_scroll(&model, 0.0) <= model.widest as f32 * CH);
+        assert!(max_h_scroll(&model, 0.0) <= model.payload_columns[0] as f32 * CH);
         // Split halves the column, so the same pane allows twice the pan.
         let split = DiffModel::build(
             &parse::diff::parse(PATCH).expect("parses"),
             DiffViewMode::Split,
         );
-        assert!(max_h_scroll(&split, 100.0) > max_h_scroll(&model, 100.0));
+        assert!(max_h_scroll(&split, 20.0) > max_h_scroll(&model, 20.0));
+    }
+
+    #[gpui::test]
+    fn extent_uses_column_advances(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            let patch = concat!(
+                "diff --git a/a.txt b/a.txt\n",
+                "--- a/a.txt\n",
+                "+++ b/a.txt\n",
+                "@@ -1 +1 @@\n",
+                "-界界界界\n",
+                "+x\n",
+            );
+            let model = DiffModel::build(
+                &parse::diff::parse(patch.as_bytes()).expect("parses"),
+                DiffViewMode::Split,
+            );
+            measure_payload_advances(&model, cx);
+            let measured = model.payload_advances.get().expect("measured");
+
+            assert!(measured[0] > measured[1]);
+            assert_eq!(max_h_scroll(&model, measured[0] * 2.0), 0.0);
+        });
     }
 
     #[test]

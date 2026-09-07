@@ -1,6 +1,10 @@
 //! Runtime representation and execution contract for a daemon job.
 
-use std::{path::Path, sync::Arc};
+use std::{
+    future::Future,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use fleet_core::ids::JobId;
 use tokio_util::sync::CancellationToken;
@@ -19,9 +23,65 @@ pub struct JobCtx {
     /// Explicit cancellation signal owned by the job manager.
     pub cancel: CancellationToken,
     pub(crate) manager: JobManager,
+    pub(crate) cleanup: CleanupTracker,
+}
+
+#[derive(Clone)]
+pub(crate) struct CleanupTracker {
+    inner: Arc<CleanupTrackerInner>,
+}
+
+struct CleanupTrackerInner {
+    registration: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
+    completions: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<()>>,
+}
+
+impl Default for CleanupTracker {
+    fn default() -> Self {
+        let (registration, completions) = tokio::sync::mpsc::channel(1);
+        Self {
+            inner: Arc::new(CleanupTrackerInner {
+                registration: Mutex::new(Some(registration)),
+                completions: tokio::sync::Mutex::new(completions),
+            }),
+        }
+    }
+}
+
+impl CleanupTracker {
+    pub(crate) fn spawn(&self, cleanup: impl Future<Output = ()> + Send + 'static) {
+        let registration = self
+            .inner
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned();
+        let Some(registration) = registration else {
+            return;
+        };
+        tokio::spawn(async move {
+            cleanup.await;
+            drop(registration);
+        });
+    }
+
+    pub(crate) async fn wait(&self) {
+        let mut completions = self.inner.completions.lock().await;
+        self.inner
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        while completions.recv().await.is_some() {}
+    }
 }
 
 impl JobCtx {
+    pub(crate) fn track_cleanup(&self, cleanup: impl Future<Output = ()> + Send + 'static) {
+        self.cleanup.spawn(cleanup);
+    }
+
     /// Records a progress line, appends it to the job log, and broadcasts the changed record.
     pub fn progress(&self, line: impl Into<String>) -> DaemonResult<()> {
         self.manager.record_progress(&self.id, line.into())

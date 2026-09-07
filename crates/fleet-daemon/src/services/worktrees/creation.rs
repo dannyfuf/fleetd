@@ -11,6 +11,15 @@ struct CreatePlan<'a> {
     base_ref: &'a str,
 }
 
+struct CreateRequest {
+    repo_id: RepoId,
+    slug: String,
+    branch: String,
+    requested_branch: Option<String>,
+    base: Option<String>,
+    hooks: RepoHooks,
+}
+
 impl Worktrees {
     /// Claims or copies a prepared slot and atomically publishes a worktree.
     pub async fn create(
@@ -38,20 +47,30 @@ impl Worktrees {
         let service = self.clone();
         let title = format!("Create {repo}#{slug}");
         let (delivery, awaited) = JobDelivery::caller_gets_copy(copy_error);
-        self.jobs.submit(
+        self.jobs.submit_for_repo(
+            repo.clone(),
             JobKind::CreateWorktree,
             format!("{}#{}:{}", repo, slug, Uuid::new_v4()),
             title,
-            true,
-            true,
+            JobPolicy::new(true, true),
             move |context| async move {
                 delivery.finish(
                     service
-                        .create_local(repo, slug, branch, base, hooks, &context)
+                        .create_local(
+                            CreateRequest {
+                                repo_id: repo,
+                                slug,
+                                branch,
+                                requested_branch,
+                                base,
+                                hooks,
+                            },
+                            &context,
+                        )
                         .await,
                 )
             },
-        );
+        )?;
         awaited.wait().await
     }
 
@@ -81,12 +100,12 @@ impl Worktrees {
         let target = format!("{}#{}:{}", repo, slug, Uuid::new_v4());
         let title = format!("Create {repo} pull request #{number}");
         let (delivery, awaited) = JobDelivery::caller_gets_copy(copy_error);
-        self.jobs.submit(
+        self.jobs.submit_for_repo(
+            repo.clone(),
             JobKind::CreateWorktree,
             target,
             title,
-            true,
-            true,
+            JobPolicy::new(true, true),
             move |context| async move {
                 delivery.finish(
                     service
@@ -94,19 +113,31 @@ impl Worktrees {
                         .await,
                 )
             },
-        );
+        )?;
         awaited.wait().await
     }
 
     async fn create_local(
         &self,
-        repo_id: RepoId,
-        slug: String,
-        branch: String,
-        base: Option<String>,
-        hooks: RepoHooks,
+        request: CreateRequest,
         context: &JobCtx,
     ) -> DaemonResult<(bool, Worktree, Option<JobRecord>)> {
+        let CreateRequest {
+            repo_id,
+            slug,
+            branch,
+            requested_branch,
+            base,
+            hooks,
+        } = request;
+        let id = worktree_id(&repo_id, &slug)?;
+        let _lifecycle = self.sessions.claim_worktree_lifecycle(id).await;
+        if let Some(existing) = self
+            .existing_create_result(&repo_id, &slug, requested_branch.as_deref())
+            .await?
+        {
+            return Ok((false, existing, None));
+        }
         let (mut repo, config) = self.repo_and_config(&repo_id).await?;
         repo.hooks = hooks;
         let base_ref = base.unwrap_or_else(|| format!("origin/{}", repo.default_branch));
@@ -151,6 +182,11 @@ impl Worktrees {
         number: u64,
         context: &JobCtx,
     ) -> DaemonResult<(bool, Worktree, Option<JobRecord>)> {
+        let id = worktree_id(&repo_id, &slug)?;
+        let _lifecycle = self.sessions.claim_worktree_lifecycle(id).await;
+        if let Some(existing) = self.existing_create_result(&repo_id, &slug, None).await? {
+            return Ok((false, existing, None));
+        }
         let (repo, config) = self.repo_and_config(&repo_id).await?;
         let base_ref = format!("pull/{number}/head");
         let plan = CreatePlan {
@@ -196,10 +232,12 @@ impl Worktrees {
             .await?;
 
         let attempt = uuid_attempt_path(&root, slug, Uuid::new_v4());
-        let mut attempt_guard = AttemptGuard::new(Arc::clone(&self.files), attempt.clone());
+        let mut attempt_guard =
+            AttemptGuard::new(Arc::clone(&self.files), attempt.clone(), context);
+        let attempt_coordination = attempt_guard.coordination();
         context.progress("claiming prepared copy")?;
         let claimed = self
-            .claim_or_fallback(repo, config, &root, &attempt, context)
+            .claim_or_fallback(repo, config, &root, &attempt, attempt_coordination, context)
             .await?;
         let result = async {
             let fresh = claimed
@@ -217,7 +255,7 @@ impl Worktrees {
                 .publish(repo, slug, branch, base_ref, &repo.hooks, &attempt)
                 .await?;
             let post_create_job =
-                self.schedule_post_create(worktree.clone(), repo.hooks.post_create.clone());
+                self.schedule_post_create(worktree.clone(), repo.hooks.post_create.clone())?;
             Ok((true, worktree, post_create_job))
         }
         .await;
@@ -243,6 +281,7 @@ impl Worktrees {
         config: &Config,
         root: &Path,
         attempt: &Path,
+        attempt_coordination: Arc<tokio::sync::Mutex<()>>,
         context: &JobCtx,
     ) -> DaemonResult<bool> {
         let lock = self.jobs.repo_lock(&repo.id);
@@ -253,11 +292,14 @@ impl Worktrees {
             return Ok(true);
         }
         context.progress("no prepared copy; copying pristine base")?;
-        let mut copy = CancellableCopy::start(
+        let coordination = attempt_coordination.lock_owned().await;
+        let mut copy = CancellableCopy::start_coordinated(
             Arc::clone(&self.files),
             PathBuf::from(&repo.path),
             attempt.to_path_buf(),
             None,
+            coordination,
+            Some(context.clone()),
         );
         copy.wait().await?;
         copy.disarm();

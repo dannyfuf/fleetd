@@ -67,7 +67,9 @@ pub(super) async fn watch_tail_to(
     loop {
         let tail = client.tail_watch(arguments.id, next_seq).await?;
         for chunk in tail.chunks {
-            write_chunk(chunk, stdout, stderr)?;
+            if write_chunk(chunk, stdout, stderr)? == ChunkWrite::Closed {
+                return Ok(());
+            }
         }
         if !arguments.follow || matches!(tail.watch.status, WatchStatus::Exited { .. }) {
             return Ok(());
@@ -92,7 +94,9 @@ pub(super) async fn watch_tail_to(
                     break;
                 }
                 cursor = chunk.seq.saturating_add(1);
-                write_chunk(chunk, stdout, stderr)?;
+                if write_chunk(chunk, stdout, stderr)? == ChunkWrite::Closed {
+                    return Ok(());
+                }
             }
             if gap {
                 break;
@@ -103,17 +107,27 @@ pub(super) async fn watch_tail_to(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChunkWrite {
+    Written,
+    Closed,
+}
+
 fn write_chunk(
     chunk: fleet_core::watches::WatchChunk,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
-) -> Result<(), ProtoError> {
+) -> Result<ChunkWrite, ProtoError> {
     let output: &mut dyn Write = match chunk.stream {
         WatchStream::Stdout => stdout,
         WatchStream::Stderr => stderr,
     };
-    output
+    match output
         .write_all(chunk.text.as_bytes())
         .and_then(|()| output.flush())
-        .map_err(|error| unknown(format!("could not write watch output: {error}")))
+    {
+        Ok(()) => Ok(ChunkWrite::Written),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(ChunkWrite::Closed),
+        Err(error) => Err(unknown(format!("could not write watch output: {error}"))),
+    }
 }

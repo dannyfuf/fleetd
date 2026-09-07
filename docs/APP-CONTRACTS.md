@@ -208,9 +208,12 @@ bridge.reconnect();                                  // `r` on a daemon surface
 bridge.shutdown();                                   // quitting
 ```
 
-`bridge.send` is the right call for every mutation: the daemon re-broadcasts its snapshot, the
-shell applies it, and your screen re-renders. Use `bridge.request` only when you need the
-answer itself (a path to copy, a doctor table, a PR slice):
+Use `bridge.send` for event-backed mutations that do not gate a local state change or navigation:
+the daemon re-broadcasts its snapshot, the shell applies it, and the screen re-renders. Enqueue and
+background delivery failures return as `BridgeEvent::MutationFailed` and occupy the sticky error
+slot; a fire-and-forget call must never fail invisibly. Use `bridge.request` when the answer gates
+local state/navigation or when you need the value itself (an acknowledgement, a path to copy, a
+doctor table, a PR slice):
 
 ```rust
 let reply = bridge.request(RequestBody::WorktreePath { id });
@@ -222,13 +225,48 @@ cx.spawn(async move |_, cx| {
 .detach();
 ```
 
+`BridgeEvent::EffectiveConfig` hydrates the app-facing terminal and notification settings,
+`jobs.warnBeforeQuit`, and the PR-cache TTL on every connection/reconnection and config response.
+Consumers use those effective values rather than reconstructing persisted defaults.
+
 Terminals attach with plain requests (`AttachTerminal`, `ResizeTerminal`, `TerminalKey`,
 `ScrollTerminal`, `DetachTerminal`); frames arrive as ordinary events and the shell has already
 applied them to `AppState::grids` before your screen renders. `fleet-client` re-attaches every
-terminal after a reconnect on its own.
+terminal after a reconnect on its own. Daemon and host share one absolute five-second attach
+deadline. App surfaces await the correlated acknowledgement with a bounded deadline; a refusal or
+timeout clears their optimistic attachment and generation, reports a sticky error, and schedules
+reconciliation again. A request already expired when the owner services it cannot resize the PTY,
+and no post-deadline result can publish an attachment frame or claim an attachment. Before the
+first valid frame, each app surface retains an ordered prefix of at most
+1,024 key/paste events and 1 MiB; it rejects the newest input after either bound and flushes the
+retained prefix only to the same live terminal.
 
 **Never block the foreground thread on the daemon.** Everything above is non-blocking by
 construction; there is no synchronous path and there must not be one.
+
+### IPC and CLI compatibility
+
+Daemon IPC remains version 4. The bug-fix program added one request field:
+`PruneWorktrees.ids: Option<Vec<WorktreeId>>`. It is defaulted and omitted when `None`, so an old
+request still decodes and the current legacy call path emits the byte-identical request shape.
+`None` retains repo/all-worktree discovery. The prune dialog sends `Some(ids)` only when committing,
+with exactly the DELETE rows the user reviewed; the daemon locks and re-inspects those IDs and may
+keep newly ineligible entries, but it never expands the set. An empty explicit list deletes nothing.
+
+This guarantees old-client/new-daemon compatibility. The mandatory Hello response envelope has a
+defaulted, omitted-when-empty `capabilities` array. A daemon that honors exact IDs advertises
+`prune.reviewed_ids`; the client retains the latest negotiated set, and the app refuses a reviewed
+prune with update/restart guidance when that capability is absent. The metadata is outside the
+existing Hello body so older IPC-v4 decoders ignore it without changing the version.
+
+Pong response envelopes likewise have an optional `daemon` object containing `pid` and `bootId`.
+`bootId` is stable for one fleetd process and changes across starts, including PID reuse. New
+clients retain it while delivering the existing unit `Pong` body to callers; older clients ignore
+the additive envelope member. App reconnect identity probes use this Pong metadata and never load
+a fallback snapshot. IPC v4 otherwise does not include daemon Git-mutation jobs, arbitrary
+terminal-history reads, terminal search/focus requests, cell hyperlinks, or frame effects. Those
+deferred surfaces require a separately negotiated additive contract before clients may send them.
+The public JSON CLI is a separate, unchanged protocol-1 envelope.
 
 ---
 
@@ -242,6 +280,7 @@ is the single source of truth on the client. The parts a screen touches:
 | `snapshot: Option<Snapshot>` | the daemon's authoritative state; `None` until the first one lands |
 | `snapshot_at` / `snapshot_age(now)` | what the `stale · <age>` stamp ages (§1.3) |
 | `grids: HashMap<TerminalId, MirrorGrid>` | one mirror grid per terminal, diffs already applied |
+| `displayed_hub: DisplayedHub` | stable IDs and rows from the Hub's current scoped/sorted/filtered projection |
 | `screen`, `hub_pane`, `pr_tab`, `scope`, `cursors` | where the cursor is, per list |
 | `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode word/key context |
 | `filter` | query + whether the input still owns the keyboard |
@@ -253,6 +292,10 @@ is the single source of truth on the client. The parts a screen touches:
 `agent_popup: Option<AgentPopupState>` is screen-independent. Its `Terminal` / `Prefix` / `Scroll`
 submodes reuse the existing `TERMINAL` / `^S` / `SCROLL` status words; it does not add a ninth mode
 word. An ordinary dialog above it temporarily shows `DIALOG`, then reveals the popup's prior word.
+
+Dialogs, the palette, and activation/destructive actions resolve their target from
+`displayed_hub`, not by repeating filters against the raw snapshot. Cursor movement may clamp an
+index, but acting always uses the stable identity of the row the user can currently see.
 
 Pure helpers worth reusing rather than re-deriving, all re-exported from `state`:
 `move_cursor`, `clamp_cursor`, `half_page` and `filter_escape` (`state/navigation.rs`);
@@ -364,8 +407,8 @@ AppendWatchOutput and FinishWatch require the starting connection (otherwise
 `Conflict`), preventing reconnected wrappers from modifying an unrelated reused
 ID after a daemon restart. They always return `Conflict` for a `discovered` watch.
 A connection lease owns each StartWatch; dropping its socket marks unfinished
-watches Exited with `code: None, signal: Some(9)` (an interruption marker, not a
-claim that the child received SIGKILL). The wrapper uses a private PID-preserving
+watches Exited with `code: None, signal: None` because the daemon does not know the
+child's exit cause. The wrapper uses a private PID-preserving
 launcher handshake so StartWatch has the child PID and the target starts with
 `FLEET_WATCH`. It forwards SIGINT/SIGTERM/SIGHUP and preserves normal/signalled
 exit codes. Reporting uses a bounded 128-chunk queue and batches up to 256 KiB
@@ -389,8 +432,9 @@ clamped to at least 500 ms by the loop. `processes` is an ordered list of
 | `claude` | `(^|/)claude( |$)` |
 | `opencode` | `(^|/)opencode( |$)` |
 
-Each scan uses one process snapshot. Environment reads are limited to candidates and
-cached by PID. Ownership order is valid Fleet env tags, then descent from a session
+Each scan uses one process snapshot. Environment reads are limited to candidates and successful
+reads are cached by `(PID, process start identity)`; failures remain retryable, and PID reuse
+cannot inherit a prior process's environment. Ownership order is valid Fleet env tags, then descent from a session
 terminal's shell PID. A valid session without a valid terminal selects the terminal
 whose launch command matches the configured agent command, then the first terminal.
 Any process launched directly by a terminal's PTY shell (the terminal's own foreground
@@ -448,6 +492,10 @@ sequence and a remaining gap requests another tail.
 
 Workspace entry/session changes and reconnect list then tail every retained watch
 with `from_seq: None`. A detected output gap tails from the next expected cursor.
+Failed list or tail requests remain unsynchronized and make four total attempts with 1 s, 2 s,
+and 4 s backoff between retries. Invalidation, daemon reconnect, and session entry reset this
+bounded retry sequence. A failed completed-watch tail preserves its exact cursor and reports a
+sticky error rather than declaring success.
 Receiver lag also invalidates the list. Tail retention gaps discard incomplete
 partial lines before resuming; local line/text retention also sets the trimmed
 indicator. `LogView::line_tones` uses existing semantic tones for stderr.

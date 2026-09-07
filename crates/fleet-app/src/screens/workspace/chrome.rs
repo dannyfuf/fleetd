@@ -16,7 +16,7 @@ impl WorkspaceScreen {
             header = header.repo(SharedString::from(repo.to_string()));
         }
         if let Some((host, reachable)) = &model.host {
-            header = header.host(host.clone(), *reachable);
+            header = header.host(host.clone(), reachable.is_reachable());
         }
         if let Some((number, badge)) = pr {
             header = header.pr(number, badge);

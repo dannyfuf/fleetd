@@ -82,7 +82,7 @@ impl FilterBar {
     /// The tone of the `shown/total` counter: amber when the filter hides everything, so the
     /// count itself says "your rows did not vanish, they were filtered out".
     pub fn count_tone(&self) -> Tone {
-        if self.is_empty_result() {
+        if self.total > 0 && self.is_empty_result() {
             Tone::Warning
         } else {
             Tone::Muted
@@ -181,5 +181,10 @@ mod tests {
     fn empty_result_is_about_the_shown_count_only() {
         assert!(FilterBar::new("", 0, 0).is_empty_result());
         assert!(!FilterBar::new("", 3, 3).is_empty_result());
+    }
+
+    #[test]
+    fn empty_unfiltered_source_is_neutral() {
+        assert_eq!(FilterBar::new("", 0, 0).count_tone(), Tone::Muted);
     }
 }

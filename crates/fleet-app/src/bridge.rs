@@ -6,13 +6,17 @@
 use std::{
     fmt,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
 
 use async_channel::{Receiver, Sender};
 use fleet_client::{Client, ensure_daemon};
-use fleet_core::paths::FleetHome;
+use fleet_core::{config::Config, paths::FleetHome};
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     event::Event,
@@ -29,15 +33,47 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 
-/// How often the bridge pings the daemon to decide whether it is still there.
+/// How often the bridge probes daemon liveness.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(2);
-/// How long a health ping may take before the daemon counts as gone.
+/// How long a liveness probe may take before the daemon counts as gone.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
+/// Identity-bearing pings stay rare; health pings cover ordinary liveness.
+const IDENTITY_INTERVAL: Duration = Duration::from_secs(60);
 /// How many lines of `fleetd.log` the "will not start" surface shows (§3.12 B).
 const LOG_TAIL_LINES: usize = 3;
+/// Requests waiting to enter the runtime before older fire-and-forget work is coalesced.
+const COMMAND_CAPACITY: usize = 512;
+/// UI events waiting for the foreground executor; backpressure is converted to a lag signal.
+const EVENT_CAPACITY: usize = 1_024;
 
-/// The name this client reports in the protocol handshake.
-const CLIENT_NAME: &str = concat!("fleet-app/", env!("CARGO_PKG_VERSION"));
+/// The effective settings consumed by the app without retaining the persisted config shape.
+#[derive(Debug, Clone)]
+pub struct EffectiveConfig {
+    /// Effective terminal settings.
+    pub terminal: fleet_core::config::TerminalConfig,
+    /// Effective agent-finished notification settings.
+    pub notifications: fleet_core::config::NotificationsConfig,
+    /// Whether active daemon jobs require quit confirmation.
+    pub warn_before_quit: bool,
+    /// How long pull-request results remain fresh.
+    pub pr_ttl: Duration,
+}
+
+impl EffectiveConfig {
+    #[must_use]
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            terminal: config.terminal.clone(),
+            notifications: config.ui.notifications.clone(),
+            warn_before_quit: config.jobs.warn_before_quit,
+            pr_ttl: Duration::from_secs(
+                u64::try_from(config.github.pr_ttl_seconds)
+                    .unwrap_or_default()
+                    .max(1),
+            ),
+        }
+    }
+}
 
 /// Everything the background thread tells the UI.
 #[derive(Debug, Clone)]
@@ -53,6 +89,13 @@ pub enum BridgeEvent {
         /// Whether a stale socket file is the known cause.
         stale_socket: bool,
     },
+    /// The daemon answered with a typed unsupported-protocol failure.
+    ProtocolMismatch {
+        /// The daemon's failure text, without presentation classification.
+        message: String,
+        /// The last few lines of `~/.fleet/logs/fleetd.log`.
+        log_tail: Vec<String>,
+    },
     /// A health ping failed: the daemon died while we were attached (§3.12 C).
     Disconnected {
         /// How many reconnect attempts have failed so far.
@@ -65,13 +108,18 @@ pub enum BridgeEvent {
         /// The fresh snapshot.
         snapshot: Box<Snapshot>,
     },
-    /// Effective terminal settings loaded on connection or a config response.
-    TerminalConfig(fleet_core::config::TerminalConfig),
-    /// Effective agent-finished notification settings.
-    NotificationConfig(fleet_core::config::NotificationsConfig),
+    /// Effective app settings loaded on connection or a config response.
+    EffectiveConfig(EffectiveConfig),
+    /// Capabilities advertised by the daemon's mandatory Hello response.
+    Capabilities(Vec<String>),
+    /// A fire-and-forget command could not be admitted or delivered.
+    MutationFailed {
+        /// Stable user-facing failure detail.
+        message: String,
+    },
     /// An ordinary daemon event.
     Daemon(Box<Event>),
-    /// The client's broadcast buffer overflowed and events were dropped.
+    /// A bridge or client buffer overflowed and state must be re-synchronized.
     ///
     /// Terminal frames are diffs: the rows changed inside the gap are never re-sent, so every
     /// mirror has to be re-primed from a full frame before it may accept another diff.
@@ -112,6 +160,8 @@ impl fmt::Debug for Command {
 pub struct Bridge {
     commands: Sender<Command>,
     events: Receiver<BridgeEvent>,
+    event_tx: Sender<BridgeEvent>,
+    resync_pending: Arc<AtomicBool>,
 }
 
 impl Bridge {
@@ -123,12 +173,14 @@ impl Bridge {
     #[must_use]
     pub fn start(home: impl Into<PathBuf>) -> Self {
         let home = home.into();
-        let (commands, command_rx) = async_channel::unbounded();
-        let (event_tx, events) = async_channel::unbounded();
+        let (commands, command_rx) = async_channel::bounded(COMMAND_CAPACITY);
+        let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
+        let resync_pending = Arc::new(AtomicBool::new(false));
         let thread_events = event_tx.clone();
+        let thread_resync = resync_pending.clone();
         if let Err(error) = thread::Builder::new()
             .name("fleet-daemon-bridge".to_owned())
-            .spawn(move || run_thread(home, command_rx, thread_events))
+            .spawn(move || run_thread(home, command_rx, thread_events, thread_resync))
         {
             let _ignored = event_tx.try_send(BridgeEvent::ConnectFailed {
                 message: format!("could not start the daemon bridge thread: {error}"),
@@ -136,7 +188,27 @@ impl Bridge {
                 stale_socket: false,
             });
         }
-        Self { commands, events }
+        Self {
+            commands,
+            events,
+            event_tx,
+            resync_pending,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_channels(
+        commands: Sender<Command>,
+        events: Receiver<BridgeEvent>,
+        event_tx: Sender<BridgeEvent>,
+        resync_pending: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            commands,
+            events,
+            event_tx,
+            resync_pending,
+        }
     }
 
     /// The stream of daemon events. The shell drains it in one `cx.spawn` loop.
@@ -149,10 +221,20 @@ impl Bridge {
     ///
     /// Use `request` when the caller needs acknowledgement or a daemon rejection.
     pub fn send(&self, body: RequestBody) {
-        let _ignored = self.commands.try_send(Command::Request {
+        let command = Command::Request {
             body: Box::new(body),
             reply: None,
-        });
+        };
+        match self.commands.try_send(command) {
+            Ok(()) => {}
+            Err(async_channel::TrySendError::Full(_)) => {
+                self.resync_pending.store(true, Ordering::Release);
+                self.report_mutation_failure("the Fleet daemon bridge queue was saturated");
+            }
+            Err(async_channel::TrySendError::Closed(_)) => {
+                self.report_mutation_failure("the Fleet daemon bridge is closed");
+            }
+        }
     }
 
     /// Sends a request and returns the channel its single answer arrives on.
@@ -167,27 +249,52 @@ impl Bridge {
     #[must_use]
     pub fn request(&self, body: RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> {
         let (reply, answer) = async_channel::bounded(1);
-        if self
-            .commands
-            .try_send(Command::Request {
-                body: Box::new(body),
-                reply: Some(reply.clone()),
-            })
-            .is_err()
-        {
-            let _ignored = reply.try_send(Err(offline("the Fleet daemon bridge is closed")));
+        match self.commands.try_send(Command::Request {
+            body: Box::new(body),
+            reply: Some(reply.clone()),
+        }) {
+            Ok(()) => {}
+            Err(async_channel::TrySendError::Full(_)) => {
+                let _ignored =
+                    reply.try_send(Err(offline("the Fleet daemon bridge queue was saturated")));
+            }
+            Err(async_channel::TrySendError::Closed(_)) => {
+                let _ignored = reply.try_send(Err(offline("the Fleet daemon bridge is closed")));
+            }
         }
         answer
     }
 
     /// Retries starting or reaching the daemon now.
     pub fn reconnect(&self) {
-        let _ignored = self.commands.try_send(Command::Reconnect);
+        self.send_control(Command::Reconnect);
     }
 
     /// Stops the runtime thread.
     pub fn shutdown(&self) {
-        let _ignored = self.commands.try_send(Command::Shutdown);
+        self.send_control(Command::Shutdown);
+    }
+
+    fn send_control(&self, command: Command) {
+        if let Err(async_channel::TrySendError::Full(command)) = self.commands.try_send(command)
+            && let Ok(Some(displaced)) = self.commands.force_send(command)
+        {
+            self.reject(displaced, "the Fleet daemon bridge queue was saturated");
+        }
+    }
+
+    fn reject(&self, command: Command, message: &str) {
+        if let Command::Request { reply, .. } = command {
+            if let Some(reply) = reply {
+                let _ignored = reply.try_send(Err(offline(message)));
+            } else {
+                self.report_mutation_failure(message);
+            }
+        }
+    }
+
+    fn report_mutation_failure(&self, message: &str) {
+        publish_mutation_failure(&self.event_tx, message);
     }
 }
 
@@ -198,7 +305,18 @@ fn offline(message: &str) -> ProtoError {
     }
 }
 
-fn run_thread(home: PathBuf, commands: Receiver<Command>, events: Sender<BridgeEvent>) {
+fn publish_mutation_failure(events: &Sender<BridgeEvent>, message: &str) {
+    let _ignored = events.try_send(BridgeEvent::MutationFailed {
+        message: message.to_owned(),
+    });
+}
+
+fn run_thread(
+    home: PathBuf,
+    commands: Receiver<Command>,
+    events: Sender<BridgeEvent>,
+    resync_pending: Arc<AtomicBool>,
+) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -213,5 +331,5 @@ fn run_thread(home: PathBuf, commands: Receiver<Command>, events: Sender<BridgeE
             return;
         }
     };
-    runtime.block_on(runtime::run(&home, &commands, &events));
+    runtime.block_on(runtime::run(&home, &commands, &events, &resync_pending));
 }

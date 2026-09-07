@@ -22,6 +22,23 @@ mod tests;
 pub use history::{WatchDisplay, WatchMirror};
 use removed::RemovedWatches;
 
+/// Initial request plus three exponentially delayed recovery attempts.
+pub(crate) const MAX_RECOVERY_ATTEMPTS: u8 = 4;
+
+#[derive(Debug, Clone, Copy)]
+struct RecoveryState {
+    attempts: u8,
+    ready: bool,
+}
+
+impl RecoveryState {
+    fn failed(&mut self) -> Option<u8> {
+        self.attempts = self.attempts.saturating_add(1);
+        self.ready = false;
+        (self.attempts < MAX_RECOVERY_ATTEMPTS).then_some(self.attempts)
+    }
+}
+
 /// Local selection/visibility survives session navigation and catch-up requests.
 #[derive(Debug, Default)]
 pub struct WatchPaneState {
@@ -42,6 +59,10 @@ pub struct Watches {
     started_events: BTreeSet<WatchId>,
     pending: BTreeMap<WatchId, Option<u64>>,
     inflight: BTreeSet<WatchId>,
+    tail_retries: BTreeMap<WatchId, RecoveryState>,
+    active_session: Option<SessionId>,
+    listing: Option<(SessionId, u64)>,
+    list_retry: Option<((SessionId, u64), RecoveryState)>,
     synced: Option<(SessionId, u64)>,
 }
 
@@ -109,6 +130,7 @@ impl Watches {
         self.started_events.remove(&id);
         self.pending.remove(&id);
         self.inflight.remove(&id);
+        self.tail_retries.remove(&id);
         if let Some(entry) = self.entries.remove(&id) {
             let next = self.ids(&entry.watch.session);
             if let Some(pane) = self.panes.get_mut(&entry.watch.session) {
@@ -194,23 +216,101 @@ impl Watches {
 
     /// Marks a session entry or reconnect as needing an authoritative list.
     pub fn enter(&mut self, session: Option<SessionId>, generation: u64) -> Option<SessionId> {
-        let next = session.clone().map(|session| (session, generation));
-        if self.synced == next {
+        if self.active_session != session {
+            self.active_session.clone_from(&session);
+            self.listing = None;
+            self.list_retry = None;
+            self.synced = None;
+            if let Some(session) = &session {
+                self.tail_retries.retain(|id, _| {
+                    self.entries
+                        .get(id)
+                        .is_none_or(|entry| &entry.watch.session != session)
+                });
+            }
+        }
+        let Some(session) = session else {
+            self.listing = None;
+            self.list_retry = None;
+            self.synced = None;
+            return None;
+        };
+        let next = (session.clone(), generation);
+        if self.synced.as_ref() == Some(&next) || self.listing.as_ref() == Some(&next) {
             return None;
         }
-        self.synced = next;
-        session
+        if self
+            .list_retry
+            .as_ref()
+            .is_some_and(|(request, retry)| request == &next && !retry.ready)
+        {
+            return None;
+        }
+        if self
+            .list_retry
+            .as_ref()
+            .is_some_and(|(request, _)| request != &next)
+        {
+            self.list_retry = None;
+        }
+        self.listing = Some(next);
+        if let Some((_, retry)) = &mut self.list_retry {
+            retry.ready = false;
+        }
+        Some(session)
+    }
+
+    /// Retains a failed list request and returns its next bounded retry number.
+    pub fn list_failed(&mut self, session: &SessionId, generation: u64) -> Option<u8> {
+        let request = (session.clone(), generation);
+        if self.listing.as_ref() != Some(&request) {
+            return None;
+        }
+        self.listing = None;
+        if self
+            .list_retry
+            .as_ref()
+            .is_none_or(|(pending, _)| pending != &request)
+        {
+            self.list_retry = Some((
+                request,
+                RecoveryState {
+                    attempts: 0,
+                    ready: false,
+                },
+            ));
+        }
+        self.list_retry
+            .as_mut()
+            .and_then(|(_, retry)| retry.failed())
+    }
+
+    /// Makes a delayed list retry eligible to be issued.
+    pub fn list_retry_ready(&mut self, session: &SessionId, generation: u64) -> bool {
+        let request = (session.clone(), generation);
+        let Some((pending, retry)) = &mut self.list_retry else {
+            return false;
+        };
+        if pending != &request || retry.attempts >= MAX_RECOVERY_ATTEMPTS {
+            return false;
+        }
+        retry.ready = true;
+        true
     }
 
     /// Re-list on event receiver lag, including watches whose start/dismiss event was lost.
     pub fn invalidate(&mut self) {
+        self.listing = None;
+        self.list_retry = None;
         self.synced = None;
+        self.tail_retries.clear();
     }
 
     /// A new connection invalidates outstanding request bookkeeping, not local preferences.
     pub fn reconnect(&mut self) {
         self.inflight.clear();
         self.pending.clear();
+        self.tail_retries.clear();
         self.invalidate();
     }
 
@@ -218,6 +318,7 @@ impl Watches {
     pub fn listed(
         &mut self,
         session: &SessionId,
+        generation: u64,
         known: Vec<WatchId>,
         watches: Vec<Watch>,
         now: Instant,
@@ -247,6 +348,12 @@ impl Watches {
             pane.selected = last;
             pane.visible = pane.selected.is_some();
         }
+        let request = (session.clone(), generation);
+        if self.listing.as_ref() == Some(&request) {
+            self.synced = Some(request);
+            self.listing = None;
+            self.list_retry = None;
+        }
     }
 
     /// Drains catch-up requests while allowing at most one tail per watch in flight.
@@ -254,12 +361,18 @@ impl Watches {
         let ids: Vec<_> = self
             .pending
             .keys()
-            .filter(|id| !self.inflight.contains(id))
+            .filter(|id| {
+                !self.inflight.contains(id)
+                    && self.tail_retries.get(id).is_none_or(|retry| retry.ready)
+            })
             .copied()
             .collect();
         ids.into_iter()
             .map(|id| {
                 self.inflight.insert(id);
+                if let Some(retry) = self.tail_retries.get_mut(&id) {
+                    retry.ready = false;
+                }
                 (id, self.pending.remove(&id).flatten())
             })
             .collect()
@@ -269,6 +382,7 @@ impl Watches {
     pub fn tailed(&mut self, tail: WatchTail, now: Instant) {
         let id = tail.watch.id;
         self.inflight.remove(&id);
+        self.tail_retries.remove(&id);
         self.upsert(tail.watch, now);
         let Some(entry) = self.entries.get_mut(&id) else {
             return;
@@ -287,10 +401,34 @@ impl Watches {
         }
     }
 
-    /// Releases a failed tail; subsequent events or session entry can retry it.
-    pub fn tail_failed(&mut self, id: WatchId) {
+    /// Restores a failed tail's exact cursor and returns its next bounded retry number.
+    pub fn tail_failed(&mut self, id: WatchId, from_seq: Option<u64>) -> Option<u8> {
         self.inflight.remove(&id);
-        self.pending.remove(&id);
+        if self.removed.contains(&id) {
+            self.pending.remove(&id);
+            self.tail_retries.remove(&id);
+            return None;
+        }
+        self.pending.entry(id).or_insert(from_seq);
+        self.tail_retries
+            .entry(id)
+            .or_insert(RecoveryState {
+                attempts: 0,
+                ready: false,
+            })
+            .failed()
+    }
+
+    /// Makes a delayed tail retry eligible to be issued.
+    pub fn tail_retry_ready(&mut self, id: WatchId) -> bool {
+        let Some(retry) = self.tail_retries.get_mut(&id) else {
+            return false;
+        };
+        if retry.attempts >= MAX_RECOVERY_ATTEMPTS {
+            return false;
+        }
+        retry.ready = true;
+        true
     }
 
     /// Reclaims empty pane records after their session leaves the authoritative snapshot.

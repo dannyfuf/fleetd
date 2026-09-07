@@ -687,7 +687,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 
 | State | Rendering |
 | --- | --- |
-| Attaching | one dim centered line `attaching…`; typed keys are buffered and flushed on the first frame |
+| Attaching | one dim centered line `attaching…`; key/paste input retains an ordered prefix capped at 1,024 events and 1 MiB, rejects newer overflow, and flushes only after the first valid frame. Attach has one absolute 5 s deadline; failure is sticky, already-expired work cannot resize, and no post-deadline result can claim the terminal. |
 | Attached | normal |
 | Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the header reads `waking…` for ≤ 1.5 s |
 | Recognized agent working / finished | the agent terminal shows an amber spinning `loader-circle` / green `circle-check`; the header uses the same aggregate state |
@@ -1049,6 +1049,12 @@ only rewording, because there is no tmux). The `? host offline` row is mandatory
 the case where an automated prune must be **seen** to have refused. The footer stamp
 `dry run · fetched <age>` is mandatory.
 
+The DELETE list is also the commit authority. The dry run uses ordinary repo-scoped discovery;
+confirm sends the exact displayed DELETE IDs as the additive IPC-v4 `PruneWorktrees.ids`
+allowlist. The daemon locks and re-inspects only those worktrees immediately before deletion. It
+may move newly unsafe entries to KEEP, but a worktree that was not reviewed can never enter the
+commit set.
+
 **Intentionally omitted from every confirm:** a "don't ask again" checkbox (the *compact* form is
 the real answer to confirm fatigue), a second "are you sure" step, a countdown or a disabled
 button delay, a typed-name confirmation (typing trains people to type), diff previews, the
@@ -1231,7 +1237,7 @@ listed dies:
 │   ● swarm-agent-claude                                │
 │ ⚠ Cancelled now:                                      │
 │   ⟳ clone nixos          40%   (restartable)          │
-│   ⟳ hooks payroll#feat-rut     (not restartable)      │
+│   ⟳ hooks payroll#feat-rut     (retryable → restartable)│
 │ 1 job keeps running: post-create hooks (detached)     │
 │                                                       │
 │ Worktrees, repos and state on disk are untouched.     │
@@ -1242,8 +1248,9 @@ listed dies:
 ```
 
 Cancellable vs. not comes from the job's cancel token; a detached post-create runner (§6 "no
-cancel") is listed under a fourth group `n job(s) keep running` and labelled `not restartable`
-rather than pretending. The `ctrl-q` line is the important one: the confirm teaches the safe
+cancel") is listed under a fourth group `n job(s) keep running`. Its restartability label is
+derived from `JobRecord.retryable`, just like every other job, rather than inferred from its
+detached execution. The `ctrl-q` line is the important one: the confirm teaches the safe
 alternative instead of only threatening. With nothing running, `ctrl-shift-q` does not confirm.
 
 ---
@@ -1477,21 +1484,22 @@ Median for the four highest-frequency tasks (open, switch session, switch tab, c
 
 ---
 
-## 6. Contract changes this spec requires (before `fleet-proto` is frozen)
+## 6. Wire and state contracts used by this spec
 
-ARCHITECTURE rule 4 freezes `fleet-core`, `fleet-proto` and the `fleet-ui-kit` API before parallel
-implementation, so these are **blocking decisions**, not UI details.
+These are the implemented data seams behind the UI. Additive fields retain their serde defaults so
+version-1 config/state and version-4 IPC payloads remain readable.
 
 | # | Change | Why the UI needs it |
 | --- | --- | --- |
 | C1 | `Session { slept_at: Option<Timestamp>, kept_terminals: Vec<KeptTerminal { name: String, reason: String }> }` | §2.5 renders `moon` for *slept* distinctly from `circle` for *detached and awake*. `SessionState` stays `none \| detached \| attached \| unknown` (§1) — **sleeping is derived**, not a fifth variant, so the wire enum is unchanged. `kept_terminals[].reason` carries §4 step 6 strings verbatim (`unsaved changes`, `claude`, `:3000`, `sleep disabled`) for the sleep toast and the detail panel. |
-| C2 | `Worktree { degraded: Option<Degraded { kind: HooksFailed, step: String, exit_code: i32, at: Timestamp, log_path: PathBuf }> }`, persisted in `state.json` | The `⚠ hooks failed` chip (§3.3). Closes §9 "Hook failures warn only; no persisted degraded fact despite ready". Requires a `state.json` schema bump or an additive optional field. |
+| C2 | `Worktree { degraded: Option<Degraded { kind: HooksFailed, step: String, exit_code: i32, at: Timestamp, log_path: PathBuf }> }`, persisted in `state.json` as an additive optional field | The `⚠ hooks failed` chip (§3.3). |
 | C3 | `Job { retryable: bool }` and a `RetryJob { id }` request | `R` in the Jobs panel (§3.7). Closes §9 "no retry path". |
 | C4 | `config.trash.retentionMs` (default **600000**) and a `RestoreTrash { entry }` request; the daemon delays the detached `rm -rf` by that long | `u` undo-last-delete (KEYMAP A6). The delete algorithm already renames to `trash/<epochms>-<slug>` first, so the safety net is nearly free. |
 | C5 | `config.jobs.warnBeforeQuit` (default **true**) and `config.jobs.keepFinishedFor` (default **600000**) | KEYMAP's `ctrl-q` clause is unimplementable without the first (§3.8.8); §3.7 retention needs the second. |
-| C6 | `Terminal { has_unseen_output: bool }`, cleared on attach/activate per client | The tab activity dot (§3.6). If the daemon cannot hold a per-client watermark, the client derives it from `FrameUpdate.seq` per terminal and this field is dropped. |
+| C6 | `Terminal { has_unseen_output: bool }`, cleared when the terminal becomes active | The tab activity dot (§3.6). |
 | C7 | `Snapshot { generated_at: Timestamp }` | The `stale · <age>` header stamp (§1.3, §3.12). |
 | C8 | `WorktreeStatus.session` must be set to `unknown` — **never `none`** — whenever the local status observation fails, matching the remote path | Directly retires the §9 defect. This is a daemon behavior requirement, not a type change. |
+| C9 | `PruneWorktrees { …, ids: Option<Vec<WorktreeId>> }`, defaulted and omitted when absent | `None` preserves legacy repo-scoped discovery; confirm commits `Some(exact displayed DELETE ids)`, and daemon reinspection may shrink but never expand that authority. IPC stays version 4. |
 
 ---
 

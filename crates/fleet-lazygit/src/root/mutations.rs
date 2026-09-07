@@ -6,7 +6,7 @@ impl Lazygit {
         cx.notify();
     }
 
-    pub(super) fn push(&mut self, _: &global::Push, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn push(&mut self, _: &global::Push, window: &mut Window, cx: &mut Context<Self>) {
         let branch = self.state.head_branch().map(str::to_owned);
         let upstream = self
             .state
@@ -19,12 +19,16 @@ impl Lazygit {
                 self.mutate("push", Mutation::Push(PushRequest::default()));
             }
             (Some(branch), None) => {
-                self.open_prompt(Prompt {
-                    title: "Push and set upstream".to_owned(),
-                    subtitle: Some(format!("`{branch}` has no upstream. Name the remote.")),
-                    buffer: crate::state::Buffer::single_line().with_text("origin"),
-                    kind: PromptKind::PushSetUpstream,
-                });
+                self.open_prompt(
+                    Prompt {
+                        title: "Push and set upstream".to_owned(),
+                        subtitle: Some(format!("`{branch}` has no upstream. Name the remote.")),
+                        buffer: crate::state::Buffer::single_line().with_text("origin"),
+                        kind: PromptKind::PushSetUpstream,
+                    },
+                    window,
+                    cx,
+                );
             }
             (None, _) => self.toast("HEAD is detached; nothing to push.", Icon::TriangleAlert),
         }
@@ -75,7 +79,7 @@ impl Lazygit {
                 ),
                 menu_request("a", "abort merge", "merge abort", Mutation::MergeAbort),
             ],
-            OperationState::CherryPicking | OperationState::Reverting => vec![
+            OperationState::CherryPicking => vec![
                 menu_request(
                     "c",
                     "continue cherry-pick",
@@ -88,6 +92,15 @@ impl Lazygit {
                     "cherry-pick abort",
                     Mutation::CherryPickAbort,
                 ),
+            ],
+            OperationState::Reverting => vec![
+                menu_request(
+                    "c",
+                    "continue revert",
+                    "revert continue",
+                    Mutation::RevertContinue,
+                ),
+                menu_request("a", "abort revert", "revert abort", Mutation::RevertAbort),
             ],
             OperationState::Bisecting => {
                 self.toast("Bisect is not supported yet.", Icon::TriangleAlert);

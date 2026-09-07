@@ -303,7 +303,7 @@ impl AppState {
             Some(existing) => *existing = job,
             None => snapshot.jobs.push(job),
         }
-        self.sticky_error = sticky_error_for(&snapshot.jobs, &self.seen_failed);
+        refresh_job_sticky_error(&mut self.sticky_error, &snapshot.jobs, &self.seen_failed);
         self.bump_snapshot_revision();
         if let Some(text) = outcome {
             self.toast(
@@ -313,6 +313,18 @@ impl AppState {
             );
         }
     }
+}
+
+/// Refreshes a job-owned slot without erasing an unrelated explicit error.
+pub(super) fn refresh_job_sticky_error(
+    slot: &mut Option<StickyError>,
+    jobs: &[JobRecord],
+    seen: &HashSet<JobId>,
+) {
+    if slot.as_ref().is_some_and(|error| error.job.is_none()) {
+        return;
+    }
+    *slot = sticky_error_for(jobs, seen);
 }
 
 /// Derives job failures without coupling the reducer to a view.

@@ -1,4 +1,4 @@
-use gpui::{Keystroke, prelude::*};
+use gpui::{EntityInputHandler, Keystroke, Modifiers, prelude::*};
 
 use super::{EditEffect, TextFieldState, TextInput, char_offset};
 
@@ -156,6 +156,169 @@ fn editing_effects_distinguish_boundaries_caret_and_text() {
     assert_eq!(state.edit_keystroke(&key("delete")), EditEffect::Changed);
     assert_eq!(state.text(), "");
     assert_eq!(state.edit_keystroke(&key("a")), EditEffect::Ignored);
+}
+
+#[test]
+fn modified_arrows_and_deletes_are_not_plain_edits() {
+    let modifiers = [
+        Modifiers {
+            alt: true,
+            ..Default::default()
+        },
+        Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+        Modifiers {
+            platform: true,
+            ..Default::default()
+        },
+    ];
+    for modifiers in modifiers {
+        for key in ["left", "right", "backspace", "delete"] {
+            let mut state = state("abc", 1);
+            let original = state.clone();
+            let keystroke = Keystroke {
+                modifiers,
+                key: key.into(),
+                key_char: None,
+            };
+            assert_eq!(state.edit_keystroke(&keystroke), EditEffect::Ignored);
+            assert_eq!(state, original);
+        }
+    }
+}
+
+#[test]
+fn edits_preserve_combining_and_emoji_graphemes() {
+    let mut combining = TextFieldState::from_text("e\u{301}x");
+    assert!(combining.move_left());
+    assert!(combining.backspace());
+    assert_eq!(combining.text(), "x");
+
+    let family = "👨‍👩‍👧‍👦";
+    let mut emoji = TextFieldState::from_text(format!("a{family}b"));
+    emoji.set_cursor(1);
+    assert!(emoji.delete_forward());
+    assert_eq!(emoji.text(), "ab");
+}
+
+#[gpui::test]
+fn ime_relative_selection_respects_multibyte_prefix(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|cx| TextInput::new(cx).with_text("é/"))
+        })
+        .expect("test window")
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    let input = window.root(&mut cx).expect("text input");
+
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(None, "漢字", Some(0..1), window, cx);
+            assert_eq!(input.text(), "é/漢字");
+            assert_eq!(input.state.marked_range(), Some(3..9));
+            assert_eq!(input.state.selected_range(), 3..6);
+            assert_eq!(
+                input
+                    .selected_text_range(false, window, cx)
+                    .map(|s| s.range),
+                Some(2..3)
+            );
+        });
+    });
+}
+
+#[gpui::test]
+fn ime_empty_replacement_uses_post_edit_cursor(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|cx| TextInput::new(cx).with_text("e\u{301}"))
+        })
+        .expect("test window")
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    let input = window.root(&mut cx).expect("text input");
+
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(Some(1..2), "", Some(0..0), window, cx);
+            assert_eq!(input.text(), "");
+            assert_eq!(input.state.selected_range(), 0..0);
+        });
+    });
+}
+
+#[gpui::test]
+fn platform_selection_round_trips_through_composition(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|cx| TextInput::new(cx).with_text("a😀b"))
+        })
+        .expect("test window")
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    let input = window.root(&mut cx).expect("text input");
+
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.set_selected_text_range(1..3, window, cx);
+            let selected = input
+                .selected_text_range(false, window, cx)
+                .expect("selection");
+            assert_eq!(selected.range, 1..3);
+
+            input.replace_and_mark_text_in_range(None, "é漢", Some(1..2), window, cx);
+            assert_eq!(input.text(), "aé漢b");
+            assert_eq!(input.marked_text_range(window, cx), Some(1..3));
+            let selected = input
+                .selected_text_range(false, window, cx)
+                .expect("selection");
+            assert_eq!(selected.range, 2..3);
+            assert!(!selected.reversed);
+
+            input.replace_and_mark_text_in_range(None, "字", None, window, cx);
+            assert_eq!(input.text(), "a字b");
+            assert_eq!(input.marked_text_range(window, cx), Some(1..2));
+            assert_eq!(
+                input
+                    .selected_text_range(false, window, cx)
+                    .map(|s| s.range),
+                Some(2..2)
+            );
+        });
+    });
+}
+
+#[gpui::test]
+fn unmark_collapses_platform_selection_before_commit(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|cx| TextInput::new(cx).with_text("ab"))
+        })
+        .expect("test window")
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    let input = window.root(&mut cx).expect("text input");
+
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(None, "漢字", Some(0..1), window, cx);
+            assert_eq!(input.state.selected_range(), 2..5);
+            assert_eq!(input.state.cursor(), 5);
+
+            input.unmark_text(window, cx);
+            assert_eq!(input.state.selected_range(), 5..5);
+
+            input.replace_text_in_range(None, "x", window, cx);
+            assert_eq!(input.text(), "ab漢x字");
+        });
+    });
 }
 
 #[gpui::test]

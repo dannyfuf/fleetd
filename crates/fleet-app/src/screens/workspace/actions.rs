@@ -1,5 +1,232 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PendingSelectionScroll {
+    terminal: TerminalId,
+    history_epoch: u64,
+    issued_seq: u64,
+    issued_base: u64,
+    target_base: u64,
+    caret_lines: i32,
+}
+
+impl PendingSelectionScroll {
+    pub(super) fn queue(
+        slot: &mut Option<Self>,
+        terminal: TerminalId,
+        grid: &crate::state::MirrorGrid,
+        lines: i32,
+    ) {
+        let retained = slot.as_ref().copied().filter(|pending| {
+            pending.terminal == terminal && pending.history_epoch == grid.viewport.history_epoch
+        });
+        let issued_base = viewport_base(grid);
+        let base = retained.map_or(issued_base, |pending| pending.target_base);
+        let limit = grid.viewport.scrollback_len as u64;
+        let target_base = shifted_viewport_base(base, limit, lines);
+        let moved = viewport_delta(base, target_base);
+        if moved == 0 && retained.is_none() {
+            *slot = None;
+            return;
+        }
+        let caret_lines = retained
+            .map_or(0, |pending| pending.caret_lines)
+            .saturating_add(moved);
+        *slot = Some(Self {
+            terminal,
+            history_epoch: grid.viewport.history_epoch,
+            issued_seq: grid.seq,
+            issued_base,
+            target_base,
+            caret_lines,
+        });
+    }
+
+    pub(super) fn reconcile(
+        &mut self,
+        terminal: TerminalId,
+        grid: &crate::state::MirrorGrid,
+    ) -> Option<i32> {
+        if self.terminal != terminal || self.history_epoch != grid.viewport.history_epoch {
+            return Some(0);
+        }
+        if grid.seq <= self.issued_seq {
+            return None;
+        }
+        let arrived_base = viewport_base(grid);
+        if arrived_base == self.target_base {
+            return Some(self.caret_lines);
+        }
+        if arrived_base == self.issued_base {
+            return None;
+        }
+        Some(viewport_delta(self.issued_base, arrived_base))
+    }
+}
+
+fn viewport_delta(from: u64, to: u64) -> i32 {
+    let delta = to as i128 - from as i128;
+    match i32::try_from(delta) {
+        Ok(delta) => delta,
+        Err(_) if delta < 0 => i32::MIN,
+        Err(_) => i32::MAX,
+    }
+}
+
+fn shifted_viewport_base(base: u64, limit: u64, lines: i32) -> u64 {
+    if lines >= 0 {
+        base.saturating_add(u64::from(lines.unsigned_abs()))
+            .min(limit)
+    } else {
+        base.saturating_sub(u64::from(lines.unsigned_abs()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExpectedResponse {
+    Ack,
+    Terminal,
+    Session,
+}
+
+fn response_matches(expected: ExpectedResponse, response: &ResponseBody) -> bool {
+    matches!(
+        (expected, response),
+        (ExpectedResponse::Ack, ResponseBody::Ack)
+            | (ExpectedResponse::Terminal, ResponseBody::Terminal(_))
+            | (ExpectedResponse::Session, ResponseBody::Session(_))
+    )
+}
+
+pub(super) fn mutation_failure(
+    answer: Result<Result<ResponseBody, fleet_proto::error::ProtoError>, async_channel::RecvError>,
+    expected: ExpectedResponse,
+    operation: &str,
+) -> Option<String> {
+    match answer {
+        Ok(Err(error)) => Some(error.message),
+        Err(_) => Some(format!("could not {operation}: daemon reply was lost")),
+        Ok(Ok(response)) if response_matches(expected, &response) => None,
+        Ok(Ok(_)) => Some(format!(
+            "could not {operation}: daemon returned an unexpected response"
+        )),
+    }
+}
+
+fn show_sticky_error(state: &Entity<AppState>, text: String, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        record_mutation_failure(app, text);
+        cx.notify();
+    });
+}
+
+pub(super) fn record_mutation_failure(app: &mut AppState, text: String) {
+    app.sticky_error = Some(crate::state::StickyError {
+        text,
+        job: None,
+        retryable: false,
+    });
+}
+
+pub(super) trait MutationRequester {
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>>;
+}
+
+impl MutationRequester for Bridge {
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>> {
+        Bridge::request(self, body)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct MutationRequest {
+    pub(super) body: RequestBody,
+    pub(super) expected: ExpectedResponse,
+    pub(super) operation: &'static str,
+}
+
+impl MutationRequest {
+    fn close(terminal: TerminalId) -> Self {
+        Self {
+            body: RequestBody::CloseTerminal { terminal },
+            expected: ExpectedResponse::Ack,
+            operation: "close terminal",
+        }
+    }
+
+    pub(super) fn restart(session: &Session) -> Option<Self> {
+        Some(Self {
+            body: RequestBody::RestartTerminal {
+                terminal: active_pty_terminal_of(session)?,
+            },
+            expected: ExpectedResponse::Terminal,
+            operation: "restart terminal",
+        })
+    }
+
+    fn select(session: SessionId, terminal: TerminalId) -> Self {
+        Self {
+            body: RequestBody::SelectTerminal { session, terminal },
+            expected: ExpectedResponse::Session,
+            operation: "select terminal",
+        }
+    }
+}
+
+pub(super) fn request_mutation(
+    requester: &impl MutationRequester,
+    request: MutationRequest,
+    state: Entity<AppState>,
+    cx: &mut App,
+) {
+    let MutationRequest {
+        body,
+        expected,
+        operation,
+    } = request;
+    let reply = requester.request(body);
+    cx.spawn(async move |cx| {
+        let failure = mutation_failure(reply.recv().await, expected, operation);
+        if let Some(error) = failure {
+            cx.update(|cx| show_sticky_error(&state, error, cx));
+        }
+    })
+    .detach();
+}
+
+pub(super) fn session_intent_is_current(expected: &SessionId, current: Option<&SessionId>) -> bool {
+    current == Some(expected)
+}
+
+pub(super) fn new_terminal_reply_target(
+    originating_session: &SessionId,
+    current_session: Option<&SessionId>,
+    response: &ResponseBody,
+) -> Option<TerminalId> {
+    if !session_intent_is_current(originating_session, current_session) {
+        return None;
+    }
+    match response {
+        ResponseBody::Terminal(terminal) => Some(terminal.id),
+        _ => None,
+    }
+}
+
+pub(super) fn active_pty_terminal_of(session: &Session) -> Option<TerminalId> {
+    let active = session.active_terminal?;
+    session
+        .terminals
+        .iter()
+        .find(|terminal| terminal.id == active && !terminal.is_native())
+        .map(|terminal| terminal.id)
+}
+
 impl WorkspaceScreen {
     /// Every `ctrl-s <key>` binding the shell does not already own.
     pub(super) fn with_prefix_actions(
@@ -15,7 +242,7 @@ impl WorkspaceScreen {
                     if local.borrow_mut().clear_selections() {
                         state.update(cx, |_, cx| cx.notify());
                     }
-                    local.borrow_mut().send_or_queue(
+                    let accepted = local.borrow_mut().send_or_queue(
                         &bridge,
                         Some(terminal),
                         primed,
@@ -26,6 +253,7 @@ impl WorkspaceScreen {
                             action: KeyAction::Press,
                         }),
                     );
+                    surface::report_input_delivery(accepted, &state, cx);
                 }
             })
         };
@@ -42,15 +270,46 @@ impl WorkspaceScreen {
             let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::SleepAndGoHub, _window, cx| {
                 let session = state.read(cx).active_session().map(|s| s.id.clone());
-                local.borrow_mut().detach(&bridge, None);
-                if let Some(session) = session {
-                    bridge.send(RequestBody::SleepSession { session });
-                }
-                state.update(cx, |app, cx| {
-                    app.leave_prefix();
-                    app.screen = Screen::hub();
-                    cx.notify();
+                let Some(session) = session else { return };
+                let reply = bridge.request(RequestBody::SleepSession {
+                    session: session.clone(),
                 });
+                let state = state.clone();
+                let bridge = bridge.clone();
+                let local = Rc::clone(&local);
+                cx.spawn(async move |cx| {
+                    let answer = reply.recv().await;
+                    cx.update(|cx| match answer {
+                        Ok(Ok(ResponseBody::Slept(_))) => {
+                            let current = state
+                                .read(cx)
+                                .active_session()
+                                .map(|active| active.id.clone());
+                            if !session_intent_is_current(&session, current.as_ref()) {
+                                return;
+                            }
+                            local.borrow_mut().detach(&bridge, None);
+                            state.update(cx, |app, cx| {
+                                app.leave_prefix();
+                                app.screen = Screen::hub();
+                                cx.notify();
+                            });
+                        }
+                        Ok(Err(error)) => show_sticky_error(&state, error.message, cx),
+                        Ok(Ok(_)) => show_sticky_error(
+                            &state,
+                            "could not sleep session: daemon returned an unexpected response"
+                                .to_owned(),
+                            cx,
+                        ),
+                        Err(_) => show_sticky_error(
+                            &state,
+                            "could not sleep session: daemon reply was lost".to_owned(),
+                            cx,
+                        ),
+                    });
+                })
+                .detach();
             })
         };
         let root = {
@@ -101,9 +360,12 @@ impl WorkspaceScreen {
                     return;
                 };
                 if terminal.keep_alive.is_empty() {
-                    bridge.send(RequestBody::CloseTerminal {
-                        terminal: terminal.id,
-                    });
+                    request_mutation(
+                        &bridge,
+                        MutationRequest::close(terminal.id),
+                        state.clone(),
+                        cx,
+                    );
                 } else {
                     let index = state
                         .read(cx)
@@ -135,8 +397,12 @@ impl WorkspaceScreen {
         let root = {
             let (_, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::RestartCommand, _window, cx| {
-                if let Some(terminal) = active_terminal(&state, cx) {
-                    bridge.send(RequestBody::RestartTerminal { terminal });
+                let request = state
+                    .read(cx)
+                    .active_session()
+                    .and_then(MutationRequest::restart);
+                if let Some(request) = request {
+                    request_mutation(&bridge, request, state.clone(), cx);
                 }
             })
         };
@@ -165,15 +431,31 @@ impl WorkspaceScreen {
                 let reply = bridge.request(RequestBody::WorktreePath { id: worktree });
                 let state = state.clone();
                 cx.spawn(async move |cx| {
-                    let Ok(Ok(ResponseBody::Path(path))) = reply.recv().await else {
-                        return;
-                    };
-                    cx.update(|cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(path));
-                        state.update(cx, |app, cx| {
-                            app.toast_short("path copied", Icon::ClipboardCheck, Instant::now());
-                            cx.notify();
-                        });
+                    let answer = reply.recv().await;
+                    cx.update(|cx| match answer {
+                        Ok(Ok(ResponseBody::Path(path))) => {
+                            cx.write_to_clipboard(ClipboardItem::new_string(path));
+                            state.update(cx, |app, cx| {
+                                app.toast_short(
+                                    "path copied",
+                                    Icon::ClipboardCheck,
+                                    Instant::now(),
+                                );
+                                cx.notify();
+                            });
+                        }
+                        Ok(Err(error)) => show_sticky_error(&state, error.message, cx),
+                        Ok(Ok(_)) => show_sticky_error(
+                            &state,
+                            "could not copy worktree path: daemon returned an unexpected response"
+                                .to_owned(),
+                            cx,
+                        ),
+                        Err(_) => show_sticky_error(
+                            &state,
+                            "could not copy worktree path: daemon reply was lost".to_owned(),
+                            cx,
+                        ),
                     });
                 })
                 .detach();
@@ -370,14 +652,20 @@ impl WorkspaceScreen {
         let root = {
             let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::Top, _window, cx| {
-                local.borrow_mut().caret = 0;
+                let mut local = local.borrow_mut();
+                local.state.pending_selection_scroll = None;
+                local.caret = 0;
+                drop(local);
                 scroll_viewport(&bridge, &state, ScrollCommand::Top, cx);
             })
         };
         let root = {
             let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::Bottom, _window, cx| {
-                local.borrow_mut().caret = u64::MAX;
+                let mut local = local.borrow_mut();
+                local.state.pending_selection_scroll = None;
+                local.caret = u64::MAX;
+                drop(local);
                 scroll_viewport(&bridge, &state, ScrollCommand::Bottom, cx);
             })
         };
@@ -396,13 +684,20 @@ impl WorkspaceScreen {
         let root = {
             let (local, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &scroll::Yank, _window, cx| {
-                let text = {
+                let selection = {
                     let borrowed = local.borrow();
                     borrowed
                         .anchor
-                        .map(|anchor| selection_text(&borrowed.history, anchor, borrowed.caret))
+                        .map(|anchor| try_selection_text(&borrowed.history, anchor, borrowed.caret))
                 };
-                let Some(text) = text else {
+                let Some(selection) = selection else {
+                    return;
+                };
+                let Some(text) = selection else {
+                    state.update(cx, |app, cx| {
+                        app.toast_short("selection scrolled away", Icon::Info, Instant::now());
+                        cx.notify();
+                    });
                     return;
                 };
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -447,6 +742,10 @@ pub(super) fn request_shell_tab(
     state: &Entity<AppState>,
     cx: &mut App,
 ) {
+    let originating_session = match &request {
+        RequestBody::NewTerminal { session, .. } => session.clone(),
+        _ => return,
+    };
     let reply = bridge.request(request);
     let state = state.clone();
     let bridge = bridge.clone();
@@ -456,8 +755,16 @@ pub(super) fn request_shell_tab(
             // §3.6: the tab the user just asked for is the tab they are about to type into.
             // Selecting it is what moves the blue underline *and* what makes the daemon clear
             // its unseen-output dot; without it the next keystrokes go to the previous PTY.
-            Ok(Ok(ResponseBody::Terminal(terminal))) => cx.update(|cx| {
-                select_terminal(&local, &bridge, &state, Some(terminal.id), cx);
+            Ok(Ok(response @ ResponseBody::Terminal(_))) => cx.update(|cx| {
+                let current = state
+                    .read(cx)
+                    .active_session()
+                    .map(|session| session.id.clone());
+                if let Some(terminal) =
+                    new_terminal_reply_target(&originating_session, current.as_ref(), &response)
+                {
+                    select_terminal(&local, &bridge, &state, Some(terminal), cx);
+                }
             }),
             // A refused request is sticky, never silent (§1.8) — this key used to fail quietly.
             Ok(Err(error)) => cx.update(|cx| {
@@ -470,7 +777,20 @@ pub(super) fn request_shell_tab(
                     cx.notify();
                 });
             }),
-            _ => {}
+            Ok(Ok(_)) => cx.update(|cx| {
+                show_sticky_error(
+                    &state,
+                    "could not create terminal: daemon returned an unexpected response".to_owned(),
+                    cx,
+                );
+            }),
+            Err(_) => cx.update(|cx| {
+                show_sticky_error(
+                    &state,
+                    "could not create terminal: daemon reply was lost".to_owned(),
+                    cx,
+                );
+            }),
         }
     })
     .detach();
@@ -526,7 +846,20 @@ pub(super) fn scroll_lines(
     lines: i32,
     cx: &mut App,
 ) {
-    local.borrow_mut().shift_caret(lines);
+    {
+        let app = state.read(cx);
+        if let Some(session) = app.active_session()
+            && let Some(terminal) = active_pty_terminal_of(session)
+            && let Some(grid) = app.grids.get(&terminal)
+        {
+            PendingSelectionScroll::queue(
+                &mut local.borrow_mut().state.pending_selection_scroll,
+                terminal,
+                grid,
+                lines,
+            );
+        }
+    }
     scroll_viewport(bridge, state, ScrollCommand::Lines(lines), cx);
 }
 
@@ -537,7 +870,11 @@ pub(super) fn exit_scroll(
     state: &Entity<AppState>,
     cx: &mut App,
 ) {
-    local.borrow_mut().clear_line_selection();
+    {
+        let mut local = local.borrow_mut();
+        local.clear_line_selection();
+        local.state.pending_selection_scroll = None;
+    }
     if let Some(terminal) = active_terminal(state, cx) {
         bridge.send(RequestBody::ScrollTerminal {
             terminal,
@@ -621,10 +958,12 @@ pub(super) fn select_terminal(
     }) else {
         return;
     };
-    bridge.send(RequestBody::SelectTerminal {
-        session: session.clone(),
-        terminal,
-    });
+    request_mutation(
+        bridge,
+        MutationRequest::select(session.clone(), terminal),
+        state.clone(),
+        cx,
+    );
     local.borrow_mut().clear_line_selection();
     state.update(cx, |app, cx| {
         app.touch_terminal(&session, terminal);
@@ -642,16 +981,7 @@ pub(super) fn select_terminal(
 
 /// Switches the Workspace to another session, sleeping nothing.
 pub(super) fn open_session(state: &Entity<AppState>, session: SessionId, cx: &mut App) {
-    state.update(cx, |app, cx| {
-        app.leave_prefix();
-        app.touch_session(session.clone());
-        app.screen = Screen::Workspace { session };
-        app.terminal_mode = TerminalMode::Terminal;
-        // The session we are moving to may rest on a `fleet://` tab; the next snapshot would
-        // fix it anyway, this only avoids one frame in the wrong mode.
-        app.sync_terminal_mode();
-        cx.notify();
-    });
+    dialogs::open_session(session, state, cx);
 }
 
 /// `ctrl-s c` and the `+` both open a plain shell, so the first one is `sh`, then `sh2`, `sh3`.

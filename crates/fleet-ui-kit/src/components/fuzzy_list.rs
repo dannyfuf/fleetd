@@ -115,6 +115,62 @@ impl FuzzyItem {
     }
 }
 
+/// The rows cursor motion may traverse.
+///
+/// A plain length keeps the original all-selectable API, while a slice of items lets lists with
+/// unavailable rows skip them without maintaining a second index map.
+pub trait FuzzyCursorSource {
+    /// Number of rows in the navigation set.
+    fn len(&self) -> usize;
+
+    /// Whether there are no rows in the navigation set.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether the row at `index` may carry the cursor.
+    fn is_selectable(&self, index: usize) -> bool;
+}
+
+impl FuzzyCursorSource for usize {
+    fn len(&self) -> usize {
+        *self
+    }
+
+    fn is_selectable(&self, index: usize) -> bool {
+        index < *self
+    }
+}
+
+impl FuzzyCursorSource for &[FuzzyItem] {
+    fn len(&self) -> usize {
+        <[FuzzyItem]>::len(self)
+    }
+
+    fn is_selectable(&self, index: usize) -> bool {
+        self.get(index).is_some_and(|item| !item.disabled)
+    }
+}
+
+fn move_cursor(
+    cursor: usize,
+    source: &impl FuzzyCursorSource,
+    step: impl Fn(usize, usize) -> usize,
+) -> usize {
+    let len = source.len();
+    if source.is_empty() {
+        return 0;
+    }
+    let mut candidate = cursor.min(len - 1);
+    for _ in 0..len {
+        candidate = step(candidate, len);
+        if source.is_selectable(candidate) {
+            return candidate;
+        }
+    }
+    0
+}
+
 /// Coalesce matched character indices into UTF-8 ranges without copying the label.
 fn match_ranges(text: &str, matches: &[usize]) -> Vec<std::ops::Range<usize>> {
     let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
@@ -234,13 +290,13 @@ impl FuzzyList {
     ///
     /// A fuzzy list wraps where a pane list clamps: the set is short, capped and re-ranked on
     /// every keystroke, so there is no scroll position for the user to lose.
-    pub fn next_cursor(cursor: usize, len: usize) -> usize {
-        super::navigation::next(cursor, len)
+    pub fn next_cursor(cursor: usize, source: impl FuzzyCursorSource) -> usize {
+        move_cursor(cursor, &source, super::navigation::next)
     }
 
     /// `ctrl-p` / `↑` (and `k` when [`FuzzyList::binds_jk`]): the previous row, wrapping.
-    pub fn prev_cursor(cursor: usize, len: usize) -> usize {
-        super::navigation::previous(cursor, len)
+    pub fn prev_cursor(cursor: usize, source: impl FuzzyCursorSource) -> usize {
+        move_cursor(cursor, &source, super::navigation::previous)
     }
 }
 
@@ -353,6 +409,27 @@ mod tests {
     fn cursor_motion_on_an_empty_list_stays_at_zero() {
         assert_eq!(FuzzyList::next_cursor(0, 0), 0);
         assert_eq!(FuzzyList::prev_cursor(0, 0), 0);
+    }
+
+    #[test]
+    fn cursor_motion_skips_disabled_rows() {
+        let items = [
+            FuzzyItem::new("first"),
+            FuzzyItem::new("disabled").disabled(true),
+            FuzzyItem::new("third"),
+        ];
+
+        assert_eq!(FuzzyList::next_cursor(0, items.as_slice()), 2);
+        assert_eq!(FuzzyList::next_cursor(2, items.as_slice()), 0);
+        assert_eq!(FuzzyList::prev_cursor(2, items.as_slice()), 0);
+        assert_eq!(FuzzyList::prev_cursor(0, items.as_slice()), 2);
+
+        let disabled = [
+            FuzzyItem::new("one").disabled(true),
+            FuzzyItem::new("two").disabled(true),
+        ];
+        assert_eq!(FuzzyList::next_cursor(0, disabled.as_slice()), 0);
+        assert_eq!(FuzzyList::prev_cursor(1, disabled.as_slice()), 0);
     }
 
     #[test]

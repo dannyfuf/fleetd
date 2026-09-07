@@ -371,13 +371,12 @@ fn host_rows(config: &Config) -> Vec<SettingRow> {
 
 /// The About section: versions, the daemon, and the two escape hatches.
 pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
-    let mut list = Vec::new();
+    let mut list = vec![fact(
+        "Fleet",
+        crate::presentation::bare_version(env!("CARGO_PKG_VERSION")).to_owned(),
+    )];
     let now = now_unix();
-    if let Some(snapshot) = app.snapshot.as_ref() {
-        list.push(fact(
-            "Fleet",
-            crate::presentation::bare_version(&snapshot.daemon.version).to_owned(),
-        ));
+    if let Some(snapshot) = app.snapshot.as_ref().filter(|_| app.daemon.is_connected()) {
         let uptime = age_secs(&snapshot.daemon.started_at, now)
             .map_or_else(|| "\u{2013}".to_owned(), fleet_ui_kit::format_age);
         list.push(fact(
@@ -387,11 +386,10 @@ pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
                 snapshot.daemon.pid
             ),
         ));
-        list.push(fact("FLEET_HOME", snapshot.daemon.home.clone()));
     } else {
         list.push(fact("fleetd", "not connected".to_owned()));
-        list.push(fact("FLEET_HOME", app.home.display().to_string()));
     }
+    list.push(fact("FLEET_HOME", app.home.display().to_string()));
     if let Some(version) = app.update_version.as_ref() {
         list.push(fact(
             "Update",

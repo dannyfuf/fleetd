@@ -18,7 +18,7 @@ FLEET := $(BIN_DIR)/fleet
 FLEETD := $(BIN_DIR)/fleetd
 RUNTIME_ENV := FLEET_HOME="$(FLEET_HOME)" FLEET_DAEMON="$(FLEETD)"
 
-.PHONY: run run-release restart daemon build check test fmt fmt-check clippy lint ci clean bootstrap doctor help
+.PHONY: run run-release restart daemon build check test test-scripts fmt fmt-check clippy lint ci clean bootstrap doctor help
 
 run: restart ## Build, restart fleetd, and open Fleet (ARGS="..." supported)
 	$(RUNTIME_ENV) "$(FLEET)" $(ARGS)
@@ -42,6 +42,13 @@ check: ## Check the workspace
 test: ## Run workspace tests
 	cargo test --workspace
 
+test-scripts: ## Run platform-specific shell-script tests
+ifeq ($(shell uname -s),Darwin)
+	./scripts/tests/bootstrap-zig-test.sh
+else
+	@echo "Skipping script tests: bootstrap-zig is only supported on Darwin."
+endif
+
 fmt: ## Format all Rust code
 	cargo fmt --all
 
@@ -53,7 +60,7 @@ clippy: ## Run Clippy with warnings denied
 
 lint: fmt-check clippy ## Run formatting and Clippy checks
 
-ci: lint test ## Run lint and test targets
+ci: lint test test-scripts ## Run lint and test targets
 
 clean: ## Remove Cargo build artifacts
 	cargo clean

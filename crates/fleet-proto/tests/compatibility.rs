@@ -1,6 +1,6 @@
 use bytes::BytesMut;
 use fleet_core::{
-    ids::TerminalId,
+    ids::{TerminalId, WorktreeId},
     model::RepoHooks,
     sessions::AgentActivity,
     watches::{WatchChunk, WatchId, WatchStream},
@@ -11,7 +11,9 @@ use fleet_proto::{
     error::{ErrorKind, ProtoError},
     event::Event,
     request::{Request, RequestBody},
-    response::{Response, ResponseBody, WorktreeDeleteResult},
+    response::{
+        DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, WorktreeDeleteResult,
+    },
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio_util::codec::{Decoder, Encoder};
@@ -83,6 +85,32 @@ fn request_wire_goldens() {
         },
         r#"{"id":4,"body":{"type":"set_config","patch":{"sleep":{"keepAlive":[{"id":"server","kind":"listening-port","label":"server"}]}}}}"#,
     );
+    assert_frame(
+        Request {
+            id: 5,
+            body: RequestBody::PruneWorktrees {
+                dry_run: false,
+                fetch: false,
+                kill_sessions: false,
+                repo: Some("acme/api".parse().unwrap()),
+                ids: None,
+            },
+        },
+        r#"{"id":5,"body":{"type":"prune_worktrees","dry_run":false,"fetch":false,"kill_sessions":false,"repo":"acme/api"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 6,
+            body: RequestBody::PruneWorktrees {
+                dry_run: false,
+                fetch: false,
+                kill_sessions: false,
+                repo: Some("acme/api".parse().unwrap()),
+                ids: Some(vec![WorktreeId::try_from("acme/api#reviewed").unwrap()]),
+            },
+        },
+        r#"{"id":6,"body":{"type":"prune_worktrees","dry_run":false,"fetch":false,"kill_sessions":false,"repo":"acme/api","ids":["acme/api#reviewed"]}}"#,
+    );
 }
 
 #[test]
@@ -126,6 +154,47 @@ fn response_wire_goldens() {
         },
         r#"{"id":4,"result":{"Ok":{"type":"ack"}}}"#,
     );
+}
+
+#[test]
+fn hello_metadata_accepts_old_and_new_ipc_v4_envelopes() {
+    let old =
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":4,"server":"fleet-test"}}}}"#;
+    let old: HelloResponse = serde_json::from_str(old).expect("old Hello envelope");
+    assert!(old.capabilities.is_empty());
+
+    let new_json = r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":4,"server":"fleet-test"}}},"capabilities":["prune.reviewed_ids"]}"#;
+    let new: HelloResponse = serde_json::from_str(new_json).expect("new Hello envelope");
+    assert_eq!(new.capabilities, ["prune.reviewed_ids"]);
+    let legacy: Response = serde_json::from_str(new_json).expect("legacy Hello decoder");
+    assert!(matches!(legacy.result, Ok(ResponseBody::Hello { .. })));
+}
+
+#[test]
+fn pong_identity_accepts_old_and_new_ipc_v4_envelopes() {
+    let old = r#"{"id":2,"result":{"Ok":{"type":"pong"}}}"#;
+    let old: PongResponse = serde_json::from_str(old).expect("old Pong envelope");
+    assert!(old.daemon.is_none());
+
+    let new = PongResponse {
+        response: Response {
+            id: 2,
+            result: Ok(ResponseBody::Pong),
+        },
+        daemon: Some(DaemonIdentity {
+            pid: 42,
+            boot_id: "boot-42".to_owned(),
+        }),
+    };
+    let encoded = serde_json::to_string(&new).expect("new Pong envelope");
+    assert_eq!(
+        encoded,
+        r#"{"id":2,"result":{"Ok":{"type":"pong"}},"daemon":{"pid":42,"bootId":"boot-42"}}"#
+    );
+    let decoded: PongResponse = serde_json::from_str(&encoded).expect("new Pong decoder");
+    assert_eq!(decoded, new);
+    let legacy: Response = serde_json::from_str(&encoded).expect("legacy Pong decoder");
+    assert_eq!(legacy.result, Ok(ResponseBody::Pong));
 }
 
 #[test]

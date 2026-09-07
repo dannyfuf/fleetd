@@ -52,8 +52,20 @@ pub struct GhosttyEngine {
     last_scrollback_len: usize,
     oldest_history: Option<TrackedGridRef>,
     output_since_frame: bool,
+    snapshot_invalid: bool,
     cols: u16,
     rows: u16,
+    #[cfg(test)]
+    fail_next: Option<TestFailure>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestFailure {
+    Snapshot,
+    Compression,
+    Key,
+    Mouse,
 }
 
 // SAFETY: libghostty's safe wrapper is conservatively !Send because its handles contain
@@ -68,8 +80,14 @@ impl GhosttyEngine {
         <Self as VtEngine>::new(cols, rows, scrollback_bytes)
     }
 
-    fn try_take_frame(&mut self, full: bool) -> Result<FrameUpdate, EngineError> {
-        let full = full || self.history_epoch != self.last_frame_history_epoch;
+    #[cfg(test)]
+    pub(crate) fn fail_next_snapshot(&mut self) {
+        self.fail_next = Some(TestFailure::Snapshot);
+    }
+
+    fn snapshot_frame(&mut self, full: bool) -> Result<FrameUpdate, EngineError> {
+        let full =
+            full || self.snapshot_invalid || self.history_epoch != self.last_frame_history_epoch;
         let snapshot = backend(self.render_state.update(&self.terminal))?;
         let cols = backend(snapshot.cols())?;
         let rows = backend(snapshot.rows())?;
@@ -140,6 +158,7 @@ impl GhosttyEngine {
         self.last_frame_history_epoch = self.history_epoch;
         self.reusable_rows = true;
         self.pending_shift = 0;
+        self.snapshot_invalid = false;
 
         Ok(FrameUpdate {
             terminal: TerminalId(0),
@@ -157,9 +176,12 @@ impl GhosttyEngine {
     }
 
     pub(crate) fn compression_pending(&self) -> bool {
-        self.terminal
-            .compression_activity()
-            .is_ok_and(|activity| self.compressed_activity != Some(activity))
+        self.try_compression_pending().unwrap_or(true)
+    }
+
+    pub(crate) fn try_compression_pending(&self) -> Result<bool, EngineError> {
+        backend(self.terminal.compression_activity())
+            .map(|activity| self.compressed_activity != Some(activity))
     }
 
     fn viewport_info(&self) -> ViewportInfo {
@@ -320,8 +342,11 @@ impl VtEngine for GhosttyEngine {
             last_scrollback_len: 0,
             oldest_history: None,
             output_since_frame: false,
+            snapshot_invalid: false,
             cols,
             rows,
+            #[cfg(test)]
+            fail_next: None,
         })
     }
 
@@ -357,9 +382,7 @@ impl VtEngine for GhosttyEngine {
     }
 
     fn take_frame(&mut self, full: bool) -> FrameUpdate {
-        let had_output = std::mem::take(&mut self.output_since_frame);
-        self.update_history_epoch(had_output);
-        match self.try_take_frame(full) {
+        match <Self as VtEngine>::try_take_frame(self, full) {
             Ok(frame) => frame,
             Err(error) => {
                 warn!(%error, "failed to snapshot Ghostty terminal");
@@ -368,7 +391,7 @@ impl VtEngine for GhosttyEngine {
                     seq: 0,
                     cols: self.cols,
                     rows: self.rows,
-                    full,
+                    full: true,
                     shift: None,
                     rows_changed: Vec::new(),
                     cursor: self.cursor(),
@@ -376,6 +399,26 @@ impl VtEngine for GhosttyEngine {
                     modes: self.modes(),
                     title: None,
                 }
+            }
+        }
+    }
+
+    fn try_take_frame(&mut self, full: bool) -> Result<FrameUpdate, EngineError> {
+        let had_output = std::mem::take(&mut self.output_since_frame);
+        self.update_history_epoch(had_output);
+        #[cfg(test)]
+        if self.fail_next == Some(TestFailure::Snapshot) {
+            self.fail_next = None;
+            self.snapshot_invalid = true;
+            return Err(EngineError::Backend("injected snapshot failure".to_owned()));
+        }
+        match self.snapshot_frame(full) {
+            Ok(frame) => Ok(frame),
+            Err(error) => {
+                self.snapshot_invalid = true;
+                self.reusable_rows = false;
+                self.pending_shift = 0;
+                Err(error)
             }
         }
     }
@@ -442,9 +485,19 @@ impl VtEngine for GhosttyEngine {
     }
 
     fn wheel(&mut self, event: &WheelEvent) -> WheelAction {
+        match <Self as VtEngine>::try_wheel(self, event) {
+            Ok(action) => action,
+            Err(error) => {
+                warn!(%error, "failed to encode Ghostty wheel event");
+                WheelAction::Drop
+            }
+        }
+    }
+
+    fn try_wheel(&mut self, event: &WheelEvent) -> Result<WheelAction, EngineError> {
         let modes = self.modes();
         if !modes.alt_screen && !(event.mods.contains(Modifiers::SHIFT) && modes.mouse_reporting) {
-            return WheelAction::Viewport(event.steps);
+            return Ok(WheelAction::Viewport(event.steps));
         }
         let steps = event
             .steps
@@ -452,7 +505,7 @@ impl VtEngine for GhosttyEngine {
             .min(u32::from(self.rows) * 4)
             .min(1024);
         let bytes = if modes.mouse_reporting {
-            self.encode_mouse(&MouseEvent {
+            self.try_encode_mouse(&MouseEvent {
                 button: if event.steps < 0 {
                     MouseButton::WheelUp
                 } else {
@@ -462,31 +515,45 @@ impl VtEngine for GhosttyEngine {
                 col: event.col.min(self.cols.saturating_sub(1)),
                 row: event.row.min(self.rows.saturating_sub(1)),
                 mods: event.mods,
-            })
+            })?
         } else if modes.alt_screen && mode(&self.terminal, Mode::ALT_SCROLL) {
-            self.encode_key(&KeyEvent {
+            self.try_encode_key(&KeyEvent {
                 key: if event.steps < 0 { Key::Up } else { Key::Down },
                 mods: Modifiers::empty(),
                 text: None,
                 action: KeyAction::Press,
-            })
+            })?
         } else {
-            return WheelAction::Drop;
+            return Ok(WheelAction::Drop);
         };
-        WheelAction::Pty(bytes.repeat(steps as usize))
+        Ok(WheelAction::Pty(bytes.repeat(steps as usize)))
     }
 
     fn compress_idle(&mut self) {
-        let Ok(activity) = self.terminal.compression_activity() else {
-            return;
-        };
+        if let Err(error) = <Self as VtEngine>::try_compress_idle(self) {
+            warn!(%error, "failed to compress Ghostty history");
+        }
+    }
+
+    fn try_compress_idle(&mut self) -> Result<(), EngineError> {
+        let activity = backend(self.terminal.compression_activity())?;
         if self.compressed_activity == Some(activity) {
-            return;
+            return Ok(());
         }
-        match self.terminal.compress(CompressionMode::Incremental) {
-            Ok(CompressionResult::Pending) => {}
-            _ => self.compressed_activity = Some(activity),
+        #[cfg(test)]
+        if self.fail_next == Some(TestFailure::Compression) {
+            self.fail_next = None;
+            return Err(EngineError::Backend(
+                "injected compression failure".to_owned(),
+            ));
         }
+        match backend(self.terminal.compress(CompressionMode::Incremental))? {
+            CompressionResult::Pending => {}
+            CompressionResult::Complete | CompressionResult::Unsupported => {
+                self.compressed_activity = Some(activity);
+            }
+        }
+        Ok(())
     }
 
     fn viewport(&self) -> ViewportInfo {
@@ -505,61 +572,90 @@ impl VtEngine for GhosttyEngine {
     }
 
     fn encode_key(&mut self, event: &KeyEvent) -> Vec<u8> {
-        let Ok(event) = ghostty_key_event(event) else {
-            return Vec::new();
-        };
+        match <Self as VtEngine>::try_encode_key(self, event) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                warn!(%error, "failed to encode Ghostty key event");
+                Vec::new()
+            }
+        }
+    }
+
+    fn try_encode_key(&mut self, event: &KeyEvent) -> Result<Vec<u8>, EngineError> {
+        #[cfg(test)]
+        if self.fail_next == Some(TestFailure::Key) {
+            self.fail_next = None;
+            return Err(EngineError::Backend("injected key failure".to_owned()));
+        }
+        let event = backend(ghostty_key_event(event))?;
         self.key_encoder
             .set_options_from_terminal(&self.terminal)
             // GPUI has already classified Option as terminal Alt. The Ghostty encoder resets
             // this process-local preference while importing terminal modes, so restore it.
             .set_macos_option_as_alt(libghostty_vt::key::OptionAsAlt::True);
         let mut output = Vec::new();
-        if let Err(error) = self.key_encoder.encode_to_vec(&event, &mut output) {
-            warn!(%error, "failed to encode Ghostty key event");
-            output.clear();
-        }
-        output
+        backend(self.key_encoder.encode_to_vec(&event, &mut output))?;
+        Ok(output)
     }
 
     fn encode_mouse(&mut self, event: &MouseEvent) -> Vec<u8> {
+        match <Self as VtEngine>::try_encode_mouse(self, event) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                warn!(%error, "failed to encode Ghostty mouse event");
+                Vec::new()
+            }
+        }
+    }
+
+    fn try_encode_mouse(&mut self, event: &MouseEvent) -> Result<Vec<u8>, EngineError> {
         let wheel = matches!(
             event.button,
             MouseButton::WheelUp | MouseButton::WheelDown | MouseButton::Other(4 | 5)
         );
-        let Ok(event) = ghostty_mouse_event(event) else {
-            return Vec::new();
-        };
+        #[cfg(test)]
+        if self.fail_next == Some(TestFailure::Mouse) {
+            self.fail_next = None;
+            return Err(EngineError::Backend("injected mouse failure".to_owned()));
+        }
+        let event = backend(ghostty_mouse_event(event))?;
+        let mut button_down = self.mouse_button_down;
         if !wheel {
             match event.action() {
-                libghostty_vt::mouse::Action::Press => self.mouse_button_down = true,
-                libghostty_vt::mouse::Action::Release => self.mouse_button_down = false,
+                libghostty_vt::mouse::Action::Press => button_down = true,
+                libghostty_vt::mouse::Action::Release => button_down = false,
                 _ => {}
             }
         }
         self.mouse_encoder
             .set_options_from_terminal(&self.terminal)
-            .set_any_button_pressed(self.mouse_button_down);
+            .set_any_button_pressed(button_down);
         let mut output = Vec::new();
-        if let Err(error) = self.mouse_encoder.encode_to_vec(&event, &mut output) {
-            warn!(%error, "failed to encode Ghostty mouse event");
-            output.clear();
-        }
-        output
+        backend(self.mouse_encoder.encode_to_vec(&event, &mut output))?;
+        self.mouse_button_down = button_down;
+        Ok(output)
     }
 
     fn encode_paste(&self, text: &str) -> Vec<u8> {
-        let mut input = text.as_bytes().to_vec();
-        let mut output = vec![0_u8; input.len().saturating_add(12)];
-        match paste::encode(&mut input, self.modes().bracketed_paste, &mut output) {
-            Ok(written) => {
-                output.truncate(written);
-                output
-            }
+        match <Self as VtEngine>::try_encode_paste(self, text) {
+            Ok(bytes) => bytes,
             Err(error) => {
                 warn!(%error, "failed to encode Ghostty paste");
                 Vec::new()
             }
         }
+    }
+
+    fn try_encode_paste(&self, text: &str) -> Result<Vec<u8>, EngineError> {
+        let mut input = text.as_bytes().to_vec();
+        let mut output = vec![0_u8; input.len().saturating_add(12)];
+        let written = backend(paste::encode(
+            &mut input,
+            self.modes().bracketed_paste,
+            &mut output,
+        ))?;
+        output.truncate(written);
+        Ok(output)
     }
 
     fn take_events(&mut self) -> Vec<EngineEvent> {

@@ -129,11 +129,95 @@ fn a_merge_fact_names_the_remote_ref_the_daemon_compared_against() {
     assert_eq!(target_ref("main"), "origin/main");
     assert_eq!(
         target_ref("release/2026"),
-        "release/2026",
-        "an already qualified ref is left alone"
+        "origin/release/2026",
+        "a slash is part of a bare branch name, not remote qualification"
     );
     assert_eq!(target_ref("origin/main"), "origin/main");
     assert_eq!(target_ref(""), "the base ref");
+}
+
+#[test]
+fn caption_and_keyboard_share_confirmation_policy() {
+    let request = ConfirmRequest::KillSession {
+        session: SessionId::try_from("buk/payroll#fix-rut").unwrap(),
+        terminals: 1,
+        running: vec!["claude".to_owned()],
+        unsaved: false,
+    };
+    let draft = ConfirmState {
+        request: Some(request),
+        ..ConfirmState::default()
+    };
+    let policy = confirmation_policy(&draft, 0);
+    assert_eq!(policy.key, ConfirmKey::Upper);
+    assert!(!admits(policy, ConfirmKey::Lower));
+    assert!(admits(policy, ConfirmKey::Upper));
+}
+
+#[test]
+fn beginning_recheck_clears_stale_prune_preview() {
+    let repo = RepoId::try_from("buk/payroll").unwrap();
+    let mut draft = ConfirmState {
+        request: Some(ConfirmRequest::Prune { repo }),
+        prune: Some(PruneResult {
+            dry_run: true,
+            deleted: vec![WorktreeId::try_from("buk/payroll#old").unwrap()],
+            skipped: Vec::new(),
+        }),
+        error: Some("fetch failed".to_owned()),
+        ..ConfirmState::default()
+    };
+    draft.begin_recheck();
+    let policy = confirmation_policy(&draft, 0);
+    assert!(draft.loading);
+    assert_eq!(draft.error, None);
+    assert_eq!(draft.prune, None);
+    assert!(!policy.authorized);
+    assert!(!admits(policy, ConfirmKey::Upper));
+}
+
+#[test]
+fn failed_recheck_blocks_stale_prune_preview() {
+    let repo = RepoId::try_from("buk/payroll").unwrap();
+    let deleted = WorktreeId::try_from("buk/payroll#old").unwrap();
+    let mut draft = ConfirmState {
+        request: Some(ConfirmRequest::Prune { repo }),
+        prune: Some(PruneResult {
+            dry_run: true,
+            deleted: vec![deleted.clone()],
+            skipped: Vec::new(),
+        }),
+        ..ConfirmState::default()
+    };
+    draft.begin_recheck();
+    draft.loading = false;
+    draft.error = Some("fetch failed".to_owned());
+
+    let policy = confirmation_policy(&draft, 0);
+    assert!(!policy.authorized);
+    assert!(!admits(policy, ConfirmKey::Upper));
+    assert!(reviewed_prune_ids(&draft).is_empty());
+    assert!(
+        draft
+            .prune
+            .as_ref()
+            .is_none_or(|result| !result.deleted.contains(&deleted))
+    );
+}
+
+#[test]
+fn delete_failure_keeps_confirm_open_with_reason() {
+    let id = WorktreeId::try_from("buk/payroll#fix-rut").unwrap();
+    let results = vec![fleet_proto::response::WorktreeDeleteResult {
+        worktree_id: id.clone(),
+        ok: false,
+        reason: Some("trash move failed".to_owned()),
+        trash_entry: None,
+    }];
+    assert_eq!(
+        delete_outcome(&id, &results),
+        Err("trash move failed".to_owned())
+    );
 }
 
 #[test]
@@ -178,4 +262,47 @@ fn prune_list_count_tracks_deleted_and_expanded_kept_sections() {
     draft.update_list();
     assert_eq!(draft.list_len(), 3);
     assert_eq!(draft.list.as_ref().unwrap().item_count(), 3);
+}
+
+#[test]
+fn commit_never_expands_reviewed_set() {
+    let reviewed = WorktreeId::try_from("buk/payroll#reviewed").unwrap();
+    let confirm = ConfirmState {
+        prune: Some(PruneResult {
+            deleted: vec![reviewed.clone()],
+            dry_run: true,
+            skipped: Vec::new(),
+        }),
+        ..ConfirmState::default()
+    };
+
+    assert_eq!(reviewed_prune_ids(&confirm), [reviewed]);
+}
+
+#[test]
+fn reviewed_prune_requires_the_negotiated_capability() {
+    let repo = RepoId::try_from("buk/payroll").expect("repo");
+    let reviewed = WorktreeId::try_from("buk/payroll#reviewed").expect("worktree");
+    let confirm = ConfirmState {
+        prune: Some(PruneResult {
+            dry_run: true,
+            deleted: vec![reviewed.clone()],
+            skipped: Vec::new(),
+        }),
+        ..ConfirmState::default()
+    };
+
+    let error = reviewed_prune_request(&confirm, repo.clone(), false)
+        .expect_err("an old daemon must be refused");
+    assert!(error.contains("update or restart fleetd"));
+    assert_eq!(
+        reviewed_prune_request(&confirm, repo, true).expect("capable daemon"),
+        RequestBody::PruneWorktrees {
+            dry_run: false,
+            fetch: false,
+            kill_sessions: false,
+            repo: Some(RepoId::try_from("buk/payroll").expect("repo")),
+            ids: Some(vec![reviewed]),
+        }
+    );
 }

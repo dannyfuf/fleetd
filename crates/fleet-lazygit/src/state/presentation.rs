@@ -83,6 +83,9 @@ pub(crate) fn has_unstaged(file: &FileStatus) -> bool {
 #[must_use]
 pub(crate) fn upstream_status(branch: &Branch) -> Option<String> {
     let upstream = branch.upstream.as_ref()?;
+    if upstream.gone {
+        return Some("gone".to_owned());
+    }
     if upstream.ahead == 0 && upstream.behind == 0 {
         return Some("✓".to_owned());
     }

@@ -48,11 +48,8 @@ impl<'a> SnapshotIndex<'a> {
             }
         }
         for job in &snapshot.jobs {
-            index
-                .jobs_by_target
-                .entry(&job.target)
-                .or_default()
-                .push(job);
+            let target = super::job_target(&job.kind, &job.target);
+            index.jobs_by_target.entry(target).or_default().push(job);
         }
         index
     }
@@ -72,7 +69,7 @@ impl<'a> SnapshotIndex<'a> {
     pub fn sessions_for_worktree(&self, id: &WorktreeId) -> &[&'a Session] {
         self.worktree_sessions.get(id).map_or(&[], Vec::as_slice)
     }
-    /// Exact wire-target match: normalization and active-status policy remain the caller's choice.
+    /// Match a canonical domain target; UUID attempt suffixes are removed while indexing.
     pub fn jobs_for_target(&self, target: &str) -> &[&'a JobRecord] {
         self.jobs_by_target.get(target).map_or(&[], Vec::as_slice)
     }
@@ -85,6 +82,7 @@ mod tests {
         model::{Context, RepoHooks},
         sessions::{AgentActivity, SessionState},
     };
+    use fleet_proto::job::{JobKind, JobStatus};
     use fleet_proto::snapshot::DaemonInfo;
 
     #[test]
@@ -176,5 +174,45 @@ mod tests {
             [&snapshot.sessions[0]]
         );
         assert!(index.jobs_for_target("missing").is_empty());
+    }
+
+    #[test]
+    fn uuid_suffixed_jobs_are_indexed_by_domain_target() {
+        let snapshot = Snapshot {
+            generated_at: String::new(),
+            contexts: vec![],
+            repos: vec![],
+            clones: vec![],
+            worktrees: vec![],
+            active_context: None,
+            sessions: vec![],
+            statuses: vec![],
+            pools: vec![],
+            hosts: vec![],
+            jobs: vec![JobRecord {
+                id: "job-create".parse().expect("job id"),
+                kind: JobKind::CreateWorktree,
+                target: "acme/api#topic:123e4567-e89b-12d3-a456-426614174000".to_owned(),
+                title: "Create topic".to_owned(),
+                status: JobStatus::Running,
+                progress: None,
+                log_path: String::new(),
+                started_at: String::new(),
+                finished_at: None,
+                cancellable: true,
+                retryable: false,
+            }],
+            daemon: DaemonInfo {
+                version: String::new(),
+                pid: 1,
+                started_at: String::new(),
+                home: String::new(),
+            },
+        };
+
+        let index = SnapshotIndex::new(&snapshot);
+
+        assert_eq!(index.jobs_for_target("acme/api#topic").len(), 1);
+        assert!(index.jobs_for_target(&snapshot.jobs[0].target).is_empty());
     }
 }

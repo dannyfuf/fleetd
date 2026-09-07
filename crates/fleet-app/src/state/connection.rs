@@ -13,6 +13,8 @@ pub enum DaemonLink {
         log_tail: Vec<String>,
         /// Whether a stale socket is the known cause.
         stale_socket: bool,
+        /// Whether the daemon answered with an unsupported protocol.
+        protocol_mismatch: bool,
     },
     /// Connected and answering pings.
     Connected,
@@ -107,8 +109,14 @@ impl AppState {
     /// Applies one message from the daemon bridge.
     pub fn apply_bridge_event(&mut self, event: BridgeEvent, now: Instant) {
         match event {
-            BridgeEvent::TerminalConfig(config) => self.terminal_config = config,
-            BridgeEvent::NotificationConfig(config) => self.notifications = config,
+            BridgeEvent::Capabilities(capabilities) => {
+                self.daemon_capabilities = capabilities.into_iter().collect();
+            }
+            BridgeEvent::EffectiveConfig(config) => {
+                self.terminal_config = config.terminal;
+                self.notifications = config.notifications;
+                self.warn_before_quit = config.warn_before_quit;
+            }
             BridgeEvent::Connected(snapshot) => {
                 self.daemon = DaemonLink::Connected;
                 self.daemon_since = now;
@@ -122,17 +130,31 @@ impl AppState {
                 log_tail,
                 stale_socket,
             } => {
+                self.daemon_capabilities.clear();
                 self.daemon = DaemonLink::Failed {
                     message,
                     log_tail,
                     stale_socket,
+                    protocol_mismatch: false,
                 };
                 self.daemon_since = now;
                 // §3.12 B takes the whole window and draws no overlay layer, so anything that
                 // was open would keep its key context alive with nothing on screen to close.
                 self.overlay = None;
             }
+            BridgeEvent::ProtocolMismatch { message, log_tail } => {
+                self.daemon_capabilities.clear();
+                self.daemon = DaemonLink::Failed {
+                    message,
+                    log_tail,
+                    stale_socket: false,
+                    protocol_mismatch: true,
+                };
+                self.daemon_since = now;
+                self.overlay = None;
+            }
             BridgeEvent::Disconnected { attempt } => {
+                self.daemon_capabilities.clear();
                 let dismissed = matches!(
                     self.daemon,
                     DaemonLink::Lost {
@@ -151,6 +173,8 @@ impl AppState {
                     // PTYs do not survive a daemon restart.
                     self.grids.clear();
                     self.watches = crate::watches::Watches::default();
+                    self.renamed_terminals.clear();
+                    self.terminal_mru.clear();
                 }
                 self.daemon = DaemonLink::Reconnected {
                     restarted,
@@ -165,6 +189,13 @@ impl AppState {
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
+            BridgeEvent::MutationFailed { message } => {
+                self.sticky_error = Some(StickyError {
+                    text: message,
+                    job: None,
+                    retryable: false,
+                });
+            }
             // Lag also affects quiet terminals. Shell requests full frames for these mirrors.
             BridgeEvent::EventsLagged { .. } => {
                 self.desync_grids();

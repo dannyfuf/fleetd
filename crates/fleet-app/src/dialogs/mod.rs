@@ -19,10 +19,7 @@ use fleet_core::ids::RepoId;
 use fleet_ui_kit::prelude::*;
 use gpui::{AnyElement, App, Div, Entity, FocusHandle, Pixels, Window, div, px};
 
-use crate::{
-    bridge::Bridge,
-    state::{AppState, RepoScope},
-};
+use crate::{bridge::Bridge, state::AppState};
 
 /// Clamped cursor stepping, named so it does not collide with the per-dialog `move_cursor`
 /// helpers that step a whole draft.
@@ -30,7 +27,8 @@ pub(crate) use crate::state::move_cursor as step;
 pub use confirm::ConfirmRequest;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
 pub(crate) use host::{
-    DialogHost, notify, open_session, open_worktree, read_host, retain_task, with_host,
+    DialogHost, SessionTransport, notify, open_agent_session, open_session, open_worktree,
+    read_host, retain_task, with_host,
 };
 pub(crate) use input::{clear_all, field, type_into, typed_char};
 
@@ -178,25 +176,13 @@ pub(crate) fn root(focus: &FocusHandle) -> Div {
 /// worktree".
 #[must_use]
 pub(crate) fn focused_repo(state: &AppState) -> Option<RepoId> {
-    let snapshot = state.snapshot.as_ref()?;
-    match &state.scope {
-        RepoScope::Repo(repo) => Some(repo.clone()),
-        RepoScope::All => {
-            let worktree = snapshot.worktrees.get(state.cursors.worktrees);
-            worktree
-                .map(|worktree| worktree.repo_id.clone())
-                .or_else(|| {
-                    snapshot
-                        .repos
-                        .get(state.cursors.repos)
-                        .map(|r| r.id.clone())
-                })
-        }
-    }
+    crate::presentation::selected_repo_id(state)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
 
     #[test]
@@ -205,6 +191,36 @@ mod tests {
             Dialogs::NewContext.context_name(),
             Dialogs::EditContext.context_name(),
             "KEYMAP gives both context dialogs one row"
+        );
+    }
+
+    #[test]
+    fn focused_repo_matches_hub() {
+        let mut state = AppState::new("/tmp/fleet", Instant::now());
+        state.displayed_hub.worktrees = vec![crate::presentation::DisplayedWorktree {
+            id: "acme/api#newest".parse().expect("worktree id"),
+            repo: "acme/api".parse().expect("repo id"),
+        }];
+        state.cursors.worktrees = 0;
+
+        assert_eq!(
+            focused_repo(&state).as_ref().map(RepoId::as_str),
+            Some("acme/api")
+        );
+
+        state.hub_pane = crate::state::HubPane::Repos;
+        state.displayed_hub.repos = vec![crate::presentation::DisplayedRepo {
+            kind: crate::presentation::DisplayedRepoKind::All,
+            repo: None,
+            job: None,
+        }];
+        state.cursors.repos = 0;
+        state.scope = crate::state::RepoScope::All;
+
+        assert_eq!(
+            focused_repo(&state).as_ref().map(RepoId::as_str),
+            Some("acme/api"),
+            "All resolves the highlighted worktree's repository"
         );
     }
 }

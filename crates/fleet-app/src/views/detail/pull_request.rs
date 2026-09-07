@@ -1,5 +1,7 @@
 use super::*;
 
+use fleet_core::slug::slugify;
+
 /// What `Enter` on a PR with no local worktree is about to create (§3.5 [D-6]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WillCreate {
@@ -17,7 +19,7 @@ struct WillCreate {
 fn will_create(pr: &PullRequest) -> WillCreate {
     let branch = local_branch_for_pr(pr);
     WillCreate {
-        worktree: format!("{}/{}", pr.repo_id.name(), branch.replace('/', "-")),
+        worktree: format!("{}/{}", pr.repo_id.name(), slugify(&branch)),
         branch: branch.clone(),
         base: format!("pull/{}/head", pr.number),
         fork: pr
@@ -29,6 +31,7 @@ fn will_create(pr: &PullRequest) -> WillCreate {
 }
 
 /// Everything the pull-request variant needs.
+#[derive(Clone, Copy)]
 pub struct PrProps<'a> {
     /// The pull request under the cursor.
     pub pr: &'a PullRequest,
@@ -45,6 +48,16 @@ pub struct PrProps<'a> {
 /// §3.5's PR detail table, plus either the `WORKTREE` block or `WILL CREATE`.
 #[must_use]
 pub fn pull_request(props: PrProps<'_>, cx: &App) -> AnyElement {
+    pull_request_with_status(props, None, cx)
+}
+
+/// Renders PR detail with the exact local-worktree status already resolved for its PR row.
+#[must_use]
+pub fn pull_request_with_status(
+    props: PrProps<'_>,
+    resolved_status: Option<StatusKind>,
+    cx: &App,
+) -> AnyElement {
     let PrProps {
         pr,
         local,
@@ -83,14 +96,9 @@ pub fn pull_request(props: PrProps<'_>, cx: &App) -> AnyElement {
 
     let tail = match local {
         Some(worktree) => {
-            let glyph = row_glyph(
-                status.map_or(SessionState::None, |status| status.session),
-                false,
-                status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
-                worktree.degraded.is_some(),
-                false,
-                false,
-            );
+            let glyph = resolved_status.unwrap_or_else(|| {
+                resolved_worktree_status(status, false, worktree.degraded.is_some(), false, false)
+            });
             let running = status
                 .map(|status| status.running.join(", "))
                 .filter(|labels| !labels.is_empty());
@@ -209,5 +217,14 @@ mod tests {
             plan.fork.as_deref(),
             Some("dannyfuf/payroll \u{2192} pr/412")
         );
+    }
+
+    #[test]
+    fn preview_uses_daemon_slug_rules() {
+        let mut pr = pull_request(false);
+        pr.head_ref_name = "Feature/Foo Bar".to_owned();
+        let plan = will_create(&pr);
+        assert_eq!(plan.branch, "Feature/Foo Bar");
+        assert_eq!(plan.worktree, "payroll/feature-foo-bar");
     }
 }

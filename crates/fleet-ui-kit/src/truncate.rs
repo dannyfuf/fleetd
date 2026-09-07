@@ -1,4 +1,4 @@
-//! Ellipsis at a fixed character budget.
+//! Ellipsis at a fixed display-column budget.
 //!
 //! Fleet truncates at a `ch` budget, not at a pixel width, because every column ladder in the
 //! UX spec is expressed in `ch`. Pixel-level ellipsis (`Styled::text_ellipsis`) is still the
@@ -6,6 +6,8 @@
 //! `ch` number.
 
 use gpui::SharedString;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Where the ellipsis goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -22,48 +24,73 @@ pub enum Truncate {
 /// The single-character ellipsis Fleet uses everywhere.
 pub const ELLIPSIS: char = '\u{2026}';
 
-/// Shorten `text` to at most `budget` characters, placing the ellipsis per `mode`.
-///
-/// Counts `char`s, not bytes and not grapheme clusters: branch names, repo slugs and PR titles
-/// are the only strings this is applied to, and column budgets are stated in `ch`.
+/// Shorten `text` to at most `budget` display columns, placing the ellipsis per `mode`.
+/// Grapheme clusters are never split.
 pub fn truncate(text: &str, budget: usize, mode: Truncate) -> SharedString {
     shortened(text, budget, mode).unwrap_or_else(|| SharedString::new(text))
 }
 
-/// Truncate shared text, retaining its storage when it already fits the scalar budget.
+/// Truncate shared text, retaining its storage when it already fits the column budget.
 pub fn truncate_shared(text: SharedString, budget: usize, mode: Truncate) -> SharedString {
     shortened(&text, budget, mode).unwrap_or(text)
 }
 
 fn shortened(text: &str, budget: usize, mode: Truncate) -> Option<SharedString> {
-    text.chars().nth(budget)?;
+    if UnicodeWidthStr::width(text) <= budget {
+        return None;
+    }
     if budget == 0 {
         return Some(SharedString::default());
     }
-    let keep = budget - 1;
-    let (front, back) = match mode {
-        Truncate::Tail => (keep, 0),
-        Truncate::Head => (0, keep),
-        Truncate::Middle => (keep.div_ceil(2), keep / 2),
+    let keep_columns = budget.saturating_sub(UnicodeWidthStr::width(ELLIPSIS_STR));
+    let (front_columns, back_columns) = match mode {
+        Truncate::Tail => (keep_columns, 0),
+        Truncate::Head => (0, keep_columns),
+        Truncate::Middle => (keep_columns.div_ceil(2), keep_columns / 2),
     };
-    let prefix_end = text
-        .char_indices()
-        .nth(front)
-        .map_or(text.len(), |(byte, _)| byte);
-    let suffix_start = if back == 0 {
-        text.len()
-    } else {
-        text.char_indices()
-            .rev()
-            .nth(back - 1)
-            .map_or(0, |(byte, _)| byte)
-    };
+    let prefix_end = prefix_end_for_columns(text, front_columns);
+    let suffix_start = suffix_start_for_columns(text, back_columns).max(prefix_end);
     let mut shortened =
         String::with_capacity(prefix_end + ELLIPSIS.len_utf8() + text.len() - suffix_start);
     shortened.push_str(&text[..prefix_end]);
     shortened.push(ELLIPSIS);
     shortened.push_str(&text[suffix_start..]);
     Some(shortened.into())
+}
+
+const ELLIPSIS_STR: &str = "…";
+
+fn prefix_end_for_columns(text: &str, budget: usize) -> usize {
+    let mut columns = 0;
+    text.grapheme_indices(true)
+        .take_while(|(_, grapheme)| {
+            let next = columns + UnicodeWidthStr::width(*grapheme);
+            let fits = next <= budget;
+            if fits {
+                columns = next;
+            }
+            fits
+        })
+        .map(|(start, grapheme)| start + grapheme.len())
+        .last()
+        .unwrap_or(0)
+}
+
+fn suffix_start_for_columns(text: &str, budget: usize) -> usize {
+    let mut columns = 0;
+    text.grapheme_indices(true)
+        .rev()
+        .take_while(|(_, grapheme)| {
+            let next = columns + UnicodeWidthStr::width(*grapheme);
+            let fits = next <= budget;
+            if fits {
+                columns = next;
+            }
+            fits
+        })
+        .map(|(start, _)| start)
+        .last()
+        .unwrap_or(text.len())
 }
 
 #[cfg(test)]
@@ -79,11 +106,17 @@ mod tests {
     }
 
     #[test]
-    fn multibyte_scalars_keep_valid_boundaries_in_every_mode() {
-        assert_eq!(truncate("é漢😀xyz", 4, Truncate::Tail), "é漢😀…");
+    fn graphemes_and_wide_cells_obey_column_budget() {
+        assert_eq!(truncate("é漢😀xyz", 4, Truncate::Tail), "é漢…");
         assert_eq!(truncate("é漢😀xyz", 4, Truncate::Head), "…xyz");
-        assert_eq!(truncate("é漢😀xyz", 4, Truncate::Middle), "é漢…z");
+        assert_eq!(truncate("é漢😀xyz", 4, Truncate::Middle), "é…z");
+        assert_eq!(truncate("e\u{301}x", 1, Truncate::Tail), "…");
+        assert_eq!(truncate("界界", 3, Truncate::Tail), "界…");
         assert_eq!(truncate("é漢😀xyz", 0, Truncate::Tail), "");
+        for mode in [Truncate::Head, Truncate::Middle, Truncate::Tail] {
+            let output = truncate("e\u{301}界😀xyz", 5, mode);
+            assert!(UnicodeWidthStr::width(output.as_ref()) <= 5);
+        }
     }
 
     #[test]
@@ -112,7 +145,7 @@ mod tests {
         for mode in [Truncate::Head, Truncate::Middle, Truncate::Tail] {
             for budget in 0..12 {
                 let out = truncate("feat/payroll-fix", budget, mode);
-                assert!(out.chars().count() <= budget);
+                assert!(UnicodeWidthStr::width(out.as_ref()) <= budget);
             }
         }
     }

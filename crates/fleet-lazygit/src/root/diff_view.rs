@@ -206,6 +206,37 @@ impl Lazygit {
         self.slot_model(SLOT_MAIN, self.main_diff().as_ref(), self.main_mode())
     }
 
+    pub(crate) fn pan_model(&self, slot: &'static str) -> Rc<DiffModel> {
+        match slot {
+            SLOT_MAIN => self.main_model(),
+            SLOT_SECONDARY => {
+                let diff = match &self.state.main {
+                    MainContent::FileDiff {
+                        unstaged, staged, ..
+                    } => match self.state.staging.as_ref().map(|staging| staging.side) {
+                        Some(DiffSide::Staged) => unstaged,
+                        Some(DiffSide::Unstaged) => staged,
+                        None if unstaged.as_ref().is_some_and(|diff| !diff.files.is_empty()) => {
+                            staged
+                        }
+                        None => unstaged,
+                    },
+                    _ => &None,
+                };
+                self.slot_model(SLOT_SECONDARY, diff.as_ref(), DiffViewMode::Unified)
+            }
+            SLOT_PATCH => {
+                let diff = match &self.state.main {
+                    MainContent::SubCommits { diff, .. }
+                    | MainContent::CommitFiles { diff, .. } => diff,
+                    _ => &None,
+                };
+                self.slot_model(SLOT_PATCH, diff.as_ref(), self.state.diff_mode)
+            }
+            _ => self.empty_models[0].clone(),
+        }
+    }
+
     pub(super) fn main_model_pending(&self) -> bool {
         self.main_diff().is_some_and(|source| {
             self.models.get(SLOT_MAIN).is_none_or(|view| {

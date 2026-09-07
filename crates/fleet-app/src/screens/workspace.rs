@@ -55,7 +55,7 @@ use crate::{
     state::{AppState, Overlay, Screen, TerminalMode},
     terminal::{
         MouseCell, SelectionGranularity, absolute_selection_at, cell_size, grid_modes, measure,
-        selection_text, surface, viewport_base, zoom_bar,
+        surface, try_selection_text, viewport_base, zoom_bar,
     },
     views::{workspace_header::WorkspaceHeader, workspace_tabs},
 };
@@ -190,6 +190,7 @@ struct WorkspaceState {
     pr_tasks: HashMap<RepoId, gpui::Task<()>>,
     pane_focused: bool,
     pane_quit: Vec<WorktreeId>,
+    pending_selection_scroll: Option<PendingSelectionScroll>,
     watch_scroll: UniformListScrollHandle,
 }
 type Local = TerminalSurface<WorkspaceState>;

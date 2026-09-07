@@ -55,19 +55,7 @@ impl Services {
                 self.contexts.update(id, name, owners).await?,
             )),
             RequestBody::DeleteContext { id } => {
-                let repo_ids = self
-                    .state
-                    .load()
-                    .await?
-                    .repos
-                    .into_iter()
-                    .filter(|repo| repo.context_id == id)
-                    .map(|repo| repo.id)
-                    .collect::<Vec<_>>();
-                for repo in repo_ids {
-                    self.delete_repo_cascade(repo).await?;
-                }
-                self.contexts.delete(id).await?;
+                self.delete_context_cascade(id).await?;
                 Ok(ResponseBody::Ack)
             }
             RequestBody::SetActiveContext { id } => {
@@ -138,9 +126,10 @@ impl Services {
                 fetch,
                 kill_sessions,
                 repo,
+                ids,
             } => Ok(ResponseBody::Pruned(
                 self.prune
-                    .worktrees(dry_run, fetch, kill_sessions, repo)
+                    .worktrees(dry_run, fetch, kill_sessions, repo, ids)
                     .await?,
             )),
             RequestBody::KillWorktree { id } => {
@@ -162,14 +151,7 @@ impl Services {
                 Ok(ResponseBody::Ack)
             }
             RequestBody::RefreshStatuses { repo } => {
-                let refreshes_all = repo.is_none();
                 let statuses = self.sessions.refresh_statuses(repo).await?;
-                if refreshes_all {
-                    *self.statuses.write().await = Some(statuses.clone());
-                } else {
-                    let mut cached = self.statuses.write().await;
-                    merge_observed_statuses(&mut cached, &statuses);
-                }
                 Ok(ResponseBody::Statuses(statuses))
             }
             RequestBody::SetAgentActivity {
@@ -320,13 +302,18 @@ impl Services {
             }
             RequestBody::GetConfig => Ok(ResponseBody::Config(self.config.load().await?)),
             RequestBody::SetConfig { patch } => {
-                Ok(ResponseBody::Config(self.config.update(patch).await?))
+                let config = self.config.update(patch).await?;
+                self.reconcile_runtime_config(&config);
+                Ok(ResponseBody::Config(config))
             }
             RequestBody::MatchKeepAliveRules => Ok(ResponseBody::KeepAliveRuleMatches(
                 self.sleep.match_keep_alive_rules().await?,
             )),
             RequestBody::ImportFromSwarm => Ok(ResponseBody::Job(self.import.start().await?)),
             RequestBody::Doctor => Ok(ResponseBody::Doctor(self.doctor.check().await?)),
+            RequestBody::ResetState => Ok(ResponseBody::Path(
+                self.state.reset_quarantined().await?.display().to_string(),
+            )),
             RequestBody::Update => Ok(ResponseBody::Job(self.update.start().await?)),
             RequestBody::DaemonPing => Ok(ResponseBody::Pong),
             RequestBody::DaemonVersion => Ok(ResponseBody::Version {
@@ -351,7 +338,7 @@ impl Services {
             .collect::<Vec<_>>();
         let failures = self
             .worktrees
-            .delete(ids)
+            .delete_guarded(ids)
             .await?
             .into_iter()
             .filter(|result| !result.ok)
@@ -365,6 +352,57 @@ impl Services {
             return Err(DaemonError::Conflict(failures.join("; ")));
         }
         self.repos.delete_guarded(repo).await
+    }
+
+    async fn delete_context_cascade(
+        &self,
+        context: fleet_core::ids::ContextId,
+    ) -> DaemonResult<()> {
+        let context_lifecycle = self.repos.context_lifecycle();
+        let _context_lifecycle = context_lifecycle.lock().await;
+        loop {
+            let state = self.state.load().await?;
+            if !state.contexts.iter().any(|entry| entry.id == context) {
+                return Err(DaemonError::NotFound(format!("context {context}")));
+            }
+            let mut repositories = state
+                .repos
+                .iter()
+                .filter(|repo| repo.context_id == context)
+                .map(|repo| repo.id.clone())
+                .chain(
+                    state
+                        .clones
+                        .iter()
+                        .filter(|clone| clone.context_id == context)
+                        .map(|clone| clone.id.clone()),
+                )
+                .collect::<Vec<_>>();
+            repositories.sort();
+            repositories.dedup();
+            if repositories.is_empty() {
+                match self.contexts.delete(context.clone()).await {
+                    Ok(()) => return Ok(()),
+                    Err(DaemonError::Conflict(message))
+                        if message == format!("context {context} still owns repositories") => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            for repository in repositories {
+                let current = self.state.load().await?;
+                let still_owned = current
+                    .repos
+                    .iter()
+                    .any(|repo| repo.id == repository && repo.context_id == context)
+                    || current
+                        .clones
+                        .iter()
+                        .any(|clone| clone.id == repository && clone.context_id == context);
+                if still_owned {
+                    self.delete_repo_cascade(repository).await?;
+                }
+            }
+        }
     }
 
     pub(super) async fn reject_remote_request(&self, body: &RequestBody) -> DaemonResult<()> {

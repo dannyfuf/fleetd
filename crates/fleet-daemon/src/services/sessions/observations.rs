@@ -140,15 +140,31 @@ impl Sessions {
         repo: Option<RepoId>,
     ) -> DaemonResult<Vec<WorktreeStatus>> {
         let state = self.state.load().await?;
+        Ok(self.snapshot_with_statuses_for(&state, repo.as_ref()).1)
+    }
+
+    pub(crate) fn snapshot_with_statuses(
+        &self,
+        state: &fleet_core::state::State,
+    ) -> (Vec<Session>, Vec<WorktreeStatus>) {
+        self.snapshot_with_statuses_for(state, None)
+    }
+
+    fn snapshot_with_statuses_for(
+        &self,
+        state: &fleet_core::state::State,
+        repo: Option<&RepoId>,
+    ) -> (Vec<Session>, Vec<WorktreeStatus>) {
         let registry = self
             .runtime
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(state
+        let sessions = registry.sessions.values().cloned().collect();
+        let statuses = state
             .worktrees
             .iter()
-            .filter(|worktree| repo.as_ref().is_none_or(|repo| &worktree.repo_id == repo))
+            .filter(|worktree| repo.is_none_or(|repo| &worktree.repo_id == repo))
             .map(|worktree| {
                 if worktree.host.is_some() {
                     return unknown_status(worktree.id.clone());
@@ -227,7 +243,8 @@ impl Sessions {
                     agent_activity_changed_at,
                 }
             })
-            .collect())
+            .collect();
+        (sessions, statuses)
     }
 
     pub(crate) fn observe_agent_activities(&self, now: Instant) -> Vec<AgentActivityTransition> {

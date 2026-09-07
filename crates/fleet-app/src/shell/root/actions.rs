@@ -10,10 +10,19 @@ use crate::{
     dialogs::Dialogs,
     state::Overlay,
 };
-use fleet_proto::request::RequestBody;
+use fleet_proto::{error::ProtoError, request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::Icon;
 use gpui::{Context, Div, KeyDownEvent, Window, prelude::*};
 use std::{cell::RefCell, rc::Rc, time::Instant};
+
+fn import_failure(answer: Option<Result<ResponseBody, ProtoError>>) -> Option<String> {
+    match answer {
+        Some(Ok(ResponseBody::Job(_))) => None,
+        Some(Ok(_)) => Some("import refused: daemon returned an unexpected response".to_owned()),
+        Some(Err(error)) => Some(format!("import refused: {}", error.message)),
+        None => Some("import refused: the daemon did not answer".to_owned()),
+    }
+}
 
 impl Shell {
     pub(super) fn open(&mut self, overlay: Overlay, cx: &mut Context<Self>) {
@@ -166,7 +175,16 @@ impl Shell {
             let _ = shell.update(cx, |shell, cx| {
                 let allowed = first_run_import_allowed(shell.state.read(cx).is_first_run(), exists);
                 if allowed {
-                    shell.bridge.send(RequestBody::ImportFromSwarm);
+                    let reply = shell.bridge.request(RequestBody::ImportFromSwarm);
+                    cx.spawn(async move |shell, cx| {
+                        let answer = reply.recv().await.ok();
+                        let _ = shell.update(cx, |shell, cx| {
+                            if let Some(message) = import_failure(answer) {
+                                shell.show_request_failure(message, cx);
+                            }
+                        });
+                    })
+                    .detach();
                 } else {
                     shell.state.update(cx, |state, cx| {
                         state.toast_short(
@@ -271,5 +289,28 @@ impl Shell {
         .on_action(cx.listener(Self::never_warn))
         .on_action(cx.listener(Self::accept_stop_daemon))
         .on_action(cx.listener(Self::reject_stop_daemon))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::root::record_request_failure;
+    use fleet_proto::error::ErrorKind;
+
+    #[test]
+    fn first_run_import_refusal_is_sticky() {
+        let failure = import_failure(Some(Err(ProtoError {
+            kind: ErrorKind::Conflict,
+            message: "existing state cannot be replaced".to_owned(),
+        })));
+        let mut state = crate::state::AppState::new("/tmp/fleet", Instant::now());
+        record_request_failure(&mut state, failure.unwrap_or_default());
+        assert_eq!(
+            state.sticky_error.as_ref().map(|error| error.text.as_str()),
+            Some("import refused: existing state cannot be replaced")
+        );
+        assert!(import_failure(Some(Ok(ResponseBody::Ack))).is_some());
+        assert!(import_failure(None).is_some());
     }
 }

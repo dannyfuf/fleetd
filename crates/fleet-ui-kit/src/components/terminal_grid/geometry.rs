@@ -56,8 +56,8 @@ impl CellMetrics {
     }
 }
 
-/// The cell that occupies terminal column `col` of `row`, honouring wide cells and spacers.
-pub(super) fn cell_at(row: Option<&GridRow>, col: usize) -> Option<&GridCell> {
+/// The owning column and cell that occupy terminal column `col` of `row`.
+pub(super) fn cell_at(row: Option<&GridRow>, col: usize) -> Option<(usize, &GridCell)> {
     let row = row?;
     let mut cursor = 0usize;
     for cell in &row.cells {
@@ -68,7 +68,7 @@ pub(super) fn cell_at(row: Option<&GridRow>, col: usize) -> Option<&GridCell> {
             continue;
         }
         if col >= cursor && col < cursor + span {
-            return Some(cell);
+            return Some((cursor, cell));
         }
         cursor += span;
     }

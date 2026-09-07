@@ -2,7 +2,9 @@ use super::{
     sessions::resolve_agent_status_target, watches::watch_tail_to, worktrees::parse_hooks,
 };
 use crate::{
-    args::{AgentStatusArgs, AgentStatusChoice, KillArgs, WatchListArgs, WatchTailArgs},
+    args::{
+        AgentStatusArgs, AgentStatusChoice, DoctorArgs, KillArgs, WatchListArgs, WatchTailArgs,
+    },
     human,
 };
 use fleet_core::{
@@ -26,6 +28,87 @@ use tokio::net::UnixListener;
 use tokio_util::codec::Framed;
 
 use super::*;
+
+struct BrokenPipe;
+
+impl std::io::Write for BrokenPipe {
+    fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "closed pipeline",
+        ))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn broken_stdout_pipe_returns_cleanly() {
+    let mut stderr = Vec::new();
+    for arguments in [
+        vec![OsString::from("fleet"), OsString::from("--version")],
+        vec![
+            OsString::from("fleet"),
+            OsString::from("--json"),
+            OsString::from("not-a-command"),
+        ],
+    ] {
+        assert_eq!(run_from(arguments, &mut BrokenPipe, &mut stderr), 0);
+    }
+    assert!(stderr.is_empty());
+}
+
+#[tokio::test]
+async fn watch_tail_broken_pipe_returns_cleanly() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        let request = next_request(&mut transport).await;
+        assert_eq!(
+            request.body,
+            RequestBody::TailWatch {
+                watch: sample_watch().id,
+                from_seq: None,
+            }
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::WatchTail(fleet_proto::watch::WatchTail {
+                watch: sample_watch(),
+                chunks: vec![fleet_core::watches::WatchChunk {
+                    seq: 0,
+                    stream: WatchStream::Stdout,
+                    text: "first line\n".into(),
+                }],
+                first_retained_seq: 0,
+                next_seq: 1,
+            })),
+        )
+        .await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let mut stderr = Vec::new();
+    watch_tail_to(
+        &client,
+        WatchTailArgs {
+            id: sample_watch().id,
+            follow: false,
+        },
+        &mut BrokenPipe,
+        &mut stderr,
+    )
+    .await
+    .unwrap();
+    assert!(stderr.is_empty());
+    server.await.unwrap();
+}
 
 #[test]
 fn watch_session_prefers_explicit_and_requires_a_valid_fallback() {
@@ -74,6 +157,45 @@ fn sample_watch() -> fleet_core::watches::Watch {
         source: fleet_core::watches::WatchSource::Cooperative,
         log_file: None,
     }
+}
+
+#[tokio::test]
+async fn doctor_reset_state_uses_typed_request_and_protocol_envelope() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let archived = home.path().join("state.json.broken-1");
+    let expected = archived.display().to_string();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        let request = next_request(&mut transport).await;
+        assert_eq!(request.body, RequestBody::ResetState);
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::Path(archived.display().to_string())),
+        )
+        .await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let output = execute(
+        &client,
+        Command::Doctor(DoctorArgs {
+            reset_state: true,
+            json: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.text).unwrap(),
+        serde_json::json!({"protocol": 1, "archivedPath": expected})
+    );
+    server.await.unwrap();
 }
 
 #[tokio::test]

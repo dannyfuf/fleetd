@@ -22,19 +22,23 @@ impl Lazygit {
         crate::state::hunk_range(rows, staging.cursor)
     }
 
-    pub(super) fn patch_selection(&self) -> Option<PatchSelection> {
+    pub(super) fn patch_selection(&self) -> Option<(PatchSelection, Arc<fleet_git::Diff>)> {
         let staging = self.state.staging.as_ref()?;
+        let displayed = self.main_diff()?;
         let (start, end) = self.staging_range()?;
         let model = self.main_model();
         let hunks = crate::state::selection_hunks(&model.rows, start, end);
         if hunks.is_empty() {
             return None;
         }
-        Some(PatchSelection {
-            path: staging.path.clone(),
-            side: staging.side,
-            hunks,
-        })
+        Some((
+            PatchSelection {
+                path: staging.path.clone(),
+                side: staging.side,
+                hunks,
+            },
+            displayed,
+        ))
     }
 
     pub(super) fn staging_apply(
@@ -43,7 +47,7 @@ impl Lazygit {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(selection) = self.patch_selection() else {
+        let Some((selection, displayed)) = self.patch_selection() else {
             self.toast("Nothing selected.", Icon::CircleDot);
             cx.notify();
             return;
@@ -57,7 +61,14 @@ impl Lazygit {
         } else {
             "unstage selection"
         };
-        self.mutate(label, Mutation::Patch { selection, action });
+        self.mutate(
+            label,
+            Mutation::Patch {
+                selection,
+                action,
+                displayed,
+            },
+        );
         if let Some(staging) = &mut self.state.staging {
             staging.anchor = None;
         }
@@ -70,7 +81,7 @@ impl Lazygit {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(selection) = self.patch_selection() else {
+        let Some((selection, displayed)) = self.patch_selection() else {
             return;
         };
         if selection.side == DiffSide::Staged {
@@ -79,6 +90,7 @@ impl Lazygit {
                 Mutation::Patch {
                     selection,
                     action: PatchAction::Unstage,
+                    displayed,
                 },
             );
             cx.notify();
@@ -94,6 +106,7 @@ impl Lazygit {
                 mutation: Box::new(Mutation::Patch {
                     selection,
                     action: PatchAction::Discard,
+                    displayed,
                 }),
             })),
         });
@@ -213,11 +226,23 @@ impl Lazygit {
     }
 
     pub(super) fn resolve(&mut self, choice: ConflictChoice, label: &str, cx: &mut Context<Self>) {
-        let crate::state::MainContent::Conflict { path, .. } = &self.state.main else {
+        let crate::state::MainContent::Conflict { path, file, .. } = &self.state.main else {
             return;
         };
         let path = path.clone();
-        self.mutate(label, Mutation::ResolveConflict { path, choice });
+        let sections = file.as_ref().map_or(0, |file| file.conflicts.len());
+        self.open_confirm(Confirm {
+            title: label.to_owned(),
+            target: path.display().to_string(),
+            facts: vec![format!(
+                "This resolves and stages the whole file ({sections} conflict sections), not only the section shown."
+            )],
+            danger: sections > 1,
+            outcome: ConfirmOutcome::Request(Box::new(GitRequest::Mutate {
+                label: label.to_owned(),
+                mutation: Box::new(Mutation::ResolveConflict { path, choice }),
+            })),
+        });
         cx.notify();
     }
 

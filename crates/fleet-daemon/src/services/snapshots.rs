@@ -1,5 +1,5 @@
 use super::*;
-use fleet_core::{config::Config, state::State};
+use fleet_core::{config::Config, sessions::WorktreeStatus, state::State};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -45,9 +45,9 @@ impl Services {
     /// Assembles an authoritative snapshot from real persisted state and jobs with runtime sessions.
     pub async fn snapshot(&self) -> DaemonResult<Snapshot> {
         let (state, config, pools) = self.inventory().await?;
-        let sessions = self.sessions.snapshot();
+        let (sessions, runtime_statuses) = self.sessions.snapshot_with_statuses(&state);
         let generated_at = chrono::Utc::now().to_rfc3339();
-        let statuses = merge_statuses(&state.worktrees, self.statuses.read().await.as_deref());
+        let statuses = merge_statuses(&state.worktrees, Some(&runtime_statuses));
         let hosts = self.hosts.snapshot(&config, &generated_at).await;
         Ok(Snapshot {
             generated_at,
@@ -185,23 +185,6 @@ pub(super) fn merge_statuses(
         .collect()
 }
 
-pub(super) fn merge_observed_statuses(
-    cached: &mut Option<Vec<WorktreeStatus>>,
-    observed: &[WorktreeStatus],
-) {
-    let statuses = cached.get_or_insert_with(Vec::new);
-    for status in observed {
-        if let Some(existing) = statuses
-            .iter_mut()
-            .find(|existing| existing.worktree_id == status.worktree_id)
-        {
-            *existing = status.clone();
-        } else {
-            statuses.push(status.clone());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,7 +193,10 @@ mod tests {
         files::{Files, RealFiles},
     };
     use fleet_core::{
-        model::{Context, Repo, RepoHooks},
+        config::{NATIVE_LAZYGIT, WindowConfig},
+        ids::WorktreeId,
+        model::{Context, Repo, RepoHooks, Worktree},
+        sessions::SessionState,
         state::default_state,
     };
 
@@ -282,5 +268,75 @@ mod tests {
             .rename(&root.join(".hot"), &root.join("claimed"))
             .unwrap();
         assert_eq!(services.inventory().await.unwrap().2[0].ready, 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_never_mixes_session_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let config = Arc::new(ConfigStore::new(home, files.clone()));
+        let mut effective = config.load().await.unwrap();
+        effective.windows = vec![WindowConfig {
+            name: "git".into(),
+            command: NATIVE_LAZYGIT.into(),
+        }];
+        config.save(effective).await.unwrap();
+        let state = Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock)));
+        let context: fleet_core::ids::ContextId = "team".parse().unwrap();
+        let repo: RepoId = "owner/repo".parse().unwrap();
+        let worktree = WorktreeId::try_from("owner/repo#main").unwrap();
+        let mut initial = default_state();
+        initial.contexts.push(Context {
+            id: context.clone(),
+            name: "Team".into(),
+            owners: vec!["owner".into()],
+            created_at: "2026-09-06T00:00:00Z".into(),
+        });
+        initial.repos.push(Repo {
+            id: repo.clone(),
+            owner: "owner".into(),
+            name: "repo".into(),
+            url: "https://example.invalid/owner/repo".into(),
+            context_id: context,
+            default_branch: "main".into(),
+            path: home.join("repos/owner/repo").display().to_string(),
+            cloned_at: "2026-09-06T00:00:00Z".into(),
+            hooks: RepoHooks::default(),
+        });
+        initial.worktrees.push(Worktree {
+            id: worktree.clone(),
+            repo_id: repo,
+            slug: "main".into(),
+            branch: "main".into(),
+            base_ref: "origin/main".into(),
+            path: home.join("worktrees/owner/repo/main").display().to_string(),
+            session: "repo/main".into(),
+            host: None,
+            created_at: "2026-09-06T00:00:00Z".into(),
+            last_opened_at: None,
+            degraded: None,
+        });
+        state.save(initial).await.unwrap();
+        let services = Services::new(
+            home,
+            config,
+            state,
+            Arc::new(JobManager::new(home)),
+            Adapters::system(files),
+        );
+        services
+            .sessions
+            .ensure(Some(worktree.clone()), None, false)
+            .await
+            .unwrap();
+        let snapshot = services.snapshot().await.unwrap();
+
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.statuses[0].session, SessionState::Detached);
+        assert_eq!(snapshot.statuses[0].windows.len(), 1);
     }
 }

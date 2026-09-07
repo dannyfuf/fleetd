@@ -71,6 +71,7 @@ fn upstream_status_puts_behind_first() {
             name: "origin/main".to_owned(),
             ahead: 3,
             behind: 5,
+            gone: false,
         }),
         subject: String::new(),
         committed_at: 0,
@@ -81,8 +82,13 @@ fn upstream_status_puts_behind_first() {
         name: "origin/main".to_owned(),
         ahead: 0,
         behind: 0,
+        gone: false,
     });
     assert_eq!(upstream_status(&branch).as_deref(), Some("✓"));
+    if let Some(upstream) = branch.upstream.as_mut() {
+        upstream.gone = true;
+    }
+    assert_eq!(upstream_status(&branch).as_deref(), Some("gone"));
     branch.upstream = None;
     assert_eq!(upstream_status(&branch), None);
 }
@@ -191,6 +197,174 @@ fn a_directory_row_survives_a_refresh_and_asks_for_its_children_diff() {
     assert!(row.is_dir && row.staged && row.unstaged);
 }
 
+fn reflog_entry(oid: &str, selector: &str, subject: &str, committed_at: i64) -> ReflogEntry {
+    ReflogEntry {
+        oid: ObjectId::from(oid),
+        parents: Vec::new(),
+        selector: selector.to_owned(),
+        subject: subject.to_owned(),
+        committed_at,
+    }
+}
+
+fn stash_entry(oid: &str, index: usize, subject: &str) -> StashEntry {
+    StashEntry {
+        index,
+        oid: ObjectId::from(oid),
+        created_at: index as i64,
+        subject: subject.to_owned(),
+    }
+}
+
+#[test]
+fn retains_reflog_and_stash_identity() {
+    let mut state = GitUiState::new(PathBuf::from("/tmp"));
+    let mut snapshot = snapshot_with_generation(1);
+    snapshot.reflog = vec![
+        reflog_entry("aaa", "HEAD@{0}", "first", 10),
+        reflog_entry("bbb", "HEAD@{1}", "selected", 9),
+    ];
+    snapshot.stashes = vec![
+        stash_entry("ccc", 0, "first stash"),
+        stash_entry("ddd", 1, "selected stash"),
+    ];
+    state.apply_snapshot(Box::new(snapshot));
+
+    state.focused = PanelId::Commits;
+    state.commit_tab = CommitTab::Reflog;
+    state.cursors.reflog.set(1);
+    state.remember_selection();
+    state.focused = PanelId::Stash;
+    state.cursors.stashes.set(1);
+    state.remember_selection();
+
+    let mut refreshed = snapshot_with_generation(2);
+    refreshed.reflog = vec![
+        reflog_entry("eee", "HEAD@{0}", "new", 11),
+        reflog_entry("aaa", "HEAD@{1}", "first", 10),
+        reflog_entry("bbb", "HEAD@{2}", "selected", 9),
+    ];
+    refreshed.stashes = vec![
+        stash_entry("fff", 0, "new stash"),
+        stash_entry("ccc", 1, "first stash"),
+        stash_entry("ddd", 2, "selected stash"),
+    ];
+    state.apply_snapshot(Box::new(refreshed));
+
+    assert_eq!(state.cursors.reflog.index(), 2);
+    assert_eq!(
+        state.selected_reflog().map(|entry| entry.oid.as_str()),
+        Some("bbb")
+    );
+    assert_eq!(state.cursors.stashes.index(), 2);
+    assert_eq!(
+        state.selected_stash().map(|entry| entry.oid.as_str()),
+        Some("ddd")
+    );
+}
+
+fn remote_branch(name: &str) -> RemoteBranch {
+    RemoteBranch {
+        name: format!("origin/{name}"),
+        branch: name.to_owned(),
+        oid: ObjectId::from(name),
+        subject: String::new(),
+        committed_at: 0,
+    }
+}
+
+#[test]
+fn restores_remote_branch_by_name() {
+    let mut state = GitUiState::new(PathBuf::from("/tmp"));
+    state.remote_drill = Some("origin".to_owned());
+    state.focused = PanelId::Branches;
+    state.branch_tab = BranchTab::Remotes;
+    let mut snapshot = snapshot_with_generation(1);
+    snapshot.remote_branches = vec![fleet_git::RemoteBranchGroup {
+        remote: "origin".to_owned(),
+        branches: vec![remote_branch("alpha"), remote_branch("selected")],
+    }];
+    state.apply_snapshot(Box::new(snapshot));
+    state.cursors.remote_branches.set(1);
+    state.remember_selection();
+
+    let mut refreshed = snapshot_with_generation(2);
+    refreshed.remote_branches = vec![fleet_git::RemoteBranchGroup {
+        remote: "origin".to_owned(),
+        branches: vec![
+            remote_branch("new"),
+            remote_branch("alpha"),
+            remote_branch("selected"),
+        ],
+    }];
+    state.apply_snapshot(Box::new(refreshed));
+
+    assert_eq!(state.cursors.remote_branches.index(), 2);
+    assert_eq!(
+        state
+            .selected_remote_branch()
+            .map(|branch| branch.name.as_str()),
+        Some("origin/selected")
+    );
+}
+
+#[test]
+fn refresh_keeps_immutable_commit_view() {
+    let mut state = GitUiState::new(PathBuf::from("/tmp"));
+    state.apply_snapshot(Box::new(snapshot_with_generation(1)));
+    state.focused = PanelId::Main;
+    state.main = MainContent::CommitFiles {
+        oid: ObjectId::from("immutable"),
+        subject: "subject".to_owned(),
+        files: Arc::default(),
+        whole: None,
+        shown: None,
+        diff: None,
+        whole_error: None,
+        diff_error: None,
+    };
+
+    assert!(
+        state
+            .apply_snapshot(Box::new(snapshot_with_generation(2)))
+            .is_empty()
+    );
+    assert!(matches!(
+        &state.main,
+        MainContent::CommitFiles { oid, .. } if oid.as_str() == "immutable"
+    ));
+
+    state.main = MainContent::SubCommits {
+        reference: "main".to_owned(),
+        commits: Arc::default(),
+        shown: None,
+        diff: None,
+        commits_error: None,
+        diff_error: None,
+    };
+    let mut refreshed = snapshot_with_generation(3);
+    refreshed.local_branches.push(Branch {
+        name: "main".to_owned(),
+        oid: ObjectId::from("tip"),
+        is_head: true,
+        upstream: Some(fleet_git::Upstream {
+            name: "origin/main".to_owned(),
+            ahead: 0,
+            behind: 0,
+            gone: false,
+        }),
+        subject: String::new(),
+        committed_at: 0,
+        checked_out_at: None,
+    });
+    let requests = state.apply_snapshot(Box::new(refreshed));
+    assert!(matches!(
+        requests.as_slice(),
+        [GitRequest::RefCommits { reference, upstream: Some(upstream), .. }]
+            if reference == "main" && upstream == "origin/main"
+    ));
+}
+
 #[test]
 fn collapsing_a_directory_moves_the_selection_onto_it() {
     let mut state = GitUiState::new(PathBuf::from("/tmp"));
@@ -231,6 +405,25 @@ fn the_buffer_edits_by_characters() {
     assert_eq!(multi.lines_with_caret().0.as_ref(), &["one", "two"]);
     multi.delete_to_line_start();
     assert_eq!(multi.value(), "one\n");
+}
+
+#[test]
+fn buffer_preserves_emoji_graphemes() {
+    let mut buffer = Buffer::single_line().with_text("a👍🏽e\u{301}👨‍👩‍👧‍👦z");
+
+    buffer.home();
+    for caret in [1, 3, 5, 12, 13] {
+        buffer.right();
+        assert_eq!(buffer.caret(), caret);
+    }
+
+    buffer.left();
+    buffer.backspace();
+    assert_eq!(buffer.value(), "a👍🏽e\u{301}z");
+    buffer.backspace();
+    assert_eq!(buffer.value(), "a👍🏽z");
+    buffer.backspace();
+    assert_eq!(buffer.value(), "az");
 }
 
 #[test]

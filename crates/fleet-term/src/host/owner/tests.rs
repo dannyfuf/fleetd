@@ -2,8 +2,10 @@ use std::{path::PathBuf, time::SystemTime};
 
 use super::commands::{PendingViewport, flush_viewport};
 use super::*;
-use crate::host::{TerminalHost, TerminalHostOptions};
-use crate::pty::PtyOptions;
+use crate::host::{
+    COMMAND_OVERHEAD, HostError, TerminalHost, TerminalHostOptions, command_bytes, send_command,
+};
+use crate::pty::{PTY_WRITE_QUEUE_BYTES, PtyOptions};
 use fleet_proto::terminal::{KeyEvent, WheelEvent};
 
 fn test_activity() -> Arc<Mutex<TerminalActivity>> {
@@ -14,7 +16,271 @@ fn test_activity() -> Arc<Mutex<TerminalActivity>> {
         output_bytes_total: 0,
     }))
 }
+
 use async_channel::TryRecvError;
+
+#[test]
+fn queue_budget_preserves_input_order() {
+    let (sender, receiver) = mpsc::channel();
+    let queued_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let command_size = COMMAND_OVERHEAD + 3;
+    let limit = command_size * 2;
+
+    send_command(
+        &sender,
+        &queued_bytes,
+        HostCommand::Write(b"one".to_vec()),
+        limit,
+    )
+    .unwrap();
+    send_command(
+        &sender,
+        &queued_bytes,
+        HostCommand::Write(b"two".to_vec()),
+        limit,
+    )
+    .unwrap();
+    assert!(matches!(
+        send_command(
+            &sender,
+            &queued_bytes,
+            HostCommand::Write(b"three".to_vec()),
+            limit,
+        ),
+        Err(HostError::QueueFull { .. })
+    ));
+
+    let queued = [receiver.recv().unwrap(), receiver.recv().unwrap()].map(|event| match event {
+        OwnerEvent::BudgetedCommand {
+            command: HostCommand::Write(bytes),
+            ..
+        } => bytes,
+        _ => panic!("unexpected queued owner event"),
+    });
+    assert_eq!(queued, [b"one".to_vec(), b"two".to_vec()]);
+}
+
+#[test]
+fn scroll_or_key_reserves_encoded_input_bytes() {
+    use fleet_proto::terminal::{Key, KeyAction, Modifiers};
+
+    let command = HostCommand::ScrollOrKey {
+        scroll: ScrollCommand::Pages(-1),
+        key: KeyEvent {
+            key: Key::Char('x'),
+            mods: Modifiers::empty(),
+            text: Some("input".to_owned()),
+            action: KeyAction::Press,
+        },
+    };
+
+    assert_eq!(command_bytes(&command), COMMAND_OVERHEAD + 5);
+}
+
+#[test]
+fn writer_saturation_is_rejected_at_host_boundary() {
+    let host = TerminalHost::spawn(TerminalHostOptions {
+        terminal: TerminalId(30),
+        pty: PtyOptions::command(
+            "/bin/sh",
+            ["-c", "stty raw -echo; printf READY; trap '' HUP; sleep 60"],
+            PathBuf::from("/tmp"),
+            80,
+            24,
+        ),
+        scrollback_bytes: 1024,
+        initial_command: None,
+        starting_sequence: 1,
+    })
+    .unwrap();
+    let events = host.event_receiver();
+    await_event(&events, |event| {
+        matches!(event, HostEvent::Frame(frame) if frame.rows_changed.iter().any(|row| {
+            row.cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .contains("READY")
+        }))
+    });
+    host.write(vec![b'x'; PTY_WRITE_QUEUE_BYTES * 3 / 4])
+        .unwrap();
+
+    let (reply, attached) = async_channel::bounded(1);
+    host.commands
+        .send(OwnerEvent::Command(HostCommand::Attach {
+            cols: 81,
+            rows: 24,
+            deadline: Instant::now() + Duration::from_secs(5),
+            reply,
+        }))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match attached.try_recv() {
+            Ok(frame) => {
+                assert_eq!(frame.unwrap().cols, 81);
+                break;
+            }
+            Err(TryRecvError::Empty) if Instant::now() < deadline => thread::yield_now(),
+            other => {
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", &host.child_pid().unwrap().to_string()])
+                    .status();
+                panic!("owner did not process the first write: {other:?}");
+            }
+        }
+    }
+
+    assert!(matches!(
+        host.write(vec![b'y'; PTY_WRITE_QUEUE_BYTES / 2]),
+        Err(HostError::QueueFull { .. })
+    ));
+    host.kill().unwrap();
+    host.join().unwrap();
+}
+
+#[test]
+fn bounded_event_queue_recovers_with_contiguous_full_frame() {
+    let (mut owner, _sender, events) = owner_fixture_with_event_capacity("exec /bin/cat", 2);
+    owner.sequence = 40;
+    owner.engine.feed(b"first");
+    owner.dirty = true;
+    owner.last_frame_at = Instant::now()
+        .checked_sub(FRAME_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    assert!(owner.deliver_frame_if_ready());
+    owner
+        .try_send_event(HostEvent::Title("occupied".to_owned()))
+        .unwrap();
+
+    owner.engine.feed(b" second");
+    owner.dirty = true;
+    owner.last_frame_at = Instant::now()
+        .checked_sub(FRAME_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    assert!(owner.deliver_frame_if_ready());
+    assert!(owner.dirty && owner.force_full);
+
+    let HostEvent::Frame(first) = events.try_recv().unwrap() else {
+        panic!("first queued event was not a frame")
+    };
+    assert_eq!(
+        events.try_recv().unwrap(),
+        HostEvent::Title("occupied".to_owned())
+    );
+    assert!(owner.deliver_frame_if_ready());
+    let HostEvent::Frame(recovery) = events.try_recv().unwrap() else {
+        panic!("recovery event was not a frame")
+    };
+    assert!(recovery.full);
+    assert_eq!(recovery.seq, first.seq + 1);
+    owner.pty.kill().unwrap();
+}
+
+#[test]
+fn pending_side_effects_coalesce_by_kind() {
+    let (mut owner, _sender, _events) = owner_fixture_with_event_capacity("exec /bin/cat", 2);
+    owner.queue_pending_event(HostEvent::Title("old title".to_owned()));
+    owner.queue_pending_event(HostEvent::Cwd("/old".to_owned()));
+    owner.queue_pending_event(HostEvent::Bell);
+    owner.queue_pending_event(HostEvent::Title("new title".to_owned()));
+    owner.queue_pending_event(HostEvent::Cwd("/new".to_owned()));
+    owner.queue_pending_event(HostEvent::Bell);
+
+    assert_eq!(
+        owner.pending_events,
+        VecDeque::from([
+            HostEvent::Title("new title".to_owned()),
+            HostEvent::Cwd("/new".to_owned()),
+            HostEvent::Bell,
+        ])
+    );
+    owner.pty.kill().unwrap();
+}
+
+#[test]
+fn blocked_write_does_not_block_owner() {
+    let host = TerminalHost::spawn(TerminalHostOptions {
+        terminal: TerminalId(29),
+        pty: PtyOptions::command(
+            "/bin/sh",
+            ["-c", "trap '' HUP; sleep 60"],
+            PathBuf::from("/tmp"),
+            80,
+            24,
+        ),
+        scrollback_bytes: 1024,
+        initial_command: None,
+        starting_sequence: 1,
+    })
+    .unwrap();
+    host.write(vec![b'x'; 512 * 1024]).unwrap();
+    let (reply, attached) = async_channel::bounded(1);
+    host.commands
+        .send(OwnerEvent::Command(HostCommand::Attach {
+            cols: 81,
+            rows: 24,
+            deadline: Instant::now() + Duration::from_secs(5),
+            reply,
+        }))
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let frame = loop {
+        match attached.try_recv() {
+            Ok(frame) => break frame.unwrap(),
+            Err(TryRecvError::Empty) if Instant::now() < deadline => {
+                thread::yield_now();
+            }
+            other => {
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", &host.child_pid().unwrap().to_string()])
+                    .status();
+                panic!("owner did not process attach while PTY write was blocked: {other:?}");
+            }
+        }
+    };
+    assert_eq!(frame.cols, 81);
+    host.kill().unwrap();
+    host.join().unwrap();
+}
+
+#[test]
+fn snapshot_failure_forces_recovery() {
+    let (mut owner, _sender, events) = owner_fixture("exec /bin/cat");
+    owner.sequence = 7;
+    owner.engine.feed(b"recover me");
+    owner.engine.fail_next_snapshot();
+    owner.dirty = true;
+    owner.last_frame_at = Instant::now()
+        .checked_sub(FRAME_INTERVAL)
+        .unwrap_or_else(Instant::now);
+
+    assert!(owner.deliver_frame_if_ready());
+    assert!(owner.dirty && owner.force_full);
+    assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+
+    owner.last_frame_at = Instant::now()
+        .checked_sub(FRAME_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    assert!(owner.deliver_frame_if_ready());
+    let HostEvent::Frame(frame) = events.try_recv().unwrap() else {
+        panic!("recovery did not emit a frame")
+    };
+    assert!(frame.full);
+    assert_eq!(frame.seq, 7);
+    assert!(
+        frame.rows_changed[0]
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .contains("recover")
+    );
+    assert!(!owner.dirty && !owner.force_full);
+    owner.pty.kill().unwrap();
+}
 
 #[test]
 fn large_paste_into_echoing_cat_does_not_block_frames_or_commands() {
@@ -42,6 +308,7 @@ fn large_paste_into_echoing_cat_does_not_block_frames_or_commands() {
         .send(OwnerEvent::Command(HostCommand::Attach {
             cols: 81,
             rows: 24,
+            deadline: Instant::now() + Duration::from_secs(15),
             reply,
         }))
         .unwrap();
@@ -533,6 +800,35 @@ fn owner_fixture(
     (owner, sender, receiver)
 }
 
+fn owner_fixture_with_event_capacity(
+    script: &str,
+    event_capacity: usize,
+) -> (
+    TerminalOwner,
+    mpsc::Sender<OwnerEvent>,
+    async_channel::Receiver<HostEvent>,
+) {
+    let (sender, inbox) = mpsc::channel();
+    let wakeup = PtyWakeup::new(sender.clone());
+    let notify = Arc::clone(&wakeup);
+    let pty = Pty::spawn_notifying(
+        PtyOptions::command("/bin/sh", ["-c", script], "/tmp", 40, 10),
+        Arc::new(move || notify.notify()),
+    )
+    .unwrap();
+    let (events, receiver) = async_channel::bounded(event_capacity);
+    let owner = TerminalOwner::new(
+        TerminalId(26),
+        pty,
+        GhosttyEngine::new(40, 10, 1024 * 1024).unwrap(),
+        inbox,
+        events,
+        test_activity(),
+        wakeup,
+    );
+    (owner, sender, receiver)
+}
+
 fn await_event(
     events: &async_channel::Receiver<HostEvent>,
     predicate: impl Fn(&HostEvent) -> bool,
@@ -602,6 +898,7 @@ fn attach_snapshots_once_and_delivers_both_sequences() {
         .send(OwnerEvent::Command(HostCommand::Attach {
             cols: 41,
             rows: 10,
+            deadline: Instant::now() + Duration::from_secs(5),
             reply,
         }))
         .unwrap();
@@ -621,6 +918,33 @@ fn attach_snapshots_once_and_delivers_both_sequences() {
         !std::iter::from_fn(|| events.try_recv().ok())
             .any(|event| matches!(event, HostEvent::Frame(_)))
     );
+}
+
+#[test]
+fn expired_attach_is_discarded_before_resize_or_snapshot() {
+    let (mut owner, sender, events) = owner_fixture("exec /bin/cat");
+    let (reply, response) = async_channel::bounded(1);
+    sender
+        .send(OwnerEvent::Command(HostCommand::Attach {
+            cols: 80,
+            rows: 24,
+            deadline: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
+            reply,
+        }))
+        .unwrap();
+
+    owner.drain_commands(None);
+
+    assert_eq!(owner.engine.rows(), 10);
+    assert_eq!(owner.frames_taken, 0);
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Err("attachment deadline elapsed".to_owned())
+    );
+    assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)));
+    owner.pty.kill().unwrap();
 }
 
 #[test]
@@ -709,7 +1033,11 @@ fn flood_frames_reconstruct_the_complete_terminal() {
             }
             other => {
                 host.kill().unwrap();
-                panic!("flood did not complete: {other:?}");
+                let last_line: String = mirror[22].iter().map(|cell| cell.text.as_str()).collect();
+                panic!(
+                    "flood did not complete: {other:?}; bytes={}, frames={frames}, last={last_line:?}",
+                    host.activity().output_bytes_total
+                );
             }
         }
     };

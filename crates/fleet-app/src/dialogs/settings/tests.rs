@@ -1,6 +1,34 @@
 use fleet_core::config::default_config;
+use gpui::AppContext;
+use std::{cell::RefCell, rc::Rc};
 
 use super::*;
+
+struct FakeSettingsRequests {
+    requests: Rc<RefCell<Vec<RequestBody>>>,
+    config: Config,
+}
+
+impl super::persistence::SettingsRequests for FakeSettingsRequests {
+    fn request(&self, body: RequestBody) -> super::persistence::SettingsReply {
+        self.requests.borrow_mut().push(body.clone());
+        let result = match body {
+            RequestBody::MatchKeepAliveRules => Err(fleet_proto::error::ProtoError {
+                kind: fleet_proto::error::ErrorKind::Unknown,
+                message: "diagnostics refused".to_owned(),
+            }),
+            RequestBody::GetConfig | RequestBody::SetConfig { .. } => {
+                Ok(ResponseBody::Config(self.config.clone()))
+            }
+            other => panic!("unexpected settings request: {other:?}"),
+        };
+        let (sender, receiver) = async_channel::bounded(1);
+        sender
+            .try_send(result)
+            .unwrap_or_else(|error| panic!("send settings response: {error}"));
+        receiver
+    }
+}
 
 fn draft() -> SettingsState {
     let config = default_config("/tmp/fleet");
@@ -60,15 +88,175 @@ fn cycling_never_wraps_past_either_end() {
 }
 
 #[test]
-fn numbers_clamp_to_their_minimum() {
+fn invalid_numbers_do_not_replace_the_last_valid_value() {
     let mut state = draft();
     let config = state.config.as_mut().unwrap_or_else(|| panic!("no config"));
-    commit_value(config, &RowId::StatusRefreshMs, "10");
-    assert_eq!(config.ui.status_refresh_ms, 500);
-    commit_value(config, &RowId::StatusRefreshMs, "4000");
+    assert!(!commit_value(config, &RowId::StatusRefreshMs, "10"));
+    assert_ne!(config.ui.status_refresh_ms, 10);
+    assert!(commit_value(config, &RowId::StatusRefreshMs, "4000"));
     assert_eq!(config.ui.status_refresh_ms, 4_000);
-    commit_value(config, &RowId::GraceMs, "not a number");
-    assert_eq!(config.sleep.grace_ms, 0);
+    let grace = config.sleep.grace_ms;
+    assert!(!commit_value(config, &RowId::GraceMs, "not a number"));
+    assert_eq!(config.sleep.grace_ms, grace);
+}
+
+#[test]
+fn late_or_duplicate_save_cannot_close_new_opening() {
+    let mut opening = draft();
+    opening.seq = 7;
+    assert_eq!(opening.begin_save(), Some(7));
+    assert_eq!(opening.begin_save(), None, "a second save is single-flight");
+    assert_eq!(opening.begin_doctor(), Some(7));
+    assert_eq!(
+        opening.begin_doctor(),
+        None,
+        "doctor is independently single-flight"
+    );
+
+    let mut newer = SettingsState { seq: 8, ..draft() };
+    assert!(!newer.finish_save(7));
+    assert!(!newer.finish_doctor(7));
+}
+
+#[test]
+fn save_patch_excludes_unchanged_concurrent_fields() {
+    let original = default_config("/tmp/fleet");
+    let mut edited = original.clone();
+    edited.jobs.warn_before_quit = !original.jobs.warn_before_quit;
+    let patch = super::persistence::changed_config_patch(&original, &edited)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        patch,
+        serde_json::json!({
+            "jobs": { "warnBeforeQuit": edited.jobs.warn_before_quit }
+        })
+    );
+}
+
+#[gpui::test]
+fn config_and_diagnostics_failures_are_retryable(cx: &mut gpui::TestAppContext) {
+    let mut failed = draft();
+    failed.config_error = Some("config refused".to_owned());
+    failed.matches_error = Some("diagnostics refused".to_owned());
+    assert!(failed.load_error().is_some());
+    assert_eq!(failed.take_failed_loads(), (true, true));
+    assert!(failed.config_error.is_none());
+    assert!(failed.matches_error.is_none());
+    failed.config_loading = true;
+    failed.matches_loading = true;
+    assert_eq!(failed.take_failed_loads(), (false, false));
+
+    let config = default_config("/tmp/fleet");
+    let state = cx.new(|_| {
+        let mut state = AppState::new("/tmp/fleet", std::time::Instant::now());
+        state.overlay = Some(crate::state::Overlay::Dialog(
+            super::super::Dialogs::Settings,
+        ));
+        state
+    });
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.settings = draft();
+            host.settings.matches_error = Some("diagnostics refused".to_owned());
+            let settings = host
+                .settings
+                .config
+                .as_mut()
+                .unwrap_or_else(|| panic!("loaded settings"));
+            settings.jobs.warn_before_quit = !settings.jobs.warn_before_quit;
+        });
+    });
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let fake = FakeSettingsRequests {
+        requests: requests.clone(),
+        config,
+    };
+    cx.update(|cx| super::persistence::save_with_requests(&state, &fake, cx));
+    cx.run_until_parked();
+
+    let requests = requests.borrow();
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(request, RequestBody::MatchKeepAliveRules))
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(request, RequestBody::SetConfig { .. })),
+        "a diagnostics retry must not consume the save action"
+    );
+    cx.update(|cx| {
+        assert!(state.read(cx).overlay.is_none());
+        with_host(&state, cx, |host| {
+            assert_eq!(
+                host.settings.matches_error.as_deref(),
+                Some("diagnostics refused")
+            );
+        });
+    });
+}
+
+#[test]
+fn numeric_edit_preserves_raw_buffer_and_caret() {
+    let mut config = default_config("/tmp/fleet");
+    let mut input = TextFieldState::from_text("0007");
+    assert!(input.move_left());
+    let caret = input.caret_chars();
+    assert!(commit_value(&mut config, &RowId::GraceMs, input.text()));
+    assert_eq!(input.text(), "0007");
+    assert_eq!(input.caret_chars(), caret);
+    assert_eq!(config.sleep.grace_ms, 7);
+
+    input.clear();
+    assert!(!commit_value(&mut config, &RowId::GraceMs, input.text()));
+    assert_eq!(input.text(), "");
+    assert_eq!(config.sleep.grace_ms, 7);
+}
+
+#[test]
+fn text_row_visual_focus_matches_key_ownership() {
+    let editing = TextFieldState::from_text("claude");
+    assert!(!super::view::input_is_focused(true, None));
+    assert!(!super::view::input_is_focused(false, Some(&editing)));
+    assert!(super::view::input_is_focused(true, Some(&editing)));
+}
+
+#[test]
+fn about_reports_app_version_and_live_link() {
+    let mut app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    app.snapshot = Some(fleet_proto::snapshot::Snapshot {
+        generated_at: String::new(),
+        contexts: Vec::new(),
+        repos: Vec::new(),
+        clones: Vec::new(),
+        worktrees: Vec::new(),
+        active_context: None,
+        sessions: Vec::new(),
+        statuses: Vec::new(),
+        pools: Vec::new(),
+        hosts: Vec::new(),
+        jobs: Vec::new(),
+        daemon: fleet_proto::snapshot::DaemonInfo {
+            version: "99.0.0-daemon".to_owned(),
+            pid: 42,
+            started_at: "2026-09-04T09:00:00Z".to_owned(),
+            home: "/tmp/fleet".to_owned(),
+        },
+    });
+    let rows = super::schema::about_rows(&app);
+    assert!(matches!(
+        &rows[0].kind,
+        RowKind::Fact(version)
+            if version == crate::presentation::bare_version(env!("CARGO_PKG_VERSION"))
+    ));
+    assert!(matches!(&rows[1].kind, RowKind::Fact(status) if status == "not connected"));
+
+    app.daemon = crate::state::DaemonLink::Connected;
+    let rows = super::schema::about_rows(&app);
+    assert!(
+        matches!(&rows[1].kind, RowKind::Fact(status) if status.starts_with("running · pid 42"))
+    );
 }
 
 #[test]

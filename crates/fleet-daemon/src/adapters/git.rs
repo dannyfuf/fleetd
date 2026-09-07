@@ -18,6 +18,7 @@ pub trait Git: Send + Sync {
         url: &str,
         staging: &Path,
         log: &Path,
+        pid_file: &Path,
     ) -> DaemonResult<DetachedProcess>;
     /// Fetches `origin`, optionally pruning removed refs.
     async fn fetch(&self, cwd: &Path, prune: bool) -> DaemonResult<()>;
@@ -123,18 +124,43 @@ impl<S: Shell + ?Sized> Git for ShellGit<S> {
         url: &str,
         staging: &Path,
         log: &Path,
+        pid_file: &Path,
     ) -> DaemonResult<DetachedProcess> {
-        self.shell
+        let pid_file_text = pid_file.to_string_lossy().into_owned();
+        let process = self
+            .shell
             .run_detached(
-                ShellCommand::new("git").args([
-                    "clone",
-                    "--progress",
-                    url,
-                    &staging.to_string_lossy(),
+                ShellCommand::new("sh").args([
+                    "-c".to_owned(),
+                    concat!(
+                        "set -eu\n",
+                        "pid_file=$1\n",
+                        "temporary=${pid_file}.tmp\n",
+                        "umask 077\n",
+                        "printf '%s\\n' \"$$\" > \"$temporary\"\n",
+                        "mv \"$temporary\" \"$pid_file\"\n",
+                        "exec git clone --progress -- \"$2\" \"$3\"",
+                    )
+                    .to_owned(),
+                    "fleet-clone".to_owned(),
+                    pid_file_text,
+                    url.to_owned(),
+                    staging.to_string_lossy().into_owned(),
                 ]),
                 log,
             )
-            .await
+            .await?;
+        if let Some(parent) = pid_file.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| DaemonError::fs(parent, error))?;
+        }
+        if !pid_file.exists() {
+            tokio::fs::write(pid_file, format!("{}\n", process.pid))
+                .await
+                .map_err(|error| DaemonError::fs(pid_file, error))?;
+        }
+        Ok(process)
     }
 
     async fn fetch(&self, cwd: &Path, prune: bool) -> DaemonResult<()> {

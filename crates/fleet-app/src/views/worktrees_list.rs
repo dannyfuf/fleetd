@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use fleet_core::{
     ids::{RepoId, WorktreeId},
     model::Worktree,
-    sessions::{AgentActivity, SessionState},
 };
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{
@@ -16,10 +15,11 @@ use fleet_ui_kit::{
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
 use crate::{
-    presentation::{
-        KeepAliveStyle, age_secs, contains_folded, inspection_badge, keep_alive_icon, row_glyph,
+    presentation::{KeepAliveStyle, age_secs, contains_folded, inspection_badge, keep_alive_icon},
+    views::{
+        detail::{Inspected, resolved_worktree_status},
+        first_run::EmptySurface,
     },
-    views::{detail::Inspected, first_run::EmptySurface},
 };
 
 /// Character budget of the `owner/name` column (§2.9 column 3).
@@ -88,14 +88,27 @@ fn job_phase(job: &JobRecord) -> SharedString {
 }
 
 pub(crate) fn owns_row(job: &JobRecord) -> bool {
-    matches!(job.status, JobStatus::Running | JobStatus::Queued)
-        && matches!(
-            job.kind,
-            JobKind::CreateWorktree
-                | JobKind::DeleteWorktree
-                | JobKind::PostCreateHooks
-                | JobKind::Prune
-        )
+    matches!(
+        job.status,
+        JobStatus::Running | JobStatus::Queued | JobStatus::Cancelling
+    ) && matches!(
+        job.kind,
+        JobKind::CreateWorktree
+            | JobKind::DeleteWorktree
+            | JobKind::PostCreateHooks
+            | JobKind::Prune
+    )
+}
+
+pub(crate) fn job_targets_worktree(job: &JobRecord, worktree: &WorktreeId) -> bool {
+    job.target.parse::<WorktreeId>().ok().as_ref() == Some(worktree)
+        || job
+            .target
+            .rsplit_once(':')
+            .filter(|(_, attempt)| !attempt.is_empty())
+            .and_then(|(target, _)| target.parse::<WorktreeId>().ok())
+            .as_ref()
+            == Some(worktree)
 }
 
 /// Everything the model needs from the snapshot to build the rows.
@@ -127,14 +140,11 @@ pub fn build_rows(
                 .jobs_for_target(worktree.id.as_str())
                 .iter()
                 .copied()
-                .find(|job| owns_row(job));
+                .find(|job| owns_row(job) && job_targets_worktree(job, &worktree.id));
             let slept = index
                 .sessions_for_worktree(&worktree.id)
                 .iter()
                 .any(|session| session.slept_at.is_some());
-            // §3.3 *Loading (cold)*: until the daemon reports a status the glyph is
-            // `circle-help`, never the `none` dot (§1.3).
-            let session = status.map_or(SessionState::Unknown, |status| status.session);
             let inspected = inputs.inspections.get(&worktree.id);
             let inspection = inspected.and_then(|slot| slot.data.as_ref());
             let inspected_age =
@@ -148,10 +158,9 @@ pub fn build_rows(
             WorktreeRow {
                 id: worktree.id.clone(),
                 repo: worktree.repo_id.clone(),
-                glyph: row_glyph(
-                    session,
+                glyph: resolved_worktree_status(
+                    status,
                     slept,
-                    status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                     worktree.degraded.is_some(),
                     unreachable,
                     job.is_some(),
@@ -295,9 +304,7 @@ pub fn render(
     if let Some(age) = stale {
         header = header.stale(age);
     }
-    if !rows.as_ref().is_empty() {
-        let first = cursor.saturating_sub(cursor % visible_rows.max(1)) + 1;
-        let last = (first + visible_rows.max(1) - 1).min(rows.as_ref().len());
+    if let Some((first, last)) = header_range(scroll, rows.as_ref().len(), visible_rows) {
         header = header.range(first, last);
     }
 
@@ -337,6 +344,32 @@ pub fn render(
         .header(header)
         .body(list)
         .into_any_element()
+}
+
+fn header_range(
+    scroll: &UniformListScrollHandle,
+    total: usize,
+    visible_rows: usize,
+) -> Option<(usize, usize)> {
+    let state = scroll.0.borrow();
+    let item_height = state.last_item_size?.item.height;
+    if item_height <= gpui::px(0.0) {
+        return None;
+    }
+    let offset_y = state.base_handle.offset().y;
+    let top = (-f32::from(offset_y) / f32::from(item_height))
+        .floor()
+        .max(0.0) as usize;
+    range_from_top(top, total, visible_rows)
+}
+
+fn range_from_top(top: usize, total: usize, visible_rows: usize) -> Option<(usize, usize)> {
+    if total == 0 {
+        return None;
+    }
+    let first = top.min(total.saturating_sub(1)) + 1;
+    let last = (first + visible_rows.max(1) - 1).min(total);
+    Some((first, last))
 }
 
 /// Resolve columns with the repository cell forced on in All scope.
@@ -497,7 +530,7 @@ mod tests {
         github::{InspectionPrState, InspectionPullRequest},
         ids::WorktreeId,
         model::Degraded,
-        sessions::{SessionState, WorktreeStatus},
+        sessions::{AgentActivity, SessionState, WorktreeStatus},
     };
 
     use super::*;
@@ -704,6 +737,31 @@ mod tests {
     }
 
     #[test]
+    fn uuid_target_and_cancelling_own_row() {
+        let worktree = worktree("a", None, "2026-09-01T10:00:00Z");
+        let job = JobRecord {
+            id: "job-cancelling"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+            kind: JobKind::DeleteWorktree,
+            target: format!("{}:550e8400-e29b-41d4-a716-446655440000", worktree.id),
+            title: "delete".to_owned(),
+            status: JobStatus::Cancelling,
+            progress: None,
+            log_path: "/tmp/j.log".to_owned(),
+            started_at: "2026-09-04T11:59:00Z".to_owned(),
+            finished_at: None,
+            cancellable: false,
+            retryable: false,
+        };
+        assert!(owns_row(&job));
+        assert!(job_targets_worktree(&job, &worktree.id));
+        let other =
+            WorktreeId::try_from("buk/payroll#other").unwrap_or_else(|error| panic!("{error}"));
+        assert!(!job_targets_worktree(&job, &other));
+    }
+
+    #[test]
     fn a_degraded_worktree_shows_the_hook_failure() {
         let mut worktree = worktree("a", None, "2026-09-01T10:00:00Z");
         worktree.degraded = Some(Degraded {
@@ -787,5 +845,38 @@ mod tests {
             .map(|column| column.key.to_string())
             .collect();
         assert_eq!(keys, vec!["glyph", "branch", "pr", "age"]);
+    }
+
+    #[test]
+    fn range_from_top_maps_the_visible_window() {
+        assert_eq!(range_from_top(0, 100, 10), Some((1, 10)));
+        assert_eq!(range_from_top(7, 100, 10), Some((8, 17)));
+        assert_eq!(range_from_top(97, 100, 10), Some((98, 100)));
+        assert_eq!(range_from_top(0, 0, 10), None);
+    }
+
+    #[test]
+    fn header_range_tracks_uniform_list_scroll_state() {
+        let scroll = UniformListScrollHandle::new();
+        assert_eq!(header_range(&scroll, 100, 10), None);
+
+        {
+            let mut state = scroll.0.borrow_mut();
+            state.last_item_size = Some(gpui::ItemSize::default());
+        }
+        assert_eq!(header_range(&scroll, 100, 10), None);
+
+        {
+            let mut state = scroll.0.borrow_mut();
+            state.last_item_size = Some(gpui::ItemSize {
+                item: gpui::size(gpui::px(100.0), gpui::px(20.0)),
+                contents: gpui::size(gpui::px(100.0), gpui::px(20.0)),
+            });
+            state
+                .base_handle
+                .set_offset(gpui::point(gpui::px(0.0), gpui::px(-140.0)));
+        }
+
+        assert_eq!(header_range(&scroll, 100, 10), Some((8, 17)));
     }
 }

@@ -20,6 +20,23 @@ pub const DEBOUNCE: Duration = Duration::from_millis(150);
 /// How many result rows the list shows (§3.8.2: "8 is swarm's cap").
 pub const RESULT_ROWS: usize = 8;
 
+type Reply = async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>>;
+
+trait CloneTransport: Clone + 'static {
+    fn send(&self, body: RequestBody);
+    fn request(&self, body: RequestBody) -> Reply;
+}
+
+impl CloneTransport for Bridge {
+    fn send(&self, body: RequestBody) {
+        Bridge::send(self, body);
+    }
+
+    fn request(&self, body: RequestBody) -> Reply {
+        Bridge::request(self, body)
+    }
+}
+
 /// The Clone dialog's draft.
 #[derive(Debug)]
 pub struct CloneState {
@@ -44,6 +61,8 @@ pub struct CloneState {
     /// `github.cloneProtocol`: the footer names it and `Enter` clones with it.
     pub(crate) protocol: CloneProtocol,
     /// Bumps on every keystroke; a late answer to a superseded query is dropped.
+    pub(crate) search_seq: u64,
+    /// Bumps on every opening; config replies never compete with query generations.
     pub(crate) seq: u64,
 }
 
@@ -61,6 +80,7 @@ impl Default for CloneState {
             cached_at: None,
             // Replaced by the effective `github.cloneProtocol` as soon as the daemon answers.
             protocol: CloneProtocol::Ssh,
+            search_seq: 0,
             seq: 0,
         }
     }
@@ -92,6 +112,16 @@ impl CloneState {
     #[must_use]
     pub fn selected(&self) -> Option<RemoteRepo> {
         self.rows().get(self.cursor).cloned()
+    }
+
+    fn begin_search(&mut self) -> u64 {
+        self.search_seq = self.search_seq.wrapping_add(1);
+        self.searching = !self.query.is_empty();
+        self.error = None;
+        self.cached_at = None;
+        self.results.clear();
+        self.cursor = 0;
+        self.search_seq
     }
 
     /// The word the footer names the protocol with.
@@ -222,12 +252,12 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 }
 
 /// Issues the debounced search for the current query.
-fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let (seq, query, owners) = with_host(state, cx, |host| {
-        host.clone.seq = host.clone.seq.wrapping_add(1);
-        host.clone.searching = !host.clone.query.is_empty();
+fn schedule_search<T: CloneTransport>(state: &Entity<AppState>, transport: &T, cx: &mut App) {
+    let (opening_seq, search_seq, query, owners) = with_host(state, cx, |host| {
+        let search_seq = host.clone.begin_search();
         (
             host.clone.seq,
+            search_seq,
             host.clone.query.text().to_owned(),
             host.clone.owners.clone(),
         )
@@ -235,7 +265,7 @@ fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     if query.trim().is_empty() || owners.is_empty() {
         with_host(state, cx, |host| {
             host.tasks.remove("clone-search");
-            if host.clone.seq == seq {
+            if host.clone.seq == opening_seq && host.clone.search_seq == search_seq {
                 host.clone.results.clear();
                 host.clone.searching = false;
             }
@@ -245,13 +275,15 @@ fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     }
     notify(state, cx);
     let weak_state = state.downgrade();
-    let bridge = bridge.clone();
+    let transport = transport.clone();
     let task = cx.spawn(async move |cx| {
         cx.background_executor().timer(DEBOUNCE).await;
         if cx.update(|cx| {
-            weak_state
-                .upgrade()
-                .is_none_or(|state| with_host(&state, cx, |host| host.clone.seq != seq))
+            weak_state.upgrade().is_none_or(|state| {
+                with_host(&state, cx, |host| {
+                    host.clone.seq != opening_seq || host.clone.search_seq != search_seq
+                })
+            })
         }) {
             return;
         }
@@ -259,7 +291,7 @@ fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
             results,
             error,
             cached_at,
-        }) = search_owners(&owners, &query, |request| bridge.request(request)).await
+        }) = search_owners(&owners, &query, |request| transport.request(request)).await
         else {
             return;
         };
@@ -268,7 +300,7 @@ fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 return;
             };
             let live = with_host(&state, cx, |host| {
-                if host.clone.seq != seq {
+                if host.clone.seq != opening_seq || host.clone.search_seq != search_seq {
                     return false;
                 }
                 host.clone.searching = false;
@@ -345,7 +377,7 @@ fn no_results(draft: &CloneState) -> AnyElement {
             .flex()
             .flex_col()
             .child(Text::ui(message).tone(Tone::Danger).ellipsize())
-            .child(KeyHintRow::new().key("r", "retry"))
+            .child(KeyHintRow::new().key("enter", "retry"))
             .into_any_element();
     }
     if draft.query.is_empty() {
@@ -495,14 +527,22 @@ fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
 /// `Enter`: hand the clone to the daemon and close; the rail shows a `⟳` row from the moment
 /// the job is persisted (§3.8.2).
 fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let Some((repo, context)) = with_host(state, cx, |host| {
-        Some((host.clone.selected()?, host.clone.context.clone()?))
-    }) else {
+    submit_with_transport(state, bridge, cx);
+}
+
+fn submit_with_transport<T: CloneTransport>(state: &Entity<AppState>, transport: &T, cx: &mut App) {
+    let selection = with_host(state, cx, |host| {
+        host.clone.selected().zip(host.clone.context.clone())
+    });
+    let Some((repo, context)) = selection else {
+        if with_host(state, cx, |host| host.clone.error.is_some()) {
+            schedule_search(state, transport, cx);
+        }
         return;
     };
     let protocol = with_host(state, cx, |host| host.clone.protocol);
     let url = clone_url(&repo, protocol);
-    bridge.send(RequestBody::CloneRepo {
+    transport.send(RequestBody::CloneRepo {
         owner: repo.owner,
         name: repo.name,
         url,
@@ -517,6 +557,46 @@ fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct FakeTransport {
+        requests: Rc<RefCell<Vec<RequestBody>>>,
+    }
+
+    impl CloneTransport for FakeTransport {
+        fn send(&self, body: RequestBody) {
+            self.requests.borrow_mut().push(body);
+        }
+
+        fn request(&self, body: RequestBody) -> Reply {
+            let (_sender, receiver) = async_channel::bounded(1);
+            self.requests.borrow_mut().push(body);
+            receiver
+        }
+    }
+
+    struct RetryView {
+        state: Entity<AppState>,
+        transport: FakeTransport,
+        focus: FocusHandle,
+    }
+
+    impl gpui::Render for RetryView {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let state = self.state.clone();
+            let transport = self.transport.clone();
+            root(&self.focus).on_action(move |_: &dialog::Confirm, _window, cx| {
+                submit_with_transport(&state, &transport, cx);
+            })
+        }
+    }
 
     #[test]
     fn the_clone_url_follows_the_configured_protocol() {
@@ -554,8 +634,6 @@ mod tests {
         draft.protocol = CloneProtocol::Https;
         assert_eq!(draft.protocol_word(), "https");
     }
-    use super::*;
-
     fn repo(full_name: &str) -> RemoteRepo {
         let (owner, name) = full_name.split_once('/').unwrap_or(("acme", "repo"));
         RemoteRepo {
@@ -617,9 +695,86 @@ mod tests {
             Some("acme/pay0".to_owned())
         );
     }
+
+    #[test]
+    fn typing_does_not_discard_config_protocol() {
+        let mut state = CloneState {
+            seq: 9,
+            protocol: CloneProtocol::Https,
+            query: TextFieldState::from_text("pay"),
+            ..CloneState::default()
+        };
+        state.begin_search();
+        assert_eq!(state.seq, 9, "query generations must not supersede config");
+        assert_eq!(state.protocol, CloneProtocol::Https);
+    }
+
+    #[test]
+    fn pending_query_cannot_select_stale_result() {
+        let mut state = CloneState {
+            query: TextFieldState::from_text("new query"),
+            results: vec![repo("acme/old-result")],
+            ..CloneState::default()
+        };
+        state.begin_search();
+        assert_eq!(state.selected(), None);
+        assert!(state.searching);
+    }
+
+    #[test]
+    fn retry_reissues_query_without_editing_text() {
+        let mut state = CloneState {
+            query: TextFieldState::from_text("payroll"),
+            error: Some("offline".to_owned()),
+            ..CloneState::default()
+        };
+        let previous = state.search_seq;
+        state.begin_search();
+        assert_eq!(state.query.text(), "payroll");
+        assert_eq!(state.search_seq, previous + 1);
+        assert_eq!(state.error, None);
+    }
+
+    #[gpui::test]
+    fn confirm_retries_errored_query_without_editing_text(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new("/tmp/fleet", std::time::Instant::now()));
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.clone.query = TextFieldState::from_text("payroll");
+                host.clone.owners = vec!["buk".to_owned()];
+                host.clone.error = Some("offline".to_owned());
+            })
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, cx| RetryView {
+            state: state.clone(),
+            transport: transport.clone(),
+            focus: cx.focus_handle(),
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut visual, |view, window, cx| {
+                window.focus(&view.focus, cx);
+                window.dispatch_action(Box::new(dialog::Confirm), cx);
+            })
+            .unwrap();
+        cx.executor().advance_clock(DEBOUNCE);
+        cx.run_until_parked();
+        let requests = transport.requests.borrow();
+        assert!(matches!(
+            requests.as_slice(),
+            [RequestBody::SearchRemoteRepos { owner, query }]
+                if owner == "buk" && query == "payroll"
+        ));
+        visual.update(|_, cx| {
+            with_host(&state, cx, |host| {
+                assert_eq!(host.clone.query.text(), "payroll");
+            })
+        });
+    }
+
     #[gpui::test]
     async fn owner_searches_are_bounded_and_preserve_result_order(cx: &mut gpui::TestAppContext) {
-        use std::{cell::RefCell, rc::Rc};
         let pending = Rc::new(RefCell::new(Vec::new()));
         let requested = pending.clone();
         let task = cx.spawn(async move |_| {

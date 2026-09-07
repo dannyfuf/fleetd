@@ -23,6 +23,48 @@ pub struct Response {
     pub result: Result<ResponseBody, ProtoError>,
 }
 
+/// Capability name for committing only the worktree IDs reviewed by a prune dry run.
+pub const PRUNE_REVIEWED_IDS_CAPABILITY: &str = "prune.reviewed_ids";
+
+/// Additive metadata carried by the mandatory Hello response envelope.
+///
+/// Keeping this outside [`ResponseBody::Hello`] lets older IPC-v4 clients ignore it while newer
+/// clients can distinguish daemons that honor exact reviewed prune IDs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelloResponse {
+    /// The ordinary correlated Hello response.
+    #[serde(flatten)]
+    pub response: Response,
+    /// Optional behaviors implemented by this daemon build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+/// Stable identity of one running daemon process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonIdentity {
+    /// Operating-system process identifier.
+    pub pid: u32,
+    /// Per-process random identity, distinct even when the OS reuses a PID.
+    pub boot_id: String,
+}
+
+/// Additive metadata carried only by a Pong response envelope.
+///
+/// An older IPC-v4 client deserializes this as an ordinary [`Response`] and ignores `daemon`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PongResponse {
+    /// The ordinary correlated Pong response.
+    #[serde(flatten)]
+    pub response: Response,
+    /// Daemon identity when the peer supports identity-bearing pings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonIdentity>,
+}
+
 /// Result of one worktree in a multi-delete request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

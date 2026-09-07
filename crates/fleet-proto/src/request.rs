@@ -223,6 +223,9 @@ pub enum RequestBody {
         kill_sessions: bool,
         /// Optional repository filter.
         repo: Option<RepoId>,
+        /// Exact worktrees approved by the caller; absent preserves legacy repo-wide pruning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ids: Option<Vec<WorktreeId>>,
     },
     /// Hard-kill a worktree session.
     KillWorktree {
@@ -460,6 +463,8 @@ pub enum RequestBody {
     ImportFromSwarm,
     /// Run dependency and environment diagnostics.
     Doctor,
+    /// Replace quarantined state with a validated empty state, retaining the archived file.
+    ResetState,
     /// Start a Fleet self-update job.
     Update,
     /// Check daemon liveness.

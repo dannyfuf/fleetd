@@ -74,7 +74,11 @@ impl AppState {
             || !snapshot.clones.is_empty();
         let live_jobs: HashSet<_> = snapshot.jobs.iter().map(|job| &job.id).collect();
         self.seen_failed.retain(|id| live_jobs.contains(id));
-        self.sticky_error = notifications::sticky_error_for(&snapshot.jobs, &self.seen_failed);
+        notifications::refresh_job_sticky_error(
+            &mut self.sticky_error,
+            &snapshot.jobs,
+            &self.seen_failed,
+        );
         self.cursors.repos = clamp_cursor(self.cursors.repos, snapshot.repos.len() + 1);
         self.cursors.worktrees = clamp_cursor(self.cursors.worktrees, snapshot.worktrees.len());
         self.cursors.jobs = clamp_cursor(self.cursors.jobs, snapshot.jobs.len());
@@ -106,6 +110,8 @@ impl AppState {
             .map(|session| &session.id)
             .collect();
         self.watches.reconcile_sessions(&live_sessions);
+        self.session_mru
+            .retain(|session| live_sessions.contains(session));
         self.renamed_terminals
             .retain(|terminal| live_terminals.contains(terminal));
         self.terminal_mru

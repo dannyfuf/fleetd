@@ -63,7 +63,13 @@ impl Shell {
         Some(match overlay? {
             Overlay::Jobs => self.jobs.render(state, bridge, focus, window, cx),
             Overlay::Dialog(_) | Overlay::Palette => self.dialogs.clone().into_any_element(),
-            Overlay::Filter => crate::dialogs::filter::render(state, bridge, focus, window, cx),
+            Overlay::Filter => crate::dialogs::filter::render(
+                state,
+                self.hub.context(state, bridge),
+                focus,
+                window,
+                cx,
+            ),
         })
     }
 
@@ -186,7 +192,12 @@ impl Shell {
             .body_overlay(ToastStack::new(
                 state.toasts.iter().map(|live| live.toast.clone()),
             ));
-        if let Some(banner) = daemon::banner(&state.daemon, state.daemon_outdated, Instant::now()) {
+        if let Some(banner) = daemon::banner(
+            &state.daemon,
+            state.daemon_since,
+            state.daemon_outdated,
+            Instant::now(),
+        ) {
             frame = frame.banner(banner);
         }
         if let Some(agent) = agent {

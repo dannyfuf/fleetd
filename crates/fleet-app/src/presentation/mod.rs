@@ -5,6 +5,8 @@ mod damage;
 mod formatting;
 mod jobs;
 mod keys;
+mod navigation;
+mod selection;
 mod snapshot;
 mod status;
 
@@ -17,6 +19,11 @@ pub use jobs::{
     job_target, latest_unseen_failure, parse_percent, sub_line,
 };
 pub use keys::{FuzzyQuery, contains_folded, humanize, pretty_keys};
+pub use navigation::enter_session;
+pub use selection::{
+    DisplayedHub, DisplayedPr, DisplayedRepo, DisplayedRepoKind, DisplayedTarget,
+    DisplayedWorktree, filter_counts, filter_target, selected_repo_id, selected_worktree_id,
+};
 pub use snapshot::SnapshotIndex;
 pub use status::{
     KeepAliveStyle, inspection_badge, keep_alive_icon, pr_badge_state, row_glyph, session_glyph,

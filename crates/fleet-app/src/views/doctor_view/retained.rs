@@ -19,6 +19,7 @@ enum Content {
         kind: DaemonFailure,
         detail: SharedString,
         lines: Vec<SharedString>,
+        error: Option<SharedString>,
     },
 }
 
@@ -50,16 +51,27 @@ impl Content {
             message,
             log_tail,
             stale_socket,
+            protocol_mismatch,
         } = &state.daemon
         {
+            let kind = DaemonFailure::classify(*protocol_mismatch, *stale_socket);
+            let error = state
+                .sticky_error
+                .as_ref()
+                .filter(|error| error.text.starts_with("doctor could not run:"))
+                .map(|error| SharedString::from(error.text.clone()));
             if let Self::Failure {
                 message: previous,
                 stale_socket: previous_stale,
+                kind: previous_kind,
                 lines,
+                error: previous_error,
                 ..
             } = self
                 && previous.as_str() == message
                 && previous_stale == stale_socket
+                && *previous_kind == kind
+                && *previous_error == error
                 && lines.len() == log_tail.len()
                 && lines
                     .iter()
@@ -73,9 +85,8 @@ impl Content {
                 .display()
                 .to_string()
                 .into();
-            let kind = DaemonFailure::classify(message, *stale_socket);
             *self = Self::Failure {
-                message: SharedString::new(message.as_str()),
+                message: SharedString::new(message),
                 stale_socket: *stale_socket,
                 detail: failure_detail(kind, message, &socket).into(),
                 kind,
@@ -83,6 +94,7 @@ impl Content {
                     .iter()
                     .map(|line| SharedString::new(line.as_str()))
                     .collect(),
+                error,
             };
             return true;
         }
@@ -131,8 +143,9 @@ impl Render for DiagnosticView {
                 kind,
                 detail,
                 lines,
+                error,
                 ..
-            } => failure_view(*kind, detail, lines, &self.scroll, cx),
+            } => failure_view(*kind, detail, lines, error.as_ref(), &self.scroll, cx),
         }
     }
 }
@@ -167,6 +180,7 @@ mod tests {
             message: "could not start".into(),
             log_tail: vec!["exited".into()],
             stale_socket: false,
+            protocol_mismatch: false,
         };
         let mut content = Content::default();
         assert!(content.update(&state));
@@ -179,10 +193,44 @@ mod tests {
             *stale_socket = true;
         }
         assert!(content.update(&state));
-        let Content::Failure { detail, lines, .. } = &content else {
+        let Content::Failure {
+            detail,
+            lines,
+            error,
+            ..
+        } = &content
+        else {
             panic!("failure content");
         };
         assert!(detail.contains("is stale"));
         assert_eq!(lines.len(), 2);
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn doctor_refusal_is_projected_without_replacing_the_failure_surface() {
+        let mut state = AppState::new("/tmp/fleet", std::time::Instant::now());
+        state.daemon = DaemonLink::Failed {
+            message: "could not start".into(),
+            log_tail: vec!["exited".into()],
+            stale_socket: false,
+            protocol_mismatch: false,
+        };
+        state.sticky_error = Some(crate::state::StickyError {
+            text: "doctor could not run: bridge unavailable".into(),
+            job: None,
+            retryable: false,
+        });
+
+        let mut content = Content::default();
+        assert!(content.update(&state));
+        let Content::Failure { error, .. } = &content else {
+            panic!("failure content");
+        };
+        assert_eq!(
+            error.as_ref().map(SharedString::as_ref),
+            Some("doctor could not run: bridge unavailable")
+        );
+        assert!(state.doctor.is_none());
     }
 }

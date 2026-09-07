@@ -99,6 +99,7 @@ impl Services {
         let prune = Prune::new(
             Arc::clone(&jobs),
             inspect.clone(),
+            sessions.clone(),
             Arc::new(worktrees.clone()),
         );
         let doctor = Doctor::new(
@@ -126,10 +127,7 @@ impl Services {
             Arc::clone(&jobs),
             Arc::clone(&adapters.git),
             Arc::clone(&adapters.shell),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .ancestors()
-                .nth(2)
-                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR"))),
+            update::runtime_checkout(),
         );
         let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
         let watches = sessions.watches();
@@ -161,10 +159,34 @@ impl Services {
             state,
             jobs,
             adapters,
-            statuses: Arc::new(RwLock::new(None)),
             inventory: Arc::new(tokio::sync::Mutex::new(snapshots::InventoryCache::default())),
             pool_refreshed_at: Arc::new(RwLock::new(BTreeMap::new())),
             events,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{adapters::clock::SystemClock, adapters::files::RealFiles};
+
+    #[test]
+    fn services_build_uses_runtime_update_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let services = Services::new(
+            home,
+            Arc::new(ConfigStore::new(home, files.clone())),
+            Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(home)),
+            Adapters::system(files),
+        );
+
+        assert_eq!(services.update.checkout(), update::runtime_checkout());
     }
 }

@@ -1,8 +1,71 @@
 use super::*;
+use crate::screens::hub::PrFreshness;
+
+fn pr_lookup_pending(requested: &[RepoId], repo: &RepoId) -> bool {
+    requested.contains(repo)
+}
+
+fn expire_pr_lookup(requested: &mut Vec<RepoId>, repo: &RepoId) {
+    requested.retain(|candidate| candidate != repo);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrLookupOutcome {
+    Succeeded { at: Instant },
+    Failed { at: Instant },
+}
+
+impl PrLookupOutcome {
+    const fn succeeded(self) -> bool {
+        matches!(self, Self::Succeeded { .. })
+    }
+}
+
+fn pr_lookup_expiry(outcome: PrLookupOutcome, freshness: PrFreshness) -> Instant {
+    let at = match outcome {
+        PrLookupOutcome::Succeeded { at } | PrLookupOutcome::Failed { at } => at,
+    };
+    at + freshness.duration()
+}
+
+fn apply_pr_lookup_result(
+    app: &mut AppState,
+    repo: &RepoId,
+    result: Result<ResponseBody, fleet_proto::error::ProtoError>,
+    at: Instant,
+) -> PrLookupOutcome {
+    let Ok(ResponseBody::PullRequests(slices)) = result else {
+        return PrLookupOutcome::Failed { at };
+    };
+    let replacement = slices
+        .into_iter()
+        .flat_map(|slice| slice.prs)
+        .map(|pr| {
+            (
+                (pr.repo_id, pr.head_ref_name),
+                (
+                    pr.number,
+                    badge_state(pr.is_draft, pr.checks, pr.review_decision),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    app.pr_badges
+        .retain(|(cached_repo, _), _| cached_repo != repo);
+    app.pr_badges.extend(replacement);
+    PrLookupOutcome::Succeeded { at }
+}
 
 impl WorkspaceScreen {
     /// Attaches, detaches and flushes so the daemon always mirrors what is on screen.
-    pub(super) fn reconcile(&self, model: &Model, bridge: &Bridge, cell: Size<Pixels>) {
+    pub(super) fn reconcile(
+        &self,
+        model: &Model,
+        bridge: &Bridge,
+        state: &Entity<AppState>,
+        cell: Size<Pixels>,
+        cx: &mut App,
+    ) {
         let mut local = self.local.borrow_mut();
         local.wheel.reconcile(model.terminal);
         // A new link means the daemon forgot every attachment, so the terminal on screen has
@@ -18,6 +81,7 @@ impl WorkspaceScreen {
             local.anchor_history_epoch = None;
             local.history.clear();
             local.row_caches.clear();
+            local.state.pending_selection_scroll = None;
             if terminal_changed {
                 local.mouse_selection = None;
             }
@@ -25,13 +89,20 @@ impl WorkspaceScreen {
             if let Some(terminal) = target {
                 local.sizes.insert(terminal, size);
             }
-            local.attach(
-                target,
-                model.link_generation,
-                model.popup_terminal,
-                size,
+            drop(local);
+            reconcile_attachment(
+                &self.local,
+                AttachmentSpec {
+                    target,
+                    generation: model.link_generation,
+                    preserve: model.popup_terminal,
+                    size,
+                },
                 bridge,
+                state,
+                cx,
             );
+            local = self.local.borrow_mut();
         }
 
         // Both views deliberately keep the shared terminal attached. While the popup is visible
@@ -96,8 +167,22 @@ impl WorkspaceScreen {
 
     /// Keeps the keyboard selection inside the viewport and retains its history.
     pub(super) fn track_selection(&self, state: &Entity<AppState>, cx: &App) {
-        if let Some(grid) = state.read(cx).active_grid() {
-            self.local.borrow_mut().track_selection(grid, true);
+        let app = state.read(cx);
+        if let Some(session) = app.active_session()
+            && let Some(terminal) = session.active_terminal
+            && let Some(grid) = app.grids.get(&terminal)
+        {
+            let mut local = self.local.borrow_mut();
+            if let Some(lines) = local
+                .state
+                .pending_selection_scroll
+                .as_mut()
+                .and_then(|pending| pending.reconcile(terminal, grid))
+            {
+                local.state.pending_selection_scroll = None;
+                local.shift_caret(lines);
+            }
+            local.track_selection(grid, true);
         }
     }
 
@@ -117,50 +202,56 @@ impl WorkspaceScreen {
         state: &Entity<AppState>,
         cx: &mut App,
     ) {
-        let (Some(repo), Some(branch)) = (model.repo.clone(), model.branch_key.clone()) else {
+        let (Some(repo), Some(_)) = (model.repo.clone(), model.branch_key.as_ref()) else {
             return;
         };
-        {
-            let local = self.local.borrow();
-            if state
-                .read(cx)
-                .pr_badges
-                .contains_key(&(repo.clone(), branch.clone()))
-                || local.state.pr_requested.contains(&repo)
-            {
-                return;
-            }
+        if pr_lookup_pending(&self.local.borrow().state.pr_requested, &repo) {
+            return;
         }
         self.local
             .borrow_mut()
             .state
             .pr_requested
             .push(repo.clone());
-        let reply = bridge.request(RequestBody::ListPullRequests {
-            repo: Some(repo.clone()),
-            context: None,
-            tab: PrTab::Mine,
-            force: false,
-        });
+        let config_reply = bridge.request(RequestBody::GetConfig);
+        let bridge = bridge.clone();
         let state = state.downgrade();
+        let local = Rc::clone(&self.local);
+        let task_repo = repo.clone();
         let task = cx.spawn(async move |cx| {
-            let Ok(Ok(ResponseBody::PullRequests(slices))) = reply.recv().await else {
-                return;
-            };
-            let _ = state.update(cx, |app, cx| {
-                for slice in slices {
-                    for pr in slice.prs {
-                        app.pr_badges.insert(
-                            (pr.repo_id, pr.head_ref_name),
-                            (
-                                pr.number,
-                                badge_state(pr.is_draft, pr.checks, pr.review_decision),
-                            ),
-                        );
-                    }
+            let freshness = match config_reply.recv().await {
+                Ok(Ok(ResponseBody::Config(config))) => {
+                    let effective = crate::bridge::EffectiveConfig::from_config(&config);
+                    crate::screens::hub::PrFreshness::from_effective(&effective)
                 }
-                cx.notify();
+                _ => crate::screens::hub::PrFreshness::default(),
+            };
+            let reply = bridge.request(RequestBody::ListPullRequests {
+                repo: Some(task_repo.clone()),
+                context: None,
+                tab: PrTab::Mine,
+                force: false,
             });
+            let result = reply.recv().await;
+            let completed_at = Instant::now();
+            let outcome = match result {
+                Ok(result) => state
+                    .update(cx, |app, cx| {
+                        let outcome = apply_pr_lookup_result(app, &task_repo, result, completed_at);
+                        if outcome.succeeded() {
+                            cx.notify();
+                        }
+                        outcome
+                    })
+                    .unwrap_or(PrLookupOutcome::Failed { at: completed_at }),
+                Err(_) => PrLookupOutcome::Failed { at: completed_at },
+            };
+            let retry_at = pr_lookup_expiry(outcome, freshness);
+            cx.background_executor()
+                .timer(retry_at.saturating_duration_since(Instant::now()))
+                .await;
+            expire_pr_lookup(&mut local.borrow_mut().state.pr_requested, &task_repo);
+            let _ = state.update(cx, |_, cx| cx.notify());
         });
         self.local.borrow_mut().state.pr_tasks.insert(repo, task);
     }
@@ -183,6 +274,7 @@ impl WorkspaceScreen {
             local.detach(bridge, preserve);
             local.pending.clear();
             local.clear_selections();
+            local.state.pending_selection_scroll = None;
             local.hint.clear();
             local.wheel.reconcile(None);
             local.state.pane_focused = false;
@@ -225,7 +317,7 @@ impl WorkspaceScreen {
         }
 
         self.local.borrow_mut().padding = Some(cx.theme().space.sm);
-        self.reconcile(&model, bridge, cell);
+        self.reconcile(&model, bridge, state, cell, cx);
         self.cache_viewport(state, cx);
         self.track_selection(state, cx);
         self.arm_prefix_hint(&model, state, cx);
@@ -268,4 +360,48 @@ pub(super) fn invalidate_history_epoch(local: &mut Local, current_epoch: Option<
         changed = true;
     }
     changed
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn failed_and_stale_pr_lookup_retries() {
+        let repo: RepoId = "owner/repo"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut config = fleet_core::config::default_config("/tmp/fleet");
+        config.github.pr_ttl_seconds = 7;
+        let effective = crate::bridge::EffectiveConfig::from_config(&config);
+        let freshness = PrFreshness::from_effective(&effective);
+        let now = Instant::now();
+        let failed = PrLookupOutcome::Failed { at: now };
+        let succeeded = PrLookupOutcome::Succeeded { at: now };
+
+        assert!(now + Duration::from_secs(6) < pr_lookup_expiry(failed, freshness));
+        assert!(now + Duration::from_secs(7) >= pr_lookup_expiry(failed, freshness));
+        assert!(now + Duration::from_secs(6) < pr_lookup_expiry(succeeded, freshness));
+        assert!(now + Duration::from_secs(7) >= pr_lookup_expiry(succeeded, freshness));
+
+        let mut app = AppState::new("/tmp/fleet", now);
+        app.pr_badges.insert(
+            (repo.clone(), "main".to_owned()),
+            (17, PrBadgeState::Approved),
+        );
+        let stale_badges = app.pr_badges.clone();
+        let outcome = apply_pr_lookup_result(
+            &mut app,
+            &repo,
+            Err(fleet_proto::error::ProtoError {
+                kind: fleet_proto::error::ErrorKind::Unknown,
+                message: "GitHub unavailable".to_owned(),
+            }),
+            now,
+        );
+
+        assert_eq!(outcome, failed);
+        assert_eq!(app.pr_badges, stale_badges);
+    }
 }

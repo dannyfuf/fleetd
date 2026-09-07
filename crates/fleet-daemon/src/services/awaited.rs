@@ -13,8 +13,8 @@ use crate::{DaemonError, DaemonResult};
 
 type Reproduce = fn(&DaemonError) -> DaemonError;
 
-/// Sender half retained by the submitted job. Cloneable so it can live in a retryable
-/// operation; only the first delivery is sent.
+/// Sender half retained by the submitted job. Retry-operation clones are deliberately
+/// disconnected so they cannot hold the initial caller open after cancellation.
 pub(crate) struct JobDelivery<T> {
     sender: Arc<Mutex<Option<oneshot::Sender<DaemonResult<T>>>>>,
     reproduce: Reproduce,
@@ -24,7 +24,7 @@ pub(crate) struct JobDelivery<T> {
 impl<T> Clone for JobDelivery<T> {
     fn clone(&self) -> Self {
         Self {
-            sender: Arc::clone(&self.sender),
+            sender: Arc::new(Mutex::new(None)),
             reproduce: self.reproduce,
             job_keeps_original: self.job_keeps_original,
         }
@@ -163,6 +163,17 @@ mod tests {
     #[tokio::test]
     async fn a_dropped_delivery_resolves_as_cancelled() {
         let (delivery, awaited) = JobDelivery::<u8>::caller_gets_copy(copy_error);
+        drop(delivery);
+        assert!(matches!(
+            awaited.wait().await.unwrap_err(),
+            DaemonError::Cancelled
+        ));
+    }
+
+    #[tokio::test]
+    async fn retry_owns_new_delivery() {
+        let (delivery, awaited) = JobDelivery::<u8>::caller_gets_copy(copy_error);
+        let _retry_delivery = delivery.clone();
         drop(delivery);
         assert!(matches!(
             awaited.wait().await.unwrap_err(),

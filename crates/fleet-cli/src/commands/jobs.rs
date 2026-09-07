@@ -1,5 +1,9 @@
 use super::{CommandOutput, FAILURE, UPDATE_RESTART, unknown, wait_event};
-use crate::human;
+use crate::{
+    args::DoctorArgs,
+    envelope::{PROTOCOL, ResetStateEnvelope, to_json},
+    human,
+};
 use fleet_client::Client;
 use fleet_core::ids::JobId;
 use fleet_proto::{
@@ -8,7 +12,22 @@ use fleet_proto::{
     job::{JobRecord, JobStatus},
 };
 
-pub(super) async fn doctor(client: &Client) -> Result<CommandOutput, ProtoError> {
+pub(super) async fn doctor(
+    client: &Client,
+    arguments: DoctorArgs,
+) -> Result<CommandOutput, ProtoError> {
+    if arguments.reset_state {
+        let archived_path = client.reset_state().await?;
+        let text = if arguments.json {
+            to_json(&ResetStateEnvelope {
+                protocol: PROTOCOL,
+                archived_path: &archived_path,
+            })?
+        } else {
+            format!("Reset Fleet state; archived broken state at {archived_path}")
+        };
+        return Ok(CommandOutput::success(text));
+    }
     let checks = client.doctor().await?;
     let ok = checks
         .iter()

@@ -37,6 +37,8 @@ impl From<&str> for ObjectId {
 pub struct Upstream {
     /// Short remote ref name.
     pub name: String,
+    /// Whether the configured upstream ref no longer exists.
+    pub gone: bool,
     /// Commits local is ahead of upstream.
     pub ahead: usize,
     /// Commits local is behind upstream.
@@ -149,7 +151,7 @@ pub struct ReflogEntry {
     pub selector: String,
     /// Reflog action/subject.
     pub subject: String,
-    /// Committer timestamp in Unix seconds.
+    /// Reflog event timestamp in Unix seconds.
     pub committed_at: i64,
 }
 

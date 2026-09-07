@@ -8,6 +8,33 @@ fn contexts(state: &AppState) -> &[fleet_core::model::Context] {
         .map_or(&[], |snapshot| snapshot.contexts.as_slice())
 }
 
+pub(super) fn reconcile_index<Row, Key: Clone + PartialEq>(
+    rows: &[Row],
+    current: usize,
+    anchor: &mut Option<Key>,
+    key: impl Fn(&Row) -> Key,
+) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    if let Some(selected) = anchor.as_ref()
+        && let Some(index) = rows.iter().position(|row| key(row) == *selected)
+    {
+        return index;
+    }
+    let index = current.min(rows.len() - 1);
+    *anchor = Some(key(&rows[index]));
+    index
+}
+
+pub(super) fn pr_navigation_matches(
+    screen: &Screen,
+    selected: Option<&PrIdentity>,
+    requested: &PrIdentity,
+) -> bool {
+    matches!(screen, Screen::Hub { tab: HubTab::Prs }) && selected == Some(requested)
+}
+
 impl HubCtx {
     /// Wraps a method as a gpui action listener, cloning the context into it.
     pub(super) fn act<A: gpui::Action>(
@@ -28,9 +55,11 @@ impl HubCtx {
         let reply = self.bridge.request(body);
         let ctx = self.clone();
         cx.spawn(async move |cx| {
-            if let Ok(result) = reply.recv().await {
-                apply(result, &ctx, cx);
-            }
+            let result = reply
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(client_error("the Fleet daemon reply channel closed")));
+            apply(result, &ctx, cx);
         })
         .detach();
     }
@@ -100,9 +129,10 @@ impl HubCtx {
     }
 
     pub(super) fn set_cursor(&self, index: usize, len: usize, moving_down: bool, cx: &mut App) {
-        let handle = {
+        let model = self.model(cx);
+        let (pane, screen, tab, handle) = {
             let state = self.state.read(cx);
-            match (state.hub_pane, &state.screen) {
+            let handle = match (state.hub_pane, &state.screen) {
                 (HubPane::Repos, _) => self.rail_scroll.clone(),
                 (
                     HubPane::List,
@@ -111,8 +141,32 @@ impl HubCtx {
                     },
                 ) => self.list_scroll.clone(),
                 (HubPane::List, _) => self.pr_scroll.clone(),
-            }
+            };
+            (state.hub_pane, state.screen.clone(), state.pr_tab, handle)
         };
+        self.hub.update(cx, |hub, _| match (pane, &screen) {
+            (HubPane::Repos, _) => {
+                hub.selection.rail = model.rail.get(index).map(|row| row.repo.clone());
+            }
+            (
+                HubPane::List,
+                Screen::Hub {
+                    tab: HubTab::Worktrees,
+                },
+            ) => {
+                hub.selection.worktree = model.worktrees.get(index).map(|row| row.id.clone());
+            }
+            (HubPane::List, _) => {
+                let selected = model
+                    .prs
+                    .get(index)
+                    .map(|row| (row.repo.clone(), row.number));
+                match tab {
+                    PrTab::Mine => hub.selection.prs_mine = selected,
+                    PrTab::Review => hub.selection.prs_review = selected,
+                }
+            }
+        });
         self.state.update(cx, |state, cx| {
             match (state.hub_pane, &state.screen) {
                 (HubPane::Repos, _) => state.cursors.repos = index,
@@ -133,6 +187,67 @@ impl HubCtx {
         cursor.set(index);
         fleet_ui_kit::ListView::reveal(&handle, &cursor, moving_down);
         self.schedule_inspection(cx);
+    }
+
+    pub(super) fn reconcile_selection(&self, model: &HubModel, cx: &mut App) -> bool {
+        let mut selection = self.hub.read(cx).selection.clone();
+        let mut cursors = self.state.read(cx).cursors.clone();
+        cursors.repos = reconcile_index(&model.rail, cursors.repos, &mut selection.rail, |row| {
+            row.repo.clone()
+        });
+        match &self.state.read(cx).screen {
+            Screen::Hub {
+                tab: HubTab::Worktrees,
+            } => {
+                cursors.worktrees = reconcile_index(
+                    &model.worktrees,
+                    cursors.worktrees,
+                    &mut selection.worktree,
+                    |row| row.id.clone(),
+                );
+            }
+            Screen::Hub { tab: HubTab::Prs } => match self.state.read(cx).pr_tab {
+                PrTab::Mine => {
+                    cursors.prs_mine = reconcile_index(
+                        &model.prs,
+                        cursors.prs_mine,
+                        &mut selection.prs_mine,
+                        |row| (row.repo.clone(), row.number),
+                    );
+                }
+                PrTab::Review => {
+                    cursors.prs_review = reconcile_index(
+                        &model.prs,
+                        cursors.prs_review,
+                        &mut selection.prs_review,
+                        |row| (row.repo.clone(), row.number),
+                    );
+                }
+            },
+            _ => {}
+        }
+        let displayed = model.displayed();
+        let changed = {
+            let state = self.state.read(cx);
+            cursors != state.cursors || displayed != state.displayed_hub
+        };
+        self.hub.update(cx, |hub, _| hub.selection = selection);
+        if changed {
+            self.state.update(cx, |state, cx| {
+                state.cursors = cursors;
+                state.displayed_hub = displayed;
+                cx.notify();
+            });
+        }
+        changed
+    }
+
+    pub(super) fn pr_navigation_is_current(&self, key: &PrIdentity, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        let selected = self
+            .selected_pr(cx)
+            .map(|row| (row.repo.clone(), row.number));
+        pr_navigation_matches(&state.screen, selected.as_ref(), key)
     }
 
     pub(super) fn move_by(&self, delta: isize, _window: &mut Window, cx: &mut App) {
@@ -187,6 +302,7 @@ impl HubCtx {
         });
         self.hub.update(cx, |hub, _| {
             hub.prs = PrCache::default();
+            hub.selection = SelectionAnchors::default();
             hub.invalidate();
         });
     }
@@ -243,6 +359,10 @@ impl HubCtx {
             state.cursors.repos = 0;
             state.cursors.worktrees = 0;
             cx.notify();
+        });
+        self.hub.update(cx, |hub, _| {
+            hub.selection.rail = None;
+            hub.selection.worktree = None;
         });
     }
 

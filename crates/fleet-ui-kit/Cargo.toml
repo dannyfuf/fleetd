@@ -10,6 +10,8 @@ description = "Fleet design system: tokens, theme, embedded Lucide icons and the
 workspace = true
 
 [dependencies]
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
 gpui.workspace = true
 
 [dev-dependencies]

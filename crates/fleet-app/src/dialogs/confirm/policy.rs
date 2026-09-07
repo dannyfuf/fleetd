@@ -195,23 +195,54 @@ impl ConfirmRequest {
 /// Whether the open confirm needs `Y` rather than `y`.
 pub(super) fn strong_required(state: &Entity<AppState>, cx: &mut App) -> bool {
     with_host(state, cx, |host| {
-        let draft = &host.confirm;
-        let Some(request) = draft.request.as_ref() else {
-            return true;
+        confirmation_policy(&host.confirm, now_unix()).key == ConfirmKey::Upper
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConfirmationPolicy {
+    pub key: ConfirmKey,
+    pub authorized: bool,
+}
+
+pub(super) fn confirmation_policy(draft: &ConfirmState, now: i64) -> ConfirmationPolicy {
+    let Some(request) = draft.request.as_ref() else {
+        return ConfirmationPolicy {
+            key: ConfirmKey::Upper,
+            authorized: false,
         };
-        if request.always_strong() {
-            return true;
-        }
+    };
+    let key = if request.always_strong() {
+        ConfirmKey::Upper
+    } else {
         match request {
             ConfirmRequest::DeleteWorktree { .. } => {
-                let facts = worktree_facts(draft.inspection.as_ref(), draft.loading, now_unix());
-                facts.list.confirm_key() == ConfirmKey::Upper || draft.error.is_some()
+                let facts = worktree_facts(draft.inspection.as_ref(), draft.loading, now);
+                if draft.error.is_some() {
+                    ConfirmKey::Upper
+                } else {
+                    facts.list.confirm_key()
+                }
             }
-            ConfirmRequest::Prune { .. } => draft.loading || draft.prune.is_none(),
+            ConfirmRequest::Prune { .. } => {
+                if draft.loading || draft.prune.is_none() || draft.error.is_some() {
+                    ConfirmKey::Upper
+                } else {
+                    ConfirmKey::Lower
+                }
+            }
             ConfirmRequest::KillSession {
                 running, unsaved, ..
-            } => *unsaved || !running.is_empty(),
-            _ => false,
+            } if *unsaved || !running.is_empty() => ConfirmKey::Upper,
+            _ => ConfirmKey::Lower,
         }
-    })
+    };
+    let authorized = !draft.loading
+        && (!matches!(request, ConfirmRequest::Prune { .. })
+            || (draft.prune.is_some() && draft.error.is_none()));
+    ConfirmationPolicy { key, authorized }
+}
+
+pub(super) fn admits(policy: ConfirmationPolicy, pressed: ConfirmKey) -> bool {
+    policy.authorized && (pressed == ConfirmKey::Upper || policy.key == ConfirmKey::Lower)
 }

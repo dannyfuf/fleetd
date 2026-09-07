@@ -13,7 +13,7 @@ impl JobsPanel {
         self.bind(state, cx);
         let daemon_lost = state.read(cx).daemon.is_lost();
         let stale_age = state.read(cx).snapshot_age(std::time::Instant::now());
-        let (filter, cursor, expanded, log, following, confirming) =
+        let (filter, cursor, expanded, log, following, log_offset, confirming) =
             self.state.read_with(cx, |panel, _| {
                 (
                     panel.filter,
@@ -21,6 +21,7 @@ impl JobsPanel {
                     panel.expanded.clone(),
                     panel.log.clone(),
                     panel.following,
+                    panel.log_offset,
                     panel.confirming_cancel_all,
                 )
             });
@@ -33,10 +34,11 @@ impl JobsPanel {
         let cancellable = prepared.cancellable;
         let log_path = prepared.log_paths.get(cursor).cloned();
         let body = if expanded.is_some() {
-            self.log_body(log, following, cx)
+            self.log_body(log, following, log_offset, state, cx)
         } else {
             presentation::list_body(visible, cursor, filter, &self.list_scroll, now_unix())
         };
+        let requests = actions::JobsRequests::bridge(bridge.clone());
 
         let header = div()
             .flex()
@@ -61,11 +63,11 @@ impl JobsPanel {
             .on_action(self.on_top(state))
             .on_action(self.on_bottom(state))
             .on_action(self.on_toggle_log(state, bridge))
-            .on_action(self.on_cancel(state, bridge))
-            .on_action(self.on_cancel_all(state, bridge))
-            .on_action(self.on_retry(state, bridge))
+            .on_action(self.on_cancel(state, requests.clone()))
+            .on_action(self.on_cancel_all(state, requests.clone()))
+            .on_action(self.on_retry(state, requests.clone()))
             .on_action(self.on_copy_log_path(state))
-            .on_action(self.on_dismiss(state, bridge))
+            .on_action(self.on_dismiss(state, requests))
             .on_action(self.on_cycle_filter(state))
             .on_action(self.on_collapse_log(state))
             .on_action(self.on_close(state))
@@ -81,7 +83,14 @@ impl JobsPanel {
     }
 
     /// The expanded log: the last [`LOG_TAIL_LINES`] lines of `logs/jobs/<id>.log`.
-    fn log_body(&self, log: Arc<[SharedString]>, following: bool, cx: &App) -> AnyElement {
+    fn log_body(
+        &self,
+        log: Arc<[SharedString]>,
+        following: bool,
+        log_offset: usize,
+        state: &Entity<AppState>,
+        cx: &App,
+    ) -> AnyElement {
         if log.is_empty() {
             let theme = cx.theme();
             return div()
@@ -93,9 +102,16 @@ impl JobsPanel {
                 .p(theme.space.lg)
                 .into_any_element();
         }
+        let panel = self.state.clone();
+        let state = state.clone();
         LogView::from_shared("jobs-panel-log", log)
             .following(following)
+            .top(log_offset)
             .track_scroll(&self.log_scroll)
+            .on_command(move |command, _, cx| {
+                panel.update(cx, |panel, _| panel.apply_log_command(command));
+                notify(&state, cx);
+            })
             .into_any_element()
     }
 }

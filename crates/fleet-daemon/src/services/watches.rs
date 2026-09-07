@@ -145,6 +145,19 @@ impl Watches {
         registry.finish(id, code, None, Instant::now())
     }
 
+    /// Retires a discovered watch whose PID now names a different process.
+    pub(crate) fn replace_discovered(&self, id: WatchId) -> DaemonResult<()> {
+        let mut registry = self.lock();
+        let entry = registry.entry(id)?;
+        if entry.watch.source != WatchSource::Discovered {
+            return Err(DaemonError::Conflict("watch is not discovered".into()));
+        }
+        entry.published_seq = entry.output.next_seq();
+        registry.finish(id, None, None, Instant::now())?;
+        registry.remove(id);
+        Ok(())
+    }
+
     /// Appends discovered output, dropping anything that arrives after the exit.
     pub(crate) fn append_discovered(&self, id: WatchId, text: String) -> DaemonResult<()> {
         let mut registry = self.lock();
@@ -276,7 +289,7 @@ impl Watches {
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
         for id in ids {
-            let _ignored = registry.finish(id, None, Some(9), Instant::now());
+            let _ignored = registry.finish(id, None, None, Instant::now());
         }
     }
     /// Flushes coalesced output and expires completed watches.
@@ -459,7 +472,7 @@ mod tests {
             watches.tail(id, None).unwrap().watch.status,
             WatchStatus::Exited {
                 code: None,
-                signal: Some(9)
+                signal: None
             }
         );
         watches.tick(Instant::now() + RETENTION);

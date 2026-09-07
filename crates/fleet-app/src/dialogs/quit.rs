@@ -19,8 +19,12 @@ struct JobLine {
     target: String,
     /// The most recent progress line, when there is one.
     progress: Option<String>,
-    /// Whether `ctrl-shift-q` can cancel it.
-    cancellable: bool,
+    /// Whether an explicit cancel can still be requested.
+    can_cancel: bool,
+    /// Whether the underlying detached process outlives fleetd.
+    survives_shutdown: bool,
+    /// Whether the operation can be started again after it stops.
+    restartable: bool,
 }
 
 /// The job kind, in the short word the ticker and both quit dialogs use.
@@ -40,15 +44,23 @@ pub(super) fn kind_word(job: &JobRecord) -> String {
 fn job_lines(jobs: &[JobRecord]) -> Vec<JobLine> {
     running_jobs(jobs)
         .into_iter()
-        .map(|job| JobLine {
-            kind: kind_word(job),
-            target: if job.target.is_empty() {
-                job.title.clone()
-            } else {
-                job.target.clone()
-            },
-            progress: job.progress.clone(),
-            cancellable: job.cancellable && !matches!(job.status, JobStatus::Cancelling),
+        .map(|job| {
+            let can_cancel = job.cancellable && !matches!(job.status, JobStatus::Cancelling);
+            let survives_shutdown = matches!(job.kind, fleet_proto::job::JobKind::PostCreateHooks)
+                && !job.cancellable
+                && matches!(job.status, JobStatus::Running);
+            JobLine {
+                kind: kind_word(job),
+                target: if job.target.is_empty() {
+                    job.title.clone()
+                } else {
+                    job.target.clone()
+                },
+                progress: job.progress.clone(),
+                can_cancel,
+                survives_shutdown,
+                restartable: job.retryable,
+            }
         })
         .collect()
 }
@@ -57,6 +69,26 @@ fn job_lines(jobs: &[JobRecord]) -> Vec<JobLine> {
 #[must_use]
 fn terminal_count(sessions: &[Session]) -> usize {
     sessions.iter().map(|session| session.terminals.len()).sum()
+}
+
+fn restart_word(line: &JobLine) -> &'static str {
+    if line.restartable {
+        "restartable"
+    } else {
+        "not restartable"
+    }
+}
+
+fn detached_jobs_fact(lines: &[&JobLine]) -> String {
+    format!(
+        "{} job(s) keep running: {}",
+        lines.len(),
+        lines
+            .iter()
+            .map(|line| format!("{} ({})", line.kind, restart_word(line)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Renders the `ctrl-q` confirm: everything listed **survives** in fleetd.
@@ -130,8 +162,8 @@ pub(crate) fn render_quit_daemon(
         || (Vec::new(), &[][..]),
         |snapshot| (job_lines(&snapshot.jobs), snapshot.sessions.as_slice()),
     );
-    let (cancellable, detached): (Vec<&JobLine>, Vec<&JobLine>) =
-        lines.iter().partition(|line| line.cancellable);
+    let (detached, stopping): (Vec<&JobLine>, Vec<&JobLine>) =
+        lines.iter().partition(|line| line.survives_shutdown);
 
     let mut killed = FactList::new();
     for session in sessions {
@@ -150,10 +182,19 @@ pub(crate) fn render_quit_daemon(
     }
 
     let mut cancelled = FactList::new();
-    for line in &cancellable {
+    for line in &stopping {
+        let restart = restart_word(line);
+        let action = if line.can_cancel {
+            "cancelled"
+        } else {
+            "stops with fleetd"
+        };
         cancelled = cancelled.fact(Fact::risk(match &line.progress {
-            Some(progress) => format!("{} {}   {progress}   (restartable)", line.kind, line.target),
-            None => format!("{} {}   (restartable)", line.kind, line.target),
+            Some(progress) => format!(
+                "{} {}   {progress}   ({action}; {restart})",
+                line.kind, line.target
+            ),
+            None => format!("{} {}   ({action}; {restart})", line.kind, line.target),
         }));
     }
 
@@ -161,7 +202,7 @@ pub(crate) fn render_quit_daemon(
     if !sessions.is_empty() {
         body = body.child(SectionHeader::new("KILLED NOW")).child(killed);
     }
-    if !cancellable.is_empty() {
+    if !stopping.is_empty() {
         body = body
             .child(SectionHeader::new("CANCELLED NOW"))
             .child(cancelled);
@@ -169,15 +210,7 @@ pub(crate) fn render_quit_daemon(
     if !detached.is_empty() {
         // §6: a detached post-create runner has no cancel token; the dialog says so rather
         // than pretending it can stop it.
-        body = body.child(Text::ui(format!(
-            "{} job(s) keep running: {} (not restartable)",
-            detached.len(),
-            detached
-                .iter()
-                .map(|line| line.kind.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
+        body = body.child(Text::ui(detached_jobs_fact(&detached)));
     }
     let body = body
         .child(Text::ui("Worktrees, repos and state on disk are untouched.").muted())
@@ -228,7 +261,7 @@ mod tests {
         let lines = job_lines(&jobs);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].kind, "clone");
-        assert!(lines[0].cancellable);
+        assert!(lines[0].can_cancel);
     }
 
     #[test]
@@ -236,7 +269,27 @@ mod tests {
         let jobs = vec![job(JobKind::PostCreateHooks, JobStatus::Cancelling, true)];
         let lines = job_lines(&jobs);
         assert_eq!(lines[0].kind, "hooks");
-        assert!(!lines[0].cancellable);
+        assert!(!lines[0].can_cancel);
+    }
+
+    #[test]
+    fn shutdown_job_facts_use_independent_capabilities() {
+        let mut cancelling = job(JobKind::Clone, JobStatus::Cancelling, true);
+        cancelling.retryable = false;
+        let mut detached = job(JobKind::PostCreateHooks, JobStatus::Running, false);
+        detached.retryable = true;
+        let lines = job_lines(&[cancelling, detached]);
+
+        assert!(!lines[0].can_cancel);
+        assert!(!lines[0].survives_shutdown);
+        assert!(!lines[0].restartable);
+        assert!(!lines[1].can_cancel);
+        assert!(lines[1].survives_shutdown);
+        assert!(lines[1].restartable);
+        assert_eq!(
+            detached_jobs_fact(&[&lines[1]]),
+            "1 job(s) keep running: hooks (restartable)"
+        );
     }
 
     #[test]

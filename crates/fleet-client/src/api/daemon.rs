@@ -73,6 +73,14 @@ impl Client {
         }
     }
 
+    /// Replaces quarantined state with a validated default and returns the archived path.
+    pub async fn reset_state(&self) -> Result<String> {
+        match self.request(RequestBody::ResetState).await? {
+            ResponseBody::Path(path) => Ok(path),
+            response => Err(unexpected("reset_state", response)),
+        }
+    }
+
     /// Starts a Fleet self-update job.
     pub async fn update(&self) -> Result<JobRecord> {
         match self.request(RequestBody::Update).await? {

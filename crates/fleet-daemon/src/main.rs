@@ -12,7 +12,7 @@ use fleet_daemon::{
         logs::RotatingLog,
     },
     jobs::JobManager,
-    server::{BroadcastBus, Listener},
+    server::{BroadcastBus, Listener, SingletonGuard},
     services::Services,
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass --home or FLEET_HOME"))?,
     };
     let layout = FleetHome::new(home.clone());
+    let singleton = SingletonGuard::acquire(&home).await?;
     std::fs::create_dir_all(layout.logs_dir())?;
     let file = RotatingLog::new(layout.logs_dir().join("fleetd.log"), 10 * 1024 * 1024, 4)?;
     let (file_writer, _log_guard) = tracing_appender::non_blocking(file);
@@ -69,8 +70,8 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     let events = BroadcastBus::default();
     let services = Services::new_with_events(&home, config, state, jobs, adapters, events.clone());
-    let listener = Listener::bind(
-        &home,
+    let listener = Listener::bind_owned(
+        singleton,
         Arc::clone(&services),
         events.clone(),
         shutdown.clone(),

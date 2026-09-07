@@ -417,30 +417,45 @@ fn cell_columns(cell: &ProtoCell) -> usize {
     }
 }
 
-/// The text a selection yanks, one line per selected scrollback line.
+/// The text a selection yanks, preserving soft wraps between selected scrollback rows.
 ///
 /// `history` is the client's record of every line it has painted since the selection was
 /// anchored, keyed by absolute scrollback line. The daemon mirrors only the *viewport*, so a
 /// selection that spans more than one screen can only be assembled from what this client saw —
 /// which is every line the user scrolled the selection over.
 ///
-/// Trailing blanks are what a terminal pads short rows with; keeping them would paste a
-/// rectangle of spaces into the next shell prompt, so they are stripped on the way in.
+/// Every row must still be retained. A missing row returns `None` instead of silently joining
+/// the rows around a gap and claiming that truncated text was copied.
 #[must_use]
-pub(crate) fn selection_text(history: &BTreeMap<u64, String>, anchor: u64, head: u64) -> String {
+pub(crate) fn try_selection_text(
+    history: &BTreeMap<u64, CachedGridRow>,
+    anchor: u64,
+    head: u64,
+) -> Option<String> {
     let (first, last) = if anchor <= head {
         (anchor, head)
     } else {
         (head, anchor)
     };
-    let mut text = String::new();
-    for (index, (_, line)) in history.range(first..=last).enumerate() {
-        if index > 0 {
-            text.push('\n');
-        }
-        text.push_str(line);
+    let line_count = last.checked_sub(first)?.checked_add(1)?;
+    if usize::try_from(line_count).ok()? > history.len() {
+        return None;
     }
-    text
+    let mut text = String::new();
+    let mut previous_wrapped = None;
+    for line in first..=last {
+        let row = history.get(&line)?;
+        append_selected_row(
+            &mut text,
+            previous_wrapped,
+            &row.cells,
+            0,
+            usize::MAX,
+            row.wrapped,
+        );
+        previous_wrapped = Some(row.wrapped);
+    }
+    Some(text)
 }
 
 #[cfg(test)]

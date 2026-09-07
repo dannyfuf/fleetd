@@ -12,11 +12,11 @@ use crate::{
     actions::{fleet, palette as palette_actions},
     bridge::Bridge,
     dialogs::{
-        ConfirmRequest, DialogHost, Dialogs, clear_all, notify, open_session, open_worktree,
-        request_confirm, step, type_into, with_host,
+        ConfirmRequest, DialogHost, Dialogs, SessionTransport, clear_all, notify,
+        open_agent_session, open_worktree, request_confirm, step, type_into, with_host,
     },
     keymap,
-    presentation::{FuzzyQuery, SnapshotIndex, pretty_keys},
+    presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
     screens::workspace::status_kind,
     state::{AppState, HubTab, Overlay, RepoScope, Screen, latest_failed_job, running_jobs},
 };
@@ -41,8 +41,11 @@ pub struct PaletteState {
 /// What a palette row does when `Enter` runs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Run {
-    /// Open a session by id.
-    OpenSession(SessionId),
+    /// Wake and open a fixed agent session.
+    OpenSession {
+        session: SessionId,
+        agent: fleet_core::config::Agent,
+    },
     /// Open (or create) a worktree's session.
     OpenWorktree(WorktreeId),
     /// Scope the Hub to a repository.
@@ -259,27 +262,31 @@ impl Command {
     pub fn valid(self, state: &AppState) -> bool {
         let snapshot = state.snapshot.as_ref();
         let has_repo = snapshot.is_some_and(|snapshot| !snapshot.repos.is_empty());
-        let has_worktree = snapshot.is_some_and(|snapshot| !snapshot.worktrees.is_empty());
-        let has_context = snapshot.is_some_and(|snapshot| !snapshot.contexts.is_empty());
+        let connected = state.daemon.is_connected();
         let on_prs = matches!(state.screen, Screen::Hub { tab: HubTab::Prs });
         match self {
-            Self::NewWorktree | Self::PruneWorktrees => has_repo,
-            Self::CloneRepo | Self::MoveRepo => has_context && has_repo || self == Self::CloneRepo,
-            Self::DeleteWorktree | Self::InspectWorktree | Self::SleepSession => has_worktree,
-            Self::KillSession => snapshot.is_some_and(|snapshot| !snapshot.sessions.is_empty()),
-            Self::EditContext | Self::DeleteContext => state.active_context().is_some(),
+            Self::NewWorktree | Self::PruneWorktrees => {
+                connected && crate::dialogs::focused_repo(state).is_some()
+            }
+            Self::CloneRepo => connected && state.active_context().is_some(),
+            Self::MoveRepo => connected && crate::dialogs::focused_repo(state).is_some(),
+            Self::DeleteWorktree | Self::InspectWorktree | Self::SleepSession => {
+                connected && selected_worktree(state).is_some()
+            }
+            Self::KillSession => connected && target_session(state).is_some(),
+            Self::EditContext | Self::DeleteContext => {
+                connected && state.active_context().is_some()
+            }
             Self::PullRequests => !on_prs && has_repo,
             Self::Worktrees => on_prs,
-            Self::UpdateFleet => state.update_version.is_some(),
+            Self::UpdateFleet => connected && state.update_version.is_some(),
             Self::NewContext
-            | Self::JobsPanel
             | Self::Settings
-            | Self::Help
             | Self::Refresh
             | Self::OpenClaude
             | Self::OpenOpencode
-            | Self::Quit
-            | Self::QuitDaemon => true,
+            | Self::QuitDaemon => connected,
+            Self::JobsPanel | Self::Help | Self::Quit => true,
         }
     }
 }
@@ -325,7 +332,7 @@ pub fn session_detail(session: SessionState, slept: bool) -> &'static str {
 /// survived the query and the section's idle cap — this runs on every keystroke.
 #[must_use]
 pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
-    let sessions_only = query.trim() == "sessions";
+    let sessions_only = is_session_switcher(query);
     let effective_query = if sessions_only { "" } else { query };
     let idle = effective_query.trim().is_empty();
     let matcher = FuzzyQuery::new(effective_query);
@@ -334,7 +341,13 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
     };
     let index = SnapshotIndex::new(snapshot);
     // §3.9 shows only the first `IDLE_ROWS` of each section until a query narrows it.
-    let limit = if idle { IDLE_ROWS } else { usize::MAX };
+    let limit = if sessions_only {
+        usize::MAX
+    } else if idle {
+        IDLE_ROWS
+    } else {
+        usize::MAX
+    };
 
     let mut rows = go_rows(state, snapshot, &index, &matcher, sessions_only, limit);
     if !sessions_only {
@@ -354,7 +367,16 @@ fn go_rows(
     limit: usize,
 ) -> Vec<Entry> {
     let mut rows: Vec<Entry> = Vec::new();
-    for session in &snapshot.sessions {
+    let mut sessions: Vec<_> = snapshot.sessions.iter().collect();
+    sessions.sort_by_key(|session| {
+        state
+            .session_mru
+            .entries()
+            .iter()
+            .position(|id| id == &session.id)
+            .unwrap_or(usize::MAX)
+    });
+    for session in sessions {
         if rows.len() == limit {
             return rows;
         }
@@ -398,7 +420,13 @@ fn go_rows(
             destructive: false,
             icon: Icon::GitBranch,
             status: Some(status_kind(session_state, slept, agent_activity, degraded)),
-            run: Run::OpenSession(session.id.clone()),
+            run: match (&session.kind, worktree) {
+                (SessionKind::Agent(agent), _) => Run::OpenSession {
+                    session: session.id.clone(),
+                    agent: *agent,
+                },
+                (SessionKind::Worktree(id), _) => Run::OpenWorktree(id.clone()),
+            },
         });
     }
     if sessions_only {
@@ -567,8 +595,10 @@ pub(super) fn render(
         )
     };
 
+    let windowed = is_session_switcher(query.text());
+    let (visible_rows, visible_cursor) = visible_rows(&rows, cursor, windowed);
     let mut card = fleet_ui_kit::Palette::new(query.text().to_owned())
-        .cursor(cursor)
+        .cursor(visible_cursor)
         .cap(ROW_CAP)
         .total(total)
         .empty(format!("Nothing matches \"{}\".", query.text()));
@@ -577,7 +607,7 @@ pub(super) fn render(
         PaletteSectionKind::Do,
         PaletteSectionKind::Context,
     ] {
-        let section: Vec<PaletteRow> = rows
+        let section: Vec<PaletteRow> = visible_rows
             .iter()
             .filter(|entry| entry.section == kind)
             .map(|entry| {
@@ -673,6 +703,15 @@ pub(super) fn render(
         .into_any_element()
 }
 
+fn visible_rows(rows: &[Entry], cursor: usize, windowed: bool) -> (&[Entry], usize) {
+    if !windowed || rows.len() <= ROW_CAP {
+        return (rows, cursor);
+    }
+    let cursor = cursor.min(rows.len() - 1);
+    let start = cursor.saturating_sub(ROW_CAP - 1).min(rows.len() - ROW_CAP);
+    (&rows[start..start + ROW_CAP], cursor - start)
+}
+
 /// Resets the draft the first time the open palette is rendered.
 pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let seed = state.update(cx, |app, _| app.palette_seed.take());
@@ -692,7 +731,12 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
     let query = with_host(state, cx, |host| host.palette.query.text().to_owned());
     let rows = candidates(state.read(cx), &query);
     let total = rows.len();
-    let rows = rows.into_iter().take(ROW_CAP).collect();
+    let cap = if is_session_switcher(&query) {
+        usize::MAX
+    } else {
+        ROW_CAP
+    };
+    let rows = rows.into_iter().take(cap).collect();
     with_host(state, cx, |host| {
         host.palette.rows = rows;
         host.palette.total = total;
@@ -718,7 +762,12 @@ fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
 }
 
 /// `Enter`: close the palette, then do what the row says.
-fn run_selected(state: &Entity<AppState>, bridge: &Bridge, window: &mut Window, cx: &mut App) {
+fn run_selected<T: SessionTransport>(
+    state: &Entity<AppState>,
+    transport: &T,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(entry) = with_host(state, cx, |host| {
         host.palette.rows.get(host.palette.cursor).cloned()
     }) else {
@@ -729,8 +778,8 @@ fn run_selected(state: &Entity<AppState>, bridge: &Bridge, window: &mut Window, 
         cx.notify();
     });
     match entry.run {
-        Run::OpenSession(session) => open_session(session, state, cx),
-        Run::OpenWorktree(id) => open_worktree(id, state, bridge, cx),
+        Run::OpenSession { agent, .. } => open_agent_session(agent, state, transport, cx),
+        Run::OpenWorktree(id) => open_worktree(id, state, transport, cx),
         Run::SelectRepo(repo) => {
             state.update(cx, |app, cx| {
                 app.scope = RepoScope::Repo(repo);
@@ -739,18 +788,18 @@ fn run_selected(state: &Entity<AppState>, bridge: &Bridge, window: &mut Window, 
             });
         }
         Run::SwitchContext(context) => {
-            bridge.send(RequestBody::SetActiveContext { id: Some(context) });
+            transport.send(RequestBody::SetActiveContext { id: Some(context) });
         }
-        Run::CancelJob(job) => bridge.send(RequestBody::CancelJob { job }),
-        Run::Command(command) => run_command(command, state, bridge, window, cx),
+        Run::CancelJob(job) => transport.send(RequestBody::CancelJob { job }),
+        Run::Command(command) => run_command(command, state, transport, window, cx),
     }
 }
 
 /// Runs one command. Destructive rows open their confirm rather than acting (§3.9).
-fn run_command(
+fn run_command<T: SessionTransport>(
     command: Command,
     state: &Entity<AppState>,
-    bridge: &Bridge,
+    transport: &T,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -787,19 +836,7 @@ fn run_command(
             }
         }
         Command::KillSession => {
-            let request = state.read(cx).snapshot.as_ref().and_then(|snapshot| {
-                let session = snapshot.sessions.first()?;
-                Some(ConfirmRequest::KillSession {
-                    session: session.id.clone(),
-                    terminals: session.terminals.len(),
-                    running: session
-                        .terminals
-                        .iter()
-                        .flat_map(|terminal| terminal.keep_alive.clone())
-                        .collect(),
-                    unsaved: false,
-                })
-            });
+            let request = kill_request(state.read(cx));
             if let Some(request) = request {
                 request_confirm(cx, request);
                 open(Dialogs::Confirm, cx);
@@ -834,12 +871,12 @@ fn run_command(
         }
         Command::SleepSession => {
             if let Some(id) = cursor_worktree(state, cx) {
-                bridge.send(RequestBody::SleepWorktree { id });
+                transport.send(RequestBody::SleepWorktree { id });
             }
         }
         Command::InspectWorktree => {
             if let Some(id) = cursor_worktree(state, cx) {
-                bridge.send(RequestBody::InspectWorktrees {
+                transport.send(RequestBody::InspectWorktrees {
                     ids: vec![id],
                     repo: None,
                     fetch: true,
@@ -858,8 +895,8 @@ fn run_command(
                 cx.notify();
             });
         }
-        Command::Refresh => bridge.send(RequestBody::RefreshStatuses { repo: None }),
-        Command::UpdateFleet => bridge.send(RequestBody::Update),
+        Command::Refresh => transport.send(RequestBody::RefreshStatuses { repo: None }),
+        Command::UpdateFleet => transport.send(RequestBody::Update),
         Command::OpenClaude => window.dispatch_action(Box::new(fleet::OpenAgentClaude), cx),
         Command::OpenOpencode => window.dispatch_action(Box::new(fleet::OpenAgentOpencode), cx),
         // The shell owns the whole quit flow, and its listeners sit on the window root, which
@@ -871,16 +908,99 @@ fn run_command(
 
 /// The worktree the Hub's cursor is on.
 fn cursor_worktree(state: &Entity<AppState>, cx: &App) -> Option<WorktreeId> {
-    let app = state.read(cx);
-    let snapshot = app.snapshot.as_ref()?;
-    snapshot
+    selected_worktree_id(state.read(cx))
+}
+
+fn selected_worktree(state: &AppState) -> Option<&fleet_core::model::Worktree> {
+    let selected = selected_worktree_id(state)?;
+    state
+        .snapshot
+        .as_ref()?
         .worktrees
-        .get(app.cursors.worktrees)
-        .map(|worktree| worktree.id.clone())
+        .iter()
+        .find(|worktree| worktree.id == selected)
+}
+
+fn target_session(state: &AppState) -> Option<&fleet_core::sessions::Session> {
+    if let Some(session) = state.active_session() {
+        return Some(session);
+    }
+    let worktree = selected_worktree(state)?;
+    state.snapshot.as_ref()?.sessions.iter().find(|session| {
+        session.id.as_str() == worktree.session
+            || matches!(&session.kind, SessionKind::Worktree(id) if id == &worktree.id)
+    })
+}
+
+fn kill_request(state: &AppState) -> Option<ConfirmRequest> {
+    let session = target_session(state)?;
+    Some(ConfirmRequest::KillSession {
+        session: session.id.clone(),
+        terminals: session.terminals.len(),
+        running: session
+            .terminals
+            .iter()
+            .flat_map(|terminal| terminal.keep_alive.clone())
+            .collect(),
+        unsaved: false,
+    })
+}
+
+fn is_session_switcher(query: &str) -> bool {
+    query.trim() == "sessions"
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
+
+    use gpui::{Context, Render};
+
+    use super::*;
+
+    type TestReplySender = async_channel::Sender<
+        Result<fleet_proto::response::ResponseBody, fleet_proto::error::ProtoError>,
+    >;
+
+    #[derive(Debug)]
+    enum RecordedRequest {
+        Sent(RequestBody),
+        Requested(RequestBody),
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeTransport {
+        requests: Rc<RefCell<Vec<RecordedRequest>>>,
+        replies: Rc<RefCell<VecDeque<TestReplySender>>>,
+    }
+
+    impl SessionTransport for FakeTransport {
+        fn send(&self, body: RequestBody) {
+            self.requests.borrow_mut().push(RecordedRequest::Sent(body));
+        }
+
+        fn request(
+            &self,
+            body: RequestBody,
+        ) -> async_channel::Receiver<
+            Result<fleet_proto::response::ResponseBody, fleet_proto::error::ProtoError>,
+        > {
+            let (sender, receiver) = async_channel::bounded(1);
+            self.requests
+                .borrow_mut()
+                .push(RecordedRequest::Requested(body));
+            self.replies.borrow_mut().push_back(sender);
+            receiver
+        }
+    }
+
+    struct PaletteFixture;
+
+    impl Render for PaletteFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
 
     #[test]
     fn a_go_row_says_its_state_not_its_type() {
@@ -897,10 +1017,6 @@ mod tests {
         assert_eq!(session_detail(SessionState::None, false), "no session");
         assert_eq!(session_detail(SessionState::Unknown, false), "unknown");
     }
-    use std::time::Instant;
-
-    use super::*;
-
     #[test]
     fn every_command_has_a_label_and_a_bound_key() {
         for command in Command::ALL {
@@ -922,11 +1038,11 @@ mod tests {
     }
 
     #[test]
-    fn commands_that_need_a_snapshot_are_not_listed_without_one() {
+    fn commands_that_need_a_connection_or_snapshot_are_not_listed_without_one() {
         let state = AppState::new("/tmp/fleet", Instant::now());
         assert!(!Command::NewWorktree.valid(&state));
         assert!(!Command::DeleteWorktree.valid(&state));
-        assert!(Command::Settings.valid(&state));
+        assert!(!Command::Settings.valid(&state));
         assert!(Command::Help.valid(&state));
         assert!(!Command::UpdateFleet.valid(&state));
     }
@@ -1002,6 +1118,135 @@ mod tests {
         snapshot
     }
 
+    fn multi_session_snapshot(count: usize) -> fleet_proto::snapshot::Snapshot {
+        let template = go_snapshot(SessionState::Detached, false);
+        let worktree = template.worktrees[0].clone();
+        let session = template.sessions[0].clone();
+        let mut snapshot = template;
+        snapshot.worktrees.clear();
+        snapshot.sessions.clear();
+        snapshot.statuses.clear();
+        for index in 0..count {
+            let worktree_id: WorktreeId = format!("acme/widgets#feature-{index}")
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}"));
+            let session_id: SessionId = format!("widgets/feature-{index}")
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}"));
+            snapshot.worktrees.push(fleet_core::model::Worktree {
+                id: worktree_id.clone(),
+                slug: format!("feature-{index}"),
+                branch: format!("feature-{index}"),
+                session: session_id.as_str().to_owned(),
+                ..worktree.clone()
+            });
+            snapshot.sessions.push(fleet_core::sessions::Session {
+                id: session_id,
+                kind: SessionKind::Worktree(worktree_id),
+                ..session.clone()
+            });
+        }
+        snapshot
+    }
+
+    fn displayed_worktrees(count: usize) -> Vec<crate::presentation::DisplayedWorktree> {
+        (0..count)
+            .map(|index| crate::presentation::DisplayedWorktree {
+                id: format!("acme/widgets#feature-{index}")
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+                repo: "acme/widgets"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn kill_targets_highlighted_session() {
+        let mut app = AppState::new("/tmp/fleet", Instant::now());
+        app.snapshot = Some(multi_session_snapshot(2));
+        app.displayed_hub.worktrees = displayed_worktrees(2);
+        app.cursors.worktrees = 1;
+        let request = kill_request(&app).expect("highlighted worktree has a session");
+        assert!(matches!(
+            request,
+            ConfirmRequest::KillSession { session, .. }
+                if session.as_str() == "widgets/feature-1"
+        ));
+
+        app.screen = Screen::Workspace {
+            session: "widgets/feature-0"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        assert_eq!(
+            target_session(&app).map(|session| session.id.as_str()),
+            Some("widgets/feature-0"),
+            "the active Workspace session outranks the Hub's retained cursor"
+        );
+    }
+
+    #[test]
+    fn commands_require_executable_current_targets() {
+        let mut app = AppState::new("/tmp/fleet", Instant::now());
+        app.snapshot = Some(multi_session_snapshot(1));
+        app.displayed_hub.worktrees = displayed_worktrees(1);
+        assert!(!Command::SleepSession.valid(&app));
+        assert!(!Command::KillSession.valid(&app));
+        assert!(!Command::Settings.valid(&app));
+
+        app.daemon = crate::state::DaemonLink::Connected;
+        assert!(Command::SleepSession.valid(&app));
+        assert!(Command::KillSession.valid(&app));
+        assert!(Command::Settings.valid(&app));
+
+        app.cursors.worktrees = 9;
+        assert!(!Command::SleepSession.valid(&app));
+        assert!(!Command::KillSession.valid(&app));
+    }
+
+    #[test]
+    fn destructive_target_matches_row() {
+        let mut app = AppState::new("/tmp/fleet", Instant::now());
+        app.snapshot = Some(multi_session_snapshot(2));
+        app.displayed_hub.worktrees = displayed_worktrees(2).into_iter().rev().collect();
+        app.cursors.worktrees = 0;
+
+        assert_eq!(
+            selected_worktree_id(&app).as_ref().map(WorktreeId::as_str),
+            Some("acme/widgets#feature-1"),
+            "the destructive target follows the first displayed row, not snapshot index zero"
+        );
+    }
+
+    #[test]
+    fn session_switcher_is_mru_and_uncapped() {
+        let mut app = AppState::new("/tmp/fleet", Instant::now());
+        app.snapshot = Some(multi_session_snapshot(ROW_CAP + 4));
+        app.touch_session(
+            "widgets/feature-2"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        );
+        app.touch_session(
+            "widgets/feature-6"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        );
+
+        let rows = candidates(&app, "sessions");
+        assert_eq!(rows.len(), ROW_CAP + 4);
+        assert_eq!(rows[0].label, "acme/widgets#feature-6");
+        assert_eq!(rows[1].label, "acme/widgets#feature-2");
+        for cursor in 0..rows.len() {
+            let (visible, local_cursor) = visible_rows(&rows, cursor, true);
+            assert_eq!(visible.len(), ROW_CAP);
+            assert!(local_cursor < visible.len());
+            assert_eq!(visible[local_cursor], rows[cursor]);
+        }
+    }
+
     #[test]
     fn a_go_row_takes_its_state_and_its_id_from_the_same_place_the_hub_does() {
         let now = Instant::now();
@@ -1030,6 +1275,165 @@ mod tests {
         let rows = candidates(&app, "");
         assert_eq!(rows[0].status, Some(StatusKind::Sleeping));
         assert_eq!(rows[0].detail.as_deref(), Some("sleeping"));
+    }
+
+    #[gpui::test]
+    fn palette_uses_normal_transition(cx: &mut gpui::TestAppContext) {
+        let now = Instant::now();
+        let snapshot = go_snapshot(SessionState::Detached, true);
+        let session = snapshot.sessions[0].clone();
+        let state = cx.new(|_| {
+            let mut app = AppState::new("/tmp/fleet", now);
+            app.apply_snapshot(snapshot, now);
+            app.overlay = Some(Overlay::Palette);
+            app.terminal_mode = crate::state::TerminalMode::Scroll;
+            app
+        });
+        cx.update(|cx| {
+            let rows = candidates(state.read(cx), "sessions").into();
+            with_host(&state, cx, |host| {
+                host.palette.rows = rows;
+                host.palette.cursor = 0;
+            });
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, _| PaletteFixture);
+
+        window
+            .update(cx, |_, window, cx| {
+                run_selected(&state, &transport, window, cx)
+            })
+            .expect("run palette selection");
+
+        assert!(matches!(
+            transport.requests.borrow().as_slice(),
+            [
+                RecordedRequest::Sent(RequestBody::TouchWorktreeOpened { id }),
+                RecordedRequest::Requested(RequestBody::EnsureSession {
+                    worktree: Some(ensured),
+                    agent: None,
+                    sleep_previous: true,
+                }),
+            ] if id == ensured && id.as_str() == "acme/widgets#feature-one"
+        ));
+        transport
+            .replies
+            .borrow_mut()
+            .pop_front()
+            .expect("ensure reply")
+            .try_send(Ok(fleet_proto::response::ResponseBody::Session(session)))
+            .expect("send ensure reply");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let app = state.read(cx);
+            assert_eq!(app.overlay, None);
+            assert_eq!(app.terminal_mode, crate::state::TerminalMode::Terminal);
+            assert_eq!(app.mode(), crate::state::Mode::Terminal);
+            assert!(matches!(
+                app.screen,
+                Screen::Workspace { ref session }
+                    if session.as_str() == "widgets/feature-one"
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn palette_wakes_agent_session_before_entering(cx: &mut gpui::TestAppContext) {
+        let now = Instant::now();
+        let mut snapshot = go_snapshot(SessionState::Detached, true);
+        snapshot.worktrees.clear();
+        snapshot.statuses.clear();
+        let agent = fleet_core::config::Agent::Claude;
+        let session = &mut snapshot.sessions[0];
+        session.id = fleet_core::sessions::agent_session_id(agent).expect("agent session id");
+        session.kind = SessionKind::Agent(agent);
+        let response = session.clone();
+        let state = cx.new(|_| {
+            let mut app = AppState::new("/tmp/fleet", now);
+            app.apply_snapshot(snapshot, now);
+            app.overlay = Some(Overlay::Palette);
+            app
+        });
+        cx.update(|cx| {
+            let rows = candidates(state.read(cx), "sessions").into();
+            with_host(&state, cx, |host| {
+                host.palette.rows = rows;
+                host.palette.cursor = 0;
+            });
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, _| PaletteFixture);
+
+        window
+            .update(cx, |_, window, cx| {
+                run_selected(&state, &transport, window, cx)
+            })
+            .expect("run agent palette selection");
+
+        assert!(matches!(
+            transport.requests.borrow().as_slice(),
+            [RecordedRequest::Requested(RequestBody::EnsureSession {
+                worktree: None,
+                agent: Some(fleet_core::config::Agent::Claude),
+                sleep_previous: true,
+            })]
+        ));
+        transport
+            .replies
+            .borrow_mut()
+            .pop_front()
+            .expect("agent ensure reply")
+            .try_send(Ok(fleet_proto::response::ResponseBody::Session(response)))
+            .expect("send agent ensure reply");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(matches!(state.read(cx).screen, Screen::Workspace { .. }));
+        });
+    }
+
+    #[gpui::test]
+    fn palette_reports_ensure_failure(cx: &mut gpui::TestAppContext) {
+        let now = Instant::now();
+        let snapshot = go_snapshot(SessionState::Detached, true);
+        let state = cx.new(|_| {
+            let mut app = AppState::new("/tmp/fleet", now);
+            app.apply_snapshot(snapshot, now);
+            app.overlay = Some(Overlay::Palette);
+            app
+        });
+        cx.update(|cx| {
+            let rows = candidates(state.read(cx), "sessions").into();
+            with_host(&state, cx, |host| host.palette.rows = rows);
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, _| PaletteFixture);
+        window
+            .update(cx, |_, window, cx| {
+                run_selected(&state, &transport, window, cx)
+            })
+            .expect("run palette selection");
+        transport
+            .replies
+            .borrow_mut()
+            .pop_front()
+            .expect("ensure reply")
+            .try_send(Err(fleet_proto::error::ProtoError {
+                kind: fleet_proto::error::ErrorKind::Tmux,
+                message: "session refused".to_owned(),
+            }))
+            .expect("send ensure refusal");
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let app = state.read(cx);
+            assert_eq!(
+                app.sticky_error.as_ref().map(|error| error.text.as_str()),
+                Some("session refused")
+            );
+            assert!(matches!(app.screen, Screen::Hub { .. }));
+        });
     }
 
     #[test]

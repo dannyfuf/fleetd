@@ -50,6 +50,12 @@ pub(crate) struct LongLine {
 }
 
 impl LongLine {
+    pub(crate) fn width(&self) -> Pixels {
+        self.chunks
+            .last()
+            .map_or(px(0.0), |chunk| chunk.left + chunk.line.width())
+    }
+
     pub(crate) fn prepare(
         text: gpui::SharedString,
         kind: RowKind,

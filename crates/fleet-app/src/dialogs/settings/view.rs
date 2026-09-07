@@ -84,7 +84,7 @@ pub(crate) fn render(
         // §3.8.6: the dirty state marks the title in accent and renames the footer.
         card = card.tone(Tone::Accent).primary("\u{23ce} Save");
     }
-    if let Some(message) = draft.error.clone() {
+    if let Some(message) = draft.error.clone().or_else(|| draft.load_error()) {
         card = card.error(message);
     }
 
@@ -148,10 +148,29 @@ pub(super) fn row_element(
             .focused(focused)
             .into_any_element(),
         RowKind::Number { value, min, unit } => {
-            let shown = editing.map_or(*value, |input| input.text().parse().unwrap_or(*value));
-            let mut field = NumberField::labeled(row.label.clone(), shown)
+            if let Some(input) = editing {
+                let valid = input
+                    .text()
+                    .trim()
+                    .parse::<i64>()
+                    .is_ok_and(|value| value >= *min);
+                let label = unit.as_ref().map_or_else(
+                    || row.label.clone(),
+                    |unit| format!("{} ({unit})", row.label),
+                );
+                let mut field = TextField::new(input.text().to_owned())
+                    .label(label)
+                    .caret(input.caret_chars())
+                    .focused(input_is_focused(focused, editing))
+                    .mono(true);
+                if !valid {
+                    field = field.invalid(format!("must be an integer of at least {min}"));
+                }
+                return field.into_any_element();
+            }
+            let mut field = NumberField::labeled(row.label.clone(), *value)
                 .min(*min)
-                .focused(focused);
+                .focused(false);
             if let Some(unit) = unit {
                 field = field.unit(unit.clone());
             }
@@ -161,7 +180,7 @@ pub(super) fn row_element(
             TextField::new(editing.map_or_else(|| value.clone(), |input| input.text().to_owned()))
                 .label(row.label.clone())
                 .caret(editing.map_or(0, TextFieldState::caret_chars))
-                .focused(focused)
+                .focused(input_is_focused(focused, editing))
                 .mono(true)
                 .into_any_element()
         }
@@ -169,6 +188,10 @@ pub(super) fn row_element(
             .row(row.label.clone(), FactValue::known(value.clone()))
             .into_any_element(),
     }
+}
+
+pub(super) fn input_is_focused(focused_row: bool, editing: Option<&TextFieldState>) -> bool {
+    focused_row && editing.is_some()
 }
 
 pub(super) fn input_actions(root: gpui::Div, state: &Entity<AppState>) -> gpui::Div {

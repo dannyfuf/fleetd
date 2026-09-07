@@ -543,6 +543,106 @@ async fn restart_keeps_frame_sequences_monotonic() {
     sessions.kill(session.id).await.unwrap();
 }
 
+#[tokio::test]
+async fn immediate_exit_is_registered() {
+    if isolated_test("immediate_exit_is_registered") {
+        return;
+    }
+    use std::time::Duration;
+
+    let fixture = fixture().await;
+    let mut config = fixture.config.load().await.unwrap();
+    config.windows = vec![WindowConfig {
+        name: "immediate".into(),
+        command: "exit 23".into(),
+    }];
+    fixture.config.save(config).await.unwrap();
+    let sessions = Sessions::new(fixture.config, fixture.state);
+    let session = sessions
+        .ensure(Some(fixture.worktree), None, false)
+        .await
+        .unwrap();
+    let terminal = session.terminals[0].id;
+
+    let code = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(code) = sessions.snapshot().iter().find_map(|session| {
+                session.terminals.iter().find_map(|entry| {
+                    (entry.id == terminal).then_some(&entry.status).and_then(
+                        |status| match status {
+                            TerminalStatus::Exited { code } => Some(*code),
+                            TerminalStatus::Starting | TerminalStatus::Running => None,
+                        },
+                    )
+                })
+            }) {
+                break code;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("immediate exit was not applied to registered metadata");
+
+    assert_eq!(code, Some(23));
+    sessions.kill(session.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn new_and_restart_transitions_serialize() {
+    if isolated_test("new_and_restart_transitions_serialize") {
+        return;
+    }
+
+    let fixture = fixture().await;
+    let sessions = Sessions::new(fixture.config, fixture.state);
+    let session = sessions
+        .ensure(Some(fixture.worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let cwd = session.cwd.clone();
+    let first = sessions.new_terminal(
+        session.id.clone(),
+        "raced".to_owned(),
+        "/bin/sh -c 'sleep 30'".to_owned(),
+        cwd.clone(),
+    );
+    let second = sessions.new_terminal(
+        session.id.clone(),
+        "raced".to_owned(),
+        "/bin/sh -c 'sleep 30'".to_owned(),
+        cwd,
+    );
+
+    let outcomes = tokio::join!(first, second);
+    let outcomes = [outcomes.0, outcomes.1];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(DaemonError::Conflict(_))))
+            .count(),
+        1
+    );
+    let registered = sessions
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.id == session.id)
+        .unwrap_or_else(|| panic!("session disappeared"));
+    assert_eq!(
+        registered
+            .terminals
+            .iter()
+            .filter(|terminal| terminal.name == "raced")
+            .count(),
+        1
+    );
+    sessions
+        .kill(session.id)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
 fn isolated_test(name: &str) -> bool {
     if std::env::var("FLEET_SESSION_TEST").as_deref() == Ok(name) {
         return false;

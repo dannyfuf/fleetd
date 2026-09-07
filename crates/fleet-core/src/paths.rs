@@ -14,6 +14,8 @@ use crate::{
 const HOT_MARKER_FILE: &str = "swarm-hot.json";
 /// Worktree publish-intent marker file name retained for swarm compatibility.
 const CREATING_MARKER_FILE: &str = "swarm-creating.json";
+/// Repository clone publish-intent marker file name.
+pub const CLONE_PUBLISH_MARKER_FILE: &str = ".fleet-clone-publish.json";
 
 /// Root of Fleet's persistent filesystem layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +161,15 @@ pub fn creating_marker_path(worktree: impl AsRef<Path>) -> PathBuf {
     worktree.as_ref().join(".git").join(CREATING_MARKER_FILE)
 }
 
+/// Returns the publish-intent marker path inside a cloned repository's `.git` directory.
+#[must_use]
+pub fn clone_publish_marker_path(repository: impl AsRef<Path>) -> PathBuf {
+    repository
+        .as_ref()
+        .join(".git")
+        .join(CLONE_PUBLISH_MARKER_FILE)
+}
+
 fn slot_name(slot: usize) -> String {
     if slot == 0 {
         ".hot".to_owned()
@@ -217,6 +228,10 @@ mod tests {
         assert_eq!(
             home.pr_cache_path(&repo, PrTab::Review),
             PathBuf::from("/tmp/.fleet/cache/github/prs/acme/api/review.json")
+        );
+        assert_eq!(
+            clone_publish_marker_path("/tmp/repo"),
+            PathBuf::from("/tmp/repo/.git/.fleet-clone-publish.json")
         );
     }
 

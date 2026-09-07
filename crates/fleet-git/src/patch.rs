@@ -95,13 +95,14 @@ pub(crate) fn build(diff: &Diff, selections: &[HunkSelection], reverse: bool) ->
             "selection contains no changed lines",
         ));
     }
+    let headers = header_lines(source, &hunks);
     let file = DiffFile {
         old_path: source.old_path.clone(),
         new_path: source.new_path.clone(),
         kind: source.kind,
         binary: source.binary,
         mode: source.mode.clone(),
-        headers: header_lines(source),
+        headers,
         hunks,
     };
     Ok(crate::parse::diff::render(&Diff { files: vec![file] }))
@@ -112,41 +113,71 @@ pub(crate) fn build(diff: &Diff, selections: &[HunkSelection], reverse: bool) ->
 /// Rename and copy metadata is dropped and both sides point at the destination
 /// path, which keeps `git apply` from trying to redo the rename while only part
 /// of the content is being staged.
-fn header_lines(file: &DiffFile) -> Vec<Vec<u8>> {
+fn header_lines(file: &DiffFile, hunks: &[Hunk]) -> Vec<Vec<u8>> {
     let renamed = matches!(file.kind, DiffKind::Renamed | DiffKind::Copied);
-    let old = if renamed {
+    let old_side_is_empty = hunks.iter().all(|hunk| hunk.old.count == 0);
+    let new_side_is_empty = hunks.iter().all(|hunk| hunk.new.count == 0);
+    let old = if renamed || (file.kind == DiffKind::Added && !old_side_is_empty) {
         file.new_path.as_deref()
     } else {
         file.old_path.as_deref()
     };
-    vec![
-        path_header(b"--- ", b"a/", old),
-        path_header(b"+++ ", b"b/", file.new_path.as_deref()),
-    ]
+    let new = if file.kind == DiffKind::Deleted && !new_side_is_empty {
+        file.old_path.as_deref()
+    } else {
+        file.new_path.as_deref()
+    };
+    let mut headers = Vec::new();
+    if let Some(header) = diff_header(old, new) {
+        headers.push(header);
+    }
+    if let Some(mode) = &file.mode {
+        match file.kind {
+            DiffKind::Added if old_side_is_empty => {
+                push_mode(&mut headers, b"new file mode ", mode.new.as_deref());
+            }
+            DiffKind::Deleted if new_side_is_empty => {
+                push_mode(&mut headers, b"deleted file mode ", mode.old.as_deref());
+            }
+            DiffKind::Added | DiffKind::Deleted => {}
+            _ => {
+                push_mode(&mut headers, b"old mode ", mode.old.as_deref());
+                push_mode(&mut headers, b"new mode ", mode.new.as_deref());
+            }
+        }
+    }
+    headers.push(path_header(b"--- ", b"a/", old));
+    headers.push(path_header(b"+++ ", b"b/", new));
+    headers
+}
+
+fn diff_header(old: Option<&Path>, new: Option<&Path>) -> Option<Vec<u8>> {
+    let old = old.or(new)?;
+    let new = new.unwrap_or(old);
+    let mut header = b"diff --git ".to_vec();
+    header.extend_from_slice(&crate::parse::path::prefixed_path(b"a/", old));
+    header.push(b' ');
+    header.extend_from_slice(&crate::parse::path::prefixed_path(b"b/", new));
+    Some(header)
+}
+
+fn push_mode(headers: &mut Vec<Vec<u8>>, marker: &[u8], mode: Option<&str>) {
+    if let Some(mode) = mode {
+        let mut header = marker.to_vec();
+        header.extend_from_slice(mode.as_bytes());
+        headers.push(header);
+    }
 }
 
 fn path_header(marker: &[u8], prefix: &[u8], path: Option<&Path>) -> Vec<u8> {
     let mut line = marker.to_vec();
     match path {
         Some(path) => {
-            line.extend_from_slice(prefix);
-            line.extend_from_slice(&path_bytes(path));
+            line.extend_from_slice(&crate::parse::path::prefixed_path(prefix, path));
         }
         None => line.extend_from_slice(b"/dev/null"),
     }
     line
-}
-
-fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().into()
-    }
-    #[cfg(not(unix))]
-    {
-        path.to_string_lossy().into_owned().into_bytes().into()
-    }
 }
 
 /// Applies the selection to one hunk's lines.
@@ -237,6 +268,60 @@ mod tests {
     use super::build;
     use crate::{HunkSelection, parse::diff::parse};
 
+    #[cfg(unix)]
+    #[test]
+    fn patch_preserves_quoted_non_utf8_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let parsed = parse(
+            b"diff --git \"a/name\\377\" \"b/name\\377\"\n--- \"a/name\\377\"\n+++ \"b/name\\377\"\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .expect("parse quoted path");
+        assert_eq!(
+            parsed.files[0]
+                .new_path
+                .as_deref()
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            b"name\xff"
+        );
+
+        let patch = build(
+            &parsed,
+            &[HunkSelection {
+                hunk_index: 0,
+                lines: None,
+            }],
+            false,
+        )
+        .expect("build quoted patch");
+        assert!(patch.starts_with(
+            b"diff --git \"a/name\\377\" \"b/name\\377\"\n--- \"a/name\\377\"\n+++ \"b/name\\377\"\n"
+        ));
+    }
+
+    #[test]
+    fn new_executable_retains_mode() {
+        let parsed = parse(
+            b"diff --git a/script b/script\nnew file mode 100755\n--- /dev/null\n+++ b/script\n@@ -0,0 +1 @@\n+echo hi\n",
+        )
+        .expect("parse executable addition");
+        let patch = build(
+            &parsed,
+            &[HunkSelection {
+                hunk_index: 0,
+                lines: None,
+            }],
+            false,
+        )
+        .expect("build executable patch");
+
+        assert!(patch.starts_with(
+            b"diff --git a/script b/script\nnew file mode 100755\n--- /dev/null\n+++ b/script\n"
+        ));
+    }
+
     fn text(diff: &[u8], selections: &[HunkSelection], reverse: bool) -> String {
         let parsed = parse(diff).expect("parse fixture");
         String::from_utf8(build(&parsed, selections, reverse).expect("build patch"))
@@ -260,7 +345,7 @@ mod tests {
         assert!(patch.contains(" tail\n"));
         assert!(patch.contains("+replacement"));
         assert!(patch.contains("@@ -1,3 +1,4 @@"));
-        assert!(patch.starts_with("--- a/a\n+++ b/a\n"));
+        assert!(patch.starts_with("diff --git a/a b/a\n--- a/a\n+++ b/a\n"));
     }
 
     #[test]
@@ -339,7 +424,9 @@ mod tests {
             }],
             false,
         );
-        assert!(added.starts_with("--- /dev/null\n+++ b/a\n"));
+        assert!(
+            added.starts_with("diff --git a/a b/a\nnew file mode 100644\n--- /dev/null\n+++ b/a\n")
+        );
         assert!(added.contains("@@ -0,0 +1,1 @@"));
 
         let deleted = text(
@@ -350,7 +437,11 @@ mod tests {
             }],
             false,
         );
-        assert!(deleted.starts_with("--- a/a\n+++ /dev/null\n"));
+        assert!(
+            deleted.starts_with(
+                "diff --git a/a b/a\ndeleted file mode 100644\n--- a/a\n+++ /dev/null\n"
+            )
+        );
         assert!(deleted.contains("@@ -1,1 +0,0 @@"));
     }
 
@@ -379,7 +470,7 @@ mod tests {
             }],
             false,
         );
-        assert!(patch.starts_with("--- a/new\n+++ b/new\n"));
+        assert!(patch.starts_with("diff --git a/new b/new\n--- a/new\n+++ b/new\n"));
         assert!(!patch.contains("rename from"));
     }
 

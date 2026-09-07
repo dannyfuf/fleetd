@@ -1862,6 +1862,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "two-face",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1898,6 +1899,8 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

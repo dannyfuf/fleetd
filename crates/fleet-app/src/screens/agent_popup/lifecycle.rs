@@ -1,7 +1,14 @@
 use super::*;
 
 impl AgentPopup {
-    pub(super) fn reconcile(&self, model: &Model, bridge: &Bridge, cell: Size<Pixels>) {
+    pub(super) fn reconcile(
+        &self,
+        model: &Model,
+        bridge: &Bridge,
+        state: &Entity<AppState>,
+        cell: Size<Pixels>,
+        cx: &mut App,
+    ) {
         let mut local = self.local.borrow_mut();
         let owner = PendingOwner {
             agent: model.agent,
@@ -27,13 +34,20 @@ impl AgentPopup {
             if model.terminal.is_some() {
                 local.state.size = Some(size);
             }
-            local.attach(
-                model.terminal,
-                model.generation,
-                model.base_terminal,
-                size,
+            drop(local);
+            reconcile_attachment(
+                &self.local,
+                AttachmentSpec {
+                    target: model.terminal,
+                    generation: model.generation,
+                    preserve: model.base_terminal,
+                    size,
+                },
                 bridge,
+                state,
+                cx,
             );
+            local = self.local.borrow_mut();
         }
         if model.primed
             && (local.mouse_selection.is_some_and(|selection| {
@@ -93,7 +107,7 @@ impl AgentPopup {
             return;
         };
         self.local.borrow_mut().padding = Some(cx.theme().space.sm);
-        self.reconcile(&model, bridge, cell_size(cx.theme()));
+        self.reconcile(&model, bridge, state, cell_size(cx.theme()), cx);
         self.cache_selection(&model, state, cx);
         self.track_selection(&model, state, cx);
         self.arm_prefix_hint(&model, state, cx);

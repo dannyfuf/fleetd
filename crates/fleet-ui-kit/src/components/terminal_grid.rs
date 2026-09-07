@@ -258,20 +258,15 @@ impl RenderOnce for TerminalGrid {
                     .filter(|c| c.visible && visible.contains(&c.row))
                     .map(|c| {
                         let cell = cell_at(rows.get(c.row), c.col);
-                        let hollow = !focused || c.shape == CursorShape::Hollow;
-                        let shape = if c.shape == CursorShape::Hollow {
-                            CursorShape::Block
-                        } else {
-                            c.shape
-                        };
+                        let (shape, hollow) = normalized_cursor(c.shape, focused);
                         // A filled block hides the glyph underneath it, so the glyph is redrawn
                         // in the terminal background color — otherwise the character under the
                         // cursor silently disappears, which is how "my shell ate my prompt" bugs
                         // are reported.
                         let glyph = (!hollow && shape == CursorShape::Block)
-                            .then(|| cell.filter(|cell| cell.paints_glyph()))
+                            .then(|| cell.filter(|(_, cell)| cell.paints_glyph()))
                             .flatten()
-                            .map(|cell| {
+                            .map(|(_, cell)| {
                                 let mut run = cell.text_run(&theme, cell.text.len());
                                 run.color = background;
                                 run.underline = None;
@@ -280,9 +275,9 @@ impl RenderOnce for TerminalGrid {
                             });
                         CursorLayout {
                             row: c.row,
-                            col: c.col,
+                            col: cell.map_or(c.col, |(owner, _)| owner),
                             cols: cell
-                                .map(|cell| cell.width.columns().max(1) as usize)
+                                .map(|(_, cell)| cell.width.columns().max(1) as usize)
                                 .unwrap_or(1),
                             shape,
                             hollow,
@@ -323,6 +318,12 @@ impl RenderOnce for TerminalGrid {
             None => grid.into_any_element(),
         }
     }
+}
+
+fn normalized_cursor(shape: CursorShape, focused: bool) -> (CursorShape, bool) {
+    let hollow = !focused || shape == CursorShape::Hollow;
+    let shape = if hollow { CursorShape::Block } else { shape };
+    (shape, hollow)
 }
 
 #[cfg(test)]

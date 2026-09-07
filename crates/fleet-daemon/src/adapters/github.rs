@@ -290,6 +290,7 @@ struct GhLabel {
 struct GhCheck {
     conclusion: Option<String>,
     status: Option<String>,
+    state: Option<String>,
 }
 
 fn parse_pull_requests(repo: &RepoId, output: &str) -> DaemonResult<Vec<PullRequest>> {
@@ -352,7 +353,10 @@ fn check_counts(checks: &[GhCheck]) -> (Option<u32>, Option<u32>) {
     let total = u32::try_from(checks.len()).unwrap_or(u32::MAX);
     let passed = checks
         .iter()
-        .filter(|check| check.conclusion.as_deref() == Some("SUCCESS"))
+        .filter(|check| {
+            check.conclusion.as_deref() == Some("SUCCESS")
+                || check.state.as_deref() == Some("SUCCESS")
+        })
         .count();
     (Some(u32::try_from(passed).unwrap_or(u32::MAX)), Some(total))
 }
@@ -374,12 +378,16 @@ fn parse_checks(checks: &[GhCheck]) -> PrChecks {
         matches!(
             check.conclusion.as_deref(),
             Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE")
-        )
+        ) || matches!(check.state.as_deref(), Some("FAILURE" | "ERROR"))
     }) {
         PrChecks::Fail
     } else if checks.iter().any(|check| {
-        check.conclusion.as_deref().is_none_or(str::is_empty)
-            || !matches!(check.status.as_deref(), Some("COMPLETED") | None)
+        if let Some(state) = check.state.as_deref() {
+            state != "SUCCESS"
+        } else {
+            check.conclusion.as_deref().is_none_or(str::is_empty)
+                || !matches!(check.status.as_deref(), Some("COMPLETED") | None)
+        }
     }) {
         PrChecks::Pending
     } else {
@@ -430,6 +438,27 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn legacy_status_contexts_contribute_to_rollup() {
+        let checks: Vec<GhCheck> = serde_json::from_str(
+            r#"[
+                {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+                {"__typename":"StatusContext","context":"legacy","state":"FAILURE"}
+            ]"#,
+        )
+        .expect("decode mixed status rollup");
+
+        assert_eq!(parse_checks(&checks), PrChecks::Fail);
+        assert_eq!(check_counts(&checks), (Some(1), Some(2)));
+
+        let passing: Vec<GhCheck> = serde_json::from_str(
+            r#"[{"__typename":"StatusContext","context":"legacy","state":"SUCCESS"}]"#,
+        )
+        .expect("decode legacy status context");
+        assert_eq!(parse_checks(&passing), PrChecks::Pass);
+        assert_eq!(check_counts(&passing), (Some(1), Some(1)));
+    }
 
     #[tokio::test]
     async fn fake_github_uses_the_production_single_pull_request_command() {

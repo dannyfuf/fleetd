@@ -47,11 +47,47 @@ fn the_summary_leads_with_the_first_failure() {
 }
 
 #[test]
-fn a_version_mismatch_is_not_a_crash_and_never_offers_retry() {
-    let mismatch = DaemonFailure::classify(
-        "Fleet daemon rejected the handshake: unsupported protocol 2; expected 4",
-        false,
+fn words_do_not_fake_protocol_mismatch() {
+    let prose = "a plugin handshake is unsupported by this host";
+    let now = std::time::Instant::now();
+    let mut state = crate::state::AppState::new("/tmp/fleet", now);
+    state.apply_bridge_event(
+        crate::bridge::BridgeEvent::ConnectFailed {
+            message: prose.to_owned(),
+            log_tail: Vec::new(),
+            stale_socket: false,
+        },
+        now,
     );
+    let crate::state::DaemonLink::Failed {
+        protocol_mismatch, ..
+    } = &state.daemon
+    else {
+        panic!("connection failure must use the daemon failure surface");
+    };
+    assert_eq!(
+        DaemonFailure::classify(*protocol_mismatch, false),
+        DaemonFailure::WontStart
+    );
+
+    state.apply_bridge_event(
+        crate::bridge::BridgeEvent::ProtocolMismatch {
+            message: "unsupported protocol 2; expected 4".to_owned(),
+            log_tail: Vec::new(),
+        },
+        now,
+    );
+    let crate::state::DaemonLink::Failed {
+        message,
+        protocol_mismatch,
+        ..
+    } = &state.daemon
+    else {
+        panic!("protocol mismatch must use the daemon failure surface");
+    };
+    assert!(*protocol_mismatch);
+    assert_eq!(message, "unsupported protocol 2; expected 4");
+    let mismatch = DaemonFailure::classify(*protocol_mismatch, false);
     assert_eq!(mismatch, DaemonFailure::VersionMismatch);
     assert!(
         !mismatch.hints().iter().any(|(key, _)| *key == "r"),
@@ -59,14 +95,13 @@ fn a_version_mismatch_is_not_a_crash_and_never_offers_retry() {
     );
     assert!(failure_headline(mismatch).contains("protocol"));
     assert!(
-        failure_detail(mismatch, "unsupported protocol 2", "/tmp/s.sock")
-            .contains("reconnecting will not help")
+        failure_detail(mismatch, message, "/tmp/s.sock").contains("reconnecting will not help")
     );
 }
 
 #[test]
 fn a_stale_socket_keeps_its_own_sentence() {
-    let stale = DaemonFailure::classify("could not connect to Fleet daemon", true);
+    let stale = DaemonFailure::classify(false, true);
     assert_eq!(stale, DaemonFailure::StaleSocket);
     assert_eq!(
         failure_detail(stale, "irrelevant", "~/.fleet/fleetd.sock"),
@@ -77,7 +112,7 @@ fn a_stale_socket_keeps_its_own_sentence() {
 
 #[test]
 fn anything_else_is_a_plain_failure_that_quotes_the_daemon() {
-    let wont_start = DaemonFailure::classify("Fleet daemon exited before becoming ready", false);
+    let wont_start = DaemonFailure::classify(false, false);
     assert_eq!(wont_start, DaemonFailure::WontStart);
     assert_eq!(
         failure_detail(wont_start, "exited with status 1", "/tmp/s.sock"),

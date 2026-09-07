@@ -7,10 +7,34 @@ pub(crate) fn channel_bridge() -> (GitBridge, Receiver<GitRequest>, Sender<GitEv
         GitBridge {
             requests,
             events: receiver,
+            event_tx: events.clone(),
         },
         reads,
         events,
     )
+}
+
+#[test]
+fn worker_disconnect_reports_failure() {
+    let (bridge, requests, _events) = channel_bridge();
+    requests.close();
+
+    bridge.send(GitRequest::Mutate {
+        label: "stage".to_owned(),
+        mutation: Box::new(Mutation::StageAll),
+    });
+    bridge.send(GitRequest::FileDiff("changed.txt".into()));
+
+    assert!(matches!(
+        bridge.events.try_recv(),
+        Ok(GitEvent::Failed { label, message })
+            if label == "stage" && message.contains("worker disconnected")
+    ));
+    assert!(matches!(
+        bridge.events.try_recv(),
+        Ok(GitEvent::ReadFailed { label, message, .. })
+            if label == "diff" && message.contains("worker disconnected")
+    ));
 }
 
 #[test]

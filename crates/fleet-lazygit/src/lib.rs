@@ -6,7 +6,10 @@
 
 #![warn(missing_docs)]
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use fleet_ui_kit::{KitAssets, Theme, ThemeMode};
 use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
@@ -31,6 +34,8 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
     init_tracing();
     tracing::info!(path = %path.display(), "fleet-lazygit: starting");
 
+    let startup_error = Arc::new(Mutex::new(None));
+    let reported_startup_error = startup_error.clone();
     gpui_platform::application()
         .with_assets(KitAssets)
         .run(move |cx: &mut App| {
@@ -86,11 +91,25 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
                 Err(error) => {
                     tracing::error!(%error, "fleet-lazygit: could not open the window");
                     eprintln!("fleet-lazygit: could not open the window: {error}");
+                    if let Ok(mut startup_error) = reported_startup_error.lock() {
+                        *startup_error = Some(error.to_string());
+                    }
                     cx.quit();
                 }
             }
         });
-    Ok(())
+    let startup_error = startup_error
+        .lock()
+        .map_err(|_| anyhow::anyhow!("fleet-lazygit: startup error state was poisoned"))?
+        .take();
+    startup_result(startup_error)
+}
+
+fn startup_result(error: Option<String>) -> anyhow::Result<()> {
+    match error {
+        Some(error) => Err(anyhow::anyhow!("could not open the window: {error}")),
+        None => Ok(()),
+    }
 }
 
 /// Installs a stderr `tracing` subscriber honouring `$RUST_LOG`. Errors are swallowed so an
@@ -102,4 +121,20 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_creation_failure_returns_error() {
+        let error = startup_result(Some("display unavailable".to_owned()))
+            .expect_err("window creation failure must reach main");
+        assert_eq!(
+            error.to_string(),
+            "could not open the window: display unavailable"
+        );
+        assert!(startup_result(None).is_ok());
+    }
 }

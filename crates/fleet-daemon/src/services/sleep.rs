@@ -117,7 +117,7 @@ impl Sleep {
 }
 
 pub(crate) async fn apply_session(
-    runtime: &SessionRuntime,
+    runtime: &Arc<SessionRuntime>,
     config_store: &ConfigStore,
     process: &dyn Process,
     session_id: &SessionId,
@@ -125,6 +125,7 @@ pub(crate) async fn apply_session(
     let Some(session) = runtime.session(session_id) else {
         return Ok(empty_result());
     };
+    let generation = SleepGeneration::capture(runtime, session.clone());
     let (config, policy) = config_store.load_with_sleep_policy().await?;
     if !config.sleep.enabled {
         let kept = session
@@ -166,7 +167,11 @@ pub(crate) async fn apply_session(
         }
 
         if let Some(editor_pid) = observation.and_then(Observation::editor_pid) {
-            if let Some(host) = runtime.host(terminal.id) {
+            if observation
+                .and_then(Observation::foreground_editor_pid)
+                .is_some()
+                && let Some(host) = runtime.host(terminal.id)
+            {
                 host.write(vec![0x1b])
                     .map_err(|error| terminal_io_error(terminal.id, error))?;
                 host.write(b":qa".to_vec())
@@ -186,27 +191,123 @@ pub(crate) async fn apply_session(
         closable.push((terminal.id, terminal.name.clone()));
     }
 
-    let closed = closable
-        .iter()
-        .map(|(_, name)| name.clone())
-        .collect::<Vec<_>>();
-    if kept.is_empty() {
-        runtime.kill_if_present(session_id);
-        return Ok(SleepResult {
-            kept,
-            closed,
-            session_killed: true,
-        });
-    }
+    let closable = generation.revalidate(runtime, &closable, &mut kept);
+    let mut closed = Vec::new();
     for (terminal, _) in closable {
-        runtime.close_terminal_if_present(terminal);
+        if generation.terminal_is_unchanged(runtime, terminal)
+            && let Some(name) = runtime.close_terminal_gated(terminal).await
+        {
+            closed.push(name);
+        }
     }
-    runtime.record_sleep(session_id, core_kept(&kept));
+    let session_killed = runtime.session(session_id).is_none();
+    if !session_killed {
+        runtime.record_sleep(session_id, core_kept(&kept));
+    }
     Ok(SleepResult {
         kept,
         closed,
-        session_killed: false,
+        session_killed,
     })
+}
+
+struct SleepGeneration {
+    session: Session,
+    output_bytes: HashMap<TerminalId, Option<u64>>,
+}
+
+impl SleepGeneration {
+    fn capture(runtime: &SessionRuntime, session: Session) -> Self {
+        let output_bytes = session
+            .terminals
+            .iter()
+            .map(|terminal| {
+                (
+                    terminal.id,
+                    runtime
+                        .host(terminal.id)
+                        .map(|host| host.activity().output_bytes_total),
+                )
+            })
+            .collect();
+        Self {
+            session,
+            output_bytes,
+        }
+    }
+
+    fn revalidate(
+        &self,
+        runtime: &SessionRuntime,
+        closable: &[(TerminalId, String)],
+        kept: &mut Vec<SleepKept>,
+    ) -> Vec<(TerminalId, String)> {
+        let Some(current) = runtime.session(&self.session.id) else {
+            return Vec::new();
+        };
+        let active_unchanged = current.active_terminal == self.session.active_terminal;
+        let mut approved = Vec::new();
+        for terminal in &current.terminals {
+            let candidate = closable
+                .iter()
+                .find(|(candidate, _)| *candidate == terminal.id);
+            let existed = self
+                .session
+                .terminals
+                .iter()
+                .any(|original| original.id == terminal.id);
+            if let Some((id, name)) = candidate
+                && active_unchanged
+                && self.terminal_matches(runtime, terminal)
+            {
+                approved.push((*id, name.clone()));
+            } else if (!existed || candidate.is_some())
+                && !kept.iter().any(|entry| entry.window == terminal.name)
+            {
+                kept.push(SleepKept {
+                    window: terminal.name.clone(),
+                    reason: "activity changed during sleep".to_owned(),
+                });
+            }
+        }
+        approved
+    }
+
+    fn terminal_is_unchanged(&self, runtime: &SessionRuntime, terminal: TerminalId) -> bool {
+        runtime
+            .session(&self.session.id)
+            .and_then(|session| {
+                session
+                    .terminals
+                    .into_iter()
+                    .find(|current| current.id == terminal)
+            })
+            .is_some_and(|current| self.terminal_matches(runtime, &current))
+    }
+
+    fn terminal_matches(
+        &self,
+        runtime: &SessionRuntime,
+        current: &fleet_core::sessions::Terminal,
+    ) -> bool {
+        let Some(original) = self
+            .session
+            .terminals
+            .iter()
+            .find(|terminal| terminal.id == current.id)
+        else {
+            return false;
+        };
+        let mut expected = original.clone();
+        expected
+            .foreground_command
+            .clone_from(&current.foreground_command);
+        expected.keep_alive.clone_from(&current.keep_alive);
+        let current_output = runtime
+            .host(current.id)
+            .map(|host| host.activity().output_bytes_total);
+        expected == *current && self.output_bytes.get(&current.id).copied() == Some(current_output)
+    }
 }
 
 #[derive(Default)]
@@ -230,6 +331,16 @@ impl Observation {
         self.processes
             .iter()
             .find(|entry| is_editor_command(&entry.command))
+            .map(|entry| entry.pid)
+    }
+
+    fn foreground_editor_pid(&self) -> Option<u32> {
+        self.processes
+            .iter()
+            .find(|entry| {
+                is_editor_command(&entry.command)
+                    && entry.terminal_foreground_process_group_id == Some(entry.process_group_id)
+            })
             .map(|entry| entry.pid)
     }
 }
@@ -451,8 +562,52 @@ mod tests {
     use super::*;
     use crate::{
         adapters::{clock::SystemClock, process::RealProcess},
-        testing::fakes::{FakeFiles, FakeShell},
+        testing::fakes::{FakeFiles, FakeProcess, FakeShell},
     };
+
+    #[tokio::test]
+    async fn terminal_close_waits_for_the_session_transition_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let files = Arc::new(FakeFiles::new(
+            temp.path().join("trash"),
+            vec![temp.path().join("worktrees")],
+        ));
+        let config = Arc::new(ConfigStore::new(temp.path(), files.clone()));
+        let mut effective = config.load().await.unwrap();
+        effective.windows = vec![fleet_core::config::WindowConfig {
+            name: "lazygit".to_owned(),
+            command: fleet_core::config::NATIVE_LAZYGIT.to_owned(),
+        }];
+        config.save(effective).await.unwrap();
+        let state = Arc::new(StateStore::new(temp.path(), files, Arc::new(SystemClock)));
+        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+        let session = sessions
+            .ensure(None, Some(fleet_core::config::Agent::Claude), false)
+            .await
+            .unwrap();
+        let session_id = session.id.clone();
+        let transition = sessions
+            .runtime
+            .claim_terminal_transition(session_id.clone())
+            .await;
+        let sleep = Sleep::new(config, state, Arc::new(FakeProcess::default()), &sessions);
+        let mut sleeping = tokio::spawn(async move { sleep.session(session_id).await });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut sleeping)
+                .await
+                .is_err(),
+            "sleep bypassed the terminal transition gate"
+        );
+        drop(transition);
+        let result = tokio::time::timeout(Duration::from_secs(2), sleeping)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.closed.len(), 1);
+        assert!(result.session_killed);
+    }
 
     #[tokio::test]
     async fn idle_observation_does_not_run_process_queries() {
@@ -483,6 +638,9 @@ mod tests {
             .map(|(pid, parent_pid)| ProcessInfo {
                 pid,
                 parent_pid,
+                process_group_id: pid,
+                terminal_foreground_process_group_id: Some(pid),
+                start_identity: format!("start-{pid}"),
                 command: pid.to_string(),
             })
             .collect::<Vec<_>>();
@@ -498,5 +656,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 5, 3, 6, 4]
         );
+    }
+
+    #[test]
+    fn background_editor_gets_no_shutdown_input() {
+        let mut observation = Observation {
+            processes: vec![ProcessInfo {
+                pid: 42,
+                parent_pid: 10,
+                process_group_id: 42,
+                terminal_foreground_process_group_id: Some(41),
+                start_identity: "editor-start".to_owned(),
+                command: "nvim notes.md".to_owned(),
+            }],
+            ..Observation::default()
+        };
+
+        assert_eq!(observation.editor_pid(), Some(42));
+        assert_eq!(observation.foreground_editor_pid(), None);
+        observation.processes[0].terminal_foreground_process_group_id = Some(42);
+        assert_eq!(observation.editor_pid(), Some(42));
+        assert_eq!(observation.foreground_editor_pid(), Some(42));
     }
 }

@@ -22,6 +22,7 @@ const MAX_DIRTY_PATHS: usize = 1024;
 pub struct RepoWatcher {
     _watcher: RecommendedWatcher,
     task: tokio::task::JoinHandle<()>,
+    last_error: Arc<Mutex<Option<GitError>>>,
 }
 
 impl RepoWatcher {
@@ -34,23 +35,38 @@ impl RepoWatcher {
         let git_dir = paths.git_dir.clone();
         let common_dir = paths.common_dir.clone();
         let callback_pending = Arc::clone(&pending);
+        let last_error = Arc::new(Mutex::new(None));
+        let callback_error = Arc::clone(&last_error);
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
-                if let Ok(event) = event {
-                    let mut changed = false;
-                    for path in event.paths {
-                        if relevant(&path, &worktree, &git_dir, &common_dir) {
-                            callback_pending
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .insert(path, Instant::now());
-                            changed = true;
+                let now = Instant::now();
+                let changed = match event {
+                    Ok(event) => {
+                        let mut changed = false;
+                        for path in event.paths {
+                            if relevant(&path, &worktree, &git_dir, &common_dir) {
+                                callback_pending
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .insert(path, now);
+                                changed = true;
+                            }
                         }
+                        changed
                     }
-                    if changed {
-                        // A pending wake already covers every path in the shared buffer.
-                        let _ = wake_tx.try_send(());
+                    Err(error) => {
+                        record_watcher_error(
+                            error.to_string(),
+                            &callback_pending,
+                            &callback_error,
+                            now,
+                        );
+                        true
                     }
+                };
+                if changed {
+                    // A pending wake already covers every path in the shared buffer.
+                    let _ = wake_tx.try_send(());
                 }
             },
             Config::default(),
@@ -75,10 +91,36 @@ impl RepoWatcher {
             Self {
                 _watcher: watcher,
                 task,
+                last_error,
             },
             event_rx,
         ))
     }
+
+    /// Takes the latest runtime watcher error, if the native backend reported one.
+    ///
+    /// The same failure also schedules a full repository refresh through the
+    /// change receiver returned by [`Self::new`].
+    pub fn take_error(&self) -> Option<GitError> {
+        self.last_error
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+}
+
+fn record_watcher_error(
+    message: String,
+    pending: &Mutex<PendingChanges>,
+    last_error: &Mutex<Option<GitError>>,
+    now: Instant,
+) {
+    *last_error.lock().unwrap_or_else(|error| error.into_inner()) =
+        Some(GitError::parse("repository watcher", message));
+    pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .invalidate_all(now);
 }
 
 impl Drop for RepoWatcher {
@@ -123,6 +165,13 @@ impl PendingChanges {
                 self.full_refresh = true;
             }
         }
+    }
+
+    fn invalidate_all(&mut self, now: Instant) {
+        self.started_at.get_or_insert(now);
+        self.updated_at = now;
+        self.paths.clone_from(&self.roots);
+        self.full_refresh = true;
     }
 
     fn deadline(&self) -> Option<Instant> {
@@ -180,8 +229,6 @@ async fn forward_changes(
 }
 
 fn relevant(path: &Path, worktree: &Path, git_dir: &Path, common_dir: &Path) -> bool {
-    let normalized = canonical(path);
-    let path = normalized.as_path();
     for directory in [git_dir, common_dir] {
         if let Ok(relative) = path.strip_prefix(directory) {
             if relative.starts_with("objects") || relative == Path::new("index.lock") {
@@ -202,21 +249,6 @@ fn relevant(path: &Path, worktree: &Path, git_dir: &Path, common_dir: &Path) -> 
         }
     }
     path.starts_with(worktree)
-}
-
-/// Canonicalizes `path`, falling back to its parent for entries that the event
-/// reports after they were already deleted.
-fn canonical(path: &Path) -> PathBuf {
-    if let Ok(resolved) = std::fs::canonicalize(path) {
-        return resolved;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => match std::fs::canonicalize(parent) {
-            Ok(resolved) => resolved.join(name),
-            Err(_) => path.to_path_buf(),
-        },
-        _ => path.to_path_buf(),
-    }
 }
 
 #[cfg(test)]
@@ -271,6 +303,40 @@ mod tests {
             pending.take_ready(now + DEBOUNCE * 2),
             Some(vec![PathBuf::from("/worktree/next")])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_event_classified_lexically() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let worktree = directory.path().join("worktree");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, worktree.join("linked")).unwrap();
+
+        assert!(relevant(
+            &worktree.join("linked/file"),
+            &worktree,
+            &worktree.join(".git"),
+            &worktree.join(".git"),
+        ));
+    }
+
+    #[test]
+    fn watcher_failure_is_retained_and_requests_full_refresh() {
+        let paths = paths();
+        let pending = Mutex::new(PendingChanges::new(&paths));
+        let last_error = Mutex::new(None);
+        let now = Instant::now();
+        record_watcher_error("backend stopped".to_owned(), &pending, &last_error, now);
+
+        assert!(last_error.lock().unwrap().is_some());
+        let mut pending = pending.lock().unwrap();
+        let refresh = pending.take_ready(now + DEBOUNCE).unwrap();
+        assert_eq!(refresh, pending.roots.iter().cloned().collect::<Vec<_>>());
     }
 
     #[tokio::test]

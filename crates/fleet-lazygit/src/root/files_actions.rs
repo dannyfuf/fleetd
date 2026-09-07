@@ -77,13 +77,22 @@ impl Lazygit {
         cx.notify();
     }
 
-    pub(super) fn commit(&mut self, _: &files::Commit, _: &mut Window, cx: &mut Context<Self>) {
-        self.open_prompt(Prompt {
-            title: "Commit".to_owned(),
-            subtitle: Some("⌘⏎ commits, ⏎ starts a new line".to_owned()),
-            buffer: crate::state::Buffer::multi_line(),
-            kind: PromptKind::Commit { amend: false },
-        });
+    pub(super) fn commit(
+        &mut self,
+        _: &files::Commit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_prompt(
+            Prompt {
+                title: "Commit".to_owned(),
+                subtitle: Some("⌘⏎ commits, ⏎ starts a new line".to_owned()),
+                buffer: crate::state::Buffer::multi_line(),
+                kind: PromptKind::Commit { amend: false },
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 

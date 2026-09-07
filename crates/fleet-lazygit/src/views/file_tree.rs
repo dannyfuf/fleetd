@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -174,13 +175,13 @@ impl FileTree {
 #[derive(Debug, Default)]
 struct Node {
     /// Child directories, keyed by their own name — a `BTreeMap` is the alphabetical sort.
-    dirs: BTreeMap<String, Node>,
+    dirs: BTreeMap<OsString, Node>,
     /// Files directly in this directory: `(name, index into files)`, alphabetical.
-    files: BTreeMap<String, usize>,
+    files: BTreeMap<OsString, usize>,
     aggregate: Aggregate,
 }
 
-fn insert(node: &mut Node, components: &[String], index: usize) {
+fn insert(node: &mut Node, components: &[OsString], index: usize) {
     match components {
         [] => {}
         [name] => {
@@ -190,9 +191,9 @@ fn insert(node: &mut Node, components: &[String], index: usize) {
     }
 }
 
-fn components(path: &Path) -> Vec<String> {
+fn components(path: &Path) -> Vec<OsString> {
     path.components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .map(|component| component.as_os_str().to_os_string())
         .collect()
 }
 
@@ -212,15 +213,21 @@ fn all_directories(files: &[FileStatus]) -> HashSet<PathBuf> {
 
 /// lazygit's `Compress`: while a directory's only child is a directory, the child replaces it and
 /// the display name grows by one segment. The chain still costs exactly one indent level.
-fn compress<'a>(name: &str, node: &'a Node, path: &Path) -> (String, PathBuf, &'a Node) {
-    let mut name = name.to_owned();
+fn compress<'a>(
+    name: &OsStr,
+    node: &'a Node,
+    path: &Path,
+    collapsed: &HashSet<PathBuf>,
+) -> (String, PathBuf, &'a Node) {
+    let mut name = name.to_string_lossy().into_owned();
     let mut path = path.to_path_buf();
     let mut node = node;
-    while node.files.is_empty() && node.dirs.len() == 1 {
+    while !collapsed.contains(&path) && node.files.is_empty() && node.dirs.len() == 1 {
         let Some((child_name, child)) = node.dirs.iter().next() else {
             break;
         };
-        name = format!("{name}/{child_name}");
+        name.push('/');
+        name.push_str(&child_name.to_string_lossy());
         path = path.join(child_name);
         node = child;
     }
@@ -270,7 +277,7 @@ fn walk(
     out: &mut Vec<FileRow>,
 ) {
     for (name, child) in &node.dirs {
-        let (name, child_path, child) = compress(name, child, &path.join(name));
+        let (name, child_path, child) = compress(name, child, &path.join(name), collapsed);
         let is_collapsed = collapsed.contains(&child_path);
         let aggregate = &child.aggregate;
         out.push(FileRow {
@@ -292,7 +299,12 @@ fn walk(
         }
     }
     for (name, index) in &node.files {
-        out.push(file_row(name.clone(), *index, depth, &files[*index]));
+        out.push(file_row(
+            name.to_string_lossy().into_owned(),
+            *index,
+            depth,
+            &files[*index],
+        ));
     }
 }
 
@@ -383,6 +395,16 @@ mod tests {
 
     fn modified(path: &str) -> FileStatus {
         file(path, ChangeKind::Unmodified, ChangeKind::Modified)
+    }
+
+    fn modified_path(path: PathBuf) -> FileStatus {
+        FileStatus {
+            path,
+            previous_path: None,
+            index: ChangeKind::Unmodified,
+            worktree: ChangeKind::Modified,
+            conflict: None,
+        }
     }
 
     fn staged(path: &str) -> FileStatus {
@@ -494,6 +516,22 @@ mod tests {
     }
 
     #[test]
+    fn compression_preserves_collapse() {
+        let initial = [modified("src/peer.txt"), modified("src/app/one.txt")];
+        let mut tree = tree(&initial);
+        tree.toggle_collapsed(Path::new("src"), &initial);
+        assert_eq!(shape(&tree), vec!["▶src"]);
+
+        let after_topology_change = [modified("src/app/one.txt")];
+        tree.rebuild(&after_topology_change);
+        assert_eq!(shape(&tree), vec!["▶src"]);
+        assert_eq!(
+            tree.row(0).map(|row| row.path.as_path()),
+            Some(Path::new("src"))
+        );
+    }
+
+    #[test]
     fn collapse_all_and_expand_all_cover_every_level() {
         let files = [modified("src/app/one.txt"), modified("src/lib/two.txt")];
         let mut tree = tree(&files);
@@ -547,5 +585,20 @@ mod tests {
             let index = row.file.expect("a file row carries its index");
             assert_eq!(files[index].path, row.path);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_siblings_are_distinct() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let first = PathBuf::from(OsString::from_vec(b"bad-\x80.txt".to_vec()));
+        let second = PathBuf::from(OsString::from_vec(b"bad-\x81.txt".to_vec()));
+        let files = [modified_path(first.clone()), modified_path(second.clone())];
+        let tree = tree(&files);
+
+        assert_eq!(tree.len(), 2);
+        assert!(tree.shared_rows().iter().any(|row| row.path == first));
+        assert!(tree.shared_rows().iter().any(|row| row.path == second));
     }
 }

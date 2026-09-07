@@ -2,7 +2,7 @@
 //! Split rows index those same rows; all rows have one uniform height.
 
 use gpui::SharedString;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -161,8 +161,10 @@ pub(crate) struct DiffModel {
     pub(crate) files: Vec<FileMeta>,
     /// Which layout this model was flattened for.
     pub(crate) mode: DiffViewMode,
-    /// The longest payload line, in characters — the horizontal scroll extent.
-    pub(crate) widest: usize,
+    /// Fallback payload widths in scalar columns, one per rendered code column.
+    pub(crate) payload_columns: [usize; 2],
+    /// Font-measured payload advances, filled on the first render of this model.
+    pub(crate) payload_advances: Cell<Option<[f32; 2]>>,
     /// How many characters one line-number gutter needs.
     pub(crate) digits: usize,
     /// Syntax runs, filled in off the foreground thread.
@@ -179,7 +181,8 @@ impl DiffModel {
             split: Vec::new(),
             files: Vec::new(),
             mode,
-            widest: 0,
+            payload_columns: [0; 2],
+            payload_advances: Cell::new(None),
             digits: 1,
             syntax: RefCell::new(Vec::new()),
         }
@@ -340,11 +343,7 @@ impl DiffModel {
             }
         }
 
-        let widest = rows
-            .iter()
-            .map(|row| row.text.chars().count())
-            .max()
-            .unwrap_or(0);
+        let payload_columns = payload_columns(&rows, &split, mode);
         let digits = highest.to_string().len().max(2);
         let count = rows.len();
         Some(Self {
@@ -357,7 +356,8 @@ impl DiffModel {
             },
             files,
             mode,
-            widest,
+            payload_columns,
+            payload_advances: Cell::new(None),
             digits,
             syntax: RefCell::new(vec![Vec::new(); count]),
         })
@@ -460,6 +460,41 @@ impl DiffModel {
             if let Some(slot) = syntax.get_mut(row) {
                 *slot = line;
             }
+        }
+    }
+}
+
+pub(crate) fn is_panned_payload(kind: RowKind) -> bool {
+    matches!(
+        kind,
+        RowKind::Added | RowKind::Removed | RowKind::Context | RowKind::Other
+    )
+}
+
+fn payload_columns(rows: &[DiffRow], split: &[SplitRow], mode: DiffViewMode) -> [usize; 2] {
+    let width = |index: usize| {
+        rows.get(index)
+            .filter(|row| is_panned_payload(row.kind))
+            .map_or(0, |row| row.text.chars().count())
+    };
+    match mode {
+        DiffViewMode::Unified => [
+            rows.iter()
+                .filter(|row| is_panned_payload(row.kind))
+                .map(|row| row.text.chars().count())
+                .max()
+                .unwrap_or(0),
+            0,
+        ],
+        DiffViewMode::Split => {
+            split
+                .iter()
+                .filter(|layout| !layout.full)
+                .fold([0, 0], |mut widest, layout| {
+                    widest[0] = widest[0].max(layout.left.map_or(0, width));
+                    widest[1] = widest[1].max(layout.right.map_or(0, width));
+                    widest
+                })
         }
     }
 }
@@ -605,7 +640,7 @@ mod tests {
         "diff --git a/demo.ts b/demo.ts\n",
         "--- a/demo.ts\n",
         "+++ b/demo.ts\n",
-        "@@ -1,3 +1,4 @@\n",
+        "@@ -1,2 +1,3 @@\n",
         " const one = 1;\n",
         "-const two = 2;\n",
         "+const two = 3;\n",

@@ -1,10 +1,16 @@
 //! §3.8.7 Help (`?`) — every context side by side, grouped by mode.
 
+use std::collections::HashMap;
+
 use fleet_ui_kit::{Icon, TextRole, prelude::*, styled_with};
-use gpui::{AnyElement, App, Entity, FocusHandle, HighlightStyle, StyledText, Window, div, px};
+use gpui::{
+    AnyElement, App, Entity, EntityId, FocusHandle, Global, HighlightStyle, ScrollHandle,
+    StyledText, Window, div, point, px,
+};
 
 use crate::{
-    dialogs::root,
+    actions::dialog,
+    dialogs::{notify, root},
     keymap,
     presentation::{age_secs, humanize, now_unix, pretty_keys},
     state::{AppState, Screen},
@@ -26,6 +32,38 @@ const KEY_COLUMN: f32 = 68.0;
 /// (`half p…`, `select…` nine rows running). Three columns leave ~190 px, which is what makes
 /// the labels readable — and readable labels are the entire job of a keymap.
 const COLUMNS: usize = 3;
+const KEYBOARD_SCROLL_STEP: f32 = 48.0;
+
+#[derive(Default)]
+struct HelpScrollRegistry(HashMap<EntityId, ScrollHandle>);
+
+impl Global for HelpScrollRegistry {}
+
+fn help_scroll(state: &Entity<AppState>, cx: &mut App) -> ScrollHandle {
+    let id = state.entity_id();
+    if let Some(scroll) = cx.default_global::<HelpScrollRegistry>().0.get(&id) {
+        return scroll.clone();
+    }
+    let scroll = ScrollHandle::new();
+    cx.default_global::<HelpScrollRegistry>()
+        .0
+        .insert(id, scroll.clone());
+    cx.observe_release(state, move |_, cx| {
+        cx.default_global::<HelpScrollRegistry>().0.remove(&id);
+    })
+    .detach();
+    scroll
+}
+
+fn next_scroll_offset(current: f32, maximum: f32, delta: f32) -> f32 {
+    (current - delta).clamp(-maximum.max(0.0), 0.0)
+}
+
+fn scroll_by(scroll: &ScrollHandle, delta: f32) {
+    let offset = scroll.offset();
+    let next = next_scroll_offset(f32::from(offset.y), f32::from(scroll.max_offset().y), delta);
+    scroll.set_offset(point(offset.x, px(next)));
+}
 
 /// The paragraph §3.8.7 calls "the single most valuable paragraph in the app", in the spec's
 /// own markdown.
@@ -336,6 +374,7 @@ pub(crate) fn render(
         let theme = cx.theme();
         (theme.space.lg, theme.space.xxs)
     };
+    let scroll = help_scroll(state, cx);
     let paragraph = what_keeps_running(cx);
     let clipboard = key_paragraph_view(TERMINAL_CLIPBOARD, cx);
     let app = state.read(cx);
@@ -422,17 +461,35 @@ pub(crate) fn render(
                 // The whole table is taller than 620 px; the wheel reaches the rest rather
                 // than the bottom rows being silently unreachable.
                 .overflow_y_scroll()
+                .track_scroll(&scroll)
                 .children(column_elements),
         );
 
+    let down = scroll.clone();
+    let up = scroll.clone();
+    let down_state = state.clone();
+    let up_state = state.clone();
     root(focus)
+        .on_action(move |_: &dialog::CursorDown, _, cx| {
+            scroll_by(&down, KEYBOARD_SCROLL_STEP);
+            notify(&down_state, cx);
+        })
+        .on_action(move |_: &dialog::CursorUp, _, cx| {
+            scroll_by(&up, -KEYBOARD_SCROLL_STEP);
+            notify(&up_state, cx);
+        })
         .child(
             Dialog::new("Keymap")
                 .icon(Icon::CircleQuestionMark)
                 .width(super::Dialogs::Help.width(cx))
                 .height(px(620.0))
                 .body(body)
-                .hint_row(KeyHintRow::new().key("?", "close").key("esc", "close"))
+                .hint_row(
+                    KeyHintRow::new()
+                        .key("↑/↓", "scroll")
+                        .key("?", "close")
+                        .key("esc", "close"),
+                )
                 .primary(format!(
                     "Fleet {version} \u{00b7} protocol {} \u{00b7} fleetd up {uptime}",
                     protocol()
@@ -657,5 +714,19 @@ mod tests {
                 spec.context
             );
         }
+    }
+
+    #[test]
+    fn keyboard_reaches_last_help_row() {
+        let mut offset = 0.0;
+        let maximum = 913.0;
+        for _ in 0..100 {
+            offset = next_scroll_offset(offset, maximum, KEYBOARD_SCROLL_STEP);
+        }
+        assert_eq!(offset, -maximum);
+        assert_eq!(
+            next_scroll_offset(offset, maximum, -KEYBOARD_SCROLL_STEP),
+            -maximum + KEYBOARD_SCROLL_STEP
+        );
     }
 }

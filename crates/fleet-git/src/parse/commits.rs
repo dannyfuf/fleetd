@@ -1,22 +1,22 @@
-//! NUL/record-separated commit, reflog, and stash parsing.
+//! Fixed-field commit, reflog, and stash parsing.
 
 use crate::{Commit, GitError, ObjectId, ReflogEntry, Result, StashEntry};
 
 /// Parses commit records from the crate's pretty format.
 pub fn commits(input: &[u8]) -> Result<Vec<Commit>> {
-    split_records(input)
-        .map(|record| {
-            let fields = fields(record, 9, "commit log")?;
+    split_records(input, 9, "commit log")?
+        .into_iter()
+        .map(|fields| {
             Ok(Commit {
-                oid: ObjectId(text(fields[0]).to_owned()),
+                oid: ObjectId(crate::parse::text(fields[0]).into_owned()),
                 parents: ids(fields[1]),
-                author_name: text(fields[2]).to_owned(),
-                author_email: text(fields[3]).to_owned(),
+                author_name: crate::parse::text(fields[2]).into_owned(),
+                author_email: crate::parse::text(fields[3]).into_owned(),
                 authored_at: number(fields[4], "author timestamp")?,
                 committed_at: number(fields[5], "committer timestamp")?,
-                subject: text(fields[6]).to_owned(),
-                body: text(fields[7]).to_owned(),
-                decorations: text(fields[8])
+                subject: crate::parse::text(fields[6]).into_owned(),
+                body: crate::parse::text(fields[7]).into_owned(),
+                decorations: crate::parse::text(fields[8])
                     .split(',')
                     .map(str::trim)
                     .filter(|item| !item.is_empty())
@@ -30,14 +30,14 @@ pub fn commits(input: &[u8]) -> Result<Vec<Commit>> {
 
 /// Parses HEAD reflog records.
 pub fn reflog(input: &[u8]) -> Result<Vec<ReflogEntry>> {
-    split_records(input)
-        .map(|record| {
-            let fields = fields(record, 5, "reflog")?;
+    split_records(input, 5, "reflog")?
+        .into_iter()
+        .map(|fields| {
             Ok(ReflogEntry {
-                oid: ObjectId(text(fields[0]).to_owned()),
+                oid: ObjectId(crate::parse::text(fields[0]).into_owned()),
                 parents: ids(fields[1]),
-                selector: text(fields[2]).to_owned(),
-                subject: text(fields[3]).to_owned(),
+                selector: crate::parse::text(fields[2]).into_owned(),
+                subject: crate::parse::text(fields[3]).into_owned(),
                 committed_at: number(fields[4], "reflog timestamp")?,
             })
         })
@@ -46,10 +46,10 @@ pub fn reflog(input: &[u8]) -> Result<Vec<ReflogEntry>> {
 
 /// Parses stash records.
 pub fn stashes(input: &[u8]) -> Result<Vec<StashEntry>> {
-    split_records(input)
-        .map(|record| {
-            let fields = fields(record, 4, "stash list")?;
-            let selector = text(fields[0]);
+    split_records(input, 4, "stash list")?
+        .into_iter()
+        .map(|fields| {
+            let selector = crate::parse::text(fields[0]);
             let index = selector
                 .strip_prefix("stash@{")
                 .and_then(|value| value.strip_suffix('}'))
@@ -59,55 +59,86 @@ pub fn stashes(input: &[u8]) -> Result<Vec<StashEntry>> {
                 })?;
             Ok(StashEntry {
                 index,
-                oid: ObjectId(text(fields[1]).to_owned()),
+                oid: ObjectId(crate::parse::text(fields[1]).into_owned()),
                 created_at: number(fields[2], "stash timestamp")?,
-                subject: text(fields[3]).to_owned(),
+                subject: crate::parse::text(fields[3]).into_owned(),
             })
         })
         .collect()
 }
 
-fn split_records(input: &[u8]) -> impl Iterator<Item = &[u8]> {
-    input.split(|byte| *byte == 0x1e).filter_map(|record| {
-        let record = record.strip_prefix(b"\n").unwrap_or(record);
-        (!record.is_empty()).then_some(record.strip_suffix(b"\n").unwrap_or(record))
-    })
-}
-
-fn fields<'a>(record: &'a [u8], width: usize, context: &'static str) -> Result<Vec<&'a [u8]>> {
-    let mut values: Vec<&[u8]> = record.split(|byte| *byte == 0).collect();
-    // Every format ends with a trailing `%x00`, and `-z` adds one more NUL as a
-    // record terminator. Trim only the surplus so a genuinely empty final field
-    // (an absent body or decoration list) survives.
-    while values.len() > width && values.last().is_some_and(|value| value.is_empty()) {
-        values.pop();
+fn split_records<'a>(
+    input: &'a [u8],
+    width: usize,
+    context: &'static str,
+) -> Result<Vec<Vec<&'a [u8]>>> {
+    let mut cursor = 0;
+    let mut records = Vec::new();
+    while cursor < input.len() {
+        while input
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b'\n' | 0))
+        {
+            cursor += 1;
+        }
+        if cursor == input.len() {
+            break;
+        }
+        if input[cursor] != 0x1e {
+            return Err(GitError::parse(context, "record is missing its prefix"));
+        }
+        cursor += 1;
+        let mut fields = Vec::with_capacity(width);
+        for _ in 0..width {
+            let end = input[cursor..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|offset| cursor + offset)
+                .ok_or_else(|| GitError::parse(context, "record is missing a field terminator"))?;
+            fields.push(&input[cursor..end]);
+            cursor = end + 1;
+        }
+        records.push(fields);
     }
-    if values.len() != width {
-        return Err(GitError::parse(
-            context,
-            format!("expected {width} fields, got {}", values.len()),
-        ));
-    }
-    Ok(values)
+    Ok(records)
 }
 
 fn ids(bytes: &[u8]) -> Vec<ObjectId> {
-    text(bytes).split_whitespace().map(ObjectId::from).collect()
-}
-
-fn text(bytes: &[u8]) -> &str {
-    std::str::from_utf8(bytes).unwrap_or_default()
+    crate::parse::text(bytes)
+        .split_whitespace()
+        .map(ObjectId::from)
+        .collect()
 }
 
 fn number(bytes: &[u8], context: &'static str) -> Result<i64> {
-    text(bytes)
-        .parse()
-        .map_err(|error| GitError::parse(context, format!("{}: {error}", text(bytes))))
+    let text = crate::parse::text(bytes);
+    text.parse()
+        .map_err(|error| GitError::parse(context, format!("{text}: {error}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{commits, reflog, stashes};
+
+    #[test]
+    fn message_may_contain_record_separator() {
+        let input: &[u8] = b"\x1eaaa\x00\x00Ada\x00ada@example.test\x001\x002\x00subject\x00body before \x1e body after\x00\x00\n\x1ebbb\x00\x00Grace\x00grace@example.test\x003\x004\x00next\x00\x00\x00";
+        let parsed = commits(input).expect("parse commits containing record separator");
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].body, "body before \u{1e} body after");
+        assert_eq!(parsed[1].oid.as_str(), "bbb");
+    }
+
+    #[test]
+    fn invalid_utf8_identity_not_erased() {
+        let input: &[u8] =
+            b"\x1eaaa\x00\x00A\xffda\x00ada@example.test\x001\x002\x00subject\x00\x00\x00";
+        let parsed = commits(input).expect("parse invalid UTF-8 identity");
+
+        assert!(!parsed[0].author_name.is_empty());
+        assert!(parsed[0].author_name.contains("\\xff"));
+    }
 
     #[test]
     fn parses_commit_records_with_bodies_and_decorations() {

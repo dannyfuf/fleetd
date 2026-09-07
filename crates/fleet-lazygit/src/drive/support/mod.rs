@@ -105,12 +105,12 @@ async fn run(
                 }
             };
             log.write(format!("run {line}"), cx).await;
-            if perform(step, dialect, &log, cx).await == Flow::Stop {
-                return;
-            }
-            if dialect == Dialect::Lazygit {
-                // This includes failed shots; changing that acknowledgement is a protocol change.
-                log.write(format!("done {line}"), cx).await;
+            match perform(step, dialect, &log, cx).await {
+                Flow::Stop => return,
+                Flow::Continue if dialect == Dialect::Lazygit => {
+                    log.write(format!("done {line}"), cx).await;
+                }
+                Flow::Continue | Flow::Failed => {}
             }
         }
     }
@@ -119,6 +119,7 @@ async fn run(
 #[derive(PartialEq, Eq)]
 enum Flow {
     Continue,
+    Failed,
     Stop,
 }
 
@@ -218,7 +219,7 @@ async fn capture(path: &Path, dialect: Dialect, log: &Log, cx: &mut AsyncWindowC
     cx.background_executor().timer(SETTLE).await;
     let targets = shot_paths(path, displays);
     let path = path.to_path_buf();
-    let messages = cx
+    let result = cx
         .background_spawn(async move {
             let status = Command::new(SCREENCAPTURE)
                 .arg("-x")
@@ -227,26 +228,43 @@ async fn capture(path: &Path, dialect: Dialect, log: &Log, cx: &mut AsyncWindowC
             screenshot_messages(dialect, &path, &targets, status)
         })
         .await;
-    for message in messages {
+    for message in result.messages {
         log.write(message, cx).await;
     }
-    Flow::Continue
+    if result.succeeded {
+        Flow::Continue
+    } else {
+        Flow::Failed
+    }
+}
+
+struct ScreenshotResult {
+    messages: Vec<String>,
+    succeeded: bool,
 }
 
 fn screenshot_messages(
-    dialect: Dialect,
+    _dialect: Dialect,
     path: &Path,
     targets: &[PathBuf],
     status: std::io::Result<std::process::ExitStatus>,
-) -> Vec<String> {
+) -> ScreenshotResult {
     match status {
-        Ok(status) if status.success() => targets
-            .iter()
-            .map(|target| format!("done shot {}", target.display()))
-            .collect(),
-        other if dialect == Dialect::Lazygit => vec![format!("shot failed: {other:?}")],
-        Ok(status) => vec![format!("error shot {}: {status}", path.display())],
-        Err(error) => vec![format!("error shot {}: {error}", path.display())],
+        Ok(status) if status.success() => ScreenshotResult {
+            messages: targets
+                .iter()
+                .map(|target| format!("done shot {}", target.display()))
+                .collect(),
+            succeeded: true,
+        },
+        Ok(status) => ScreenshotResult {
+            messages: vec![format!("error shot {}: {status}", path.display())],
+            succeeded: false,
+        },
+        Err(error) => ScreenshotResult {
+            messages: vec![format!("error shot {}: {error}", path.display())],
+            succeeded: false,
+        },
     }
 }
 
@@ -325,33 +343,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn screenshot_messages_keep_both_dialects() {
+    fn failed_screenshot_emits_error() {
         use std::os::unix::process::ExitStatusExt;
         let path = Path::new("/tmp/help.png");
         let targets = shot_paths(path, 2);
+        let success = screenshot_messages(
+            Dialect::Fleet,
+            path,
+            &targets,
+            Ok(std::process::ExitStatus::from_raw(0)),
+        );
+        assert!(success.succeeded);
         assert_eq!(
-            screenshot_messages(
-                Dialect::Fleet,
-                path,
-                &targets,
-                Ok(std::process::ExitStatus::from_raw(0))
-            ),
+            success.messages,
             ["done shot /tmp/help.png", "done shot /tmp/help-2.png"]
         );
-        assert_eq!(
-            screenshot_messages(
-                Dialect::Fleet,
+
+        for dialect in [Dialect::Fleet, Dialect::Lazygit] {
+            let failure = screenshot_messages(
+                dialect,
                 path,
                 &targets,
-                Err(std::io::Error::other("failed"))
-            ),
-            ["error shot /tmp/help.png: failed"]
+                Err(std::io::Error::other("failed")),
+            );
+            assert!(!failure.succeeded);
+            assert_eq!(failure.messages, ["error shot /tmp/help.png: failed"]);
+        }
+
+        let failure = screenshot_messages(
+            Dialect::Lazygit,
+            path,
+            &targets[..1],
+            Ok(std::process::ExitStatus::from_raw(256)),
         );
-        let status = Ok(std::process::ExitStatus::from_raw(256));
-        let expected = format!("shot failed: {status:?}");
-        assert_eq!(
-            screenshot_messages(Dialect::Lazygit, path, &targets[..1], status),
-            [expected]
-        );
+        assert!(!failure.succeeded);
+        assert!(failure.messages[0].starts_with("error shot /tmp/help.png:"));
     }
 }

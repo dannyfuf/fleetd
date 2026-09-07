@@ -1,4 +1,136 @@
 use super::*;
+use async_channel::{Receiver, RecvError};
+use fleet_proto::error::{ErrorKind, ProtoError};
+
+type MutationReply = Result<Result<ResponseBody, ProtoError>, RecvError>;
+
+#[derive(Clone)]
+pub(super) struct JobsRequests(
+    Arc<dyn Fn(RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> + Send + Sync>,
+);
+
+impl JobsRequests {
+    pub(super) fn bridge(bridge: Bridge) -> Self {
+        Self(Arc::new(move |body| bridge.request(body)))
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_fn(
+        request: Arc<
+            dyn Fn(RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> + Send + Sync,
+        >,
+    ) -> Self {
+        Self(request)
+    }
+
+    fn request(&self, body: RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> {
+        (self.0)(body)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ExpectedMutation<'a> {
+    Cancel(&'a JobId),
+    Retry,
+    Dismiss,
+}
+
+pub(super) fn mutation_failure(
+    reply: MutationReply,
+    expected: ExpectedMutation<'_>,
+    operation: &str,
+) -> Option<String> {
+    match reply {
+        Ok(Err(error))
+            if error.kind == ErrorKind::NotFound
+                && matches!(expected, ExpectedMutation::Dismiss) =>
+        {
+            None
+        }
+        Ok(Err(error)) => Some(error.message),
+        Err(_) => Some(format!("could not {operation}: daemon reply was lost")),
+        Ok(Ok(ResponseBody::JobCancelled(actual))) if matches!(expected, ExpectedMutation::Cancel(expected) if actual == *expected) => {
+            None
+        }
+        Ok(Ok(ResponseBody::Job(_))) if matches!(expected, ExpectedMutation::Retry) => None,
+        Ok(Ok(ResponseBody::Ack)) if matches!(expected, ExpectedMutation::Dismiss) => None,
+        Ok(Ok(_)) => Some(format!(
+            "could not {operation}: daemon returned an unexpected response"
+        )),
+    }
+}
+
+pub(super) fn record_mutation_failure(
+    app: &mut AppState,
+    text: String,
+    job: Option<JobId>,
+    retryable: bool,
+) {
+    app.sticky_error = Some(StickyError {
+        text,
+        job,
+        retryable,
+    });
+}
+
+fn await_job_mutation(
+    reply: async_channel::Receiver<Result<ResponseBody, ProtoError>>,
+    expected_job: JobId,
+    retryable: bool,
+    retry: bool,
+    state: Entity<AppState>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        let answer = reply.recv().await;
+        let expected = if retry {
+            ExpectedMutation::Retry
+        } else {
+            ExpectedMutation::Cancel(&expected_job)
+        };
+        if let Some(error) = mutation_failure(
+            answer,
+            expected,
+            if retry { "retry job" } else { "cancel job" },
+        ) {
+            state.update(cx, |app, cx| {
+                record_mutation_failure(app, error, None, retryable);
+                cx.notify();
+            });
+        }
+    })
+    .detach();
+}
+
+pub(super) fn acknowledge_dismissal(app: &mut AppState, dismissed: &[JobId]) {
+    if let Some(snapshot) = app.snapshot.as_mut() {
+        snapshot.jobs.retain(|job| !dismissed.contains(&job.id));
+    }
+    app.seen_failed.extend(dismissed.iter().cloned());
+    if app
+        .sticky_error
+        .as_ref()
+        .and_then(|error| error.job.as_ref())
+        .is_some_and(|job| dismissed.contains(job))
+    {
+        app.sticky_error = None;
+    }
+}
+
+pub(super) fn reconcile_dismissed_panel(
+    panel: &mut PanelState,
+    jobs: &[JobRecord],
+    dismissed: &[JobId],
+) {
+    if panel
+        .expanded
+        .as_ref()
+        .is_some_and(|job| dismissed.contains(job))
+    {
+        panel.collapse();
+    }
+    panel.clamp(panel.visible_len(jobs));
+}
 
 /// The job the cursor is on, or `None` when the filtered list is empty.
 fn selected_job(
@@ -6,7 +138,115 @@ fn selected_job(
     state: &Entity<AppState>,
     cx: &App,
 ) -> Option<JobRecord> {
-    panel.read(cx).selected(snapshot_jobs(state, cx)).cloned()
+    panel.read(cx).action_job(snapshot_jobs(state, cx)).cloned()
+}
+
+pub(super) fn request_cancel(
+    panel: &Entity<PanelState>,
+    state: &Entity<AppState>,
+    requests: &JobsRequests,
+    cx: &mut App,
+) {
+    let Some(job) = selected_job(panel, state, cx) else {
+        return;
+    };
+    if !can_cancel(&job) {
+        refuse(state, "Job is not cancellable", cx);
+        return;
+    }
+    let expected = job.id.clone();
+    let reply = requests.request(RequestBody::CancelJob { job: job.id });
+    await_job_mutation(reply, expected, job.retryable, false, state.clone(), cx);
+    notify(state, cx);
+}
+
+pub(super) fn request_cancel_all(
+    panel: &Entity<PanelState>,
+    state: &Entity<AppState>,
+    requests: &JobsRequests,
+    cx: &mut App,
+) {
+    let jobs = snapshot_jobs(state, cx);
+    let targets: Vec<JobId> = jobs
+        .iter()
+        .filter(|job| can_cancel(job))
+        .map(|job| job.id.clone())
+        .collect();
+    if targets.is_empty() {
+        refuse(state, "Nothing to cancel", cx);
+        return;
+    }
+    let armed = panel.read_with(cx, |panel, _| panel.confirming_cancel_all);
+    if !armed {
+        panel.update(cx, |panel, _| panel.confirming_cancel_all = true);
+        notify(state, cx);
+        return;
+    }
+    panel.update(cx, |panel, _| panel.confirming_cancel_all = false);
+    for job in targets {
+        let reply = requests.request(RequestBody::CancelJob { job: job.clone() });
+        await_job_mutation(reply, job, false, false, state.clone(), cx);
+    }
+    notify(state, cx);
+}
+
+pub(super) fn request_retry(
+    panel: &Entity<PanelState>,
+    state: &Entity<AppState>,
+    requests: &JobsRequests,
+    cx: &mut App,
+) {
+    let Some(job) = selected_job(panel, state, cx) else {
+        return;
+    };
+    if !job.retryable {
+        refuse(state, "This job cannot be retried", cx);
+        return;
+    }
+    let expected = job.id.clone();
+    let reply = requests.request(RequestBody::RetryJob { job: job.id });
+    await_job_mutation(reply, expected, job.retryable, true, state.clone(), cx);
+    notify(state, cx);
+}
+
+pub(super) fn request_dismissal(
+    panel: &Entity<PanelState>,
+    state: &Entity<AppState>,
+    requests: &JobsRequests,
+    cx: &mut App,
+) {
+    let gone: Vec<JobId> = snapshot_jobs(state, cx)
+        .iter()
+        .filter(|job| is_dismissable(&job.status))
+        .map(|job| job.id.clone())
+        .collect();
+    if gone.is_empty() {
+        return;
+    }
+    let reply = requests.request(RequestBody::DismissJobs { jobs: gone.clone() });
+    let panel = panel.clone();
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        let answer = reply.recv().await;
+        cx.update(|cx| {
+            if let Some(error) = mutation_failure(answer, ExpectedMutation::Dismiss, "dismiss jobs")
+            {
+                state.update(cx, |app, cx| {
+                    record_mutation_failure(app, error, None, false);
+                    cx.notify();
+                });
+                return;
+            }
+            state.update(cx, |app, cx| {
+                acknowledge_dismissal(app, &gone);
+                cx.notify();
+            });
+            panel.update(cx, |panel, cx| {
+                reconcile_dismissed_panel(panel, snapshot_jobs(&state, cx), &gone);
+            });
+        });
+    })
+    .detach();
 }
 
 impl JobsPanel {
@@ -219,77 +459,36 @@ impl JobsPanel {
     pub(super) fn on_cancel(
         &self,
         state: &Entity<AppState>,
-        bridge: &Bridge,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::CancelJob, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
-        let bridge = bridge.clone();
         move |_, _, cx| {
-            let Some(job) = selected_job(&panel, &state, cx) else {
-                return;
-            };
-            if !can_cancel(&job) {
-                refuse(&state, "Job is not cancellable", cx);
-                return;
-            }
-            bridge.send(RequestBody::CancelJob { job: job.id });
-            notify(&state, cx);
+            request_cancel(&panel, &state, &requests, cx);
         }
     }
 
     pub(super) fn on_cancel_all(
         &self,
         state: &Entity<AppState>,
-        bridge: &Bridge,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::CancelAll, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
-        let bridge = bridge.clone();
         move |_, _, cx| {
-            let jobs = snapshot_jobs(&state, cx);
-            let targets: Vec<JobId> = jobs
-                .iter()
-                .filter(|job| can_cancel(job))
-                .map(|job| job.id.clone())
-                .collect();
-            if targets.is_empty() {
-                refuse(&state, "Nothing to cancel", cx);
-                return;
-            }
-            let armed = panel.read_with(cx, |panel, _| panel.confirming_cancel_all);
-            if !armed {
-                panel.update(cx, |panel, _| panel.confirming_cancel_all = true);
-                notify(&state, cx);
-                return;
-            }
-            panel.update(cx, |panel, _| panel.confirming_cancel_all = false);
-            for job in targets {
-                bridge.send(RequestBody::CancelJob { job });
-            }
-            notify(&state, cx);
+            request_cancel_all(&panel, &state, &requests, cx);
         }
     }
 
     pub(super) fn on_retry(
         &self,
         state: &Entity<AppState>,
-        bridge: &Bridge,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::Retry, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
-        let bridge = bridge.clone();
         move |_, _, cx| {
-            let Some(job) = selected_job(&panel, &state, cx) else {
-                return;
-            };
-            if !job.retryable {
-                refuse(&state, "This job cannot be retried", cx);
-                return;
-            }
-            // The retried job comes back as a fresh record, so the failed one stops owning the
-            // sticky slot the moment the daemon answers.
-            bridge.send(RequestBody::RetryJob { job: job.id });
-            notify(&state, cx);
+            request_retry(&panel, &state, &requests, cx);
         }
     }
 
@@ -318,42 +517,12 @@ impl JobsPanel {
     pub(super) fn on_dismiss(
         &self,
         state: &Entity<AppState>,
-        bridge: &Bridge,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::DismissFinished, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
-        let bridge = bridge.clone();
         move |_, _, cx| {
-            let jobs = snapshot_jobs(&state, cx);
-            let gone: Vec<JobId> = jobs
-                .iter()
-                .filter(|job| is_dismissable(&job.status))
-                .map(|job| job.id.clone())
-                .collect();
-            let total = jobs.len();
-            if gone.is_empty() {
-                return;
-            }
-            panel.update(cx, |panel, _| {
-                if panel
-                    .expanded
-                    .as_ref()
-                    .is_some_and(|job| gone.contains(job))
-                {
-                    panel.collapse();
-                }
-                let len = total.saturating_sub(gone.len());
-                panel.clamp(len);
-            });
-            bridge.send(RequestBody::DismissJobs { jobs: gone.clone() });
-            state.update(cx, |state, cx| {
-                if let Some(snapshot) = state.snapshot.as_mut() {
-                    snapshot.jobs.retain(|job| !gone.contains(&job.id));
-                }
-                state.seen_failed.extend(gone.iter().cloned());
-                state.sticky_error = None;
-                cx.notify();
-            });
+            request_dismissal(&panel, &state, &requests, cx);
         }
     }
 }

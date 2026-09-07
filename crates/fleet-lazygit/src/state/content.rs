@@ -14,6 +14,8 @@ pub(crate) enum MainContent {
         unstaged: Option<Arc<Diff>>,
         /// Index vs HEAD.
         staged: Option<Arc<Diff>>,
+        /// Failure from the read for this path.
+        error: Option<String>,
     },
     /// A commit's diff and file list.
     CommitDiff {
@@ -23,6 +25,8 @@ pub(crate) enum MainContent {
         diff: Option<Arc<Diff>>,
         /// Its changed files.
         files: Arc<[CommitFile]>,
+        /// Failure from the commit read.
+        error: Option<String>,
     },
     /// A branch's diff against its merge base with HEAD.
     BranchDiff {
@@ -30,6 +34,8 @@ pub(crate) enum MainContent {
         name: String,
         /// Its diff.
         diff: Option<Arc<Diff>>,
+        /// Failure from the branch read.
+        error: Option<String>,
     },
     /// A stash entry's diff.
     StashDiff {
@@ -37,6 +43,8 @@ pub(crate) enum MainContent {
         index: usize,
         /// Its diff.
         diff: Option<Arc<Diff>>,
+        /// Failure from the stash read.
+        error: Option<String>,
     },
     /// A ref's commits — lazygit's sub-commits view, drilled into from a branch.
     SubCommits {
@@ -48,6 +56,10 @@ pub(crate) enum MainContent {
         shown: Option<ObjectId>,
         /// That patch, once read.
         diff: Option<Arc<Diff>>,
+        /// Failure from loading the ref's commit list.
+        commits_error: Option<String>,
+        /// Failure from loading the shown commit's patch.
+        diff_error: Option<String>,
     },
     /// A commit's changed files — lazygit's commit-files view, drilled into from a commit.
     CommitFiles {
@@ -63,6 +75,10 @@ pub(crate) enum MainContent {
         shown: Option<PathBuf>,
         /// That patch, once read.
         diff: Option<Arc<Diff>>,
+        /// Failure from loading the whole commit and its file list.
+        whole_error: Option<String>,
+        /// Failure from loading the selected file's patch.
+        diff_error: Option<String>,
     },
     /// A remote's URLs.
     RemoteInfo {
@@ -82,9 +98,96 @@ pub(crate) enum MainContent {
         file: Option<Arc<ConflictFile>>,
         /// Which conflict section is selected.
         section: usize,
+        /// Failure from reading the conflicted file.
+        error: Option<String>,
     },
     /// Nothing to show; the string is the reason.
     Empty(String),
+}
+
+impl MainContent {
+    fn read_error_slot(
+        &mut self,
+        identity: &crate::bridge::ReadIdentity,
+    ) -> Option<&mut Option<String>> {
+        match (self, identity) {
+            (Self::FileDiff { path, error, .. }, crate::bridge::ReadIdentity::FileDiff(read))
+                if path == read =>
+            {
+                Some(error)
+            }
+            (
+                Self::CommitDiff { oid, error, .. },
+                crate::bridge::ReadIdentity::CommitDiff(read),
+            ) if oid == read => Some(error),
+            (
+                Self::BranchDiff { name, error, .. },
+                crate::bridge::ReadIdentity::BranchDiff(read),
+            ) if name == read => Some(error),
+            (
+                Self::StashDiff { index, error, .. },
+                crate::bridge::ReadIdentity::StashDiff(read),
+            ) if index == read => Some(error),
+            (
+                Self::SubCommits {
+                    reference,
+                    commits_error,
+                    ..
+                },
+                crate::bridge::ReadIdentity::RefCommits(read),
+            ) if reference == read => Some(commits_error),
+            (
+                Self::SubCommits {
+                    shown: Some(shown),
+                    diff_error,
+                    ..
+                },
+                crate::bridge::ReadIdentity::CommitDiff(read),
+            ) if shown == read => Some(diff_error),
+            (
+                Self::CommitFiles {
+                    oid, whole_error, ..
+                },
+                crate::bridge::ReadIdentity::CommitDiff(read),
+            ) if oid == read => Some(whole_error),
+            (
+                Self::CommitFiles {
+                    oid,
+                    shown: Some(shown),
+                    diff_error,
+                    ..
+                },
+                crate::bridge::ReadIdentity::CommitFileDiff {
+                    oid: read_oid,
+                    path,
+                },
+            ) if oid == read_oid && shown == path => Some(diff_error),
+            (Self::Conflict { path, error, .. }, crate::bridge::ReadIdentity::Conflict(read))
+                if path == read =>
+            {
+                Some(error)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn record_read_error(
+        &mut self,
+        identity: &crate::bridge::ReadIdentity,
+        message: String,
+    ) -> bool {
+        let Some(slot) = self.read_error_slot(identity) else {
+            return false;
+        };
+        *slot = Some(message);
+        true
+    }
+
+    pub(crate) fn clear_read_error(&mut self, identity: &crate::bridge::ReadIdentity) {
+        if let Some(slot) = self.read_error_slot(identity) {
+            *slot = None;
+        }
+    }
 }
 
 /// Replaces a cached patch only when its content really changed.
@@ -169,13 +272,13 @@ impl GitUiState {
             &mut self.cursors.reflog,
             &snapshot.reflog,
             &mut self.sel_reflog,
-            |entry| entry.selector.clone(),
+            |entry| ReflogIdentity::from(entry),
         );
         retain_selection(
             &mut self.cursors.stashes,
             &snapshot.stashes,
             &mut self.sel_stash,
-            |entry| entry.index,
+            |entry| entry.oid.clone(),
         );
 
         if let Some(remote) = self.remote_drill.clone() {
@@ -183,8 +286,13 @@ impl GitUiState {
                 .remote_branches
                 .iter()
                 .find(|group| group.remote == remote)
-                .map_or(0, |group| group.branches.len());
-            self.cursors.remote_branches.set_len(branches);
+                .map_or(&[][..], |group| group.branches.as_slice());
+            retain_selection(
+                &mut self.cursors.remote_branches,
+                branches,
+                &mut self.sel_remote_branch,
+                |branch| branch.name.clone(),
+            );
         }
 
         self.snapshot = Some(snapshot);
@@ -199,16 +307,37 @@ impl GitUiState {
         if let Some(staging) = &self.staging {
             return vec![GitRequest::FileDiff(staging.path.clone())];
         }
-        // A main-panel drill-down (sub-commits, commit files) survives a refresh: it is a view
-        // of history, not of the working tree, and rebuilding it from the side panel's selection
-        // would throw the user out of it on the next watcher tick.
-        if self.focused == PanelId::Main
-            && matches!(
-                self.main,
-                MainContent::SubCommits { .. } | MainContent::CommitFiles { .. }
-            )
-        {
-            return Vec::new();
+        // A commit-files drill-down is keyed by an immutable OID and survives unchanged. A ref
+        // log has mutable membership, so keep the drill-down open but refresh its rows.
+        if self.focused == PanelId::Main {
+            match &self.main {
+                MainContent::CommitFiles { .. } => return Vec::new(),
+                MainContent::SubCommits { reference, .. } => {
+                    let reference = reference.clone();
+                    let upstream = self.snapshot.as_ref().and_then(|snapshot| {
+                        snapshot
+                            .local_branches
+                            .iter()
+                            .find(|branch| branch.name == reference)
+                            .and_then(|branch| branch.upstream.as_ref())
+                            .map(|upstream| upstream.name.clone())
+                            .or_else(|| {
+                                snapshot
+                                    .remote_branches
+                                    .iter()
+                                    .flat_map(|group| &group.branches)
+                                    .any(|branch| branch.name == reference)
+                                    .then(|| reference.clone())
+                            })
+                    });
+                    return vec![GitRequest::RefCommits {
+                        reference,
+                        upstream,
+                        limit: 300,
+                    }];
+                }
+                _ => {}
+            }
         }
         let panel = if self.focused == PanelId::Main {
             self.previous_panel
@@ -290,6 +419,7 @@ impl GitUiState {
                     oid: oid.clone(),
                     diff: None,
                     files: Arc::default(),
+                    error: None,
                 };
             }
         }
@@ -303,7 +433,11 @@ impl GitUiState {
         let index = entry.index;
         if !matches!(&self.main, MainContent::StashDiff { index: current, .. } if *current == index)
         {
-            self.main = MainContent::StashDiff { index, diff: None };
+            self.main = MainContent::StashDiff {
+                index,
+                diff: None,
+                error: None,
+            };
         }
         vec![GitRequest::StashDiff(index)]
     }
@@ -335,6 +469,7 @@ impl GitUiState {
                         path: path.clone(),
                         file: None,
                         section: 0,
+                        error: None,
                     };
                 }
                 return vec![GitRequest::Conflict(path)];
@@ -346,6 +481,7 @@ impl GitUiState {
                 path,
                 unstaged: None,
                 staged: None,
+                error: None,
             };
         }
         vec![request]
@@ -357,6 +493,7 @@ impl GitUiState {
             self.main = MainContent::BranchDiff {
                 name: name.clone(),
                 diff: None,
+                error: None,
             };
         }
         vec![GitRequest::BranchDiff(name)]
@@ -373,6 +510,7 @@ impl GitUiState {
                 path: current,
                 unstaged: u,
                 staged: s,
+                ..
             } if current == path => {
                 keep_or_replace(u, unstaged);
                 keep_or_replace(s, staged);

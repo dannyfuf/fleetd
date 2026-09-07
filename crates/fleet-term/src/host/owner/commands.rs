@@ -75,12 +75,17 @@ impl TerminalOwner {
         let mut viewport = None;
         // Bound input work as well as PTY output, so neither can starve frame delivery.
         for _ in 0..COMMAND_BATCH_LIMIT {
-            let command = match first
+            let (command, reservation) = match first
                 .take()
                 .map(Ok)
                 .unwrap_or_else(|| self.inbox.try_recv())
             {
-                Ok(OwnerEvent::Command(command)) => command,
+                #[cfg(test)]
+                Ok(OwnerEvent::Command(command)) => (command, None),
+                Ok(OwnerEvent::BudgetedCommand {
+                    command,
+                    _reservation,
+                }) => (command, Some(_reservation)),
                 Ok(OwnerEvent::PtyReady) => {
                     self.wakeup.pending.store(false, Ordering::Release);
                     continue;
@@ -92,17 +97,20 @@ impl TerminalOwner {
                 Err(mpsc::TryRecvError::Empty) => break,
             };
             let command = match command {
-                HostCommand::Wheel(event) => match self.engine.wheel(&event) {
-                    WheelAction::Viewport(steps) => {
+                HostCommand::Wheel(event) => match self.engine.try_wheel(&event) {
+                    Ok(WheelAction::Viewport(steps)) => {
                         HostCommand::Scroll(ScrollCommand::Lines(steps))
                     }
-                    WheelAction::Pty(bytes) => {
+                    Ok(WheelAction::Pty(bytes)) => {
                         self.flush_viewport(&mut viewport);
-                        self.record_input();
-                        self.write(&bytes);
+                        self.write_command_input(&bytes, reservation);
                         continue;
                     }
-                    WheelAction::Drop => continue,
+                    Ok(WheelAction::Drop) => continue,
+                    Err(error) => {
+                        warn!(%error, terminal = %self.terminal, "failed to encode terminal wheel event");
+                        continue;
+                    }
                 },
                 HostCommand::ScrollOrKey { scroll, key } => {
                     if self.engine.modes().alt_screen {
@@ -121,35 +129,41 @@ impl TerminalOwner {
             }
             // Preserve input/resize ordering across scroll batches.
             self.flush_viewport(&mut viewport);
-            self.apply_command(command);
+            self.apply_command(command, reservation);
         }
         self.flush_viewport(&mut viewport);
         self.forward_engine_events();
     }
 
-    fn apply_command(&mut self, command: HostCommand) {
+    fn apply_command(&mut self, command: HostCommand, reservation: Option<CommandReservation>) {
         match command {
             HostCommand::Write(bytes) => {
                 follow_input(&mut self.engine, &mut self.viewport_moved);
-                self.record_input();
-                self.write(&bytes);
+                self.write_command_input(&bytes, reservation);
             }
             HostCommand::Key(event) => {
                 follow_input(&mut self.engine, &mut self.viewport_moved);
-                let bytes = self.engine.encode_key(&event);
-                self.record_input();
-                self.write(&bytes);
+                match self.engine.try_encode_key(&event) {
+                    Ok(bytes) => self.write_command_input(&bytes, reservation),
+                    Err(error) => {
+                        warn!(%error, terminal = %self.terminal, "failed to encode terminal key")
+                    }
+                }
             }
-            HostCommand::Mouse(event) => {
-                let bytes = self.engine.encode_mouse(&event);
-                self.record_input();
-                self.write(&bytes);
-            }
+            HostCommand::Mouse(event) => match self.engine.try_encode_mouse(&event) {
+                Ok(bytes) => self.write_command_input(&bytes, reservation),
+                Err(error) => {
+                    warn!(%error, terminal = %self.terminal, "failed to encode terminal mouse event")
+                }
+            },
             HostCommand::Paste(text) => {
                 follow_input(&mut self.engine, &mut self.viewport_moved);
-                let bytes = self.engine.encode_paste(&text);
-                self.record_input();
-                self.write(&bytes);
+                match self.engine.try_encode_paste(&text) {
+                    Ok(bytes) => self.write_command_input(&bytes, reservation),
+                    Err(error) => {
+                        warn!(%error, terminal = %self.terminal, "failed to encode terminal paste")
+                    }
+                }
             }
             HostCommand::Resize { cols, rows } => {
                 match resize(&self.pty, &mut self.engine, cols, rows) {
@@ -163,7 +177,12 @@ impl TerminalOwner {
                     }
                 }
             }
-            HostCommand::Attach { cols, rows, reply } => self.attach(cols, rows, reply),
+            HostCommand::Attach {
+                cols,
+                rows,
+                deadline,
+                reply,
+            } => self.attach(cols, rows, deadline, reply),
             HostCommand::RequestFull => self.force_full = true,
             HostCommand::Kill => self.kill(),
             HostCommand::Scroll(_) | HostCommand::Wheel(_) | HostCommand::ScrollOrKey { .. } => {
@@ -172,22 +191,62 @@ impl TerminalOwner {
         }
     }
 
-    fn attach(&mut self, cols: u16, rows: u16, reply: Sender<Result<FrameUpdate, String>>) {
+    fn write_command_input(&mut self, bytes: &[u8], reservation: Option<CommandReservation>) {
+        match self.write(bytes, reservation) {
+            Ok(()) => self.record_input(),
+            Err(error) => {
+                warn!(%error, terminal = %self.terminal, "failed to write terminal PTY input")
+            }
+        }
+    }
+
+    fn attach(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        deadline: Instant,
+        reply: Sender<Result<FrameUpdate, String>>,
+    ) {
+        if deadline <= Instant::now() {
+            let _ = reply.try_send(Err("attachment deadline elapsed".to_owned()));
+            return;
+        }
         if let Err(error) = resize(&self.pty, &mut self.engine, cols, rows) {
-            let _ = reply.send_blocking(Err(error));
+            let _ = reply.try_send(Err(error));
             return;
         }
         self.compression_at
             .get_or_insert(Instant::now() + COMPRESSION_IDLE);
-        let mut frame = self.take_frame(true);
-        let _ = reply.send_blocking(Ok(frame.clone()));
-        // Keep both delivery sequences, but snapshot the emulator only once.
-        frame.seq = self.sequence;
-        self.sequence = self.sequence.saturating_add(1);
-        if self.events.send_blocking(HostEvent::Frame(frame)).is_err() {
-            self.commands_closed = true;
+        let mut frame = match self.take_frame(true) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.dirty = true;
+                self.force_full = true;
+                let _ = reply.try_send(Err(error.to_string()));
+                return;
+            }
+        };
+        if deadline <= Instant::now() {
+            self.dirty = true;
+            self.force_full = true;
+            let _ = reply.try_send(Err("attachment deadline elapsed".to_owned()));
+            return;
         }
-        self.frame_delivered();
+        if reply.try_send(Ok(frame.clone())).is_err() {
+            self.dirty = true;
+            self.force_full = true;
+            return;
+        }
+        // Keep both delivery sequences, but snapshot the emulator only once.
+        self.sequence = self.sequence.saturating_add(1);
+        frame.seq = self.sequence;
+        if self.try_send_event(HostEvent::Frame(frame)).is_ok() {
+            self.sequence = self.sequence.saturating_add(1);
+            self.frame_delivered();
+        } else {
+            self.dirty = true;
+            self.force_full = true;
+        }
     }
 
     fn flush_viewport(&mut self, pending: &mut Option<PendingViewport>) {

@@ -23,9 +23,9 @@ use crate::{
     DaemonError, DaemonResult,
     adapters::{git::Git, github::Github},
     error::REMOTE_UNSUPPORTED,
-    jobs::{JobCtx, JobManager},
+    jobs::{JobCtx, JobManager, JobPolicy},
     services::{
-        awaited::{JobDelivery, git_error},
+        awaited::{JobDelivery, copy_error},
         sessions::Sessions,
     },
     stores::state::StateStore,
@@ -70,18 +70,41 @@ impl Inspect {
         repo: Option<RepoId>,
         fetch: bool,
     ) -> DaemonResult<Vec<WorktreeInspection>> {
+        let repos = if let Some(repo) = &repo {
+            vec![repo.clone()]
+        } else {
+            ids.iter()
+                .map(|id| {
+                    RepoId::try_from(id.repo())
+                        .map_err(|error| DaemonError::Validation(error.to_string()))
+                })
+                .collect::<DaemonResult<Vec<_>>>()?
+        };
         let service = self.clone();
-        let (delivery, awaited) = JobDelivery::job_gets_copy(git_error);
-        self.jobs.submit(
-            JobKind::Inspect,
-            format!("inspect-{}", uuid::Uuid::new_v4()),
-            "Inspect worktrees",
-            true,
-            true,
-            move |context| async move {
-                delivery.finish(service.inspect_inner(ids, repo, fetch, &context).await)
-            },
-        );
+        let (delivery, awaited) = JobDelivery::job_gets_copy(copy_error);
+        let target = format!("inspect-{}", uuid::Uuid::new_v4());
+        if repos.is_empty() {
+            self.jobs.submit_for_all_repos(
+                JobKind::Inspect,
+                target,
+                "Inspect worktrees",
+                JobPolicy::new(true, true),
+                move |context| async move {
+                    delivery.finish(service.inspect_inner(ids, repo, fetch, &context).await)
+                },
+            )?;
+        } else {
+            self.jobs.submit_for_repos(
+                repos,
+                JobKind::Inspect,
+                target,
+                "Inspect worktrees",
+                JobPolicy::new(true, true),
+                move |context| async move {
+                    delivery.finish(service.inspect_inner(ids, repo, fetch, &context).await)
+                },
+            )?;
+        }
         awaited.wait().await
     }
 
@@ -261,6 +284,20 @@ impl Inspect {
                 return failed_inspection(&worktree, status, inspected_at, error.to_string());
             }
         };
+        let branch = match self.git.current_branch(path).await {
+            Ok(branch) if !branch.is_empty() => branch,
+            Ok(_) => {
+                return failed_inspection(
+                    &worktree,
+                    status,
+                    inspected_at,
+                    "HEAD is detached".to_owned(),
+                );
+            }
+            Err(error) => {
+                return failed_inspection(&worktree, status, inspected_at, error.to_string());
+            }
+        };
         let porcelain = match self.git.status_porcelain(path).await {
             Ok(porcelain) => porcelain,
             Err(error) => {
@@ -269,7 +306,7 @@ impl Inspect {
         };
         let dirty_files = porcelain.lines().filter(|line| !line.is_empty()).count() as u64;
 
-        let pull_request = match self.latest_pull_request(&repo.id, &worktree.branch).await {
+        let pull_request = match self.latest_pull_request(&repo.id, &branch).await {
             Ok(pull_request) => pull_request,
             Err(()) => {
                 warnings.push(WARNING_GH_UNAVAILABLE.to_owned());
@@ -281,7 +318,7 @@ impl Inspect {
             |pull| pull.base_ref_name.clone(),
         );
 
-        let (upstream, upstream_gone) = match self.git.upstream(path, &worktree.branch).await {
+        let (upstream, upstream_gone) = match self.git.upstream(path, &branch).await {
             Ok(raw) => parse_upstream(&raw),
             Err(_) => (None, false),
         };
@@ -303,18 +340,14 @@ impl Inspect {
             (None, None)
         };
 
-        let remote_branch_exists = match self
-            .git
-            .remote_branch_exists(remote_path, &worktree.branch)
-            .await
-        {
+        let remote_branch_exists = match self.git.remote_branch_exists(remote_path, &branch).await {
             Ok(exists) => exists,
             Err(_) => {
                 warnings.push(WARNING_PUBLISHED_STATUS_UNAVAILABLE.to_owned());
                 false
             }
         };
-        let expected_upstream = format!("origin/{}", worktree.branch);
+        let expected_upstream = format!("origin/{branch}");
         let matching_upstream_gone =
             upstream_gone && upstream.as_deref() == Some(expected_upstream.as_str());
         let published = derive_published(remote_branch_exists, matching_upstream_gone);
@@ -323,25 +356,39 @@ impl Inspect {
         let (unique_commits, merged_into_target) =
             match self.git.revision_exists(remote_path, &target).await {
                 Ok(true) => {
-                    let unique = match self
-                        .git
-                        .unique_commits_from(remote_path, &target, &head)
+                    match self
+                        .shared_target_revision(path, remote_path, &target)
                         .await
                     {
-                        Ok(count) => Some(count),
+                        Ok(target_head) => {
+                            let unique = match self
+                                .git
+                                .unique_commits_from(path, &target_head, &head)
+                                .await
+                            {
+                                Ok(count) => Some(count),
+                                Err(_) => {
+                                    warnings
+                                        .push(WARNING_UNIQUE_COMMIT_COUNT_UNAVAILABLE.to_owned());
+                                    None
+                                }
+                            };
+                            let merged = match self.git.is_ancestor(path, &head, &target_head).await
+                            {
+                                Ok(merged) => merged,
+                                Err(_) => {
+                                    warnings.push(WARNING_TARGET_COMPARISON_FAILED.to_owned());
+                                    false
+                                }
+                            };
+                            (unique, merged)
+                        }
                         Err(_) => {
                             warnings.push(WARNING_UNIQUE_COMMIT_COUNT_UNAVAILABLE.to_owned());
-                            None
-                        }
-                    };
-                    let merged = match self.git.is_ancestor(remote_path, &head, &target).await {
-                        Ok(merged) => merged,
-                        Err(_) => {
                             warnings.push(WARNING_TARGET_COMPARISON_FAILED.to_owned());
-                            false
+                            (None, false)
                         }
-                    };
-                    (unique, merged)
+                    }
                 }
                 Ok(false) => {
                     warnings.push(WARNING_TARGET_REF_MISSING.to_owned());
@@ -369,7 +416,7 @@ impl Inspect {
             repo_id: worktree.repo_id,
             host: "local".to_owned(),
             path: worktree.path,
-            branch: worktree.branch,
+            branch,
             base_ref: worktree.base_ref,
             head: Some(head),
             target_branch,
@@ -405,6 +452,32 @@ impl Inspect {
             .latest_inspection_pull_request(repo, branch)
             .await
             .map_err(|_| ())
+    }
+
+    async fn shared_target_revision(
+        &self,
+        worktree: &Path,
+        pristine: &Path,
+        target: &str,
+    ) -> DaemonResult<String> {
+        let target_head = self.git.revision(pristine, target).await?;
+        if target_head.is_empty() {
+            return Err(DaemonError::Git(
+                "target resolved to an empty revision".to_owned(),
+            ));
+        }
+        let peeled = format!("{target_head}^{{commit}}");
+        if self.git.revision(worktree, &peeled).await.is_err() {
+            self.git
+                .fetch_refs(
+                    worktree,
+                    &pristine.to_string_lossy(),
+                    std::slice::from_ref(&target_head),
+                )
+                .await?;
+            self.git.revision(worktree, &peeled).await?;
+        }
+        Ok(target_head)
     }
 
     async fn pr_head_contains_local_head(

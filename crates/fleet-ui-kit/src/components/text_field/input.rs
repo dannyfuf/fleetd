@@ -6,7 +6,7 @@ use gpui::{
     UTF16Selection, Window, point, prelude::*, px,
 };
 
-use super::{EditEffect, FieldChrome, TextFieldState, TextInputElement};
+use super::{EditEffect, FieldChrome, TextFieldState, TextInputElement, state::offset_from_utf16};
 
 use crate::{icons::Icon, theme::ActiveTheme};
 
@@ -249,9 +249,8 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let caret = self.state.offset_to_utf16(self.state.cursor());
         Some(UTF16Selection {
-            range: caret..caret,
+            range: self.state.range_to_utf16(&self.state.selected_range()),
             reversed: false,
         })
     }
@@ -292,11 +291,17 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = self.resolve_range(range_utf16);
-        let start = range.start;
         self.state.replace_and_mark(range, new_text);
         if let Some(selected) = new_selected_range_utf16 {
-            let selected = self.state.range_from_utf16(&selected);
-            self.state.set_cursor(start + selected.end);
+            let inserted = self.state.marked_range().unwrap_or_else(|| {
+                let cursor = self.state.cursor();
+                cursor..cursor
+            });
+            let insertion = self.state.text().get(inserted.clone()).unwrap_or("");
+            let relative_start = offset_from_utf16(insertion, selected.start);
+            let relative_end = offset_from_utf16(insertion, selected.end);
+            self.state
+                .set_selected_range(inserted.start + relative_start..inserted.start + relative_end);
         }
         self.emit_changed(cx);
     }
@@ -336,7 +341,7 @@ impl EntityInputHandler for TextInput {
         cx: &mut Context<Self>,
     ) {
         let range = self.state.range_from_utf16(&range_utf16);
-        self.state.set_cursor(range.end);
+        self.state.set_selected_range(range);
         cx.notify();
     }
 
@@ -351,14 +356,14 @@ impl EntityInputHandler for TextInput {
 
 impl TextInput {
     /// The byte range an IME edit applies to: the explicit range, else the marked range, else
-    /// the caret.
+    /// the platform selection.
     fn resolve_range(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
         match range_utf16 {
             Some(range) => self.state.range_from_utf16(&range),
             None => self
                 .state
                 .marked_range()
-                .unwrap_or(self.state.cursor()..self.state.cursor()),
+                .unwrap_or_else(|| self.state.selected_range()),
         }
     }
 }

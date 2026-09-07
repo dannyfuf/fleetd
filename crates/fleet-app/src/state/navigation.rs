@@ -549,8 +549,11 @@ impl AppState {
                 self.seen_failed.insert(job);
             }
             if let Some(snapshot) = self.snapshot.as_ref() {
-                self.sticky_error =
-                    notifications::sticky_error_for(&snapshot.jobs, &self.seen_failed);
+                notifications::refresh_job_sticky_error(
+                    &mut self.sticky_error,
+                    &snapshot.jobs,
+                    &self.seen_failed,
+                );
             }
         }
         self.overlay = Some(overlay);

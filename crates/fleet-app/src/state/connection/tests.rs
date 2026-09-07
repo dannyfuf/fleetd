@@ -112,3 +112,27 @@ fn a_daemon_that_will_not_start_owns_the_whole_window() {
     );
     assert_eq!(state.context_chain(), vec!["Daemon", "Down"]);
 }
+
+#[test]
+fn restart_clears_daemon_local_identity() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let session: SessionId = "payroll/feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    state.renamed_terminals.insert(TerminalId(7));
+    state.touch_terminal(&session, TerminalId(7));
+
+    let mut restarted_snapshot = snapshot();
+    restarted_snapshot.sessions = vec![session_with(session.as_str(), &[7])];
+    state.apply_bridge_event(
+        BridgeEvent::Reconnected {
+            restarted: true,
+            snapshot: Box::new(restarted_snapshot),
+        },
+        now,
+    );
+
+    assert!(state.renamed_terminals.is_empty());
+    assert!(state.terminal_mru.is_empty());
+}

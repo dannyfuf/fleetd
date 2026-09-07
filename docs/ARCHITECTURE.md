@@ -66,7 +66,9 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   services, and forwards subscribed events. Length-prefixed (u32 BE) JSON frames (`fleet-proto`).
 - **Stores**: `ConfigStore` (deep-merged defaults, atomic write), `StateStore` (Zod-equivalent
   validation with serde, `state.json.lock` cross-process lock, transaction API, broken-state
-  quarantine) — semantics exactly as in the inventory.
+  quarantine) — semantics exactly as in the inventory. Writes retain their serialization guard
+  through blocking completion even if the async caller is cancelled, and invalid observations are
+  re-read under the cross-process lock before quarantine.
 - **Adapters** (traits + real impls + fakes for tests): `Shell`, `Git`, `Github`, `Files`
   (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`, `Logs`.
   Exact git/gh command lines are those in the inventory §7.
@@ -77,11 +79,15 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   `Import`, `Update`. `services/composition.rs` wires them, `dispatch.rs` routes requests,
   `snapshots.rs` builds the broadcast snapshot, and `maintenance.rs` owns the periodic sweeps.
   Revision-keyed caches in `services/cache.rs` let unchanged inventories be reused instead of
-  rebuilt per request.
+  rebuilt per request. Cache expiry inspects entry types and removes only the file identity it
+  observed, so a concurrent refresh or temporary/non-directory entry is never unlinked as stale.
 - **Jobs**: `JobManager` runs every long operation as a `Job` (id, kind, target, status,
   last progress line, log path, timestamps, cancellable). Per-repo mutexes, pool concurrency 2,
   GitHub concurrency 4, cancellation tokens. Job state is broadcast as events; logs go to
-  `logs/jobs/<id>.log`. Jobs are never attached to a client connection.
+  `logs/jobs/<id>.log`. Jobs are never attached to a client connection. Repo-scoped admission is
+  typed and atomic with repository deletion; cancellation does not report completion until tracked
+  rollback/worker cleanup finishes. Clone launch ownership is persisted beside the job log, so a
+  daemon restart can recover a child launched before its in-memory PID was published.
 - **Sessions replace tmux**. `Session { id, kind: Worktree(id) | Agent(claude|opencode),
   cwd, terminals: Vec<Terminal>, active_terminal }`. `Terminal { id, name, command, cwd,
   shell_pid, foreground_command, status, title, keep_alive labels, kind: Pty | Native }`. A
@@ -89,9 +95,12 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   shell survives the command, like tmux). Session naming and the default `nvim | cc | lg`
   layout follow the inventory. Multiple clients may attach to a terminal; the daemon keeps the
   VT state and sends a full frame on attach and dirty-row diffs afterwards; the most recent
-  attach's size wins. Sleep applies the swarm policy (keep-alive rules, `:qa` handshake, port
-  detection); "close window" = kill that terminal. PTYs do not survive a daemon restart (like a
-  tmux server).
+  attach's size wins. Attach is asynchronous under one absolute five-second deadline; requests
+  already expired when serviced cannot resize, and post-deadline results cannot publish a frame or
+  increment attachment membership. Sleep applies the
+  swarm policy (keep-alive rules, `:qa` handshake, port detection), but sends editor shutdown input
+  only when the candidate process group is the terminal's foreground group; "close window" = kill
+  that terminal. PTYs do not survive a daemon restart (like a tmux server).
 - **Native tabs (`kind: Native`)**. A `windows[].command` may be a reserved `fleet://` command
   instead of a program. The daemon still owns the tab — same id counter, same position in
   `terminals`, same `active_terminal` and `SelectTerminal` — but spawns no PTY: `shell_pid` is
@@ -104,6 +113,12 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   (`fleet://lazygit` → `lazygit`), because the client-side implementation runs `git` locally.
   The only reserved command today is `fleet://lazygit`, drawn by `crates/fleet-lazygit`
   embedded in `fleet-app` (see that crate's README, "Embedding").
+
+The native Git pane still executes mutations locally rather than as daemon jobs. Safety-sensitive
+operations carry the identity the user reviewed: partial staging carries the displayed diff
+preimage, stash drop carries the stash OID rather than only a mutable index, and continuation
+distinguishes revert from merge/rebase. The backend revalidates those identities immediately
+before mutation; merged status comes from commit reachability.
 
 ## Terminal pipeline
 
@@ -159,12 +174,14 @@ active terminal (including no terminal), the terminal under the pointer, ending 
 events otherwise pass through unchanged. Cell coordinates use measured inner painter bounds
 with grid padding already removed. Settings load on connection/reconnection and config responses.
 
-The PTY reader uses an unbounded queue so large writes into echoing children cannot deadlock.
-The host drains at most 256 KiB or 2 ms of PTY output per iteration and batches at most 1,024
-commands, coalescing adjacent viewport moves with per-command boundary clamping. Key/resize
-and application-directed wheel input preserve ordering by ending the current viewport batch.
-Viewport moves emit frames immediately, bypassing the normal 16,667 µs output frame gate.
-A blocking command receive wakes immediately for input, with a 4 ms timeout for PTY polling.
+PTY output, PTY writes, and host commands each have a 4 MiB byte budget; host events use two
+16 MiB slots. The isolated writer thread prevents a blocked child from blocking the terminal
+owner. Queue exhaustion is an explicit error, never silent loss. The host drains at most 256 KiB
+or 2 ms of PTY output per iteration and batches at most 1,024 commands, coalescing adjacent
+viewport moves with per-command boundary clamping. Key/resize and application-directed wheel
+input preserve ordering by ending the current viewport batch. Viewport moves emit frames
+immediately, bypassing the normal 16,667 µs output frame gate. A blocking command receive wakes
+immediately for input, with a 4 ms timeout for PTY polling.
 
 Small viewport-only moves use `FrameUpdate.shift`: positive shifts move existing mirror rows
 up, negative shifts move them down, and wrap flags rotate with their rows. Only newly exposed
@@ -183,8 +200,18 @@ handling on the alternate screen, using live modes for the four viewport shortcu
 At the bottom, output follows live. While scrolled up, Ghostty preserves the history anchor.
 Real keys, raw input and paste atomically return to bottom on the host before writing to the
 PTY. Wheel input and copy-mode navigation preserve the viewport; copy-mode exit retains its
-explicit return-to-bottom behavior. Wire protocol version is 4; the separate swarm-compatible
-CLI JSON envelope remains version 1.
+explicit return-to-bottom behavior.
+
+## Protocol compatibility
+
+Daemon IPC remains version 4. `PruneWorktrees.ids` is the shipped additive field: it defaults to
+absent and is omitted when `None`, preserving legacy request JSON; `Some(ids)` is the exact
+reviewed allowlist for a commit, which the daemon may shrink after locked reinspection but never
+expand. This is old-client/new-daemon compatible; `Hello` has no capability list, so exact-set
+commits cannot safely target an older daemon that ignores the field. Daemon Git-mutation jobs,
+terminal search/history/focus, cell hyperlinks/frame effects, and persisted `ui.presentation`
+configuration remain outside the current protocol and config schemas. The separate
+swarm-compatible CLI JSON envelope remains version 1.
 
 ## Client (`fleet` app)
 
@@ -244,12 +271,17 @@ stdout/stderr. `FLEET_WATCH` prevents nested watches. See
 `APP-CONTRACTS.md` for wire types, recovery, retention, and ownership semantics.
 
 The `WatchDiscovery` loop takes one process-table snapshot per scan. It reads
-environments only for matching candidates and caches them by PID. Ownership prefers
+environments only for matching candidates and caches successful reads by PID plus kernel process
+start identity; failed reads retry, and a reused PID gets a fresh environment. Ownership prefers
 `FLEET_SESSION` and a valid `FLEET_TERMINAL_ID`, then falls back to ancestry beneath a
 terminal login shell. Session-only tags select the configured agent terminal, then the
 first terminal. Helper processes and each terminal's own foreground program (a direct child of its
 PTY shell) are excluded, and a matching tree collapses to its topmost eligible process. Existing cooperative or
 discovered PIDs win deduplication.
+
+Dropping a cooperative watch's owner connection marks it exited with unknown cause
+(`code: None, signal: None`); it does not invent SIGKILL. Discovered watches likewise report an
+unknown cause when liveness disappears without companion completion metadata.
 
 Codex companion workers are correlated with their per-workspace job JSON. Their log is
 tailed into stdout chunks, beginning with its last 64 KiB after discovery or daemon

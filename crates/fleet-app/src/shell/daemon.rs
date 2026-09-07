@@ -29,10 +29,15 @@ struct BannerSpec {
     hints: &'static [(&'static str, &'static str)],
 }
 
-/// The reconnect countdown of §3.12 C, cycling `3s → reconnecting… → 6s`.
+/// The reconnect countdown of §3.12 C, derived from the absolute retry deadline.
 #[must_use]
-fn countdown_label(attempt: u32) -> String {
-    format!("reconnecting in {}s", reconnect_backoff(attempt).as_secs())
+fn countdown_label(retry_at: Instant, now: Instant) -> String {
+    let remaining = retry_at.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return "reconnecting…".to_owned();
+    }
+    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+    format!("reconnecting in {seconds}s")
 }
 
 /// The banner for the current daemon state, or `None` when there is nothing to say.
@@ -40,14 +45,22 @@ fn countdown_label(attempt: u32) -> String {
 /// A dismissed `Lost` banner returns `None`; the daemon dot stays red, which is exactly what
 /// §3.12 asks for.
 #[must_use]
-fn banner_spec(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<BannerSpec> {
+fn banner_spec(
+    daemon: &DaemonLink,
+    daemon_since: Instant,
+    outdated: bool,
+    now: Instant,
+) -> Option<BannerSpec> {
     match daemon {
         DaemonLink::Lost {
             attempt,
             dismissed: false,
         } => Some(BannerSpec {
             text: "fleetd stopped",
-            countdown: Some(countdown_label(*attempt)),
+            countdown: Some(countdown_label(
+                daemon_since + reconnect_backoff(*attempt),
+                now,
+            )),
             hints: &[
                 ("r", "reconnect now"),
                 ("l", "open the log"),
@@ -110,8 +123,13 @@ pub(super) const fn dot_label(daemon: &DaemonLink) -> Option<&'static str> {
 
 /// Renders the banner, or nothing.
 #[must_use]
-pub(super) fn banner(daemon: &DaemonLink, outdated: bool, now: Instant) -> Option<AnyElement> {
-    let spec = banner_spec(daemon, outdated, now)?;
+pub(super) fn banner(
+    daemon: &DaemonLink,
+    daemon_since: Instant,
+    outdated: bool,
+    now: Instant,
+) -> Option<AnyElement> {
+    let spec = banner_spec(daemon, daemon_since, outdated, now)?;
     let mut banner = Banner::warning(spec.text).icon(Icon::Unplug);
     if let Some(countdown) = spec.countdown {
         banner = banner.countdown(countdown);
@@ -169,16 +187,23 @@ mod tests {
             attempt: 0,
             dismissed: true,
         };
-        assert_eq!(banner_spec(&lost, false, now), None);
+        assert_eq!(banner_spec(&lost, now, false, now), None);
         assert_eq!(dot_state(&lost), DaemonState::Lost);
     }
 
     #[test]
-    fn the_countdown_follows_the_backoff() {
-        assert_eq!(countdown_label(0), "reconnecting in 1s");
-        assert_eq!(countdown_label(1), "reconnecting in 2s");
-        assert_eq!(countdown_label(2), "reconnecting in 4s");
-        assert_eq!(countdown_label(9), "reconnecting in 8s");
+    fn countdown_tracks_retry_deadline() {
+        let now = Instant::now();
+        let retry_at = now + Duration::from_millis(2_250);
+        assert_eq!(countdown_label(retry_at, now), "reconnecting in 3s");
+        assert_eq!(
+            countdown_label(retry_at, now + Duration::from_millis(1_251)),
+            "reconnecting in 1s"
+        );
+        assert_eq!(
+            countdown_label(retry_at, now + Duration::from_millis(2_250)),
+            "reconnecting…"
+        );
     }
 
     #[test]
@@ -189,13 +214,13 @@ mod tests {
             since: now,
         };
         let spec =
-            banner_spec(&restarted, false, now).unwrap_or_else(|| panic!("expected a banner"));
+            banner_spec(&restarted, now, false, now).unwrap_or_else(|| panic!("expected a banner"));
         assert_eq!(spec.text, RESTART_SENTENCE);
         assert!(spec.text.contains("did not survive"));
 
         // It stays for the full six seconds, not 800 ms.
-        assert!(banner_spec(&restarted, false, now + Duration::from_secs(5)).is_some());
-        assert!(banner_spec(&restarted, false, now + Duration::from_secs(7)).is_none());
+        assert!(banner_spec(&restarted, now, false, now + Duration::from_secs(5)).is_some());
+        assert!(banner_spec(&restarted, now, false, now + Duration::from_secs(7)).is_none());
     }
 
     #[test]
@@ -205,9 +230,10 @@ mod tests {
             restarted: false,
             since: now,
         };
-        let spec = banner_spec(&warm, false, now).unwrap_or_else(|| panic!("expected a banner"));
+        let spec =
+            banner_spec(&warm, now, false, now).unwrap_or_else(|| panic!("expected a banner"));
         assert_eq!(spec.text, "reconnected");
-        assert!(banner_spec(&warm, false, now + Duration::from_millis(900)).is_none());
+        assert!(banner_spec(&warm, now, false, now + Duration::from_millis(900)).is_none());
     }
 
     #[test]
@@ -220,7 +246,8 @@ mod tests {
 
     #[test]
     fn a_newer_binary_uses_the_existing_daemon_banner_surface() {
-        let spec = banner_spec(&DaemonLink::Connected, true, Instant::now())
+        let now = Instant::now();
+        let spec = banner_spec(&DaemonLink::Connected, now, true, now)
             .unwrap_or_else(|| panic!("expected the existing banner"));
         assert_eq!(spec.text, OUTDATED_SENTENCE);
         assert!(spec.hints.is_empty());

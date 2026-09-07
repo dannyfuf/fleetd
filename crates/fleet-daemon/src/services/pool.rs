@@ -9,18 +9,19 @@ use std::{
 use chrono::{DateTime, Utc};
 use fleet_core::{
     config::Config,
-    ids::RepoId,
+    ids::{JobId, RepoId},
     model::{Repo, RepoHooks},
-    paths::{HotMarker, hot_marker_path, slot_path, slot_pid_path, slot_staging_path},
+    paths::{HotMarker, hot_marker_path, slot_path},
 };
 use fleet_proto::job::JobKind;
 use sha2::{Digest, Sha256};
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
     adapters::{files::Files, git::Git, shell::Shell},
-    jobs::{JobCtx, JobManager},
+    jobs::{JobCtx, JobManager, JobPolicy},
     stores::{config::ConfigStore, state::StateStore},
 };
 
@@ -35,7 +36,13 @@ pub struct Pool {
     git: Arc<dyn Git>,
     files: Arc<dyn Files>,
     shell: Arc<dyn Shell>,
-    in_flight: Arc<Mutex<HashMap<RepoId, fleet_core::ids::JobId>>>,
+    in_flight: Arc<Mutex<HashMap<RepoId, PrepareFlights>>>,
+}
+
+#[derive(Default)]
+struct PrepareFlights {
+    ordinary: Option<JobId>,
+    forced: Option<JobId>,
 }
 
 impl Pool {
@@ -63,7 +70,7 @@ impl Pool {
     /// Ensures configured slots exist. `force` refreshes every existing slot first.
     pub async fn prepare(&self, repo: RepoId, force: bool) -> DaemonResult<()> {
         self.jobs.ensure_repo_available(&repo)?;
-        let id = self.submit_prepare(repo, force);
+        let id = self.submit_prepare(repo, force)?;
         match self.jobs.wait(&id).await?.status {
             fleet_proto::job::JobStatus::Succeeded => Ok(()),
             fleet_proto::job::JobStatus::Cancelled => Err(DaemonError::Cancelled),
@@ -82,7 +89,7 @@ impl Pool {
         let destination = root.join(format!(".claimed-{}", Uuid::new_v4()));
         let claimed = self.claim_into(&repo, &destination).await?;
         if claimed {
-            self.submit_prepare(repo, false);
+            let _ignored = self.submit_prepare(repo, false);
             Ok(Some(destination))
         } else {
             Ok(None)
@@ -124,7 +131,7 @@ impl Pool {
     /// Queues one immediate replacement after a successful prepared-copy claim.
     pub(crate) fn refill(&self, repo: RepoId) {
         if self.jobs.ensure_repo_available(&repo).is_ok() {
-            self.submit_prepare(repo, false);
+            let _ignored = self.submit_prepare(repo, false);
         }
     }
 
@@ -138,34 +145,31 @@ impl Pool {
         self.slot_is_fresh(copy, repo, config, &fingerprint).await
     }
 
-    fn submit_prepare(&self, repo: RepoId, force: bool) -> fleet_core::ids::JobId {
+    fn submit_prepare(&self, repo: RepoId, force: bool) -> DaemonResult<JobId> {
         let mut in_flight = self
             .in_flight
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(id) = in_flight.get(&repo).cloned() {
-            if self.jobs.record(&id).is_some_and(|record| {
-                matches!(
-                    record.status,
-                    fleet_proto::job::JobStatus::Queued
-                        | fleet_proto::job::JobStatus::Running
-                        | fleet_proto::job::JobStatus::Cancelling
-                )
-            }) {
-                return id;
+        let flights = in_flight.entry(repo.clone()).or_default();
+        flights.ordinary = active_job(&self.jobs, flights.ordinary.take());
+        flights.forced = active_job(&self.jobs, flights.forced.take());
+        if force {
+            if let Some(id) = &flights.forced {
+                return Ok(id.clone());
             }
-            in_flight.remove(&repo);
+        } else if let Some(id) = flights.forced.as_ref().or(flights.ordinary.as_ref()) {
+            return Ok(id.clone());
         }
         let service = self.clone();
         let target = repo.to_string();
-        let repo_for_cleanup = repo.clone();
         let repo_for_job = repo.clone();
         let title = if force {
             format!("Refresh prepared copies for {repo}")
         } else {
             format!("Prepare copies for {repo}")
         };
-        let id = self.jobs.submit(
+        let id = self.jobs.submit_for_repo(
+            repo.clone(),
             if force {
                 JobKind::PoolRefresh
             } else {
@@ -173,20 +177,15 @@ impl Pool {
             },
             target,
             title,
-            true,
-            true,
-            move |context| async move {
-                let result = service.prepare_job(&repo_for_job, force, &context).await;
-                service
-                    .in_flight
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&repo_for_cleanup);
-                result
-            },
-        );
-        in_flight.insert(repo, id.clone());
-        id
+            JobPolicy::new(true, true),
+            move |context| async move { service.prepare_job(&repo_for_job, force, &context).await },
+        )?;
+        if force {
+            flights.forced = Some(id.clone());
+        } else {
+            flights.ordinary = Some(id.clone());
+        }
+        Ok(id)
     }
 
     async fn prepare_job(
@@ -203,7 +202,7 @@ impl Pool {
             .await
             .map_err(|_| DaemonError::Cancelled)?;
         let lock = self.jobs.repo_lock(repo_id);
-        let _guard = lock.lock().await;
+        let mut coordination = Some(lock.lock_owned().await);
         self.jobs.ensure_repo_available(repo_id)?;
         check_cancelled(context)?;
 
@@ -244,7 +243,7 @@ impl Pool {
                     .slot_is_fresh(&slot_path(&root, slot), &repo, &config, &fingerprint)
                     .await?;
             if force || stale {
-                self.refresh_slot(&repo, &config, &root, slot, &fingerprint, context)
+                self.refresh_slot(&repo, &root, slot, &fingerprint, context, &mut coordination)
                     .await?;
             }
         }
@@ -252,7 +251,7 @@ impl Pool {
         for slot in 0..usize_from_u64(config.hot_pool_size) {
             check_cancelled(context)?;
             if !self.files.exists(&slot_path(&root, slot)) {
-                self.build_slot(&repo, &root, slot, &fingerprint, context)
+                self.build_slot(&repo, &root, slot, &fingerprint, context, &mut coordination)
                     .await?;
             }
         }
@@ -303,11 +302,11 @@ impl Pool {
     async fn refresh_slot(
         &self,
         repo: &Repo,
-        config: &Config,
         root: &Path,
         slot: usize,
         fingerprint: &str,
         context: &JobCtx,
+        coordination: &mut Option<OwnedMutexGuard<()>>,
     ) -> DaemonResult<()> {
         let path = slot_path(root, slot);
         let old = self.read_hot_marker(&path).ok();
@@ -318,7 +317,7 @@ impl Pool {
             context.progress(format!("rebuilding slot {slot} after prepare hook change"))?;
             discard_path(self.files.as_ref(), &path)?;
             return self
-                .build_slot(repo, root, slot, fingerprint, context)
+                .build_slot(repo, root, slot, fingerprint, context, coordination)
                 .await;
         }
 
@@ -327,9 +326,6 @@ impl Pool {
         self.refresh_copy(&path, repo, None).await?;
         hooks::run_prepare(self.shell.as_ref(), &path, &repo.hooks, context).await?;
         self.write_hot_marker(&path, repo, fingerprint).await?;
-        if config.hot_pool_size <= slot as u64 {
-            discard_path(self.files.as_ref(), &path)?;
-        }
         Ok(())
     }
 
@@ -340,23 +336,26 @@ impl Pool {
         slot: usize,
         fingerprint: &str,
         context: &JobCtx,
+        coordination: &mut Option<OwnedMutexGuard<()>>,
     ) -> DaemonResult<()> {
-        let staging = slot_staging_path(root, slot);
-        let pid_path = slot_pid_path(root, slot);
+        let (staging, pid_path) = copy_attempt_paths(root, slot);
         let final_path = slot_path(root, slot);
-        if self.files.exists(&staging) {
-            discard_path(self.files.as_ref(), &staging)?;
-        }
         self.files
             .atomic_write_text(&pid_path, &format!("{}\n", std::process::id()))?;
         context.progress(format!("copying prepared slot {slot}"))?;
-        let mut copy = CancellableCopy::start(
+        let mut copy = CancellableCopy::start_coordinated(
             Arc::clone(&self.files),
             PathBuf::from(&repo.path),
             staging.clone(),
             Some(pid_path.clone()),
+            coordination.take().ok_or_else(|| {
+                DaemonError::Conflict("prepared-copy coordination is missing".to_owned())
+            })?,
+            Some(context.clone()),
         );
-        copy.wait().await?;
+        let copy_result = copy.wait().await;
+        *coordination = copy.take_coordination();
+        copy_result?;
 
         let result = async {
             check_cancelled(context)?;
@@ -554,6 +553,36 @@ fn usize_from_u64(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
+fn active_job(jobs: &JobManager, id: Option<JobId>) -> Option<JobId> {
+    id.filter(|id| {
+        jobs.record(id).is_some_and(|record| {
+            matches!(
+                record.status,
+                fleet_proto::job::JobStatus::Queued
+                    | fleet_proto::job::JobStatus::Running
+                    | fleet_proto::job::JobStatus::Cancelling
+            )
+        })
+    })
+}
+
+fn copy_attempt_paths(root: &Path, slot: usize) -> (PathBuf, PathBuf) {
+    let slot = slot_path(root, slot);
+    let name = slot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(".hot");
+    let staging = root.join(format!("{name}.staging-{}", Uuid::new_v4()));
+    let pid = root.join(format!(
+        "{}.pid",
+        staging
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(".hot.staging")
+    ));
+    (staging, pid)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PoolEntryKind {
     Slot,
@@ -562,7 +591,14 @@ enum PoolEntryKind {
 }
 
 fn parse_pool_entry(name: &str) -> Option<(usize, PoolEntryKind)> {
-    let (slot_name, kind) = if let Some(value) = name.strip_suffix(".staging.pid") {
+    let (slot_name, kind) = if let Some(value) = name
+        .strip_suffix(".pid")
+        .and_then(|value| value.split_once(".staging-").map(|(slot, _attempt)| slot))
+    {
+        (value, PoolEntryKind::Pid)
+    } else if let Some((value, _attempt)) = name.split_once(".staging-") {
+        (value, PoolEntryKind::Staging)
+    } else if let Some(value) = name.strip_suffix(".staging.pid") {
         (value, PoolEntryKind::Pid)
     } else if let Some(value) = name.strip_suffix(".staging") {
         (value, PoolEntryKind::Staging)
@@ -585,15 +621,31 @@ pub(crate) struct CancellableCopy {
     files: Arc<dyn Files>,
     destination: PathBuf,
     pid_path: Option<PathBuf>,
+    coordination: Option<OwnedMutexGuard<()>>,
+    context: Option<JobCtx>,
     cleanup_on_drop: bool,
 }
 
 impl CancellableCopy {
-    pub(crate) fn start(
+    pub(crate) fn start_coordinated(
         files: Arc<dyn Files>,
         source: PathBuf,
         destination: PathBuf,
         pid_path: Option<PathBuf>,
+        coordination: OwnedMutexGuard<()>,
+        context: Option<JobCtx>,
+    ) -> Self {
+        let mut copy = Self::start_inner(files, source, destination, pid_path, Some(coordination));
+        copy.context = context;
+        copy
+    }
+
+    fn start_inner(
+        files: Arc<dyn Files>,
+        source: PathBuf,
+        destination: PathBuf,
+        pid_path: Option<PathBuf>,
+        coordination: Option<OwnedMutexGuard<()>>,
     ) -> Self {
         let task_files = Arc::clone(&files);
         let task_destination = destination.clone();
@@ -604,6 +656,8 @@ impl CancellableCopy {
             files,
             destination,
             pid_path,
+            coordination,
+            context: None,
             cleanup_on_drop: true,
         }
     }
@@ -622,6 +676,10 @@ impl CancellableCopy {
     pub(crate) fn disarm(&mut self) {
         self.cleanup_on_drop = false;
     }
+
+    fn take_coordination(&mut self) -> Option<OwnedMutexGuard<()>> {
+        self.coordination.take()
+    }
 }
 
 impl Drop for CancellableCopy {
@@ -636,11 +694,16 @@ impl Drop for CancellableCopy {
         let files = Arc::clone(&self.files);
         let destination = self.destination.clone();
         let pid_path = self.pid_path.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _result = task.await;
-                cleanup_copy_artifact(&files, &destination, pid_path.as_deref());
-            });
+        let coordination = self.coordination.take();
+        let cleanup = async move {
+            let _result = task.await;
+            cleanup_copy_artifact(&files, &destination, pid_path.as_deref());
+            drop(coordination);
+        };
+        if let Some(context) = self.context.take() {
+            context.track_cleanup(cleanup);
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(cleanup);
         }
     }
 }
@@ -654,7 +717,80 @@ fn cleanup_copy_artifact(files: &Arc<dyn Files>, destination: &Path, pid_path: O
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use crate::adapters::files::RealFiles;
+
     use super::*;
+
+    struct BlockingFiles {
+        inner: RealFiles,
+        started: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Files for BlockingFiles {
+        fn read_text(&self, path: &Path) -> DaemonResult<String> {
+            self.inner.read_text(path)
+        }
+
+        fn create_dir_all(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn clone_dir(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
+            if let Some(started) = self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ignored = started.send(());
+                self.release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                    .map_err(|error| DaemonError::Join(error.to_string()))?;
+            }
+            self.inner.clone_dir(source, destination)
+        }
+
+        fn atomic_write_text(&self, path: &Path, text: &str) -> DaemonResult<()> {
+            self.inner.atomic_write_text(path, text)
+        }
+
+        fn rename(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
+            self.inner.rename(source, destination)
+        }
+
+        fn trash(&self, path: &Path) -> DaemonResult<PathBuf> {
+            self.inner.trash(path)
+        }
+
+        fn remove_detached(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.remove_detached(path)
+        }
+
+        fn remove_file(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path)
+        }
+
+        fn list(&self, path: &Path) -> DaemonResult<Vec<PathBuf>> {
+            self.inner.list(path)
+        }
+
+        fn guard_strict_descendant(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.guard_strict_descendant(path)
+        }
+
+        fn set_removable_roots(&self, roots: Vec<PathBuf>) {
+            self.inner.set_removable_roots(roots);
+        }
+    }
 
     #[test]
     fn fingerprints_match_sha256_of_json_stringified_hook_array() {
@@ -680,5 +816,51 @@ mod tests {
             Some((0, PoolEntryKind::Pid))
         );
         assert_eq!(parse_pool_entry("feature"), None);
+    }
+
+    #[tokio::test]
+    async fn cancelled_copy_cannot_delete_later_attempt() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let root = temp.path().join("worktrees/acme/api");
+        let source = temp.path().join("repos/acme/api");
+        std::fs::create_dir_all(&source).unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(source.join("README.md"), "fleet\n")
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("{error}"));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let files: Arc<dyn Files> = Arc::new(BlockingFiles {
+            inner: RealFiles::new(temp.path().join("trash"), [temp.path().to_path_buf()]),
+            started: Mutex::new(Some(started_tx)),
+            release: Mutex::new(release_rx),
+        });
+        let coordination = Arc::new(tokio::sync::Mutex::new(()));
+        let guard = Arc::clone(&coordination).lock_owned().await;
+        let (first_attempt, first_pid) = copy_attempt_paths(&root, 0);
+        let (later_attempt, _later_pid) = copy_attempt_paths(&root, 0);
+        assert_ne!(first_attempt, later_attempt);
+        let copy = CancellableCopy::start_coordinated(
+            Arc::clone(&files),
+            source,
+            first_attempt.clone(),
+            Some(first_pid),
+            guard,
+            None,
+        );
+        tokio::task::spawn_blocking(move || started_rx.recv())
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        drop(copy);
+        assert!(coordination.try_lock().is_err());
+        release_tx
+            .send(())
+            .unwrap_or_else(|error| panic!("{error}"));
+        let _guard = coordination.lock().await;
+        std::fs::create_dir_all(&later_attempt).unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(!first_attempt.exists());
+        assert!(later_attempt.exists());
     }
 }

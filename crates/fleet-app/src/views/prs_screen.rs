@@ -6,7 +6,6 @@ use fleet_core::{
     github::{PrTab, PullRequest, derive_pr_state},
     ids::{RepoId, WorktreeId},
     model::Worktree,
-    sessions::{AgentActivity, SessionState},
 };
 use fleet_proto::response::PrSlice;
 use fleet_ui_kit::{
@@ -17,8 +16,8 @@ use fleet_ui_kit::{
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
 use crate::{
-    presentation::{SnapshotIndex, age_secs, contains_folded, pr_badge_state, session_glyph},
-    views::first_run::EmptySurface,
+    presentation::{SnapshotIndex, age_secs, contains_folded, pr_badge_state},
+    views::{detail::resolved_worktree_status, first_run::EmptySurface},
 };
 
 /// The `All` scope cap of §3.5 [D-7]: never a refusal, always a final "narrow me" row.
@@ -115,11 +114,21 @@ pub fn build_rows(inputs: &PrInputs<'_>, index: &SnapshotIndex<'_>) -> Vec<PrRow
                     .sessions_for_worktree(&worktree.id)
                     .iter()
                     .any(|session| session.slept_at.is_some());
+                let unreachable = worktree
+                    .host
+                    .as_ref()
+                    .is_some_and(|host| index.host(host).is_some_and(|host| !host.reachable));
+                let job_running = index
+                    .jobs_for_target(worktree.id.as_str())
+                    .iter()
+                    .any(|job| crate::views::worktrees_list::owns_row(job));
                 (
-                    session_glyph(
-                        status.map_or(SessionState::Unknown, |status| status.session),
+                    resolved_worktree_status(
+                        status,
                         slept,
-                        status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
+                        worktree.degraded.is_some(),
+                        unreachable,
+                        job_running,
                     ),
                     Some(worktree.id.clone()),
                 )
@@ -232,22 +241,11 @@ pub fn render(
     let tabs = SegmentedTabs::new([tab_of("Mine", mine_count), tab_of("Review", review_count)])
         .active(usize::from(tab == PrTab::Review));
 
-    let stamp = match (loading, fetched_age) {
-        (true, Some(age)) => Text::ui(format!(
-            "\u{27F3} refreshing · fetched {} ago",
-            format_age(age)
-        ))
-        .muted(),
-        (true, None) => Text::ui("\u{27F3} refreshing").muted(),
-        (false, Some(age)) => {
-            let text = Text::ui(format!("fetched {} ago", format_age(age)));
-            if error.is_some() {
-                text.tone(Tone::Warning)
-            } else {
-                text.muted()
-            }
-        }
-        (false, None) => Text::ui("never fetched").muted(),
+    let stamp = Text::ui(fetch_stamp_text(loading, fetched_age));
+    let stamp = if !loading && fetched_age.is_some() && error.is_some() {
+        stamp.tone(Tone::Warning)
+    } else {
+        stamp.muted()
     };
 
     let header = div()
@@ -307,9 +305,21 @@ pub fn render(
 }
 
 fn tab_of(label: &'static str, count: Option<usize>) -> SegmentedTab {
-    match count {
-        Some(count) => SegmentedTab::new(label, count),
-        None => SegmentedTab::bare(label).loading(true),
+    count.map_or_else(
+        || SegmentedTab::bare(label).loading(true),
+        |count| SegmentedTab::new(label, count),
+    )
+}
+
+fn fetch_stamp_text(loading: bool, fetched_age: Option<i64>) -> SharedString {
+    match (loading, fetched_age) {
+        (true, Some(age)) => SharedString::from(format!(
+            "\u{27F3} refreshing · fetched {} ago",
+            format_age(age)
+        )),
+        (true, None) => SharedString::new_static("\u{27F3} refreshing"),
+        (false, Some(age)) => SharedString::from(format!("fetched {} ago", format_age(age))),
+        (false, None) => SharedString::new_static("never fetched"),
     }
 }
 
@@ -413,12 +423,13 @@ fn pr_row(
 mod tests {
     use fleet_core::{
         github::{PrChecks, PrReviewDecision},
-        ids::WorktreeId,
+        ids::{HostId, WorktreeId},
+        model::Degraded,
     };
 
     use super::*;
 
-    use fleet_proto::snapshot::Snapshot;
+    use fleet_proto::snapshot::{HostStatus, Snapshot};
 
     fn pr(number: u64, updated: &str, cross: bool, head: &str) -> PullRequest {
         PullRequest {
@@ -566,6 +577,57 @@ mod tests {
         let slice = slice(vec![pr(7, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
         let rows = rows(&slice, &snapshot(Vec::new()), &[(repo, 7)]);
         assert_eq!(rows[0].presence, StatusKind::JobRunning);
+    }
+
+    #[test]
+    fn pr_presence_obeys_worktree_health_precedence() {
+        let pull_requests = slice(vec![pr(1, "2026-09-04T10:00:00Z", false, "feat/x")], 1);
+        let mut degraded = worktree("feat/x", "origin/main");
+        degraded.degraded = Some(Degraded {
+            kind: "post_create_hooks".to_owned(),
+            step: "1".to_owned(),
+            exit_code: Some(1),
+            at: "2026-09-04T11:00:00Z".to_owned(),
+            log_path: "/tmp/hooks.log".to_owned(),
+        });
+        let degraded_snapshot = snapshot(vec![degraded]);
+        assert_eq!(
+            rows(&pull_requests, &degraded_snapshot, &[])[0].presence,
+            StatusKind::Degraded
+        );
+
+        let mut remote = worktree("feat/x", "origin/main");
+        let host = HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}"));
+        remote.host = Some(host.clone());
+        let mut offline_snapshot = snapshot(vec![remote]);
+        offline_snapshot.hosts.push(HostStatus {
+            id: host,
+            reachable: false,
+            checked_at: "2026-09-04T11:59:00Z".to_owned(),
+            error: Some("ssh timed out".to_owned()),
+        });
+        assert_eq!(
+            rows(&pull_requests, &offline_snapshot, &[])[0].presence,
+            StatusKind::HostUnreachable
+        );
+    }
+
+    #[test]
+    fn refreshing_counts_are_consistently_marked() {
+        let cached = tab_of("Mine", Some(7));
+        assert_eq!(cached.count, Some(7));
+        assert!(!cached.loading);
+        assert_eq!(cached.count_text().as_deref(), Some("7"));
+        assert_eq!(
+            fetch_stamp_text(true, Some(120)).as_ref(),
+            "\u{27F3} refreshing · fetched 2m ago"
+        );
+
+        let settled = tab_of("Review", Some(4));
+        assert_eq!(settled.count_text().as_deref(), Some("4"));
+        let cold = tab_of("Review", None);
+        assert!(cold.loading);
+        assert_eq!(cold.count_text().as_deref(), Some("\u{2026}"));
     }
 
     #[test]

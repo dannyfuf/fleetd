@@ -13,6 +13,7 @@ name = "fleet-lazygit"
 path = "src/main.rs"
 
 [dependencies]
+unicode-segmentation.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
 fleet-git.workspace = true

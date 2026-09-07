@@ -248,18 +248,26 @@ pub fn init(cx: &mut App) {
     cx.bind_keys(bindings());
 }
 
-/// Whether a binding predicate is satisfied by a rendered chain.
+/// The deepest rendered context matched by a binding predicate.
 ///
-/// `A > B` is gpui's *descendant* operator: it means "a node carrying `B` with `A` somewhere
-/// above it", not "the immediate child of `A`". Matching is therefore a subsequence test over
-/// the chain, root context included.
-#[must_use]
-pub(crate) fn context_matches(context: &str, chain: &[&str]) -> bool {
+/// `A > B` is gpui's descendant operator, so matching is a subsequence walk over the rendered
+/// context chain rather than an immediate-parent check.
+fn context_depth(context: &str, chain: &[&str]) -> Option<usize> {
     let mut words = std::iter::once(ROOT_CONTEXT).chain(chain.iter().copied());
-    context
-        .split('>')
-        .map(str::trim)
-        .all(|word| words.any(|candidate| candidate == word))
+    let mut depth = 0;
+    let mut candidate_depth = 0;
+    for word in context.split('>').map(str::trim) {
+        loop {
+            let candidate = words.next()?;
+            if candidate == word {
+                depth = candidate_depth;
+                candidate_depth += 1;
+                break;
+            }
+            candidate_depth += 1;
+        }
+    }
+    Some(depth)
 }
 
 /// Every binding reachable from a rendered chain, in table order.
@@ -277,10 +285,25 @@ pub(crate) fn bindings_for_chain(chain: &[&'static str]) -> Rc<[BindingSpec]> {
         {
             return Rc::clone(&resolved.bindings);
         }
-        let bindings: Rc<[BindingSpec]> = cached_table()
+        let table = cached_table();
+        let mut winners: Vec<(&str, usize, usize)> = Vec::new();
+        for (index, spec) in table.iter().enumerate() {
+            let Some(depth) = context_depth(spec.context, chain) else {
+                continue;
+            };
+            if let Some(winner) = winners.iter_mut().find(|winner| winner.0 == spec.keys) {
+                if depth >= winner.2 {
+                    *winner = (spec.keys, index, depth);
+                }
+            } else {
+                winners.push((spec.keys, index, depth));
+            }
+        }
+        let bindings: Rc<[BindingSpec]> = table
             .iter()
-            .copied()
-            .filter(|spec| context_matches(spec.context, chain))
+            .enumerate()
+            .filter(|(index, _)| winners.iter().any(|winner| winner.1 == *index))
+            .map(|(_, spec)| *spec)
             .collect();
         *last = Some(ResolvedBindings {
             chain: chain.to_vec(),
@@ -498,6 +521,23 @@ mod tests {
             &bindings,
             &bindings_for_chain(&["Panels", "Commits"])
         ));
+    }
+
+    #[test]
+    fn bindings_match_shadow_precedence() {
+        let bindings = bindings_for_chain(&["Panels", "Main", "Staging"]);
+        let action_for = |keys| {
+            bindings
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .map(|binding| binding.action)
+        };
+
+        assert_eq!(action_for("h"), Some(Action::name(&staging::PrevHunk)));
+        assert_eq!(action_for("l"), Some(Action::name(&staging::NextHunk)));
+        assert!(!bindings.iter().any(|binding| {
+            binding.keys == "h" && binding.action == Action::name(&global::PrevTab)
+        }));
     }
 
     #[test]

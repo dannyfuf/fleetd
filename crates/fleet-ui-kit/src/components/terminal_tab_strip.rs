@@ -33,6 +33,24 @@ pub enum TerminalTabKind {
     Native,
 }
 
+/// The only process states that can appear as agent activity on a terminal tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalAgentState {
+    /// The recognized agent is actively working.
+    Working,
+    /// The recognized agent has finished and is waiting for the user.
+    Finished,
+}
+
+impl TerminalAgentState {
+    fn status_kind(self) -> StatusKind {
+        match self {
+            Self::Working => StatusKind::AgentWorking,
+            Self::Finished => StatusKind::AgentFinished,
+        }
+    }
+}
+
 /// One terminal tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalTab {
@@ -49,8 +67,8 @@ pub struct TerminalTab {
     pub starting: bool,
     /// The keep-alive kind glyph: `bot`, `server`, `file-pen`.
     pub keep_alive: Option<Icon>,
-    /// Recognized agent activity, limited to `AgentWorking` or `AgentFinished`.
-    pub agent_status: Option<StatusKind>,
+    /// Recognized agent activity.
+    pub agent_status: Option<TerminalAgentState>,
     /// The command exited. `Some(None)` is a signal-killed process, which has **no** exit
     /// code; the strip renders `—` rather than inventing one.
     pub exited: Option<Option<i32>>,
@@ -105,11 +123,7 @@ impl TerminalTab {
     }
 
     /// Mark recognized agent activity on this terminal.
-    pub fn agent_status(mut self, status: StatusKind) -> Self {
-        debug_assert!(matches!(
-            status,
-            StatusKind::AgentWorking | StatusKind::AgentFinished
-        ));
+    pub fn agent_status(mut self, status: TerminalAgentState) -> Self {
         self.agent_status = Some(status);
         self
     }
@@ -333,10 +347,11 @@ fn tab_body(tab: TerminalTab, is_active: bool, theme: &Theme) -> gpui::Div {
                 .size(IconSize::Small)
                 .color(theme.colors.text_secondary)
         }))
-        .children(
-            tab.agent_status
-                .map(|status| StatusGlyph::new(status).size(IconSize::Small).id("agent")),
-        )
+        .children(tab.agent_status.map(|status| {
+            StatusGlyph::new(status.status_kind())
+                .size(IconSize::Small)
+                .id("agent")
+        }))
         .children(exited.map(|code| {
             div()
                 .flex()
@@ -478,5 +493,17 @@ mod tests {
     fn exited_accepts_both_a_code_and_none() {
         assert_eq!(TerminalTab::new(1, "cc").exited(1).exited, Some(Some(1)));
         assert_eq!(TerminalTab::new(1, "cc").exited(None).exited, Some(None));
+    }
+
+    #[test]
+    fn agent_state_maps_only_working_and_finished() {
+        assert_eq!(
+            TerminalAgentState::Working.status_kind(),
+            StatusKind::AgentWorking
+        );
+        assert_eq!(
+            TerminalAgentState::Finished.status_kind(),
+            StatusKind::AgentFinished
+        );
     }
 }

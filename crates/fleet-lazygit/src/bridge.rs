@@ -37,6 +37,8 @@ pub enum Mutation {
         selection: PatchSelection,
         /// What to do with it.
         action: PatchAction,
+        /// The exact diff from which the positional selection was made.
+        displayed: Arc<Diff>,
     },
     /// Commit the index.
     Commit {
@@ -86,6 +88,10 @@ pub enum Mutation {
     CherryPickContinue,
     /// Abort the in-progress cherry-pick.
     CherryPickAbort,
+    /// Continue the in-progress revert.
+    RevertContinue,
+    /// Abort the in-progress revert.
+    RevertAbort,
     /// Cherry-pick commits onto HEAD.
     CherryPick(Vec<ObjectId>),
     /// Revert one commit.
@@ -132,8 +138,13 @@ pub enum Mutation {
     StashApply(usize),
     /// Apply and drop a stash entry.
     StashPop(usize),
-    /// Drop a stash entry.
-    StashDrop(usize),
+    /// Drop the stash entry that still has the reviewed object identity.
+    StashDrop {
+        /// Mutable stash-list index shown to the user.
+        index: usize,
+        /// Object identity shown at confirmation time.
+        oid: ObjectId,
+    },
     /// Create a branch from a stash entry.
     StashBranch {
         /// New branch name.
@@ -232,6 +243,19 @@ pub enum GitRequest {
     Shutdown,
 }
 
+/// Stable identity of a read request and the content slot its result belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadIdentity {
+    Snapshot,
+    FileDiff(PathBuf),
+    CommitDiff(ObjectId),
+    BranchDiff(String),
+    RefCommits(String),
+    CommitFileDiff { oid: ObjectId, path: PathBuf },
+    StashDiff(usize),
+    Conflict(PathBuf),
+}
+
 /// A message from the git thread to the UI.
 #[derive(Debug)]
 pub enum GitEvent {
@@ -323,6 +347,8 @@ pub enum GitEvent {
     ReadFailed {
         /// Which read.
         label: String,
+        /// Exact content slot the read was intended to fill.
+        identity: ReadIdentity,
         /// The git error, stderr included.
         message: String,
     },
@@ -332,6 +358,11 @@ pub enum GitEvent {
     Command(Box<CommandEvent>),
     /// The command-log broadcast dropped events; the log is re-seeded from `recent_commands`.
     CommandsReseeded(Vec<fleet_git::CommandRecord>),
+    /// The native watcher failed at runtime; a full refresh is also delivered.
+    WatcherFailed {
+        /// The retained backend failure.
+        message: String,
+    },
     /// The watcher saw the worktree change.
     Changed(Box<ChangeEvent>),
 }
@@ -341,6 +372,7 @@ pub enum GitEvent {
 pub struct GitBridge {
     requests: Sender<GitRequest>,
     events: Receiver<GitEvent>,
+    event_tx: Sender<GitEvent>,
 }
 
 impl GitBridge {
@@ -361,7 +393,11 @@ impl GitBridge {
                 message: format!("could not start the git thread: {error}"),
             });
         }
-        Self { requests, events }
+        Self {
+            requests,
+            events,
+            event_tx,
+        }
     }
 
     /// The stream the root view drains in one `cx.spawn` loop.
@@ -372,7 +408,68 @@ impl GitBridge {
 
     /// Fire-and-forget: every outcome arrives as an event.
     pub fn send(&self, request: GitRequest) {
-        let _ignored = self.requests.try_send(request);
+        if let Err(error) = self.requests.try_send(request) {
+            let Some(event) = disconnected_event(error.into_inner()) else {
+                return;
+            };
+            let _ignored = self.event_tx.try_send(event);
+        }
+    }
+}
+
+fn disconnected_event(request: GitRequest) -> Option<GitEvent> {
+    const MESSAGE: &str = "git worker disconnected before accepting the request";
+    match request {
+        GitRequest::Mutate { label, .. } => Some(GitEvent::Failed {
+            label,
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::Snapshot => Some(GitEvent::ReadFailed {
+            label: "refresh".to_owned(),
+            identity: ReadIdentity::Snapshot,
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::FileDiff(path) => Some(GitEvent::ReadFailed {
+            label: "diff".to_owned(),
+            identity: ReadIdentity::FileDiff(path),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::PathsDiff { key, .. } => Some(GitEvent::ReadFailed {
+            label: "diff".to_owned(),
+            identity: ReadIdentity::FileDiff(key),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::CommitDiff(oid) => Some(GitEvent::ReadFailed {
+            label: "commit diff".to_owned(),
+            identity: ReadIdentity::CommitDiff(oid),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::BranchDiff(name) => Some(GitEvent::ReadFailed {
+            label: "branch diff".to_owned(),
+            identity: ReadIdentity::BranchDiff(name),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::RefCommits { reference, .. } => Some(GitEvent::ReadFailed {
+            label: "ref commits".to_owned(),
+            identity: ReadIdentity::RefCommits(reference),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::CommitFileDiff { oid, path } => Some(GitEvent::ReadFailed {
+            label: "commit file diff".to_owned(),
+            identity: ReadIdentity::CommitFileDiff { oid, path },
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::StashDiff(index) => Some(GitEvent::ReadFailed {
+            label: "stash diff".to_owned(),
+            identity: ReadIdentity::StashDiff(index),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::Conflict(path) => Some(GitEvent::ReadFailed {
+            label: "conflict".to_owned(),
+            identity: ReadIdentity::Conflict(path),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::SetDiffContext(_) | GitRequest::Shutdown => None,
     }
 }
 
@@ -419,7 +516,7 @@ async fn run(path: PathBuf, requests: &Receiver<GitRequest>, events: &Sender<Git
     let helper = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fleet-lazygit"));
     let mut commands = repository.subscribe_commands();
     let watcher = fleet_git::watch::RepoWatcher::new(repository.paths());
-    let (_watcher, changes) = match watcher {
+    let (watcher, changes) = match watcher {
         Ok((watcher, changes)) => (Some(watcher), Some(changes)),
         Err(error) => {
             tracing::warn!(%error, "fleet-lazygit: the filesystem watcher did not start");
@@ -455,6 +552,11 @@ async fn run(path: PathBuf, requests: &Receiver<GitRequest>, events: &Sender<Git
             },
             change = change_next => match change {
                 Some(change) => {
+                    if let Some(error) = watcher.as_ref().and_then(fleet_git::watch::RepoWatcher::take_error)
+                        && events.send(GitEvent::WatcherFailed { message: error.to_string() }).await.is_err()
+                    {
+                        return;
+                    }
                     if events.send(GitEvent::Changed(Box::new(change))).await.is_err() {
                         return;
                     }
@@ -631,7 +733,13 @@ async fn serve(
                         .is_ok()
                 }
                 (Err(error), _) | (_, Err(error)) => {
-                    fail(events, "commit diff", &describe(&error)).await
+                    fail(
+                        events,
+                        ReadIdentity::CommitDiff(oid),
+                        "commit diff",
+                        &describe(&error),
+                    )
+                    .await
                 }
             }
         }
@@ -644,7 +752,15 @@ async fn serve(
                     })
                     .await
                     .is_ok(),
-                Err(error) => fail(events, "branch diff", &describe(&error)).await,
+                Err(error) => {
+                    fail(
+                        events,
+                        ReadIdentity::BranchDiff(name),
+                        "branch diff",
+                        &describe(&error),
+                    )
+                    .await
+                }
             }
         }
         GitRequest::RefCommits {
@@ -664,7 +780,15 @@ async fn serve(
                     })
                     .await
                     .is_ok(),
-                Err(error) => fail(events, "ref commits", &describe(&error)).await,
+                Err(error) => {
+                    fail(
+                        events,
+                        ReadIdentity::RefCommits(reference),
+                        "ref commits",
+                        &describe(&error),
+                    )
+                    .await
+                }
             }
         }
         GitRequest::CommitFileDiff { oid, path } => {
@@ -697,7 +821,15 @@ async fn serve(
                         .await
                         .is_ok()
                 }
-                Err(error) => fail(events, "commit file diff", &describe(&error)).await,
+                Err(error) => {
+                    fail(
+                        events,
+                        ReadIdentity::CommitFileDiff { oid, path },
+                        "commit file diff",
+                        &describe(&error),
+                    )
+                    .await
+                }
             }
         }
         GitRequest::SetDiffContext(lines) => {
@@ -715,7 +847,15 @@ async fn serve(
                 })
                 .await
                 .is_ok(),
-            Err(error) => fail(events, "stash diff", &describe(&error)).await,
+            Err(error) => {
+                fail(
+                    events,
+                    ReadIdentity::StashDiff(index),
+                    "stash diff",
+                    &describe(&error),
+                )
+                .await
+            }
         },
         GitRequest::Conflict(path) => match repository.conflicted_file(&path).await {
             Ok(file) => events
@@ -725,7 +865,15 @@ async fn serve(
                 })
                 .await
                 .is_ok(),
-            Err(error) => fail(events, "conflict", &describe(&error)).await,
+            Err(error) => {
+                fail(
+                    events,
+                    ReadIdentity::Conflict(path),
+                    "conflict",
+                    &describe(&error),
+                )
+                .await
+            }
         },
         GitRequest::Mutate { label, mutation } => {
             let result = apply(repository, helper, *mutation).await;
@@ -764,7 +912,15 @@ async fn send_file_diff(
             })
             .await
             .is_ok(),
-        (Err(error), _) | (_, Err(error)) => fail(events, "diff", &describe(&error)).await,
+        (Err(error), _) | (_, Err(error)) => {
+            fail(
+                events,
+                ReadIdentity::FileDiff(path),
+                "diff",
+                &describe(&error),
+            )
+            .await
+        }
     }
 }
 
@@ -788,7 +944,7 @@ async fn send_snapshot(
                 .await
                 .is_ok()
         }
-        Err(error) => fail(events, "refresh", &describe(&error)).await,
+        Err(error) => fail(events, ReadIdentity::Snapshot, "refresh", &describe(&error)).await,
     }
 }
 
@@ -811,10 +967,16 @@ fn describe(error: &fleet_git::GitError) -> String {
 
 /// Reports a failed **read**. Mutations report through [`GitEvent::Failed`] instead, because only
 /// they own an in-progress guard and an escalation dialog.
-async fn fail(events: &Sender<GitEvent>, label: &str, message: &str) -> bool {
+async fn fail(
+    events: &Sender<GitEvent>,
+    identity: ReadIdentity,
+    label: &str,
+    message: &str,
+) -> bool {
     events
         .send(GitEvent::ReadFailed {
             label: label.to_owned(),
+            identity,
             message: message.to_owned(),
         })
         .await
@@ -832,8 +994,14 @@ async fn apply(
         Mutation::StageAll => repository.stage_all().await,
         Mutation::UnstageAll => repository.unstage_all().await,
         Mutation::Discard(paths) => repository.discard_paths(&paths).await,
-        Mutation::Patch { selection, action } => {
-            repository.apply_patch_selection(selection, action).await
+        Mutation::Patch {
+            selection,
+            action,
+            displayed,
+        } => {
+            repository
+                .apply_patch_selection_verified(selection, action, displayed.as_ref())
+                .await
         }
         Mutation::Commit { message, options } => repository.commit(&message, options).await,
         Mutation::Checkout(reference) => repository.checkout(&reference).await,
@@ -853,6 +1021,8 @@ async fn apply(
         Mutation::MergeAbort => repository.merge_abort().await,
         Mutation::CherryPickContinue => repository.cherry_pick_continue().await,
         Mutation::CherryPickAbort => repository.cherry_pick_abort().await,
+        Mutation::RevertContinue => repository.revert_continue().await,
+        Mutation::RevertAbort => repository.revert_abort().await,
         Mutation::CherryPick(oids) => repository.cherry_pick(&oids).await,
         Mutation::Revert(oid) => repository.revert(&oid).await,
         Mutation::Reset { to, mode } => repository.reset(&to, mode).await,
@@ -882,7 +1052,7 @@ async fn apply(
         Mutation::StashPush(options) => repository.stash_push(options).await,
         Mutation::StashApply(index) => repository.stash_apply(index).await,
         Mutation::StashPop(index) => repository.stash_pop(index).await,
-        Mutation::StashDrop(index) => repository.stash_drop(index).await,
+        Mutation::StashDrop { index, oid } => repository.stash_drop_verified(index, &oid).await,
         Mutation::StashBranch { name, index } => repository.stash_branch(&name, index).await,
         Mutation::Fetch(request) => repository.fetch(request).await,
         Mutation::Pull(request) => repository.pull(request).await,

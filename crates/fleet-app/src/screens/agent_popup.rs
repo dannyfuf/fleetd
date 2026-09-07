@@ -16,7 +16,11 @@ use lifecycle::*;
 use model::*;
 use terminal::*;
 
-use std::{cell::RefCell, rc::Rc, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Instant,
+};
 
 use fleet_core::{
     config::Agent,
@@ -41,8 +45,8 @@ use crate::{
     bridge::Bridge,
     state::{AgentPopupMode, AppState, Screen},
     terminal::{
-        MouseCell, absolute_selection_at, cell_size, grid_size, measure, selection_text, surface,
-        viewport_base,
+        MouseCell, absolute_selection_at, cell_size, grid_size, measure, surface,
+        try_selection_text, viewport_base,
     },
 };
 
@@ -63,12 +67,13 @@ impl TerminalSurface<PopupState> {
         self.pending.clear();
     }
 
-    fn queue_input(&mut self, owner: PendingOwner, input: PendingInput) {
+    #[must_use = "rejected input must be surfaced to the user"]
+    fn queue_input(&mut self, owner: PendingOwner, input: PendingInput) -> bool {
         if self.state.pending_owner != Some(owner) {
             self.discard_pending();
             self.state.pending_owner = Some(owner);
         }
-        self.pending.push(input);
+        self.queue_pending(input)
     }
 
     fn take_pending(&mut self, owner: PendingOwner) -> Vec<PendingInput> {

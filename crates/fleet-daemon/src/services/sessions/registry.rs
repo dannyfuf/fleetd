@@ -8,6 +8,8 @@ impl SessionRuntime {
                 ..Registry::default()
             }),
             ensure_locks: Mutex::new(HashMap::new()),
+            terminal_transition_locks: Mutex::new(HashMap::new()),
+            worktree_lifecycle_locks: Mutex::new(HashMap::new()),
             watches: crate::services::watches::Watches::default(),
             frames,
             process: Mutex::new(None),
@@ -51,6 +53,47 @@ impl SessionRuntime {
         };
         claim.guard = Some(Arc::clone(&claim.lock.mutex).lock_owned().await);
         claim
+    }
+
+    async fn claim_transition<K>(
+        locks: &Mutex<HashMap<K, Weak<TransitionLock>>>,
+        key: K,
+    ) -> TransitionLockClaim
+    where
+        K: Eq + std::hash::Hash,
+    {
+        let lock = {
+            let mut locks = locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            locks.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+                let lock = Arc::new(TransitionLock {
+                    mutex: Arc::new(AsyncMutex::new(())),
+                });
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            })
+        };
+        let guard = Arc::clone(&lock.mutex).lock_owned().await;
+        TransitionLockClaim {
+            _lock: lock,
+            _guard: guard,
+        }
+    }
+
+    pub(crate) async fn claim_terminal_transition(
+        self: &Arc<Self>,
+        session: SessionId,
+    ) -> TransitionLockClaim {
+        Self::claim_transition(&self.terminal_transition_locks, session).await
+    }
+
+    pub(super) async fn claim_worktree_lifecycle(
+        self: &Arc<Self>,
+        worktree: WorktreeId,
+    ) -> TransitionLockClaim {
+        Self::claim_transition(&self.worktree_lifecycle_locks, worktree).await
     }
 
     fn prune_ensure_lock(&self, session: &SessionId) {
@@ -136,6 +179,7 @@ impl SessionRuntime {
         registry.terminal_sessions.remove(&terminal);
         registry.attachments.remove(&terminal);
         registry.next_sequences.remove(&terminal);
+        registry.observed_output_bytes.remove(&terminal);
         registry.observed_agents.remove(&terminal);
         registry.activity_trackers.remove(&terminal);
         registry.activity_changed_at.remove(&terminal);
@@ -176,6 +220,21 @@ impl SessionRuntime {
         }
         self.notify_snapshot();
         Some(name)
+    }
+
+    pub(crate) async fn close_terminal_gated(
+        self: &Arc<Self>,
+        terminal: TerminalId,
+    ) -> Option<String> {
+        let session = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal_sessions
+            .get(&terminal)
+            .cloned()?;
+        let _transition = self.claim_terminal_transition(session).await;
+        self.close_terminal_if_present(terminal)
     }
 
     pub(crate) fn kill_if_present(&self, session: &SessionId) -> bool {

@@ -81,6 +81,7 @@ impl Lazygit {
                 self.state.refreshing = false;
             }
             GitEvent::Snapshot(snapshot) => {
+                let previous = self.current_main_identity();
                 self.last_refresh = now;
                 let requests = self.state.apply_snapshot(snapshot);
                 if self.active {
@@ -89,25 +90,40 @@ impl Lazygit {
                     }
                 }
                 self.sync_main_len();
+                self.reset_main_scroll_if_changed(&previous);
                 if self.active && self.snapshot_dirty {
                     self.snapshot_dirty = false;
                     self.state.refreshing = true;
                     self.bridge.send(GitRequest::Snapshot);
                 }
             }
-            GitEvent::ReadFailed { label, message } => {
+            GitEvent::ReadFailed {
+                label,
+                identity,
+                message,
+            } => {
                 // A read owns no in-progress guard and arms no escalation dialog.
                 self.state.finish_read();
-                self.state.last_error =
-                    Some(format!("{label}: {}", crate::state::error_line(&message)));
+                if identity == crate::bridge::ReadIdentity::Snapshot {
+                    self.state.refreshing = false;
+                }
+                let line = format!("{label}: {}", crate::state::error_line(&message));
+                self.state.main.record_read_error(&identity, line.clone());
+                self.last_error_label = None;
+                self.state.last_error = Some(line);
             }
             GitEvent::Mutated { label, warning } => {
                 self.state.finish_mutation();
-                self.state.last_error = None;
                 self.disarm_escalation(&label);
+                self.finish_prompt_submission(&label, true);
+                if self.last_error_label.as_deref() == Some(visible_label(&label)) {
+                    self.state.last_error = None;
+                    self.last_error_label = None;
+                }
                 if let Some(warning) = warning {
                     self.state.toast(
-                        Toast::new(format!("{label}: {warning}")).icon(Icon::TriangleAlert),
+                        Toast::new(format!("{}: {warning}", visible_label(&label)))
+                            .icon(Icon::TriangleAlert),
                         now,
                         TOAST_DWELL,
                     );
@@ -117,12 +133,17 @@ impl Lazygit {
                 self.state.finish_mutation();
                 // A safe attempt that Git refused becomes the "are you sure?" dialog rather than
                 // an error the user cannot act on.
-                if let Some(escalation) = self.take_escalation(&label) {
+                if let Some(escalation) = self.take_escalation(&label, &message) {
                     self.open_confirm(*escalation);
                     return true;
                 }
-                self.state.last_error =
-                    Some(format!("{label}: {}", crate::state::error_line(&message)));
+                self.finish_prompt_submission(&label, false);
+                self.last_error_label = Some(visible_label(&label).to_owned());
+                self.state.last_error = Some(format!(
+                    "{}: {}",
+                    visible_label(&label),
+                    crate::state::error_line(&message)
+                ));
             }
             GitEvent::Command(event) => {
                 if let Some(line) = command_line(&event) {
@@ -136,6 +157,11 @@ impl Lazygit {
                         self.state.log_command(line);
                     }
                 }
+            }
+            GitEvent::WatcherFailed { message } => {
+                self.last_error_label = None;
+                self.state.last_error =
+                    Some(format!("watcher: {}", crate::state::error_line(&message)));
             }
             GitEvent::Changed(change) => {
                 tracing::debug!(
@@ -207,6 +233,9 @@ impl Lazygit {
                 unstaged,
                 staged,
             } => {
+                self.state
+                    .main
+                    .clear_read_error(&crate::bridge::ReadIdentity::FileDiff(path.clone()));
                 if self.state.apply_file_diff(&path, unstaged, staged) {
                     self.retarget_staging_side();
                     self.sync_main_len();
@@ -219,11 +248,20 @@ impl Lazygit {
                 oid,
                 diff,
                 files: changed,
-            } => self.apply_commit_diff(&oid, diff, changed),
+            } => {
+                self.state
+                    .main
+                    .clear_read_error(&crate::bridge::ReadIdentity::CommitDiff(oid.clone()));
+                self.apply_commit_diff(&oid, diff, changed);
+            }
             GitEvent::BranchDiff { name, diff } => {
+                self.state
+                    .main
+                    .clear_read_error(&crate::bridge::ReadIdentity::BranchDiff(name.clone()));
                 if let MainContent::BranchDiff {
                     name: current,
                     diff: slot,
+                    ..
                 } = &mut self.state.main
                     && *current == name
                 {
@@ -232,9 +270,13 @@ impl Lazygit {
                 }
             }
             GitEvent::StashDiff { index, diff } => {
+                self.state
+                    .main
+                    .clear_read_error(&crate::bridge::ReadIdentity::StashDiff(index));
                 if let MainContent::StashDiff {
                     index: current,
                     diff: slot,
+                    ..
                 } = &mut self.state.main
                     && *current == index
                 {
@@ -243,6 +285,9 @@ impl Lazygit {
                 }
             }
             GitEvent::Conflict { path, file } => {
+                self.state
+                    .main
+                    .clear_read_error(&crate::bridge::ReadIdentity::Conflict(path.clone()));
                 if let MainContent::Conflict {
                     path: current,
                     file: slot,
@@ -257,18 +302,50 @@ impl Lazygit {
                 reference,
                 commits: loaded,
             } => {
+                self.state
+                    .main
+                    .clear_read_error(&crate::bridge::ReadIdentity::RefCommits(reference.clone()));
+                let mut reload = None;
                 if let MainContent::SubCommits {
                     reference: current,
                     commits,
+                    shown,
+                    diff,
+                    diff_error,
                     ..
                 } = &mut self.state.main
                     && *current == reference
                 {
+                    let selected = commits
+                        .get(self.state.cursors.main.index())
+                        .map(|commit| commit.oid.clone());
                     *commits = loaded;
-                    self.sync_main_len();
+                    self.state.cursors.main.retain(commits.len(), |_| {
+                        let selected = selected.as_ref()?;
+                        commits.iter().position(|commit| &commit.oid == selected)
+                    });
+                    let retained = commits
+                        .get(self.state.cursors.main.index())
+                        .map(|commit| commit.oid.clone());
+                    if selected != retained && shown.is_some() {
+                        *shown = retained.clone();
+                        *diff = None;
+                        *diff_error = None;
+                        reload = retained;
+                    }
+                }
+                self.sync_main_len();
+                if let Some(oid) = reload {
+                    self.send(GitRequest::CommitDiff(oid));
                 }
             }
             GitEvent::CommitFileDiff { oid, path, diff } => {
+                self.state
+                    .main
+                    .clear_read_error(&crate::bridge::ReadIdentity::CommitFileDiff {
+                        oid: oid.clone(),
+                        path: path.clone(),
+                    });
                 if let MainContent::CommitFiles {
                     oid: current,
                     shown: Some(shown),
@@ -299,6 +376,7 @@ impl Lazygit {
                 oid: current,
                 diff: slot,
                 files,
+                ..
             } if current == oid => {
                 crate::state::keep_or_replace(slot, diff);
                 *files = changed;
@@ -344,12 +422,30 @@ impl Lazygit {
     }
 
     /// Takes the escalation armed for `label`, if the failure that just arrived is its.
-    pub(super) fn take_escalation(&mut self, label: &str) -> Option<Box<Confirm>> {
+    pub(super) fn take_escalation(&mut self, label: &str, message: &str) -> Option<Box<Confirm>> {
         match &self.state.escalation {
             Some((armed, _)) if armed == label => {
-                self.state.escalation.take().map(|(_, confirm)| confirm)
+                let confirm = self.state.escalation.take().map(|(_, confirm)| confirm);
+                is_unmerged_delete_failure(message)
+                    .then_some(confirm)
+                    .flatten()
             }
             _ => None,
+        }
+    }
+
+    pub(super) fn tracked_label(&mut self, label: &str) -> String {
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        format!("{label}\u{1f}{}", self.next_request_id)
+    }
+
+    fn finish_prompt_submission(&mut self, label: &str, succeeded: bool) {
+        if self.pending_prompt.as_deref() != Some(label) {
+            return;
+        }
+        self.pending_prompt = None;
+        if succeeded && matches!(self.state.overlay(), Some(Overlay::Prompt(_))) {
+            self.state.pop_overlay();
         }
     }
 
@@ -400,6 +496,15 @@ impl Lazygit {
     }
 }
 
+fn visible_label(label: &str) -> &str {
+    label.split_once('\u{1f}').map_or(label, |(label, _)| label)
+}
+
+fn is_unmerged_delete_failure(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("not fully merged") || message.contains("is not merged")
+}
+
 /// One command-log line, or `None` for events that add nothing.
 fn command_line(event: &CommandEvent) -> Option<String> {
     match event {
@@ -435,6 +540,40 @@ fn record_line(record: &fleet_git::CommandRecord) -> Option<String> {
             ))
         }
         CommandOutcome::TimedOut => Some(format!("✗ {argv} — timed out")),
+        CommandOutcome::Cancelled => Some(format!("✗ {argv} — cancelled")),
+        CommandOutcome::OutputLimitExceeded => Some(format!("✗ {argv} — output limit exceeded")),
         CommandOutcome::SpawnFailed(message) => Some(format!("✗ {argv} — {message}")),
+    }
+}
+
+#[cfg(test)]
+mod command_log_tests {
+    use std::time::SystemTime;
+
+    use fleet_git::{CommandKind, CommandOutcome, CommandRecord};
+
+    use super::record_line;
+
+    fn record(outcome: CommandOutcome) -> CommandRecord {
+        CommandRecord {
+            id: 1,
+            kind: CommandKind::Read,
+            display_argv: vec!["git".to_owned(), "status".to_owned()],
+            started_at: SystemTime::UNIX_EPOCH,
+            elapsed: None,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn terminal_command_outcomes_are_visible() {
+        assert_eq!(
+            record_line(&record(CommandOutcome::Cancelled)).as_deref(),
+            Some("✗ git status — cancelled")
+        );
+        assert_eq!(
+            record_line(&record(CommandOutcome::OutputLimitExceeded)).as_deref(),
+            Some("✗ git status — output limit exceeded")
+        );
     }
 }

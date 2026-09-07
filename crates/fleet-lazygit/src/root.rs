@@ -29,10 +29,10 @@ use fleet_git::{
     ResetMode, StashOptions,
 };
 use fleet_ui_kit::prelude::*;
-use fleet_ui_kit::{AppFrame, Toast};
+use fleet_ui_kit::{AppFrame, TextInput, Toast};
 use gpui::{
-    AnyElement, App, Context, Div, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Pixels,
-    Render, Size, Task, UniformListScrollHandle, Window, canvas, div,
+    AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent,
+    Pixels, Render, Size, Task, UniformListScrollHandle, Window, canvas, div,
 };
 
 use crate::actions::{
@@ -107,6 +107,11 @@ pub struct Lazygit {
     _theme_subscription: gpui::Subscription,
     _focus_subscription: Option<gpui::Subscription>,
     overlay_focused: bool,
+    pub(crate) prompt_input: Option<Entity<TextInput>>,
+    pending_prompt: Option<String>,
+    last_error_label: Option<String>,
+    pub(crate) help_context: Option<Vec<&'static str>>,
+    next_request_id: u64,
     /// How many whole rows a flexible side pane can show, measured each frame.
     pub(crate) rows_side: usize,
     /// How many whole rows the Stash pane can show while it keeps its fixed height.
@@ -164,6 +169,11 @@ impl Lazygit {
             scroll_secondary: UniformListScrollHandle::new(),
             _focus_subscription: None,
             overlay_focused: false,
+            prompt_input: None,
+            pending_prompt: None,
+            last_error_label: None,
+            help_context: None,
+            next_request_id: 0,
             conflict_view: None,
             scroll_conflict_ours: UniformListScrollHandle::new(),
             scroll_conflict_theirs: UniformListScrollHandle::new(),
@@ -221,16 +231,19 @@ impl Lazygit {
                     let overlay = this.state.overlay().is_some();
                     if overlay != this.overlay_focused {
                         this.overlay_focused = overlay;
-                        if this.active && this.owns_keyboard(window) {
-                            window.focus(this.wanted_focus(), cx);
+                        if this.active && this.owns_keyboard(window, cx) {
+                            window.focus(&this.wanted_focus(cx), cx);
+                        }
+                        if !overlay {
+                            this.prompt_input = None;
                         }
                     }
                 }));
         }
         let was = self.active;
         self.active = active;
-        if active && !self.owns_keyboard(window) {
-            window.focus(self.wanted_focus(), cx);
+        if active && !self.owns_keyboard(window, cx) {
+            window.focus(&self.wanted_focus(cx), cx);
         }
         if was != active {
             self._ticker = active.then(|| Self::spawn_ticker(cx));
@@ -245,17 +258,26 @@ impl Lazygit {
     }
 
     /// The handle that must hold the keyboard for the rendered context chain to answer keys.
-    fn wanted_focus(&self) -> &FocusHandle {
-        if self.state.overlay().is_some() {
-            &self.overlay_focus
+    fn wanted_focus(&self, cx: &App) -> FocusHandle {
+        if matches!(self.state.overlay(), Some(Overlay::Prompt(prompt)) if !prompt.buffer.is_multiline())
+            && let Some(input) = &self.prompt_input
+        {
+            input.focus_handle(cx)
+        } else if self.state.overlay().is_some() {
+            self.overlay_focus.clone()
         } else {
-            &self.focus
+            self.focus.clone()
         }
     }
 
-    /// Whether one of this view's two handles is the focused element.
-    fn owns_keyboard(&self, window: &Window) -> bool {
-        self.focus.is_focused(window) || self.overlay_focus.is_focused(window)
+    /// Whether one of this view's handles is the focused element.
+    fn owns_keyboard(&self, window: &Window, cx: &App) -> bool {
+        self.focus.is_focused(window)
+            || self.overlay_focus.is_focused(window)
+            || self
+                .prompt_input
+                .as_ref()
+                .is_some_and(|input| input.focus_handle(cx).is_focused(window))
     }
 }
 

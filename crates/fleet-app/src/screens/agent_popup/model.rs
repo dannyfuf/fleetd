@@ -14,8 +14,17 @@ pub(super) struct Model {
     pub(super) alt_screen: bool,
     pub(super) scroll_offset: usize,
     pub(super) scrollback_len: usize,
+    pub(super) terminal_state: AgentTerminalState,
     pub(super) exit_code: Option<Option<i32>>,
     pub(super) activity: AgentActivity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgentTerminalState {
+    Unknown,
+    Starting,
+    Running,
+    Exited,
 }
 
 impl Model {
@@ -39,6 +48,13 @@ impl Model {
             }),
             Screen::Hub { .. } => None,
         };
+        let terminal_state = terminal_record.map_or(AgentTerminalState::Unknown, |terminal| {
+            match terminal.status {
+                TerminalStatus::Starting => AgentTerminalState::Starting,
+                TerminalStatus::Running => AgentTerminalState::Running,
+                TerminalStatus::Exited { .. } => AgentTerminalState::Exited,
+            }
+        });
         let exit_code = terminal_record.and_then(|terminal| match terminal.status {
             TerminalStatus::Exited { code } => Some(code),
             TerminalStatus::Starting | TerminalStatus::Running => None,
@@ -58,6 +74,7 @@ impl Model {
             alt_screen: grid.is_some_and(|grid| grid.modes.alt_screen),
             scroll_offset: grid.map_or(0, |grid| grid.viewport.offset),
             scrollback_len: grid.map_or(0, |grid| grid.viewport.scrollback_len),
+            terminal_state,
             exit_code,
             activity,
         })

@@ -2,7 +2,7 @@ use std::{rc::Rc, sync::Arc};
 
 use gpui::{point, px, size};
 
-use super::*;
+use super::{painter::cell_rect_bounds, *};
 use crate::theme::Theme;
 
 fn theme() -> Theme {
@@ -160,11 +160,79 @@ fn cell_at_resolves_through_wide_cells() {
         GridCell::new("", &t).width(CellWidth::Spacer),
         GridCell::new("b", &t),
     ]);
-    assert_eq!(cell_at(Some(&row), 0).map(|c| c.text.as_ref()), Some("a"));
-    assert_eq!(cell_at(Some(&row), 1).map(|c| c.text.as_ref()), Some("漢"));
-    assert_eq!(cell_at(Some(&row), 2).map(|c| c.text.as_ref()), Some("漢"));
-    assert_eq!(cell_at(Some(&row), 3).map(|c| c.text.as_ref()), Some("b"));
+    assert_eq!(
+        cell_at(Some(&row), 0).map(|(_, c)| c.text.as_ref()),
+        Some("a")
+    );
+    assert_eq!(
+        cell_at(Some(&row), 1).map(|(_, c)| c.text.as_ref()),
+        Some("漢")
+    );
+    assert_eq!(
+        cell_at(Some(&row), 2).map(|(_, c)| c.text.as_ref()),
+        Some("漢")
+    );
+    assert_eq!(
+        cell_at(Some(&row), 3).map(|(_, c)| c.text.as_ref()),
+        Some("b")
+    );
     assert_eq!(cell_at(Some(&row), 9), None);
+}
+
+#[test]
+fn wide_cursor_uses_owning_cell_start() {
+    let t = theme();
+    let row = GridRow::new([
+        GridCell::new("a", &t),
+        GridCell::new("漢", &t).width(CellWidth::Wide),
+        GridCell::new("", &t).width(CellWidth::Spacer),
+    ]);
+    let (owner, cell) = cell_at(Some(&row), 2).expect("wide cell");
+    assert_eq!(owner, 1);
+    assert_eq!(cell.text.as_ref(), "漢");
+}
+
+#[test]
+fn unfocused_bar_and_underline_become_hollow_blocks() {
+    for shape in [CursorShape::Bar, CursorShape::Underline] {
+        assert_eq!(normalized_cursor(shape, false), (CursorShape::Block, true));
+    }
+    assert_eq!(
+        normalized_cursor(CursorShape::Bar, true),
+        (CursorShape::Bar, false)
+    );
+}
+
+#[gpui::test]
+fn adjacent_fractional_rectangles_share_device_edges(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext;
+
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| cx.new(|_| gpui::EmptyView))
+            .expect("test window")
+    });
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, _| {
+        window.set_scale_factor(2.0);
+        let metrics = CellMetrics {
+            width: px(7.5),
+            height: px(18.0),
+        };
+        let color = theme().terminal.background;
+        let first = CellRect {
+            row: 0,
+            rows: 1,
+            col: 0,
+            cols: 1,
+            color,
+        };
+        let second = CellRect { col: 1, ..first };
+        let origin = point(px(0.25), px(0.0));
+        let first = cell_rect_bounds(&first, origin, metrics, window);
+        let second = cell_rect_bounds(&second, origin, metrics, window);
+        assert_eq!(first.right(), second.left());
+    });
 }
 
 #[test]

@@ -71,6 +71,8 @@ pub struct AppState {
     pub home: PathBuf,
     /// The daemon connection situation (§3.12).
     pub daemon: DaemonLink,
+    /// Optional IPC-v4 behaviors advertised by the connected daemon.
+    pub daemon_capabilities: HashSet<String>,
     /// When the current [`DaemonLink`] was entered, for the splash and banner timings.
     pub daemon_since: Instant,
     /// The sibling/on-path fleetd binary is newer than the connected daemon process.
@@ -101,6 +103,8 @@ pub struct AppState {
     pub scope: RepoScope,
     /// One cursor per list.
     pub cursors: Cursors,
+    /// Stable identities from the rows currently prepared for the Hub.
+    pub displayed_hub: crate::presentation::DisplayedHub,
     /// The Workspace sub-mode.
     pub terminal_mode: TerminalMode,
     /// The floating agent popup, independent of the base Hub or Workspace screen.
@@ -166,6 +170,7 @@ impl AppState {
         Self {
             home: home.into(),
             daemon: DaemonLink::Starting,
+            daemon_capabilities: HashSet::new(),
             daemon_since: now,
             daemon_outdated: false,
             snapshot: None,
@@ -179,6 +184,7 @@ impl AppState {
             pr_tab: PrTab::Mine,
             scope: RepoScope::All,
             cursors: Cursors::default(),
+            displayed_hub: crate::presentation::DisplayedHub::default(),
             terminal_mode: TerminalMode::Terminal,
             agent_popup: None,
             terminal_config: fleet_core::config::TerminalConfig::default(),

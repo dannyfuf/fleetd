@@ -192,7 +192,9 @@ impl HubScreen {
                 now.saturating_sub(model.prepared_at),
             ),
             _ => {
-                let slice = hub.prs.slice(state.pr_tab);
+                let cache_key = cache::PrCacheKey::from_state(state);
+                let slice = hub.prs.slice_for(state.pr_tab, &cache_key);
+                let cache_matches_scope = hub.prs.matches(&cache_key);
                 prs_screen::render(
                     PrScreenProps {
                         header_override: (state.filter.editing && state.hub_pane == HubPane::List)
@@ -201,15 +203,20 @@ impl HubScreen {
                         cursor: pr_cursor(state),
                         focused: state.hub_pane == HubPane::List,
                         tab: state.pr_tab,
-                        mine_count: hub.prs.mine.as_ref().map(|slice| slice.prs.len()),
-                        review_count: hub.prs.review.as_ref().map(|slice| slice.prs.len()),
+                        mine_count: cache_matches_scope
+                            .then(|| hub.prs.mine.as_ref().map(|slice| slice.prs.len()))
+                            .flatten(),
+                        review_count: cache_matches_scope
+                            .then(|| hub.prs.review.as_ref().map(|slice| slice.prs.len()))
+                            .flatten(),
                         fetched_age: slice.and_then(|slice| age_secs(&slice.fetched_at, now)),
-                        loading: hub.prs.loading,
-                        cold: hub.prs.is_cold() && hub.prs.loading,
-                        error: hub
-                            .prs
-                            .error
-                            .clone()
+                        loading: cache_matches_scope && hub.prs.loading(state.pr_tab),
+                        cold: cache_matches_scope
+                            && hub.prs.is_cold(state.pr_tab)
+                            && hub.prs.loading(state.pr_tab),
+                        error: cache_matches_scope
+                            .then(|| hub.prs.error(state.pr_tab).map(ToOwned::to_owned))
+                            .flatten()
                             .or_else(|| slice.and_then(|slice| slice.error.clone()))
                             .map(SharedString::from),
                         hidden: model.pr_hidden,
@@ -322,7 +329,7 @@ impl HubScreen {
                 .worktrees
                 .iter()
                 .find(|worktree| worktree.id == row.id)?;
-            return Some(detail::worktree(
+            return Some(detail::worktree_with_status(
                 WorktreeProps {
                     worktree,
                     status: snapshot
@@ -335,6 +342,7 @@ impl HubScreen {
                     home: &home,
                     now,
                 },
+                row.glyph,
                 cx,
             ));
         }
@@ -345,7 +353,7 @@ impl HubScreen {
             .worktrees
             .iter()
             .find(|worktree| worktree_matches_pr(worktree, pr));
-        Some(detail::pull_request(
+        Some(detail::pull_request_with_status(
             PrProps {
                 pr,
                 local,
@@ -358,6 +366,7 @@ impl HubScreen {
                 home: &home,
                 now,
             },
+            Some(row.presence),
             cx,
         ))
     }

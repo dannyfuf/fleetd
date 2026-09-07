@@ -41,6 +41,36 @@ pub(super) struct Tail {
     path: PathBuf,
     offset: u64,
     partial: Vec<u8>,
+    identity: Option<FileIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(not(unix))]
+    created: Option<std::time::SystemTime>,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                created: metadata.created().ok(),
+            }
+        }
+    }
 }
 
 impl Tail {
@@ -49,6 +79,7 @@ impl Tail {
             path,
             offset: 0,
             partial: Vec::new(),
+            identity: None,
         }
     }
 
@@ -57,10 +88,16 @@ impl Tail {
         let Ok(mut file) = File::open(&self.path) else {
             return Vec::new();
         };
-        let Ok(length) = file.metadata().map(|meta| meta.len()) else {
+        let Ok(metadata) = file.metadata() else {
             return Vec::new();
         };
-        if length < self.offset {
+        let identity = FileIdentity::from_metadata(&metadata);
+        let replaced = self
+            .identity
+            .replace(identity)
+            .is_some_and(|old| old != identity);
+        let length = metadata.len();
+        if replaced || length < self.offset {
             self.offset = 0;
             self.partial.clear();
         }
@@ -137,6 +174,21 @@ mod tests {
         script.append(b" line\n");
         assert_eq!(tail.poll(), ["last line"]);
         std::fs::write(&script.0, b"new\n").expect("truncate script");
+        assert_eq!(tail.poll(), ["new"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_length_replacement_restarts_tail() {
+        let script = Script::new();
+        std::fs::write(&script.0, b"old\n").expect("write initial script");
+        let mut tail = Tail::new(script.0.clone());
+        assert_eq!(tail.poll(), ["old"]);
+
+        let replacement = script.0.with_extension("replacement");
+        std::fs::write(&replacement, b"new\n").expect("write replacement script");
+        std::fs::rename(&replacement, &script.0).expect("replace script atomically");
+
         assert_eq!(tail.poll(), ["new"]);
     }
 

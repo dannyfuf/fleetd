@@ -22,9 +22,27 @@ mod repo;
 mod worktree;
 
 pub use inspection::Inspected;
-pub use pull_request::{PrProps, pull_request};
+pub use pull_request::{PrProps, pull_request, pull_request_with_status};
 pub use repo::{RepoProps, clone_job, repo};
-pub use worktree::{WorktreeProps, worktree};
+pub use worktree::{WorktreeProps, worktree, worktree_with_status};
+
+/// Resolves every worktree surface through the same health-first status precedence.
+pub(crate) fn resolved_worktree_status(
+    status: Option<&WorktreeStatus>,
+    slept: bool,
+    degraded: bool,
+    host_unreachable: bool,
+    job_running: bool,
+) -> StatusKind {
+    row_glyph(
+        status.map_or(SessionState::Unknown, |status| status.session),
+        slept,
+        status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
+        degraded,
+        host_unreachable,
+        job_running,
+    )
+}
 
 fn path_budget(cx: &App) -> usize {
     let theme = cx.theme();
@@ -135,4 +153,51 @@ fn block(children: Vec<AnyElement>, cx: &App) -> AnyElement {
         .gap(theme.space.xs)
         .children(children)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use fleet_core::{
+        ids::WorktreeId,
+        sessions::{AgentActivity, SessionState, WorktreeStatus},
+    };
+
+    use super::*;
+
+    fn status(session: SessionState, activity: AgentActivity) -> WorktreeStatus {
+        WorktreeStatus {
+            worktree_id: WorktreeId::try_from("acme/api#feature")
+                .unwrap_or_else(|error| panic!("{error}")),
+            session,
+            windows: Vec::new(),
+            running: Vec::new(),
+            agent_activity: activity,
+            agent_activity_changed_at: None,
+        }
+    }
+
+    #[test]
+    fn detail_and_list_resolve_identical_status() {
+        let attached = status(SessionState::Attached, AgentActivity::Working);
+        assert_eq!(
+            resolved_worktree_status(Some(&attached), false, true, true, true),
+            StatusKind::HostUnreachable
+        );
+        assert_eq!(
+            resolved_worktree_status(Some(&attached), false, true, false, true),
+            StatusKind::Degraded
+        );
+        assert_eq!(
+            resolved_worktree_status(Some(&attached), false, false, false, true),
+            StatusKind::JobRunning
+        );
+        assert_eq!(
+            resolved_worktree_status(Some(&attached), false, false, false, false),
+            StatusKind::AgentWorking
+        );
+        assert_eq!(
+            resolved_worktree_status(None, false, false, false, false),
+            StatusKind::Unknown
+        );
+    }
 }

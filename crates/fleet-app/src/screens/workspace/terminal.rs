@@ -292,24 +292,27 @@ pub(super) fn paste_clipboard(
     let Some((terminal, primed)) = terminal_input_target(state, cx) else {
         return;
     };
+    let mut accepted = true;
     surface::route_paste(local, state, cx, |input| {
-        local
+        accepted = local
             .borrow_mut()
             .send_or_queue(bridge, Some(terminal), primed, input);
     });
+    surface::report_input_delivery(accepted, state, cx);
 }
 
 pub(super) fn terminal_input_target(
     state: &Entity<AppState>,
     cx: &App,
 ) -> Option<(TerminalId, bool)> {
-    let app = state.read(cx);
+    terminal_input_target_of(state.read(cx))
+}
+
+pub(super) fn terminal_input_target_of(app: &AppState) -> Option<(TerminalId, bool)> {
     if app.overlay.is_some() || app.agent_popup.is_some() || app.drops_terminal_keys() {
         return None;
     }
-    let terminal = app
-        .active_session()
-        .and_then(|session| session.active_terminal)?;
+    let terminal = active_pty_terminal_of(app.active_session()?)?;
     let primed = app.grids.get(&terminal).is_some_and(|grid| grid.primed);
     Some((terminal, primed))
 }
@@ -356,11 +359,14 @@ pub(super) fn forward_terminal_key(
     let Some((terminal, primed)) = terminal_input_target(state, cx) else {
         return false;
     };
-    surface::route_key(local, state, keystroke, is_held, cx, |input| {
-        local
+    let mut accepted = true;
+    let routed = surface::route_key(local, state, keystroke, is_held, cx, |input| {
+        accepted = local
             .borrow_mut()
             .send_or_queue(bridge, Some(terminal), primed, input);
-    })
+    });
+    surface::report_input_delivery(accepted, state, cx);
+    routed
 }
 
 pub(super) fn copy_selection(
@@ -377,12 +383,13 @@ pub(super) fn copy_selection(
     if state.read(cx).terminal_mode == TerminalMode::Terminal
         && let Some((terminal, primed)) = terminal_input_target(state, cx)
     {
-        local.borrow_mut().send_or_queue(
+        let accepted = local.borrow_mut().send_or_queue(
             bridge,
             Some(terminal),
             primed,
             PendingInput::Key(copy_keystroke()),
         );
+        surface::report_input_delivery(accepted, state, cx);
     }
 }
 

@@ -268,8 +268,8 @@ impl Render for Lazygit {
                     .absolute()
                     .inset_0()
                     .track_focus(&self.overlay_focus)
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                        this.typed(event, cx);
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        this.typed(event, window, cx);
                     }))
                     .child(element)
                     .into_any_element(),
@@ -350,8 +350,8 @@ impl Lazygit {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
-                    if this.active && !this.owns_keyboard(window) {
-                        window.focus(this.wanted_focus(), cx);
+                    if this.active && !this.owns_keyboard(window, cx) {
+                        window.focus(&this.wanted_focus(cx), cx);
                         cx.notify();
                     }
                 }),

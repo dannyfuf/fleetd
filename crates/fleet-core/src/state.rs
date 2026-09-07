@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
 pub const STATE_VERSION: u32 = 1;
 
 /// Fleet's complete persisted state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
     /// Persisted schema version, always one.
@@ -31,6 +31,55 @@ pub struct State {
     /// Currently selected context, omitted when none exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_context_id: Option<ContextId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedState {
+    version: u32,
+    contexts: Vec<Context>,
+    repos: Vec<Repo>,
+    #[serde(default)]
+    clones: Vec<CloneJob>,
+    worktrees: Vec<Worktree>,
+    active_context_id: Option<ContextId>,
+}
+
+impl<'de> Deserialize<'de> for State {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let persisted = PersistedState::deserialize(deserializer)?;
+        Ok(Self::from(persisted))
+    }
+}
+
+impl From<PersistedState> for State {
+    fn from(mut persisted: PersistedState) -> Self {
+        for repo in &mut persisted.repos {
+            repo.owner = repo.id.owner().to_owned();
+            repo.name = repo.id.name().to_owned();
+        }
+        for clone in &mut persisted.clones {
+            clone.owner = clone.id.owner().to_owned();
+            clone.name = clone.id.name().to_owned();
+        }
+        for worktree in &mut persisted.worktrees {
+            if let Ok(repo_id) = RepoId::try_from(worktree.id.repo()) {
+                worktree.repo_id = repo_id;
+            }
+            worktree.slug = worktree.id.slug().to_owned();
+        }
+        Self {
+            version: persisted.version,
+            contexts: persisted.contexts,
+            repos: persisted.repos,
+            clones: persisted.clones,
+            worktrees: persisted.worktrees,
+            active_context_id: persisted.active_context_id,
+        }
+    }
 }
 
 impl State {
@@ -65,6 +114,20 @@ pub enum StateValidationError {
         target: &'static str,
         /// Missing referenced identifier.
         target_id: String,
+    },
+    /// An entity's redundant identity fields disagree with its canonical identifier.
+    #[error("{entity} `{id}` has {field} `{actual}`, expected `{expected}`")]
+    MismatchedIdentity {
+        /// Entity type containing the mismatch.
+        entity: &'static str,
+        /// Canonical entity identifier.
+        id: String,
+        /// Redundant field that disagrees with the identifier.
+        field: &'static str,
+        /// Persisted field value.
+        actual: String,
+        /// Value derived from the canonical identifier.
+        expected: String,
     },
     /// A clone job conflicts with an already registered repository.
     #[error("clone `{0}` conflicts with an existing repository")]
@@ -104,11 +167,21 @@ pub fn validate_state(state: &State) -> Result<(), StateValidationError> {
         return Err(missing("state", "activeContextId", "context", active));
     }
     for repo in &state.repos {
+        validate_identity(
+            "repository",
+            &repo.id,
+            "owner",
+            &repo.owner,
+            repo.id.owner(),
+        )?;
+        validate_identity("repository", &repo.id, "name", &repo.name, repo.id.name())?;
         if !contexts.contains(&repo.context_id) {
             return Err(missing("repository", &repo.id, "context", &repo.context_id));
         }
     }
     for clone in &state.clones {
+        validate_identity("clone", &clone.id, "owner", &clone.owner, clone.id.owner())?;
+        validate_identity("clone", &clone.id, "name", &clone.name, clone.id.name())?;
         if !contexts.contains(&clone.context_id) {
             return Err(missing("clone", &clone.id, "context", &clone.context_id));
         }
@@ -117,6 +190,20 @@ pub fn validate_state(state: &State) -> Result<(), StateValidationError> {
         }
     }
     for worktree in &state.worktrees {
+        validate_identity(
+            "worktree",
+            &worktree.id,
+            "repoId",
+            worktree.repo_id.as_str(),
+            worktree.id.repo(),
+        )?;
+        validate_identity(
+            "worktree",
+            &worktree.id,
+            "slug",
+            &worktree.slug,
+            worktree.id.slug(),
+        )?;
         if !repos.contains(&worktree.repo_id) {
             return Err(missing(
                 "worktree",
@@ -127,6 +214,25 @@ pub fn validate_state(state: &State) -> Result<(), StateValidationError> {
         }
     }
     Ok(())
+}
+
+fn validate_identity(
+    entity: &'static str,
+    id: impl ToString,
+    field: &'static str,
+    actual: &str,
+    expected: &str,
+) -> Result<(), StateValidationError> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(StateValidationError::MismatchedIdentity {
+        entity,
+        id: id.to_string(),
+        field,
+        actual: actual.to_owned(),
+        expected: expected.to_owned(),
+    })
 }
 
 fn collect_unique<'a, T>(

@@ -129,7 +129,7 @@ pub use terminal_grid::{
     TerminalGrid, TerminalGridCache, UnderlineStyle,
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
-pub use terminal_tab_strip::{TerminalTab, TerminalTabKind, TerminalTabStrip};
+pub use terminal_tab_strip::{TerminalAgentState, TerminalTab, TerminalTabKind, TerminalTabStrip};
 pub use text_field::{
     EditEffect, TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
 };
