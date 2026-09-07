@@ -3,3 +3,6 @@
 pub mod config;
 pub mod lock;
 pub mod state;
+
+/// Per-board JSON document persistence.
+pub mod board;

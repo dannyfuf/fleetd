@@ -522,6 +522,7 @@ fn event_kind(event: &Event) -> EventKind {
         Event::WatchExited(_) => EventKind::WatchExited,
         Event::WatchDismissed(_) => EventKind::WatchDismissed,
         Event::SnapshotChanged(_) => EventKind::SnapshotChanged,
+        Event::BoardChanged { .. } => EventKind::BoardChanged,
         Event::JobUpdated(_) => EventKind::JobUpdated,
         Event::SessionChanged(_) => EventKind::SessionChanged,
         Event::AgentActivityChanged { .. } => EventKind::AgentActivityChanged,

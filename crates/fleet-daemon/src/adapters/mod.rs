@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+/// Board backend boundaries and registry.
+pub mod board;
 pub mod clock;
 pub mod files;
 pub mod git;
@@ -19,6 +21,8 @@ use shell::{RealShell, Shell};
 /// Cloneable dependency bundle shared by daemon domain services.
 #[derive(Clone)]
 pub struct Adapters {
+    /// Board synchronization implementations.
+    pub board_backends: board::BoardBackends,
     /// Git command boundary.
     pub git: Arc<dyn Git>,
     /// GitHub metadata boundary.
@@ -45,6 +49,7 @@ impl Adapters {
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
+            board_backends: board::BoardBackends::system(Arc::clone(&shell), Arc::clone(&clock)),
             git,
             github,
             process,
@@ -58,13 +63,15 @@ impl Adapters {
     #[must_use]
     pub fn system(files: Arc<dyn Files>) -> Self {
         let shell: Arc<dyn Shell> = Arc::new(RealShell);
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         Self {
+            board_backends: board::BoardBackends::system(Arc::clone(&shell), Arc::clone(&clock)),
             git: Arc::new(ShellGit::new(Arc::clone(&shell))),
             github: Arc::new(GhCli::new(Arc::clone(&shell))),
             process: Arc::new(RealProcess::new(Arc::clone(&shell))),
             files,
             shell,
-            clock: Arc::new(SystemClock),
+            clock,
         }
     }
 }
