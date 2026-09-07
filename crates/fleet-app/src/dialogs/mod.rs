@@ -27,6 +27,10 @@
 //! state.
 
 pub mod assign_repo;
+pub mod board_settings;
+pub mod card_create;
+pub mod card_detail;
+pub mod card_picker;
 pub mod clone_repo;
 pub mod confirm;
 pub mod context;
@@ -58,6 +62,14 @@ pub use confirm::ConfirmRequest;
 /// Which dialog is open (§3.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dialogs {
+    /// Board settings (BOARD §8).
+    BoardSettings,
+    /// Card property (BOARD §8).
+    CardPicker,
+    /// New card (BOARD §8).
+    CardCreate,
+    /// Card detail (BOARD §8).
+    CardDetail,
     /// §3.8.1 Create worktree (`n` in the worktrees pane).
     CreateWorktree,
     /// §3.8.2 Clone repo (`n` in the repos pane).
@@ -92,6 +104,10 @@ impl Dialogs {
     #[must_use]
     pub const fn context_name(&self) -> &'static str {
         match self {
+            Self::BoardSettings => "BoardSettings",
+            Self::CardPicker => "CardPicker",
+            Self::CardCreate => "CardCreate",
+            Self::CardDetail => "CardDetail",
             Self::CreateWorktree => "Create",
             Self::CloneRepo => "Clone",
             Self::Confirm => "Confirm",
@@ -110,6 +126,10 @@ impl Dialogs {
     #[must_use]
     pub const fn title(&self) -> &'static str {
         match self {
+            Self::BoardSettings => "Board settings",
+            Self::CardPicker => "Card property",
+            Self::CardCreate => "New card",
+            Self::CardDetail => "Card detail",
             Self::CreateWorktree => "New worktree",
             Self::CloneRepo => "Clone repository",
             Self::Confirm => "Confirm",
@@ -129,6 +149,10 @@ impl Dialogs {
     #[must_use]
     pub const fn icon(&self) -> Icon {
         match self {
+            Self::BoardSettings => Icon::Settings2,
+            Self::CardPicker => Icon::ArrowRightLeft,
+            Self::CardCreate => Icon::Plus,
+            Self::CardDetail => Icon::FilePen,
             Self::CreateWorktree => Icon::GitBranchPlus,
             Self::CloneRepo => Icon::CloudDownload,
             Self::Confirm => Icon::TriangleAlert,
@@ -146,6 +170,10 @@ impl Dialogs {
     #[must_use]
     pub fn width(&self) -> Pixels {
         match self {
+            Self::BoardSettings => px(560.0),
+            Self::CardPicker => px(560.0),
+            Self::CardCreate => px(560.0),
+            Self::CardDetail => px(880.0),
             Self::CreateWorktree | Self::CloneRepo | Self::QuitDaemon => px(560.0),
             Self::Confirm => px(480.0),
             Self::NewContext | Self::EditContext | Self::RenameTerminal => px(460.0),
@@ -174,6 +202,10 @@ impl Dialogs {
         watch(state, cx);
         seed(self, state, bridge, cx);
         match self {
+            Self::BoardSettings => board_settings::render(state, bridge, focus, window, cx),
+            Self::CardPicker => card_picker::render(state, bridge, focus, window, cx),
+            Self::CardCreate => card_create::render(state, bridge, focus, window, cx),
+            Self::CardDetail => card_detail::render(state, bridge, focus, window, cx),
             Self::CreateWorktree => create_worktree::render(state, bridge, focus, window, cx),
             Self::CloneRepo => clone_repo::render(state, bridge, focus, window, cx),
             Self::Confirm => confirm::render(state, bridge, focus, window, cx),
@@ -196,8 +228,18 @@ impl Dialogs {
 /// Every dialog's mutable draft, plus the dialog the drafts were seeded for.
 #[derive(Debug, Default)]
 pub struct DialogHost {
+    /// Board settings draft.
+    pub board_settings: board_settings::BoardSettingsState,
+    /// Card property draft.
+    pub card_picker: card_picker::CardPickerState,
+    /// New card draft.
+    pub card_create: card_create::CardCreateState,
+    /// Card detail draft.
+    pub card_detail: card_detail::CardDetailState,
     /// The dialog the drafts below belong to, or `None` when no dialog is open.
     pub open: Option<Dialogs>,
+    /// The dialog the open palette replaced, so a palette command can act on its draft.
+    pub behind_palette: Option<Dialogs>,
     /// Whether the palette's draft has been seeded for the currently open palette.
     pub palette_open: bool,
     /// §3.8.1.
@@ -273,15 +315,34 @@ fn watch(state: &Entity<AppState>, cx: &mut App) {
     }
     let subscription = cx.observe(state, |entity, cx| {
         let overlay = entity.read(cx).overlay.clone();
-        let host = cx.default_global::<DialogHost>();
-        if !matches!(overlay, Some(Overlay::Dialog(_))) {
-            host.open = None;
-        }
-        if !matches!(overlay, Some(Overlay::Palette)) {
-            host.palette_open = false;
-        }
+        track_overlay(cx.default_global::<DialogHost>(), overlay.as_ref());
     });
     cx.default_global::<DialogWatch>().subscription = Some(subscription);
+}
+
+/// Retires the drafts an overlay change invalidated.
+///
+/// The palette does not stack on the dialog it is opened over: it replaces it, and the dialog's
+/// draft is all that is left of it. `behind_palette` keeps that dialog's name so a palette row
+/// that acts on it — every `Card detail:` row saves or cancels an edit that is already typed —
+/// can reopen it instead of reseeding it over the user's text. This runs on every notify while
+/// an overlay is open, not only when one changes, so it must be idempotent.
+fn track_overlay(host: &mut DialogHost, overlay: Option<&Overlay>) {
+    match overlay {
+        Some(Overlay::Dialog(_)) => host.behind_palette = None,
+        Some(Overlay::Palette) => {
+            if let Some(open) = host.open.take() {
+                host.behind_palette = Some(open);
+            }
+        }
+        _ => {
+            host.open = None;
+            host.behind_palette = None;
+        }
+    }
+    if !matches!(overlay, Some(Overlay::Palette)) {
+        host.palette_open = false;
+    }
 }
 
 /// Seeds the open dialog's draft the first time it is rendered.
@@ -291,6 +352,10 @@ fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
     }
     with_host(cx, |host| host.open = Some(dialog.clone()));
     match dialog {
+        Dialogs::BoardSettings => board_settings::seed(state, cx),
+        Dialogs::CardPicker => card_picker::seed(state, cx),
+        Dialogs::CardCreate => card_create::seed(state, cx),
+        Dialogs::CardDetail => card_detail::seed(state, cx),
         Dialogs::CreateWorktree => create_worktree::seed(state, bridge, cx),
         Dialogs::CloneRepo => clone_repo::seed(state, bridge, cx),
         Dialogs::Confirm => confirm::seed(state, bridge, cx),
@@ -575,8 +640,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_palette_remembers_the_dialog_it_replaced() {
+        let mut host = DialogHost {
+            open: Some(Dialogs::CardDetail),
+            ..DialogHost::default()
+        };
+        host.palette_open = true;
+        track_overlay(&mut host, Some(&Overlay::Palette));
+        assert_eq!(host.open, None);
+        assert_eq!(host.behind_palette, Some(Dialogs::CardDetail));
+        assert!(host.palette_open);
+        // The observer runs on every notify, not only when the overlay changes: a second pass
+        // must not forget what the first one recorded.
+        track_overlay(&mut host, Some(&Overlay::Palette));
+        assert_eq!(host.behind_palette, Some(Dialogs::CardDetail));
+        // Reopening the dialog the palette hid retires the record of it.
+        host.open = Some(Dialogs::CardDetail);
+        track_overlay(&mut host, Some(&Overlay::Dialog(Dialogs::CardDetail)));
+        assert_eq!(host.open, Some(Dialogs::CardDetail));
+        assert_eq!(host.behind_palette, None);
+        assert!(!host.palette_open);
+        // Any other overlay invalidates every dialog draft.
+        track_overlay(&mut host, None);
+        assert_eq!(host.open, None);
+        assert_eq!(host.behind_palette, None);
+    }
+
+    #[test]
     fn every_dialog_has_a_key_context_word() {
         for dialog in [
+            Dialogs::BoardSettings,
+            Dialogs::CardPicker,
+            Dialogs::CardCreate,
+            Dialogs::CardDetail,
             Dialogs::CreateWorktree,
             Dialogs::CloneRepo,
             Dialogs::Confirm,

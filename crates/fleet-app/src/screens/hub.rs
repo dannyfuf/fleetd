@@ -509,6 +509,7 @@ pub fn prune_facts(result: &PruneResult) -> FactList {
 
 /// The Hub screen.
 pub struct HubScreen {
+    board: super::board::BoardScreen,
     hub: Entity<HubState>,
     rail_scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
@@ -520,6 +521,7 @@ impl HubScreen {
     #[must_use]
     pub fn new(cx: &mut App) -> Self {
         Self {
+            board: super::board::BoardScreen::new(cx),
             hub: cx.new(|_| HubState::default()),
             rail_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
@@ -550,28 +552,39 @@ impl HubScreen {
             list_scroll: self.list_scroll.clone(),
             pr_scroll: self.pr_scroll.clone(),
         };
-        ctx.tick_pull_requests(cx);
-        ctx.tick_inspection(cx);
 
-        let now = now_epoch();
-        let viewport = window.viewport_size();
-        let width = f32::from(viewport.width);
-        let rows = visible_rows(f32::from(viewport.height), cx);
-        let model = model(state.read(cx), self.hub.read(cx), now);
-        publish_breadcrumb(state, &model, cx);
-        let body = self.body(
-            state.read(cx),
-            self.hub.read(cx),
-            &model,
-            Viewport { width, rows },
-            now,
-            cx,
-        );
+        let body = if matches!(state.read(cx).screen, Screen::Hub { tab: HubTab::Board }) {
+            self.board.render(state, bridge, focus, window, cx)
+        } else {
+            ctx.tick_pull_requests(cx);
+            ctx.tick_inspection(cx);
+            let now = now_epoch();
+            let viewport = window.viewport_size();
+            let width = f32::from(viewport.width);
+            let rows = visible_rows(f32::from(viewport.height), cx);
+            let model = model(state.read(cx), self.hub.read(cx), now);
+            publish_breadcrumb(state, &model, cx);
+            self.body(
+                state.read(cx),
+                self.hub.read(cx),
+                &model,
+                Viewport { width, rows },
+                now,
+                cx,
+            )
+        };
+        let tabs = hub_tabs(state.read(cx));
 
         div()
-            .track_focus(focus)
+            .when(
+                !matches!(state.read(cx).screen, Screen::Hub { tab: HubTab::Board }),
+                |el| el.track_focus(focus),
+            )
             .size_full()
-            .child(body)
+            .flex()
+            .flex_col()
+            .child(div().px(cx.theme().space.md).child(tabs))
+            .child(div().flex_1().min_h_0().child(body))
             // ---- §3.1 contexts and global Hub keys
             .on_action(ctx.act(|ctx, _: &hub::MoveDown, window, cx| ctx.move_by(1, window, cx)))
             .on_action(ctx.act(|ctx, _: &hub::MoveUp, window, cx| ctx.move_by(-1, window, cx)))
@@ -1095,7 +1108,21 @@ impl HubCtx {
         self.schedule_inspection(cx);
     }
 
+    /// Whether the Hub is showing the board, whose own keys own the screen (BOARD §8).
+    fn on_board(&self, cx: &App) -> bool {
+        matches!(
+            self.state.read(cx).screen,
+            Screen::Hub { tab: HubTab::Board }
+        )
+    }
+
     fn move_by(&self, delta: isize, _window: &mut Window, cx: &mut App) {
+        // The board replaced the worktrees pane: a shared cursor key must move the cards the
+        // user can see, not the hidden list underneath them.
+        if self.on_board(cx) {
+            crate::screens::board::move_rows(&self.state, delta, cx);
+            return;
+        }
         let model = self.model(cx);
         let len = self.cursor_len(&model, cx);
         let next = move_cursor(self.cursor_index(cx), delta, len);
@@ -1103,6 +1130,10 @@ impl HubCtx {
     }
 
     fn move_to_end(&self, bottom: bool, _window: &mut Window, cx: &mut App) {
+        if self.on_board(cx) {
+            crate::screens::board::jump_rows(&self.state, bottom, cx);
+            return;
+        }
         let model = self.model(cx);
         let len = self.cursor_len(&model, cx);
         let next = if bottom { len.saturating_sub(1) } else { 0 };
@@ -1757,6 +1788,11 @@ impl HubCtx {
 
     /// `b` — the PR's URL on the PR screen, the inspected PR or the repo elsewhere.
     fn open_in_browser(&self, cx: &mut App) {
+        // Nothing on the board is a worktree or a pull request; acting on the hidden selection
+        // would open a URL for a row the user cannot see.
+        if self.on_board(cx) {
+            return;
+        }
         let url = if matches!(self.state.read(cx).screen, Screen::Hub { tab: HubTab::Prs }) {
             self.selected_pr(cx).map(|row| row.url.to_string())
         } else if self.state.read(cx).hub_pane == HubPane::Repos {
@@ -1872,11 +1908,56 @@ impl HubCtx {
 /// `ctrl-d` / `ctrl-u` and the header's `first–last/total` range both depend on it, so it is
 /// derived from the live viewport and the theme's metrics rather than assumed.
 fn visible_rows(window_height: f32, cx: &App) -> usize {
-    let metrics = cx.theme().metrics;
+    row_capacity(window_height, cx.theme().metrics)
+}
+
+fn row_capacity(window_height: f32, metrics: fleet_ui_kit::theme::Metrics) -> usize {
     let chrome = f32::from(metrics.context_bar_h)
         + f32::from(metrics.status_bar_h)
-        + f32::from(metrics.pane_header_h);
+        + 2.0 * f32::from(metrics.pane_header_h);
     (((window_height - chrome).max(0.0) / f32::from(metrics.row_h).max(1.0)) as usize).max(2)
+}
+
+/// The Hub's screen tabs; summary counts are context scoped, independent of repo scope.
+fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
+    use fleet_ui_kit::{SegmentedTab, SegmentedTabs};
+    let summary = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .boards
+            .iter()
+            .find(|board| Some(&board.context_id) == state.active_context())
+    });
+    let label = if summary.is_some_and(|board| board.conflict_count > 0) {
+        "Board •"
+    } else {
+        "Board"
+    };
+    let board = summary
+        .map_or_else(
+            || SegmentedTab::bare(label),
+            |summary| SegmentedTab::new(label, summary.open_count),
+        )
+        .loading(state.board.loading);
+    let active = match state.screen {
+        Screen::Hub { tab: HubTab::Prs } => 1,
+        Screen::Hub { tab: HubTab::Board } => 2,
+        _ => 0,
+    };
+    SegmentedTabs::new([
+        SegmentedTab::bare("Worktrees"),
+        SegmentedTab::bare("Pull requests"),
+        board,
+    ])
+    .active(active)
+    .underlined(false)
+    .on_select(|index, window, cx| {
+        let action: Box<dyn gpui::Action> = match index {
+            1 => Box::new(hub::GoPrs),
+            2 => Box::new(crate::actions::board::GoBoard),
+            _ => Box::new(hub::GoWorktrees),
+        };
+        window.dispatch_action(action, cx);
+    })
 }
 
 #[cfg(test)]
@@ -1914,6 +1995,14 @@ mod tests {
             warnings: Vec::new(),
             error: None,
         }
+    }
+
+    #[test]
+    fn hub_tabs_and_pane_header_both_reduce_visible_rows() {
+        assert_eq!(
+            row_capacity(422.0, fleet_ui_kit::theme::Metrics::default()),
+            10
+        );
     }
 
     #[test]

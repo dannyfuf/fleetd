@@ -10,8 +10,9 @@ use fleet_ui_kit::{Chip, ContextBar, ContextTab, Icon, StatusBar, Tone};
 use gpui::{AnyElement, App, IntoElement, SharedString, px};
 
 use crate::{
+    dialogs::Dialogs,
     shell::daemon::{dot_label, dot_state},
-    state::{AppState, RepoScope, breadcrumb, chip_counts},
+    state::{AppState, HubTab, Overlay, RepoScope, Screen, breadcrumb, chip_counts},
     views::{job_ticker, sticky_error},
 };
 
@@ -229,8 +230,33 @@ pub fn breadcrumb_text(state: &AppState) -> String {
         RepoScope::All => String::new(),
         RepoScope::Repo(repo) => repo.name().to_owned(),
     };
-    let row = state.breadcrumb_row.clone().unwrap_or_default();
+    // The board's row is derived here, not cached by its render: the status bar is built before
+    // the body, so a row written during the body's render names the previously selected card.
+    let row = if matches!(state.screen, Screen::Hub { tab: HubTab::Board }) {
+        board_row(state)
+    } else {
+        state.breadcrumb_row.clone().unwrap_or_default()
+    };
     breadcrumb(&[&context, &repo, &row])
+}
+
+/// The board's breadcrumb row: the focused card, unless the surface is not about a card.
+///
+/// Board settings edits the *board*, so naming a card there points the reader at the one thing
+/// the dialog cannot change. The board's name would be no better — it defaults to the context's,
+/// which the breadcrumb already says — so the row is simply dropped and `breadcrumb` suppresses
+/// it.
+fn board_row(state: &AppState) -> String {
+    if matches!(state.overlay, Some(Overlay::Dialog(Dialogs::BoardSettings))) {
+        return String::new();
+    }
+    crate::screens::board::selected_card(state)
+        .map(|card| {
+            state
+                .board()
+                .map_or_else(|| card.title.clone(), |view| card.display_key(&view.board))
+        })
+        .unwrap_or_default()
 }
 
 /// The 26 px status bar (§2.2): breadcrumb · mode word · job ticker · sticky error slot.
@@ -337,6 +363,7 @@ mod tests {
         let id: fleet_core::ids::ContextId =
             "acme".parse().unwrap_or_else(|error| panic!("{error}"));
         fleet_proto::snapshot::Snapshot {
+            boards: Vec::new(),
             generated_at: "2026-09-04T12:00:00Z".to_owned(),
             contexts: vec![Context {
                 id: id.clone(),
@@ -381,6 +408,66 @@ mod tests {
                  first tab, which is what the bar underlines (active_context set: {active})"
             );
         }
+    }
+
+    #[test]
+    fn the_board_breadcrumb_names_the_card_that_is_selected_right_now() {
+        let now = std::time::Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.apply_snapshot(one_context_snapshot(true), now);
+        state.screen = Screen::Hub { tab: HubTab::Board };
+        let context = Context {
+            id: "acme".parse().unwrap_or_else(|error| panic!("{error}")),
+            name: "acme".to_owned(),
+            owners: Vec::new(),
+            created_at: "2026-09-04T09:00:00Z".to_owned(),
+        };
+        let mut board = fleet_core::board::new_board(&context, &context.created_at);
+        let mut cards = Vec::new();
+        for (index, title) in ["First", "Second"].iter().enumerate() {
+            let card = fleet_core::board::create_card(
+                &mut board,
+                &cards,
+                format!("card-{index}")
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+                fleet_core::board::CardDraft {
+                    title: (*title).to_owned(),
+                    ..Default::default()
+                },
+                &context.created_at,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            cards.push(card);
+        }
+        let column = board
+            .statuses
+            .iter()
+            .position(|status| status.id == cards[0].status_id)
+            .unwrap_or_else(|| panic!("no column"));
+        let keys: Vec<String> = cards.iter().map(|card| card.display_key(&board)).collect();
+        state.board.view = Some(fleet_core::board::BoardView { board, cards });
+        state.board.focus = crate::state::BoardFocus { column, row: 0 };
+        // Stale by construction: the status bar is built before the body, so a row the board's
+        // render caches always names the previously selected card.
+        state.breadcrumb_row = Some("stale".to_owned());
+        assert!(breadcrumb_text(&state).ends_with(&keys[0]), "{keys:?}");
+        state.board.focus.row = 1;
+        assert!(breadcrumb_text(&state).ends_with(&keys[1]), "{keys:?}");
+
+        // A dialog about the card keeps naming it; the one about the board does not, because
+        // the card is the one thing board settings cannot change.
+        state.open_overlay(Overlay::Dialog(Dialogs::CardDetail));
+        assert!(breadcrumb_text(&state).ends_with(&keys[1]), "{keys:?}");
+        state.close_overlay();
+        state.open_overlay(Overlay::Dialog(Dialogs::BoardSettings));
+        assert_eq!(
+            breadcrumb_text(&state),
+            "acme",
+            "board settings edits the board, so the breadcrumb names no card"
+        );
+        state.close_overlay();
+        assert!(breadcrumb_text(&state).ends_with(&keys[1]), "{keys:?}");
     }
 
     #[test]

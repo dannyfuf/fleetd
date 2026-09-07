@@ -7,6 +7,8 @@
 //!
 //! Add one module per view and re-export it here.
 
+pub mod board_card_detail;
+pub mod board_screen;
 pub mod detail_panel;
 pub mod doctor_view;
 pub mod first_run;

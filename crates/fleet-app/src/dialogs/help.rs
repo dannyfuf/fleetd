@@ -154,6 +154,17 @@ const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "Board",
+        &[
+            "Hub > Board",
+            "Filter > BoardFilter",
+            "Dialog > CardDetail",
+            "Dialog > CardCreate",
+            "Dialog > CardPicker",
+            "Dialog > BoardSettings",
+        ],
+    ),
+    (
         "Dialogs & filter",
         &[
             "Filter",

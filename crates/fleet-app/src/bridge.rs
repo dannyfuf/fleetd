@@ -185,6 +185,11 @@ impl Bridge {
 
     /// Sends a request and returns the channel its single answer arrives on.
     ///
+    /// Board replies follow the same path as worktree paths and PR slices: no typed
+    /// Board bridge events are emitted. The caller receives ResponseBody::Board
+    /// or ResponseBody::Card and applies AppState::apply_board_view / apply_card.
+    /// screens::board::ensure_current implements EnsureBoard with context/generation guards.
+    ///
     /// ```ignore
     /// let reply = bridge.request(RequestBody::GetSnapshot);
     /// cx.spawn(async move |_, _| {
