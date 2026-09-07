@@ -12,6 +12,8 @@ use crate::{job::JobRecord, snapshot::Snapshot, terminal::FrameUpdate};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    /// Board or card mutations.
+    BoardChanged,
     /// Watch registration.
     WatchStarted,
     /// Coalesced watch output.
@@ -56,6 +58,13 @@ pub enum ToastLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    /// A board or its cards changed.
+    BoardChanged {
+        /// Changed board identifier.
+        board_id: fleet_core::ids::BoardId,
+        /// Nature of the mutation.
+        reason: BoardChangeReason,
+    },
     /// A child watch was registered.
     WatchStarted(fleet_core::watches::Watch),
     /// Retained output batched every 50 ms; sequence gaps require TailWatch.
@@ -151,5 +160,45 @@ mod tests {
         let decoded: ToastLevel =
             serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, ToastLevel::Warning);
+    }
+}
+
+/// Why a board changed; clients reload its authoritative view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardChangeReason {
+    /// Board creation.
+    Created,
+    /// Board configuration changed.
+    Updated,
+    /// Board deletion.
+    Deleted,
+    /// Card content or membership changed.
+    CardChanged,
+    /// Synchronization completed.
+    Synced,
+    /// Synchronization failed.
+    SyncFailed,
+}
+
+#[cfg(test)]
+mod board_tests {
+    use super::*;
+    #[test]
+    fn board_change_preserves_event_tag_convention() {
+        let event = Event::BoardChanged {
+            board_id: "work".parse().unwrap(),
+            reason: BoardChangeReason::CardChanged,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type":"board_changed", "data":{"board_id":"work", "reason":"card_changed"}})
+        );
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
+        assert_eq!(
+            serde_json::to_value(EventKind::BoardChanged).unwrap(),
+            "board_changed"
+        );
     }
 }

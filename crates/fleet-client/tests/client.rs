@@ -370,13 +370,14 @@ async fn authenticate(
     if let Some(expected) = expected_subscription {
         assert_eq!(events, expected);
     } else {
-        assert_eq!(events.len(), 13);
+        assert_eq!(events.len(), 14);
         for kind in [
             EventKind::WatchStarted,
             EventKind::WatchOutput,
             EventKind::WatchExited,
             EventKind::WatchDismissed,
             EventKind::AgentActivityChanged,
+            EventKind::BoardChanged,
         ] {
             assert!(events.contains(&kind));
         }

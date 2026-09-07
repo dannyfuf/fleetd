@@ -57,6 +57,9 @@ pub struct HostStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    /// Board summaries belonging to current contexts.
+    #[serde(default)]
+    pub boards: Vec<fleet_core::board::BoardSummary>,
     /// ISO-8601 time at which this snapshot was assembled.
     pub generated_at: String,
     /// Registered contexts.
@@ -112,5 +115,22 @@ mod tests {
         let decoded: HostStatus =
             serde_json::from_str(&encoded).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, host);
+    }
+}
+
+#[cfg(test)]
+mod board_tests {
+    use super::*;
+    #[test]
+    fn snapshots_without_boards_default_to_empty() {
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "generatedAt":"now", "contexts":[], "repos":[], "clones":[], "worktrees":[], "activeContext":null,
+            "sessions":[], "statuses":[], "jobs":[], "daemon":{"version":"test", "pid":1, "startedAt":"now", "home":"/tmp/fleet"}
+        })).unwrap();
+        assert!(snapshot.boards.is_empty());
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap()["boards"],
+            serde_json::json!([])
+        );
     }
 }

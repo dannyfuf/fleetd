@@ -15,3 +15,8 @@ pub mod slug;
 pub mod state;
 pub mod validate;
 pub mod watches;
+
+/// Backend-independent board domain.
+pub mod board;
+pub use board::*;
+pub use ids::{BoardId, CardId, LabelId, StatusId};

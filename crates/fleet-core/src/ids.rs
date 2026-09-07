@@ -182,6 +182,32 @@ fn validate_job_id(value: &str) -> Result<(), IdError> {
     Ok(())
 }
 
+fn validate_slug(value: &str) -> Result<(), IdError> {
+    validate_context_id(value)
+}
+
+fn validate_opaque_id(value: &str) -> Result<(), IdError> {
+    if value.is_empty() || value.len() > 64 || value.chars().any(char::is_whitespace) {
+        return Err(IdError::new(
+            "card",
+            value,
+            "expected 1..=64 bytes without whitespace",
+        ));
+    }
+    Ok(())
+}
+
+string_id!(BoardId, "board", validate_slug);
+string_id!(CardId, "card", validate_opaque_id);
+string_id!(StatusId, "status", validate_slug);
+string_id!(LabelId, "label", validate_slug);
+
+impl From<ContextId> for BoardId {
+    fn from(id: ContextId) -> Self {
+        Self(id.0)
+    }
+}
+
 string_id!(ContextId, "context id", validate_context_id);
 string_id!(RepoId, "repository id", validate_repo_id);
 string_id!(WorktreeId, "worktree id", validate_worktree_id);

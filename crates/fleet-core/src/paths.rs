@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     github::PrTab,
-    ids::{JobId, RepoId, WorktreeId},
+    ids::{BoardId, JobId, RepoId, WorktreeId},
 };
 
 /// Prepared-copy freshness marker file name retained for swarm compatibility.
@@ -35,6 +35,14 @@ impl FleetHome {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    /// Returns the per-board document directory.
+    pub fn boards_dir(&self) -> PathBuf {
+        self.root.join("boards")
+    }
+    /// Returns one board's JSON document path.
+    pub fn board_path(&self, id: &BoardId) -> PathBuf {
+        self.boards_dir().join(format!("{id}.json"))
     }
     /// Returns `config.json`.
     #[must_use]

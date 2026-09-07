@@ -383,7 +383,17 @@ fn update_connection_state(state: &mut ConnectionState, body: &RequestBody) {
 fn request_timeout(body: &RequestBody) -> Option<Duration> {
     if matches!(
         body,
-        RequestBody::CreateWorktree { .. } | RequestBody::CreateWorktreeFromPr { .. }
+        RequestBody::CreateWorktree { .. }
+            | RequestBody::CreateWorktreeFromPr { .. }
+            | RequestBody::CreateWorktreeFromCard { .. }
+            // A board backend validates and describes itself by shelling out to its own CLI,
+            // which has a deadline and a retry budget of its own an order of magnitude past
+            // this one. Timing these out here replaces the backend's own sentence — the
+            // install hint, the throttling notice, the JQL Jira refused — with a transport
+            // error, while the daemon keeps running the call the client stopped waiting for.
+            | RequestBody::CreateBoard { .. }
+            | RequestBody::UpdateBoard { .. }
+            | RequestBody::DescribeBoardBackend { .. }
     ) {
         None
     } else {
@@ -552,6 +562,7 @@ fn all_event_kinds() -> Vec<EventKind> {
         EventKind::WatchExited,
         EventKind::WatchDismissed,
         EventKind::SnapshotChanged,
+        EventKind::BoardChanged,
         EventKind::JobUpdated,
         EventKind::SessionChanged,
         EventKind::AgentActivityChanged,
@@ -614,9 +625,49 @@ mod tests {
             })
             .is_none()
         );
+        // A card worktree runs the same prepare hooks, so it waits just as long.
+        assert!(
+            request_timeout(&RequestBody::CreateWorktreeFromCard {
+                card_id: "card".parse().unwrap_or_else(|error| panic!("{error}")),
+                repo_id: None,
+                base: None,
+                host: None,
+            })
+            .is_none()
+        );
         assert_eq!(
             request_timeout(&RequestBody::DaemonPing),
             Some(REQUEST_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn board_backend_requests_wait_for_the_backend_to_answer() {
+        let board_id = "board".parse().unwrap_or_else(|error| panic!("{error}"));
+        // `describe` is two or three CLI calls, each with its own retry budget: a deadline
+        // here would report a transport error instead of what the backend had to say.
+        assert!(
+            request_timeout(&RequestBody::DescribeBoardBackend {
+                board_id: "board".parse().unwrap_or_else(|error| panic!("{error}")),
+            })
+            .is_none()
+        );
+        // Setting or creating a backend validates it against the remote before it is stored.
+        assert!(
+            request_timeout(&RequestBody::UpdateBoard {
+                board_id,
+                patch: fleet_core::board::BoardPatch::default(),
+            })
+            .is_none()
+        );
+        assert!(
+            request_timeout(&RequestBody::CreateBoard {
+                context_id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+                name: None,
+                prefix: None,
+                backend: None,
+            })
+            .is_none()
         );
     }
 }
