@@ -1367,8 +1367,6 @@ fn overlays_section(cx: &mut App) -> AnyElement {
     LAYOUT.section("overlays", &t, children)
 }
 
-// ---------------------------------------------------------------- board
-
 /// The document the markdown panel renders: every construct the parser knows, in one card.
 const MARKDOWN_SAMPLE: &str = "\
 # Board sync
@@ -1397,7 +1395,7 @@ fn board_section(cx: &mut App) -> AnyElement {
             .count(2)
             .accent(Some(t.colors.text_muted))
             .empty_hint("Nothing queued.")
-            .children([
+            .tiles([
                 CardTile::new("bl-1", "FLT-31", "Board backend adapter for Jira")
                     .priority(PriorityLevel::Medium)
                     .labels(vec![("backend".into(), Some("info".into()))])
@@ -1412,7 +1410,7 @@ fn board_section(cx: &mut App) -> AnyElement {
             .count(2)
             .accent(Some(t.colors.warning))
             .focused(true)
-            .children([
+            .tiles([
                 CardTile::new("ip-1", "FLT-12", "Kanban column and card tile in the kit")
                     .priority(PriorityLevel::Urgent)
                     .labels(vec![
@@ -1439,7 +1437,7 @@ fn board_section(cx: &mut App) -> AnyElement {
             .count(0)
             .accent(Some(t.colors.success))
             .empty_hint("Nothing shipped yet.")
-            .children([])
+            .tiles([])
             .into_any_element(),
     ]);
 

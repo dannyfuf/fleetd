@@ -1,14 +1,5 @@
-//! The active context's board mirror and the local presentation state around it (BOARD §8).
-
-use fleet_core::{
-    board::{BackendDescriptor, BoardView, Card},
-    ids::ContextId,
-};
-
-use super::{
-    AppState, FilterEscape, HubTab, NO_ACTIVE_CONTEXT, Overlay, Screen, clamp_cursor, filter_escape,
-};
-use crate::dialogs::Dialogs;
+use super::*;
+use fleet_core::board::{BoardView, Card};
 
 /// Keyboard selection within the board's status columns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -57,7 +48,7 @@ pub struct BoardState {
 impl BoardState {
     /// Whether cards are currently being filtered.
     #[must_use]
-    pub fn is_filtered(&self) -> bool {
+    fn is_filtered(&self) -> bool {
         !self.filter.trim().is_empty()
     }
 }
@@ -115,7 +106,7 @@ impl AppState {
     }
 
     /// Clears board data and invalidates requests from the previous context or connection.
-    pub fn clear_board(&mut self) {
+    pub(super) fn clear_board(&mut self) {
         if matches!(
             self.overlay,
             Some(Overlay::Dialog(
@@ -146,7 +137,7 @@ impl AppState {
     }
 
     /// Adopts the daemon's backend registry.
-    pub fn apply_backends(&mut self, backends: Vec<BackendDescriptor>) {
+    pub(crate) fn apply_backends(&mut self, backends: Vec<BackendDescriptor>) {
         self.board_backends = backends;
     }
 
@@ -161,7 +152,7 @@ impl AppState {
 
     /// The descriptor of one backend kind, when the daemon registers it.
     #[must_use]
-    pub fn backend_descriptor(&self, kind: &str) -> Option<&BackendDescriptor> {
+    pub(crate) fn backend_descriptor(&self, kind: &str) -> Option<&BackendDescriptor> {
         self.board_backends
             .iter()
             .find(|descriptor| descriptor.kind == kind)
@@ -172,7 +163,7 @@ impl AppState {
     /// The fallback matters on the first frames of a connection and against an older daemon:
     /// a header that draws nothing at all where the backend goes reads as a broken board.
     #[must_use]
-    pub fn backend_label(&self, kind: &str) -> String {
+    pub(crate) fn backend_label(&self, kind: &str) -> String {
         self.backend_descriptor(kind)
             .map_or_else(|| kind.to_owned(), |descriptor| descriptor.label.clone())
     }
@@ -182,7 +173,7 @@ impl AppState {
     /// Empty on a local board, exactly as `fleet_core::board::ops` reads it: a local board
     /// declares no backend, so nothing it holds is read-only.
     #[must_use]
-    pub fn readonly_fields(&self) -> &[String] {
+    fn readonly_fields(&self) -> &[String] {
         self.board()
             .filter(|view| !view.board.backend.is_local())
             .map_or(&[][..], |view| &view.board.sync.readonly_fields)
@@ -190,7 +181,7 @@ impl AppState {
 
     /// Whether the daemon would refuse a local edit to `field` on the shown board.
     #[must_use]
-    pub fn is_readonly_field(&self, field: &str) -> bool {
+    pub(crate) fn is_readonly_field(&self, field: &str) -> bool {
         self.readonly_fields()
             .iter()
             .any(|readonly| readonly == field)
@@ -273,7 +264,7 @@ impl AppState {
 
     /// Whether the board's filter input, rather than the board itself, owns the keyboard.
     #[must_use]
-    pub fn board_filter_owns_keys(&self) -> bool {
+    pub(super) fn board_filter_owns_keys(&self) -> bool {
         self.overlay.is_none()
             && self.agent_popup.is_none()
             && matches!(self.screen, Screen::Hub { tab: HubTab::Board })
@@ -284,7 +275,7 @@ impl AppState {
     ///
     /// Returns whether it consumed the key; when it did not, `Esc` belongs to whoever owns the
     /// surface behind the board.
-    pub fn board_filter_escape(&mut self) -> bool {
+    pub(crate) fn board_filter_escape(&mut self) -> bool {
         match filter_escape(self.board.filter_editing) {
             FilterEscape::LeaveInput => {
                 self.board.filter_editing = false;
@@ -299,3 +290,6 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -15,16 +15,21 @@ use gpui::{AnyElement, App, SharedString, div, prelude::*, px};
 
 use crate::{dialogs::card_picker::PickerKind, presentation::age_label};
 
+#[cfg(test)]
+mod tests;
+
 /// How many activity entries §8 shows.
-pub const ACTIVITY_ROWS: usize = 10;
+const ACTIVITY_ROWS: usize = 10;
 /// The width of a property row's label column.
 const LABEL_WIDTH: f32 = 78.0;
+/// The width of an activity entry's age column, which the messages line up against.
+const ACTIVITY_AGE_WIDTH: f32 = 44.0;
 /// The trailing slot the lock glyph of a backend-owned row sits in, in `ch`.
 const LOCK_COLUMN_CH: f32 = 2.0;
 
 /// What `Enter` does on a property row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PropertyTarget {
+pub(crate) enum PropertyTarget {
     /// Open the picker that edits this field.
     Pick(PickerKind),
     /// Open the linked worktree's session.
@@ -37,21 +42,21 @@ pub enum PropertyTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyRow {
     /// The field name.
-    pub label: SharedString,
+    pub(crate) label: SharedString,
     /// The value, already rendered; an en dash when unset.
-    pub value: SharedString,
+    pub(crate) value: SharedString,
     /// How the value reads: `Muted` for an unset one, `Danger` for a conflict.
-    pub tone: Tone,
+    pub(crate) tone: Tone,
     /// Whether the value is an identifier and belongs in the mono face.
-    pub mono: bool,
+    pub(crate) mono: bool,
     /// Whether the board's backend owns this field and refuses local writes.
     ///
     /// The row keeps its picker target: `Enter` still has to answer, and the answer is the
     /// daemon's own sentence about the backend. A row that silently did nothing would look
     /// exactly like a broken key.
-    pub locked: bool,
+    pub(crate) locked: bool,
     /// What `Enter` does here.
-    pub target: PropertyTarget,
+    pub(crate) target: PropertyTarget,
 }
 
 impl PropertyRow {
@@ -67,17 +72,20 @@ impl PropertyRow {
         }
     }
 
+    #[must_use]
     fn mono(mut self) -> Self {
         self.mono = true;
         self
     }
 
+    #[must_use]
     fn tone(mut self, tone: Tone) -> Self {
         self.tone = tone;
         self
     }
 
     /// Marks the row as owned by the backend: secondary tone plus the lock glyph.
+    #[must_use]
     fn locked(mut self, locked: bool) -> Self {
         self.locked = locked;
         if locked {
@@ -93,7 +101,7 @@ impl PropertyRow {
 /// nothing on it is read-only, however stale a `readonly_fields` list left behind by a former
 /// backend might be.
 #[must_use]
-pub fn is_readonly(board: &Board, field: &str) -> bool {
+fn is_readonly(board: &Board, field: &str) -> bool {
     !board.backend.is_local()
         && board
             .sync
@@ -258,7 +266,12 @@ pub fn property_rows(board: &Board, cards: &[Card], card: &Card, now: i64) -> Ve
 
 /// Renders one property row with its selection and cursor state.
 #[must_use]
-pub fn property_row(row: &PropertyRow, selected: bool, focused: bool, theme: &Theme) -> AnyElement {
+pub(crate) fn property_row(
+    row: &PropertyRow,
+    selected: bool,
+    focused: bool,
+    theme: &Theme,
+) -> AnyElement {
     let value = if row.mono {
         Text::data_small(row.value.clone())
             .tone(row.tone)
@@ -293,7 +306,7 @@ pub fn property_row(row: &PropertyRow, selected: bool, focused: bool, theme: &Th
 /// `field_label` lives in the core: the CLI's card report prints the same conflict list, and
 /// "Conflict — status_id, due_date" is a sentence the user has to translate on either surface.
 #[must_use]
-pub fn conflict_banner(card: &Card) -> Option<Banner> {
+pub(crate) fn conflict_banner(card: &Card) -> Option<Banner> {
     let conflict = card.conflict.as_ref()?;
     let fields = if conflict.fields.is_empty() {
         "the remote changed".to_owned()
@@ -321,7 +334,7 @@ pub fn conflict_banner(card: &Card) -> Option<Banner> {
 
 /// The comments list, newest last, each with its author and age.
 #[must_use]
-pub fn comments(card: &Card, now: i64, cx: &App) -> AnyElement {
+pub(crate) fn comments(card: &Card, now: i64, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
         .flex()
@@ -357,7 +370,7 @@ pub fn comments(card: &Card, now: i64, cx: &App) -> AnyElement {
 
 /// The last [`ACTIVITY_ROWS`] activity entries, newest first.
 #[must_use]
-pub fn activity(card: &Card, now: i64, cx: &App) -> AnyElement {
+pub(crate) fn activity(card: &Card, now: i64, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let entries: Vec<_> = card.activity.iter().rev().take(ACTIVITY_ROWS).collect();
     div()
@@ -373,7 +386,7 @@ pub fn activity(card: &Card, now: i64, cx: &App) -> AnyElement {
                 .items_baseline()
                 .gap(theme.space.xs)
                 .w_full()
-                .child(Text::hint(age_label(&entry.at, now)).w(px(44.0)))
+                .child(Text::hint(age_label(&entry.at, now)).w(px(ACTIVITY_AGE_WIDTH)))
                 .child(Text::ui(entry.message.clone()).muted().ellipsize())
         }))
         .into_any_element()
@@ -381,7 +394,7 @@ pub fn activity(card: &Card, now: i64, cx: &App) -> AnyElement {
 
 /// The card's key, priority glyph and title, as the left pane's first line.
 #[must_use]
-pub fn title_line(board: &Board, card: &Card, cx: &App) -> AnyElement {
+pub(crate) fn title_line(board: &Board, card: &Card, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
         .flex()
@@ -409,177 +422,4 @@ pub fn title_line(board: &Board, card: &Card, cx: &App) -> AnyElement {
         )
         .child(Text::title(card.title.clone()))
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use fleet_core::{
-        board::{CardDraft, Label, RemoteLink, create_card, new_board},
-        ids::{ContextId, LabelId},
-        model::Context,
-    };
-
-    fn fixture() -> (Board, Card) {
-        let context = Context {
-            id: ContextId::try_from("work").unwrap_or_else(|error| panic!("{error}")),
-            name: "Fleet".into(),
-            owners: vec![],
-            created_at: "2026-09-06T12:00:00Z".into(),
-        };
-        let mut board = new_board(&context, "2026-09-06T12:00:00Z");
-        board.labels.push(Label {
-            id: LabelId::try_from("bug").unwrap_or_else(|error| panic!("{error}")),
-            name: "Bug".into(),
-            color: None,
-        });
-        let card = create_card(
-            &mut board,
-            &[],
-            "card-1".parse().unwrap_or_else(|error| panic!("{error}")),
-            CardDraft {
-                title: "Fix login".into(),
-                labels: vec![LabelId::try_from("bug").unwrap_or_else(|error| panic!("{error}"))],
-                ..CardDraft::default()
-            },
-            "2026-09-06T12:00:00Z",
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-        (board, card)
-    }
-
-    #[test]
-    fn the_rows_are_the_contract_order_and_unset_values_read_as_a_dash() {
-        let (board, card) = fixture();
-        let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
-        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_ref()).collect();
-        assert_eq!(
-            labels,
-            [
-                "Status", "Priority", "Assignee", "Labels", "Estimate", "Due", "Parent", "Repo",
-                "Worktree"
-            ]
-        );
-        let assignee = &rows[2];
-        assert_eq!(assignee.value.as_ref(), "\u{2013}");
-        assert_eq!(assignee.tone, Tone::Muted);
-        assert_eq!(rows[3].value.as_ref(), "Bug");
-    }
-
-    #[test]
-    fn every_editable_row_names_the_picker_that_edits_it() {
-        let (board, card) = fixture();
-        let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
-        assert_eq!(rows[0].target, PropertyTarget::Pick(PickerKind::Status));
-        assert_eq!(rows[5].target, PropertyTarget::Pick(PickerKind::DueDate));
-        assert_eq!(
-            rows[6].target,
-            PropertyTarget::ReadOnly,
-            "parent is v1 read-only"
-        );
-        assert_eq!(rows[8].target, PropertyTarget::ReadOnly, "no worktree yet");
-    }
-
-    #[test]
-    fn a_linked_card_gains_the_remote_rows_and_a_worktree_target() {
-        let (board, mut card) = fixture();
-        card.worktree_id = Some(
-            "buk/payroll#fix"
-                .parse()
-                .unwrap_or_else(|error| panic!("{error}")),
-        );
-        card.dirty = true;
-        card.remote = Some(RemoteLink {
-            parent_key: None,
-            backend: "jira".into(),
-            key: "PROJ-12".into(),
-            url: Some("https://example.test/PROJ-12".into()),
-            version: None,
-            synced_at: "2026-09-06T12:00:00Z".into(),
-            remote_updated_at: None,
-        });
-        let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
-        assert_eq!(rows[8].target, PropertyTarget::Worktree);
-        let remote = rows
-            .iter()
-            .find(|row| row.label.as_ref() == "Remote")
-            .unwrap_or_else(|| panic!("no remote row"));
-        assert!(remote.value.contains("PROJ-12"));
-        assert!(remote.value.contains("dirty"));
-        assert_eq!(remote.tone, Tone::Warning);
-        assert!(rows.iter().any(|row| row.label.as_ref() == "URL"));
-        assert!(rows.iter().any(|row| row.label.as_ref() == "Synced"));
-    }
-
-    #[test]
-    fn a_backend_owned_field_reads_as_locked_but_keeps_its_picker() {
-        let (mut board, card) = fixture();
-        board.sync.readonly_fields = vec!["priority".into(), "parent_id".into()];
-        let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
-        assert!(
-            rows.iter().all(|row| !row.locked),
-            "a local board declares no backend, so nothing on it is read-only"
-        );
-
-        board.backend.kind = "jira".into();
-        let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
-        let locked: Vec<&str> = rows
-            .iter()
-            .filter(|row| row.locked)
-            .map(|row| row.label.as_ref())
-            .collect();
-        assert_eq!(locked, ["Priority", "Parent"]);
-        assert_eq!(rows[1].tone, Tone::Secondary);
-        assert_eq!(
-            rows[1].target,
-            PropertyTarget::Pick(PickerKind::Priority),
-            "the row still has to answer Enter — with the backend's own sentence"
-        );
-        assert!(!rows[0].locked, "status is writable on this board");
-    }
-
-    #[test]
-    fn a_property_the_schema_calls_uneditable_wears_the_same_lock() {
-        let (mut board, card) = fixture();
-        board.properties.push(fleet_core::board::PropertySchema {
-            key: "created".into(),
-            name: "Created".into(),
-            kind: PropertyKind::Date,
-            options: Vec::new(),
-            editable: false,
-            source: PropertySource::Backend,
-            show_on_card: false,
-        });
-        let rows = property_rows(&board, std::slice::from_ref(&card), &card, 0);
-        let row = rows.last().unwrap_or_else(|| panic!("no property row"));
-        assert!(row.locked);
-        assert_eq!(row.tone, Tone::Secondary);
-        assert_eq!(row.target, PropertyTarget::ReadOnly);
-    }
-
-    #[test]
-    fn a_conflict_banner_names_the_fields_that_differ() {
-        let (_, mut card) = fixture();
-        assert!(conflict_banner(&card).is_none());
-        card.conflict = Some(fleet_core::board::Conflict {
-            detected_at: "2026-09-06T12:00:00Z".into(),
-            remote: fleet_core::board::RemoteCard {
-                key: "PROJ-12".into(),
-                ..fleet_core::board::RemoteCard::default()
-            },
-            fields: vec!["title".into(), "status".into()],
-        });
-        assert!(conflict_banner(&card).is_some());
-    }
-
-    /// `differing_fields` answers in wire names; the banner has to say what the rows say.
-    #[test]
-    fn the_conflict_banner_names_fields_the_way_the_property_rows_do() {
-        assert_eq!(field_label("status_id"), "Status");
-        assert_eq!(field_label("due_date"), "Due");
-        assert_eq!(field_label("parent_id"), "Parent");
-        assert_eq!(field_label("title"), "Title");
-        // A name nobody mapped is still printed rather than dropped.
-        assert_eq!(field_label("something_new"), "something_new");
-    }
 }

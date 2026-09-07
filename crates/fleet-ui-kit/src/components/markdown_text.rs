@@ -21,12 +21,16 @@ use gpui::{App, FontWeight, HighlightStyle, SharedString, StyledText, Window, di
 
 use crate::{
     text::{Text, TextRole, styled_with},
-    theme::{ActiveTheme, Theme},
+    theme::{ActiveTheme, Theme, ch},
     tone::Tone,
 };
 
 /// The deepest heading level the renderer distinguishes. `####` and beyond are paragraphs.
 pub const MAX_HEADING_LEVEL: u8 = 3;
+
+/// The width of a list item's marker gutter, in `ch` of the UI face — wide enough for `10.`,
+/// so a two-digit ordered list keeps its items on one hanging indent.
+pub const LIST_MARKER_CH: f32 = 3.0;
 
 /// One inline run of a paragraph or a list item.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,6 +197,7 @@ fn list_item(line: &str) -> Option<(bool, &str)> {
     Some((true, line))
 }
 
+/// Take an ordered item's authored marker out of its first span, or `·` for a bullet.
 fn list_marker(ordered: bool, spans: &mut [MdSpan]) -> String {
     if ordered
         && let Some(MdSpan::Text(text)) = spans.first_mut()
@@ -371,14 +376,14 @@ fn inline_line(spans: &[MdSpan], theme: &Theme, body: gpui::Hsla) -> gpui::Div {
 
 impl RenderOnce for MarkdownText {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
         let body = if self.muted {
             theme.colors.text_secondary
         } else {
             theme.colors.text
         };
         let blocks = parse_markdown(self.source.as_ref());
-        let marker_width = crate::theme::ch(3.0);
+        let marker_width = ch(LIST_MARKER_CH);
 
         div()
             .flex()
@@ -396,7 +401,7 @@ impl RenderOnce for MarkdownText {
                             .into_any_element()
                     }
                     MdBlock::Paragraph(spans) => {
-                        inline_line(&spans, &theme, body).into_any_element()
+                        inline_line(&spans, theme, body).into_any_element()
                     }
                     MdBlock::List { ordered, items } => div()
                         .flex()
@@ -421,19 +426,19 @@ impl RenderOnce for MarkdownText {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(inline_line(&spans, &theme, body)),
+                                        .child(inline_line(&spans, theme, body)),
                                 )
                         }))
                         .into_any_element(),
                     // A fenced block is data, so it goes on the sunken ground in the data face,
                     // exactly like a log tail.
-                    MdBlock::Code(code) => styled_with(div(), TextRole::Data.style(&theme), &theme)
+                    MdBlock::Code(code) => styled_with(div(), TextRole::Data.style(theme), theme)
                         .w_full()
                         .min_w_0()
                         .p(theme.space.sm)
                         .rounded(theme.radii.sm)
                         .bg(theme.colors.bg)
-                        .border_1()
+                        .border(theme.metrics.hairline)
                         .border_color(theme.colors.border)
                         .text_color(theme.colors.text)
                         // A long command wraps instead of clipping: a description that hides
@@ -441,7 +446,7 @@ impl RenderOnce for MarkdownText {
                         // reflows it.
                         .children(code.split('\n').map(|line| {
                             div()
-                                .min_h(TextRole::Data.style(&theme).line_height)
+                                .min_h(TextRole::Data.style(theme).line_height)
                                 .child(line.to_string())
                         }))
                         .into_any_element(),

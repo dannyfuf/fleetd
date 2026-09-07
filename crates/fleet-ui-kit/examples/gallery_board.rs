@@ -1,7 +1,7 @@
 //! The visual and behavioural test bench for the **board** group of `fleet-ui-kit`.
 //!
 //! `KanbanBoard` · `KanbanColumn` · `CardTile` · `PriorityGlyph` · `MarkdownText` ·
-//! `TextArea` / `TextAreaState`.
+//! `TextArea` · `TextAreaState`.
 //!
 //! Every component appears in every state it can be in, in both themes, and the interactive
 //! ones are *live*: the cursor really moves between columns, `[` / `]` really move the card,
@@ -27,13 +27,19 @@
 //! owns the keyboard the root switches to `BoardTyping`, so `h`, `i`, `p` and friends are typed
 //! instead of fired — the same rule §3.10 states for the real Hub.
 
-use fleet_ui_kit::KitAssets;
+pub mod support;
+const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
+    label_width: 150.0,
+    column: true,
+    divided: false,
+    compact: false,
+};
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, Hsla, KeyBinding,
-    KeyDownEvent, Menu, MenuItem, MouseDownEvent, ScrollHandle, SharedString, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, px, size,
+    AnyElement, App, Context, FocusHandle, Focusable, Hsla, KeyBinding, KeyDownEvent,
+    MouseDownEvent, Pixels, ScrollHandle, SharedString, Window, actions, div, px,
 };
+use support::layout::strip;
 
 actions!(
     gallery_board,
@@ -53,7 +59,17 @@ actions!(
     ]
 );
 
-// ---------------------------------------------------------------------------------- fixtures
+/// How many rows the description editor shows.
+const EDITOR_ROWS: u32 = 8;
+
+/// The height the live board is staged at, so a column really scrolls inside the gallery.
+const BOARD_H: f32 = 420.0;
+
+/// The width one static card panel is measured at; a real column is `COLUMN_WIDTH_CH` wide.
+const TILE_W: f32 = 260.0;
+
+/// The width a static text-area panel is measured at.
+const AREA_W: f32 = 320.0;
 
 /// The status category a column belongs to, which is the only thing that picks its accent.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,7 +182,7 @@ impl DemoColumn {
     }
 }
 
-/// The markdown every card description is a variation of.
+/// The markdown every card description is a variation of: every construct the parser knows.
 const DESCRIPTION: &str = "\
 # Board sync
 The reconciler is **pure**: it takes the local card, the remote card and the policy, and
@@ -253,7 +269,39 @@ fn fixtures() -> Vec<DemoColumn> {
     ]
 }
 
-// ------------------------------------------------------------------------------------- view
+/// A bordered stage a live surface is shown at its real height inside.
+fn stage(t: &Theme, height: Pixels, child: impl IntoElement) -> AnyElement {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .w_full()
+        .h(height)
+        .rounded(t.radii.sm)
+        .bg(t.colors.bg)
+        .border(t.metrics.hairline)
+        .border_color(t.colors.border)
+        .overflow_hidden()
+        .child(child)
+        .into_any_element()
+}
+
+/// A fixed-width panel one static specimen is measured in.
+fn panel(width: f32, child: impl IntoElement) -> AnyElement {
+    div().w(px(width)).child(child).into_any_element()
+}
+
+/// A wrapping row of fixed-width panels.
+fn row_of(t: &Theme, children: Vec<AnyElement>) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_start()
+        .gap(t.space.md)
+        .children(children)
+        .into_any_element()
+}
 
 struct BoardGallery {
     focus_handle: FocusHandle,
@@ -261,8 +309,10 @@ struct BoardGallery {
     column: usize,
     row: usize,
     board_scroll: ScrollHandle,
+    detail_scroll: ScrollHandle,
+    page_scroll: ScrollHandle,
     editor: TextAreaState,
-    editor_scroll: gpui::ScrollHandle,
+    editor_scroll: ScrollHandle,
     editing: bool,
     read_mode: bool,
 }
@@ -276,8 +326,10 @@ impl BoardGallery {
             column: 1,
             row: 0,
             board_scroll: ScrollHandle::new(),
+            detail_scroll: ScrollHandle::new(),
+            page_scroll: ScrollHandle::new(),
             editor: TextAreaState::new(),
-            editor_scroll: gpui::ScrollHandle::new(),
+            editor_scroll: ScrollHandle::new(),
             editing: false,
             read_mode: true,
         };
@@ -337,8 +389,6 @@ impl BoardGallery {
         self.clamp_row();
         cx.notify();
     }
-
-    // ------------------------------------------------------------------ actions
 
     fn toggle_theme(&mut self, _: &ToggleTheme, _window: &mut Window, cx: &mut Context<Self>) {
         Theme::toggle(cx);
@@ -433,211 +483,404 @@ impl Focusable for BoardGallery {
     }
 }
 
-/// How many rows the description editor shows.
-const EDITOR_ROWS: u32 = 8;
+/// The live board: one column per fixture, one tile per card, the cursor really moving.
+fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>) -> AnyElement {
+    let column_index = gallery.column;
+    let row_index = gallery.row;
 
-/// The width of the detail panel, which is the design system's detail width.
-fn detail_width(theme: &Theme) -> gpui::Pixels {
-    theme.metrics.detail_w
+    let columns: Vec<AnyElement> = gallery
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let focused = index == column_index;
+            let tiles: Vec<AnyElement> = column
+                .cards
+                .iter()
+                .enumerate()
+                .map(|(row, card)| {
+                    let selected = focused && row == row_index;
+                    let on_click =
+                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                            this.column = index;
+                            this.row = row;
+                            this.editing = false;
+                            this.load_editor();
+                            cx.notify();
+                        });
+                    CardTile::new(
+                        SharedString::from(format!("card-{}", card.key)),
+                        card.key.clone(),
+                        card.title.clone(),
+                    )
+                    .priority(card.priority)
+                    .labels(card.labels.clone())
+                    .assignee(card.assignee.clone())
+                    .estimate(card.estimate)
+                    .due(card.due.clone())
+                    .worktree(card.worktree)
+                    .dirty(card.dirty)
+                    .conflict(card.conflict)
+                    .selected(selected)
+                    .focused(selected)
+                    .on_click(on_click)
+                    .into_any_element()
+                })
+                .collect();
+
+            KanbanColumn::new(
+                SharedString::from(format!("column-{index}")),
+                column.title.clone(),
+            )
+            .count(column.cards.len())
+            .accent(Some(column.category.accent(t)))
+            .focused(focused)
+            .empty_hint("No cards here.")
+            .scroll_handle(column.scroll.clone())
+            .tiles(tiles)
+            .into_any_element()
+        })
+        .collect();
+
+    KanbanBoard::new("board")
+        .scroll_handle(gallery.board_scroll.clone())
+        .columns(columns)
+        .into_any_element()
 }
 
-impl BoardGallery {
-    /// The live board: one column per fixture, one tile per card.
-    fn board(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let column_index = self.column;
-        let row_index = self.row;
-
-        let columns: Vec<AnyElement> = self
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                let focused = index == column_index;
-                let tiles: Vec<AnyElement> = column
-                    .cards
-                    .iter()
-                    .enumerate()
-                    .map(|(row, card)| {
-                        let selected = focused && row == row_index;
-                        let on_click =
-                            cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                                this.column = index;
-                                this.row = row;
-                                this.editing = false;
-                                this.load_editor();
-                                cx.notify();
-                            });
-                        CardTile::new(
-                            SharedString::from(format!("card-{}", card.key)),
-                            card.key.clone(),
-                            card.title.clone(),
-                        )
-                        .priority(card.priority)
-                        .labels(card.labels.clone())
-                        .assignee(card.assignee.clone())
-                        .estimate(card.estimate)
-                        .due(card.due.clone())
-                        .worktree(card.worktree)
-                        .dirty(card.dirty)
-                        .conflict(card.conflict)
-                        .selected(selected)
-                        .focused(selected)
-                        .on_click(on_click)
-                        .into_any_element()
-                    })
-                    .collect();
-
-                KanbanColumn::new(
-                    SharedString::from(format!("column-{index}")),
-                    column.title.clone(),
-                )
-                .count(column.cards.len())
-                .accent(Some(column.category.accent(&theme)))
-                .focused(focused)
-                .empty_hint("No cards here.")
-                .scroll_handle(column.scroll.clone())
-                .children(tiles)
-                .into_any_element()
-            })
-            .collect();
-
-        KanbanBoard::new("board")
-            .scroll_handle(self.board_scroll.clone())
-            .columns(columns)
-            .into_any_element()
-    }
-
-    /// The detail panel: the card's properties, then its description in read or edit mode.
-    fn detail(&self, theme: &Theme) -> AnyElement {
-        let Some(card) = self.selected() else {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .w(detail_width(theme))
-                .h_full()
-                .border_l(theme.metrics.hairline)
-                .border_color(theme.colors.border)
-                .child(EmptyState::new("No card selected.").action("h l  pick a column"))
-                .into_any_element();
-        };
-
-        let description = if self.read_mode && !self.editing {
-            div()
-                .w_full()
-                .child(MarkdownText::new(card.description.clone()))
-                .into_any_element()
-        } else {
-            TextArea::new(self.editor.shared_text())
-                .label("description")
-                .placeholder("Describe the card. Markdown is rendered in read mode.")
-                .cursor(self.editor.cursor())
-                .focused(self.editing)
-                .rows(EDITOR_ROWS)
-                .max_rows(EDITOR_ROWS)
-                .scroll_row(self.editor.scroll_row())
-                .scroll("gallery-board-editor-scroll", self.editor_scroll.clone())
-                .into_any_element()
-        };
-
-        div()
+/// The detail panel: the card's properties, then its description in read or edit mode.
+fn live_detail(gallery: &BoardGallery, t: &Theme) -> AnyElement {
+    let Some(card) = gallery.selected() else {
+        return div()
             .flex()
             .flex_col()
             .flex_none()
-            .w(detail_width(theme))
+            .w(t.metrics.detail_w)
             .h_full()
-            .gap(theme.space.sm)
-            .p(theme.space.md)
-            .border_l(theme.metrics.hairline)
-            .border_color(theme.colors.border)
-            .child(Text::data_small(card.key.clone()).faint())
-            .child(Text::title(card.title.clone()))
-            .child(
+            .border_l(t.metrics.hairline)
+            .border_color(t.colors.border)
+            .child(EmptyState::new("No card selected.").action("h l  pick a column"))
+            .into_any_element();
+    };
+
+    let reading = gallery.read_mode && !gallery.editing;
+    let description = if reading {
+        div()
+            .w_full()
+            .child(MarkdownText::new(card.description.clone()))
+            .into_any_element()
+    } else {
+        TextArea::new(gallery.editor.shared_text())
+            .label("description")
+            .placeholder("Describe the card. Markdown is rendered in read mode.")
+            .cursor(gallery.editor.cursor())
+            .focused(gallery.editing)
+            .rows(EDITOR_ROWS)
+            .max_rows(EDITOR_ROWS)
+            .scroll_row(gallery.editor.scroll_row())
+            .scroll("gallery-board-editor-scroll", gallery.editor_scroll.clone())
+            .into_any_element()
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(t.metrics.detail_w)
+        .h_full()
+        .gap(t.space.sm)
+        .p(t.space.md)
+        .border_l(t.metrics.hairline)
+        .border_color(t.colors.border)
+        .child(Text::data_small(card.key.clone()).faint())
+        .child(Text::title(card.title.clone()))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(t.space.md)
+                .child(PriorityGlyph::new(card.priority).with_label(true))
+                .children(
+                    card.assignee
+                        .clone()
+                        .map(|assignee| Chip::new().text(assignee).filled(true)),
+                ),
+        )
+        .child(SectionHeader::new(if reading {
+            "description · read"
+        } else {
+            "description · edit"
+        }))
+        .child(
+            div()
+                .id("detail-description")
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_y_scroll()
+                .track_scroll(&gallery.detail_scroll)
+                .child(description),
+        )
+        .child(
+            KeyHintRow::new()
+                .key("i", "edit")
+                .key("m", "read / edit")
+                .key("esc", "leave"),
+        )
+        .into_any_element()
+}
+
+fn live_board_section(
+    gallery: &BoardGallery,
+    t: &Theme,
+    cx: &mut Context<BoardGallery>,
+) -> AnyElement {
+    let board = live_board(gallery, t, cx);
+    let detail = live_detail(gallery, t);
+    let children = vec![
+        LAYOUT.labeled(
+            "board · detail",
+            t,
+            stage(
+                t,
+                px(BOARD_H),
                 div()
                     .flex()
                     .flex_row()
-                    .items_center()
-                    .gap(theme.space.md)
-                    .child(PriorityGlyph::new(card.priority).with_label(true))
-                    .children(
-                        card.assignee
-                            .clone()
-                            .map(|assignee| Chip::new().text(assignee).filled(true)),
-                    ),
-            )
-            .child(SectionHeader::new(if self.read_mode && !self.editing {
-                "description · read"
-            } else {
-                "description · edit"
-            }))
-            .child(
-                div()
-                    .id("detail-description")
-                    .flex_1()
+                    .size_full()
                     .min_h_0()
-                    .w_full()
-                    .overflow_y_scroll()
-                    .child(description),
-            )
-            .child(
-                KeyHintRow::new()
-                    .key("i", "edit")
-                    .key("m", "read / edit")
-                    .key("esc", "leave"),
-            )
-            .into_any_element()
-    }
+                    .child(div().flex_1().min_w_0().h_full().child(board))
+                    .child(detail),
+            ),
+        ),
+    ];
+    LAYOUT.section("live board", t, children)
+}
 
-    /// Every priority mark at once, so a reviewer can compare the ladder in one glance.
-    fn priorities(&self, theme: &Theme) -> AnyElement {
+fn card_tile_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+
+    let bare = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-bare",
+            "FLT-40",
+            "A bare card: key and title, no meta row at all",
+        ),
+    );
+    let full = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-full",
+            "FLT-41",
+            "Every meta slot at once, with a title long enough to clip at two lines",
+        )
+        .priority(PriorityLevel::High)
+        .labels(vec![
+            ("bug".into(), Some("danger".into())),
+            ("infra".into(), Some("warning".into())),
+        ])
+        .assignee(Some("Danny Fuentes".into()))
+        .estimate(Some(8))
+        .due(Some("2026-03-04".into()))
+        .worktree(true)
+        .dirty(true)
+        .conflict(true)
+        .extras(vec!["QA: pending".into()]),
+    );
+    let selected = panel(
+        TILE_W,
+        CardTile::new("tile-selected", "FLT-42", "Selected, keyboard elsewhere")
+            .priority(PriorityLevel::Low)
+            .selected(true),
+    );
+    let focused = panel(
+        TILE_W,
+        CardTile::new("tile-focused", "FLT-43", "Selected and focused")
+            .priority(PriorityLevel::Urgent)
+            .selected(true)
+            .focused(true),
+    );
+    let unknown_token = panel(
+        TILE_W,
+        CardTile::new(
+            "tile-token",
+            "FLT-44",
+            "An unknown color token falls back to neutral",
+        )
+        .labels(vec![
+            ("from-jira".into(), Some("chartreuse".into())),
+            ("no-token".into(), None),
+        ])
+        .assignee(Some("ñandú ávila".into())),
+    );
+
+    let children = vec![
+        LAYOUT.labeled("bare · every slot", &t, row_of(&t, vec![bare, full])),
+        LAYOUT.labeled(
+            "selected · focused",
+            &t,
+            row_of(&t, vec![selected, focused]),
+        ),
+        LAYOUT.labeled("label tokens", &t, row_of(&t, vec![unknown_token])),
+    ];
+    LAYOUT.section("card tile", &t, children)
+}
+
+fn priority_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+
+    let with_label = strip(
+        &t,
+        PriorityLevel::ALL
+            .into_iter()
+            .map(|level| {
+                PriorityGlyph::new(level)
+                    .with_label(true)
+                    .into_any_element()
+            })
+            .collect(),
+    );
+    let marks_only = strip(
+        &t,
+        PriorityLevel::ALL
+            .into_iter()
+            .map(|level| PriorityGlyph::new(level).into_any_element())
+            .collect(),
+    );
+
+    let children = vec![
+        LAYOUT.labeled("with label", &t, with_label),
+        LAYOUT.labeled("mark only (on a tile)", &t, marks_only),
+    ];
+    LAYOUT.section("priority glyph", &t, children)
+}
+
+fn markdown_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+
+    let framed = |child: MarkdownText| {
         div()
-            .flex()
-            .flex_row()
-            .flex_none()
-            .items_center()
-            .gap(theme.space.lg)
-            .h(theme.metrics.strip_h)
-            .px(theme.space.md)
-            .children(
-                PriorityLevel::ALL
-                    .into_iter()
-                    .map(|level| PriorityGlyph::new(level).with_label(true)),
-            )
+            .w_full()
+            .p(t.space.md)
+            .rounded(t.radii.sm)
+            .bg(t.colors.surface)
+            .border(t.metrics.hairline)
+            .border_color(t.colors.border)
+            .child(child)
             .into_any_element()
-    }
+    };
+
+    let children = vec![
+        LAYOUT.labeled("document", &t, framed(MarkdownText::new(DESCRIPTION))),
+        LAYOUT.labeled(
+            "muted",
+            &t,
+            framed(MarkdownText::new(DESCRIPTION).muted(true)),
+        ),
+        LAYOUT.labeled(
+            "unclosed marks stay text",
+            &t,
+            framed(MarkdownText::new(
+                "**bold and `code never close, and #### deep is a paragraph.",
+            )),
+        ),
+    ];
+    LAYOUT.section("markdown", &t, children)
+}
+
+fn text_area_section(cx: &mut App) -> AnyElement {
+    let t = cx.theme().clone();
+
+    let filled = panel(
+        AREA_W,
+        TextArea::new(
+            "Reproduce with `fleet board sync`.\nThe second line wraps as soon as the box is narrower than the sentence it holds.",
+        )
+        .label("description")
+        .cursor(34)
+        .focused(true)
+        .rows(5),
+    );
+    let placeholder = panel(
+        AREA_W,
+        TextArea::new("")
+            .label("comment")
+            .placeholder("Leave a comment. ctrl-s saves, esc cancels.")
+            .focused(true)
+            .rows(3),
+    );
+    let resting = panel(
+        AREA_W,
+        TextArea::new("Unfocused: no caret, resting border.")
+            .label("resting")
+            .rows(3),
+    );
+    let mono_invalid = panel(
+        AREA_W,
+        TextArea::new("fleet board move FLT-12 done\nfleet worktree new --card FLT-12")
+            .label("mono · invalid")
+            .mono(true)
+            .invalid(true)
+            .rows(3),
+    );
+    let capped = panel(
+        AREA_W,
+        TextArea::new("one\ntwo\nthree\nfour\nfive\nsix\nseven")
+            .label("capped at 3 rows")
+            .rows(3)
+            .max_rows(3),
+    );
+
+    let children = vec![
+        LAYOUT.labeled(
+            "focused · placeholder",
+            &t,
+            row_of(&t, vec![filled, placeholder]),
+        ),
+        LAYOUT.labeled(
+            "resting · mono · invalid",
+            &t,
+            row_of(&t, vec![resting, mono_invalid]),
+        ),
+        LAYOUT.labeled("capped", &t, row_of(&t, vec![capped])),
+    ];
+    LAYOUT.section("text area", &t, children)
 }
 
 impl Render for BoardGallery {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let t = cx.theme().clone();
         let cards: usize = self.columns.iter().map(|column| column.cards.len()).sum();
-        let board = self.board(cx);
-        let detail = self.detail(&theme);
-        let priorities = self.priorities(&theme);
         let editing = self.editing;
+
+        let sections = vec![
+            live_board_section(self, &t, cx),
+            card_tile_section(cx),
+            priority_section(cx),
+            markdown_section(cx),
+            text_area_section(cx),
+        ];
 
         AppFrame::new()
             .context_bar(
                 ContextBar::new([ContextTab::new("board", cards)])
+                    .active(0)
                     .leading_inset(px(84.0))
                     .chip(Chip::labeled(
-                        if theme.mode.is_dark() {
+                        if t.mode.is_dark() {
                             Icon::Moon
                         } else {
                             Icon::CircleArrowUp
                         },
-                        if theme.mode.is_dark() {
-                            "dark"
-                        } else {
-                            "light"
-                        },
+                        if t.mode.is_dark() { "dark" } else { "light" },
                     ))
                     .daemon(DaemonState::Healthy),
             )
             .body(
                 div()
-                    .id("gallery-board")
+                    .id("gallery-board-scroll")
                     .key_context(if editing {
                         "BoardTyping"
                     } else {
@@ -658,34 +901,18 @@ impl Render for BoardGallery {
                     .on_action(cx.listener(Self::escape))
                     .on_key_down(cx.listener(Self::on_key_down))
                     .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.page_scroll)
+                    .p(t.space.xl)
                     .flex()
                     .flex_col()
-                    .min_h_0()
-                    .bg(theme.colors.bg)
-                    .text_color(theme.colors.text)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .child(div().flex_1().min_w_0().h_full().child(board))
-                            .child(detail),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .w_full()
-                            .border_t(theme.metrics.hairline)
-                            .border_color(theme.colors.border)
-                            .child(priorities),
-                    ),
+                    .bg(t.colors.bg)
+                    .text_color(t.colors.text)
+                    .children(sections),
             )
             .status_bar(
                 StatusBar::new()
-                    .breadcrumb("fleet-ui-kit · board components, every state")
+                    .breadcrumb("fleet-ui-kit › board")
                     .mode(if editing { Mode::Dialog } else { Mode::Normal })
                     .ticker(
                         KeyHintRow::new()
@@ -693,6 +920,7 @@ impl Render for BoardGallery {
                             .key("j k", "card")
                             .key("[ ]", "move")
                             .key("p", "priority")
+                            .key("i m", "describe")
                             .key("ctrl-t", "theme"),
                     ),
             )
@@ -700,10 +928,11 @@ impl Render for BoardGallery {
 }
 
 fn main() {
-    gpui_platform::application()
-        .with_assets(KitAssets)
-        .run(|cx: &mut App| {
-            Theme::init(ThemeMode::Dark, cx);
+    support::runtime::run(
+        "fleet-ui-kit · board gallery",
+        (1240.0, 900.0),
+        Quit,
+        |cx| {
             cx.bind_keys([
                 // Always available, in both modes.
                 KeyBinding::new("ctrl-t", ToggleTheme, None),
@@ -725,43 +954,7 @@ fn main() {
                 KeyBinding::new("i", EditDescription, Some("BoardNormal")),
                 KeyBinding::new("m", ToggleReadMode, Some("BoardNormal")),
             ]);
-            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.set_menus(vec![Menu {
-                name: "fleet-ui-kit".into(),
-                items: vec![MenuItem::action("Quit", Quit)],
-                disabled: false,
-            }]);
-            cx.on_window_closed(|cx: &mut App, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            let bounds = Bounds::centered(None, size(px(1240.0), px(860.0)), cx);
-            let window = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("fleet-ui-kit · board gallery".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    let view: Entity<BoardGallery> = cx.new(BoardGallery::new);
-                    view
-                },
-            );
-
-            if let Ok(window) = window {
-                window
-                    .update(cx, |view, window, cx| {
-                        window.focus(&view.focus_handle(cx), cx);
-                    })
-                    .ok();
-            }
-
-            cx.activate(true);
-        });
+        },
+        BoardGallery::new,
+    );
 }

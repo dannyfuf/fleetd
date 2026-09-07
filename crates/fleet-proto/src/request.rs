@@ -658,11 +658,7 @@ mod tests {
             assert_round_trip(body);
         }
     }
-}
 
-#[cfg(test)]
-mod board_tests {
-    use super::*;
     #[test]
     fn every_board_request_uses_contracted_snake_case_names() {
         let requests = [
@@ -683,25 +679,20 @@ mod board_tests {
             serde_json::json!({"type":"describe_board_backend","board_id":"work"}),
         ];
         for json in requests {
-            let request: RequestBody = serde_json::from_value(json.clone()).unwrap();
-            let encoded = serde_json::to_value(&request).unwrap();
+            let request: RequestBody =
+                serde_json::from_value(json.clone()).unwrap_or_else(|error| panic!("{error}"));
+            let encoded = serde_json::to_value(&request).unwrap_or_else(|error| panic!("{error}"));
             assert_eq!(encoded["type"], json["type"]);
-            for (key, value) in json.as_object().unwrap() {
+            let fields = encoded.as_object().expect("tagged request object");
+            for (key, value) in json.as_object().expect("fixture object") {
+                // A patch and a draft carry their own camelCase contract; only the variant's
+                // own fields are snake_case.
                 if key != "patch" && key != "draft" {
                     assert_eq!(&encoded[key], value, "wire field {key}");
                 }
             }
-            assert!(
-                !encoded
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .any(|key| key.chars().any(char::is_uppercase))
-            );
-            assert_eq!(
-                serde_json::from_value::<RequestBody>(encoded).unwrap(),
-                request
-            );
+            assert!(!fields.keys().any(|key| key.contains(char::is_uppercase)));
+            assert_round_trip(request);
         }
     }
 }

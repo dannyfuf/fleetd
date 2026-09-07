@@ -72,8 +72,9 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
 - **Adapters** (traits + real impls + fakes for tests): `Shell`, `Git`, `Github`, `Files`
   (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`, `Logs`.
   Exact git/gh command lines are those in the inventory §7.
-- **Services**: `Contexts`, `Repos` (clone jobs, discovery cache), `Worktrees` (creation,
-  publication, recovery, trash, hooks) with the prepared-copy `Pool`, `Inspect`, `Prune`,
+- **Services**: `Contexts`, `Boards` (documents, cards, remote sync), `Repos` (clone jobs,
+  discovery cache), `Worktrees` (creation, publication, recovery, trash, hooks) with the
+  prepared-copy `Pool`, `Inspect`, `Prune`,
   `Github` (PR tabs, caches, TTLs), `Sessions` (registry, lifecycle, host bridge, observations),
   `Hosts`, `Sleep`, `Watches` and `WatchDiscovery`, `AgentActivity`, `Awaited`, `Doctor`,
   `Import`, `Update`. `services/composition.rs` wires them, `dispatch.rs` routes requests,

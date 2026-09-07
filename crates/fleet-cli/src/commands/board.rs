@@ -1,36 +1,30 @@
-//! Board command orchestration using the typed daemon client.
-
-use fleet_core::{
-    board::{
-        BackendDescriptor, BackendRef, Board, BoardPatch, BoardView, Card, CardDraft, CardPatch,
-        ConflictPolicy, ConflictResolution, Label, Priority, merge_settings, summarize, valid_date,
-    },
-    ids::{BoardId, ContextId, JobId, LabelId, StatusId},
-};
-
-#[cfg(test)]
-mod tests;
-
 use super::{CommandOutput, unknown, validation, worktrees::parse_host};
-use crate::human;
 use crate::{
     args::{
         BoardArgs, BoardCardCommand, BoardCardFields, BoardCommand, BoardConflictPolicy,
-        BoardPriority, BoardResolution, BoardSetArgs,
+        BoardCreateArgs, BoardPriority, BoardResolution, BoardSetArgs,
     },
     envelope::{
         BoardBackendSchemaEnvelope, BoardBackendsEnvelope, BoardCardEnvelope, BoardEnvelope,
         BoardListEnvelope, BoardSyncEnvelope, BoardWorktreeEnvelope, OkEnvelope, PROTOCOL, to_json,
     },
+    human,
 };
 use fleet_client::Client;
+use fleet_core::{
+    board::{
+        BackendDescriptor, BackendRef, Board, BoardPatch, BoardView, Card, CardDraft, CardPatch,
+        ConflictPolicy, ConflictResolution, Label, Priority, merge_settings, summarize, valid_date,
+    },
+    ids::{BoardId, ContextId, JobId, LabelId, RepoId, StatusId},
+};
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     job::{JobRecord, JobStatus},
 };
 use std::time::Duration;
 
-pub(super) async fn execute(
+pub(super) async fn board(
     client: &Client,
     arguments: BoardArgs,
 ) -> Result<CommandOutput, ProtoError> {
@@ -46,105 +40,16 @@ pub(super) async fn execute(
         return Err(validation("--board and --context cannot be used together"));
     }
     match command {
-        BoardCommand::List => {
-            let mut boards = client.list_boards(context).await?;
-            if let Some(id) = board {
-                // An empty table would read as "that board has nothing", not "no such board".
-                if !boards.iter().any(|board| board.id == id) {
-                    return Err(ProtoError {
-                        kind: ErrorKind::NotFound,
-                        message: format!("board `{id}` was not found"),
-                    });
-                }
-                boards.retain(|board| board.id == id);
-            }
-            let text = if json {
-                to_json(&BoardListEnvelope {
-                    protocol: PROTOCOL,
-                    boards: &boards,
-                })?
-            } else {
-                human::boards(&boards)
-            };
-            Ok(CommandOutput::success(text))
-        }
-        BoardCommand::Backends => {
-            // Which kinds exist is a property of the daemon, not of any one board.
-            let backends = client.list_board_backends().await?;
-            let text = if json {
-                to_json(&BoardBackendsEnvelope {
-                    protocol: PROTOCOL,
-                    backends: &backends,
-                })?
-            } else {
-                human::board_backends(&backends)
-            };
-            Ok(CommandOutput::success(text))
-        }
-        BoardCommand::Create(arguments) => {
-            if board.is_some() {
-                return Err(validation("board create accepts --context, not --board"));
-            }
-            let context = resolve_context(client, context).await?;
-            let settings = backend_settings(&serde_json::Value::Null, &arguments.settings)?;
-            let view = client
-                .create_board(
-                    context,
-                    arguments.name,
-                    arguments.prefix,
-                    arguments.backend.map(|kind| BackendRef { kind, settings }),
-                )
-                .await?;
-            let label = if json {
-                None
-            } else {
-                backend_descriptor(client, &view.board.backend.kind).await
-            };
-            board_show_output(&view, label.as_ref(), json)
-        }
+        BoardCommand::List => list(client, board, context, json).await,
+        BoardCommand::Backends => backends(client, json).await,
+        BoardCommand::Create(arguments) => create(client, board, context, arguments, json).await,
+        // Every remaining command names one board, and each resolves it the same way.
         command => {
             let view = resolve_board(client, board, context).await?;
             match command {
-                BoardCommand::Show => {
-                    // The label lives in the descriptor list, which only the human header
-                    // reads: the JSON envelope carries the board verbatim and must not pay
-                    // for a second round trip.
-                    let label = if json {
-                        None
-                    } else {
-                        backend_descriptor(client, &view.board.backend.kind).await
-                    };
-                    board_show_output(&view, label.as_ref(), json)
-                }
-                BoardCommand::Describe => {
-                    let schema = client.describe_board_backend(view.board.id.clone()).await?;
-                    let text = if json {
-                        to_json(&BoardBackendSchemaEnvelope {
-                            protocol: PROTOCOL,
-                            schema: &schema,
-                        })?
-                    } else {
-                        human::board_backend_schema(&schema)
-                    };
-                    Ok(CommandOutput::success(text))
-                }
-                BoardCommand::Set(arguments) => {
-                    let patch = board_patch(&view.board, arguments)?;
-                    // `card edit` refuses an empty patch for the same reason: a request that
-                    // changes nothing still asks the daemon to rewrite the document.
-                    if patch.is_empty() {
-                        return Err(validation("board set requires at least one field"));
-                    }
-                    let view = client.update_board(view.board.id, patch).await?;
-                    // The same board view `show` prints, so it carries the same header: a
-                    // raw `jira` here and a `Jira (acli)` there read as two different things.
-                    let label = if json {
-                        None
-                    } else {
-                        backend_descriptor(client, &view.board.backend.kind).await
-                    };
-                    board_show_output(&view, label.as_ref(), json)
-                }
+                BoardCommand::Show => show(client, &view, json).await,
+                BoardCommand::Describe => describe(client, &view, json).await,
+                BoardCommand::Set(arguments) => set(client, view, arguments, json).await,
                 BoardCommand::Sync { wait, full } => {
                     sync(client, view.board.id, wait, full, json).await
                 }
@@ -157,6 +62,145 @@ pub(super) async fn execute(
             }
         }
     }
+}
+
+/// Prints every board the daemon knows, or the one `--board` names.
+async fn list(
+    client: &Client,
+    board: Option<BoardId>,
+    context: Option<ContextId>,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let mut boards = client.list_boards(context).await?;
+    if let Some(id) = board {
+        // An empty table would read as "that board has nothing", not "no such board".
+        if !boards.iter().any(|board| board.id == id) {
+            return Err(ProtoError {
+                kind: ErrorKind::NotFound,
+                message: format!("board `{id}` was not found"),
+            });
+        }
+        boards.retain(|board| board.id == id);
+    }
+    let text = if json {
+        to_json(&BoardListEnvelope {
+            protocol: PROTOCOL,
+            boards: &boards,
+        })?
+    } else {
+        human::boards(&boards)
+    };
+    Ok(CommandOutput::success(text))
+}
+
+/// Prints the backend kinds this daemon registers.
+///
+/// Which kinds exist is a property of the daemon, not of any one board, so this command
+/// resolves no board at all.
+async fn backends(client: &Client, json: bool) -> Result<CommandOutput, ProtoError> {
+    let backends = client.list_board_backends().await?;
+    let text = if json {
+        to_json(&BoardBackendsEnvelope {
+            protocol: PROTOCOL,
+            backends: &backends,
+        })?
+    } else {
+        human::board_backends(&backends)
+    };
+    Ok(CommandOutput::success(text))
+}
+
+/// Creates a board in the named or active context and prints it.
+async fn create(
+    client: &Client,
+    board: Option<BoardId>,
+    context: Option<ContextId>,
+    arguments: BoardCreateArgs,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    if board.is_some() {
+        return Err(validation("board create accepts --context, not --board"));
+    }
+    let context = resolve_context(client, context).await?;
+    let settings = backend_settings(&serde_json::Value::Null, &arguments.settings)?;
+    let view = client
+        .create_board(
+            context,
+            arguments.name,
+            arguments.prefix,
+            arguments.backend.map(|kind| BackendRef { kind, settings }),
+        )
+        .await?;
+    board_show_output(
+        &view,
+        descriptor_for(client, &view, json).await.as_ref(),
+        json,
+    )
+}
+
+/// Prints the board's columns and cards.
+async fn show(client: &Client, view: &BoardView, json: bool) -> Result<CommandOutput, ProtoError> {
+    board_show_output(
+        view,
+        descriptor_for(client, view, json).await.as_ref(),
+        json,
+    )
+}
+
+/// Prints what the board's backend reports about itself.
+async fn describe(
+    client: &Client,
+    view: &BoardView,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let schema = client.describe_board_backend(view.board.id.clone()).await?;
+    let text = if json {
+        to_json(&BoardBackendSchemaEnvelope {
+            protocol: PROTOCOL,
+            schema: &schema,
+        })?
+    } else {
+        human::board_backend_schema(&schema)
+    };
+    Ok(CommandOutput::success(text))
+}
+
+/// Applies the `--name`, `--prefix`, `--backend`, `--setting` and label flags to the board.
+async fn set(
+    client: &Client,
+    view: BoardView,
+    arguments: BoardSetArgs,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let patch = board_patch(&view.board, arguments)?;
+    // `card edit` refuses an empty patch for the same reason: a request that
+    // changes nothing still asks the daemon to rewrite the document.
+    if patch.is_empty() {
+        return Err(validation("board set requires at least one field"));
+    }
+    let view = client.update_board(view.board.id, patch).await?;
+    // The same board view `show` prints, so it carries the same header: a raw `jira` here and
+    // a `Jira (acli)` there read as two different things.
+    board_show_output(
+        &view,
+        descriptor_for(client, &view, json).await.as_ref(),
+        json,
+    )
+}
+
+/// The descriptor naming the board's backend, or `None` when nobody will print it.
+///
+/// The label lives in the descriptor list, which only the human header reads: the JSON
+/// envelope carries the board verbatim and must not pay for a second round trip.
+async fn descriptor_for(
+    client: &Client,
+    view: &BoardView,
+    json: bool,
+) -> Option<BackendDescriptor> {
+    if json {
+        return None;
+    }
+    backend_descriptor(client, &view.board.backend.kind).await
 }
 
 async fn resolve_context(
@@ -524,124 +568,200 @@ async fn card_command(
     command: BoardCardCommand,
     json: bool,
 ) -> Result<CommandOutput, ProtoError> {
-    let mut board = view.board.clone();
-    let card = match command {
+    match command {
         BoardCardCommand::New { title, fields } => {
-            // The contract gives `new` the value flags only: a clear flag would be a silent
-            // no-op on a card that has nothing to clear yet.
-            if let Some(flag) = fields.clear_flag() {
-                return Err(validation(format!(
-                    "{flag} applies to `card edit`, not `card new`"
-                )));
-            }
-            let patch = card_patch(&view.board, fields)?;
-            client
-                .create_card(
-                    view.board.id.clone(),
-                    CardDraft {
-                        title,
-                        description: patch.description.unwrap_or_default(),
-                        status_id: patch.status_id,
-                        priority: patch.priority.unwrap_or_default(),
-                        labels: patch.labels.unwrap_or_default(),
-                        assignee: patch.assignee.flatten(),
-                        estimate: patch.estimate.flatten(),
-                        due_date: patch.due_date.flatten(),
-                        repo_id: patch.repo_id.flatten(),
-                        ..CardDraft::default()
-                    },
-                )
-                .await?
+            card_new(client, view, title, fields, json).await
         }
         BoardCardCommand::Show { key } => {
-            return card_output(&view.board, &view.cards, resolve_card(view, &key)?, json);
+            card_output(&view.board, &view.cards, resolve_card(view, &key)?, json)
         }
         BoardCardCommand::Edit {
             key,
             title,
             fields,
             archive,
-        } => {
-            let card = resolve_card(view, &key)?;
-            let mut patch = card_patch(&view.board, fields)?;
-            patch.title = title;
-            patch.archived = archive;
-            if patch.is_empty() {
-                return Err(validation(
-                    "card edit requires at least one field or --archive",
-                ));
-            }
-            client.update_card(card.id.clone(), patch).await?
-        }
+        } => card_edit(client, view, &key, title, fields, archive, json).await,
         BoardCardCommand::Move { key, status, index } => {
-            let card = resolve_card(view, &key)?;
-            client
-                .move_card(
-                    card.id.clone(),
-                    resolve_status(&view.board, &status)?,
-                    index,
-                )
-                .await?
+            card_move(client, view, &key, &status, index, json).await
         }
         BoardCardCommand::Comment { key, body } => {
-            client
-                .add_card_comment(resolve_card(view, &key)?.id.clone(), body)
-                .await?
+            card_comment(client, view, &key, body, json).await
         }
-        BoardCardCommand::Delete { key } => {
-            let card = resolve_card(view, &key)?;
-            client.delete_card(card.id.clone()).await?;
-            let text = if json {
-                to_json(&OkEnvelope {
-                    protocol: PROTOCOL,
-                    ok: true,
-                })?
-            } else {
-                format!("Deleted {}", card.display_key(&view.board))
-            };
-            return Ok(CommandOutput::success(text));
-        }
+        BoardCardCommand::Delete { key } => card_delete(client, view, &key, json).await,
         BoardCardCommand::Worktree {
             key,
             repo,
             base,
             host,
-        } => {
-            let card_id = resolve_card(view, &key)?.id.clone();
-            let host = parse_host(host.as_deref())?;
-            let (card, worktree, created) = client
-                .create_worktree_from_card(card_id, repo, base, host)
-                .await?;
-            let text = if json {
-                to_json(&BoardWorktreeEnvelope {
-                    protocol: PROTOCOL,
-                    created,
-                    card: &card,
-                    worktree: &worktree,
-                })?
-            } else if created {
-                format!("Created {}", worktree.id)
-            } else {
-                format!("Existing {}", worktree.id)
-            };
-            return Ok(CommandOutput::success(text));
-        }
+        } => card_worktree(client, view, &key, repo, base, host, json).await,
         BoardCardCommand::Resolve { key, resolution } => {
-            let resolution = match resolution {
-                BoardResolution::KeepLocal => ConflictResolution::KeepLocal,
-                BoardResolution::TakeRemote => ConflictResolution::TakeRemote,
-            };
-            let card = client
-                .resolve_card_conflict(resolve_card(view, &key)?.id.clone(), resolution)
-                .await?;
-            // Taking the remote materializes its labels on the board itself. Rendering the
-            // card against the snapshot this command opened with would print the new label's
-            // slug instead of its name; a refresh that fails leaves that snapshot in place.
-            if let Ok(refreshed) = client.get_board(view.board.id.clone()).await {
-                board = refreshed.board;
-            }
-            card
+            card_resolve(client, view, &key, resolution, json).await
         }
+    }
+}
+
+/// Creates a card from the `card new` value flags.
+async fn card_new(
+    client: &Client,
+    view: &BoardView,
+    title: String,
+    fields: BoardCardFields,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    // The contract gives `new` the value flags only: a clear flag would be a silent no-op on
+    // a card that has nothing to clear yet.
+    if let Some(flag) = fields.clear_flag() {
+        return Err(validation(format!(
+            "{flag} applies to `card edit`, not `card new`"
+        )));
+    }
+    let patch = card_patch(&view.board, fields)?;
+    let card = client
+        .create_card(
+            view.board.id.clone(),
+            CardDraft {
+                title,
+                description: patch.description.unwrap_or_default(),
+                status_id: patch.status_id,
+                priority: patch.priority.unwrap_or_default(),
+                labels: patch.labels.unwrap_or_default(),
+                assignee: patch.assignee.flatten(),
+                estimate: patch.estimate.flatten(),
+                due_date: patch.due_date.flatten(),
+                repo_id: patch.repo_id.flatten(),
+                ..CardDraft::default()
+            },
+        )
+        .await?;
+    card_output(&view.board, &view.cards, &card, json)
+}
+
+/// Applies the `card edit` field flags and `--archive` to one card.
+async fn card_edit(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    title: Option<String>,
+    fields: BoardCardFields,
+    archive: Option<bool>,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let card = resolve_card(view, key)?;
+    let mut patch = card_patch(&view.board, fields)?;
+    patch.title = title;
+    patch.archived = archive;
+    // `board set` refuses an empty patch for the same reason: a request that changes nothing
+    // still asks the daemon to rewrite the document.
+    if patch.is_empty() {
+        return Err(validation(
+            "card edit requires at least one field or --archive",
+        ));
+    }
+    let card = client.update_card(card.id.clone(), patch).await?;
+    card_output(&view.board, &view.cards, &card, json)
+}
+
+/// Moves a card to another column, optionally at a position inside it.
+async fn card_move(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    status: &str,
+    index: Option<usize>,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let card = resolve_card(view, key)?;
+    let card = client
+        .move_card(card.id.clone(), resolve_status(&view.board, status)?, index)
+        .await?;
+    card_output(&view.board, &view.cards, &card, json)
+}
+
+/// Appends a comment to a card.
+async fn card_comment(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    body: String,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let card = client
+        .add_card_comment(resolve_card(view, key)?.id.clone(), body)
+        .await?;
+    card_output(&view.board, &view.cards, &card, json)
+}
+
+/// Deletes a card and confirms it by the key the user typed.
+async fn card_delete(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let card = resolve_card(view, key)?;
+    client.delete_card(card.id.clone()).await?;
+    let text = if json {
+        to_json(&OkEnvelope {
+            protocol: PROTOCOL,
+            ok: true,
+        })?
+    } else {
+        format!("Deleted {}", card.display_key(&view.board))
+    };
+    Ok(CommandOutput::success(text))
+}
+
+/// Creates or adopts the worktree a card names.
+async fn card_worktree(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    repo: Option<RepoId>,
+    base: Option<String>,
+    host: Option<String>,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let card_id = resolve_card(view, key)?.id.clone();
+    let host = parse_host(host.as_deref())?;
+    let (card, worktree, created) = client
+        .create_worktree_from_card(card_id, repo, base, host)
+        .await?;
+    let text = if json {
+        to_json(&BoardWorktreeEnvelope {
+            protocol: PROTOCOL,
+            created,
+            card: &card,
+            worktree: &worktree,
+        })?
+    } else if created {
+        format!("Created {}", worktree.id)
+    } else {
+        format!("Existing {}", worktree.id)
+    };
+    Ok(CommandOutput::success(text))
+}
+
+/// Resolves a card's conflict by keeping the local or the remote side.
+async fn card_resolve(
+    client: &Client,
+    view: &BoardView,
+    key: &str,
+    resolution: BoardResolution,
+    json: bool,
+) -> Result<CommandOutput, ProtoError> {
+    let resolution = match resolution {
+        BoardResolution::KeepLocal => ConflictResolution::KeepLocal,
+        BoardResolution::TakeRemote => ConflictResolution::TakeRemote,
+    };
+    let card = client
+        .resolve_card_conflict(resolve_card(view, key)?.id.clone(), resolution)
+        .await?;
+    // Taking the remote materializes its labels on the board itself. Rendering the card
+    // against the snapshot this command opened with would print the new label's slug instead
+    // of its name; a refresh that fails leaves that snapshot in place.
+    let board = match client.get_board(view.board.id.clone()).await {
+        Ok(refreshed) => refreshed.board,
+        Err(_) => view.board.clone(),
     };
     card_output(&board, &view.cards, &card, json)
 }
@@ -723,3 +843,6 @@ async fn wait_for_sync(client: &Client, id: &JobId) -> Result<JobRecord, ProtoEr
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+#[cfg(test)]
+mod tests;

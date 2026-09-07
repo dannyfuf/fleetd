@@ -1,4 +1,5 @@
 //! Board service persistence, worktree, synchronization, and event contracts.
+
 use std::{sync::Arc, time::Duration};
 
 use chrono::{TimeZone, Utc};

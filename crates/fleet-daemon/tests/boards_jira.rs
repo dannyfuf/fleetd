@@ -39,8 +39,6 @@ use tokio_util::sync::CancellationToken;
 
 const NOW: &str = "2026-09-06T12:00:00+00:00";
 
-// ---------------------------------------------------------------- scripted acli
-
 fn ok(stdout: impl Into<String>) -> ShellResult {
     ShellResult {
         status: 0,
@@ -242,8 +240,6 @@ impl Shell for Counting {
         self.inner.run_streaming(command, cancel, on_line).await
     }
 }
-
-// ---------------------------------------------------------------- backend
 
 #[tokio::test]
 async fn validate_checks_the_cli_the_session_and_the_site() {
@@ -806,8 +802,6 @@ async fn a_pull_whose_every_key_is_missing_refuses_to_call_it_a_deletion() {
         .to_string();
     assert!(error.contains("came back missing"), "{error}");
 }
-
-// ---------------------------------------------------------------- push
 
 /// A linked, dirty card with a label and an assignee, as `reconcile` would hand it over.
 fn linked_card(board: &mut Board) -> Card {
@@ -1637,8 +1631,6 @@ async fn a_comment_whose_id_jira_withheld_is_recovered_from_the_issue() {
         [("local-comment".to_owned(), "10502".to_owned())]
     );
 }
-
-// ---------------------------------------------------------------- service
 
 struct Fixture {
     _temp: tempfile::TempDir,

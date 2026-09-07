@@ -1,8 +1,10 @@
 //! Defaults for a context's local board.
-use super::model::*;
+
+use super::model::{BackendRef, Board, BoardSettings, Status, StatusCategory, SyncState};
 use crate::{ids::StatusId, model::Context};
 
 /// Creates the five initial ordered status columns.
+#[must_use]
 pub fn default_statuses() -> Vec<Status> {
     [
         ("backlog", "Backlog", StatusCategory::Backlog),
@@ -22,6 +24,7 @@ pub fn default_statuses() -> Vec<Status> {
 }
 
 /// First three ASCII alphanumeric name characters, uppercased; FLT when absent.
+#[must_use]
 pub fn default_prefix(context: &Context) -> String {
     let prefix: String = context
         .name
@@ -38,6 +41,7 @@ pub fn default_prefix(context: &Context) -> String {
 }
 
 /// Creates an empty local board with the context's identity and current timestamp.
+#[must_use]
 pub fn new_board(context: &Context, now: &str) -> Board {
     Board {
         id: context.id.clone().into(),

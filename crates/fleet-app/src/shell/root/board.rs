@@ -1,5 +1,3 @@
-//! Board and card-detail key handlers (BOARD §8).
-
 use super::Shell;
 use crate::actions::{board, card_detail};
 use gpui::{Context, Window};

@@ -27,7 +27,6 @@ use crate::{
 };
 
 mod agent_activity;
-/// Board orchestration.
 pub mod boards;
 pub mod contexts;
 pub mod doctor;

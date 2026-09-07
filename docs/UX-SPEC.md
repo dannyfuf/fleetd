@@ -624,6 +624,26 @@ URL · `r` force refresh both tabs · `I` inspect the matching local worktree ·
 
 ---
 
+### 3.5.1 Hub — Board (`g b`)
+
+The board is the Hub's third tab, beside Worktrees and Pull requests, and its full contract —
+columns, card tiles, the card detail, the four board dialogs, and every key — lives in
+`docs/BOARD.md` §8. Three things it does differently from the rest of the Hub are stated here
+because they are cross-screen rules:
+
+- **The board owns the body and its own keys.** While it is up, the Hub's rail and list are not
+  composed at all, and the board's bindings shadow the inherited `Hub` ones (`docs/KEYMAP.md`
+  "Board and card detail").
+- **`/` is not the Hub's filter overlay.** The board's rows are cards in columns, not worktrees, so
+  it keeps its own query in `BoardState.filter` and publishes the `Filter` key context while the
+  input has the keyboard — which is what makes bare letters type instead of fire (§3.10's two-stage
+  `Esc` still applies: leave the input, then clear the filter).
+- **The breadcrumb names the card, live.** §2.2's third segment is derived when the status bar is
+  built rather than cached by the body's render, because the status bar is composed first and a
+  cached row would name the previously selected card.
+
+---
+
 ### 3.6 Workspace
 
 **Purpose:** *Be a terminal. Say only which terminal I am in, whether the session is healthy, and

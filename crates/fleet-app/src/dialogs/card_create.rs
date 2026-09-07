@@ -13,14 +13,16 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{board as board_actions, dialog},
     bridge::Bridge,
-    dialogs::{DialogHost, Dialogs, notify, root, typed_char, with_host},
+    dialogs::{
+        DialogHost, Dialogs, host::complete_request, notify, read_host, root, typed_char, with_host,
+    },
     screens::board,
     state::AppState,
 };
 
 /// Which field of the create dialog owns the keyboard.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Field {
+pub(super) enum Field {
     /// The one-line title.
     #[default]
     Title,
@@ -30,31 +32,31 @@ pub enum Field {
 
 /// Draft for a new card on the current board.
 #[derive(Debug, Clone, Default)]
-pub struct CardCreateState {
+pub(crate) struct CardCreateState {
     /// Identity of this opening, used to ignore replies to discarded drafts.
-    pub generation: u64,
+    pub(super) generation: u64,
     /// A request is in flight; retain and freeze the draft until it answers.
-    pub saving: bool,
+    pub(super) saving: bool,
     /// Destination board.
-    pub board_id: Option<BoardId>,
+    pub(super) board_id: Option<BoardId>,
     /// Pending card fields.
-    pub draft: CardDraft,
+    pub(super) draft: CardDraft,
     /// Which field owns the keyboard.
-    pub field: Field,
+    pub(super) field: Field,
     /// Caret in `draft.title`, as a character offset.
-    pub title_caret: usize,
+    pub(super) title_caret: usize,
     /// Persistent description editor, including caret and preferred column.
-    pub description_area: TextAreaState,
+    pub(super) description_area: TextAreaState,
     /// Pixel scroll of the description box, which owns what `scroll_row` cannot: how tall the
     /// box made the lines it wrapped.
-    pub description_scroll: gpui::ScrollHandle,
+    pub(super) description_scroll: gpui::ScrollHandle,
     /// The exact message from a refused create.
-    pub error: Option<String>,
+    pub(super) error: Option<String>,
 }
 
 impl CardCreateState {
     /// Completes only the request belonging to this opening.
-    pub fn finish_save(&mut self, generation: u64, error: Option<String>) -> bool {
+    pub(super) fn finish_save(&mut self, generation: u64, error: Option<String>) -> bool {
         if self.generation != generation || !self.saving {
             return false;
         }
@@ -65,7 +67,7 @@ impl CardCreateState {
 
     /// Whether `Enter` may create: a card is its title, so a blank one is not a card.
     #[must_use]
-    pub fn can_submit(&self) -> bool {
+    pub(super) fn can_submit(&self) -> bool {
         !self.saving && self.board_id.is_some() && !self.draft.title.trim().is_empty()
     }
 
@@ -91,6 +93,7 @@ impl CardCreateState {
     }
 
     /// The title caret as a byte offset, which is what [`TextAreaState`] counts in.
+    #[must_use]
     fn title_byte_cursor(&self) -> usize {
         self.draft
             .title
@@ -100,6 +103,7 @@ impl CardCreateState {
     }
 }
 
+/// Opens an empty draft against the current board.
 pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let board_id = state.read(cx).board().map(|view| view.board.id.clone());
     with_host(state, cx, |host| {
@@ -112,7 +116,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
 }
 
 /// Renders the two fields and their two ways out.
-pub fn render(
+pub(crate) fn render(
     state: &Entity<AppState>,
     bridge: &Bridge,
     focus: &FocusHandle,
@@ -121,7 +125,7 @@ pub fn render(
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.md;
-    let draft = with_host(state, cx, |host| host.card_create.clone());
+    let draft = read_host(state, cx, |host, _| host.card_create.clone());
     let board_name = state
         .read(cx)
         .board()
@@ -167,14 +171,14 @@ pub fn render(
                         "description"
                     },
                 )
-                .key("⇧tab", "title")
+                .key("\u{21e7}tab", "title")
                 .key("\u{2303}\u{23ce}", "create & open")
                 .key("esc", "cancel"),
         )
         .primary(if draft.field == Field::Description {
-            "⌃↵ Create & open"
+            "\u{2303}\u{21b5} Create & open"
         } else {
-            "↵ Create"
+            "\u{21b5} Create"
         });
     if let Some(name) = board_name {
         card = card.subtitle(name);
@@ -206,7 +210,7 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &dialog::NextField, _window, cx| {
-                if with_host(&state, cx, |host| {
+                if read_host(&state, cx, |host, _| {
                     host.card_create.field == Field::Description
                 }) {
                     edit(&state, cx, TextAreaState::insert_tab);
@@ -293,7 +297,7 @@ pub fn render(
             }
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
-            if with_host(&submit_state, cx, |host| {
+            if read_host(&submit_state, cx, |host, _| {
                 host.card_create.field == Field::Description
             }) {
                 edit(&submit_state, cx, TextAreaState::insert_newline);
@@ -354,8 +358,7 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
         draft,
     });
     notify(state, cx);
-    let handle = state.clone();
-    cx.spawn(async move |cx| {
+    complete_request(state, cx, async move |state, cx| {
         let answer = match reply.recv().await {
             Ok(Ok(ResponseBody::Card(card))) => Ok(card),
             Ok(Err(error)) => Err(error.message),
@@ -363,35 +366,39 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
             Err(_) => Err("Daemon disconnected before replying".into()),
         };
         cx.update(|cx| {
-            if handle.read(cx).overlay != Some(crate::state::Overlay::Dialog(Dialogs::CardCreate))
-                || !handle
+            let Some(state) = state.upgrade() else { return };
+            if state.read(cx).overlay != Some(crate::state::Overlay::Dialog(Dialogs::CardCreate))
+                || !state
                     .read(cx)
                     .board()
                     .is_some_and(|view| view.board.id == board_id)
             {
                 return;
             }
-            let completed = with_host(&handle, cx, |host| {
+            let completed = with_host(&state, cx, |host| {
                 host.card_create
                     .finish_save(generation, answer.as_ref().err().cloned())
             });
             if completed && let Ok(card) = answer {
                 let id = card.id.clone();
-                handle.update(cx, |app, cx| {
+                state.update(cx, |app, cx| {
                     app.apply_card(card);
                     board::focus_card(app, &id);
                     app.close_overlay();
-                    app.toast_short("✓ card created", Icon::Boxes, std::time::Instant::now());
+                    app.toast_short(
+                        "\u{2713} card created",
+                        Icon::Boxes,
+                        std::time::Instant::now(),
+                    );
                     cx.notify();
                 });
                 if open_after {
-                    board::open_dialog(&handle, Dialogs::CardDetail, cx);
+                    board::open_dialog(&state, Dialogs::CardDetail, cx);
                 }
             }
-            notify(&handle, cx);
+            notify(&state, cx);
         });
-    })
-    .detach();
+    });
 }
 
 #[cfg(test)]

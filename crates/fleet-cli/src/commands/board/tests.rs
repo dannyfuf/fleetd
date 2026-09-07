@@ -17,7 +17,7 @@ mod parsing {
         board::{
             BackendCapabilities, BackendDescriptor, BackendRef, BackendSchema, BoardView, Card,
             Comment, Label, PropertyKind, PropertySchema, PropertySource, PropertyValue,
-            RemoteStatus, StatusCategory, new_board, summarize,
+            RemoteLink, RemoteStatus, StatusCategory, new_board, summarize,
         },
         model::{Context, Worktree},
     };
@@ -659,6 +659,60 @@ mod parsing {
     }
 
     #[test]
+    fn nothing_a_backend_names_reaches_the_terminal_unsanitised() {
+        let mut view = view();
+        // Everything a remote chooses: the issue key that heads every row, the column and
+        // board names it maps, its own timestamps, and the free text it parks in a property.
+        view.board.name = "Fleet \u{1b}[2J".into();
+        view.board.statuses[0].name = "To do \u{1b}[31m".into();
+        view.board.properties.push(PropertySchema {
+            key: "sprint".into(),
+            name: "Sprint \u{1b}[7m".into(),
+            kind: PropertyKind::Text,
+            options: vec![],
+            editable: true,
+            show_on_card: true,
+            source: PropertySource::Backend,
+        });
+        view.cards[0].remote = Some(RemoteLink {
+            parent_key: None,
+            backend: "jira".into(),
+            key: "SP-4\u{1b}[2K".into(),
+            url: Some("https://example.test/\u{1b}]0;x\u{7}".into()),
+            version: None,
+            synced_at: "now\u{1b}[1A".into(),
+            remote_updated_at: None,
+        });
+        view.cards[0].properties.insert(
+            "sprint".into(),
+            PropertyValue::Text("Sprint 9 \u{1b}[5m".into()),
+        );
+        let mut summary = summarize(&view.board, &view.cards);
+        summary.last_error = Some("acli said \u{1b}[2Jboom".into());
+        let job = JobRecord {
+            id: "sync-1".parse().unwrap(),
+            kind: JobKind::Custom("board.sync".into()),
+            target: "work".into(),
+            title: "Sync".into(),
+            status: JobStatus::Succeeded,
+            progress: Some("pulled 2 \u{1b}[31m".into()),
+            log_path: "/tmp/sync.log".into(),
+            started_at: "now".into(),
+            finished_at: Some("later".into()),
+            cancellable: false,
+            retryable: false,
+        };
+        for text in [
+            human::board(&view, None, 0),
+            human::board_card(&view.board, &view.cards, &view.cards[0]),
+            human::boards(&[summary.clone()]),
+            human::board_sync(&job, &summary),
+        ] {
+            assert!(!text.contains('\u{1b}'), "{text:?}");
+        }
+    }
+
+    #[test]
     fn card_header_stays_one_line_and_an_author_less_comment_names_nobody() {
         let mut view = view();
         view.cards[0].title = "Fix login\nand logout".into();
@@ -1092,6 +1146,7 @@ mod orchestration {
     };
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
+    use std::path::Path;
     use tempfile::TempDir;
     use tokio::{net::UnixListener, time::timeout};
     use tokio_util::codec::Framed;
@@ -1141,6 +1196,42 @@ mod orchestration {
         }
     }
 
+    type ServerTransport = Framed<tokio::net::UnixStream, FleetCodec<serde_json::Value, Request>>;
+
+    async fn bind(home: &Path) -> UnixListener {
+        UnixListener::bind(home.join("fleetd.sock")).unwrap()
+    }
+
+    async fn authenticate(transport: &mut ServerTransport) {
+        let hello = next_request(transport).await;
+        assert!(matches!(hello.body, RequestBody::Hello { .. }));
+        send_result(
+            transport,
+            hello.id,
+            Ok(ResponseBody::Hello {
+                protocol: PROTOCOL_VERSION,
+                server: "test-daemon".to_owned(),
+            }),
+        )
+        .await;
+        let subscribe = next_request(transport).await;
+        assert!(matches!(subscribe.body, RequestBody::Subscribe { .. }));
+        send_result(transport, subscribe.id, Ok(ResponseBody::Ack)).await;
+    }
+
+    async fn next_request(transport: &mut ServerTransport) -> Request {
+        transport.next().await.expect("connection closed").unwrap()
+    }
+
+    async fn send_result(
+        transport: &mut ServerTransport,
+        id: u64,
+        result: Result<ResponseBody, ProtoError>,
+    ) {
+        let response = serde_json::to_value(Response { id, result }).unwrap();
+        transport.send(response).await.unwrap();
+    }
+
     /// Exercises real request framing without requiring or spawning fleetd.
     async fn run(
         arguments: &[&str],
@@ -1148,51 +1239,15 @@ mod orchestration {
     ) -> Result<CommandOutput, ProtoError> {
         timeout(Duration::from_secs(5), async {
             let home = TempDir::new().unwrap();
-            let listener = UnixListener::bind(home.path().join("fleetd.sock")).unwrap();
+            let listener = bind(home.path()).await;
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
-                let mut transport =
-                    Framed::new(socket, FleetCodec::<serde_json::Value, Request>::new());
-                let hello = transport.next().await.unwrap().unwrap();
-                assert!(matches!(hello.body, RequestBody::Hello { .. }));
-                transport
-                    .send(
-                        serde_json::to_value(Response {
-                            id: hello.id,
-                            result: Ok(ResponseBody::Hello {
-                                protocol: PROTOCOL_VERSION,
-                                server: "test".into(),
-                            }),
-                        })
-                        .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                let subscribe = transport.next().await.unwrap().unwrap();
-                assert!(matches!(subscribe.body, RequestBody::Subscribe { .. }));
-                transport
-                    .send(
-                        serde_json::to_value(Response {
-                            id: subscribe.id,
-                            result: Ok(ResponseBody::Ack),
-                        })
-                        .unwrap(),
-                    )
-                    .await
-                    .unwrap();
+                let mut transport = Framed::new(socket, FleetCodec::new());
+                authenticate(&mut transport).await;
                 for (expected, result) in steps {
-                    let request = transport.next().await.unwrap().unwrap();
+                    let request = next_request(&mut transport).await;
                     assert_eq!(request.body, expected);
-                    transport
-                        .send(
-                            serde_json::to_value(Response {
-                                id: request.id,
-                                result,
-                            })
-                            .unwrap(),
-                        )
-                        .await
-                        .unwrap();
+                    send_result(&mut transport, request.id, result).await;
                 }
             });
             let client = Client::connect(home.path()).await.unwrap();

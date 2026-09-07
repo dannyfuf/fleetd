@@ -109,7 +109,9 @@ pub use list_view::{
 };
 pub use list_view::{ListCursor, ListView};
 pub use log_view::{LOG_TAIL_LINES, LogCommand, LogView};
-pub use markdown_text::{MAX_HEADING_LEVEL, MarkdownText, MdBlock, MdSpan, parse_markdown};
+pub use markdown_text::{
+    LIST_MARKER_CH, MAX_HEADING_LEVEL, MarkdownText, MdBlock, MdSpan, parse_markdown,
+};
 pub use mode_word::{Mode, ModeWord};
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};

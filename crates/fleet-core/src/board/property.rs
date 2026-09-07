@@ -118,6 +118,7 @@ pub enum PropertyValue {
 }
 impl PropertyValue {
     /// Formats a property for a generic UI field.
+    #[must_use]
     pub fn display(&self) -> String {
         match self {
             Self::Text(s) | Self::Date(s) | Self::Select(s) | Self::User(s) | Self::Url(s) => {
@@ -130,6 +131,7 @@ impl PropertyValue {
         }
     }
     /// Whether this value can inhabit the given schema kind; null clears any kind.
+    #[must_use]
     pub fn matches_kind(&self, kind: PropertyKind) -> bool {
         matches!(
             (self, kind),

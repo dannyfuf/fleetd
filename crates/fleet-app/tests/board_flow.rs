@@ -1,4 +1,5 @@
 //! Board events and payloads cross the real socket into the app's state and view models.
+
 mod common;
 
 use std::time::{Duration, Instant};

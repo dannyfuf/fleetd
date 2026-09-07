@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-/// Board backend boundaries and registry.
 pub mod board;
 pub mod clock;
 pub mod files;

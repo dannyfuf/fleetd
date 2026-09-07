@@ -1,45 +1,55 @@
 # Board — Jira backend (via `acli`)
 
-Status: **implemented** (authoritative for the Jira milestone). Builds on `docs/BOARD.md`; every signature
-there stays valid. This file was reconciled against the code at integration: where the implementation
-refined the contract, the text below is the refined rule, and the change is called out inline. When code
-and this doc disagree from here on, fix the code.
+**Status: authoritative.** This document owns the Jira backend: what `acli` can and cannot do, how
+an issue becomes a `RemoteCard`, and which card fields the remote refuses. It builds on
+`docs/BOARD.md`, whose signatures all stay valid — nothing here changes a seam outside
+`crates/fleet-daemon/src/adapters/board/jira/`. Where the code and this file disagree, the code is
+the bug.
+
+The decisions behind the shape — `acli` rather than an HTTP client, per-key fetch, name-keyed
+statuses, and a hand-written ADF converter — are recorded in
+`docs/decisions/0009-jira-board-backend.md`.
 
 ## 0. Goal and constraints
 
-A `BoardBackend` of kind `"jira"` that mirrors one Jira project (optionally narrowed by JQL) into a context's
-board, using **only the Atlassian CLI (`acli`)** through the daemon's `Shell` adapter — no HTTP client, no
-API token. Verified against `acli` 1.3.18 (`docs/BOARD-JIRA.md` §7 lists the exact commands):
+A `BoardBackend` of kind `"jira"` that mirrors one Jira project (optionally narrowed by JQL) into
+a context's board, using **only the Atlassian CLI (`acli`)** through the daemon's `Shell` adapter
+— no HTTP client, no API token. Verified against `acli` 1.3.18 (`docs/BOARD-JIRA.md` §7 lists the
+exact commands):
 
-- `search` returns only `key, summary, status, assignee, priority, issuetype, description, labels`; everything
-  else (updated, duedate, parent, comments, custom fields) needs one `view --fields … --json` **per key**.
-- `edit` can change **summary, description, assignee, labels** only. Priority, due date, parent and story
-  points are **not writable** post-create. `transition --status <name>` moves by **status name**; transitions
-  cannot be listed. `comment create` adds comments.
+- `search` returns only `key, summary, status, assignee, priority, issuetype, description,
+  labels`; everything else (updated, duedate, parent, comments, custom fields) needs one `view
+  --fields … --json` **per key**.
+- `edit` can change **summary, description, assignee, labels** only. Priority, due date, parent
+  and story points are **not writable** post-create. `transition --status <name>` moves by
+  **status name**; transitions cannot be listed. `comment create` adds comments.
 - Descriptions and comment bodies are **ADF** (Atlassian Document Format) JSON, not text.
 - No cursor pagination, no page metadata; incremental sync is JQL `updated >= "-<n>m"`.
-- One active `acli` account per machine (`acli jira auth status`), OAuth session; failures come back as text.
+- One active `acli` account per machine (`acli jira auth status`), OAuth session; failures come
+  back as text.
 
-Consequences encoded below: per-key fetch with bounded concurrency, name-keyed statuses, a pure ADF⇄markdown
-converter, backend-declared **read-only fields** enforced by the core, and a **settings schema** so the app
-renders backend settings generically (nothing Jira-specific in `fleet-app`).
+Consequences encoded below: per-key fetch with bounded concurrency, name-keyed statuses, a pure
+ADF⇄markdown converter, backend-declared **read-only fields** enforced by the core, and a
+**settings schema** so the app renders backend settings generically (nothing Jira-specific in
+`fleet-app`).
 
-## 1. Ownership
+## 1. Where it lives
 
-| Piece | Path | Stage |
-|---|---|---|
-| Core additions (§2) | `crates/fleet-core/src/board/{sync,ops,model}.rs` | contracts (types) / service (logic+tests) |
-| Proto additions (§2) | `crates/fleet-proto/src/{request,response}.rs`, `crates/fleet-client/src/api.rs` | contracts |
-| Trait/registry changes (§3) | `crates/fleet-daemon/src/adapters/board/{mod,local}.rs`, `adapters/mod.rs`, `testing/fakes.rs` | contracts |
-| Jira backend | `crates/fleet-daemon/src/adapters/board/jira/{mod,settings,acli,adf,map,users}.rs` | contracts (skeleton) → jira-adf (adf.rs) + jira-backend (rest) |
-| Service changes (§4) | `crates/fleet-daemon/src/services/boards.rs`, `services/mod.rs` dispatch arms | contracts (arms/signatures) → service (logic) |
-| Daemon tests | `crates/fleet-daemon/tests/boards_jira.rs`, `tests/fixtures/jira/*.json` | jira-backend |
-| CLI (§5) | `crates/fleet-cli/src/{args.rs,commands/board.rs,envelope.rs,human.rs}`, `tests/board_cli.rs` | cli |
-| App (§6) | `crates/fleet-app/src/dialogs/board_settings.rs`, `dialogs/card_picker.rs`, `views/board_card_detail.rs`, `dialogs/card_detail.rs`, `state.rs`, `keymap.rs`, `actions.rs`, `dialogs/palette.rs`, `docs/KEYMAP.md` | app |
-| Docs | this file, `docs/BOARD.md` §10, `docs/ARCHITECTURE.md`, `README.md` | each stage its surface; integrate consolidates |
+| Piece | Path |
+|---|---|
+| Core additions (§2) | `crates/fleet-core/src/board/{sync,ops,model}.rs` |
+| Proto additions (§2) | `crates/fleet-proto/src/{request,response}.rs`, `crates/fleet-client/src/api/boards.rs` |
+| Trait and registry changes (§3) | `crates/fleet-daemon/src/adapters/board.rs` and `adapters/board/local.rs`, `adapters/mod.rs`, `testing/fakes.rs` |
+| Jira backend | `crates/fleet-daemon/src/adapters/board/jira.rs` and `jira/{acli,adf,map,push,schema,settings,users}.rs` |
+| Service changes (§4) | `crates/fleet-daemon/src/services/boards.rs` and `services/boards/{cards,documents,lifecycle,sync,worktree}.rs`, `services/dispatch.rs` |
+| Daemon tests | `crates/fleet-daemon/tests/boards_jira.rs`, `tests/fixtures/jira/*.json` |
+| CLI (§5) | `crates/fleet-cli/src/{args.rs,commands/board.rs,envelope.rs,human.rs}` |
+| App (§6) | `crates/fleet-app/src/dialogs/{board_settings,card_picker,card_detail}.rs`, `views/board_card_detail.rs`, `state/board.rs`, `keymap.rs`, `actions.rs`, `dialogs/palette.rs` |
+| Docs | this file, `docs/BOARD.md` §10, `docs/ARCHITECTURE.md` |
 
-Rules as in `docs/BOARD.md` §1: disjoint ownership, no dependency changes (everything needed exists:
-`serde_json`, `chrono`, `regex`, `tokio` process, `async-trait`), no commits, RFC3339 timestamps.
+The backend adds no workspace dependency: `serde_json`, `chrono`, `regex`, `tokio`'s process
+support and `async-trait` are all already in `fleet-daemon`. Timestamps stay RFC3339 strings, as
+everywhere else on the wire.
 
 ## 2. Core and protocol additions (all additive, `#[serde(default)]`)
 
@@ -77,7 +87,7 @@ RequestBody::ListBoardBackends {}  → ResponseBody::BoardBackends(Vec<BackendDe
 ## 3. Backend trait and registry changes
 
 ```rust
-// adapters/board/mod.rs
+// adapters/board.rs
 pub trait BoardBackend: Send + Sync {
     …existing…,
     fn label(&self) -> &'static str;                       // "Local", "Jira (acli)"
@@ -93,30 +103,34 @@ impl BoardBackends {
 
 ## 4. Service changes (`services/boards.rs`)
 
-- `sync(&self, id, full: bool)`; `full` → pull with `cursor = None` and **clear** `sync.cursor` first (under the
-  mutation gate, before the job starts, so a failed full sync still leaves the cursor cleared).
-- After `pull`, before `reconcile`: collect the distinct `RemoteStatus`es of pulled cards that are not yet in
-  `status_map.remote_to_local` (or whose mapping points at a dead column). For each, **insert a real column**
-  first — after the last column of its own `StatusCategory` or earlier, so a status a project gained between two
-  syncs does not land a *started* column to the right of the completed one; a status whose category the remote
-  did not declare is a guess either way and goes at the end — `adopt_schema` alone only matches an already-mapped board by name/category, it does not invent
-  columns — then call `adopt_schema` again so the map picks them up, so newly seen Jira statuses become columns
-  instead of "unmapped" activity noise. The schema handed to that second call is the **described** schema minus
-  any status the pull re-describes, plus the pulled ones: `adopt_schema` replaces `status_map`, `properties`
-  and `readonly_fields` wholesale, so a statuses-only schema would erase every mapping and property `describe`
-  named and silently disarm the read-only guard. Skipped entirely while the board still carries the untouched
-  default columns with nothing mapped, where a wholesale adoption would trade them for the handful this pull
-  mentioned. A pulled status whose name already matches a column is mapped, never duplicated; one with neither
-  id nor name is ignored.
+- `sync(&self, id, full: bool)`; `full` → pull with `cursor = None` and **clear** `sync.cursor`
+  first (under the mutation gate, before the job starts, so a failed full sync still leaves the
+  cursor cleared).
+- After `pull`, before `reconcile`: collect the distinct `RemoteStatus`es of pulled cards that are
+  not yet in `status_map.remote_to_local` (or whose mapping points at a dead column). For each,
+  **insert a real column** first — after the last column of its own `StatusCategory` or earlier,
+  so a status a project gained between two syncs does not land a *started* column to the right of
+  the completed one; a status whose category the remote did not declare is a guess either way and
+  goes at the end — `adopt_schema` alone only matches an already-mapped board by name/category, it
+  does not invent columns — then call `adopt_schema` again so the map picks them up, so newly seen
+  Jira statuses become columns instead of "unmapped" activity noise. The schema handed to that
+  second call is the **described** schema minus any status the pull re-describes, plus the pulled
+  ones: `adopt_schema` replaces `status_map`, `properties` and `readonly_fields` wholesale, so a
+  statuses-only schema would erase every mapping and property `describe` named and silently disarm
+  the read-only guard. Skipped entirely while the board still carries the untouched default
+  columns with nothing mapped, where a wholesale adoption would trade them for the handful this
+  pull mentioned. A pulled status whose name already matches a column is mapped, never duplicated;
+  one with neither id nor name is ignored.
 - `list_backends(&self) -> Vec<BackendDescriptor>`; dispatch arm for `ListBoardBackends`.
-- `update`: when `patch.backend` changes **kind**, `settings` must come from the patch (never carried over): the
-  stored settings are dropped before `apply_board_patch`, and `sync` (cursor, status map, read-only fields) is
-  reset — they all describe the remote the board is leaving.
+- `update`: when `patch.backend` changes **kind**, `settings` must come from the patch (never
+  carried over): the stored settings are dropped before `apply_board_patch`, and `sync` (cursor,
+  status map, read-only fields) is reset — they all describe the remote the board is leaving.
 - `update_card`/`move_card` propagate `BoardError::ReadOnlyField` as `DaemonError::Validation`
-  (`ErrorKind::Validation` on the wire, the same class as `BoardError::Invalid`) with the message intact — the
-  CLI and app show it verbatim.
-- `delete_card` clears a child's `parent_id` **directly** (plus the usual activity, never dirtying the card)
-  rather than through `apply_card_patch`, which would refuse it on a backend where `parent_id` is read-only.
+  (`ErrorKind::Validation` on the wire, the same class as `BoardError::Invalid`) with the message
+  intact — the CLI and app show it verbatim.
+- `delete_card` clears a child's `parent_id` **directly** (plus the usual activity, never dirtying
+  the card) rather than through `apply_card_patch`, which would refuse it on a backend where
+  `parent_id` is read-only.
 - `describe_backend` works on a `local` board too — `LocalBackend::describe` answers with an empty
   `BackendSchema`, so `fleet board describe` never fails for lack of a remote.
 
@@ -318,39 +332,43 @@ fleet board create --backend jira --setting project=SP ...    # --setting requir
 fleet board sync [--wait] [--full]
 fleet board card edit … on a read-only field → exit 1 with the daemon's message
 ```
-`board show`'s human header prints the descriptor **label**, not the raw kind:
-`backend: Jira (acli) · project SP · synced 3m ago · 2 dirty · 1 conflict` (`site` after `project` when set,
-raw kind when `ListBoardBackends` fails or lists no such kind — a failed lookup never fails the command).
-The two settings named there are the **first two of the descriptor's own `settings_schema`** that the board has
-set, never a key list in the printer: `project` and `site` are simply Jira's first two rows, and a second
-backend's identity settings reach the header without a client change (BOARD §10). Without a descriptor the
-header names the kind and stops, rather than guessing which keys identify a board.
-A local board prints `backend: Local` alone: no sync tail for a board with no remote. `--json` carries the board
-verbatim and never issues `ListBoardBackends`. Envelopes: `{"protocol":1,"backends":[BackendDescriptor…]}` and
+`board show`'s human header prints the descriptor **label**, not the raw kind: `backend: Jira
+(acli) · project SP · synced 3m ago · 2 dirty · 1 conflict` (`site` after `project` when set, raw
+kind when `ListBoardBackends` fails or lists no such kind — a failed lookup never fails the
+command). The two settings named there are the **first two of the descriptor's own
+`settings_schema`** that the board has set, never a key list in the printer: `project` and `site`
+are simply Jira's first two rows, and a second backend's identity settings reach the header
+without a client change (BOARD §10). Without a descriptor the header names the kind and stops,
+rather than guessing which keys identify a board. A local board prints `backend: Local` alone: no
+sync tail for a board with no remote. `--json` carries the board verbatim and never issues
+`ListBoardBackends`. Envelopes: `{"protocol":1,"backends":[BackendDescriptor…]}` and
 `{"protocol":1,"schema":BackendSchema}`. `fleet board backends` resolves no board.
 
 App (generic, no Jira strings in `fleet-app`):
-- Board settings dialog: a **Backend** row cycling over `ListBoardBackends` kinds (h/l), then one row per
-  `settings_schema` entry (Text → inline text field, Bool → toggle, Number → number field, Select → cycler,
-  MultiSelect → comma-separated text); Save sends `BoardPatch { backend: Some(BackendRef { kind, settings }) }`
-  and shows the daemon's validation message on failure (dialog stays open). Changing kind on a linked board shows the
-  daemon's error verbatim.
-  A setting whose schema `name` ends in `(required)` is starred and refuses to save empty; the marker is stripped
-  from the row label. Number rows accept digits only (so `h`/`l` keep stepping them), `Select` rows cycle, and the
-  row list scrolls — a nine-row backend form is taller than the card ever gets.
-- Read-only fields: pickers for a field in `board.sync.readonly_fields` do not open; the refusal reads "<field> is
-  read-only on <backend label> boards"; detail rows render in the secondary tone with a lock glyph. On the **board**
-  the refusal is a toast; inside the **card detail** it is the dialog's own error line — `shell/root.rs` puts the
-  toast stack in `body_overlay`, and a dialog's scrim would make a toast there unreadable. Same sentence either way.
-- Card detail key `x` (context `Dialog > CardDetail`): open the remote issue URL in the browser (`cx.open_url`);
-  Board key `x` does the same for the focused card. Both in `docs/KEYMAP.md`, palette, help. A card with no remote
-  link says so, with the same toast/error-line split.
-- Header shows backend label (from descriptors) instead of the raw kind. Descriptors are fetched once per
-  connection on **board render** (the header needs the label too), not on dialog open; a dialog already seeded
-  adopts a late schema.
+- Board settings dialog: a **Backend** row cycling over `ListBoardBackends` kinds (h/l), then one
+  row per `settings_schema` entry (Text → inline text field, Bool → toggle, Number → number field,
+  Select → cycler, MultiSelect → comma-separated text); Save sends `BoardPatch { backend:
+  Some(BackendRef { kind, settings }) }` and shows the daemon's validation message on failure
+  (dialog stays open). Changing kind on a linked board shows the daemon's error verbatim. A
+  setting whose schema `name` ends in `(required)` is starred and refuses to save empty; the
+  marker is stripped from the row label. Number rows accept digits only (so `h`/`l` keep stepping
+  them), `Select` rows cycle, and the row list scrolls — a nine-row backend form is taller than
+  the card ever gets.
+- Read-only fields: pickers for a field in `board.sync.readonly_fields` do not open; the refusal
+  reads "<field> is read-only on <backend label> boards"; detail rows render in the secondary tone
+  with a lock glyph. On the **board** the refusal is a toast; inside the **card detail** it is the
+  dialog's own error line — `shell/root.rs` puts the toast stack in `body_overlay`, and a dialog's
+  scrim would make a toast there unreadable. Same sentence either way.
+- Card detail key `x` (context `Dialog > CardDetail`): open the remote issue URL in the browser
+  (`cx.open_url`); Board key `x` does the same for the focused card. Both in `docs/KEYMAP.md`,
+  palette, help. A card with no remote link says so, with the same toast/error-line split.
+- Header shows backend label (from descriptors) instead of the raw kind. Descriptors are fetched
+  once per connection on **board render** (the header needs the label too), not on dialog open; a
+  dialog already seeded adopts a late schema.
 - Full sync: the palette gets "Board: Full sync" issuing `SyncBoard { full: true }`. The palette's
-  `every_command_has_a_label_and_a_bound_key` invariant refuses a keyless command, so it is backed by a real
-  action `board::FullSync` bound to `F` in `Hub > Board` (in `docs/KEYMAP.md`) rather than being CLI-only.
+  `every_command_has_a_label_and_a_bound_key` invariant refuses a keyless command, so it is backed
+  by a real action `board::FullSync` bound to `F` in `Hub > Board` (in `docs/KEYMAP.md`) rather
+  than being CLI-only.
 
 ## 7. `acli` command reference (verified 1.3.18)
 
@@ -365,25 +383,33 @@ acli jira workitem transition --key <KEY> --status "<Status Name>" --yes --json
 acli jira workitem create --from-json f.json --json           # {"projectKey","type","summary","description":{ADF},"labels":[],"assignee","parentIssueId"}
 acli jira workitem comment create --key <KEY> --body-file c.json --json
 ```
-Failure texts to recognize: `✗ Error: …`, `can't be transitioned: No allowed transitions found`, `not authenticated`,
-`unauthorized`, `429`/`rate`, `usage limit`, `Issue does not exist`. Always drive writes by explicit `--key`, never `--jql`.
+Failure texts to recognize: `✗ Error: …`, `can't be transitioned: No allowed transitions found`,
+`not authenticated`, `unauthorized`, `429`/`rate`, `usage limit`, `Issue does not exist`. Always
+drive writes by explicit `--key`, never `--jql`.
 
 ## 8. Tests
 
-- Unit: settings parse/defaults/deny-unknown; `build_search_jql`; cursor round-trip; `status_category`; priority maps;
-  `issue_to_remote_card` on a realistic fixture (`tests/fixtures/jira/issue.json`, ADF description, comments, parent,
-  story points); ADF⇄markdown (≥ 25 cases incl. nested lists, code blocks, links, mentions, unknown nodes, round-trip).
-- Backend with `FakeShell`: describe (sampled statuses ordered by category), full pull (search + N views, concurrency
-  ≤ max), incremental pull (JQL contains `updated >= "-Nm"`, cursor advanced, `pulls_since_full` counts, full every N),
-  view 404 → deleted_keys, push Update (label diff → correct add/remove flags; unsupported field skipped), Transition
-  failure → PushFailure, Create → key + url + version, AddComment; auth failure → clear error; rate limit → retried.
-- Service integration (`tests/boards_jira.rs`): a board with `backend: jira` + `FakeShell` scripted acli → `sync`
-  creates cards in mapped columns, a second sync with a changed remote and a dirty local card yields a conflict, a
-  local title edit is pushed via `edit`, a status move via `transition`, a comment via `comment create`; editing
-  priority on the Jira board is rejected with `ReadOnlyField`; `sync(full=true)` clears the cursor.
-- CLI tests for the new flags/commands; app unit tests for the generic settings rows and readonly picker guard.
-- The retry policy's *exhaustion* path (3 steps, 13 s of real sleep) is exercised with a single 1 s step: skipping
-  the sleep would need `tokio`'s `test-util` feature, and this milestone adds no dependencies.
-- Real-Jira smoke (read-only, **not part of `make ci`**; run by hand against a live site): throwaway FLEET_HOME, `fleet board set --backend jira --setting project=SP
-  --setting jql="assignee = currentUser()"`, `fleet board sync --wait`, `fleet board show`; screenshots of the app.
-  **No push/create/edit/transition/comment against the real site, ever.**
+- Unit: settings parse/defaults/deny-unknown; `build_search_jql`; cursor round-trip;
+  `status_category`; priority maps; `issue_to_remote_card` on a realistic fixture
+  (`tests/fixtures/jira/issue.json`, ADF description, comments, parent, story points);
+  ADF⇄markdown (≥ 25 cases incl. nested lists, code blocks, links, mentions, unknown nodes,
+  round-trip).
+- Backend with `FakeShell`: describe (sampled statuses ordered by category), full pull (search + N
+  views, concurrency ≤ max), incremental pull (JQL contains `updated >= "-Nm"`, cursor advanced,
+  `pulls_since_full` counts, full every N), view 404 → deleted_keys, push Update (label diff →
+  correct add/remove flags; unsupported field skipped), Transition failure → PushFailure, Create →
+  key + url + version, AddComment; auth failure → clear error; rate limit → retried.
+- Service integration (`tests/boards_jira.rs`): a board with `backend: jira` + `FakeShell`
+  scripted acli → `sync` creates cards in mapped columns, a second sync with a changed remote and
+  a dirty local card yields a conflict, a local title edit is pushed via `edit`, a status move via
+  `transition`, a comment via `comment create`; editing priority on the Jira board is rejected
+  with `ReadOnlyField`; `sync(full=true)` clears the cursor.
+- CLI tests for the new flags/commands; app unit tests for the generic settings rows and readonly
+  picker guard.
+- The retry policy's *exhaustion* path (3 steps, 13 s of real sleep) is exercised with a single 1
+  s step: skipping the sleep would need `tokio`'s `test-util` feature, and this milestone adds no
+  dependencies.
+- Real-Jira smoke (read-only, **not part of `make ci`**; run by hand against a live site):
+  throwaway FLEET_HOME, `fleet board set --backend jira --setting project=SP --setting
+  jql="assignee = currentUser()"`, `fleet board sync --wait`, `fleet board show`; screenshots of
+  the app. **No push/create/edit/transition/comment against the real site, ever.**

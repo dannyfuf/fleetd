@@ -201,7 +201,7 @@ impl CardTile {
 
 impl RenderOnce for CardTile {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
         let selected = self.selected;
         let focused = self.focused;
         let has_meta = self.has_meta();
@@ -274,7 +274,7 @@ impl RenderOnce for CardTile {
             .child(
                 // The title is the only thing on a tile allowed two lines; anything longer is
                 // a description, and a board that grows its cards stops being scannable.
-                styled_with(div(), TextRole::UiStrong.style(&theme), &theme)
+                styled_with(div(), TextRole::UiStrong.style(theme), theme)
                     .w_full()
                     .min_w_0()
                     .line_clamp(CARD_TITLE_LINES)
@@ -291,7 +291,7 @@ impl RenderOnce for CardTile {
             .flex_none()
             .overflow_hidden()
             .rounded(theme.radii.sm)
-            .border_1()
+            .border(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .bg(if selected {
                 theme.colors.row_selected

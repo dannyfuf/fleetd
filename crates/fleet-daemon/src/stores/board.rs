@@ -1,4 +1,5 @@
 //! Atomic board document persistence and recoverable quarantine/deletion.
+
 use crate::{DaemonError, DaemonResult, adapters::files::Files};
 use fleet_core::{
     board::{BOARD_DOCUMENT_VERSION, BoardDocument, validate_board, validate_card},
@@ -16,6 +17,7 @@ pub struct BoardStore {
 
 impl BoardStore {
     /// Creates a store using the supplied filesystem boundary.
+    #[must_use]
     pub fn new(home: FleetHome, files: Arc<dyn Files>) -> Self {
         Self { home, files }
     }

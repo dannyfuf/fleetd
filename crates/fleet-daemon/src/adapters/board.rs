@@ -7,10 +7,9 @@ use fleet_core::board::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-/// Jira boards mirrored through the Atlassian CLI.
 pub mod jira;
-/// Local-only board backend.
 pub mod local;
+
 pub use jira::JiraBackend;
 pub use local::LocalBackend;
 

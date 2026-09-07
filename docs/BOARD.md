@@ -1,50 +1,55 @@
 # Board — contracts and architecture
 
-Status: **implemented (core milestone)** (authoritative). Every implementer honors the signatures in this
-file verbatim. Deviations must be reported in the stage's `INTEGRATION NOTES`, never
-applied silently. When code and this doc disagree after integration, fix the code.
+**Status: authoritative.** This document owns the board's domain model, its reconciliation engine,
+its persistence, its wire messages and its surface. The signatures below are the seams every other
+crate is written against; changing one is a deliberate, workspace-wide change, and this document
+changes in the same pass. Where the code and this file disagree, the code is the bug.
+
+The decisions behind the shape — a backend-agnostic core with a pure reconciliation engine, no
+markdown crate, and the protocol bump the board's messages needed — are recorded in
+`docs/decisions/0008-board-model-and-sync.md`.
 
 ## 0. What we are building
 
-A Linear-style kanban **board of cards**, one board per **context** (`fleet_core::Context`).
-Cards are the unit of project tracking: identifier (`FLT-12`), title, markdown description,
-status column, priority, labels, assignee, estimate, due date, parent, custom properties,
-comments, activity. A card can **spawn a worktree** (the existing prepared-copy pipeline)
-and remembers it.
+A Linear-style kanban **board of cards**, one board per **context** (`fleet_core::Context`). Cards
+are the unit of project tracking: identifier (`FLT-12`), title, markdown description, status
+column, priority, labels, assignee, estimate, due date, parent, custom properties, comments,
+activity. A card can **spawn a worktree** (the existing prepared-copy pipeline) and remembers it.
 
 The **core is backend-agnostic and reusable**. A `BoardBackend` adapter (daemon side) plus a
-**pure reconciliation engine** (core side) let a board mirror a remote system — Jira via
-`acli`, Notion, anything — without the core knowing their shape. Backend-specific fields ride
-in `Card.properties`, described by `PropertySchema` so the generic UI can render/edit them.
-The first backend is `local` (no remote). Jira is the second (separate contract, later).
+**pure reconciliation engine** (core side) let a board mirror a remote system — Jira via `acli`,
+Notion, anything — without the core knowing their shape. Backend-specific fields ride in
+`Card.properties`, described by `PropertySchema` so the generic UI can render/edit them. The first
+backend is `local` (no remote). Jira is the second (separate contract, later).
 
 Non-goals for v1: multiple boards per context in the UI (the model allows it, the UI shows the
-context's first board), cycles/projects/milestones, attachments, rich-text editing beyond a
-plain multi-line editor with a read-mode markdown renderer.
+context's first board), cycles/projects/milestones, attachments, rich-text editing beyond a plain
+multi-line editor with a read-mode markdown renderer.
 
-## 1. Crate placement and ownership
+## 1. Crate placement
 
-| Piece | Crate / path | Owner stage |
-|---|---|---|
-| Domain types, ids, pure ops, sync engine | `crates/fleet-core/src/board/{mod,model,property,ops,sync,defaults}.rs` | core |
-| Ids `BoardId CardId StatusId LabelId` | `crates/fleet-core/src/ids.rs` (via `string_id!`) | contracts |
-| Paths `boards_dir()`, `board_path()` | `crates/fleet-core/src/paths.rs` | contracts |
-| Wire types (requests/responses/events/snapshot) | `crates/fleet-proto/src/{request,response,event,snapshot}.rs` | contracts |
-| Backend trait + registry + local backend | `crates/fleet-daemon/src/adapters/board/{mod,local}.rs` | daemon |
-| Board store (per-board JSON document) | `crates/fleet-daemon/src/stores/board.rs` | daemon |
-| `Boards` service + sync job + worktree-from-card | `crates/fleet-daemon/src/services/boards.rs` | daemon |
-| Dispatch arms | `crates/fleet-daemon/src/services/mod.rs` | contracts (arms call `self.boards.*`) |
-| Client API | `crates/fleet-client/src/api.rs` (board section) | client-cli |
-| CLI `fleet board …` | `crates/fleet-cli/src/{args.rs,commands.rs,envelope.rs,commands/board.rs}` | client-cli |
-| UI-kit components | `crates/fleet-ui-kit/src/components/{text_area,kanban_column,card_tile,priority_glyph,markdown_text}.rs` | ui-kit |
-| App screen, views, dialogs, state, keymap | `crates/fleet-app/src/{screens/board.rs,views/board_*.rs,dialogs/card_*.rs,dialogs/board_settings.rs,state.rs,keymap.rs,actions.rs,dialogs/palette.rs}` | app |
-| Docs | `docs/{BOARD,ARCHITECTURE,APP-CONTRACTS,KEYMAP,UX-SPEC,DESIGN-SYSTEM}.md` | each stage documents its own surface |
+| Piece | Crate / path |
+|---|---|
+| Domain types, ids, pure ops, sync engine | `crates/fleet-core/src/board.rs` and `board/{defaults,model,property,ops,sync}.rs` |
+| Ids `BoardId CardId StatusId LabelId` | `crates/fleet-core/src/ids.rs` (via `string_id!`) |
+| Paths `boards_dir()`, `board_path()` | `crates/fleet-core/src/paths.rs` |
+| Wire types (requests/responses/events/snapshot) | `crates/fleet-proto/src/{request,response,event,snapshot}.rs` |
+| Backend trait + registry + local backend | `crates/fleet-daemon/src/adapters/board.rs` and `adapters/board/local.rs` |
+| Board store (per-board JSON document) | `crates/fleet-daemon/src/stores/board.rs` |
+| `Boards` service + sync job + worktree-from-card | `crates/fleet-daemon/src/services/boards.rs` and `services/boards/{cards,documents,lifecycle,sync,worktree}.rs` |
+| Dispatch arms | `crates/fleet-daemon/src/services/mod.rs` |
+| Client API | `crates/fleet-client/src/api/boards.rs` |
+| CLI `fleet board …` | `crates/fleet-cli/src/{args.rs,commands.rs,envelope.rs,human.rs,commands/board.rs}` |
+| UI-kit components | `crates/fleet-ui-kit/src/components/{card_tile,kanban_column,markdown_text,priority_glyph,text_area}.rs` |
+| App screen, views, dialogs, state, keymap | `crates/fleet-app/src/{screens/board.rs,views/board_*.rs,dialogs/card_*.rs,dialogs/board_settings.rs,state/board.rs,shell/root/board.rs,keymap.rs,actions.rs,dialogs/palette.rs}` |
+| Docs | `docs/{BOARD,ARCHITECTURE,APP-CONTRACTS,KEYMAP,UX-SPEC,DESIGN-SYSTEM}.md` |
 
-Rules (from `docs/DEVELOPMENT.md`): never edit another stage's files; needs elsewhere go in
-`INTEGRATION NOTES`. No stage adds workspace dependencies — the contracts stage adds them all
-(`async-trait` already exists in `fleet-daemon`; nothing else is needed; **no** markdown crate).
-No stage commits. Timestamps are RFC3339 strings on the wire (as `Context.created_at`), produced
-daemon-side via the `Clock` adapter. Dates (`due_date`) are `YYYY-MM-DD` strings.
+The board adds no workspace dependency: `async-trait` already exists in `fleet-daemon`, and the
+markdown reader and writer are hand-written on purpose
+(`docs/decisions/0008-board-model-and-sync.md`).
+Timestamps are RFC3339 strings on the wire, as `Context.created_at` is, produced daemon-side through
+the `Clock` adapter so `fleet-core` stays free of clocks. Dates (`due_date`) are `YYYY-MM-DD`
+strings.
 
 ## 2. Domain model (`fleet_core::board`)
 
@@ -435,7 +440,7 @@ pub fn apply_remote(board: &mut Board, card: &mut Card, remote: &RemoteCard, now
 ## 4. Daemon
 
 ```rust
-// crates/fleet-daemon/src/adapters/board/mod.rs
+// crates/fleet-daemon/src/adapters/board.rs
 #[async_trait::async_trait]
 pub trait BoardBackend: Send + Sync {
     fn kind(&self) -> &'static str;
@@ -531,19 +536,20 @@ impl Boards {
     pub async fn summaries(&self) -> Vec<BoardSummary>;   // for Snapshot.boards
 }
 ```
-Every mutation: load doc → apply pure op → `validate_card` → save → emit `Event::BoardChanged`. Cards whose
-`worktree_id` no longer exists in `State.worktrees` are reported with `worktree_id: None` (not persisted),
-and a `repo_id` — on a card or as `Board.default_repo_id` — naming a repository the state no longer has in
-the board's context is reported the same way and skipped when `create_worktree_from_card` picks a repository.
-`ensure`/`create` refuse a context whose board document is quarantined rather than creating an empty board
-over it; `delete_for_context` takes the quarantined remains with it. `summaries` reparses a board document
-only when its `stamp` changed or this daemon rewrote it.
-Boards whose context no longer exists are skipped by `list`/`summaries`, and deleting a context
-deletes its board in the same cascade (`delete_for_context`) so a later context deriving the same id
-cannot adopt it. Board locks are per board: no board's clone, sync or hook run blocks another board's
-requests, and `ensure` reads an existing board without taking one.
+Every mutation: load doc → apply pure op → `validate_card` → save → emit `Event::BoardChanged`.
+Cards whose `worktree_id` no longer exists in `State.worktrees` are reported with `worktree_id:
+None` (not persisted), and a `repo_id` — on a card or as `Board.default_repo_id` — naming a
+repository the state no longer has in the board's context is reported the same way and skipped
+when `create_worktree_from_card` picks a repository. `ensure`/`create` refuse a context whose
+board document is quarantined rather than creating an empty board over it; `delete_for_context`
+takes the quarantined remains with it. `summaries` reparses a board document only when its `stamp`
+changed or this daemon rewrote it. Boards whose context no longer exists are skipped by
+`list`/`summaries`, and deleting a context deletes its board in the same cascade
+(`delete_for_context`) so a later context deriving the same id cannot adopt it. Board locks are
+per board: no board's clone, sync or hook run blocks another board's requests, and `ensure` reads
+an existing board without taking one.
 
-## 5. Protocol (`fleet-proto`, bump `PROTOCOL_VERSION` to 5)
+## 5. Protocol (`fleet-proto`, version 5)
 
 ```rust
 // RequestBody discriminants and fields use snake_case, like their siblings; domain payloads use camelCase.
@@ -572,9 +578,10 @@ enum BoardChangeReason { Created, Updated, Deleted, CardChanged, Synced, SyncFai
 ## 6. Client and CLI
 
 `Client::create_worktree_from_card` returns `(Card, Worktree, bool /* created */)`.
-`fleet_client::Client` gains one typed method per request above (`list_boards`, `get_board`, `ensure_board`,
-`create_board`, `update_board`, `delete_board`, `create_card`, `update_card`, `move_card`, `delete_card`,
-`add_card_comment`, `create_worktree_from_card`, `sync_board`, `resolve_card_conflict`, `describe_board_backend`).
+`fleet_client::Client` gains one typed method per request above (`list_boards`, `get_board`,
+`ensure_board`, `create_board`, `update_board`, `delete_board`, `create_card`, `update_card`,
+`move_card`, `delete_card`, `add_card_comment`, `create_worktree_from_card`, `sync_board`,
+`resolve_card_conflict`, `describe_board_backend`).
 
 CLI (`fleet board …`, JSON envelopes v1 with `--json`, human tables otherwise; board resolved from
 `--board <id>` else `--context <id>` else the active context via `EnsureBoard`):
@@ -595,10 +602,10 @@ fleet board card delete <key|id>
 fleet board card worktree <key|id> [--repo owner/name] [--base REF] [--host H]   # prints the created worktree like `fleet create`
 fleet board card resolve <key|id> keep-local|take-remote
 ```
-`<key|id>` accepts a display key (`FLT-12`, `PROJ-123`) or a CardId, and the local key of a
-card with no remote link — a mirrored card's local key is not a selector, because a board
-mirroring the Jira project its own prefix names would have two namespaces of the same shape
-overlapping. `board card show` prints `Local key:` for exactly the cards that answer to one.
+`<key|id>` accepts a display key (`FLT-12`, `PROJ-123`) or a CardId, and the local key of a card
+with no remote link — a mirrored card's local key is not a selector, because a board mirroring the
+Jira project its own prefix names would have two namespaces of the same shape overlapping. `board
+card show` prints `Local key:` for exactly the cards that answer to one.
 
 ## 7. UI-kit components (`fleet-ui-kit`, gpui only, tokens only)
 
@@ -664,27 +671,38 @@ pub struct KanbanBoard { /* RenderOnce: horizontal scroller of columns with gutt
 impl KanbanBoard { pub fn new(id: impl Into<ElementId>) -> Self; pub fn columns(self, impl IntoIterator<Item = AnyElement>) -> Self; pub fn scroll_handle(self, ScrollHandle) -> Self; }
 ```
 All exported from `components/mod.rs` and shown in the `kit_gallery` example in both themes.
-Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse `FuzzyList`/`Select`.
+Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
+`FuzzyList`/`Select`.
 
 ## 8. App (`fleet-app`)
 
 - **Screen**: the board is a hub tab: `HubTab::Board`, key `g b`, tab label "Board", rendered by
-  `screens/board.rs::BoardScreen` with the frozen screen signature (`docs/APP-CONTRACTS.md` §2). The hub context
-  bar scopes it: the board shown is `EnsureBoard(active_context)`.
-- **State** (`state.rs`): `AppState.board: BoardState { view: Option<BoardView>, loading: bool, error: Option<String>, focus: BoardFocus { column: usize, row: usize }, filter: String, filter_editing: bool, group_secondary: Option<GroupBy> }`.
-  Loaded on tab open / context switch (`EnsureBoard`), refreshed on `Event::BoardChanged` for the shown board id.
+  `screens/board.rs::BoardScreen` with the frozen screen signature (`docs/APP-CONTRACTS.md` §2).
+  The hub context bar scopes it: the board shown is `EnsureBoard(active_context)`.
+- **State** (`state.rs`): `AppState.board: BoardState { view: Option<BoardView>, loading: bool,
+  error: Option<String>, focus: BoardFocus { column: usize, row: usize }, filter: String,
+  filter_editing: bool, group_secondary: Option<GroupBy> }`. Loaded on tab open / context switch
+  (`EnsureBoard`), refreshed on `Event::BoardChanged` for the shown board id.
   `AppState.snapshot.boards` summaries drive the tab badge (open count, conflict dot).
-- **Bridge**: board requests use `Bridge::request` reply receivers, with no new `BridgeEvent` variants.
-  Responses land in `AppState` reducers (`apply_board_view`, `apply_card`); board loads use context/generation guards.
-- **Dialogs** (`Dialogs` variants; state in `DialogHost`): `CardDetail` (`dialogs/card_detail.rs`, `CardDetailState`),
-  `CardCreate` (`dialogs/card_create.rs`), `CardPicker` (`dialogs/card_picker.rs`, `PickerKind { Status, Priority, Assignee, Labels, Estimate, DueDate, Repo, Property(key) }`),
-  `BoardSettings` (`dialogs/board_settings.rs`: name, prefix, default repo, start-on-worktree, push-new-cards, conflict policy,
-  and the backend — a kind cycler over `ListBoardBackends` plus one generic row per `settings_schema` entry; see
-  `docs/BOARD-JIRA.md` §6).
-- **Card detail layout** (UX-SPEC §board): two panes. Left: key + title (editable, `i`), description (`MarkdownText`; `d` toggles `TextArea` edit; `ctrl-s`/`esc` saves/cancels), comments (list + `c` to add via a `TextArea`), activity (last 10).
-  Right: property list — Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo, Worktree (enter = open its session), Remote (key/url/synced/dirty), then custom properties from `board.properties`; `j/k` select row, `enter` opens the matching picker.
-  Conflict banner with `K` keep-local / `R` take-remote when `card.conflict` is set.
-- **Keymap** (`docs/KEYMAP.md` rows, contexts `Hub > Board` and `Dialog > CardDetail` etc., one action per row):
+- **Bridge**: board requests use `Bridge::request` reply receivers, with no new `BridgeEvent`
+  variants. Responses land in `AppState` reducers (`apply_board_view`, `apply_card`); board loads
+  use context/generation guards.
+- **Dialogs** (`Dialogs` variants; state in `DialogHost`): `CardDetail` (`dialogs/card_detail.rs`,
+  `CardDetailState`), `CardCreate` (`dialogs/card_create.rs`), `CardPicker`
+  (`dialogs/card_picker.rs`, `PickerKind { Status, Priority, Assignee, Labels, Estimate, DueDate,
+  Repo, Property(key) }`), `BoardSettings` (`dialogs/board_settings.rs`: name, prefix, default
+  repo, start-on-worktree, push-new-cards, conflict policy, and the backend — a kind cycler over
+  `ListBoardBackends` plus one generic row per `settings_schema` entry; see `docs/BOARD-JIRA.md`
+  §6).
+- **Card detail layout** (UX-SPEC §board): two panes. Left: key + title (editable, `i`),
+  description (`MarkdownText`; `d` toggles `TextArea` edit; `ctrl-s`/`esc` saves/cancels),
+  comments (list + `c` to add via a `TextArea`), activity (last 10). Right: property list —
+  Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo, Worktree (enter = open its
+  session), Remote (key/url/synced/dirty), then custom properties from `board.properties`; `j/k`
+  select row, `enter` opens the matching picker. Conflict banner with `K` keep-local / `R`
+  take-remote when `card.conflict` is set.
+- **Keymap** (`docs/KEYMAP.md` rows, contexts `Hub > Board` and `Dialog > CardDetail` etc., one
+  action per row):
 
 | Key | Context | Action |
 |---|---|---|
@@ -723,76 +741,91 @@ Palette commands mirror every row above (`Board: New card`, `Board: Sync`, …).
 
 ### Integrated implementation decisions
 
-Public function signatures above are preserved. Additive helpers/builders and app editing
-fields are documented in APP-CONTRACTS and DESIGN-SYSTEM. `BoardSummary` also derives `Eq`.
-Nested optional patch fields preserve missing = unchanged and JSON null = clear.
+Public function signatures above are preserved. Additive helpers/builders and app editing fields
+are documented in APP-CONTRACTS and DESIGN-SYSTEM. `BoardSummary` also derives `Eq`. Nested
+optional patch fields preserve missing = unchanged and JSON null = clear.
 
-The daemon supplies the context that pure sync signatures cannot inspect: before schema
-adoption it seeds missing sync metadata from linked cards, and remaps unlinked cards when
-status IDs change. Before TakeRemote it materializes labels with `apply_remote` on a scratch
-card, then resolves parent keys against stored cards, dropping a resolved parent that would close
-a cycle exactly as it drops a key that names no local card. Standalone core callers must do the
-same parent lookup and supply missing labels before calling immutable-board `resolve_conflict`.
+The daemon supplies the context that pure sync signatures cannot inspect: before schema adoption
+it seeds missing sync metadata from linked cards, and remaps unlinked cards when status IDs
+change. Before TakeRemote it materializes labels with `apply_remote` on a scratch card, then
+resolves parent keys against stored cards, dropping a resolved parent that would close a cycle
+exactly as it drops a key that names no local card. Standalone core callers must do the same
+parent lookup and supply missing labels before calling immutable-board `resolve_conflict`.
 Successful push acknowledgements supply `SyncSummary.pushed`; job progress carries the counts.
 Remote sync jobs are retryable and noncancellable, checkpoint pulls before pushes, and persist
-failures in `Board.sync.last_error`. Local sync returns Unsupported without scheduling a job.
-A pull carrying an unimportable issue persists every card that did reconcile, leaves the cursor where
-it was so the next pull offers the bad one again, and **continues into the push**: the skipped keys
-(joined with the pull's own `failed_keys`) are reported as a warning on `Board.sync.last_error`, which
-`reconcile` clears on the next sync. The job fails only when nothing reconciled and there was nothing
-to push — one bad issue must never strand every queued local edit, or pin the board to full pulls
-forever. That covers
-remote *updates* as much as remote drafts: a remote field the board cannot hold leaves the local card
-untouched and reports `"{key}: {reason}"`. A remote `parent_key` that would close a cycle is dropped,
-exactly as `resolve_conflict` drops one. `position`
-is local ordering: reordering a column dirties nothing, and only a real status change dirties the card
-that moved. A card's `parent_id` must name another card of the same board and may not close a cycle.
+failures in `Board.sync.last_error`. Local sync returns Unsupported without scheduling a job. A
+pull carrying an unimportable issue persists every card that did reconcile, leaves the cursor
+where it was so the next pull offers the bad one again, and **continues into the push**: the
+skipped keys (joined with the pull's own `failed_keys`) are reported as a warning on
+`Board.sync.last_error`, which `reconcile` clears on the next sync. The job fails only when
+nothing reconciled and there was nothing to push — one bad issue must never strand every queued
+local edit, or pin the board to full pulls forever. That covers remote *updates* as much as remote
+drafts: a remote field the board cannot hold leaves the local card untouched and reports `"{key}:
+{reason}"`. A remote `parent_key` that would close a cycle is dropped, exactly as
+`resolve_conflict` drops one. `position` is local ordering: reordering a column dirties nothing,
+and only a real status change dirties the card that moved. A card's `parent_id` must name another
+card of the same board and may not close a cycle.
 
 The app refreshes through `EnsureBoard(active_context)` after BoardChanged. `filter_editing`
-selects the Filter key context while typing, with two-stage Escape. `group_secondary` is
-reserved; Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog.
-`ctrl-enter` in CardCreate creates and opens detail; label pickers use Space for multi-select;
-BoardSettings reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`.
-These supplemental dialog keys are listed in KEYMAP; context-only create-and-open has no
-palette command. Description/comment editors compose presentational TextArea with its state
-and key handling; a separate live input entity is not required. Card tiles suppress None
-priority, while standalone PriorityGlyph still renders it. Label colors remain token names.
+selects the Filter key context while typing, with two-stage Escape. `group_secondary` is reserved;
+Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog. `ctrl-enter` in
+CardCreate creates and opens detail; label pickers use Space for multi-select; BoardSettings
+reuses the settings row keys. Delete uses `ConfirmRequest::DeleteCard`. These supplemental dialog
+keys are listed in KEYMAP; context-only create-and-open has no palette command.
+Description/comment editors compose presentational TextArea with its state and key handling; a
+separate live input entity is not required. Card tiles suppress None priority, while standalone
+PriorityGlyph still renders it. Label colors remain token names.
 
-## 9. Definition of done (core milestone)
+## 9. What the tests hold
 
-1. `make ci` green (fmt, clippy `-D warnings`, all tests) on the whole workspace.
-2. Unit tests: core ops (create/patch/move/positions/validation/worktree_slug), sync engine (adopt_schema mapping
-   cases, reconcile create/update/delete/conflict per policy, push ops, apply_push_result), markdown parser, TextAreaState.
-3. Daemon integration tests (`crates/fleet-daemon/tests/boards_*.rs`): ensure/create/patch/move/delete/comment,
-   persistence round-trip, worktree-from-card (fake git), sync with `FakeBackend` (conflict + resolution), events emitted.
-4. CLI tests for envelopes; client round-trip test.
-5. App: board tab renders columns/cards from a daemon; card detail opens, edits title/description/properties,
-   creates worktree; keymap/palette/help/KEYMAP.md consistent (existing keymap drift test passes).
-6. Docs updated: ARCHITECTURE (service + backend), APP-CONTRACTS (new dialogs, state), KEYMAP, UX-SPEC (§board), DESIGN-SYSTEM (new components).
+The board's regression surface is spread across the crates it touches, and each layer holds one
+thing so a failure names the layer that broke.
 
-## 10. Backend implementation guide (for Jira/Notion later)
+- **Core** (`crates/fleet-core/src/board/`) covers the pure rules: create, patch, move and the
+  fractional positions they produce; validation and `worktree_slug`; and the reconciliation engine
+  — `adopt_schema`'s status mapping, `reconcile`'s create/update/delete/conflict decisions under
+  each `ConflictPolicy`, the push operations it emits, and `apply_push_result`.
+- **Daemon** (`crates/fleet-daemon/tests/boards_*.rs`) covers the service against a real store: the
+  ensure/create/patch/move/delete/comment round trip, persistence and quarantine, worktree-from-card
+  over a fake git, a full sync against `FakeBackend` including a conflict and its resolution, and
+  the events each mutation emits.
+- **CLI and client** cover the JSON envelopes and one socket round trip per typed method.
+- **App** covers the reducers rather than rendered strings: the board mirror's staleness and
+  generation rules, the focus clamp under a filter, and the two-stage filter `Esc`. The keymap
+  drift test keeps `docs/KEYMAP.md` and `keymap.rs` in agreement.
 
-A new backend = one module under `adapters/board/<kind>.rs` implementing `BoardBackend`, a typed settings struct
-deserialized from `BackendRef.settings`, registration in `BoardBackends::system()`, and (optionally) a `board set
---backend <kind> --setting k=v` CLI path. It maps native issues into `RemoteCard` (native-only fields go into
-`properties` with a `PropertySchema` from `describe`), and applies `PushOp`s. It never touches the store or the UI.
+The board's own surfaces answer the same standing rule the rest of the kit does: a state that is
+not in `cargo run -p fleet-ui-kit --example gallery_board` is not implemented.
 
-Jira is the worked example, and it is implemented: `adapters/board/jira/{mod,settings,acli,adf,map,users}.rs`,
-contract in `docs/BOARD-JIRA.md`. Three of its lessons generalize. **A backend declares what it cannot write.**
-`BackendSchema.readonly_fields` lists standard card fields the remote refuses post-create (for Jira: priority,
-estimate, due date, parent); `adopt_schema` copies the list into `board.sync.readonly_fields`, and
-`ops::apply_card_patch`/`move_card`/`check_draft_writable` refuse a local change to one with `BoardError::ReadOnlyField`, which the CLI
-and app show verbatim — so a field the remote would silently drop never becomes a dirty card that can never be
-pushed. `parent_id` is the one exemption, on both doors: a backend's *create* can carry the hierarchy even where
-its `edit` cannot, so a draft may name a parent and so may a patch of a card that has no `remote` yet.
-`sync::resolve_conflict`'s `KeepLocal` copies these fields (and the backend's non-editable properties) from the
-conflict's remote side for the same reason: the user's "keep local" is a choice over the fields they can own,
-and the link it stamps carries the remote's version, so nothing would ever revisit them again.
-The list is *replaced* on every adoption, so every `adopt_schema` call site must re-state it.
-**A backend describes its own settings.** `BoardBackend::label()` and `settings_schema()` feed
-`BackendDescriptor`, published by `ListBoardBackends`; the CLI's `fleet board backends` and the app's board
-settings dialog render any backend's form from that schema alone, so adding a backend needs no client change.
-**A backend's shape is its remote's shape.** Jira's per-key fetch, name-keyed statuses, JQL time-window
-incremental pulls and pure ADF⇄markdown conversion are all consequences of `acli`'s limits, kept inside the
-adapter: the core, the store and the UI stay backend-agnostic, and outside `adapters/board/jira/` the word
-"jira" appears in `fleet-app` only in tests and doc comments — never in a rendered string or a branch.
+## 10. Adding a backend
+
+A new backend = one module under `adapters/board/<kind>.rs` implementing `BoardBackend`, a typed
+settings struct deserialized from `BackendRef.settings`, registration in
+`BoardBackends::system()`, and (optionally) a `board set --backend <kind> --setting k=v` CLI path.
+It maps native issues into `RemoteCard` (native-only fields go into `properties` with a
+`PropertySchema` from `describe`), and applies `PushOp`s. It never touches the store or the UI.
+
+Jira is the worked example, and it is implemented:
+`adapters/board/jira.rs` and `jira/{acli,adf,map,push,schema,settings,users}.rs`, contract in
+`docs/BOARD-JIRA.md`.
+Three of its lessons generalize. **A backend declares what it cannot write.**
+`BackendSchema.readonly_fields` lists standard card fields the remote refuses post-create (for
+Jira: priority, estimate, due date, parent); `adopt_schema` copies the list into
+`board.sync.readonly_fields`, and `ops::apply_card_patch`/`move_card`/`check_draft_writable`
+refuse a local change to one with `BoardError::ReadOnlyField`, which the CLI and app show verbatim
+— so a field the remote would silently drop never becomes a dirty card that can never be pushed.
+`parent_id` is the one exemption, on both doors: a backend's *create* can carry the hierarchy even
+where its `edit` cannot, so a draft may name a parent and so may a patch of a card that has no
+`remote` yet. `sync::resolve_conflict`'s `KeepLocal` copies these fields (and the backend's
+non-editable properties) from the conflict's remote side for the same reason: the user's "keep
+local" is a choice over the fields they can own, and the link it stamps carries the remote's
+version, so nothing would ever revisit them again. The list is *replaced* on every adoption, so
+every `adopt_schema` call site must re-state it. **A backend describes its own settings.**
+`BoardBackend::label()` and `settings_schema()` feed `BackendDescriptor`, published by
+`ListBoardBackends`; the CLI's `fleet board backends` and the app's board settings dialog render
+any backend's form from that schema alone, so adding a backend needs no client change. **A
+backend's shape is its remote's shape.** Jira's per-key fetch, name-keyed statuses, JQL
+time-window incremental pulls and pure ADF⇄markdown conversion are all consequences of `acli`'s
+limits, kept inside the adapter: the core, the store and the UI stay backend-agnostic, and outside
+`adapters/board/jira/` the word "jira" appears in `fleet-app` only in tests and doc comments —
+never in a rendered string or a branch.

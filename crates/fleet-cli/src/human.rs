@@ -178,7 +178,7 @@ pub fn boards(boards: &[fleet_core::board::BoardSummary]) -> String {
             board.id,
             board.context_id,
             crate::envelope::single_line(&board.name),
-            board.backend_kind,
+            crate::envelope::single_line(&board.backend_kind),
             board.card_count,
             board.open_count,
             board.dirty_count,
@@ -205,17 +205,21 @@ pub fn board(
 ) -> String {
     let mut sections = vec![format!(
         "{} ({})\n{}",
-        view.board.name,
-        view.board.prefix,
+        crate::envelope::single_line(&view.board.name),
+        crate::envelope::single_line(&view.board.prefix),
         board_header(view, backend, now)
     )];
     for status in &view.board.statuses {
         let cards = fleet_core::board::column_cards(&view.cards, &status.id);
-        let mut lines = vec![format!("{} ({})", status.name, cards.len())];
+        let mut lines = vec![format!(
+            "{} ({})",
+            crate::envelope::single_line(&status.name),
+            cards.len()
+        )];
         for card in cards {
             let mut row = format!(
                 "{}  {}  {}",
-                card.display_key(&view.board),
+                display_key(&view.board, card),
                 card.priority.label().to_lowercase(),
                 crate::envelope::single_line(&card.title)
             );
@@ -252,7 +256,7 @@ pub fn board(
         lines.extend(orphans.iter().map(|card| {
             format!(
                 "{}  {}  {}  [status {}]",
-                card.display_key(&view.board),
+                display_key(&view.board, card),
                 card.priority.label().to_lowercase(),
                 crate::envelope::single_line(&card.title),
                 crate::envelope::single_line(card.status_id.as_str())
@@ -533,6 +537,14 @@ const fn property_kind_name(kind: fleet_core::board::PropertyKind) -> &'static s
     }
 }
 
+/// The key a reader can type back, sanitised: on a mirrored card it is the remote's own.
+///
+/// `Card::display_key` answers `remote.key` for a linked card, so the identifier at the head of
+/// every board row and card report is a string the backend chose, not one Fleet validated.
+fn display_key(board: &fleet_core::board::Board, card: &fleet_core::board::Card) -> String {
+    crate::envelope::single_line(&card.display_key(board))
+}
+
 /// The card's label names, or the em dash every other empty field in this report prints.
 fn card_labels(board: &fleet_core::board::Board, card: &fleet_core::board::Card) -> String {
     if card.labels.is_empty() {
@@ -573,10 +585,12 @@ pub fn board_card(
         // The header is one row of a line-oriented report: a multi-line title cannot break it.
         format!(
             "{}  {}",
-            card.display_key(board),
+            display_key(board, card),
             crate::envelope::single_line(&card.title)
         ),
-        format!("ID: {}", card.id),
+        // `CardId` admits any non-whitespace bytes, and a mirrored card takes its id from the
+        // remote: the one identifier this report promises is exact still cannot be trusted raw.
+        format!("ID: {}", crate::envelope::single_line(card.id.as_str())),
         format!("Status: {status}"),
         format!("Priority: {}", card.priority.label()),
         format!("Labels: {}", card_labels(board, card)),
@@ -591,15 +605,20 @@ pub fn board_card(
             card.estimate
                 .map_or_else(|| "—".to_owned(), |value| value.to_string())
         ),
-        format!("Due: {}", card.due_date.as_deref().unwrap_or("—")),
+        format!(
+            "Due: {}",
+            card.due_date
+                .as_deref()
+                .map_or_else(|| "\u{2014}".to_owned(), crate::envelope::single_line)
+        ),
         format!(
             "Parent: {}",
             card.parent_id.as_ref().map_or_else(
                 || "\u{2014}".to_owned(),
-                |id| cards
-                    .iter()
-                    .find(|parent| parent.id == *id)
-                    .map_or_else(|| id.to_string(), |parent| parent.display_key(board))
+                |id| cards.iter().find(|parent| parent.id == *id).map_or_else(
+                    || crate::envelope::single_line(id.as_str()),
+                    |parent| display_key(board, parent)
+                )
             )
         ),
         format!(
@@ -612,21 +631,37 @@ pub fn board_card(
         ),
         format!("Archived: {}", card.archived),
         format!("Dirty: {}", card.dirty),
-        format!("Created: {}", card.created_at),
-        format!("Updated: {}", card.updated_at),
+        format!(
+            "Created: {}",
+            crate::envelope::single_line(&card.created_at)
+        ),
+        format!(
+            "Updated: {}",
+            crate::envelope::single_line(&card.updated_at)
+        ),
     ];
     // Only an unlinked card answers to its local key, so only an unlinked card is told one:
     // `resolve_card` refuses `FLT-7` on a mirrored card, and printing it here handed the reader
     // a selector the very next command rejected.
     if card.remote.is_none() {
-        lines.push(format!("Local key: {}", card.local_key(board)));
+        lines.push(format!(
+            "Local key: {}",
+            crate::envelope::single_line(&card.local_key(board))
+        ));
     }
     if let Some(remote) = &card.remote {
-        lines.push(format!("Remote: {} ({})", remote.key, remote.backend));
+        lines.push(format!(
+            "Remote: {} ({})",
+            crate::envelope::single_line(&remote.key),
+            crate::envelope::single_line(&remote.backend)
+        ));
         if let Some(url) = &remote.url {
-            lines.push(format!("URL: {url}"));
+            lines.push(format!("URL: {}", crate::envelope::single_line(url)));
         }
-        lines.push(format!("Synced: {}", remote.synced_at));
+        lines.push(format!(
+            "Synced: {}",
+            crate::envelope::single_line(&remote.synced_at)
+        ));
     }
     if let Some(conflict) = &card.conflict {
         // The same table the app's conflict banner reads: `status_id, due_date` is a sentence
@@ -636,7 +671,7 @@ pub fn board_card(
         let fields = conflict
             .fields
             .iter()
-            .map(|field| fleet_core::board::field_label(field))
+            .map(|field| crate::envelope::single_line(fleet_core::board::field_label(field)))
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(if fields.is_empty() {
@@ -662,7 +697,11 @@ pub fn board_card(
             .map(|schema| schema.name.as_str())
             .filter(|name| !taken.iter().any(|used| used == name))
             .unwrap_or(key.as_str());
-        lines.push(format!("{name}: {}", value.display()));
+        lines.push(format!(
+            "{}: {}",
+            crate::envelope::single_line(name),
+            crate::envelope::single_line(&value.display())
+        ));
     }
     lines.push(format!(
         "\nDescription\n{}",
@@ -678,7 +717,7 @@ pub fn board_card(
             .unwrap_or_default();
         lines.push(format!(
             "{}{author}\n{}",
-            comment.created_at,
+            crate::envelope::single_line(&comment.created_at),
             crate::envelope::safe_block(&comment.body)
         ));
     }
@@ -693,14 +732,17 @@ pub fn board_sync(
 ) -> String {
     let mut lines = vec![format!("Synced {} ({})", summary.id, job.id)];
     if let Some(progress) = &job.progress {
-        lines.push(progress.clone());
+        lines.push(crate::envelope::single_line(progress));
     }
     lines.push(format!(
         "{} cards, {} open, {} dirty, {} conflicts",
         summary.card_count, summary.open_count, summary.dirty_count, summary.conflict_count
     ));
     if let Some(error) = &summary.last_error {
-        lines.push(format!("Last error: {error}"));
+        lines.push(format!(
+            "Last error: {}",
+            crate::envelope::single_line(error)
+        ));
     }
     lines.join("\n")
 }

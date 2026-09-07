@@ -686,7 +686,8 @@ Amber by default, because "in flight" is amber everywhere.
 
 All input components are **presentational**: the caller owns the string, the caret, the cursor
 and the focus, and handles the keys. `RenderOnce` cannot own state, and the dialogs already own
-theirs.
+theirs. `MarkdownText` is grouped here because it is the read half of the description surface
+`TextArea` edits, and the two are always specified together.
 
 #### `TextField`
 **Purpose.** A single-line input with a blue caret and a zero-shift validation line.
@@ -708,6 +709,51 @@ An entity that installs the platform input handler must call `handle_edit_keystr
 `handle_keystroke`, or every printable character is inserted twice. Dialog-level bare-letter
 bindings must also be shadowed with `gpui::NoAction` in `TEXT_FIELD_KEY_CONTEXT`, or the outer
 action must be removed while the field owns the keyboard.
+
+#### `TextArea` / `TextAreaState`
+**Purpose.** The multi-line sibling of `TextField`: card descriptions and comments.
+**Anatomy.** optional label · a box with the same border ladder as `TextField` (danger beats
+focus beats rest) · line-wrapped value · the same 2 px accent caret bar. There is **no** 18 px
+status slot: a multi-line body has no derived preview, so `invalid` is a `bool` that reddens
+the border and the message belongs to the field that names the rule.
+**API.** `TextArea::new(value).cursor(byte_offset).focused(bool).placeholder(..).label(..)
+.rows(u32).max_rows(u32).scroll_row(usize).scroll(id, ScrollHandle).mono(bool).invalid(bool)`;
+`TEXT_AREA_ROWS` is the
+6-row default and `TAB_WIDTH` is 2.
+`TextAreaState::{new, from_text, text, shared_text, is_empty, set_text, clear, cursor,
+set_cursor, line_col, lines, line_count, scroll_row, set_scroll_row, reveal_cursor, insert,
+insert_newline, insert_tab, backspace, delete_forward, delete_word_before, delete_word_after,
+delete_to_line_start, delete_to_line_end, move_left, move_right, move_up, move_down,
+move_to_line_start, move_to_line_end, move_to_start, move_to_end, handle_edit_keystroke,
+handle_keystroke}`.
+**States.** default · focused (accent border + caret) · placeholder (muted, caret before it) ·
+invalid (red border) · mono · capped (`max_rows` clips and the caller calls `reveal_cursor`).
+**Keyboard (the caller implements).** printable · `Enter` newline · `Tab` = `TAB_WIDTH` (2)
+spaces · `Backspace` / `Delete` · `←` `→` `↑` `↓` · `Home` / `End` = line start / end ·
+`ctrl-a` / `ctrl-e` = line start / end · `ctrl-w` / `alt-d` word · `ctrl-u` / `ctrl-k` line.
+**Usage rule.** The cursor is a **byte** offset (`TextField`'s is a character index), because a
+multi-line model has to slice lines. `↑` / `↓` keep a preferred column and every other
+operation clears it. `\r\n`, `\r` and `\t` are normalized on the way in, so what the store
+receives is exactly what `MarkdownText` will render. A host that installs the platform input
+handler binds `handle_edit_keystroke`, never `handle_keystroke`, or every character is inserted
+twice.
+
+#### `MarkdownText` / `parse_markdown`
+**Purpose.** Read mode for a card description, a comment and any other stored markdown — the
+read half of the surface `TextArea` edits, which is why it sits in this group.
+**API.** `MarkdownText::new(source).muted(bool)`; `parse_markdown(&str) -> Vec<MdBlock>`;
+`MdBlock::{Heading{level,text}, Paragraph(Vec<MdSpan>), List{ordered,items}, Code(String)}`;
+`MdSpan::{Text, Code, Bold, Link}` with `.text()`; `MAX_HEADING_LEVEL` = 3 and
+`LIST_MARKER_CH` = 3 (the list gutter, in `ch`).
+Ordered item spans retain the authored numeric marker, which rendering extracts without renumbering.
+**Subset.** `#` `##` `###` headings (`Title` / `UiStrong` / `Label` of the type scale) ·
+paragraphs with blank-line breaks · `-` `*` `1.` lists · ``` fenced code (data face, sunken
+`bg`, hairline) · `` `inline code` `` (data face on a low-alpha fill) · `**bold**` · bare
+`http(s)://` URLs (accent). **Anything else is text.**
+**Usage rule.** No markdown crate — `docs/BOARD.md` §1 forbids one, and the parser is pure and
+unit-tested instead. It never guesses: an unclosed `**` renders as two asterisks, and `####`
+is a paragraph. Inline flow is one `gpui::StyledText` with byte-range highlights, so a
+paragraph wraps like text rather than like a flex row.
 
 #### `FuzzyList` / `FuzzyItem`
 **Purpose.** A capped list of already-ranked results.
@@ -991,96 +1037,23 @@ from `Theme::metrics.veil_opacity`.
 surface is veiled. Keys typed into a veiled grid are **dropped, not buffered**; the component
 renders the scrim and `drops_keys()` states the contract the caller must honour.
 
----
+### 6.6 Board
 
-## 7. What is deliberately not in the kit
-
-- **Buttons.** There are none in Fleet. Affordances are `KeyHint`s.
-- **Tooltips.** Every affordance already states its key.
-- **A generic `Card`.** `Pane`, `Dialog`, `Sheet` and `Overlay` are the four surfaces; a fifth
-  would erode the meaning of the other four.
-- **Progress bars.** A phase word (`copying files…`, `hooks 2/3`) is more honest than a
-  percentage, and `JobRow` shows a percent only when the job actually parses one.
-- **A disabled visual style.** "You cannot edit this here" is said by the *absence* of an input
-  box (a read-only `FactRow`), and an unavailable command is not listed at all.
-- **Decorative color.** Four semantic colors and three neutrals. Nothing else.
-
-## 8. Changing the system
-
-1. A new token goes in `theme/tokens.rs` **and** in §2 of this document, in the same commit.
-2. A new icon means downloading the SVG into `crates/fleet-ui-kit/assets/icons/`, rewriting its
-   `stroke-width` to 1.5, adding the variant to the `lucide_icons!` list in `src/icons.rs`, and
-   adding it to §5.1 here.
-3. A new component gets its own module under `src/components/`, a `pub use` in
-   `components/mod.rs`, an entry in §6 here, and a panel in the matching per-group gallery
-   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_terminal`, or `gallery_board`) showing
-   **every** state. `kit_gallery` remains the combined overview. If a state is not in a gallery,
-   it is not implemented.
-4. `cargo check -p fleet-ui-kit --examples` and
-   `cargo run -p fleet-ui-kit --example kit_gallery` are the acceptance gate.
-
----
-
-## 9. Board components
-
-The kanban surface of `docs/BOARD.md` §7, added to the inventory of §6. Everything here obeys
-the same two rules as the rest of the kit: no domain type crosses the boundary (a card arrives
-as `SharedString`s, scalars and closures), and no color, size, radius or duration is a literal.
-
-### 9.1 Text
-
-#### `TextArea` / `TextAreaState`
-**Purpose.** The multi-line sibling of `TextField`: card descriptions and comments.
-**Anatomy.** optional label · a box with the same border ladder as `TextField` (danger beats
-focus beats rest) · line-wrapped value · the same 2 px accent caret bar. There is **no** 18 px
-status slot: a multi-line body has no derived preview, so `invalid` is a `bool` that reddens
-the border and the message belongs to the field that names the rule.
-**API.** `TextArea::new(value).cursor(byte_offset).focused(bool).placeholder(..).label(..)
-.rows(u32).max_rows(u32).scroll_row(usize).mono(bool).invalid(bool)`; `TEXT_AREA_ROWS` is the
-6-row default.
-`TextAreaState::{new, from_text, text, shared_text, is_empty, set_text, clear, cursor,
-set_cursor, line_col, lines, line_count, scroll_row, set_scroll_row, reveal_cursor, insert,
-insert_newline, insert_tab, backspace, delete_forward, delete_word_before, delete_word_after,
-delete_to_line_start, delete_to_line_end, move_left, move_right, move_up, move_down,
-move_to_line_start, move_to_line_end, move_to_start, move_to_end, handle_edit_keystroke,
-handle_keystroke}`.
-**States.** default · focused (accent border + caret) · placeholder (muted, caret before it) ·
-invalid (red border) · mono · capped (`max_rows` clips and the caller calls `reveal_cursor`).
-**Keyboard (the caller implements).** printable · `Enter` newline · `Tab` = `TAB_WIDTH` (2)
-spaces · `Backspace` / `Delete` · `←` `→` `↑` `↓` · `Home` / `End` = line start / end ·
-`ctrl-a` / `ctrl-e` = line start / end · `ctrl-w` / `alt-d` word · `ctrl-u` / `ctrl-k` line.
-**Usage rule.** The cursor is a **byte** offset (`TextField`'s is a character index), because a
-multi-line model has to slice lines. `↑` / `↓` keep a preferred column and every other
-operation clears it. `\r\n`, `\r` and `\t` are normalized on the way in, so what the store
-receives is exactly what `MarkdownText` will render. A host that installs the platform input
-handler binds `handle_edit_keystroke`, never `handle_keystroke`, or every character is inserted
-twice.
-
-#### `MarkdownText` / `parse_markdown`
-**Purpose.** Read mode for a card description, a comment and any other stored markdown.
-**API.** `MarkdownText::new(source).muted(bool)`; `parse_markdown(&str) -> Vec<MdBlock>`;
-`MdBlock::{Heading{level,text}, Paragraph(Vec<MdSpan>), List{ordered,items}, Code(String)}`;
-`MdSpan::{Text, Code, Bold, Link}` with `.text()`; `MAX_HEADING_LEVEL` = 3.
-Ordered item spans retain the authored numeric marker, which rendering extracts without renumbering.
-**Subset.** `#` `##` `###` headings (`Title` / `UiStrong` / `Label` of the type scale) ·
-paragraphs with blank-line breaks · `-` `*` `1.` lists · ``` fenced code (data face, sunken
-`bg`, hairline) · `` `inline code` `` (data face on a low-alpha fill) · `**bold**` · bare
-`http(s)://` URLs (accent). **Anything else is text.**
-**Usage rule.** No markdown crate — `docs/BOARD.md` §1 forbids one, and the parser is pure and
-unit-tested instead. It never guesses: an unclosed `**` renders as two asterisks, and `####`
-is a paragraph. Inline flow is one `gpui::StyledText` with byte-range highlights, so a
-paragraph wraps like text rather than like a flex row.
-
-### 9.2 Board
+The kanban surface of `docs/BOARD.md` §7. It obeys the same two rules as the rest of the
+kit: no domain type crosses the boundary (a card arrives as `SharedString`s, scalars and
+closures), and no color, size, radius or duration is a literal.
 
 #### `PriorityGlyph` / `PriorityLevel`
 **Purpose.** The five priority marks, drawn as shapes.
-**API.** `PriorityGlyph::new(PriorityLevel).with_label(bool)`;
-`PriorityLevel::{Urgent, High, Medium, Low, None}` with `ALL`, `.label()`, `.lit_bars()`;
-`PRIORITY_BARS` = 3.
 **Anatomy.** `Urgent` is a filled 8 px `danger` square · `High` / `Medium` / `Low` light 3 / 2 /
 1 of a three-bar ladder (2 px wide, 4 → 6 → 8 px tall, secondary lit and muted unlit) · `None`
 is a dashed hollow 6 px dot.
+**API.** `PriorityGlyph::new(PriorityLevel).with_label(bool)`;
+`PriorityLevel::{Urgent, High, Medium, Low, None}` with `ALL`, `.label()`, `.lit_bars()`;
+`PRIORITY_BARS` = 3.
+**States.** The mark has none: it is a pure function of its level.
+**Variants.** mark only (a card tile) · mark + word (`with_label`, the card detail and the
+pickers).
 **Usage rule.** Only `Urgent` gets a color (§1.4: color is semantic, shape carries the
 information), so the ladder still reads in grayscale. `None` is dashed and hollow because
 "nobody decided" is not the same as `Low`.
@@ -1110,8 +1083,10 @@ is zero-suppressed, so a bare card costs exactly a key and a title.
 count `Badge`) · scrollable gapped body of tiles · `EmptyState` hint when the column is empty ·
 `Pane`'s 2 px focus ring.
 **API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).focused(bool)
-.width(Pixels).empty_hint(..).children(..).scroll_handle(ScrollHandle)`; `COLUMN_WIDTH_CH` = 34.
+.width(Pixels).empty_hint(..).tiles(..).scroll_handle(ScrollHandle)`; `COLUMN_WIDTH_CH` = 34.
 `KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
+**States.** default · focused (the 2 px pane ring) · empty (the `empty_hint` `EmptyState`).
+**Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
 count reads as "unknown", not as "empty". `accent` takes a resolved `Hsla` because the status
 category → token mapping is domain knowledge that lives in the app; the call site passes a
@@ -1121,3 +1096,31 @@ cursor the screen owns, exactly as they do for `ListView`.
 **Gallery.** The board group's bench is `examples/gallery_board.rs` (live cursor, live editor,
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the
 same components as a static overview in both themes.
+
+---
+
+## 7. What is deliberately not in the kit
+
+- **Buttons.** There are none in Fleet. Affordances are `KeyHint`s.
+- **Tooltips.** Every affordance already states its key.
+- **A generic `Card`.** `Pane`, `Dialog`, `Sheet` and `Overlay` are the four surfaces; a fifth
+  would erode the meaning of the other four.
+- **Progress bars.** A phase word (`copying files…`, `hooks 2/3`) is more honest than a
+  percentage, and `JobRow` shows a percent only when the job actually parses one.
+- **A disabled visual style.** "You cannot edit this here" is said by the *absence* of an input
+  box (a read-only `FactRow`), and an unavailable command is not listed at all.
+- **Decorative color.** Four semantic colors and three neutrals. Nothing else.
+
+## 8. Changing the system
+
+1. A new token goes in `theme/tokens.rs` **and** in §2 of this document, in the same commit.
+2. A new icon means downloading the SVG into `crates/fleet-ui-kit/assets/icons/`, rewriting its
+   `stroke-width` to 1.5, adding the variant to the `lucide_icons!` list in `src/icons.rs`, and
+   adding it to §5.1 here.
+3. A new component gets its own module under `src/components/`, a `pub use` in
+   `components/mod.rs`, an entry in §6 here, and a panel in the matching per-group gallery
+   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_terminal`, or `gallery_board`) showing
+   **every** state. `kit_gallery` remains the combined overview. If a state is not in a gallery,
+   it is not implemented.
+4. `cargo check -p fleet-ui-kit --examples` and
+   `cargo run -p fleet-ui-kit --example kit_gallery` are the acceptance gate.

@@ -1,6 +1,7 @@
 //! Pure domain types and helpers for Fleet, including identifiers, configuration and state schemas, validation, inspection models, session policy, and naming, with no I/O responsibilities.
 
 pub mod agents;
+pub mod board;
 pub mod cache;
 pub mod config;
 pub mod github;
@@ -14,8 +15,3 @@ pub mod slug;
 pub mod state;
 pub mod validate;
 pub mod watches;
-
-/// Backend-independent board domain.
-pub mod board;
-pub use board::*;
-pub use ids::{BoardId, CardId, LabelId, StatusId};

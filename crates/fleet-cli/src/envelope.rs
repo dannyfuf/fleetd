@@ -1,6 +1,7 @@
 //! Stable protocol-versioned JSON output envelopes.
 
 use fleet_core::{
+    board::{BackendDescriptor, BackendSchema, Board, BoardSummary, Card},
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
     sessions::{AgentActivity, WorktreeStatus},
@@ -107,6 +108,63 @@ pub struct SleepEnvelope<'a> {
     pub session_killed: bool,
 }
 
+/// A complete board and its cards in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardEnvelope<'a> {
+    pub protocol: u32,
+    pub board: &'a Board,
+    pub cards: &'a [Card],
+}
+
+/// Board summaries in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardListEnvelope<'a> {
+    pub protocol: u32,
+    pub boards: &'a [BoardSummary],
+}
+
+/// One created, inspected, or updated card in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardCardEnvelope<'a> {
+    pub protocol: u32,
+    pub card: &'a Card,
+}
+
+/// A worktree created from a card, with the card it links, in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardWorktreeEnvelope<'a> {
+    pub protocol: u32,
+    pub created: bool,
+    pub card: &'a Card,
+    pub worktree: &'a Worktree,
+}
+
+/// A submitted board synchronization job and its completed result, in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardSyncEnvelope<'a> {
+    pub protocol: u32,
+    pub job_id: &'a fleet_core::ids::JobId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<&'a fleet_proto::job::JobRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<&'a BoardSummary>,
+}
+
+/// The registered board backend kinds in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardBackendsEnvelope<'a> {
+    pub protocol: u32,
+    pub backends: &'a [BackendDescriptor],
+}
+
+/// What one board's backend reports about itself, in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardBackendSchemaEnvelope<'a> {
+    pub protocol: u32,
+    pub schema: &'a BackendSchema,
+}
+
 /// A protocol-compatible error result.
 #[derive(Debug, Serialize)]
 pub struct ErrorEnvelope<'a> {
@@ -208,80 +266,4 @@ mod tests {
         assert_eq!(single_line("a \u{9b}31m b"), "a 31m b");
         assert_eq!(single_line("a \u{7} b"), "a b");
     }
-}
-
-/// A complete board and its cards in a protocol-one envelope.
-#[derive(Debug, Serialize)]
-pub struct BoardEnvelope<'a> {
-    /// Stable CLI protocol version.
-    pub protocol: u32,
-    /// Board properties and schema.
-    pub board: &'a fleet_core::board::Board,
-    /// Cards belonging to the board.
-    pub cards: &'a [fleet_core::board::Card],
-}
-
-/// Board summaries in a protocol-one envelope.
-#[derive(Debug, Serialize)]
-pub struct BoardListEnvelope<'a> {
-    /// Stable CLI protocol version.
-    pub protocol: u32,
-    /// Available board summaries.
-    pub boards: &'a [fleet_core::board::BoardSummary],
-}
-
-/// Registered backend kinds in a protocol-one envelope.
-#[derive(Debug, Serialize)]
-pub struct BoardBackendsEnvelope<'a> {
-    /// Stable CLI protocol version.
-    pub protocol: u32,
-    /// Backend kinds, their capabilities, and their settings schema.
-    pub backends: &'a [fleet_core::board::BackendDescriptor],
-}
-
-/// What one board's backend reports about itself, in a protocol-one envelope.
-#[derive(Debug, Serialize)]
-pub struct BoardBackendSchemaEnvelope<'a> {
-    /// Stable CLI protocol version.
-    pub protocol: u32,
-    /// Remote statuses, labels, properties, people, and read-only fields.
-    pub schema: &'a fleet_core::board::BackendSchema,
-}
-
-/// One created, inspected, or updated card.
-#[derive(Debug, Serialize)]
-pub struct BoardCardEnvelope<'a> {
-    /// Stable CLI protocol version.
-    pub protocol: u32,
-    /// Resulting card.
-    pub card: &'a fleet_core::board::Card,
-}
-
-/// Worktree creation result with its linked card.
-#[derive(Debug, Serialize)]
-pub struct BoardWorktreeEnvelope<'a> {
-    /// Stable CLI protocol version.
-    pub protocol: u32,
-    /// Whether the returned worktree was newly linked to this card.
-    pub created: bool,
-    /// Updated card.
-    pub card: &'a fleet_core::board::Card,
-    /// Created or existing worktree, as in [`CreateEnvelope`].
-    pub worktree: &'a Worktree,
-}
-
-/// Submitted synchronization job and optional completed result.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BoardSyncEnvelope<'a> {
-    /// Stable CLI protocol version.
-    pub protocol: u32,
-    /// Submitted job identifier.
-    pub job_id: &'a fleet_core::ids::JobId,
-    /// Final job state and progress when --wait was requested.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub job: Option<&'a fleet_proto::job::JobRecord>,
-    /// Refreshed board summary when --wait was requested.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<&'a fleet_core::board::BoardSummary>,
 }

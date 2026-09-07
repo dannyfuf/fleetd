@@ -128,7 +128,7 @@ impl RenderOnce for PriorityGlyph {
                         .flex_none()
                         .size(theme.metrics.dot_size_small)
                         .rounded(theme.radii.full)
-                        .border_1()
+                        .border(theme.metrics.hairline)
                         .border_dashed()
                         .border_color(theme.colors.text_muted),
                 ),

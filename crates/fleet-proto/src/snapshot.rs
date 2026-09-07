@@ -108,20 +108,18 @@ mod tests {
             error: Some("ssh timed out".to_owned()),
         });
     }
-}
 
-#[cfg(test)]
-mod board_tests {
-    use super::*;
     #[test]
     fn snapshots_without_boards_default_to_empty() {
         let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
             "generatedAt":"now", "contexts":[], "repos":[], "clones":[], "worktrees":[], "activeContext":null,
             "sessions":[], "statuses":[], "jobs":[], "daemon":{"version":"test", "pid":1, "startedAt":"now", "home":"/tmp/fleet"}
-        })).unwrap();
+        }))
+        .expect("snapshot without a boards field");
         assert!(snapshot.boards.is_empty());
+        assert_round_trip(snapshot.clone());
         assert_eq!(
-            serde_json::to_value(snapshot).unwrap()["boards"],
+            serde_json::to_value(snapshot).unwrap_or_else(|error| panic!("{error}"))["boards"],
             serde_json::json!([])
         );
     }

@@ -36,7 +36,7 @@ pub struct KanbanColumn {
     focused: bool,
     width: Option<Pixels>,
     empty_hint: Option<SharedString>,
-    children: Vec<AnyElement>,
+    tiles: Vec<AnyElement>,
     scroll: Option<ScrollHandle>,
 }
 
@@ -51,7 +51,7 @@ impl KanbanColumn {
             focused: false,
             width: None,
             empty_hint: None,
-            children: Vec::new(),
+            tiles: Vec::new(),
             scroll: None,
         }
     }
@@ -91,9 +91,9 @@ impl KanbanColumn {
         self
     }
 
-    /// The tiles, normally [`super::CardTile`]s.
-    pub fn children(mut self, children: impl IntoIterator<Item = AnyElement>) -> Self {
-        self.children = children.into_iter().collect();
+    /// The tiles this column holds, normally [`super::CardTile`]s, in board order.
+    pub fn tiles(mut self, tiles: impl IntoIterator<Item = AnyElement>) -> Self {
+        self.tiles = tiles.into_iter().collect();
         self
     }
 
@@ -108,7 +108,7 @@ impl RenderOnce for KanbanColumn {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let width = self.width.unwrap_or_else(|| ch(COLUMN_WIDTH_CH));
-        let empty = self.children.is_empty();
+        let empty = self.tiles.is_empty();
         let body_id =
             ElementId::NamedChild(Arc::new(self.id.clone()), SharedString::new_static("body"));
 
@@ -150,7 +150,7 @@ impl RenderOnce for KanbanColumn {
                         .map(|hint| div().h_full().w_full().child(EmptyState::new(hint))),
                 )
             })
-            .children(self.children);
+            .children(self.tiles);
 
         let content = div()
             .flex()
@@ -180,7 +180,7 @@ impl RenderOnce for KanbanColumn {
             .overflow_hidden()
             .rounded(theme.radii.md)
             .bg(theme.colors.surface)
-            .border_1()
+            .border(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(FocusRing::pane(self.focused).content(content))
     }
