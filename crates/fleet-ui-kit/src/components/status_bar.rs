@@ -16,7 +16,7 @@
 //! The two flex halves are equal, which is what keeps the 84 px word optically centered on
 //! every screen including the Workspace and including zoom.
 
-use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use crate::{
     components::{Mode, ModeWord},
@@ -69,12 +69,6 @@ impl StatusBar {
         self
     }
 
-    /// A custom mode element.
-    pub fn mode_element(mut self, mode: impl IntoElement) -> Self {
-        self.mode = Some(mode.into_any_element());
-        self
-    }
-
     /// The job ticker. Hidden while an error is present.
     pub fn ticker(mut self, ticker: impl IntoElement) -> Self {
         self.ticker = Some(ticker.into_any_element());
@@ -113,7 +107,7 @@ impl RenderOnce for StatusBar {
             .px(theme.space.md)
             .gap(theme.space.md)
             .bg(theme.colors.bg)
-            .border_t(px(1.0))
+            .border_t(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(
                 div()

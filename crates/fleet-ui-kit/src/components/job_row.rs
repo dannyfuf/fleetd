@@ -9,7 +9,7 @@
 //! finished work must stop competing for the eye). Nothing here decays on a timer — [D-9]
 //! makes retention the caller's decision, and a failed job is never auto-dismissed.
 
-use gpui::{App, ElementId, SharedString, Window, prelude::*, px};
+use gpui::{App, ElementId, SharedString, Window, prelude::*};
 
 use crate::{
     components::{ColumnAlign, Row, RowColumn, StatusGlyph, StatusKind},
@@ -66,11 +66,6 @@ impl JobStatus {
             JobStatus::Done => Tone::Success,
             JobStatus::Failed => Tone::Danger,
         }
-    }
-
-    /// Whether the row is two lines tall (only running jobs carry a progress sub-line).
-    pub fn has_progress(self) -> bool {
-        matches!(self, JobStatus::Running | JobStatus::Cancelling)
     }
 
     /// Whether the glyph spins. Only `Running` does; `Cancelling` has *stopped* making
@@ -272,7 +267,10 @@ impl RenderOnce for JobRow {
             );
         }
         if let Some(key) = self.trailing_key {
-            row = row.column(RowColumn::fixed(px(20.0), Text::hint(key)).align(ColumnAlign::Right));
+            row = row.column(
+                RowColumn::fixed(theme.metrics.job_key_w, Text::hint(key))
+                    .align(ColumnAlign::Right),
+            );
         }
         if let Some(progress) = self.progress {
             row = row.second_line(
@@ -297,20 +295,6 @@ impl RenderOnce for JobRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_in_flight_jobs_carry_a_progress_line() {
-        assert!(JobStatus::Running.has_progress());
-        assert!(JobStatus::Cancelling.has_progress());
-        for status in [
-            JobStatus::Queued,
-            JobStatus::Cancelled,
-            JobStatus::Done,
-            JobStatus::Failed,
-        ] {
-            assert!(!status.has_progress(), "{status:?}");
-        }
-    }
 
     #[test]
     fn cancelling_stops_spinning_because_it_stopped_progressing() {

@@ -1,12 +1,9 @@
 //! Prepared-copy pool scheduling, refresh, and claiming.
 
-mod sha256;
-
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-    time::Duration,
+    sync::{Arc, Mutex},
 };
 
 use chrono::{DateTime, Utc};
@@ -16,21 +13,18 @@ use fleet_core::{
     model::{Repo, RepoHooks},
     paths::{HotMarker, hot_marker_path, slot_path, slot_pid_path, slot_staging_path},
 };
-use fleet_proto::{job::JobKind, snapshot::PoolStatus};
+use fleet_proto::job::JobKind;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::{
-        files::Files,
-        git::Git,
-        shell::{Shell, ShellCommand, ShellResult},
-    },
+    adapters::{files::Files, git::Git, shell::Shell},
     jobs::{JobCtx, JobManager},
     stores::{config::ConfigStore, state::StateStore},
 };
 
-static STATUS_CACHE: OnceLock<Mutex<HashMap<RepoId, PoolStatus>>> = OnceLock::new();
+use super::{branch_refspec, check_cancelled, discard_path, hooks, repo_worktrees_dir};
 
 /// Prepared-copy pool service serialized by per-repository job-manager locks.
 #[derive(Clone)]
@@ -40,12 +34,12 @@ pub struct Pool {
     jobs: Arc<JobManager>,
     git: Arc<dyn Git>,
     files: Arc<dyn Files>,
-    shell: Option<Arc<dyn Shell>>,
+    shell: Arc<dyn Shell>,
     in_flight: Arc<Mutex<HashMap<RepoId, fleet_core::ids::JobId>>>,
 }
 
 impl Pool {
-    /// Creates the prepared-copy pool service and starts startup/periodic maintenance.
+    /// Creates a pool; periodic maintenance belongs to `Services`.
     #[must_use]
     pub fn new(
         config: Arc<ConfigStore>,
@@ -53,18 +47,7 @@ impl Pool {
         jobs: Arc<JobManager>,
         git: Arc<dyn Git>,
         files: Arc<dyn Files>,
-    ) -> Self {
-        let service = Self::without_background(config, state, jobs, git, files);
-        service.start_background_maintenance();
-        service
-    }
-
-    pub(crate) fn without_background(
-        config: Arc<ConfigStore>,
-        state: Arc<StateStore>,
-        jobs: Arc<JobManager>,
-        git: Arc<dyn Git>,
-        files: Arc<dyn Files>,
+        shell: Arc<dyn Shell>,
     ) -> Self {
         Self {
             config,
@@ -72,16 +55,9 @@ impl Pool {
             jobs,
             git,
             files,
-            shell: None,
+            shell,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    /// Uses the daemon's shared command adapter for prepare hooks.
-    #[must_use]
-    pub fn with_shell(mut self, shell: Arc<dyn Shell>) -> Self {
-        self.shell = Some(shell);
-        self
     }
 
     /// Ensures configured slots exist. `force` refreshes every existing slot first.
@@ -119,12 +95,11 @@ impl Pool {
         let root = repo_worktrees_dir(&config, repo);
         let lock = self.jobs.repo_lock(repo);
         let _guard = lock.lock().await;
-        self.claim_into_locked(repo, destination, &config, &root)
+        self.claim_into_locked(destination, &config, &root)
     }
 
     pub(crate) fn claim_into_locked(
         &self,
-        repo: &RepoId,
         destination: &Path,
         config: &Config,
         root: &Path,
@@ -136,14 +111,13 @@ impl Pool {
             }
             match self.files.rename(&source, destination) {
                 Ok(()) => {
-                    self.update_status(repo, config, root);
                     return Ok(true);
                 }
                 Err(DaemonError::NotFound(_)) => continue,
                 Err(error) => return Err(error),
             }
         }
-        self.update_status(repo, config, root);
+
         Ok(false)
     }
 
@@ -162,32 +136,6 @@ impl Pool {
     ) -> DaemonResult<bool> {
         let fingerprint = prepare_fingerprint(&repo.hooks)?;
         self.slot_is_fresh(copy, repo, config, &fingerprint).await
-    }
-
-    /// Summarizes each repository's actual default-layout slots plus observed custom-layout slots.
-    #[must_use]
-    pub fn snapshot_statuses(repos: &[Repo], configured_size: u64) -> Vec<PoolStatus> {
-        let configured = u32::try_from(configured_size).unwrap_or(u32::MAX);
-        let cache = STATUS_CACHE
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        repos
-            .iter()
-            .map(|repo| {
-                if let Some(status) = cache.get(&repo.id) {
-                    let mut status = status.clone();
-                    status.size = configured;
-                    return status;
-                }
-                scan_default_layout(repo, configured_size).unwrap_or(PoolStatus {
-                    repo: repo.id.clone(),
-                    ready: 0,
-                    size: configured,
-                    refreshed_at: None,
-                })
-            })
-            .collect()
     }
 
     fn submit_prepare(&self, repo: RepoId, force: bool) -> fleet_core::ids::JobId {
@@ -272,7 +220,6 @@ impl Pool {
         self.cleanup_artifacts(&root, config.hot_pool_size)?;
 
         if config.hot_pool_size == 0 {
-            self.update_status(repo_id, &config, &root);
             return Ok(());
         }
 
@@ -310,7 +257,7 @@ impl Pool {
             }
         }
         self.cleanup_artifacts(&root, config.hot_pool_size)?;
-        self.update_status(repo_id, &config, &root);
+
         Ok(())
     }
 
@@ -328,17 +275,24 @@ impl Pool {
                 repo.default_branch, repo.id
             )));
         }
+        self.reset_to_default_branch(path, &repo.default_branch)
+            .await
+    }
+
+    /// Returns a checkout to a clean `origin/<default>`: switch branches when it drifted,
+    /// hard-reset when it is behind or dirty, and clean whatever the reset left behind.
+    async fn reset_to_default_branch(&self, path: &Path, default_branch: &str) -> DaemonResult<()> {
         let current = self.git.current_branch(path).await?;
         let head = self.git.revision(path, "HEAD").await?;
         let remote = self
             .git
-            .revision(path, &format!("origin/{}", repo.default_branch))
+            .revision(path, &format!("origin/{default_branch}"))
             .await?;
         let dirty = !self.git.status_porcelain(path).await?.is_empty();
-        if current != repo.default_branch {
-            self.git.checkout_reset(path, &repo.default_branch).await?;
+        if current != default_branch {
+            self.git.checkout_reset(path, default_branch).await?;
         } else if head != remote || dirty {
-            self.git.hard_reset(path, &repo.default_branch).await?;
+            self.git.hard_reset(path, default_branch).await?;
         }
         if dirty {
             self.git.clean(path).await?;
@@ -362,7 +316,7 @@ impl Pool {
             .is_some_and(|marker| marker.prepare_fingerprint != fingerprint)
         {
             context.progress(format!("rebuilding slot {slot} after prepare hook change"))?;
-            self.discard(&path)?;
+            discard_path(self.files.as_ref(), &path)?;
             return self
                 .build_slot(repo, root, slot, fingerprint, context)
                 .await;
@@ -371,10 +325,10 @@ impl Pool {
         context.progress(format!("refreshing prepared slot {slot}"))?;
         self.files.remove_file(&hot_marker_path(&path))?;
         self.refresh_copy(&path, repo, None).await?;
-        self.run_prepare_hooks(&path, &repo.hooks, context).await?;
+        hooks::run_prepare(self.shell.as_ref(), &path, &repo.hooks, context).await?;
         self.write_hot_marker(&path, repo, fingerprint).await?;
         if config.hot_pool_size <= slot as u64 {
-            self.discard(&path)?;
+            discard_path(self.files.as_ref(), &path)?;
         }
         Ok(())
     }
@@ -391,7 +345,7 @@ impl Pool {
         let pid_path = slot_pid_path(root, slot);
         let final_path = slot_path(root, slot);
         if self.files.exists(&staging) {
-            self.discard(&staging)?;
+            discard_path(self.files.as_ref(), &staging)?;
         }
         self.files
             .atomic_write_text(&pid_path, &format!("{}\n", std::process::id()))?;
@@ -406,8 +360,7 @@ impl Pool {
 
         let result = async {
             check_cancelled(context)?;
-            self.run_prepare_hooks(&staging, &repo.hooks, context)
-                .await?;
+            hooks::run_prepare(self.shell.as_ref(), &staging, &repo.hooks, context).await?;
             self.write_hot_marker(&staging, repo, fingerprint).await?;
             if self.files.exists(&final_path) {
                 return Err(DaemonError::Conflict(format!(
@@ -420,7 +373,7 @@ impl Pool {
         .await;
         let _ignored = self.files.remove_file(&pid_path);
         if result.is_err() && self.files.exists(&staging) {
-            let _ignored = self.discard(&staging);
+            let _ignored = discard_path(self.files.as_ref(), &staging);
         }
         copy.disarm();
         result
@@ -462,49 +415,8 @@ impl Pool {
                 repo.default_branch
             )));
         }
-        let current = self.git.current_branch(path).await?;
-        let head = self.git.revision(path, "HEAD").await?;
-        let target = format!("origin/{}", repo.default_branch);
-        let remote = self.git.revision(path, &target).await?;
-        let dirty = !self.git.status_porcelain(path).await?.is_empty();
-        if current != repo.default_branch {
-            self.git.checkout_reset(path, &repo.default_branch).await?;
-        } else if head != remote || dirty {
-            self.git.hard_reset(path, &repo.default_branch).await?;
-        }
-        if dirty {
-            self.git.clean(path).await?;
-        }
-        Ok(())
-    }
-
-    async fn run_prepare_hooks(
-        &self,
-        cwd: &Path,
-        hooks: &RepoHooks,
-        context: &JobCtx,
-    ) -> DaemonResult<()> {
-        for command in &hooks.prepare {
-            check_cancelled(context)?;
-            context.progress(format!("prepare: {command}"))?;
-            match run_shell_hook(self.shell.as_deref(), cwd, command, context).await {
-                Ok(output) if output.success() => {
-                    record_hook_output(context, &output)?;
-                }
-                Ok(output) => {
-                    record_hook_output(context, &output)?;
-                    context.progress(format!(
-                        "warning: prepare hook exited {}: {command}",
-                        output.status
-                    ))?;
-                }
-                Err(DaemonError::Cancelled) => return Err(DaemonError::Cancelled),
-                Err(error) => {
-                    context.progress(format!("warning: prepare hook failed: {error}"))?;
-                }
-            }
-        }
-        Ok(())
+        self.reset_to_default_branch(path, &repo.default_branch)
+            .await
     }
 
     async fn write_hot_marker(
@@ -625,170 +537,21 @@ impl Pool {
                 if kind == PoolEntryKind::Pid {
                     self.files.remove_file(&entry)?;
                 } else if self.files.exists(&entry) {
-                    self.discard(&entry)?;
+                    discard_path(self.files.as_ref(), &entry)?;
                 }
             }
         }
         Ok(())
-    }
-
-    fn discard(&self, path: &Path) -> DaemonResult<()> {
-        if !self.files.exists(path) {
-            return Ok(());
-        }
-        let parent = path.parent().ok_or_else(|| {
-            DaemonError::Validation(format!("path has no parent: {}", path.display()))
-        })?;
-        let discarded = parent.join(format!(".discard-{}", Uuid::new_v4()));
-        self.files.rename(path, &discarded)?;
-        self.files.remove_detached(&discarded)
-    }
-
-    fn update_status(&self, repo: &RepoId, config: &Config, root: &Path) {
-        let mut refreshed_at = None;
-        let mut ready = 0_u32;
-        for slot in 0..usize_from_u64(config.hot_pool_size) {
-            let path = slot_path(root, slot);
-            if !self.files.exists(&path) {
-                continue;
-            }
-            ready = ready.saturating_add(1);
-            if let Ok(marker) = self.read_hot_marker(&path)
-                && refreshed_at
-                    .as_ref()
-                    .is_none_or(|current: &String| marker.fetched_at > *current)
-            {
-                refreshed_at = Some(marker.fetched_at);
-            }
-        }
-        STATUS_CACHE
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                repo.clone(),
-                PoolStatus {
-                    repo: repo.clone(),
-                    ready,
-                    size: u32::try_from(config.hot_pool_size).unwrap_or(u32::MAX),
-                    refreshed_at,
-                },
-            );
-    }
-
-    fn start_background_maintenance(&self) {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        let startup = self.clone();
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            if let Ok(state) = startup.state.load().await {
-                for repo in state.repos {
-                    startup.submit_prepare(repo.id, false);
-                }
-            }
-        });
-
-        let periodic = self.clone();
-        tokio::spawn(async move {
-            loop {
-                let interval = periodic
-                    .config
-                    .load()
-                    .await
-                    .map(|config| config.hot_refresh_interval_ms)
-                    .unwrap_or(60_000);
-                let delay = if interval == 0 { 60_000 } else { interval };
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-                let Ok(config) = periodic.config.load().await else {
-                    continue;
-                };
-                if config.hot_pool_size == 0 || config.hot_refresh_interval_ms == 0 {
-                    continue;
-                }
-                if let Ok(state) = periodic.state.load().await {
-                    for repo in state.repos {
-                        if let Err(error) = periodic.prepare(repo.id, false).await {
-                            tracing::warn!(%error, "periodic prepared-copy refresh failed");
-                        }
-                    }
-                }
-            }
-        });
     }
 }
 
 fn prepare_fingerprint(hooks: &RepoHooks) -> DaemonResult<String> {
     let json = serde_json::to_string(&hooks.prepare)?;
-    Ok(sha256::digest_hex(json.as_bytes()))
-}
-
-fn repo_worktrees_dir(config: &Config, repo: &RepoId) -> PathBuf {
-    Path::new(&config.worktrees_dir)
-        .join(repo.owner())
-        .join(repo.name())
-}
-
-fn branch_refspec(branch: &str) -> String {
-    format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")
+    Ok(format!("{:x}", Sha256::digest(json.as_bytes())))
 }
 
 fn usize_from_u64(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
-}
-
-fn check_cancelled(context: &JobCtx) -> DaemonResult<()> {
-    if context.cancel.is_cancelled() {
-        Err(DaemonError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-async fn run_shell_hook(
-    shell: Option<&dyn Shell>,
-    cwd: &Path,
-    command: &str,
-    context: &JobCtx,
-) -> DaemonResult<ShellResult> {
-    if let Some(shell) = shell {
-        check_cancelled(context)?;
-        let output = shell
-            .run(ShellCommand::new("sh").args(["-c", command]).cwd(cwd))
-            .await?;
-        check_cancelled(context)?;
-        return Ok(output);
-    }
-    let mut process = tokio::process::Command::new("sh");
-    process
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let output = process.output();
-    tokio::select! {
-        () = context.cancel.cancelled() => Err(DaemonError::Cancelled),
-        output = output => output
-            .map(|output| ShellResult {
-                status: output.status.code().unwrap_or(-1),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            })
-            .map_err(|error| DaemonError::Shell(format!("sh -c `{command}`: {error}"))),
-    }
-}
-
-fn record_hook_output(context: &JobCtx, output: &ShellResult) -> DaemonResult<()> {
-    for line in output.stdout.lines() {
-        context.progress(line)?;
-    }
-    for line in output.stderr.lines() {
-        context.progress(line)?;
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -815,34 +578,6 @@ fn parse_pool_entry(name: &str) -> Option<(usize, PoolEntryKind)> {
             .ok()
             .map(|slot| (slot, kind))
     }
-}
-
-fn scan_default_layout(repo: &Repo, configured_size: u64) -> Option<PoolStatus> {
-    let repo_path = Path::new(&repo.path);
-    let home = repo_path.parent()?.parent()?.parent()?;
-    let root = home
-        .join("worktrees")
-        .join(repo.id.owner())
-        .join(repo.id.name());
-    let mut ready = 0_u32;
-    let mut refreshed = BTreeSet::new();
-    for slot in 0..usize_from_u64(configured_size) {
-        let path = slot_path(&root, slot);
-        if path.is_dir() {
-            ready = ready.saturating_add(1);
-            if let Ok(text) = std::fs::read_to_string(hot_marker_path(&path))
-                && let Ok(marker) = serde_json::from_str::<HotMarker>(&text)
-            {
-                refreshed.insert(marker.fetched_at);
-            }
-        }
-    }
-    Some(PoolStatus {
-        repo: repo.id.clone(),
-        ready,
-        size: u32::try_from(configured_size).unwrap_or(u32::MAX),
-        refreshed_at: refreshed.into_iter().next_back(),
-    })
 }
 
 pub(crate) struct CancellableCopy {
@@ -914,16 +649,7 @@ fn cleanup_copy_artifact(files: &Arc<dyn Files>, destination: &Path, pid_path: O
     if let Some(pid_path) = pid_path {
         let _ignored = files.remove_file(pid_path);
     }
-    if !files.exists(destination) {
-        return;
-    }
-    let Some(parent) = destination.parent() else {
-        return;
-    };
-    let discarded = parent.join(format!(".discard-{}", Uuid::new_v4()));
-    if files.rename(destination, &discarded).is_ok() {
-        let _ignored = files.remove_detached(&discarded);
-    }
+    let _ignored = discard_path(files.as_ref(), destination);
 }
 
 #[cfg(test)]

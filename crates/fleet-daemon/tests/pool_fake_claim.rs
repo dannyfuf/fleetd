@@ -42,8 +42,9 @@ async fn pool_claim_uses_the_lowest_ready_fake_slot() {
         config,
         state.clone(),
         jobs,
-        Arc::new(FakeGit::new(shell)),
+        Arc::new(FakeGit::new(Arc::clone(&shell))),
         files.clone(),
+        shell,
     );
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 

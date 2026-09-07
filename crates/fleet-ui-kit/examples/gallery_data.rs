@@ -18,12 +18,17 @@
 //! | `s` | cycle the live list between rows, cold load and empty |
 //! | `q` / `cmd-q` | quit |
 
-use fleet_ui_kit::KitAssets;
+pub mod support;
+const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
+    label_width: 190.0,
+    column: false,
+    divided: true,
+    compact: false,
+};
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Menu, MenuItem,
-    Pixels, SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds,
-    WindowOptions, actions, div, px, size,
+    AnyElement, App, Context, FocusHandle, Focusable, KeyBinding, Pixels, UniformListScrollHandle,
+    Window, actions, div, px,
 };
 
 actions!(
@@ -124,49 +129,7 @@ impl Focusable for DataGallery {
     }
 }
 
-// ---------------------------------------------------------------- layout helpers
-
-fn section(title: &str, t: &Theme, children: Vec<AnyElement>) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .gap(t.space.md)
-        .pb(t.space.xl)
-        .child(SectionHeader::new(title.to_string()))
-        .child(Divider::horizontal())
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .gap(t.space.md)
-                .pt(t.space.xs)
-                .children(children),
-        )
-        .into_any_element()
-}
-
-fn labeled(label: &str, t: &Theme, child: impl IntoElement) -> AnyElement {
-    div()
-        .flex()
-        .items_start()
-        .w_full()
-        .gap(t.space.md)
-        .child(Text::hint(label.to_string()).faint().w(px(190.0)))
-        .child(div().flex().flex_1().min_w_0().items_center().child(child))
-        .into_any_element()
-}
-
-fn strip(t: &Theme, children: Vec<AnyElement>) -> AnyElement {
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(t.space.md)
-        .children(children)
-        .into_any_element()
-}
+use support::layout::strip;
 
 fn framed(t: &Theme, width: Option<Pixels>, height: Pixels, child: impl IntoElement) -> AnyElement {
     div()
@@ -176,14 +139,12 @@ fn framed(t: &Theme, width: Option<Pixels>, height: Pixels, child: impl IntoElem
         .when(width.is_none(), |el| el.w_full())
         .rounded(t.radii.sm)
         .bg(t.colors.surface)
-        .border_1()
+        .border(t.metrics.hairline)
         .border_color(t.colors.border)
         .overflow_hidden()
         .child(child)
         .into_any_element()
 }
-
-// ---------------------------------------------------------------- sample data
 
 fn keep_alive() -> Vec<KeepAliveLabel> {
     vec![
@@ -216,8 +177,6 @@ const PR_STATES: [PrBadgeState; 7] = [
     PrBadgeState::Review,
     PrBadgeState::Merged,
 ];
-
-// ---------------------------------------------------------------- sections
 
 fn glyph_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
@@ -269,14 +228,14 @@ fn glyph_section(cx: &mut App) -> AnyElement {
         ],
     );
 
-    section(
+    LAYOUT.section(
         "status glyphs (§2.5 vocabulary)",
         &t,
         vec![
-            labeled("every kind", &t, strip(&t, glyphs)),
-            labeled("sizes 16 / 14 / 12", &t, sizes),
-            labeled("detail sentences", &t, sentences),
-            labeled(
+            LAYOUT.labeled("every kind", &t, strip(&t, glyphs)),
+            LAYOUT.labeled("sizes 16 / 14 / 12", &t, sizes),
+            LAYOUT.labeled("detail sentences", &t, sentences),
+            LAYOUT.labeled(
                 "blank cell vs. no session",
                 &t,
                 strip(
@@ -374,7 +333,9 @@ fn marks_section(cx: &mut App) -> AnyElement {
             StatusDot::new(Tone::Success).into_any_element(),
             StatusDot::new(Tone::Warning).into_any_element(),
             StatusDot::new(Tone::Danger).into_any_element(),
-            StatusDot::new(Tone::Muted).opacity(0.4).into_any_element(),
+            StatusDot::new(Tone::Muted)
+                .opacity(t.metrics.dimmed_opacity)
+                .into_any_element(),
             StatusDot::small(Tone::Warning).into_any_element(),
             StatusDot::small(Tone::Secondary).into_any_element(),
         ],
@@ -408,30 +369,30 @@ fn marks_section(cx: &mut App) -> AnyElement {
         })
         .collect();
 
-    section(
+    LAYOUT.section(
         "chips, badges and dots",
         &t,
         vec![
-            labeled("chips", &t, chips),
-            labeled("zero suppression", &t, suppressed),
-            labeled("badges", &t, badges),
-            labeled("status dots 8 / 6 px", &t, dots),
-            labeled("pr badges", &t, strip(&t, pr_badges)),
-            labeled("pr badge · stale, state only", &t, pr_variants),
-            labeled("keep-alive ladder", &t, strip(&t, keep_alive_ladder)),
-            labeled(
+            LAYOUT.labeled("chips", &t, chips),
+            LAYOUT.labeled("zero suppression", &t, suppressed),
+            LAYOUT.labeled("badges", &t, badges),
+            LAYOUT.labeled("status dots 8 / 6 px", &t, dots),
+            LAYOUT.labeled("pr badges", &t, strip(&t, pr_badges)),
+            LAYOUT.labeled("pr badge · stale, state only", &t, pr_variants),
+            LAYOUT.labeled("keep-alive ladder", &t, strip(&t, keep_alive_ladder)),
+            LAYOUT.labeled(
                 "keep-alive · kind icons",
                 &t,
                 KeepAliveChips::new(keep_alive())
                     .show_kind_icons(true)
                     .max_visible(3),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "degraded (outranks keep-alive)",
                 &t,
                 DegradedChip::hooks_failed().hint("J", "for log"),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "spinners",
                 &t,
                 strip(
@@ -496,13 +457,13 @@ fn time_section(cx: &mut App) -> AnyElement {
         ],
     );
 
-    section(
+    LAYOUT.section(
         "ages and freshness (§2.6)",
         &t,
         vec![
-            labeled("age labels", &t, ages),
-            labeled("freshness ladder", &t, stamps),
-            labeled("derived marks", &t, derived),
+            LAYOUT.labeled("age labels", &t, ages),
+            LAYOUT.labeled("freshness ladder", &t, stamps),
+            LAYOUT.labeled("derived marks", &t, derived),
         ],
     )
 }
@@ -576,20 +537,20 @@ fn facts_section(cx: &mut App) -> AnyElement {
         ),
     ]);
 
-    section(
+    LAYOUT.section(
         "facts, tables and hints",
         &t,
         vec![
-            labeled("fact rows", &t, kv),
-            labeled("fact rows \u{b7} re-inspecting", &t, kv_refreshing),
-            labeled("fact list \u{b7} compact", &t, compact.clone()),
-            labeled("", &t, key_line(&compact)),
-            labeled("fact list \u{b7} expanded", &t, expanded.clone()),
-            labeled("", &t, key_line(&expanded)),
-            labeled("fact list \u{b7} loading", &t, loading.clone()),
-            labeled("", &t, key_line(&loading)),
-            labeled("doctor table", &t, doctor),
-            labeled(
+            LAYOUT.labeled("fact rows", &t, kv),
+            LAYOUT.labeled("fact rows \u{b7} re-inspecting", &t, kv_refreshing),
+            LAYOUT.labeled("fact list \u{b7} compact", &t, compact.clone()),
+            LAYOUT.labeled("", &t, key_line(&compact)),
+            LAYOUT.labeled("fact list \u{b7} expanded", &t, expanded.clone()),
+            LAYOUT.labeled("", &t, key_line(&expanded)),
+            LAYOUT.labeled("fact list \u{b7} loading", &t, loading.clone()),
+            LAYOUT.labeled("", &t, key_line(&loading)),
+            LAYOUT.labeled("doctor table", &t, doctor),
+            LAYOUT.labeled(
                 "key hints",
                 &t,
                 KeyHintRow::new()
@@ -598,7 +559,7 @@ fn facts_section(cx: &mut App) -> AnyElement {
                     .hint(KeyHint::labeled("Y", "delete").key_tone(Tone::Default))
                     .key("esc", "cancel"),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "section header",
                 &t,
                 div().w_full().child(
@@ -606,7 +567,7 @@ fn facts_section(cx: &mut App) -> AnyElement {
                         .trailing(StatusGlyph::new(StatusKind::Attached).id("section-glyph")),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "dividers",
                 &t,
                 div()
@@ -650,7 +611,11 @@ fn worktree_row(t: &Theme, ix: usize, pane_ch: f32, cursor: bool) -> AnyElement 
         .selected(cursor)
         .cursor(cursor);
 
-    for column in ladder.resolve(pane_ch) {
+    for column in ladder
+        .resolve(pane_ch)
+        .into_iter()
+        .filter(|column| column.key != "glyph")
+    {
         let element: AnyElement = match column.key.as_ref() {
             "branch" => div()
                 .flex()
@@ -782,11 +747,11 @@ fn rows_section(cx: &mut App, pane_ch: f32) -> AnyElement {
         })
         .collect();
 
-    section(
+    LAYOUT.section(
         "rows and the column ladder (§2.9)",
         &t,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "row states",
                 &t,
                 div()
@@ -802,12 +767,12 @@ fn rows_section(cx: &mut App, pane_ch: f32) -> AnyElement {
                     )
                     .child(states),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "worktrees ladder",
                 &t,
                 div().flex().flex_col().children(ladder_keys),
             ),
-            labeled("pr ladder", &t, div().flex().flex_col().children(pr_ladder)),
+            LAYOUT.labeled("pr ladder", &t, div().flex().flex_col().children(pr_ladder)),
         ],
     )
 }
@@ -865,11 +830,11 @@ fn list_section(cx: &mut App, gallery: &DataGallery) -> AnyElement {
         ],
     );
 
-    section(
+    LAYOUT.section(
         "list view (virtualized, scrolloff 2)",
         &t,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "live list",
                 &t,
                 div()
@@ -890,12 +855,12 @@ fn list_section(cx: &mut App, gallery: &DataGallery) -> AnyElement {
                     )
                     .child(framed(&t, None, px(240.0), list)),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "skeleton rows",
                 &t,
                 framed(&t, None, px(120.0), SkeletonRows::new(4)),
             ),
-            labeled("empty states", &t, empties),
+            LAYOUT.labeled("empty states", &t, empties),
         ],
     )
 }
@@ -982,10 +947,11 @@ impl Render for DataGallery {
 }
 
 fn main() {
-    gpui_platform::application()
-        .with_assets(KitAssets)
-        .run(|cx: &mut App| {
-            Theme::init(ThemeMode::Dark, cx);
+    support::runtime::run(
+        "fleet-ui-kit · data display",
+        (1280.0, 860.0),
+        Quit,
+        |cx| {
             let mut bindings = vec![
                 KeyBinding::new("t", ToggleTheme, None),
                 KeyBinding::new("w", CycleWidth, None),
@@ -996,44 +962,7 @@ fn main() {
             // The real list bindings, straight from the kit: j / k / gg / G / ctrl-d / ctrl-u.
             bindings.extend(list_key_bindings(None));
             cx.bind_keys(bindings);
-            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.set_menus(vec![Menu {
-                name: "fleet-ui-kit".into(),
-                items: vec![MenuItem::action("Quit", Quit)],
-                disabled: false,
-            }]);
-            cx.on_window_closed(|cx: &mut App, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            let bounds = Bounds::centered(None, size(px(1280.0), px(860.0)), cx);
-            let title: SharedString = "fleet-ui-kit \u{b7} data display".into();
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        titlebar: Some(TitlebarOptions {
-                            title: Some(title),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    |_window, cx| {
-                        let view: Entity<DataGallery> = cx.new(DataGallery::new);
-                        view
-                    },
-                )
-                .expect("failed to open the data-display gallery window");
-
-            window
-                .update(cx, |view, window, cx| {
-                    window.focus(&view.focus_handle(cx), cx);
-                })
-                .ok();
-
-            cx.activate(true);
-        });
+        },
+        DataGallery::new,
+    );
 }

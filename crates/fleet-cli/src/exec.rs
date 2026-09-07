@@ -19,11 +19,15 @@ use std::{
     },
     path::Path,
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
     io::AsyncWriteExt,
-    signal::unix::{SignalKind, signal},
+    signal::unix::{Signal as SignalStream, SignalKind, signal},
     sync::mpsc,
 };
 
@@ -86,6 +90,7 @@ fn debug(error: impl std::fmt::Display) {
         eprintln!("fleet exec: watch unavailable: {reason}");
     }
 }
+
 fn passthrough(argv: &[OsString], watch: Option<String>) -> i32 {
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
@@ -125,9 +130,7 @@ async fn watched(args: &ExecArgs, terminal: TerminalId) -> anyhow::Result<i32> {
     let gate_path = gate_dir.path().join("gate");
     let gate = tokio::net::UnixListener::bind(&gate_path)?;
     let executable = std::env::current_exe()?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut hangup = signal(SignalKind::hangup())?;
+    let signals = Signals::install()?;
     let mut child = Command::new(executable)
         .arg("watch-child")
         .arg(&gate_path)
@@ -138,80 +141,28 @@ async fn watched(args: &ExecArgs, terminal: TerminalId) -> anyhow::Result<i32> {
         .stderr(Stdio::piped())
         .spawn()?;
     // No fallible early return after spawn: the user's command must never run twice.
-    let pid = Some(child.id());
-    let forward = tokio::spawn(async move {
-        loop {
-            let sig = tokio::select! {
-                _ = interrupt.recv() => Signal::SIGINT,
-                _ = terminate.recv() => Signal::SIGTERM,
-                _ = hangup.recv() => Signal::SIGHUP,
-            };
-            if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
-                let _ = kill(Pid::from_raw(pid), sig);
-            }
-        }
-    });
-    let label = args.label.clone().unwrap_or_else(|| {
-        Path::new(&args.command[0])
-            .file_name()
-            .unwrap_or(&args.command[0])
-            .to_string_lossy()
-            .into_owned()
-    });
-    let registration = tokio::time::timeout(
-        WATCH_TIMEOUT,
-        client.start_watch(
-            terminal,
-            label,
-            args.command
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect(),
-            std::env::current_dir().ok(),
-            pid,
-        ),
-    )
-    .await;
-    let watch = match registration {
-        Ok(Ok(id)) => Some(id),
-        Ok(Err(error)) => {
-            debug(error);
-            None
-        }
-        Err(error) => {
-            debug(error);
-            None
-        }
-    };
-    if let Ok(Ok((mut socket, _))) = tokio::time::timeout(WATCH_TIMEOUT, gate.accept()).await {
-        if let Some(id) = watch {
-            let _ = socket.write_all(id.to_string().as_bytes()).await;
-        }
-        let _ = socket.shutdown().await;
-    }
-    drop(gate);
-    let (tx, rx) = mpsc::channel(128);
-    let mut readers = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        let tx = tx.clone();
-        readers.push(std::thread::spawn(move || {
-            tee(stdout, WatchStream::Stdout, tx)
-        }));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        let tx = tx.clone();
-        readers.push(std::thread::spawn(move || {
-            tee(stderr, WatchStream::Stderr, tx)
-        }));
-    }
-    drop(tx);
-    let reporter = tokio::spawn(report(client.clone(), watch, rx));
+    let pid = child.id();
+    let forward = signals.forward_to(pid);
+    let watch = register_watch(&client, terminal, args, pid).await;
+    release_child(gate, watch).await;
+
+    let (chunks_tx, chunks) = mpsc::channel(128);
+    let omitted = Arc::new(OmittedOutput::default());
+    let readers = tee_child_output(&mut child, &chunks_tx, &omitted);
+    drop(chunks_tx);
+    let reporter = tokio::spawn(report(client.clone(), watch, chunks, omitted.clone()));
+
     let status = tokio::task::spawn_blocking(move || child.wait()).await;
     forward.abort(); // Do not forward to a reaped (and possibly reused) PID while draining.
     for reader in readers {
         let _ = tokio::task::spawn_blocking(move || reader.join()).await;
     }
-    let _ = reporter.await;
+    if let Some(message) = omitted.message() {
+        eprintln!("fleet exec: {message}");
+    }
+    if let Err(error) = reporter.await {
+        debug(format!("watch reporter failed: {error}"));
+    }
     match status {
         Ok(Ok(status)) => {
             if let Some(id) = watch {
@@ -232,46 +183,209 @@ async fn watched(args: &ExecArgs, terminal: TerminalId) -> anyhow::Result<i32> {
     }
 }
 
-fn tee(mut pipe: impl Read, stream: WatchStream, tx: mpsc::Sender<(WatchStream, Vec<u8>)>) {
+/// Terminal signals this wrapper relays to the launched child.
+struct Signals {
+    interrupt: SignalStream,
+    terminate: SignalStream,
+    hangup: SignalStream,
+}
+
+impl Signals {
+    fn install() -> std::io::Result<Self> {
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+            hangup: signal(SignalKind::hangup())?,
+        })
+    }
+
+    /// Relays signals until the returned task is aborted; abort it before the PID is reaped.
+    fn forward_to(mut self, pid: u32) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let Ok(pid) = i32::try_from(pid) else {
+                return;
+            };
+            loop {
+                let received = tokio::select! {
+                    _ = self.interrupt.recv() => Signal::SIGINT,
+                    _ = self.terminate.recv() => Signal::SIGTERM,
+                    _ = self.hangup.recv() => Signal::SIGHUP,
+                };
+                let _ = kill(Pid::from_raw(pid), received);
+            }
+        })
+    }
+}
+
+/// Registers the watch, reporting an unavailable daemon rather than failing the command.
+async fn register_watch(
+    client: &Client,
+    terminal: TerminalId,
+    args: &ExecArgs,
+    pid: u32,
+) -> Option<WatchId> {
+    let label = args.label.clone().unwrap_or_else(|| {
+        Path::new(&args.command[0])
+            .file_name()
+            .unwrap_or(&args.command[0])
+            .to_string_lossy()
+            .into_owned()
+    });
+    let command = args
+        .command
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    let registration = tokio::time::timeout(
+        WATCH_TIMEOUT,
+        client.start_watch(
+            terminal,
+            label,
+            command,
+            std::env::current_dir().ok(),
+            Some(pid),
+        ),
+    )
+    .await;
+    match registration {
+        Ok(Ok(id)) => Some(id),
+        Ok(Err(error)) => {
+            debug(error);
+            None
+        }
+        Err(error) => {
+            debug(error);
+            None
+        }
+    }
+}
+
+/// Hands the launcher its watch ID, then closes the gate so the child execs the real command.
+async fn release_child(gate: tokio::net::UnixListener, watch: Option<WatchId>) {
+    if let Ok(Ok((mut socket, _))) = tokio::time::timeout(WATCH_TIMEOUT, gate.accept()).await {
+        if let Some(id) = watch {
+            let _ = socket.write_all(id.to_string().as_bytes()).await;
+        }
+        let _ = socket.shutdown().await;
+    }
+}
+
+/// Starts one blocking copier per captured stream; each forwards output before monitoring.
+fn tee_child_output(
+    child: &mut std::process::Child,
+    chunks: &mpsc::Sender<(WatchStream, Vec<u8>)>,
+    omitted: &Arc<OmittedOutput>,
+) -> Vec<std::thread::JoinHandle<()>> {
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let (chunks, omitted) = (chunks.clone(), omitted.clone());
+        readers.push(std::thread::spawn(move || {
+            tee(
+                stdout,
+                std::io::stdout(),
+                WatchStream::Stdout,
+                chunks,
+                &omitted,
+            );
+        }));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let (chunks, omitted) = (chunks.clone(), omitted.clone());
+        readers.push(std::thread::spawn(move || {
+            tee(
+                stderr,
+                std::io::stderr(),
+                WatchStream::Stderr,
+                chunks,
+                &omitted,
+            );
+        }));
+    }
+    readers
+}
+
+#[derive(Default)]
+struct OmittedOutput {
+    stdout: AtomicU64,
+    stderr: AtomicU64,
+}
+
+impl OmittedOutput {
+    fn record(&self, stream: WatchStream, bytes: u64) {
+        let counter = match stream {
+            WatchStream::Stdout => &self.stdout,
+            WatchStream::Stderr => &self.stderr,
+        };
+        counter.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn message(&self) -> Option<String> {
+        let stdout = self.stdout.load(Ordering::Relaxed);
+        let stderr = self.stderr.load(Ordering::Relaxed);
+        (stdout > 0 || stderr > 0).then(|| format!(
+            "watch copy omitted {stdout} stdout bytes and {stderr} stderr bytes because monitoring could not keep up; original output was forwarded"
+        ))
+    }
+}
+
+fn tee(
+    mut pipe: impl Read,
+    mut output: impl Write,
+    stream: WatchStream,
+    tx: mpsc::Sender<(WatchStream, Vec<u8>)>,
+    omitted: &OmittedOutput,
+) {
     let mut buffer = [0_u8; 8192];
-    let mut copying = true;
+    let mut omitted_bytes = 0;
+    let mut monitoring_closed = false;
     loop {
         let n = match pipe.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => n,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(error) => {
+                debug(format!("child output read failed: {error}"));
+                break;
+            }
         };
         let bytes = &buffer[..n];
-        let forwarded = match stream {
-            WatchStream::Stdout => {
-                let mut out = std::io::stdout().lock();
-                out.write_all(bytes).and_then(|()| out.flush())
-            }
-            WatchStream::Stderr => {
-                let mut out = std::io::stderr().lock();
-                out.write_all(bytes).and_then(|()| out.flush())
-            }
-        };
-        if forwarded.is_err() {
+        if output
+            .write_all(bytes)
+            .and_then(|()| output.flush())
+            .is_err()
+        {
             // Closing our read end propagates a broken consumer pipe to the child.
             break;
         }
-        // Flush original bytes before enqueueing. Bounded backpressure preserves burst output;
-        // the reporter closes this queue on RPC timeout so daemon failure cannot strand readers.
-        if copying && tx.blocking_send((stream, bytes.to_vec())).is_err() {
-            copying = false;
+        if monitoring_closed {
+            continue;
+        }
+        match tx.try_reserve() {
+            Ok(permit) => {
+                permit.send((stream, bytes.to_vec()));
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Never stall the child's output on watch RPCs: skip this chunk, count the
+                // gap, and resume copying as soon as the monitoring task drains the channel.
+                omitted_bytes += n as u64;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // An unavailable watch has already been reported by the monitoring task.
+                monitoring_closed = true;
+            }
         }
     }
+    omitted.record(stream, omitted_bytes);
 }
 
 async fn report(
     client: Client,
     watch: Option<WatchId>,
     mut rx: mpsc::Receiver<(WatchStream, Vec<u8>)>,
-) -> bool {
+    omitted: Arc<OmittedOutput>,
+) {
     let Some(watch) = watch else {
-        return false;
+        return;
     };
     let mut interval = tokio::time::interval(BATCH);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -290,6 +404,12 @@ async fn report(
             }
             _ = interval.tick() => false,
         };
+        if done && let Some(message) = omitted.message() {
+            chunks.push((
+                WatchStream::Stderr,
+                format!("\n[fleet exec: {message}]\n").into_bytes(),
+            ));
+        }
         for (stream, data) in chunks.drain(..) {
             if !matches!(
                 tokio::time::timeout(
@@ -303,12 +423,13 @@ async fn report(
                 .await,
                 Ok(Ok(()))
             ) {
-                return false;
+                debug("watch output reporting failed or timed out");
+                return;
             }
         }
         bytes = 0;
         if done {
-            return true;
+            return;
         }
     }
 }
@@ -316,6 +437,63 @@ async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn saturated_monitoring_keeps_passthrough_exact_and_records_omissions() {
+        let input = (0..32_768)
+            .map(|index| (index % 256) as u8)
+            .collect::<Vec<_>>();
+        let expected = input.clone();
+        let (tx, mut rx) = mpsc::channel(1);
+        let omitted = Arc::new(OmittedOutput::default());
+        let copy_omitted = omitted.clone();
+        let reader = tokio::task::spawn_blocking(move || {
+            let mut output = Vec::new();
+            tee(
+                input.as_slice(),
+                &mut output,
+                WatchStream::Stdout,
+                tx,
+                &copy_omitted,
+            );
+            output
+        });
+        let result = tokio::time::timeout(Duration::from_secs(1), reader).await;
+        // Release a blocked sender even if the timeout assertion fails.
+        rx.close();
+        let output = result.expect("monitoring stalled passthrough").unwrap();
+        assert_eq!(output, expected);
+        let (stream, prefix) = rx.recv().await.unwrap();
+        assert_eq!(stream, WatchStream::Stdout);
+        assert_eq!(prefix, expected[..8192]);
+        assert!(rx.recv().await.is_none());
+        assert_eq!(omitted.stdout.load(Ordering::Relaxed), 24_576);
+        assert_eq!(omitted.stderr.load(Ordering::Relaxed), 0);
+        assert!(
+            omitted
+                .message()
+                .unwrap()
+                .contains("24576 stdout bytes and 0 stderr bytes")
+        );
+    }
+
+    #[test]
+    fn closed_monitoring_keeps_stderr_passthrough_exact() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let omitted = OmittedOutput::default();
+        let input = vec![0xff; 20_000];
+        let mut output = Vec::new();
+        tee(
+            input.as_slice(),
+            &mut output,
+            WatchStream::Stderr,
+            tx,
+            &omitted,
+        );
+        assert_eq!(output, input);
+        assert!(omitted.message().is_none());
+    }
 
     fn eligibility(watch: bool, env: &[(&str, &str)]) -> Result<TerminalId, &'static str> {
         watch_terminal(watch, |key| {

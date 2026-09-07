@@ -96,9 +96,13 @@ pub(crate) fn build(diff: &Diff, selections: &[HunkSelection], reverse: bool) ->
         ));
     }
     let file = DiffFile {
+        old_path: source.old_path.clone(),
+        new_path: source.new_path.clone(),
+        kind: source.kind,
+        binary: source.binary,
+        mode: source.mode.clone(),
         headers: header_lines(source),
         hunks,
-        ..source.clone()
     };
     Ok(crate::parse::diff::render(&Diff { files: vec![file] }))
 }
@@ -133,15 +137,15 @@ fn path_header(marker: &[u8], prefix: &[u8], path: Option<&Path>) -> Vec<u8> {
     line
 }
 
-fn path_bytes(path: &Path) -> Vec<u8> {
+fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().to_vec()
+        path.as_os_str().as_bytes().into()
     }
     #[cfg(not(unix))]
     {
-        path.to_string_lossy().into_owned().into_bytes()
+        path.to_string_lossy().into_owned().into_bytes().into()
     }
 }
 

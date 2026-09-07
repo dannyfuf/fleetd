@@ -51,10 +51,13 @@ impl Tone {
     /// A low-alpha fill of the same hue, for chip and badge backgrounds.
     pub fn fill(self, theme: &Theme) -> Hsla {
         match self {
-            Tone::Default | Tone::Secondary | Tone::Muted | Tone::Inverse => {
-                theme.colors.text.opacity(0.08)
-            }
-            other => other.color(theme).opacity(0.14),
+            Tone::Default | Tone::Secondary | Tone::Muted | Tone::Inverse => theme
+                .colors
+                .text
+                .opacity(theme.metrics.neutral_fill_opacity),
+            other => other
+                .color(theme)
+                .opacity(theme.metrics.semantic_fill_opacity),
         }
     }
 }

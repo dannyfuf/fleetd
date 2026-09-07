@@ -1,4 +1,4 @@
-//! Typed GitHub CLI operations matching swarm inventory section 7.
+//! Typed GitHub CLI operations for repository and pull-request metadata.
 
 use std::sync::Arc;
 
@@ -22,8 +22,6 @@ const PR_FIELDS: &str = "number,title,url,author,headRefName,baseRefName,isDraft
 /// Typed GitHub metadata operations used by discovery and pull-request services.
 #[async_trait]
 pub trait Github: Send + Sync {
-    /// Returns the authenticated viewer login.
-    async fn viewer_login(&self) -> DaemonResult<String>;
     /// Lists up to 1,000 repositories for an owner.
     async fn list_repositories(&self, owner: &str) -> DaemonResult<Vec<RemoteRepo>>;
     /// Returns the open pull request for a same-repository branch, when present.
@@ -60,32 +58,27 @@ pub trait Github: Send + Sync {
 }
 
 /// GitHub CLI adapter implemented through an injected [`Shell`].
-#[derive(Clone)]
-pub struct GhCli {
-    shell: Arc<dyn Shell>,
-    cwd: Option<std::path::PathBuf>,
+pub struct GhCli<S: ?Sized = dyn Shell> {
+    shell: Arc<S>,
 }
 
-impl GhCli {
+impl<S: ?Sized> Clone for GhCli<S> {
+    fn clone(&self) -> Self {
+        Self {
+            shell: Arc::clone(&self.shell),
+        }
+    }
+}
+
+impl<S: Shell + ?Sized> GhCli<S> {
     /// Creates a GitHub CLI adapter.
     #[must_use]
-    pub fn new(shell: Arc<dyn Shell>) -> Self {
-        Self { shell, cwd: None }
-    }
-
-    /// Sets an optional working directory for every `gh` invocation.
-    #[must_use]
-    pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
-        self.cwd = Some(cwd.into());
-        self
+    pub fn new(shell: Arc<S>) -> Self {
+        Self { shell }
     }
 
     async fn run(&self, args: impl IntoIterator<Item = impl Into<String>>) -> DaemonResult<String> {
-        let mut command = ShellCommand::new("gh").args(args);
-        if let Some(cwd) = &self.cwd {
-            command = command.cwd(cwd);
-        }
-        let result = self.shell.run(command).await?;
+        let result = self.shell.run(ShellCommand::new("gh").args(args)).await?;
         if !result.success() {
             return Err(DaemonError::Github(format!(
                 "gh exited {}: {}",
@@ -98,13 +91,7 @@ impl GhCli {
 }
 
 #[async_trait]
-impl Github for GhCli {
-    async fn viewer_login(&self) -> DaemonResult<String> {
-        self.run(["api", "user", "--jq", ".login"])
-            .await
-            .map(|output| output.trim().to_owned())
-    }
-
+impl<S: Shell + ?Sized> Github for GhCli<S> {
     async fn list_repositories(&self, owner: &str) -> DaemonResult<Vec<RemoteRepo>> {
         let output = self
             .run([
@@ -443,6 +430,28 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn fake_github_uses_the_production_single_pull_request_command() {
+        let shell = Arc::new(FakeShell::new());
+        shell.when(
+            |command| command.program == "gh" && command.args.starts_with(&["pr".into(), "view".into(), "42".into()]),
+            ShellResult {
+                status: 0,
+                stdout: r#"{"number":42,"title":"Fix","url":"https://example.invalid/pull/42","author":null,"headRefName":"fix","baseRefName":"main","isDraft":false,"isCrossRepository":false,"headRepository":null,"headRepositoryOwner":null,"reviewDecision":null,"additions":2,"deletions":1,"updatedAt":"2026-09-06T00:00:00Z"}"#.to_owned(),
+                stderr: String::new(),
+            },
+        );
+        let github = crate::testing::fakes::FakeGithub::new(shell.clone());
+        let pull = github
+            .pull_request(&RepoId::try_from("acme/api").expect("repo"), 42)
+            .await
+            .expect("request")
+            .expect("pull request");
+        assert_eq!(pull.number, 42);
+        assert_eq!(pull.title, "Fix");
+        assert_eq!(shell.calls().len(), 1);
+    }
 
     #[tokio::test]
     async fn repository_discovery_uses_exact_gh_shape_and_normalizes_defaults() {

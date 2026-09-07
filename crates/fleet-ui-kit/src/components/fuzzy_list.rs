@@ -22,7 +22,6 @@ use crate::{
     icons::{Icon, IconSize},
     text::{Text, TextRole},
     theme::{ActiveTheme, Theme, ch},
-    tone::Tone,
 };
 
 /// The `ch` budget of the right-aligned key column, wide enough for `S-⏎`.
@@ -116,45 +115,52 @@ impl FuzzyItem {
     }
 }
 
-/// Split `text` into `(segment, is_match)` runs, merging adjacent runs of the same kind.
-fn match_runs(text: &str, matches: &[usize]) -> Vec<(String, bool)> {
-    let mut runs: Vec<(String, bool)> = Vec::new();
-    for (index, ch) in text.chars().enumerate() {
-        let hit = matches.binary_search(&index).is_ok();
-        match runs.last_mut() {
-            Some((run, run_hit)) if *run_hit == hit => run.push(ch),
-            _ => runs.push((ch.to_string(), hit)),
+/// Coalesce matched character indices into UTF-8 ranges without copying the label.
+fn match_ranges(text: &str, matches: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut hits = matches.iter().copied().peekable();
+    for (index, (byte, ch)) in text.char_indices().enumerate() {
+        while hits.peek().is_some_and(|hit| *hit < index) {
+            hits.next();
+        }
+        if hits.peek() != Some(&index) {
+            continue;
+        }
+        hits.next();
+        if let Some(range) = ranges.last_mut()
+            && range.end == byte
+        {
+            range.end += ch.len_utf8();
+        } else {
+            ranges.push(byte..byte + ch.len_utf8());
         }
     }
-    runs
+    ranges
 }
 
-/// Render `text` with its matched characters raised to full contrast and medium weight.
-fn highlighted(
-    role: TextRole,
-    text: &SharedString,
-    matches: &[usize],
-    theme: &Theme,
-) -> AnyElement {
+fn highlighted(role: TextRole, text: SharedString, matches: &[usize], theme: &Theme) -> AnyElement {
     if matches.is_empty() {
-        return Text::new(role, text.clone()).ellipsize().into_any_element();
+        return Text::new(role, text).ellipsize().into_any_element();
     }
-    div()
-        .flex()
-        .flex_row()
+    let ranges = match_ranges(&text, matches);
+    crate::styled_with(div(), role.style(theme), theme)
         .min_w_0()
         .overflow_hidden()
-        .children(
-            match_runs(text.as_ref(), matches)
-                .into_iter()
-                .map(move |(segment, hit)| {
-                    let run = Text::new(role, segment);
-                    if hit {
-                        run.tone(Tone::Default).weight(theme.text.ui_strong.weight)
-                    } else {
-                        run.tone(Tone::Secondary).weight(FontWeight::NORMAL)
-                    }
-                }),
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_color(theme.colors.text_secondary)
+        .font_weight(FontWeight::NORMAL)
+        .child(
+            gpui::StyledText::new(text).with_highlights(ranges.into_iter().map(|range| {
+                (
+                    range,
+                    gpui::HighlightStyle {
+                        color: Some(theme.colors.text),
+                        font_weight: Some(theme.text.ui_strong.weight),
+                        ..Default::default()
+                    },
+                )
+            })),
         )
         .into_any_element()
 }
@@ -229,24 +235,18 @@ impl FuzzyList {
     /// A fuzzy list wraps where a pane list clamps: the set is short, capped and re-ranked on
     /// every keystroke, so there is no scroll position for the user to lose.
     pub fn next_cursor(cursor: usize, len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        if cursor + 1 >= len { 0 } else { cursor + 1 }
+        super::navigation::next(cursor, len)
     }
 
     /// `ctrl-p` / `↑` (and `k` when [`FuzzyList::binds_jk`]): the previous row, wrapping.
     pub fn prev_cursor(cursor: usize, len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        if cursor == 0 { len - 1 } else { cursor - 1 }
+        super::navigation::previous(cursor, len)
     }
 }
 
 impl RenderOnce for FuzzyList {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
         if self.items.is_empty() {
             return div()
                 .flex()
@@ -275,6 +275,9 @@ impl RenderOnce for FuzzyList {
                         let selected = ix == cursor && !item.disabled;
                         let has_secondary = item.secondary.is_some();
                         let mut row = Row::new()
+                            // Only some items carry a glyph; the column is reserved so the
+                            // primary text of every row starts at the same x.
+                            .reserve_leading(true)
                             .selected(selected)
                             .cursor(selected)
                             .disabled(item.disabled)
@@ -297,9 +300,9 @@ impl RenderOnce for FuzzyList {
 
                         row = row.column(RowColumn::flex(highlighted(
                             TextRole::Ui,
-                            &item.primary,
+                            item.primary,
                             &item.matches,
-                            &theme,
+                            theme,
                         )));
 
                         if let Some(detail) = item.detail {
@@ -332,34 +335,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runs_merge_adjacent_characters_of_the_same_kind() {
-        let runs = match_runs("payroll", &[0, 1, 2]);
-        assert_eq!(
-            runs,
-            vec![("pay".to_string(), true), ("roll".to_string(), false)]
-        );
-    }
-
-    #[test]
-    fn runs_ignore_out_of_range_matches() {
-        let runs = match_runs("ab", &[0, 9]);
-        assert_eq!(
-            runs,
-            vec![("a".to_string(), true), ("b".to_string(), false)]
-        );
-    }
-
-    #[test]
-    fn runs_handle_multibyte_characters_by_char_index() {
-        let runs = match_runs("héllo", &[1]);
-        assert_eq!(
-            runs,
-            vec![
-                ("h".to_string(), false),
-                ("é".to_string(), true),
-                ("llo".to_string(), false),
-            ]
-        );
+    fn ranges_merge_adjacent_matches_and_keep_utf8_boundaries() {
+        assert_eq!(match_ranges("payroll", &[0, 1, 2]), vec![0..3]);
+        assert_eq!(match_ranges("ab", &[0, 9]), vec![0..1]);
+        assert_eq!(match_ranges("héllo", &[1]), vec![1..3]);
     }
 
     #[test]

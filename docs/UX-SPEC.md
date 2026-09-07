@@ -1,11 +1,10 @@
 # Fleet — UX specification
 
 **Status: authoritative.** This is the single document UI implementers follow for `fleet-app`
-and `fleet-ui-kit`. It is the synthesis of the three lens proposals in `docs/ux/`
-(`proposal-glanceability.md` as the base system, with the safety spine of
-`proposal-background-safety.md` and the navigation/mode/toast layer of `proposal-flow-speed.md`
-merged in). Where the proposals disagreed, this document decides; the decisions are marked
-**[D-n]** and collected in §8.
+and `fleet-ui-kit`. It is the synthesis of three lens proposals — glanceability as the base
+system, with a background-safety spine and a flow-speed navigation/mode/toast layer merged in
+(`docs/decisions/0006-ux-lens-synthesis.md`). Where those proposals disagreed, this document
+decides; the decisions are marked **[D-n]** and collected in §8.
 
 It obeys `docs/ARCHITECTURE.md` and `docs/KEYMAP.md`, and preserves every behavior in
 `docs/SWARM-INVENTORY.md` (cited as §1 domain model, §3 operations, §4 sessions/sleep, §5 TUI,
@@ -150,7 +149,7 @@ persists until `!` or `Esc`, replaces the ticker when present).
 | Update | `arrow-up-circle` | `fg.faint` | `↑<version>` when an update is available | §5 `U` |
 
 **[D-1]** The `unknown/offline` chip is mandatory: collapsing attached + detached into one chip
-(as `proposal-glanceability` §3.1 did) drops exactly the count that a stale daemon needs to show.
+drops exactly the count that a stale daemon needs to show.
 **[D-2]** "Update available" is a chip and a Settings › About row — **never** a sticky toast. An
 update is never urgent and `U` is already bound.
 
@@ -207,7 +206,7 @@ Every fact that comes from a **job** (`inspect`, `prune --dry-run`, PR fetch) ra
 | errored | mark is not drawn at all; the detail panel shows `error: <message>` and `I retry` |
 | whole pane frozen (daemon lost) | pane header gains `stale · <age>`; every session glyph forced to `circle-help` |
 
-**[D-4] Auto-inspect cadence (resolves `proposal-glanceability` open question 3).** The daemon
+**[D-4] Auto-inspect cadence.** The daemon
 re-inspects (a) the **selected** worktree with `--no-fetch`, debounced **400 ms** after the cursor
 settles; (b) all **visible** rows with `--no-fetch` on a **30 s idle** timer (never on scroll,
 never while a modal is open); (c) the affected worktree after any `create` / `delete` / `open` /
@@ -490,7 +489,7 @@ with the age of every job-derived fact.*
 | SAFETY section | `dirty` (file count), `ahead`/`behind`, `uniqueCommits`, `published`, `merged`, `PR` | block 3 | the same facts the delete/prune confirm quotes, so the confirm is never a surprise | `WorktreeInspection`, §3 inspect |
 | **Null facts** | `—` in `fg.faint`, **never `0`** | value column | §1.3 | `ahead`/`behind`/`uniqueCommits` are nullable |
 | Warnings | amber `triangle-alert` + each `warnings[]` string **verbatim** | under SAFETY | swarm's 11 soft-warning strings are greppable diagnostics and must not be paraphrased | §3 inspect step 6 |
-| Freshness stamp | `checked <age> ago` in the SAFETY header (amber > 2 min, red on error) | right of the header | a fact without an age is not a fact | `inspectedAt` |
+| Freshness stamp | `checked <age> ago` in the SAFETY header, on the §1.3 ladder | right of the header | a fact without an age is not a fact | `inspectedAt` |
 | Times | `opened <rel> · created <rel>` | last block | low priority by definition | `lastOpenedAt`, `createdAt` |
 | Footer | `inspected <age> · I refresh` | last row, only when > 60 s | prevents trusting stale safety facts | §2.6 |
 
@@ -613,8 +612,8 @@ badge), `url` (`y` / `b`), reviewer avatars, a merged/closed section, a third "A
 
 **Scope.** The PR screen scopes to the selected repo, or to every repo of the active context when
 `All` is selected. **[D-7]** In `All` scope the list is capped at **100** rows per tab, sorted by
-`updatedAt` desc, with a final faint row `+n more — select a repo to narrow` (resolves
-`proposal-glanceability` open question 4; the cap matches the §9 PR cap of 100 and never refuses).
+`updatedAt` desc, with a final faint row `+n more — select a repo to narrow` (the cap matches the
+§9 PR cap of 100 and never refuses).
 
 **Icons:** the badge table above, plus `git-fork`, and the §2.5 session glyphs for presence.
 
@@ -696,7 +695,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
 | Native tab selected | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard" |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
-| Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and a 26 px amber banner replaces the header — §3.12 |
+| Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner replaces the header |
 
 **Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`, `circle-check`, `loader-circle`,
 `zap`, `bot`, `sparkles` (opencode), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,

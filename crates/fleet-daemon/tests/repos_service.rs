@@ -3,18 +3,23 @@ use std::{path::Path, process::Command, sync::Arc, time::Duration};
 use fleet_core::model::RepoHooks;
 use fleet_daemon::{
     adapters::{
+        Adapters,
         clock::SystemClock,
         files::{Files, RealFiles},
         git::{Git, ShellGit},
         github::Github,
-        shell::{RealShell, ShellResult},
+        process::{Process, RealProcess},
+        shell::{RealShell, Shell, ShellResult},
     },
     jobs::JobManager,
-    services::{contexts::Contexts, repos::Repos},
+    services::{Services, contexts::Contexts, repos::Repos},
     stores::{config::ConfigStore, state::StateStore},
     testing::fakes::{FakeGithub, FakeShell},
 };
-use fleet_proto::job::{JobKind, JobStatus};
+use fleet_proto::{
+    job::{JobKind, JobStatus},
+    request::RequestBody,
+};
 
 fn stores(temp: &tempfile::TempDir) -> (Arc<ConfigStore>, Arc<StateStore>, Arc<dyn Files>) {
     let home = temp.path().join(".fleet");
@@ -84,17 +89,22 @@ async fn repos_clone_reconciles_then_moves_updates_hooks_and_deletes() {
     let second = contexts.create("Second".to_owned(), vec![]).await.unwrap();
     let jobs = Arc::new(JobManager::new(temp.path().join(".fleet")));
     let shell = Arc::new(FakeShell::new());
-    let github: Arc<dyn Github> = Arc::new(FakeGithub::new(shell));
-    let real_shell = Arc::new(RealShell);
-    let git: Arc<dyn Git> = Arc::new(ShellGit::new(real_shell));
-    let repos = Repos::new(
+    let real_shell: Arc<dyn Shell> = Arc::new(RealShell);
+    let adapters = Adapters {
+        git: Arc::new(ShellGit::new(Arc::clone(&real_shell))),
+        github: Arc::new(FakeGithub::new(shell)),
+        process: Arc::new(RealProcess::new(Arc::clone(&real_shell))),
+        files,
+        shell: real_shell,
+    };
+    let services = Services::new(
+        temp.path().join(".fleet"),
         config,
         Arc::clone(&state),
         Arc::clone(&jobs),
-        git,
-        github,
-        files,
+        adapters,
     );
+    let repos = &services.repos;
 
     let failed = repos
         .clone_repo(
@@ -158,7 +168,10 @@ async fn repos_clone_reconciles_then_moves_updates_hooks_and_deletes() {
         .unwrap();
     assert_eq!(moved.context_id.as_str(), "second");
 
-    repos.delete(repo_id).await.unwrap();
+    services
+        .dispatch(RequestBody::DeleteRepo { repo: repo_id })
+        .await
+        .unwrap();
     assert!(state.load().await.unwrap().repos.is_empty());
 }
 
@@ -178,8 +191,19 @@ async fn repos_discovery_is_cached_and_search_is_tokenized() {
     );
     let github: Arc<dyn Github> = Arc::new(FakeGithub::new(Arc::clone(&shell)));
     let git_shell = Arc::new(FakeShell::new());
-    let git: Arc<dyn Git> = Arc::new(fleet_daemon::testing::fakes::FakeGit::new(git_shell));
-    let repos = Repos::new(config, state, Arc::clone(&jobs), git, github, files);
+    let git: Arc<dyn Git> = Arc::new(fleet_daemon::testing::fakes::FakeGit::new(Arc::clone(
+        &git_shell,
+    )));
+    let process: Arc<dyn Process> = Arc::new(RealProcess::new(git_shell));
+    let repos = Repos::new(
+        config,
+        state,
+        Arc::clone(&jobs),
+        git,
+        github,
+        files,
+        process,
+    );
 
     let cache = repos.list_remote("acme".to_owned(), true).await.unwrap();
     assert_eq!(cache.repos.len(), 2);

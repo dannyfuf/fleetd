@@ -2,33 +2,26 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use fleet_proto::{
-    job::JobRecord,
-    response::{DoctorCheck, DoctorStatus},
-};
+use fleet_proto::response::{DoctorCheck, DoctorStatus};
 
 use crate::{
     DaemonError, DaemonResult,
     adapters::{
         files::Files,
-        git::Git,
         github::Github,
         shell::{Shell, ShellCommand},
     },
-    jobs::JobManager,
-    services::{hosts::Hosts, update::Update},
+    services::hosts::Hosts,
     stores::config::ConfigStore,
 };
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Environment diagnostics and self-update service.
+/// Environment diagnostics service.
 #[derive(Clone)]
 pub struct Doctor {
-    jobs: Arc<JobManager>,
     config: Arc<ConfigStore>,
     shell: Arc<dyn Shell>,
-    git: Arc<dyn Git>,
     github: Arc<dyn Github>,
     files: Arc<dyn Files>,
 }
@@ -37,18 +30,14 @@ impl Doctor {
     /// Creates the diagnostics service.
     #[must_use]
     pub fn new(
-        jobs: Arc<JobManager>,
         config: Arc<ConfigStore>,
         shell: Arc<dyn Shell>,
-        git: Arc<dyn Git>,
         github: Arc<dyn Github>,
         files: Arc<dyn Files>,
     ) -> Self {
         Self {
-            jobs,
             config,
             shell,
-            git,
             github,
             files,
         }
@@ -123,18 +112,6 @@ impl Doctor {
             .await,
         );
         Ok(checks)
-    }
-
-    /// Starts the source update and release-build workflow as a detached job.
-    pub async fn update(&self) -> DaemonResult<JobRecord> {
-        Update::new(
-            Arc::clone(&self.jobs),
-            Arc::clone(&self.git),
-            Arc::clone(&self.shell),
-            checkout_root(),
-        )
-        .start()
-        .await
     }
 }
 
@@ -265,13 +242,6 @@ const fn copy_detail() -> &'static str {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const fn copy_detail() -> &'static str {
     "recursive copy available"
-}
-
-fn checkout_root() -> PathBuf {
-    std::env::var_os("FLEET_INSTALL_ROOT").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
-        PathBuf::from,
-    )
 }
 
 #[cfg(test)]

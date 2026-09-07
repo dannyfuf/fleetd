@@ -1,10 +1,6 @@
 //! Worktree activity, process, and port inspection orchestration.
 
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use fleet_core::{
     github::{InspectionPrState, InspectionPullRequest},
@@ -21,54 +17,50 @@ use fleet_core::{
     sessions::{AgentActivity, SessionState, WorktreeStatus},
 };
 use fleet_proto::job::JobKind;
-use futures_util::{StreamExt, stream::FuturesUnordered};
+use futures_util::{StreamExt, stream};
 
 use crate::{
     DaemonError, DaemonResult,
     adapters::{git::Git, github::Github},
+    error::REMOTE_UNSUPPORTED,
     jobs::{JobCtx, JobManager},
-    services::sessions::Sessions,
-    stores::{config::ConfigStore, state::StateStore},
+    services::{
+        awaited::{JobDelivery, git_error},
+        sessions::Sessions,
+    },
+    stores::state::StateStore,
 };
 
-const REMOTE_UNSUPPORTED: &str = "remote hosts are not supported yet";
+const INSPECTION_CONCURRENCY: usize = 8;
+const FETCH_CONCURRENCY: usize = 4;
 
 /// Worktree inspection service coordinating Git, GitHub, process, and remote facts.
 #[derive(Clone)]
 pub struct Inspect {
-    config: Arc<ConfigStore>,
     state: Arc<StateStore>,
     jobs: Arc<JobManager>,
     git: Arc<dyn Git>,
     github: Arc<dyn Github>,
-    sessions: Option<Sessions>,
+    sessions: Sessions,
 }
 
 impl Inspect {
     /// Creates the inspection service.
     #[must_use]
     pub fn new(
-        config: Arc<ConfigStore>,
         state: Arc<StateStore>,
         jobs: Arc<JobManager>,
         git: Arc<dyn Git>,
         github: Arc<dyn Github>,
+        sessions: Sessions,
     ) -> Self {
         Self {
-            config,
             state,
             jobs,
             git,
             github,
-            sessions: None,
+            sessions,
         }
-    }
-
-    /// Adds live daemon session observations to inspection results.
-    #[must_use]
-    pub fn with_sessions(mut self, sessions: Sessions) -> Self {
-        self.sessions = Some(sessions);
-        self
     }
 
     /// Inspects selected worktrees, preserving fail-closed warning semantics.
@@ -79,32 +71,18 @@ impl Inspect {
         fetch: bool,
     ) -> DaemonResult<Vec<WorktreeInspection>> {
         let service = self.clone();
-        let target = format!("inspect-{}", uuid::Uuid::new_v4());
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let sender = Arc::new(Mutex::new(Some(sender)));
+        let (delivery, awaited) = JobDelivery::job_gets_copy(git_error);
         self.jobs.submit(
             JobKind::Inspect,
-            target,
+            format!("inspect-{}", uuid::Uuid::new_v4()),
             "Inspect worktrees",
             true,
             true,
             move |context| async move {
-                let result = service.inspect_inner(ids, repo, fetch, &context).await;
-                let outcome = result
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(|error| DaemonError::Git(error.to_string()));
-                if let Some(sender) = sender
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
-                    let _ignored = sender.send(result);
-                }
-                outcome
+                delivery.finish(service.inspect_inner(ids, repo, fetch, &context).await)
             },
         );
-        receiver.await.map_err(|_| DaemonError::Cancelled)?
+        awaited.wait().await
     }
 
     pub(crate) async fn inspect_inner(
@@ -115,22 +93,19 @@ impl Inspect {
         context: &JobCtx,
     ) -> DaemonResult<Vec<WorktreeInspection>> {
         let state = self.state.load().await?;
-        // Loading config here validates it before any external work and preserves the
-        // documented inspection dependency on both stores.
-        let _config = self.config.load().await?;
-        let by_id = state
-            .worktrees
-            .iter()
-            .map(|worktree| (worktree.id.clone(), worktree.clone()))
-            .collect::<HashMap<_, _>>();
         let selected = if ids.is_empty() {
-            state.worktrees.clone()
+            state.worktrees
         } else {
-            ids.into_iter()
+            let by_id = state
+                .worktrees
+                .iter()
+                .map(|worktree| (&worktree.id, worktree))
+                .collect::<HashMap<_, _>>();
+            ids.iter()
                 .map(|id| {
                     by_id
-                        .get(&id)
-                        .cloned()
+                        .get(id)
+                        .map(|worktree| (*worktree).clone())
                         .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))
                 })
                 .collect::<DaemonResult<Vec<_>>>()?
@@ -158,38 +133,36 @@ impl Inspect {
             return Err(DaemonError::Cancelled);
         }
 
-        let statuses = match &self.sessions {
-            Some(sessions) => sessions.refresh_statuses(repo_filter.clone()).await?,
-            None => status_snapshot(&selected),
-        };
+        let statuses = self.sessions.refresh_statuses(repo_filter.clone()).await?;
         let status_by_id = statuses
             .into_iter()
             .map(|status| (status.worktree_id.clone(), status))
             .collect::<HashMap<_, _>>();
         context.progress(format!("inspecting {} worktrees", selected.len()))?;
 
-        let mut pending = FuturesUnordered::new();
-        for (index, worktree) in selected.into_iter().enumerate() {
-            let repo = repos.get(&worktree.repo_id).cloned();
-            let status = status_by_id
-                .get(&worktree.id)
-                .cloned()
-                .unwrap_or_else(|| unknown_status(&worktree));
-            let fetch_failed = fetch_failures.contains_key(&worktree.repo_id);
-            let service = self.clone();
-            let cancel = context.cancel.clone();
-            pending.push(async move {
-                if cancel.is_cancelled() {
-                    return Err(DaemonError::Cancelled);
+        let mut pending =
+            stream::iter(selected.into_iter().enumerate().map(|(index, worktree)| {
+                let repo = repos.get(&worktree.repo_id).cloned();
+                let status = status_by_id
+                    .get(&worktree.id)
+                    .cloned()
+                    .unwrap_or_else(|| Self::unknown_status(&worktree));
+                let fetch_failed = fetch_failures.contains_key(&worktree.repo_id);
+                let service = self.clone();
+                let cancel = context.cancel.clone();
+                async move {
+                    if cancel.is_cancelled() {
+                        return Err(DaemonError::Cancelled);
+                    }
+                    Ok((
+                        index,
+                        service
+                            .inspect_one(worktree, repo, status, fetch_failed)
+                            .await,
+                    ))
                 }
-                Ok((
-                    index,
-                    service
-                        .inspect_one(worktree, repo, status, fetch_failed)
-                        .await,
-                ))
-            });
-        }
+            }))
+            .buffer_unordered(INSPECTION_CONCURRENCY);
 
         let mut inspections = Vec::new();
         while let Some(inspection) = pending.next().await {
@@ -210,28 +183,28 @@ impl Inspect {
         repos: &HashMap<RepoId, Repo>,
         context: &JobCtx,
     ) -> DaemonResult<HashMap<RepoId, String>> {
-        let mut pending = FuturesUnordered::new();
         let selected_repos = worktrees
             .iter()
             .filter(|worktree| worktree.host.is_none())
             .map(|worktree| worktree.repo_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        for repo_id in &selected_repos {
-            let Some(repo) = repos.get(repo_id) else {
-                continue;
-            };
+        let selected = selected_repos
+            .iter()
+            .filter_map(|id| repos.get(id))
+            .map(|repo| (repo.id.clone(), repo.path.clone()))
+            .collect::<Vec<_>>();
+        let mut pending = stream::iter(selected.into_iter().map(|(id, path)| {
             let git = Arc::clone(&self.git);
             let cancel = context.cancel.clone();
-            let id = repo.id.clone();
-            let path = repo.path.clone();
-            pending.push(async move {
+            async move {
                 if cancel.is_cancelled() {
                     return Err(DaemonError::Cancelled);
                 }
                 let result = git.fetch(Path::new(&path), true).await;
                 Ok((id, result.err().map(|error| error.to_string())))
-            });
-        }
+            }
+        }))
+        .buffer_unordered(FETCH_CONCURRENCY);
         let mut failures = HashMap::new();
         while let Some(result) = pending.next().await {
             let (repo, failure) = result?;
@@ -460,28 +433,17 @@ impl Inspect {
         }
     }
 
-    /// Refreshes runtime worktree statuses for one repository or all repositories.
-    ///
-    pub async fn refresh_statuses(
-        &self,
-        repo: Option<RepoId>,
-    ) -> DaemonResult<Vec<WorktreeStatus>> {
-        if let Some(sessions) = &self.sessions {
-            return sessions.refresh_statuses(repo).await;
-        }
-        let state = self.state.load().await?;
-        let worktrees = state
-            .worktrees
-            .into_iter()
-            .filter(|worktree| repo.as_ref().is_none_or(|repo| &worktree.repo_id == repo))
-            .collect::<Vec<_>>();
-        Ok(status_snapshot(&worktrees))
-    }
-
-    /// Produces fail-closed status placeholders until the status poller has observed each worktree.
+    /// Produces a fail-closed status placeholder until the status poller has observed a worktree.
     #[must_use]
-    pub fn unknown_statuses(worktrees: &[Worktree]) -> Vec<WorktreeStatus> {
-        worktrees.iter().map(unknown_status).collect()
+    pub(crate) fn unknown_status(worktree: &Worktree) -> WorktreeStatus {
+        WorktreeStatus {
+            worktree_id: worktree.id.clone(),
+            session: SessionState::Unknown,
+            windows: Vec::new(),
+            running: Vec::new(),
+            agent_activity: AgentActivity::Unknown,
+            agent_activity_changed_at: None,
+        }
     }
 }
 
@@ -492,35 +454,6 @@ fn parse_upstream(raw: &str) -> (Option<String>, bool) {
         (!name.is_empty()).then(|| name.to_owned()),
         tracking.contains("gone"),
     )
-}
-
-fn status_snapshot(worktrees: &[Worktree]) -> Vec<WorktreeStatus> {
-    worktrees
-        .iter()
-        .map(|worktree| WorktreeStatus {
-            worktree_id: worktree.id.clone(),
-            session: if worktree.host.is_some() {
-                SessionState::Unknown
-            } else {
-                SessionState::None
-            },
-            windows: Vec::new(),
-            running: Vec::new(),
-            agent_activity: AgentActivity::Unknown,
-            agent_activity_changed_at: None,
-        })
-        .collect()
-}
-
-fn unknown_status(worktree: &Worktree) -> WorktreeStatus {
-    WorktreeStatus {
-        worktree_id: worktree.id.clone(),
-        session: SessionState::Unknown,
-        windows: Vec::new(),
-        running: Vec::new(),
-        agent_activity: AgentActivity::Unknown,
-        agent_activity_changed_at: None,
-    }
 }
 
 fn failed_inspection(
@@ -587,12 +520,11 @@ mod tests {
             degraded: None,
         };
 
-        let statuses = Inspect::unknown_statuses(&[worktree]);
+        let status = Inspect::unknown_status(&worktree);
 
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].session, SessionState::Unknown);
-        assert!(statuses[0].windows.is_empty());
-        assert!(statuses[0].running.is_empty());
+        assert_eq!(status.session, SessionState::Unknown);
+        assert!(status.windows.is_empty());
+        assert!(status.running.is_empty());
     }
 
     #[test]

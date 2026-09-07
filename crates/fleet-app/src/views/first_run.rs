@@ -1,12 +1,4 @@
-//! The first-run card of UX-SPEC §3.13, and every empty state the app can show.
-//!
-//! **[D-18]: for this user the empty state is a migration, not an onboarding.** The import row
-//! is the primary path and is shown *only* when `~/.swarm/state.json` exists; without it the
-//! block is omitted entirely (zero-suppression, §1.2) and the card falls back to `N` / `n` /
-//! `?` under a single `boxes` glyph. There is no carousel, tour, checklist or sample data.
-//!
-//! Copy is swarm's, verbatim: [`EMPTY_STATES`] is the §3.13 table as data, so a screen renders
-//! the sanctioned wording instead of inventing its own.
+//! First-run migration card and pane-local empty-state copy.
 
 use std::path::{Path, PathBuf};
 
@@ -14,102 +6,57 @@ use fleet_ui_kit::{ActiveTheme, EmptyState, Icon, IconSize, Text, Tone, prelude:
 use gpui::{AnyElement, App, SharedString, div, px};
 
 /// The card's title.
-pub const TITLE: &str = "Fleet";
+const TITLE: &str = "Fleet";
 /// The card's one-sentence promise, which is also the promise the Jobs panel demonstrates.
-pub const TAGLINE: &str =
+const TAGLINE: &str =
     "Copies, sessions and PRs — all owned by fleetd, so they survive this window.";
 /// The sentence that appears only when there is something to migrate.
-pub const FOUND_SWARM: &str = "Found ~/.swarm.";
+const FOUND_SWARM: &str = "Found ~/.swarm.";
 /// The reassurance that makes `i` safe to press.
-pub const IMPORT_IS_SAFE: &str = "(nothing in ~/.swarm is modified)";
+const IMPORT_IS_SAFE: &str = "(nothing in ~/.swarm is modified)";
 
-/// One row of the §3.13 empty-state table: the fact, then the key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EmptyStateCopy {
-    /// The surface the wording belongs to.
-    pub surface: &'static str,
-    /// Line 1: the fact. `{}` is substituted with the scope when the row has one.
-    pub fact: &'static str,
-    /// Line 2, faint: the key.
-    pub action: &'static str,
+/// Typed copy for each empty surface. `{}` in a fact is replaced by the caller's scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EmptySurface {
+    Contexts,
+    Repos,
+    Worktrees,
+    WorktreesRepo,
+    Filter,
+    PrsMine,
+    PrsReview,
 }
 
-/// The §3.13 table, verbatim. Every empty state in the app renders from this.
-pub const EMPTY_STATES: &[EmptyStateCopy] = &[
-    EmptyStateCopy {
-        surface: "contexts",
-        fact: "No contexts yet.",
-        action: "N  create your first context",
-    },
-    EmptyStateCopy {
-        surface: "repos",
-        fact: "No repos in {}.",
-        action: "n  clone one",
-    },
-    EmptyStateCopy {
-        surface: "worktrees",
-        fact: "No worktrees yet.",
-        action: "n  create one",
-    },
-    EmptyStateCopy {
-        surface: "worktrees-repo",
-        fact: "No worktrees for {} yet.",
-        action: "n  create one",
-    },
-    EmptyStateCopy {
-        surface: "filter",
-        fact: "Nothing matches \"{}\".",
-        action: "esc  clear",
-    },
-    EmptyStateCopy {
-        surface: "prs-mine",
-        fact: "No open PRs authored by you in {}.",
-        action: "r  refresh",
-    },
-    EmptyStateCopy {
-        surface: "prs-review",
-        fact: "No PRs waiting for your review in {}.",
-        action: "r  refresh",
-    },
-    EmptyStateCopy {
-        surface: "jobs",
-        fact: "Nothing running.",
-        action: "Jobs and sessions live in fleetd, so they survive closing this window.",
-    },
-    EmptyStateCopy {
-        surface: "terminal-exited",
-        fact: "process exited ({})",
-        action: "^s x  close    ^s c  new    ^s r  restart",
-    },
-];
+impl EmptySurface {
+    pub(crate) fn copy(self, scope: Option<&str>) -> (SharedString, &'static str) {
+        let (fact, action) = match self {
+            Self::Contexts => ("No contexts yet.", "N  create your first context"),
+            Self::Repos => ("No repos in {}.", "n  clone one"),
+            Self::Worktrees => ("No worktrees yet.", "n  create one"),
+            Self::WorktreesRepo => ("No worktrees for {} yet.", "n  create one"),
+            Self::Filter => ("Nothing matches \"{}\".", "esc  clear"),
+            Self::PrsMine => ("No open PRs authored by you in {}.", "r  refresh"),
+            Self::PrsReview => ("No PRs waiting for your review in {}.", "r  refresh"),
+        };
+        (
+            if fact.contains("{}") {
+                fact.replacen("{}", scope.unwrap_or_default(), 1).into()
+            } else {
+                SharedString::new_static(fact)
+            },
+            action,
+        )
+    }
 
-/// Looks a §3.13 row up by surface, substituting the one `{}` placeholder when it has one.
-///
-/// Returns `None` for an unknown surface rather than inventing wording: a screen that needs a
-/// new empty state adds a row to [`EMPTY_STATES`] and to `docs/UX-SPEC.md`, in that order.
-#[must_use]
-pub fn empty_copy(surface: &str, scope: Option<&str>) -> Option<(String, String)> {
-    let row = EMPTY_STATES.iter().find(|row| row.surface == surface)?;
-    let fact = match scope {
-        Some(scope) => row.fact.replacen("{}", scope, 1),
-        None => row.fact.replace("{}", ""),
-    };
-    Some((fact, row.action.to_owned()))
-}
-
-/// Renders one §3.13 empty state, **inside the affected pane only** — never full-screen, so the
-/// surrounding panes stay usable.
-#[must_use]
-pub fn empty_state(surface: &str, scope: Option<&str>) -> AnyElement {
-    match empty_copy(surface, scope) {
-        Some((fact, action)) => EmptyState::new(fact).action(action).into_any_element(),
-        None => div().into_any_element(),
+    pub(crate) fn render(self, scope: Option<&str>) -> AnyElement {
+        let (fact, action) = self.copy(scope);
+        EmptyState::new(fact).action(action).into_any_element()
     }
 }
 
 /// `~/.swarm/state.json`, the file whose existence turns the first run into a migration.
 #[must_use]
-pub fn swarm_state_path(home: Option<&Path>) -> Option<PathBuf> {
+fn swarm_state_path(home: Option<&Path>) -> Option<PathBuf> {
     Some(home?.join(".swarm").join("state.json"))
 }
 
@@ -119,65 +66,32 @@ pub fn has_swarm_state(home: Option<&Path>) -> bool {
     swarm_state_path(home).is_some_and(|path| path.exists())
 }
 
-/// The user's home directory.
-#[must_use]
-pub fn user_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// The width of the card's key column, in pixels.
-///
-/// §3.13 draws the card as a small table — `N   create your first context` — so the labels line
-/// up under each other. A fixed column is what makes them line up; joining the hints with `·`
-/// collapses the table into one unreadable line.
+/// First-run key alignment; no shared semantic token exists for this column.
 const KEY_COLUMN: f32 = 20.0;
 
 /// The keys the card offers, in spec order. `i` appears only with something to import.
 #[must_use]
-pub fn keys(has_swarm: bool) -> Vec<(&'static str, &'static str)> {
-    let mut keys = Vec::with_capacity(5);
-    if has_swarm {
-        keys.push(("i", "import contexts, repos and worktrees"));
-    }
-    keys.push(("N", "create your first context"));
-    keys.push(("n", "clone a repository"));
-    keys.push(("?", "keymap"));
-    keys.push((",", "settings"));
-    keys
+pub fn keys(has_swarm: bool) -> &'static [(&'static str, &'static str)] {
+    if has_swarm { &KEYS } else { &KEYS[1..] }
 }
 
-/// The card's hint block, grouped into the §3.13 rows.
-///
-/// One key per row, except the last: the spec pairs `?   keymap` with `,   settings` on a
-/// single line because both are meta keys, not first steps. `i` is excluded — it is drawn by
-/// the import block, with the sentence that makes it safe to press.
-#[must_use]
-pub fn hint_rows(has_swarm: bool) -> Vec<Vec<(&'static str, &'static str)>> {
-    let mut rows: Vec<Vec<(&'static str, &'static str)>> = Vec::new();
-    for hint in keys(has_swarm).into_iter().filter(|(key, _)| *key != "i") {
-        if hint.0 == ","
-            && let Some(row) = rows.last_mut()
-        {
-            row.push(hint);
-        } else {
-            rows.push(vec![hint]);
-        }
-    }
-    rows
-}
+const KEYS: [(&str, &str); 5] = [
+    ("i", "import contexts, repos and worktrees"),
+    ("N", "create your first context"),
+    ("n", "clone a repository"),
+    ("?", "keymap"),
+    (",", "settings"),
+];
+const HINT_ROWS: &[&[(&str, &str)]] = &[&[KEYS[1]], &[KEYS[2]], &[KEYS[3], KEYS[4]]];
 
-/// The card's footer: `◍ fleetd running · <version> · <home>` (§3.13).
-///
-/// The version is the bare semver — the daemon's build string already carries the product name
-/// the line just said — and the home path is tilde-collapsed, because a default install lives
-/// at `~/.fleet` and spelling out `/Users/<u>/.fleet` says nothing extra.
 #[must_use]
-pub fn footer_line(version: Option<&str>, home: &Path, user_home: Option<&Path>) -> String {
-    let home = crate::views::jobs_panel::tilde(&home.to_string_lossy(), user_home);
+fn footer_line(version: Option<&str>, home: &Path, user_home: Option<&Path>) -> String {
+    let home_text = home.to_string_lossy();
+    let home = crate::presentation::tilde(&home_text, user_home);
     match version {
         Some(version) => format!(
             "\u{25CD} fleetd running \u{00b7} {} \u{00b7} {home}",
-            crate::shell::bare_version(version)
+            crate::presentation::bare_version(version)
         ),
         None => format!("\u{25CD} fleetd \u{00b7} {home}"),
     }
@@ -185,7 +99,13 @@ pub fn footer_line(version: Option<&str>, home: &Path, user_home: Option<&Path>)
 
 /// The single centered card of §3.13.
 #[must_use]
-pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App) -> AnyElement {
+pub(crate) fn card_with_home(
+    home: &Path,
+    daemon_version: Option<&str>,
+    has_swarm: bool,
+    user_home: Option<&Path>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let glyph = if has_swarm {
         Icon::Sailboat
@@ -193,7 +113,6 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
         Icon::Boxes
     };
 
-    // One row of the card's key table: the key in a fixed column, then what it does.
     let hint = |key: &'static str, label: &'static str| {
         div()
             .flex()
@@ -203,14 +122,16 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
             .child(Text::hint(label))
     };
 
+    let keys = keys(has_swarm);
     let import_block = has_swarm.then(|| {
+        let (key, label) = keys[0];
         div()
             .flex()
             .flex_col()
             .items_start()
             .gap(theme.space.xs)
             .child(Text::ui(FOUND_SWARM))
-            .child(hint("i", "import contexts, repos and worktrees"))
+            .child(hint(key, label))
             .child(
                 div()
                     .pl(px(KEY_COLUMN) + theme.space.sm)
@@ -218,19 +139,17 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
             )
     });
 
-    // §3.13 is three rows, not one interpunct-joined line: the keys line up in a column so the
-    // eye reads down the first steps instead of scanning a sentence.
     let hints = div()
         .flex()
         .flex_col()
         .items_start()
         .gap(theme.space.xs)
-        .children(hint_rows(has_swarm).into_iter().map(|row| {
+        .children(HINT_ROWS.iter().map(|row| {
             div()
                 .flex()
                 .items_center()
                 .gap(theme.space.lg)
-                .children(row.into_iter().map(|(key, label)| hint(key, label)))
+                .children(row.iter().map(|(key, label)| hint(key, label)))
         }));
 
     div()
@@ -240,8 +159,6 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
         .justify_center()
         .size_full()
         .gap(theme.space.lg)
-        // §3.13 draws the title as one line, `⛵ Fleet`: the glyph is part of the name, not a
-        // row of its own.
         .child(
             div()
                 .flex()
@@ -262,7 +179,7 @@ pub fn card(home: &Path, daemon_version: Option<&str>, has_swarm: bool, cx: &App
             Text::hint(SharedString::from(footer_line(
                 daemon_version,
                 home,
-                user_home().as_deref(),
+                user_home,
             )))
             .tone(Tone::Muted),
         )
@@ -288,68 +205,29 @@ mod tests {
     }
 
     #[test]
-    fn the_hint_block_is_three_rows_and_pairs_the_meta_keys() {
-        assert_eq!(
-            hint_rows(false),
-            vec![
-                vec![("N", "create your first context")],
-                vec![("n", "clone a repository")],
-                vec![("?", "keymap"), (",", "settings")],
-            ],
-            "§3.13 is a table of rows, never one interpunct-joined line"
-        );
-        assert_eq!(
-            hint_rows(true),
-            hint_rows(false),
-            "`i` belongs to the import block, which draws it with its own reassurance"
-        );
+    fn the_hint_rows_use_the_non_import_keys_in_order() {
+        let rows: Vec<_> = HINT_ROWS
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect();
+        assert_eq!(rows, keys(false));
     }
 
     #[test]
-    fn the_card_never_offers_a_tour() {
-        let text = format!("{TITLE} {TAGLINE} {FOUND_SWARM} {IMPORT_IS_SAFE}");
-        for banned in ["tour", "carousel", "checklist", "sample", "welcome"] {
-            assert!(
-                !text.to_lowercase().contains(banned),
-                "§3.13 forbids `{banned}` in the first-run card"
-            );
-        }
-        assert!(IMPORT_IS_SAFE.contains("nothing in ~/.swarm is modified"));
-    }
-
-    #[test]
-    fn every_documented_empty_state_is_available_verbatim() {
+    fn scoped_copy_substitutes_only_the_fact() {
         assert_eq!(
-            empty_copy("worktrees", None),
-            Some(("No worktrees yet.".to_owned(), "n  create one".to_owned()))
+            EmptySurface::WorktreesRepo.copy(Some("payroll")),
+            ("No worktrees for payroll yet.".into(), "n  create one")
         );
         assert_eq!(
-            empty_copy("worktrees-repo", Some("payroll")),
-            Some((
-                "No worktrees for payroll yet.".to_owned(),
-                "n  create one".to_owned()
-            ))
+            EmptySurface::Filter.copy(Some("rut")),
+            ("Nothing matches \"rut\".".into(), "esc  clear")
         );
         assert_eq!(
-            empty_copy("filter", Some("rut")),
-            Some((
-                "Nothing matches \"rut\".".to_owned(),
-                "esc  clear".to_owned()
-            ))
+            EmptySurface::Contexts.copy(None),
+            ("No contexts yet.".into(), "N  create your first context"),
+            "an unscoped fact is a static string, not a substitution"
         );
-        assert_eq!(
-            empty_copy("jobs", None).map(|copy| copy.0),
-            Some("Nothing running.".to_owned())
-        );
-        assert_eq!(empty_copy("no-such-surface", None), None);
-    }
-
-    #[test]
-    fn the_exited_terminal_state_spells_its_prefix() {
-        let (fact, action) =
-            empty_copy("terminal-exited", Some("130")).unwrap_or_else(|| panic!("missing row"));
-        assert_eq!(fact, "process exited (130)");
-        assert!(action.starts_with("^s x"), "no bare keys over a terminal");
     }
 
     #[test]

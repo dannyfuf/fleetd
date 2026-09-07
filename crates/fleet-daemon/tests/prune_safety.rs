@@ -12,6 +12,7 @@ use fleet_daemon::{
     services::{
         inspect::Inspect,
         prune::{Prune, WorktreeDeleter},
+        sessions::Sessions,
     },
     stores::{config::ConfigStore, state::StateStore},
     testing::fakes::{FakeFiles, FakeGit, FakeGithub, FakeShell, FixedClock},
@@ -40,9 +41,9 @@ async fn prune_deletes_eligible_worktrees_through_the_deletion_seam() {
         vec![home.join("repos"), home.join("worktrees")],
     ));
     let clock = Arc::new(FixedClock::new(chrono::Utc::now()));
-    let config = Arc::new(ConfigStore::new(&home, files.clone()));
     let state = Arc::new(StateStore::new(&home, files.clone(), clock.clone()));
     let jobs = Arc::new(JobManager::with_clock(&home, clock));
+    let config = Arc::new(ConfigStore::new(&home, files.clone()));
     let repo_id = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
     let context_id = ContextId::try_from("acme").unwrap_or_else(|error| panic!("{error}"));
     let worktree_id =
@@ -126,9 +127,10 @@ async fn prune_deletes_eligible_worktrees_through_the_deletion_seam() {
     shell.when(|command| command.program == "git", success(""));
     let git = Arc::new(FakeGit::new(shell.clone()));
     let github = Arc::new(FakeGithub::new(shell));
-    let inspect = Inspect::new(config, state, jobs.clone(), git, github);
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let inspect = Inspect::new(state, jobs.clone(), git, github, sessions);
     let deleter = Arc::new(RecordingDeleter::default());
-    let prune = Prune::with_deleter(jobs, inspect, deleter.clone());
+    let prune = Prune::new(jobs, inspect, deleter.clone());
 
     let result = prune
         .worktrees(false, false, false, None)

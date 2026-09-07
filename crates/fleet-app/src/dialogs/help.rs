@@ -1,24 +1,18 @@
 //! §3.8.7 Help (`?`) — every context side by side, grouped by mode.
-//!
-//! The rows are generated from [`crate::keymap::table`], never restated, so a binding and its
-//! documentation cannot drift (`docs/APP-CONTRACTS.md` §6). The action label is the action's
-//! own name, de-camel-cased; that is what makes the guarantee mechanical.
-//!
-//! The dialog is context-sensitive: opened from a Workspace or Agent terminal it puts that
-//! surface's group first and in accent and dims the rest.
 
 use fleet_ui_kit::{Icon, TextRole, prelude::*, styled_with};
 use gpui::{AnyElement, App, Entity, FocusHandle, HighlightStyle, StyledText, Window, div, px};
 
 use crate::{
-    dialogs::{root, uptime_label},
+    dialogs::root,
     keymap,
+    presentation::{age_secs, humanize, now_unix, pretty_keys},
     state::{AppState, Screen},
 };
 
 /// The wire protocol this build speaks, for the Settings About section.
 #[must_use]
-pub const fn protocol() -> u32 {
+pub(super) const fn protocol() -> u32 {
     fleet_proto::PROTOCOL_VERSION
 }
 
@@ -31,7 +25,7 @@ const KEY_COLUMN: f32 = 68.0;
 /// columns leave ~70 px for the action label, which ellipsized nearly every one of them
 /// (`half p…`, `select…` nine rows running). Three columns leave ~190 px, which is what makes
 /// the labels readable — and readable labels are the entire job of a keymap.
-pub const COLUMNS: usize = 3;
+const COLUMNS: usize = 3;
 
 /// The paragraph §3.8.7 calls "the single most valuable paragraph in the app", in the spec's
 /// own markdown.
@@ -39,12 +33,12 @@ pub const COLUMNS: usize = 3;
 /// The backticks are **markup**, not characters: [`key_paragraph`] strips them and reports the
 /// ranges so the keys render in the same mono face as the key column below. Every key the spec
 /// backticks is backticked here, so the four key names in the sentence are styled alike.
-pub const WHAT_KEEPS_RUNNING: &str = "What keeps running. Jobs and sessions live in fleetd. \
+const WHAT_KEEPS_RUNNING: &str = "What keeps running. Jobs and sessions live in fleetd. \
 Closing a dialog, leaving a screen or quitting Fleet (`ctrl-q`) never stops them. Only `c` in \
 the Jobs panel, `K`, and `ctrl-shift-q` stop things. Terminals do not survive a daemon restart.";
 
 /// The terminal clipboard behaviour that is not expressible as a keymap row.
-pub const TERMINAL_CLIPBOARD: &str = "Terminal clipboard. Drag selects, double-click selects a \
+const TERMINAL_CLIPBOARD: &str = "Terminal clipboard. Drag selects, double-click selects a \
 word, and triple-click selects a line; selection copies immediately. `cmd-c` copies the \
 selection; `cmd-v` pastes. `ctrl-c` and `ctrl-v` stay terminal keys.";
 
@@ -54,7 +48,7 @@ selection; `cmd-v` pastes. `ctrl-c` and `ctrl-v` stay terminal keys.";
 /// for exactly one thing, and printing them verbatim is how the help came to read
 /// "Only `c` in the Jobs panel".
 #[must_use]
-pub fn key_paragraph(markdown: &str) -> (String, Vec<std::ops::Range<usize>>) {
+fn key_paragraph(markdown: &str) -> (String, Vec<std::ops::Range<usize>>) {
     let mut text = String::with_capacity(markdown.len());
     let mut keys = Vec::new();
     let mut rest = markdown;
@@ -82,40 +76,41 @@ pub fn key_paragraph(markdown: &str) -> (String, Vec<std::ops::Range<usize>>) {
 /// context at all, while `Esc` alone is true in the palette and `q` alone in a confirm. Rows are
 /// therefore merged **within** a section, and the section says which context it documents.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Section {
+struct Section {
     /// The gpui key-context predicate these rows are scoped to.
-    pub context: &'static str,
+    context: &'static str,
     /// The sub-head, or `None` when the group documents a single context and the group title
     /// already names it.
-    pub title: Option<String>,
+    title: Option<gpui::SharedString>,
     /// Its rows, in registration order.
-    pub rows: Vec<(String, String)>,
+    rows: Vec<(gpui::SharedString, gpui::SharedString)>,
 }
 
 /// One column of the help grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Group {
+struct Group {
     /// The mode this column documents.
-    pub title: &'static str,
+    title: &'static str,
     /// One section per contributing key context, in `GROUPS` order.
-    pub sections: Vec<Section>,
+    sections: Vec<Section>,
 }
 
 impl Group {
     /// How many rows the group holds across every section.
     #[must_use]
-    pub fn row_count(&self) -> usize {
+    fn row_count(&self) -> usize {
         self.sections.iter().map(|section| section.rows.len()).sum()
     }
 
     /// How many lines the group occupies: its head, every sub-head, and every row.
     #[must_use]
-    pub fn height(&self) -> usize {
-        1 + self
-            .sections
-            .iter()
-            .map(|section| section.rows.len() + usize::from(section.title.is_some()))
-            .sum::<usize>()
+    fn height(&self) -> usize {
+        1 + self.row_count()
+            + self
+                .sections
+                .iter()
+                .filter(|section| section.title.is_some())
+                .count()
     }
 }
 
@@ -124,7 +119,7 @@ impl Group {
 /// `Dialog > Confirm` is `confirm`, `Hub > Worktrees` is `worktrees`, `Workspace > Prefix` is
 /// `prefix` — which is also the word that tells the reader those keys follow `^s`.
 #[must_use]
-pub fn context_label(context: &str) -> String {
+fn context_label(context: &str) -> String {
     humanize(context.rsplit(" > ").next().unwrap_or(context))
 }
 
@@ -179,7 +174,7 @@ const GROUPS: &[(&str, &[&str])] = &[
 /// merging on the label alone produced rows like `⏎ / y / Y accept` out of four different
 /// dialogs' `Accept` actions, and such a row is accurate in none of them.
 #[must_use]
-pub fn groups() -> Vec<Group> {
+fn groups() -> Vec<Group> {
     let table = keymap::table();
     GROUPS
         .iter()
@@ -206,8 +201,11 @@ pub fn groups() -> Vec<Group> {
                 }
                 sections.push(Section {
                     context,
-                    title: multi.then(|| context_label(context)),
-                    rows,
+                    title: multi.then(|| context_label(context).into()),
+                    rows: rows
+                        .into_iter()
+                        .map(|(keys, label)| (keys.into(), label.into()))
+                        .collect(),
                 });
             }
             Group { title, sections }
@@ -221,7 +219,7 @@ pub fn groups() -> Vec<Group> {
 /// split is the one that makes the tallest column as short as possible, so the grid stays
 /// balanced whichever group the caller moved to the front.
 #[must_use]
-pub fn columns(groups: Vec<Group>) -> Vec<Vec<Group>> {
+fn columns(groups: Vec<Group>) -> Vec<Vec<Group>> {
     if groups.len() <= COLUMNS {
         return groups.into_iter().map(|group| vec![group]).collect();
     }
@@ -266,37 +264,29 @@ fn column_heights(heights: &[usize], cuts: &[usize]) -> Vec<usize> {
     totals
 }
 
-/// `hub::MoveDown` becomes `move down`.
-#[must_use]
-pub fn humanize(action: &str) -> String {
-    let name = action.rsplit("::").next().unwrap_or(action);
-    let mut words = String::new();
-    for (index, character) in name.char_indices() {
-        if character.is_ascii_uppercase() && index > 0 {
-            words.push(' ');
-        }
-        words.extend(character.to_lowercase());
-    }
-    words
+fn prepared_columns(active_group: Option<&str>) -> &'static [Vec<Group>] {
+    static LAYOUTS: std::sync::OnceLock<[Vec<Vec<Group>>; 3]> = std::sync::OnceLock::new();
+    let layouts = LAYOUTS.get_or_init(|| {
+        [None, Some("Terminal (^s)"), Some("Agent popup (^s)")].map(|active| {
+            let mut groups = groups();
+            if let Some(index) =
+                active.and_then(|title| groups.iter().position(|group| group.title == title))
+            {
+                let group = groups.remove(index);
+                groups.insert(0, group);
+            }
+            columns(groups)
+        })
+    });
+    &layouts[match active_group {
+        Some("Terminal (^s)") => 1,
+        Some("Agent popup (^s)") => 2,
+        _ => 0,
+    }]
 }
 
-/// `ctrl-n` becomes `^n`, `shift-tab` becomes `S-⇥`; the mono column is narrow.
-#[must_use]
-pub fn pretty_keys(keys: &str) -> String {
-    keys.split(' ')
-        .map(|stroke| {
-            stroke
-                .replace("ctrl-", "^")
-                .replace("shift-", "S-")
-                .replace("alt-", "\u{2325}")
-                .replace("escape", "esc")
-                .replace("enter", "\u{23ce}")
-                .replace("tab", "\u{21e5}")
-                .replace("space", "\u{2423}")
-                .replace("backspace", "\u{232b}")
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+pub(super) fn prepare() {
+    prepared_columns(None);
 }
 
 /// The §3.8.7 paragraph, with its key names in the same mono face as the key column below.
@@ -359,27 +349,17 @@ pub(crate) fn render(
     let (version, uptime) = app.snapshot.as_ref().map_or_else(
         || ("\u{2013}".to_owned(), "\u{2013}".to_owned()),
         |snapshot| {
-            let started =
-                crate::dialogs::age_secs(&snapshot.daemon.started_at, crate::dialogs::now_epoch());
+            let started = age_secs(&snapshot.daemon.started_at, now_unix());
             (
-                crate::shell::bare_version(&snapshot.daemon.version).to_owned(),
-                started.map_or_else(|| "\u{2013}".to_owned(), uptime_label),
+                crate::presentation::bare_version(&snapshot.daemon.version).to_owned(),
+                started.map_or_else(|| "\u{2013}".to_owned(), fleet_ui_kit::format_age),
             )
         },
     );
 
-    let mut columns = groups();
-    if let Some(active_group) = active_group {
-        // §3.8.7: the originating terminal group comes first and in accent.
-        if let Some(index) = columns.iter().position(|group| group.title == active_group) {
-            let terminal = columns.remove(index);
-            columns.insert(0, terminal);
-        }
-    }
-
     let column_elements =
-        self::columns(columns)
-            .into_iter()
+        prepared_columns(active_group)
+            .iter()
             .enumerate()
             .map(|(column_index, groups)| {
                 div()
@@ -388,7 +368,7 @@ pub(crate) fn render(
                     .flex_1()
                     .min_w_0()
                     .gap(gap)
-                    .children(groups.into_iter().enumerate().map(|(stacked, group)| {
+                    .children(groups.iter().enumerate().map(|(stacked, group)| {
                         // Only the group the caller moved to the front is accented (§3.8.7).
                         let accented = active_group.is_some() && column_index == 0 && stacked == 0;
                         let dimmed = active_group.is_some() && !accented;
@@ -398,27 +378,25 @@ pub(crate) fn render(
                             .min_w_0()
                             .gap(tight)
                             .child(SectionHeader::new(group.title))
-                            .children(group.sections.into_iter().map(move |section| {
+                            .children(group.sections.iter().map(move |section| {
                                 div()
                                     .flex()
                                     .flex_col()
                                     .min_w_0()
                                     // The sub-head is subordinate to the group head: it names
                                     // the key context these rows are actually true in.
-                                    .children(
-                                        section.title.map(|title| {
-                                            Text::hint(title).faint().into_any_element()
-                                        }),
-                                    )
-                                    .children(section.rows.into_iter().map(|(keys, label)| {
+                                    .children(section.title.as_ref().map(|title| {
+                                        Text::hint(title.clone()).faint().into_any_element()
+                                    }))
+                                    .children(section.rows.iter().map(|(keys, label)| {
                                         Row::new()
                                             .dimmed(dimmed)
                                             .column(RowColumn::fixed(
                                                 px(KEY_COLUMN),
-                                                Text::data_small(keys),
+                                                Text::data_small(keys.clone()),
                                             ))
                                             .column(RowColumn::flex(
-                                                Text::ui(label).muted().ellipsize(),
+                                                Text::ui(label.clone()).muted().ellipsize(),
                                             ))
                                     }))
                             }))
@@ -451,7 +429,7 @@ pub(crate) fn render(
         .child(
             Dialog::new("Keymap")
                 .icon(Icon::CircleQuestionMark)
-                .width(super::Dialogs::Help.width())
+                .width(super::Dialogs::Help.width(cx))
                 .height(px(620.0))
                 .body(body)
                 .hint_row(KeyHintRow::new().key("?", "close").key("esc", "close"))
@@ -544,7 +522,7 @@ mod tests {
         let section = |context, label: &str| Section {
             context,
             title: None,
-            rows: vec![("k".to_owned(), label.to_owned())],
+            rows: vec![("k".into(), label.to_owned().into())],
         };
         let small = vec![
             Group {
@@ -589,7 +567,7 @@ mod tests {
                         assert!(
                             table.iter().any(|spec| spec.context == section.context
                                 && pretty_keys(spec.keys) == key
-                                && humanize(spec.action) == *label),
+                                && humanize(spec.action).as_str() == label.as_ref()),
                             "`{key} {label}` is not bound in `{}`",
                             section.context
                         );

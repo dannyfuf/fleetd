@@ -3,14 +3,15 @@ name = "fleet-ui-kit"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 description = "Fleet design system: tokens, theme, embedded Lucide icons and the component API contract, on raw gpui."
+
+[lints]
+workspace = true
 
 [dependencies]
 gpui.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 gpui_platform.workspace = true
-
-[[example]]
-name = "kit_gallery"
-path = "examples/kit_gallery.rs"

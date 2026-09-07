@@ -30,12 +30,17 @@
 //! keyboard the root switches to `GalleryTyping`, so `h`, `y`, `o` and friends are typed
 //! instead of fired — the same rule §3.10 states for the real Hub.
 
-use fleet_ui_kit::KitAssets;
+pub mod support;
+const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
+    label_width: 170.0,
+    column: true,
+    divided: false,
+    compact: true,
+};
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
-    Menu, MenuItem, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
-    div, px, size,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
+    SharedString, Window, actions, div, px,
 };
 
 actions!(
@@ -84,8 +89,6 @@ enum Capture {
     Palette,
 }
 
-// ---------------------------------------------------------------------------------- fixtures
-
 /// The candidate set the fuzzy list and the filter bar rank over.
 const BRANCHES: &[(&str, &str)] = &[
     ("origin/main", "default"),
@@ -109,6 +112,7 @@ const DO_ROWS: &[(&str, &str, bool)] = &[
     ("Clone repo", "n", false),
     ("Sleep this worktree", "s", false),
 ];
+const CONTEXT_PREFIX: &str = "Switch to context: ";
 const CONTEXT_ROWS: &[(&str, &str)] = &[("personal", "2"), ("buk", "1")];
 
 /// A forgiving subsequence match: returns the matched character indices, or `None`.
@@ -146,8 +150,6 @@ fn branch_error(value: &str) -> Option<SharedString> {
     }
     None
 }
-
-// ------------------------------------------------------------------------------------- view
 
 struct InputGallery {
     focus_handle: FocusHandle,
@@ -207,11 +209,13 @@ impl InputGallery {
     fn on_editor_event(
         &mut self,
         _editor: Entity<TextInput>,
-        _event: &TextInputEvent,
+        event: &TextInputEvent,
         cx: &mut Context<Self>,
     ) {
-        self.refresh_editor_status(cx);
-        cx.notify();
+        if *event == TextInputEvent::Changed {
+            self.refresh_editor_status(cx);
+            cx.notify();
+        }
     }
 
     fn refresh_editor_status(&mut self, cx: &mut Context<Self>) {
@@ -276,9 +280,12 @@ impl InputGallery {
             .iter()
             .filter_map(|(label, digit)| {
                 subsequence(label, query).map(|hits| {
-                    PaletteRow::new(format!("Switch to context: {label}"))
+                    PaletteRow::new(format!("{CONTEXT_PREFIX}{label}"))
                         .key(*digit)
-                        .matches(hits.into_iter().map(|ix| ix + 22))
+                        .matches(
+                            hits.into_iter()
+                                .map(|ix| ix + CONTEXT_PREFIX.chars().count()),
+                        )
                         .icon(Icon::Boxes)
                 })
             })
@@ -304,8 +311,6 @@ impl InputGallery {
             self.ranked_branches().len()
         }
     }
-
-    // ------------------------------------------------------------------ actions
 
     fn toggle_theme(&mut self, _: &ToggleTheme, _window: &mut Window, cx: &mut Context<Self>) {
         Theme::toggle(cx);
@@ -455,7 +460,15 @@ impl InputGallery {
         cx.notify();
     }
 
-    fn confirm_yes(&mut self, _: &ConfirmYes, _window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_yes(&mut self, _: &ConfirmYes, window: &mut Window, cx: &mut Context<Self>) {
+        let required = match self.confirm {
+            ConfirmDemo::None => return,
+            ConfirmDemo::Compact => ConfirmKey::Lower,
+            ConfirmDemo::Expanded => ConfirmKey::Upper,
+        };
+        if required == ConfirmKey::Upper && !window.modifiers().shift {
+            return;
+        }
         if self.confirm != ConfirmDemo::None {
             self.answer = Some(match self.confirm {
                 ConfirmDemo::Expanded => "confirmed with Y".into(),
@@ -500,60 +513,26 @@ impl Focusable for InputGallery {
     }
 }
 
-// --------------------------------------------------------------------------- layout helpers
-
-fn section(title: &str, theme: &Theme, children: Vec<AnyElement>) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .gap(theme.space.md)
-        .pb(theme.space.xl)
-        .child(SectionHeader::new(title.to_string()))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .gap(theme.space.sm)
-                .children(children),
-        )
-        .into_any_element()
-}
-
-fn labeled(label: &str, theme: &Theme, child: impl IntoElement) -> AnyElement {
-    div()
-        .flex()
-        .items_start()
-        .w_full()
-        .gap(theme.space.md)
-        .child(Text::hint(label.to_string()).faint().w(px(170.0)))
-        .child(div().flex().flex_1().min_w_0().flex_col().child(child))
-        .into_any_element()
-}
-
 /// A bordered surface, so a component that paints on `surface` is judged on the right ground.
 fn card(theme: &Theme, width: gpui::Pixels, child: impl IntoElement) -> AnyElement {
     div()
         .w(width)
         .rounded(theme.radii.sm)
         .bg(theme.colors.surface)
-        .border_1()
+        .border(theme.metrics.hairline)
         .border_color(theme.colors.border)
         .overflow_hidden()
         .child(child)
         .into_any_element()
 }
 
-// -------------------------------------------------------------------------------- sections
-
 fn text_field_section(theme: &Theme) -> AnyElement {
     let width = px(380.0);
-    section(
+    LAYOUT.section(
         "text field \u{b7} presentational",
         theme,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "focused + preview",
                 theme,
                 div().w(width).child(
@@ -565,7 +544,7 @@ fn text_field_section(theme: &Theme) -> AnyElement {
                         .preview("\u{2192} buk/payroll#feat-rut-validator"),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "invalid (same slot)",
                 theme,
                 div().w(width).child(
@@ -578,14 +557,14 @@ fn text_field_section(theme: &Theme) -> AnyElement {
                         .invalid("branch cannot contain \"..\""),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "unfocused",
                 theme,
                 div()
                     .w(width)
                     .child(TextField::new("origin/main").label("base").mono(true)),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "placeholder + icon",
                 theme,
                 div().w(width).child(
@@ -595,7 +574,7 @@ fn text_field_section(theme: &Theme) -> AnyElement {
                         .focused(true),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "44 px, no status slot",
                 theme,
                 div().w(width).child(
@@ -614,16 +593,16 @@ fn live_editor_section(gallery: &InputGallery, theme: &Theme, cx: &App) -> AnyEl
     let state = gallery.editor.read(cx);
     let caret = state.state().caret_chars();
     let value_len = state.text().chars().count();
-    section(
+    LAYOUT.section(
         "text input \u{b7} live (ctrl-i to focus)",
         theme,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "real editor",
                 theme,
                 div().w(px(380.0)).child(gallery.editor.clone()),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "state",
                 theme,
                 Text::hint(format!(
@@ -645,11 +624,11 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
         item
     });
 
-    section(
+    LAYOUT.section(
         "fuzzy list",
         theme,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "ranked + highlighted",
                 theme,
                 card(
@@ -665,7 +644,7 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         ))),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "two-line + disabled + key",
                 theme,
                 card(
@@ -685,7 +664,7 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                     .cursor(0),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "empty",
                 theme,
                 card(
@@ -701,11 +680,11 @@ fn fuzzy_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
 fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     let shown = gallery.ranked_branches().len();
     let total = BRANCHES.len();
-    section(
+    LAYOUT.section(
         "filter bar",
         theme,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "live (/ to focus)",
                 theme,
                 card(
@@ -717,7 +696,7 @@ fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         .placeholder("filter branches"),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "retained (input exited)",
                 theme,
                 card(
@@ -726,7 +705,7 @@ fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                     FilterBar::new("rut", 2, 12).focused(false),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "no match",
                 theme,
                 card(theme, px(460.0), FilterBar::new("zzz", 0, 12)),
@@ -737,11 +716,11 @@ fn filter_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
 
 fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
     let host = HOSTS[gallery.host];
-    section(
+    LAYOUT.section(
         "cycler \u{b7} toggle \u{b7} number field",
         theme,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "cycler (\u{2190} \u{2192})",
                 theme,
                 card(
@@ -769,7 +748,7 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         ),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "toggles (space)",
                 theme,
                 card(
@@ -798,7 +777,7 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                         ),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "number fields (+ \u{2212})",
                 theme,
                 card(
@@ -849,11 +828,11 @@ fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement 
     .cursor(0)
     .under_text_field(false);
 
-    section(
+    LAYOUT.section(
         "segmented tabs \u{b7} select",
         theme,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "tabs (h / l)",
                 theme,
                 SegmentedTabs::new([
@@ -863,13 +842,13 @@ fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement 
                 ])
                 .active(gallery.tab),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "tabs \u{b7} bare",
                 theme,
                 SegmentedTabs::new([SegmentedTab::bare("keys"), SegmentedTab::bare("glossary")])
                     .active(1),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "select, open (o)",
                 theme,
                 div().w(px(420.0)).child(
@@ -881,7 +860,7 @@ fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement 
                         .options(options),
                 ),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "select \u{b7} placeholder / invalid / disabled",
                 theme,
                 div()
@@ -906,11 +885,11 @@ fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement 
 }
 
 fn confirm_hint_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
-    section(
+    LAYOUT.section(
         "confirm \u{b7} palette",
         theme,
         vec![
-            labeled(
+            LAYOUT.labeled(
                 "open one",
                 theme,
                 KeyHintRow::new()
@@ -918,7 +897,7 @@ fn confirm_hint_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                     .key("D", "expanded confirm (Y)")
                     .key(":", "palette"),
             ),
-            labeled(
+            LAYOUT.labeled(
                 "last answer",
                 theme,
                 Text::ui(gallery.answer.clone().unwrap_or_else(|| "\u{2014}".into())).muted(),
@@ -926,8 +905,6 @@ fn confirm_hint_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
         ],
     )
 }
-
-// --------------------------------------------------------------------------------- overlays
 
 fn compact_confirm() -> ConfirmDialog {
     ConfirmDialog::new(
@@ -1033,7 +1010,7 @@ impl Render for InputGallery {
                     .px(theme.space.lg)
                     .gap(theme.space.md)
                     .bg(theme.colors.surface)
-                    .border_b(px(1.0))
+                    .border_b(theme.metrics.hairline)
                     .border_color(theme.colors.border)
                     .child(Text::label("fleet-ui-kit \u{b7} input group"))
                     .child(
@@ -1072,7 +1049,7 @@ impl Render for InputGallery {
                     .h(theme.metrics.status_bar_h)
                     .px(theme.space.lg)
                     .bg(theme.colors.surface)
-                    .border_t(px(1.0))
+                    .border_t(theme.metrics.hairline)
                     .border_color(theme.colors.border)
                     .child(ModeWord::new(if typing {
                         Mode::Filter
@@ -1088,7 +1065,7 @@ impl Render for InputGallery {
             )
             .when(self.palette_open, |el| {
                 el.child(
-                    Overlay::new().child(
+                    Overlay::new().content(
                         palette_sections.into_iter().fold(
                             Palette::new(palette_query)
                                 .caret(palette_caret)
@@ -1110,10 +1087,11 @@ impl Render for InputGallery {
 }
 
 fn main() {
-    gpui_platform::application()
-        .with_assets(KitAssets)
-        .run(|cx: &mut App| {
-            Theme::init(ThemeMode::Dark, cx);
+    support::runtime::run(
+        "fleet-ui-kit · input gallery",
+        (1180.0, 880.0),
+        Quit,
+        |cx| {
             cx.bind_keys([
                 // Always available, in both modes.
                 KeyBinding::new("ctrl-t", ToggleTheme, None),
@@ -1143,43 +1121,7 @@ fn main() {
                 KeyBinding::new("+", Increment, Some("GalleryNormal")),
                 KeyBinding::new("-", Decrement, Some("GalleryNormal")),
             ]);
-            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.set_menus(vec![Menu {
-                name: "fleet-ui-kit".into(),
-                items: vec![MenuItem::action("Quit", Quit)],
-                disabled: false,
-            }]);
-            cx.on_window_closed(|cx: &mut App, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            let bounds = Bounds::centered(None, size(px(1180.0), px(880.0)), cx);
-            let window = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("fleet-ui-kit \u{b7} input gallery".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |_window, cx| {
-                    let view: Entity<InputGallery> = cx.new(InputGallery::new);
-                    view
-                },
-            );
-
-            if let Ok(window) = window {
-                window
-                    .update(cx, |view, window, cx| {
-                        window.focus(&view.focus_handle(cx), cx);
-                    })
-                    .ok();
-            }
-
-            cx.activate(true);
-        });
+        },
+        InputGallery::new,
+    );
 }

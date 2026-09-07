@@ -14,7 +14,7 @@ use fleet_daemon::{
         shell::{RealShell, ShellResult},
     },
     jobs::JobManager,
-    services::inspect::Inspect,
+    services::{inspect::Inspect, sessions::Sessions},
     stores::{config::ConfigStore, state::StateStore},
     testing::fakes::{FakeGithub, FakeShell},
 };
@@ -63,8 +63,7 @@ async fn inspect_reports_dirty_file_count_and_conservative_merge() {
         home.join("trash"),
         [home.join("repos"), home.join("worktrees")],
     ));
-    let config = Arc::new(ConfigStore::new(&home, files.clone()));
-    let state = Arc::new(StateStore::new(&home, files, Arc::new(SystemClock)));
+    let state = Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock)));
     let repo_id = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
     let context_id = ContextId::try_from("acme").unwrap_or_else(|error| panic!("{error}"));
     let worktree_id =
@@ -116,7 +115,14 @@ async fn inspect_reports_dirty_file_count_and_conservative_merge() {
     );
     let git: Arc<dyn Git> = Arc::new(ShellGit::new(Arc::new(RealShell)));
     let github: Arc<dyn Github> = Arc::new(FakeGithub::new(gh_shell));
-    let inspect = Inspect::new(config, state, Arc::new(JobManager::new(&home)), git, github);
+    let sessions = Sessions::new(Arc::new(ConfigStore::new(&home, files)), Arc::clone(&state));
+    let inspect = Inspect::new(
+        state,
+        Arc::new(JobManager::new(&home)),
+        git,
+        github,
+        sessions,
+    );
 
     let inspections = inspect
         .worktrees(Vec::new(), None, true)

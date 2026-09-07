@@ -16,32 +16,64 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.97.1"
+publish = false
+
+# Hazards only. Clippy's default `style`, `complexity`, `perf` and `correctness`
+# groups stay at warn and are enforced by `-D warnings` in `make clippy`, so this
+# list never grants an allowance — it only raises what a warning would let slip.
+[workspace.lints.clippy]
+dbg_macro = "deny"
+declare_interior_mutable_const = "deny"
+disallowed_methods = "deny"
+todo = "deny"
+unimplemented = "deny"
+# `redundant_clone` belongs here too, but the app and lazygit render paths still
+# trip it. Add it once `cargo clippy --workspace --all-targets --all-features --
+# -W clippy::redundant_clone` is quiet.
 
 [workspace.dependencies]
+fleet-cli = { path = "crates/fleet-cli" }
+fleet-client = { path = "crates/fleet-client" }
+fleet-core = { path = "crates/fleet-core" }
+fleet-daemon = { path = "crates/fleet-daemon" }
+fleet-git = { path = "crates/fleet-git" }
+fleet-lazygit = { path = "crates/fleet-lazygit" }
+fleet-proto = { path = "crates/fleet-proto" }
+fleet-term = { path = "crates/fleet-term" }
+fleet-ui-kit = { path = "crates/fleet-ui-kit" }
+
 anyhow = "1"
 async-channel = "2"
+async-trait = "0.1"
 bitflags = "2"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.18.1", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.18.1", features = ["font-kit"] }
+libc = "0.2"
+libghostty-vt = "=0.2.1"
+nix = { version = "0.28", features = ["process", "signal"] }
+notify = "8"
 portable-pty = "0.9.0"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+shell-words = "1"
 similar = "3.2"
 smol_str = "0.3"
-syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio = { version = "1", default-features = false }
+tokio-util = "0.7"
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = "0.3"
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-libghostty-vt = "=0.2.1"
-notify = "8"
 
 [profile.dev]
 opt-level = 1

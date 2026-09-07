@@ -1,28 +1,37 @@
 //! Repository registration, discovery, caching, and clone orchestration.
 
+use super::{
+    awaited::{JobDelivery, git_error, github_error},
+    cache::{cache_is_fresh, fleet_home, read_cache, write_cache},
+};
+
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use fleet_core::{
     cache::RepoCache,
-    ids::{ContextId, JobId, RepoId},
+    ids::{ContextId, RepoId},
     model::{CloneJob, CloneStatus, Repo, RepoHooks},
-    paths::FleetHome,
 };
 use fleet_proto::{
     job::{JobKind, JobRecord},
     response::BaseRefs,
 };
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::{
     DaemonError, DaemonResult,
-    adapters::{files::Files, git::Git, github::Github, process::Process},
+    adapters::{
+        files::Files,
+        git::Git,
+        github::Github,
+        process::{Process, pid_is_alive},
+    },
+    error::remote_unsupported,
     jobs::{JobCtx, JobManager},
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -36,7 +45,7 @@ pub struct Repos {
     git: Arc<dyn Git>,
     github: Arc<dyn Github>,
     files: Arc<dyn Files>,
-    process: Option<Arc<dyn Process>>,
+    process: Arc<dyn Process>,
 }
 
 impl Repos {
@@ -49,6 +58,7 @@ impl Repos {
         git: Arc<dyn Git>,
         github: Arc<dyn Github>,
         files: Arc<dyn Files>,
+        process: Arc<dyn Process>,
     ) -> Self {
         Self {
             config,
@@ -57,15 +67,8 @@ impl Repos {
             git,
             github,
             files,
-            process: None,
+            process,
         }
-    }
-
-    /// Adds process liveness for daemon-startup clone reconciliation.
-    #[must_use]
-    pub fn with_process(mut self, process: Arc<dyn Process>) -> Self {
-        self.process = Some(process);
-        self
     }
 
     /// Resumes reconciliation for detached clones recorded before a daemon restart.
@@ -96,7 +99,7 @@ impl Repos {
             let state = Arc::clone(&self.state);
             let git = Arc::clone(&self.git);
             let files = Arc::clone(&self.files);
-            let process = self.process.clone();
+            let process = Arc::clone(&self.process);
             self.jobs.submit(
                 JobKind::Clone,
                 format!("{}:startup-reconcile", clone.id),
@@ -104,10 +107,7 @@ impl Repos {
                 true,
                 false,
                 move |context| async move {
-                    while process
-                        .as_ref()
-                        .map_or_else(|| process_is_alive(pid), |process| process.is_alive(pid))
-                    {
+                    while process.is_alive(pid) {
                         tokio::select! {
                             () = context.cancel.cancelled() => {
                                 terminate_process_group(pid).await;
@@ -129,7 +129,7 @@ impl Repos {
         Ok(())
     }
 
-    /// Starts detached `git clone --progress` and reconciliation (inventory sections 2, 6, and 7).
+    /// Starts detached `git clone --progress` and reconciliation.
     pub async fn clone_repo(
         &self,
         owner: String,
@@ -223,17 +223,14 @@ impl Repos {
             true,
             move |context| async move { clone_operation(context, clone, state, git, files).await },
         );
-        job_record(&self.jobs, &job_id).ok_or_else(|| {
+        self.jobs.record(&job_id).ok_or_else(|| {
             DaemonError::NotFound(format!("clone job for repository {operation_id}"))
         })
     }
 
-    /// Cascades repository deletion through registered children and recoverable trash.
-    pub async fn delete(&self, repo: RepoId) -> DaemonResult<()> {
-        let _deleting = self.jobs.begin_repo_deletion(&repo)?;
-        self.delete_guarded(repo).await
-    }
-
+    /// Deletes one repository's registry entries and trashes its directories. Callers
+    /// hold the deletion guard and have already removed the repository's worktrees; the
+    /// whole cascade lives in `Services::delete_repo_cascade`.
     pub(crate) async fn delete_guarded(&self, repo: RepoId) -> DaemonResult<()> {
         let snapshot = self.state.load().await?;
         if snapshot
@@ -241,9 +238,7 @@ impl Repos {
             .iter()
             .any(|worktree| worktree.repo_id == repo && worktree.host.is_some())
         {
-            return Err(DaemonError::Unsupported(
-                "remote hosts are not supported yet".to_owned(),
-            ));
+            return Err(remote_unsupported());
         }
         let registered = snapshot.repos.iter().find(|item| item.id == repo).cloned();
         let clone = snapshot.clones.iter().find(|item| item.id == repo).cloned();
@@ -281,9 +276,7 @@ impl Repos {
                 if state.worktrees.iter().any(|worktree| {
                     worktree.repo_id == repo_in_transaction && worktree.host.is_some()
                 }) {
-                    return Err(DaemonError::Unsupported(
-                        "remote hosts are not supported yet".to_owned(),
-                    ));
+                    return Err(remote_unsupported());
                 }
                 for path in &paths {
                     if files.exists(path) {
@@ -321,7 +314,7 @@ impl Repos {
         Ok(())
     }
 
-    /// Moves a repository to an existing context in one state transaction (inventory sections 1 and 6).
+    /// Moves a repository to an existing context in one state transaction.
     pub async fn move_to_context(&self, repo: RepoId, context: ContextId) -> DaemonResult<Repo> {
         self.state
             .transaction(move |state| {
@@ -374,8 +367,7 @@ impl Repos {
         let semaphore = self.jobs.github_semaphore();
         let owner_for_job = owner.clone();
         let target = format!("{owner}:{}", Uuid::new_v4());
-        let (sender, receiver) = oneshot::channel::<Result<RepoCache, String>>();
-        let sender = Arc::new(Mutex::new(Some(sender)));
+        let (delivery, awaited) = JobDelivery::caller_gets_copy(github_error);
         self.jobs.submit(
             JobKind::RepoDiscovery,
             target,
@@ -383,53 +375,31 @@ impl Repos {
             true,
             true,
             move |context| async move {
-                let result: DaemonResult<RepoCache> = async {
-                    let _permit = semaphore
-                        .acquire_owned()
-                        .await
-                        .map_err(|error| DaemonError::Join(error.to_string()))?;
-                    context.progress(format!("listing repositories for {owner_for_job}"))?;
-                    let repos = github.list_repositories(&owner_for_job).await?;
-                    let cache = RepoCache {
-                        fetched_at: Utc::now().to_rfc3339(),
-                        repos,
-                    };
-                    write_cache(files.as_ref(), &cache_path, &cache)?;
-                    Ok(cache)
-                }
-                .await;
-                match result {
-                    Ok(cache) => {
-                        if let Some(sender) = sender
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ignored = sender.send(Ok(cache));
-                        }
-                        Ok(())
+                delivery.finish(
+                    async {
+                        let _permit = semaphore
+                            .acquire_owned()
+                            .await
+                            .map_err(|error| DaemonError::Join(error.to_string()))?;
+                        context.progress(format!("listing repositories for {owner_for_job}"))?;
+                        let repos = github.list_repositories(&owner_for_job).await?;
+                        let cache = RepoCache {
+                            fetched_at: Utc::now().to_rfc3339(),
+                            repos,
+                        };
+                        write_cache(files.as_ref(), &cache_path, &cache)?;
+                        Ok(cache)
                     }
-                    Err(error) => {
-                        let message = error.to_string();
-                        if let Some(sender) = sender
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            let _ignored = sender.send(Err(message));
-                        }
-                        Err(error)
-                    }
-                }
+                    .await,
+                )
             },
         );
-        match receiver.await {
-            Ok(Ok(cache)) => Ok(cache),
-            Ok(Err(_error)) if cached.is_some() => {
-                cached.ok_or_else(|| DaemonError::NotFound("repository cache".to_owned()))
-            }
-            Ok(Err(error)) => Err(DaemonError::Github(error)),
-            Err(_) => Err(DaemonError::Cancelled),
+        match awaited.wait().await {
+            Ok(cache) => Ok(cache),
+            // Every delivered failure arrives in the GitHub category; a bare cancellation
+            // means the job was dropped before it delivered anything.
+            Err(DaemonError::Cancelled) => Err(DaemonError::Cancelled),
+            Err(error) => cached.ok_or(error),
         }
     }
 
@@ -446,8 +416,7 @@ impl Repos {
         if force {
             let git = Arc::clone(&self.git);
             let path_for_job = path.clone();
-            let (sender, receiver) = oneshot::channel::<Result<(), String>>();
-            let sender = Arc::new(Mutex::new(Some(sender)));
+            let (delivery, awaited) = JobDelivery::caller_gets_copy(git_error);
             self.jobs.submit(
                 JobKind::RepoFetch,
                 format!("{repo}:{}", Uuid::new_v4()),
@@ -455,38 +424,16 @@ impl Repos {
                 true,
                 true,
                 move |context| async move {
-                    context.progress("fetching origin")?;
-                    let result = git.fetch(&path_for_job, true).await;
-                    match result {
-                        Ok(()) => {
-                            if let Some(sender) = sender
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .take()
-                            {
-                                let _ignored = sender.send(Ok(()));
-                            }
-                            Ok(())
+                    delivery.finish(
+                        async {
+                            context.progress("fetching origin")?;
+                            git.fetch(&path_for_job, true).await
                         }
-                        Err(error) => {
-                            let message = error.to_string();
-                            if let Some(sender) = sender
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .take()
-                            {
-                                let _ignored = sender.send(Err(message));
-                            }
-                            Err(error)
-                        }
-                    }
+                        .await,
+                    )
                 },
             );
-            match receiver.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(DaemonError::Git(error)),
-                Err(_) => return Err(DaemonError::Cancelled),
-            }
+            awaited.wait().await?;
         }
         let mut refs = self
             .git
@@ -538,11 +485,6 @@ impl Repos {
             })
             .await
     }
-
-    /// Starts a non-destructive import from the default swarm home.
-    pub async fn import_from_swarm(&self) -> DaemonResult<JobRecord> {
-        Err(DaemonError::Unimplemented("repos::import_from_swarm"))
-    }
 }
 
 async fn clone_operation(
@@ -579,7 +521,7 @@ async fn clone_operation(
         .await?;
     context.progress(format!("clone running as pid {}", process.pid))?;
 
-    while process_is_alive(process.pid) {
+    while pid_is_alive(process.pid) {
         tokio::select! {
             () = context.cancel.cancelled() => {
                 terminate_process_group(process.pid).await;
@@ -728,25 +670,16 @@ async fn resolve_default_branch(git: &dyn Git, path: &Path, hint: &str) -> Strin
     "main".to_owned()
 }
 
-fn process_is_alive(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal zero performs an existence/permission check and does not modify the process.
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
 async fn terminate_process_group(pid: u32) {
     let Ok(pid) = i32::try_from(pid) else {
         return;
     };
     signal_process_group(pid, libc::SIGTERM);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while process_is_alive(pid.cast_unsigned()) && tokio::time::Instant::now() < deadline {
+    while pid_is_alive(pid.cast_unsigned()) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    if process_is_alive(pid.cast_unsigned()) {
+    if pid_is_alive(pid.cast_unsigned()) {
         signal_process_group(pid, libc::SIGKILL);
     }
 }
@@ -774,39 +707,4 @@ fn validate_owner(owner: &str) -> DaemonResult<()> {
     } else {
         Ok(())
     }
-}
-
-fn cache_is_fresh(fetched_at: &str, ttl_seconds: i64) -> bool {
-    if ttl_seconds < 0 {
-        return false;
-    }
-    DateTime::parse_from_rfc3339(fetched_at)
-        .ok()
-        .map(|fetched| Utc::now().signed_duration_since(fetched.with_timezone(&Utc)))
-        .is_some_and(|age| age.num_milliseconds() >= 0 && age.num_seconds() < ttl_seconds)
-}
-
-fn read_cache<T: serde::de::DeserializeOwned>(files: &dyn Files, path: &Path) -> Option<T> {
-    files
-        .read_text(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-}
-
-fn write_cache<T: serde::Serialize>(files: &dyn Files, path: &Path, cache: &T) -> DaemonResult<()> {
-    let mut text = serde_json::to_string(cache)?;
-    text.push('\n');
-    files.atomic_write_text(path, &text)
-}
-
-fn fleet_home(state: &StateStore) -> DaemonResult<FleetHome> {
-    state
-        .path()
-        .parent()
-        .map(|path| FleetHome::new(path.to_path_buf()))
-        .ok_or_else(|| DaemonError::Validation("state path has no parent".to_owned()))
-}
-
-fn job_record(jobs: &JobManager, id: &JobId) -> Option<JobRecord> {
-    jobs.list().into_iter().find(|record| &record.id == id)
 }

@@ -2,7 +2,6 @@
 
 use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
 
-use fleet_core::{ids::SessionId, sessions::SessionKind};
 use fleet_proto::{
     codec::FleetCodec,
     event::{Event, EventKind},
@@ -10,6 +9,7 @@ use fleet_proto::{
     response::{Response, ResponseBody},
 };
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
+use serde::Serialize;
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio_util::{codec::Framed, sync::CancellationToken};
@@ -59,57 +59,9 @@ impl Connection {
     pub async fn run(self) -> DaemonResult<()> {
         #[cfg(test)]
         let mut before_serialized_response = self.before_serialized_response;
-        let mut framed = Framed::new(self.stream, FleetCodec::<serde_json::Value, Request>::new());
-        let Some(first) = framed.next().await else {
+        let mut framed = Framed::new(self.stream, FleetCodec::<Outbound, Request>::new());
+        if !negotiate_hello(&mut framed).await? {
             return Ok(());
-        };
-        let first = first.map_err(|error| DaemonError::Protocol(error.to_string()))?;
-        match first.body {
-            RequestBody::Hello {
-                protocol: fleet_proto::PROTOCOL_VERSION,
-                ..
-            } => {
-                send_response(
-                    &mut framed,
-                    Response {
-                        id: first.id,
-                        result: Ok(ResponseBody::Hello {
-                            protocol: fleet_proto::PROTOCOL_VERSION,
-                            server: Services::version(),
-                        }),
-                    },
-                )
-                .await?;
-            }
-            RequestBody::Hello { protocol, .. } => {
-                send_response(
-                    &mut framed,
-                    Response {
-                        id: first.id,
-                        result: Err(DaemonError::Unsupported(format!(
-                            "unsupported protocol {protocol}; expected {}",
-                            fleet_proto::PROTOCOL_VERSION
-                        ))
-                        .into()),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-            _ => {
-                send_response(
-                    &mut framed,
-                    Response {
-                        id: first.id,
-                        result: Err(DaemonError::Protocol(
-                            "Hello must be the first request".to_owned(),
-                        )
-                        .into()),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
         }
 
         let watch_owner = self.services.watches.owner();
@@ -136,105 +88,34 @@ impl Connection {
                         RequestBody::DaemonShutdown { stop_sessions } => Some(*stop_sessions),
                         _ => None,
                     };
-                    let effects = RequestEffects::for_request(&request.body, &self.services);
-                    let attachment = match &request.body {
-                        RequestBody::AttachTerminal { terminal, .. } => Some((true, *terminal)),
-                        RequestBody::DetachTerminal { terminal } => Some((false, *terminal)),
-                        _ => None,
-                    };
-                    match request.body {
-                        RequestBody::Hello { .. } => {
-                            let result = Err(DaemonError::Protocol("Hello is only valid as the first request".to_owned()));
-                            if let Err(error) = send_response(
-                                &mut framed,
-                                Response { id, result: result.map_err(Into::into) },
-                            )
-                            .await
-                            {
-                                break Err(error);
-                            }
-                        }
+                    let snapshot_changed = request_changes_snapshot(&request.body);
+                    // Connection-local and attachment requests answer here; everything else joins
+                    // `pending` and may complete out of order.
+                    let answered = match request.body {
+                        RequestBody::Hello { .. } => Some(Err(DaemonError::Protocol(
+                            "Hello is only valid as the first request".to_owned(),
+                        ))),
                         RequestBody::Subscribe { events } => {
                             subscriptions.extend(events);
-                            if let Err(error) = send_response(
-                                &mut framed,
-                                Response { id, result: Ok(ResponseBody::Ack) },
-                            )
-                            .await
-                            {
-                                break Err(error);
-                            }
+                            Some(Ok(ResponseBody::Ack))
                         }
                         RequestBody::Unsubscribe => {
                             subscriptions.clear();
-                            if let Err(error) = send_response(
-                                &mut framed,
-                                Response { id, result: Ok(ResponseBody::Ack) },
-                            )
-                            .await
-                            {
-                                break Err(error);
+                            Some(Ok(ResponseBody::Ack))
+                        }
+                        body if terminal_attachment_request_is_serialized(&body) => {
+                            let result = run_attachment_request(&self.services, owner_id, body, &mut attached).await;
+                            if result.is_ok() && snapshot_changed {
+                                self.events.request_snapshot(Arc::clone(&self.services));
                             }
+                            #[cfg(test)]
+                            if let Some((ready, release)) = before_serialized_response.take() {
+                                let _ = ready.send(());
+                                let _ = release.await;
+                            }
+                            Some(result)
                         }
                         body => {
-                            // Attachment membership and PTY dimensions are one ordered piece of
-                            // per-connection state. Running these requests in `pending` lets two
-                            // Attach calls both observe a missing membership (leaking a service
-                            // refcount), or lets an older resize finish after a newer one. They are
-                            // infrequent and must complete here before this actor accepts the next
-                            // control request.
-                            if terminal_attachment_request_is_serialized(&body) {
-                                let resize_existing = matches!(
-                                    &body,
-                                    RequestBody::AttachTerminal { terminal, .. }
-                                        if attached.contains(terminal)
-                                );
-                                let detach_missing = matches!(
-                                    &body,
-                                    RequestBody::DetachTerminal { terminal }
-                                        if !attached.contains(terminal)
-                                );
-                                let result = match body {
-                                    RequestBody::AttachTerminal { terminal, cols, rows }
-                                        if resize_existing =>
-                                    {
-                                        self.services.sessions.resize(terminal, cols, rows).await
-                                            .map(|()| ResponseBody::Ack)
-                                    }
-                                    RequestBody::DetachTerminal { .. } if detach_missing => {
-                                        Ok(ResponseBody::Ack)
-                                    }
-                                    body => self.services.dispatch_owned(body, owner_id).await,
-                                };
-                                let succeeded = result.is_ok();
-                                if succeeded
-                                    && let Some((attach, terminal)) = attachment
-                                {
-                                    if attach {
-                                        attached.insert(terminal);
-                                    } else {
-                                        attached.remove(&terminal);
-                                    }
-                                }
-                                if succeeded {
-                                    effects.publish(&result, &self.services, &self.events);
-                                }
-                                #[cfg(test)]
-                                if let Some((ready, release)) = before_serialized_response.take()
-                                {
-                                    let _ = ready.send(());
-                                    let _ = release.await;
-                                }
-                                if let Err(error) = send_response(
-                                    &mut framed,
-                                    Response { id, result: result.map_err(Into::into) },
-                                )
-                                .await
-                                {
-                                    break Err(error);
-                                }
-                                continue;
-                            }
                             let terminal_order = pty_input_request_is_ordered(&body).then(|| {
                                 let previous = terminal_order_tail.take();
                                 let (release, next) = oneshot::channel();
@@ -255,16 +136,22 @@ impl Connection {
                                 if let Some(release) = release_terminal_order {
                                     let _ = release.send(());
                                 }
-                                CompletedRequest { id, result, effects, shutdown_request }
+                                CompletedRequest { id, result, snapshot_changed, shutdown_request }
                             }));
+                            None
                         }
+                    };
+                    if let Some(result) = answered
+                        && let Err(error) = send_response(&mut framed, Response { id, result: result.map_err(Into::into) }).await
+                    {
+                        break Err(error);
                     }
                 }
                 Some(completed) = pending.next(), if !pending.is_empty() => {
-                    let CompletedRequest { id, result, effects, shutdown_request } = completed;
+                    let CompletedRequest { id, result, snapshot_changed, shutdown_request } = completed;
                     let succeeded = result.is_ok();
-                    if succeeded {
-                        effects.publish(&result, &self.services, &self.events);
+                    if succeeded && snapshot_changed {
+                        self.events.request_snapshot(Arc::clone(&self.services));
                     }
                     if shutdown_request == Some(true) && succeeded {
                         self.services.stop_all_sessions().await;
@@ -328,6 +215,85 @@ impl Connection {
     }
 }
 
+/// Answers the mandatory opening Hello and reports whether the session may proceed.
+async fn negotiate_hello(
+    framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
+) -> DaemonResult<bool> {
+    let Some(first) = framed.next().await else {
+        return Ok(false);
+    };
+    let first = first.map_err(|error| DaemonError::Protocol(error.to_string()))?;
+    let result = match first.body {
+        RequestBody::Hello {
+            protocol: fleet_proto::PROTOCOL_VERSION,
+            ..
+        } => Ok(ResponseBody::Hello {
+            protocol: fleet_proto::PROTOCOL_VERSION,
+            server: Services::version(),
+        }),
+        RequestBody::Hello { protocol, .. } => Err(DaemonError::Unsupported(format!(
+            "unsupported protocol {protocol}; expected {}",
+            fleet_proto::PROTOCOL_VERSION
+        ))),
+        _ => Err(DaemonError::Protocol(
+            "Hello must be the first request".to_owned(),
+        )),
+    };
+    let accepted = result.is_ok();
+    send_response(
+        framed,
+        Response {
+            id: first.id,
+            result: result.map_err(Into::into),
+        },
+    )
+    .await?;
+    Ok(accepted)
+}
+
+/// Runs one attachment or resize request to completion and reconciles this connection's membership.
+///
+/// Attachment membership and PTY dimensions are one ordered piece of per-connection state. Running
+/// these concurrently would let two Attach calls both observe a missing membership (leaking a
+/// service refcount), or let an older resize finish after a newer one.
+async fn run_attachment_request(
+    services: &Services,
+    owner_id: u64,
+    body: RequestBody,
+    attached: &mut HashSet<fleet_core::ids::TerminalId>,
+) -> DaemonResult<ResponseBody> {
+    let membership = match &body {
+        RequestBody::AttachTerminal { terminal, .. } => Some((true, *terminal)),
+        RequestBody::DetachTerminal { terminal } => Some((false, *terminal)),
+        _ => None,
+    };
+    let result = match body {
+        RequestBody::AttachTerminal {
+            terminal,
+            cols,
+            rows,
+        } if attached.contains(&terminal) => services
+            .sessions
+            .resize(terminal, cols, rows)
+            .await
+            .map(|()| ResponseBody::Ack),
+        RequestBody::DetachTerminal { terminal } if !attached.contains(&terminal) => {
+            Ok(ResponseBody::Ack)
+        }
+        body => services.dispatch_owned(body, owner_id).await,
+    };
+    if result.is_ok()
+        && let Some((attach, terminal)) = membership
+    {
+        if attach {
+            attached.insert(terminal);
+        } else {
+            attached.remove(&terminal);
+        }
+    }
+    result
+}
+
 type DispatchFuture = Pin<Box<dyn Future<Output = CompletedRequest> + Send>>;
 
 /// Requests whose effects append to the PTY input byte stream.
@@ -359,143 +325,46 @@ fn terminal_attachment_request_is_serialized(body: &RequestBody) -> bool {
 struct CompletedRequest {
     id: u64,
     result: DaemonResult<ResponseBody>,
-    effects: RequestEffects,
+    snapshot_changed: bool,
     shutdown_request: Option<bool>,
 }
 
-struct RequestEffects {
-    snapshot_changed: bool,
-    session_changed: bool,
-    previous_session: Option<SessionId>,
-}
-
-impl RequestEffects {
-    fn for_request(body: &RequestBody, services: &Services) -> Self {
-        // Watch output is a hot path and never changes session/snapshot metadata.
-        if matches!(
-            body,
-            RequestBody::StartWatch { .. }
-                | RequestBody::AppendWatchOutput { .. }
-                | RequestBody::FinishWatch { .. }
-                | RequestBody::ListWatches { .. }
-                | RequestBody::TailWatch { .. }
-                | RequestBody::DismissWatch { .. }
-        ) {
-            return Self {
-                snapshot_changed: false,
-                session_changed: false,
-                previous_session: None,
-            };
-        }
-        let snapshot_changed = matches!(
-            body,
-            RequestBody::CreateContext { .. }
-                | RequestBody::UpdateContext { .. }
-                | RequestBody::DeleteContext { .. }
-                | RequestBody::SetActiveContext { .. }
-                | RequestBody::CloneRepo { .. }
-                | RequestBody::DeleteRepo { .. }
-                | RequestBody::MoveRepoToContext { .. }
-                | RequestBody::SetRepoHooks { .. }
-                | RequestBody::DismissClone { .. }
-                | RequestBody::CreateWorktree { .. }
-                | RequestBody::DeleteWorktrees { .. }
-                | RequestBody::PruneWorktrees { .. }
-                | RequestBody::TouchWorktreeOpened { .. }
-                | RequestBody::RestoreTrash { .. }
-                | RequestBody::RefreshStatuses { .. }
-                | RequestBody::CreateWorktreeFromPr { .. }
-                | RequestBody::EnsureSession { .. }
-                | RequestBody::KillWorktree { .. }
-                | RequestBody::SleepWorktree { .. }
-                | RequestBody::KillSession { .. }
-                | RequestBody::SleepSession { .. }
-                | RequestBody::NewTerminal { .. }
-                | RequestBody::CloseTerminal { .. }
-                | RequestBody::RestartTerminal { .. }
-                | RequestBody::RenameTerminal { .. }
-                | RequestBody::SelectTerminal { .. }
-                | RequestBody::AttachTerminal { .. }
-                | RequestBody::DetachTerminal { .. }
-                | RequestBody::DismissJobs { .. }
-                | RequestBody::SetConfig { .. }
-                | RequestBody::ImportFromSwarm
-                | RequestBody::Update
-        );
-        let session_changed = matches!(
-            body,
-            RequestBody::EnsureSession { .. }
-                | RequestBody::KillWorktree { .. }
-                | RequestBody::SleepWorktree { .. }
-                | RequestBody::KillSession { .. }
-                | RequestBody::SleepSession { .. }
-                | RequestBody::NewTerminal { .. }
-                | RequestBody::CloseTerminal { .. }
-                | RequestBody::RestartTerminal { .. }
-                | RequestBody::RenameTerminal { .. }
-                | RequestBody::SelectTerminal { .. }
-        );
-        let terminal = match body {
-            RequestBody::CloseTerminal { terminal }
-            | RequestBody::RestartTerminal { terminal }
-            | RequestBody::RenameTerminal { terminal, .. } => Some(*terminal),
-            _ => None,
-        };
-        let sessions = services.sessions.snapshot();
-        let previous_session = match body {
-            RequestBody::KillSession { session }
-            | RequestBody::SleepSession { session }
-            | RequestBody::NewTerminal { session, .. }
-            | RequestBody::SelectTerminal { session, .. } => Some(session.clone()),
-            RequestBody::KillWorktree { id } | RequestBody::SleepWorktree { id } => sessions
-                .iter()
-                .find(|session| matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == id))
-                .map(|session| session.id.clone()),
-            _ => terminal.and_then(|terminal| {
-                sessions
-                    .iter()
-                    .find(|session| session.terminals.iter().any(|item| item.id == terminal))
-                    .map(|session| session.id.clone())
-            }),
-        };
-        Self {
-            snapshot_changed,
-            session_changed,
-            previous_session,
-        }
-    }
-
-    fn publish(
-        &self,
-        result: &DaemonResult<ResponseBody>,
-        services: &Arc<Services>,
-        events: &BroadcastBus,
-    ) {
-        if self.snapshot_changed {
-            events.request_snapshot(Arc::clone(services));
-        }
-        if !self.session_changed {
-            return;
-        }
-        if let Ok(ResponseBody::Session(session)) = result {
-            events.publish(Event::SessionChanged(session.clone()));
-            return;
-        }
-        let sessions = services.sessions.snapshot();
-        if let Ok(ResponseBody::Terminal(terminal)) = result
-            && let Some(session) = sessions
-                .iter()
-                .find(|session| session.terminals.iter().any(|item| item.id == terminal.id))
-        {
-            events.publish(Event::SessionChanged(session.clone()));
-            return;
-        }
-        if let Some(id) = &self.previous_session
-            && let Some(session) = sessions.iter().find(|session| &session.id == id)
-        {
-            events.publish(Event::SessionChanged(session.clone()));
-        }
-    }
+fn request_changes_snapshot(body: &RequestBody) -> bool {
+    matches!(
+        body,
+        RequestBody::CreateContext { .. }
+            | RequestBody::UpdateContext { .. }
+            | RequestBody::DeleteContext { .. }
+            | RequestBody::SetActiveContext { .. }
+            | RequestBody::CloneRepo { .. }
+            | RequestBody::DeleteRepo { .. }
+            | RequestBody::MoveRepoToContext { .. }
+            | RequestBody::SetRepoHooks { .. }
+            | RequestBody::DismissClone { .. }
+            | RequestBody::CreateWorktree { .. }
+            | RequestBody::DeleteWorktrees { .. }
+            | RequestBody::PruneWorktrees { .. }
+            | RequestBody::TouchWorktreeOpened { .. }
+            | RequestBody::RestoreTrash { .. }
+            | RequestBody::RefreshStatuses { .. }
+            | RequestBody::CreateWorktreeFromPr { .. }
+            | RequestBody::EnsureSession { .. }
+            | RequestBody::KillWorktree { .. }
+            | RequestBody::SleepWorktree { .. }
+            | RequestBody::KillSession { .. }
+            | RequestBody::SleepSession { .. }
+            | RequestBody::NewTerminal { .. }
+            | RequestBody::CloseTerminal { .. }
+            | RequestBody::RestartTerminal { .. }
+            | RequestBody::RenameTerminal { .. }
+            | RequestBody::SelectTerminal { .. }
+            | RequestBody::AttachTerminal { .. }
+            | RequestBody::DetachTerminal { .. }
+            | RequestBody::DismissJobs { .. }
+            | RequestBody::SetConfig { .. }
+            | RequestBody::ImportFromSwarm
+            | RequestBody::Update
+    )
 }
 
 fn event_visible(
@@ -533,24 +402,29 @@ fn event_kind(event: &Event) -> EventKind {
     }
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Outbound {
+    Response(Response),
+    Event(Event),
+}
+
 async fn send_response(
-    framed: &mut Framed<UnixStream, FleetCodec<serde_json::Value, Request>>,
+    framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     response: Response,
 ) -> DaemonResult<()> {
-    let value = serde_json::to_value(response)?;
     framed
-        .send(value)
+        .send(Outbound::Response(response))
         .await
         .map_err(|error| DaemonError::Protocol(error.to_string()))
 }
 
 async fn send_event(
-    framed: &mut Framed<UnixStream, FleetCodec<serde_json::Value, Request>>,
+    framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     event: Event,
 ) -> DaemonResult<()> {
-    let value = serde_json::to_value(event)?;
     framed
-        .send(value)
+        .send(Outbound::Event(event))
         .await
         .map_err(|error| DaemonError::Protocol(error.to_string()))
 }
@@ -587,6 +461,45 @@ mod tests {
             Adapters::system(files),
             BroadcastBus::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn outbound_envelopes_preserve_protocol_shapes() {
+        let (server, client) = UnixStream::pair().expect("socket pair");
+        let mut server = Framed::new(server, FleetCodec::<Outbound, Request>::new());
+        let mut client = Framed::new(client, FleetCodec::<Request, serde_json::Value>::new());
+        for golden in [
+            r#"{"id":7,"result":{"Ok":{"type":"pong"}}}"#,
+            r#"{"id":8,"result":{"Err":{"kind":"unsupported","message":"unsupported protocol"}}}"#,
+        ] {
+            let expected: serde_json::Value =
+                serde_json::from_str(golden).expect("response golden");
+            let response = serde_json::from_value(expected.clone()).expect("response shape");
+            send_response(&mut server, response)
+                .await
+                .expect("send response");
+            let actual = tokio::time::timeout(Duration::from_secs(1), client.next())
+                .await
+                .expect("receive deadline")
+                .expect("response")
+                .expect("frame");
+            assert_eq!(actual, expected);
+        }
+        for golden in [
+            r#"{"type":"terminal_title","data":{"terminal":9,"title":"編集中"}}"#,
+            r#"{"type":"terminal_exited","data":{"terminal":9,"code":0}}"#,
+            r#"{"type":"terminal_frame","data":{"terminal":9,"seq":3,"cols":1,"rows":1,"full":true,"rowsChanged":[{"index":0,"cells":[{"text":"é","fg":"default","bg":"default","underlineColor":null,"attrs":"BOLD","width":"narrow"}],"wrapped":false}],"cursor":{"row":0,"col":0,"visible":true,"shape":"block"},"viewport":{"scrollbackLen":0,"offset":0,"historyEpoch":0},"modes":{"altScreen":false,"mouseReporting":false,"bracketedPaste":false,"focusEvents":false,"kittyKeyboardFlags":0,"appCursorKeys":false},"title":null}}"#,
+        ] {
+            let expected: serde_json::Value = serde_json::from_str(golden).expect("event golden");
+            let event = serde_json::from_value(expected.clone()).expect("event shape");
+            send_event(&mut server, event).await.expect("send event");
+            let actual = tokio::time::timeout(Duration::from_secs(1), client.next())
+                .await
+                .expect("receive deadline")
+                .expect("event")
+                .expect("frame");
+            assert_eq!(actual, expected);
+        }
     }
 
     #[tokio::test]

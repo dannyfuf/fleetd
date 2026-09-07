@@ -3,6 +3,7 @@
 use fleet_core::{
     ids::{SessionId, TerminalId},
     sessions::{AgentActivity, Session},
+    watches::{Watch, WatchChunk, WatchId},
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,18 +58,18 @@ pub enum ToastLevel {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
     /// A child watch was registered.
-    WatchStarted(fleet_core::watches::Watch),
+    WatchStarted(Watch),
     /// Retained output batched every 50 ms; sequence gaps require TailWatch.
     WatchOutput {
         /// Watch identifier.
-        watch: fleet_core::watches::WatchId,
+        watch: WatchId,
         /// Immutable sequenced output chunks.
-        chunks: Vec<fleet_core::watches::WatchChunk>,
+        chunks: Vec<WatchChunk>,
     },
     /// A child exited or its owning connection disappeared.
-    WatchExited(fleet_core::watches::Watch),
+    WatchExited(Watch),
     /// A watch was removed; this never kills a process.
-    WatchDismissed(fleet_core::watches::WatchId),
+    WatchDismissed(WatchId),
     /// The authoritative domain snapshot changed.
     SnapshotChanged(Snapshot),
     /// A job was created or changed.
@@ -118,38 +119,22 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_round_trip;
 
     #[test]
-    fn event_and_kind_round_trip() {
-        let event = Event::TerminalExited {
+    fn events_kinds_and_toast_levels_round_trip() {
+        assert_round_trip(Event::TerminalExited {
             terminal: TerminalId(3),
             code: Some(0),
-        };
-        let json = serde_json::to_string(&event).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: Event = serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, event);
-
-        let json =
-            serde_json::to_string(&EventKind::Toast).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: EventKind =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, EventKind::Toast);
-
-        let event = Event::AgentActivityChanged {
+        });
+        assert_round_trip(Event::AgentActivityChanged {
             session: SessionId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
             terminal_id: TerminalId(3),
             agent: Some("claude".to_owned()),
             activity: AgentActivity::Idle,
             changed_at: "2026-09-05T12:00:00Z".to_owned(),
-        };
-        let json = serde_json::to_string(&event).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: Event = serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, event);
-
-        let json =
-            serde_json::to_string(&ToastLevel::Warning).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: ToastLevel =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, ToastLevel::Warning);
+        });
+        assert_round_trip(EventKind::Toast);
+        assert_round_trip(ToastLevel::Warning);
     }
 }

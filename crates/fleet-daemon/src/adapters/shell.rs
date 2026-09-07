@@ -199,13 +199,22 @@ impl Shell for RealShell {
             .process_group(0)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        let child = process
+        let mut child = process
             .spawn()
             .map_err(|error| DaemonError::Shell(format!("{description}: {error}")))?;
         let pid = child
             .id()
             .ok_or_else(|| DaemonError::Shell(format!("{description}: child has no pid")))?;
-        drop(child);
+        // A detached child survives runtime shutdown; while running, the daemon reaps it.
+        tokio::spawn(async move {
+            match child.wait().await {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!(pid, %status, %description, "detached command failed"),
+                Err(error) => {
+                    tracing::warn!(pid, %error, %description, "failed to reap detached command")
+                }
+            }
+        });
         Ok(DetachedProcess { pid })
     }
 

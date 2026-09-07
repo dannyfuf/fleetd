@@ -14,7 +14,7 @@ if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
 fi
 
 if [ -x "$install_dir/zig" ]; then
-    installed_version=$($install_dir/zig version)
+    installed_version=$("$install_dir/zig" version)
     if [ "$installed_version" != "$zig_version" ]; then
         printf 'Refusing to replace %s (reports version %s).\n' "$install_dir" "$installed_version" >&2
         exit 1
@@ -79,8 +79,8 @@ else
     /bin/ln -s "$expected_shim" "$shim"
 fi
 
-verified_version=$($install_dir/zig version)
-shim_version=$($shim version)
+verified_version=$("$install_dir/zig" version)
+shim_version=$("$shim" version)
 if [ "$verified_version" != "$zig_version" ] || [ "$shim_version" != "$zig_version" ]; then
     printf '%s\n' "Zig verification failed." >&2
     exit 1

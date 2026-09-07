@@ -75,14 +75,14 @@ one renderer.
 | `src/main.rs` | `maybe_run_from_env()` first (Git re-invokes this binary as `GIT_SEQUENCE_EDITOR`), then the path argument, then `run`. |
 | `src/lib.rs` | gpui boot for the standalone binary: assets, theme, keymap, window, `LazygitEvent::Quit` → `cx.quit()`, the optional drive script. |
 | `src/bridge.rs` | One background thread with a Tokio runtime owning the `Repository` and its `RepoWatcher`; `GitRequest` in, `GitEvent` out over `async_channel`. |
-| `src/state.rs` | `GitUiState`: the `Arc<RepoSnapshot>`, every cursor, the overlay stack, the command log, plus the pure reducers and their unit tests. |
-| `src/root.rs` | The one gpui view: focus routing, the key-context chain, every action handler, and the two frames (window and embedded pane — see "Embedding"). |
+| `src/state.rs` | `GitUiState` and its submodules: `selections` (cursors, panels, screen mode), `content` (what the main panel shows, snapshot application), `staging` (the hunk/line selection), `overlays` (the overlay stack and its text buffers), `presentation` (formatting the reducers share) and `tests`. Pure `&mut self` reducers, no gpui and no I/O. |
+| `src/root.rs` | The one gpui view, `Lazygit`, split by responsibility: `composition` (the two frames, `measure`, the key-context chain), `navigation` (focus and selection), `events` (the bridge stream), `diff_view` (the prepared diff model and its background pass), `overlays`, `conflicts`, and one action module per domain — `files_actions`, `staging_actions`, `commits_actions`, `refs`, `mutations`. |
 | `src/keymap.rs` | The declarative key table; also feeds the `?` help and the bottom hint bar. |
 | `src/actions.rs` | One `gpui::actions!` namespace per key context. |
-| `src/panels/` | The five side panes, the banner, the bottom bar, the main panel and the command log. |
+| `src/panels/` | The frame: `side` (the five side panes), `main_panel` (the main area and the command log) and `bands` (the operation banner and the bottom bar). |
 | `src/overlays.rs` | Confirmations, prompts, menus and the generated help. |
-| `src/views/` | Pure presentation, one function per row type. |
-| `src/views/diff_model.rs` | The cached flattened diff: one uniform-height row per rendered line, the split layout that indexes those rows, per-file metadata (counts, language, mode) and the slot the background syntax pass fills. Keyed by `ModelKey` (`Arc<Diff>` pointer + shape + view mode), so it is rebuilt only when the patch really changes. |
+| `src/views/` | Pure presentation: `rows` (one function per list row), `diff` and `diff_model`, `syntax`, `intraline`, `long_line`, `file_tree`. |
+| `src/views/diff_model.rs` | The cached flattened diff: one uniform-height row per rendered line, the split layout that indexes those rows, per-file metadata (counts, language, mode) and the slot the background syntax pass fills. Keyed by `ModelKey` (`Arc<Diff>` pointer + view mode); the owning `DiffView` retains the source `Arc`, so no other patch can reuse that address while the key is cached. |
 | `src/views/diff.rs` | The renderer: file-header cards, `@@` separators, tinted rows, gutters, the position scrollbar and the `uniform_list` that virtualises them. |
 | `src/views/syntax.rs` | `syntect` + `two-face` TextMate highlighting, per-hunk and per-side, yielding colour *buckets* rather than colours so the work can run off the foreground thread. |
 | `src/views/intraline.rs` | Change-block pairing inside a hunk and `similar` word-level marks, with the ratio gate, the size caps and Pierre's join-single-separator rule. |

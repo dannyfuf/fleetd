@@ -9,6 +9,7 @@ use fleet_daemon::{
         Adapters,
         clock::SystemClock,
         files::{Files, RealFiles},
+        logs::RotatingLog,
     },
     jobs::JobManager,
     server::{BroadcastBus, Listener},
@@ -38,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let layout = FleetHome::new(home.clone());
     std::fs::create_dir_all(layout.logs_dir())?;
-    let file = tracing_appender::rolling::never(layout.logs_dir(), "fleetd.log");
+    let file = RotatingLog::new(layout.logs_dir().join("fleetd.log"), 10 * 1024 * 1024, 4)?;
     let (file_writer, _log_guard) = tracing_appender::non_blocking(file);
     tracing_subscriber::fmt()
         .with_writer((|| std::io::stderr()).and(file_writer))

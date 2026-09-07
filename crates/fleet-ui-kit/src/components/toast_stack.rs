@@ -20,9 +20,9 @@
 //!    letting a transient red line exist.
 //!
 //! Dwell is the caller's timer: it owns the `Vec<Toast>` and removes an entry when
-//! [`ToastDuration::millis`] has elapsed. `RenderOnce` cannot hold a timer.
+//! [`ToastDuration::millis`] has elapsed. The stack draws the supplied live entries.
 
-use gpui::{App, SharedString, Window, deferred, div, prelude::*, px};
+use gpui::{App, SharedString, Window, deferred, div, prelude::*};
 
 use crate::{
     components::OverlayLayer,
@@ -130,7 +130,7 @@ impl Toast {
 pub struct ToastStack {
     toasts: Vec<Toast>,
     max: usize,
-    bottom_inset: gpui::Pixels,
+    bottom_inset: Option<gpui::Pixels>,
 }
 
 impl ToastStack {
@@ -142,7 +142,7 @@ impl ToastStack {
         Self {
             toasts: toasts.into_iter().collect(),
             max: Self::MAX,
-            bottom_inset: px(12.0),
+            bottom_inset: None,
         }
     }
 
@@ -154,7 +154,7 @@ impl ToastStack {
 
     /// Distance from the edges of the layer the stack is placed in. 12 px by §2.2.
     pub fn bottom_inset(mut self, inset: gpui::Pixels) -> Self {
-        self.bottom_inset = inset;
+        self.bottom_inset = Some(inset);
         self
     }
 
@@ -194,8 +194,8 @@ impl ToastStack {
         }
     }
 
-    /// The line a toast renders, `×n` suffix included. Exposed for tests.
-    pub fn resolved_text(toast: &Toast) -> SharedString {
+    /// The line a toast renders, `×n` suffix included.
+    fn resolved_text(toast: &Toast) -> SharedString {
         if toast.count > 1 {
             SharedString::from(format!("{} \u{d7}{}", toast.text, toast.count))
         } else {
@@ -229,7 +229,7 @@ impl RenderOnce for ToastStack {
                 .flex_col()
                 .justify_end()
                 .items_end()
-                .p(self.bottom_inset)
+                .p(self.bottom_inset.unwrap_or(theme.metrics.toast_inset))
                 .gap(theme.space.sm)
                 .children(visible.into_iter().map(|toast| {
                     let tone = if toast.tone == Tone::Danger {
@@ -249,7 +249,7 @@ impl RenderOnce for ToastStack {
                         .py(theme.space.sm)
                         .rounded(theme.radii.md)
                         .bg(theme.colors.elevated)
-                        .border_1()
+                        .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
                         .shadow(theme.sheet_shadow())
                         .occlude()

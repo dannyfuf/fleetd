@@ -152,21 +152,24 @@ authoritative map.
 ## Architecture
 
 ```text
-fleet-app    binary `fleet`: GPUI state mirror, screens, dialogs, and terminal rendering
-fleet-daemon binary `fleetd`: stores, adapters, services, jobs, PTYs, and Unix socket server
-fleet-core   domain types, schemas, validation, defaults, and pure helpers; no I/O
-fleet-proto  length-prefixed JSON Request/Response/Event types and terminal frame updates
-fleet-term   portable PTYs, VT engine abstraction, Ghostty VT, terminal host, and key encoding
-fleet-client async daemon connect/spawn, requests, events, and terminal attachment
-fleet-ui-kit domain-independent GPUI theme, assets, Lucide icons, and reusable components
-fleet-cli    Clap parser, protocol-1 JSON envelopes, and human-readable output
-runtime      `fleet` -> `fleet-client` -> `$FLEET_HOME/fleetd.sock` -> `fleetd`
-ownership    daemon owns jobs, sessions, PTYs, state, and filesystem work; clients mirror it
+fleet-app     binary `fleet`: GPUI state mirror, screens, dialogs, and terminal rendering
+fleet-daemon  binary `fleetd`: stores, adapters, services, jobs, PTYs, and Unix socket server
+fleet-core    domain types, schemas, validation, defaults, and pure helpers; no I/O
+fleet-proto   length-prefixed JSON Request/Response/Event types and terminal frame updates
+fleet-term    portable PTYs, VT engine abstraction, Ghostty VT, terminal host, and key encoding
+fleet-client  async daemon connect/spawn, requests, events, and terminal attachment
+fleet-ui-kit  domain-independent GPUI theme, assets, Lucide icons, and reusable components
+fleet-git     typed, byte-preserving Git backend that shells out to `git` with explicit argv
+fleet-lazygit native lazygit clone: panels, keymap, diff view, and overlays
+fleet-cli     Clap parser, protocol-1 JSON envelopes, and human-readable output
+runtime       `fleet` -> `fleet-client` -> `$FLEET_HOME/fleetd.sock` -> `fleetd`
+ownership     daemon owns jobs, sessions, PTYs, state, and filesystem work; clients mirror it
 ```
 
-The dependency direction is `core <- proto <- {term, client, cli} <- {daemon, app}`; the UI kit
-depends only on GPUI. Read [architecture](docs/ARCHITECTURE.md), the [UX specification](docs/UX-SPEC.md),
-and the [design system](docs/DESIGN-SYSTEM.md) for the full contracts.
+The dependency direction is `core <- proto <- {term, client, cli} <- {daemon, app}` and
+`git <- lazygit <- app`; the UI kit depends only on GPUI. Read [architecture](docs/ARCHITECTURE.md),
+the [UX specification](docs/UX-SPEC.md), and the [design system](docs/DESIGN-SYSTEM.md) for the
+full contracts, and the [documentation index](docs/README.md) for everything else.
 
 ## Development
 

@@ -1,12 +1,6 @@
-//! The Hub's repos rail (UX-SPEC §3.2).
-//!
-//! The rail answers exactly two questions — *what does the worktrees list show* and *is any
-//! repository unhealthy or still cloning* — so it carries one glyph, one name and one count per
-//! row and nothing else. Everything §3.2 lists as intentionally omitted (`url`, `path`,
-//! `defaultBranch`, hooks, pool state) lives in the detail panel.
-//!
-//! The model half ([`rail_rows`], [`aggregate_glyph`], [`filter_rows`]) is pure and tested; the
-//! render half composes `fleet-ui-kit` components only.
+//! Repository and clone rows for the Hub rail.
+
+use std::collections::HashMap;
 
 use fleet_core::{
     ids::{ContextId, RepoId},
@@ -14,12 +8,12 @@ use fleet_core::{
 };
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{
-    ColumnAlign, ListView, Pane, PaneBorder, PaneHeader, Row, RowColumn, StatusGlyph, StatusKind,
-    Text, Truncate, truncate,
+    ActiveTheme, ColumnAlign, ListView, Pane, PaneBorder, PaneHeader, Row, RowColumn, StatusGlyph,
+    StatusKind, Text, Truncate, truncate,
 };
-use gpui::{AnyElement, IntoElement, SharedString, UniformListScrollHandle, px};
+use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, px};
 
-use crate::state::parse_percent;
+use crate::{presentation::parse_percent, views::first_run::EmptySurface};
 
 /// Width of the collapsed icon rail (`H`, KEYMAP A22).
 pub const COLLAPSED_WIDTH: f32 = 44.0;
@@ -66,54 +60,59 @@ pub struct RailRow {
     pub percent: Option<u8>,
 }
 
-/// Worst-of aggregation for a repository's session glyph (§3.2).
+/// How loudly a glyph asks for attention (§3.2).
 ///
 /// Health failures and active jobs stay at the top. Among ordinary session states, unknown
 /// remains worst; then a finished agent outranks a working agent because finished work needs the
 /// user's attention, and both outrank attachment/sleep state.
-#[must_use]
-pub fn aggregate_glyph(kinds: impl IntoIterator<Item = StatusKind>) -> StatusKind {
-    fn rank(kind: StatusKind) -> u8 {
-        match kind {
-            StatusKind::CloneFailed => 11,
-            StatusKind::HostUnreachable => 10,
-            StatusKind::Degraded => 9,
-            StatusKind::JobRunning | StatusKind::Cloning => 8,
-            StatusKind::Unknown => 7,
-            StatusKind::AgentFinished => 6,
-            StatusKind::AgentWorking => 5,
-            StatusKind::Attached => 4,
-            StatusKind::DetachedAwake => 3,
-            StatusKind::Sleeping => 2,
-            StatusKind::NoSession => 1,
-        }
+const fn rank(kind: StatusKind) -> u8 {
+    match kind {
+        StatusKind::CloneFailed => 11,
+        StatusKind::HostUnreachable => 10,
+        StatusKind::Degraded => 9,
+        StatusKind::JobRunning | StatusKind::Cloning => 8,
+        StatusKind::Unknown => 7,
+        StatusKind::AgentFinished => 6,
+        StatusKind::AgentWorking => 5,
+        StatusKind::Attached => 4,
+        StatusKind::DetachedAwake => 3,
+        StatusKind::Sleeping => 2,
+        StatusKind::NoSession => 1,
     }
+}
+
+/// Worst-of aggregation for a repository's session glyph (§3.2).
+#[must_use]
+fn aggregate_glyph(kinds: impl IntoIterator<Item = StatusKind>) -> StatusKind {
     kinds
         .into_iter()
         .max_by_key(|kind| rank(*kind))
         .unwrap_or(StatusKind::NoSession)
 }
 
-/// The label a repository shows: its bare name, or `owner/name` when the name collides (§5).
-#[must_use]
-pub fn display_name(repo: &Repo, all: &[Repo]) -> String {
-    let collides = all
-        .iter()
-        .any(|other| other.id != repo.id && other.name == repo.name);
-    if collides {
-        format!("{}/{}", repo.owner, repo.name)
-    } else {
-        repo.name.clone()
-    }
+/// The worst-of glyph per repository, folded as the projection walks the worktrees so no
+/// per-repo vector is ever built.
+#[derive(Default)]
+pub struct RepoGlyphs<'a> {
+    worst: HashMap<&'a RepoId, StatusKind>,
 }
 
-/// Whether a running job is deleting this repository's rows.
-fn is_deleting(repo: &RepoId, jobs: &[JobRecord]) -> bool {
-    jobs.iter().any(|job| {
-        matches!(job.status, JobStatus::Running | JobStatus::Queued)
-            && matches!(job.kind, JobKind::DeleteWorktree)
-            && job.target.starts_with(repo.as_str())
-    })
+impl<'a> RepoGlyphs<'a> {
+    /// Folds one worktree's glyph into its repository's aggregate.
+    pub fn add(&mut self, repo: &'a RepoId, glyph: StatusKind) {
+        let slot = self.worst.entry(repo).or_insert(StatusKind::NoSession);
+        if rank(glyph) > rank(*slot) {
+            *slot = glyph;
+        }
+    }
+
+    /// A repository with no worktrees aggregates to the quietest glyph.
+    fn get(&self, repo: &RepoId) -> StatusKind {
+        self.worst
+            .get(repo)
+            .copied()
+            .unwrap_or(StatusKind::NoSession)
+    }
 }
 
 /// Builds every rail row for one context, `All` first and the rest sorted by label.
@@ -126,7 +125,7 @@ pub fn rail_rows(
     repos: &[Repo],
     clones: &[CloneJob],
     worktrees: &[Worktree],
-    glyphs: &dyn Fn(&RepoId) -> Vec<StatusKind>,
+    glyphs: &RepoGlyphs<'_>,
     jobs: &[JobRecord],
 ) -> Vec<RailRow> {
     let in_context = |candidate: &ContextId| context.is_none_or(|active| candidate == active);
@@ -135,14 +134,39 @@ pub fn rail_rows(
         .filter(|repo| in_context(&repo.context_id))
         .collect();
 
+    let mut counts = HashMap::new();
+    for worktree in worktrees {
+        *counts.entry(&worktree.repo_id).or_insert(0usize) += 1;
+    }
+    let mut names = HashMap::new();
+    for repo in repos {
+        let entry = names.entry(repo.name.as_str()).or_insert((&repo.id, false));
+        entry.1 |= entry.0 != &repo.id;
+    }
+    // Retain the existing raw-prefix deletion policy until the correctness pass.
+    let mut deletions: Vec<_> = jobs
+        .iter()
+        .filter(|job| {
+            matches!(job.status, JobStatus::Running | JobStatus::Queued)
+                && matches!(job.kind, JobKind::DeleteWorktree)
+        })
+        .map(|job| job.target.as_str())
+        .collect();
+    deletions.sort_unstable();
+    let mut clone_progress = HashMap::new();
+    for job in jobs.iter().filter(|job| matches!(job.kind, JobKind::Clone)) {
+        if let Some(percent) = job.progress.as_deref().and_then(parse_percent) {
+            clone_progress.entry(job.target.as_str()).or_insert(percent);
+        }
+    }
     let mut rows: Vec<RailRow> = scoped
         .iter()
         .map(|repo| {
-            let count = worktrees
-                .iter()
-                .filter(|worktree| worktree.repo_id == repo.id)
-                .count();
-            let deleting = is_deleting(&repo.id, jobs);
+            let count = counts.get(&repo.id).copied().unwrap_or_default();
+            let index = deletions.partition_point(|target| *target < repo.id.as_str());
+            let deleting = deletions
+                .get(index)
+                .is_some_and(|target| target.starts_with(repo.id.as_str()));
             RailRow {
                 kind: if deleting {
                     RailKind::Deleting
@@ -150,11 +174,18 @@ pub fn rail_rows(
                     RailKind::Repo
                 },
                 repo: Some(repo.id.clone()),
-                name: SharedString::from(display_name(repo, repos)),
+                name: if names
+                    .get(repo.name.as_str())
+                    .is_some_and(|(_, collides)| *collides)
+                {
+                    SharedString::new(repo.id.as_str())
+                } else {
+                    SharedString::new(repo.name.as_str())
+                },
                 glyph: if deleting {
                     StatusKind::JobRunning
                 } else {
-                    aggregate_glyph(glyphs(&repo.id))
+                    glyphs.get(&repo.id)
                 },
                 count: Some(count),
                 percent: None,
@@ -182,16 +213,16 @@ pub fn rail_rows(
                         StatusKind::Cloning
                     },
                     count: None,
-                    percent: clone_percent(clone, jobs),
+                    percent: clone_progress.get(clone.id.as_str()).copied(),
                 }
             }),
     );
     rows.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let total = worktrees
+    let total = scoped
         .iter()
-        .filter(|worktree| scoped.iter().any(|repo| repo.id == worktree.repo_id))
-        .count();
+        .map(|repo| counts.get(&repo.id).copied().unwrap_or_default())
+        .sum();
     let mut all = vec![RailRow {
         kind: RailKind::All,
         repo: None,
@@ -204,32 +235,21 @@ pub fn rail_rows(
     all
 }
 
-/// The percent shown in a cloning row's count slot, when the daemon reported one.
-fn clone_percent(clone: &CloneJob, jobs: &[JobRecord]) -> Option<u8> {
-    jobs.iter()
-        .filter(|job| matches!(job.kind, JobKind::Clone) && job.target == clone.id.as_str())
-        .find_map(|job| job.progress.as_deref().and_then(parse_percent))
-}
-
-/// Applies the filter query (§3.10), keeping the pinned `All` row so the scope is never lost.
+/// The filter query (§3.10) never hides the pinned `All` row, so the scope is never lost.
 #[must_use]
-pub fn filter_rows(rows: &[RailRow], query: &str) -> Vec<RailRow> {
-    if query.is_empty() {
-        return rows.to_vec();
+pub fn matches(row: &RailRow, query: &str) -> bool {
+    if query.is_empty() || row.kind == RailKind::All {
+        return true;
     }
-    let needle = query.to_lowercase();
-    rows.iter()
-        .filter(|row| row.kind == RailKind::All || row.name.to_lowercase().contains(&needle))
-        .cloned()
-        .collect()
+    row.name.to_lowercase().contains(&query.to_lowercase())
 }
 
 /// Everything the rail needs to draw itself.
-pub struct RailProps {
+pub struct RailProps<Rows = Vec<RailRow>> {
     /// A live filter editor that replaces the ordinary pane header.
     pub header_override: Option<AnyElement>,
     /// The rows, already filtered.
-    pub rows: Vec<RailRow>,
+    pub rows: Rows,
     /// The cursor index into `rows`.
     pub cursor: usize,
     /// Whether the rail owns the keyboard (blue cursor bar and focus ring).
@@ -246,7 +266,11 @@ pub struct RailProps {
 
 /// Renders the rail: header, rows, and the §3.13 empty states.
 #[must_use]
-pub fn render(props: RailProps, scroll: &UniformListScrollHandle) -> AnyElement {
+pub fn render(
+    props: RailProps<impl AsRef<[RailRow]> + 'static>,
+    scroll: &UniformListScrollHandle,
+    cx: &App,
+) -> AnyElement {
     let RailProps {
         rows,
         header_override,
@@ -258,7 +282,7 @@ pub fn render(props: RailProps, scroll: &UniformListScrollHandle) -> AnyElement 
         stale,
     } = props;
 
-    let repo_rows = rows.len().saturating_sub(1);
+    let repo_rows = rows.as_ref().len().saturating_sub(1);
     let mut header = PaneHeader::new("Repos").total(repo_rows);
     if let Some(query) = filter.clone() {
         header = header.filter_chip(query);
@@ -268,17 +292,18 @@ pub fn render(props: RailProps, scroll: &UniformListScrollHandle) -> AnyElement 
     }
 
     let empty = match filter.clone() {
-        Some(query) => crate::views::first_run::empty_state("filter", Some(&query)),
-        None => crate::views::first_run::empty_state("repos", Some(&context_name)),
+        Some(query) => EmptySurface::Filter.render(Some(&query)),
+        None => EmptySurface::Repos.render(Some(&context_name)),
     };
 
     // Only the `All` row survived the filter: the rail has nothing to offer.
-    let body_rows = rows.clone();
+    let row_count = rows.as_ref().len();
+    let body_rows = rows;
     let list = ListView::new(
         "hub-repos-rail",
-        if repo_rows == 0 { 0 } else { rows.len() },
+        if repo_rows == 0 { 0 } else { row_count },
         move |index, is_cursor, _window, _cx| {
-            let Some(row) = body_rows.get(index) else {
+            let Some(row) = body_rows.as_ref().get(index) else {
                 return gpui::div().into_any_element();
             };
             rail_row(row, is_cursor, focused, collapsed)
@@ -288,7 +313,12 @@ pub fn render(props: RailProps, scroll: &UniformListScrollHandle) -> AnyElement 
     .track_scroll(scroll)
     .empty(empty);
 
-    let mut pane = Pane::fixed(px(if collapsed { COLLAPSED_WIDTH } else { 240.0 }))
+    let width = if collapsed {
+        px(COLLAPSED_WIDTH)
+    } else {
+        cx.theme().metrics.rail_w
+    };
+    let mut pane = Pane::fixed(width)
         .border(PaneBorder::Right)
         .focused(focused)
         .body(list);
@@ -334,12 +364,8 @@ fn rail_row(row: &RailRow, is_cursor: bool, focused: bool, collapsed: bool) -> A
 }
 
 /// A failed clone row states its failure in the name's contrast, never in a hue of its own.
-fn rail_tone_is_muted(kind: RailKind) -> bool {
-    matches!(kind, RailKind::Deleting | RailKind::Cloning)
-}
-
 fn row_tone(kind: RailKind) -> fleet_ui_kit::Tone {
-    if rail_tone_is_muted(kind) {
+    if matches!(kind, RailKind::Deleting | RailKind::Cloning) {
         fleet_ui_kit::Tone::Secondary
     } else {
         fleet_ui_kit::Tone::Default
@@ -453,8 +479,9 @@ mod tests {
             repo("acme", "payroll", "buk"),
             repo("buk", "www", "buk"),
         ];
-        assert_eq!(display_name(&repos[0], &repos), "buk/payroll");
-        assert_eq!(display_name(&repos[2], &repos), "www");
+        let rows = rail_rows(None, &repos, &[], &[], &RepoGlyphs::default(), &[]);
+        assert_eq!(rows[2].name.as_ref(), "buk/payroll");
+        assert_eq!(rows[3].name.as_ref(), "www");
     }
 
     #[test]
@@ -470,7 +497,7 @@ mod tests {
             &repos,
             &[],
             &worktrees,
-            &|_| Vec::new(),
+            &RepoGlyphs::default(),
             &[],
         );
         assert_eq!(rows[0].kind, RailKind::All);
@@ -489,7 +516,7 @@ mod tests {
             &repos,
             &clones,
             &[],
-            &|_| Vec::new(),
+            &RepoGlyphs::default(),
             &[],
         );
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_ref()).collect();
@@ -502,7 +529,14 @@ mod tests {
     fn a_failed_clone_keeps_its_row_until_dismissed() {
         let clones = vec![clone_job("buk", "old-api", "buk", CloneStatus::Failed)];
         let context = ContextId::try_from("buk").unwrap_or_else(|error| panic!("{error}"));
-        let rows = rail_rows(Some(&context), &[], &clones, &[], &|_| Vec::new(), &[]);
+        let rows = rail_rows(
+            Some(&context),
+            &[],
+            &clones,
+            &[],
+            &RepoGlyphs::default(),
+            &[],
+        );
         assert_eq!(rows[1].kind, RailKind::CloneFailed);
         assert_eq!(rows[1].glyph, StatusKind::CloneFailed);
         assert!(rows[1].kind.selectable());
@@ -512,12 +546,19 @@ mod tests {
     fn filtering_keeps_the_all_row() {
         let repos = vec![repo("buk", "payroll", "buk"), repo("buk", "www", "buk")];
         let context = repos[0].context_id.clone();
-        let rows = rail_rows(Some(&context), &repos, &[], &[], &|_| Vec::new(), &[]);
-        let filtered = filter_rows(&rows, "pay");
+        let rows = rail_rows(
+            Some(&context),
+            &repos,
+            &[],
+            &[],
+            &RepoGlyphs::default(),
+            &[],
+        );
+        let filtered: Vec<_> = rows.iter().filter(|row| matches(row, "pay")).collect();
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].kind, RailKind::All);
         assert_eq!(filtered[1].name.as_ref(), "payroll");
-        assert_eq!(filter_rows(&rows, "nothing").len(), 1);
+        assert_eq!(rows.iter().filter(|row| matches(row, "nothing")).count(), 1);
     }
 
     #[test]

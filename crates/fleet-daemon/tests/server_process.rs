@@ -1,9 +1,13 @@
 //! End-to-end daemon binary protocol and lifecycle coverage.
 
 use std::{
-    process::{Command, Stdio},
+    process::Command,
     time::{Duration, Instant},
 };
+
+mod infra;
+
+use infra::DaemonProcess;
 
 use fleet_proto::{
     PROTOCOL_VERSION,
@@ -19,14 +23,7 @@ use tokio_util::codec::Framed;
 async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
     let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
     let home = temp.path().join("fleet-home");
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_fleetd"))
-        .arg("--home")
-        .arg(&home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|error| panic!("failed to start fleetd: {error}"));
+    let mut daemon = DaemonProcess::start(&home);
 
     let socket = home.join("fleetd.sock");
     let stream = connect_until_ready(&socket).await;
@@ -76,23 +73,7 @@ async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
         Ok(ResponseBody::ShuttingDown)
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match daemon.try_wait() {
-            Ok(Some(status)) => {
-                assert!(status.success(), "fleetd exited with {status}");
-                break;
-            }
-            Ok(None) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Ok(None) => {
-                let _ignored = daemon.kill();
-                panic!("fleetd did not shut down within five seconds");
-            }
-            Err(error) => panic!("failed to wait for fleetd: {error}"),
-        }
-    }
+    daemon.wait().await;
     assert!(!socket.exists());
     assert!(!home.join("fleetd.pid").exists());
 }
@@ -115,8 +96,7 @@ async fn connect_until_ready(socket: &std::path::Path) -> UnixStream {
     loop {
         match UnixStream::connect(socket).await {
             Ok(stream) => return stream,
-            Err(error) if Instant::now() < deadline => {
-                let _ignored = error;
+            Err(_) if Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Err(error) => panic!("fleetd socket was not ready: {error}"),
@@ -128,18 +108,18 @@ async fn send(
     client: &mut Framed<UnixStream, FleetCodec<Request, serde_json::Value>>,
     request: Request,
 ) {
-    client
-        .send(request)
+    tokio::time::timeout(Duration::from_secs(5), client.send(request))
         .await
+        .expect("request write timed out")
         .unwrap_or_else(|error| panic!("failed to send request: {error}"));
 }
 
 async fn receive(
     client: &mut Framed<UnixStream, FleetCodec<Request, serde_json::Value>>,
 ) -> Response {
-    let value = client
-        .next()
+    let value = tokio::time::timeout(Duration::from_secs(5), client.next())
         .await
+        .expect("response timed out")
         .unwrap_or_else(|| panic!("daemon closed the connection"))
         .unwrap_or_else(|error| panic!("failed to receive response: {error}"));
     serde_json::from_value(value).unwrap_or_else(|error| panic!("invalid response: {error}"))

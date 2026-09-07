@@ -162,7 +162,11 @@ async fn route_updates(
 ) {
     let mut received_full = false;
     loop {
-        match events.recv().await {
+        let event = tokio::select! {
+            _ = updates.closed() => return,
+            event = events.recv() => event,
+        };
+        match event {
             Ok(Event::TerminalFrame(frame)) if frame.terminal == terminal_id => {
                 if !received_full && !frame.full {
                     continue;

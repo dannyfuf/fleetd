@@ -149,11 +149,12 @@ pub struct StatusGlyph {
 
 impl StatusGlyph {
     /// A glyph for a state.
+    #[track_caller]
     pub fn new(kind: StatusKind) -> Self {
         Self {
             kind,
             size: IconSize::Large,
-            id: None,
+            id: Some(std::panic::Location::caller().into()),
         }
     }
 
@@ -186,11 +187,10 @@ impl RenderOnce for StatusGlyph {
             .color(color)
             .opacity(self.kind.opacity(theme.metrics.no_session_opacity))
             .spinning(self.kind.spins())
-            // A spinning glyph needs a stable id; falling back to the glyph's own name keeps
-            // two different kinds under one parent from sharing an animation.
-            .id(self.id.unwrap_or_else(|| {
-                ElementId::from(SharedString::new_static(self.kind.icon().name()))
-            }))
+            .map(|glyph| match self.id {
+                Some(id) => glyph.id(id),
+                None => glyph,
+            })
     }
 }
 

@@ -14,13 +14,9 @@ fn main() {
     let sha = std::env::var("FLEET_BUILD_SHA")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(git_sha)
+        .or_else(|| git_value(&["rev-parse", "--short=7", "HEAD"]))
         .unwrap_or_else(|| "dev".to_owned());
     println!("cargo:rustc-env=FLEET_GIT_SHA={sha}");
-}
-
-fn git_sha() -> Option<String> {
-    git_value(&["rev-parse", "--short=7", "HEAD"])
 }
 
 fn git_path(name: &str) -> Option<String> {

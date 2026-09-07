@@ -1,16 +1,11 @@
 //! Unix socket binding and connection acceptance.
 
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use fleet_core::{
-    ids::TerminalId,
-    paths::FleetHome,
-    sessions::{Session, TerminalStatus},
-};
+use fleet_core::paths::FleetHome;
 use fleet_proto::{
     event::{Event, ToastLevel},
     job::JobStatus,
@@ -23,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     DaemonError, DaemonResult,
+    adapters::process::pid_is_alive,
     server::{broadcast::BroadcastBus, connection::Connection},
     services::Services,
 };
@@ -91,41 +87,11 @@ impl Listener {
 
     /// Accepts connections until shutdown and removes the owned socket and PID files.
     pub async fn run(self) -> DaemonResult<()> {
-        let mut job_updates = self.services.jobs.subscribe();
-        let job_events = self.events.clone();
-        let job_shutdown = self.shutdown.clone();
-        let forwarder_services = Arc::clone(&self.services);
-        let forwarder = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    () = job_shutdown.cancelled() => break,
-                    update = job_updates.recv() => match update {
-                        Ok(job) => {
-                            let failure = match &job.status {
-                                JobStatus::Failed { error } => Some(error.clone()),
-                                _ => None,
-                            };
-                            let terminal = matches!(
-                                job.status,
-                                JobStatus::Succeeded | JobStatus::Failed { .. } | JobStatus::Cancelled
-                            );
-                            job_events.publish(Event::JobUpdated(job));
-                            if let Some(message) = failure {
-                                job_events.publish(Event::Toast {
-                                    level: ToastLevel::Error,
-                                    message,
-                                });
-                            }
-                            if terminal {
-                                job_events.request_snapshot(Arc::clone(&forwarder_services));
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            }
-        });
+        let job_forwarder = spawn_job_forwarder(
+            Arc::clone(&self.services),
+            self.events.clone(),
+            self.shutdown.clone(),
+        );
         let session_forwarder = spawn_session_forwarder(
             Arc::clone(&self.services),
             self.events.clone(),
@@ -164,9 +130,9 @@ impl Listener {
         })
         .await;
         connections.abort_all();
-        forwarder.abort();
+        job_forwarder.abort();
         session_forwarder.abort();
-        let _ignored = forwarder.await;
+        let _ignored = job_forwarder.await;
         let _ignored = session_forwarder.await;
         remove_owned(&self.pid_path, &self.socket_path).await;
         result
@@ -179,61 +145,78 @@ impl Listener {
     }
 }
 
-fn spawn_session_forwarder(
+/// Republishes job records as client events, with an error toast and a snapshot on completion.
+fn spawn_job_forwarder(
     services: Arc<Services>,
     events: BroadcastBus,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    let mut updates = services.jobs.subscribe();
     tokio::spawn(async move {
-        let mut previous = services.sessions.snapshot();
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
-                _ = interval.tick() => {
-                    let current = services.sessions.snapshot();
-                    publish_session_differences(&previous, &current, &events);
-                    if current != previous {
-                        events.request_snapshot(Arc::clone(&services));
+                update = updates.recv() => match update {
+                    Ok(job) => {
+                        let failure = match &job.status {
+                            JobStatus::Failed { error } => Some(error.clone()),
+                            _ => None,
+                        };
+                        let finished = matches!(
+                            job.status,
+                            JobStatus::Succeeded | JobStatus::Failed { .. } | JobStatus::Cancelled
+                        );
+                        events.publish(Event::JobUpdated(job));
+                        if let Some(message) = failure {
+                            events.publish(Event::Toast {
+                                level: ToastLevel::Error,
+                                message,
+                            });
+                        }
+                        if finished {
+                            events.request_snapshot(Arc::clone(&services));
+                        }
                     }
-                    previous = current;
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
     })
 }
 
-fn publish_session_differences(previous: &[Session], current: &[Session], events: &BroadcastBus) {
-    let previous_terminals = previous
-        .iter()
-        .flat_map(|session| &session.terminals)
-        .map(|terminal| (terminal.id, terminal))
-        .collect::<BTreeMap<TerminalId, _>>();
-
-    for session in current {
-        for terminal in &session.terminals {
-            let Some(old) = previous_terminals.get(&terminal.id) else {
-                continue;
-            };
-            if old.title != terminal.title
-                && let Some(title) = &terminal.title
-            {
-                events.publish(Event::TerminalTitle {
-                    terminal: terminal.id,
-                    title: title.clone(),
-                });
-            }
-            if !matches!(old.status, TerminalStatus::Exited { .. })
-                && let TerminalStatus::Exited { code } = &terminal.status
-            {
-                events.publish(Event::TerminalExited {
-                    terminal: terminal.id,
-                    code: *code,
-                });
+/// Forwards service events onto the connection bus when the two are separate channels.
+///
+/// Session transitions — including a background terminal's first unseen output — are published
+/// by the services themselves, which also request the coalesced snapshot that follows.
+fn spawn_session_forwarder(
+    services: Arc<Services>,
+    events: BroadcastBus,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    // Services constructed without `new_with_events` still need snapshot assembly attached.
+    services.events.attach_services(Arc::downgrade(&services));
+    let mut forwarded_events =
+        (!events.same_channel(&services.events)).then(|| services.events.subscribe());
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                event = async {
+                    match &mut forwarded_events {
+                        Some(receiver) => receiver.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if forwarded_events.is_some() => match event {
+                    Ok(event) => { events.publish(event); }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        events.request_snapshot(Arc::clone(&services));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
             }
         }
-    }
+    })
 }
 
 async fn read_pid(path: &Path) -> Option<u32> {
@@ -260,15 +243,6 @@ async fn write_pid(path: &Path) -> DaemonResult<()> {
     file.sync_all()
         .await
         .map_err(|error| DaemonError::fs(path, error))
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    // SAFETY: signal zero checks existence without delivering a signal.
-    let result = unsafe { libc::kill(pid.cast_signed(), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 async fn remove_owned(pid_path: &Path, socket_path: &Path) {

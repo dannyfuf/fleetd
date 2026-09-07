@@ -404,6 +404,40 @@ impl Default for Motion {
 /// Fixed pixel geometry that the UX spec pins down. Components must not hard-code these.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
+    /// Default expanded dialog width.
+    pub dialog_w: Pixels,
+    /// Compact confirmation width.
+    pub confirm_compact_w: Pixels,
+    /// Minimum terminal tab width.
+    pub terminal_tab_min_w: Pixels,
+    /// Maximum terminal tab width.
+    pub terminal_tab_max_w: Pixels,
+    /// New-terminal control width.
+    pub new_terminal_tab_w: Pixels,
+    /// Scroll-mode pill width.
+    pub scroll_pill_w: Pixels,
+    /// macOS titlebar inset.
+    pub traffic_light_inset: Pixels,
+    /// Toast inset from the overlay edges.
+    pub toast_inset: Pixels,
+    /// Job row trailing shortcut width.
+    pub job_key_w: Pixels,
+    /// Diff row height.
+    pub diff_row_h: Pixels,
+    /// Diff position scrollbar width.
+    pub diff_scrollbar_w: Pixels,
+    /// Minimum diff scrollbar thumb height.
+    pub diff_thumb_min_h: Pixels,
+    /// Horizontal diff keyboard step (four monospace columns).
+    pub diff_horizontal_step: Pixels,
+    /// Compact detail overlay width.
+    pub detail_overlay_w: Pixels,
+    /// 640 px two-column help overlay.
+    pub overlay_help_w: Pixels,
+    /// 160 px multi-line editor box: a commit subject plus a short body.
+    pub editor_box_h: Pixels,
+    /// 14 px caret bar inside a [`Self::diff_row_h`] editor line, inset top and bottom.
+    pub diff_caret_h: Pixels,
     /// 1 px separator hairline.
     pub hairline: Pixels,
     /// 8 px daemon status dot.
@@ -418,6 +452,10 @@ pub struct Metrics {
     pub pane_header_h: Pixels,
     /// 30 px list row.
     pub row_h: Pixels,
+    /// 62 px Git status pane: one row under its header.
+    pub status_pane_h: Pixels,
+    /// 92 px unfocused Git stash pane.
+    pub stash_pane_h: Pixels,
     /// 34 px palette row.
     pub palette_row_h: Pixels,
     /// 44 px two-line job row.
@@ -480,6 +518,16 @@ pub struct Metrics {
     pub refreshing_opacity: f32,
     /// Derived-mark opacity for stale facts.
     pub stale_opacity: f32,
+    /// Blinking terminal text opacity without a repaint timer.
+    pub terminal_blink_opacity: f32,
+    /// Semantic banner border opacity.
+    pub banner_border_opacity: f32,
+    /// Hover fill on sticky errors.
+    pub error_hover_opacity: f32,
+    /// Neutral chip and badge fill opacity.
+    pub neutral_fill_opacity: f32,
+    /// Semantic chip and badge fill opacity.
+    pub semantic_fill_opacity: f32,
     /// Cold-load skeleton opacity.
     pub skeleton_opacity: f32,
     /// No-session status glyph opacity.
@@ -489,6 +537,23 @@ pub struct Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Self {
+            dialog_w: px(560.0),
+            confirm_compact_w: px(480.0),
+            terminal_tab_min_w: px(84.0),
+            terminal_tab_max_w: px(200.0),
+            new_terminal_tab_w: px(36.0),
+            scroll_pill_w: px(176.0),
+            traffic_light_inset: px(84.0),
+            toast_inset: px(12.0),
+            job_key_w: px(20.0),
+            diff_row_h: px(18.0),
+            diff_scrollbar_w: px(5.0),
+            diff_thumb_min_h: px(24.0),
+            diff_horizontal_step: ch(4.0),
+            detail_overlay_w: px(320.0),
+            overlay_help_w: px(640.0),
+            editor_box_h: px(160.0),
+            diff_caret_h: px(14.0),
             hairline: px(1.0),
             dot_size: px(8.0),
             dot_size_small: px(6.0),
@@ -496,6 +561,8 @@ impl Default for Metrics {
             status_bar_h: px(26.0),
             pane_header_h: px(30.0),
             row_h: px(30.0),
+            status_pane_h: px(62.0),
+            stash_pane_h: px(92.0),
             palette_row_h: px(34.0),
             job_row_h: px(44.0),
             section_header_h: px(20.0),
@@ -527,6 +594,11 @@ impl Default for Metrics {
             dimmed_opacity: 0.40,
             refreshing_opacity: 0.60,
             stale_opacity: 0.55,
+            terminal_blink_opacity: 0.70,
+            banner_border_opacity: 0.35,
+            error_hover_opacity: 0.22,
+            neutral_fill_opacity: 0.08,
+            semantic_fill_opacity: 0.14,
             skeleton_opacity: 0.30,
             no_session_opacity: 0.30,
         }

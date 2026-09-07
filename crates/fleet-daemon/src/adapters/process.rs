@@ -34,8 +34,6 @@ pub struct ListeningPort {
 pub trait Process: Send + Sync {
     /// Captures `ps -axo pid=,ppid=,command=`.
     async fn snapshot(&self) -> DaemonResult<Vec<ProcessInfo>>;
-    /// Returns all recursive descendants of `pid`.
-    async fn descendants(&self, pid: u32) -> DaemonResult<Vec<ProcessInfo>>;
     /// Returns TCP listeners owned by the supplied process identifiers.
     async fn listening_ports(&self, pids: &[u32]) -> DaemonResult<Vec<ListeningPort>>;
     /// Reads a same-user process environment without mutating it.
@@ -44,7 +42,7 @@ pub trait Process: Send + Sync {
     fn is_alive(&self, pid: u32) -> bool;
 }
 
-/// Real process adapter implemented with swarm's exact `ps` and `lsof` commands.
+/// Process observations from `ps` and `lsof`.
 #[derive(Clone)]
 pub struct RealProcess {
     shell: Arc<dyn Shell>,
@@ -78,26 +76,6 @@ impl Process for RealProcess {
             .filter(|line| !line.trim().is_empty())
             .map(parse_process)
             .collect()
-    }
-
-    async fn descendants(&self, pid: u32) -> DaemonResult<Vec<ProcessInfo>> {
-        let snapshot = self.snapshot().await?;
-        let mut parents = BTreeSet::from([pid]);
-        let mut descendants = Vec::new();
-        loop {
-            let mut changed = false;
-            for process in &snapshot {
-                if parents.contains(&process.parent_pid) && !parents.contains(&process.pid) {
-                    parents.insert(process.pid);
-                    descendants.push(process.clone());
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        Ok(descendants)
     }
 
     async fn listening_ports(&self, pids: &[u32]) -> DaemonResult<Vec<ListeningPort>> {
@@ -136,8 +114,7 @@ impl Process for RealProcess {
         #[cfg(target_os = "linux")]
         {
             let path = format!("/proc/{pid}/environ");
-            let bytes =
-                std::fs::read(&path).map_err(|error| DaemonError::fs(path.clone(), error))?;
+            let bytes = std::fs::read(&path).map_err(|error| DaemonError::fs(&path, error))?;
             return Ok(bytes
                 .split(|byte| *byte == 0)
                 .filter_map(|entry| {
@@ -172,13 +149,17 @@ impl Process for RealProcess {
     }
 
     fn is_alive(&self, pid: u32) -> bool {
-        if pid == 0 || pid > i32::MAX as u32 {
-            return false;
-        }
-        // SAFETY: signal zero performs no mutation and accepts any integer pid.
-        let result = unsafe { libc::kill(pid.cast_signed(), 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        pid_is_alive(pid)
     }
+}
+
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    // SAFETY: signal zero checks process existence without delivering a signal.
+    let result = unsafe { libc::kill(pid.cast_signed(), 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn parse_environment_suffix(command: &str) -> Vec<(String, String)> {
@@ -213,12 +194,10 @@ fn parse_process(line: &str) -> DaemonResult<ProcessInfo> {
     let (parent_pid, command) = remaining.split_at(parent_end);
     let pid = pid
         .parse()
-        .ok()
-        .ok_or_else(|| DaemonError::Process(format!("invalid ps row: {line}")))?;
+        .map_err(|_| DaemonError::Process(format!("invalid ps row: {line}")))?;
     let parent_pid = parent_pid
         .parse()
-        .ok()
-        .ok_or_else(|| DaemonError::Process(format!("invalid ps row: {line}")))?;
+        .map_err(|_| DaemonError::Process(format!("invalid ps row: {line}")))?;
     let command = command.trim_start().to_owned();
     Ok(ProcessInfo {
         pid,
@@ -252,7 +231,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn parses_recursive_descendants_and_lsof_ports() {
+    async fn parses_process_table_and_lsof_ports() {
         let shell = Arc::new(FakeShell::new());
         shell.when(
             |command| command.program == "ps",
@@ -274,13 +253,13 @@ mod tests {
         let process = RealProcess::new(shell);
         assert_eq!(
             process
-                .descendants(10)
+                .snapshot()
                 .await
                 .unwrap_or_else(|error| panic!("{error}"))
                 .iter()
-                .map(|entry| entry.pid)
+                .map(|entry| (entry.pid, entry.parent_pid))
                 .collect::<Vec<_>>(),
-            vec![11, 12]
+            vec![(10, 1), (11, 10), (12, 11), (20, 1)]
         );
         assert_eq!(
             process

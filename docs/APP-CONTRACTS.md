@@ -3,39 +3,44 @@
 **Status: authoritative for the app's internal seams.** `docs/UX-SPEC.md` decides what a screen
 shows, `docs/KEYMAP.md` decides which key does it, `docs/DESIGN-SYSTEM.md` + `fleet-ui-kit`
 decide what it is drawn with. This document decides **how the parts of `fleet-app` plug into
-each other**, so the Hub, the Workspace, the Jobs panel and the dialogs can be implemented in
-parallel without touching the shell.
+each other**: what the shell owns, what a screen owns, and what crosses between them.
 
-Everything below is frozen. A change to a signature here is a cross-agent change: raise it as an
-integration request instead of editing another agent's file.
+These seams are stable on purpose: changing a signature here changes every screen, so change it
+deliberately and update this document in the same pass.
 
 ---
 
-## 1. Module map and ownership
+## 1. Module map
 
-| Module | Owns | Implemented by |
-| --- | --- | --- |
-| `shell/` | window, `AppFrame`, routing, chrome, focus, key contexts, quit flow, daemon surfaces | app-shell |
-| `state.rs` | `AppState`, the snapshot mirror, mirror grids, modes, cursors, MRU, toasts | app-shell |
-| `bridge.rs` | the tokio thread and the daemon channels | app-shell |
-| `actions.rs` / `keymap.rs` | one action per `KEYMAP.md` row and the binding table | app-shell |
-| `screens/hub.rs` | §3.1–§3.5 | hub agent |
-| `screens/workspace.rs` | §3.6 | workspace agent |
-| `screens/agent_popup.rs` | §3.6.1 floating agent surface, coordinated terminal attachment | app-shell |
-| `screens/jobs.rs` | §3.7 | jobs agent |
-| `dialogs/` | §3.8, §3.9, §3.10 | dialogs agent |
-| `terminal_element.rs` | the painted cell grid | workspace agent |
-| `views/` | shared domain views composed from the kit (rows, detail panel, …) | whoever needs one first |
+| Module | Owns |
+| --- | --- |
+| `shell/` | the window, `AppFrame`, routing, chrome, focus, key contexts, the quit flow, the daemon surfaces |
+| `state.rs` + `state/` | `AppState`: the snapshot mirror, mirror grids, modes, cursors, MRU, toasts, notifications |
+| `bridge.rs` + `bridge/` | the tokio thread, the daemon channels, and request dispatch |
+| `actions.rs` / `keymap.rs` | one action per `KEYMAP.md` row, and the binding table as data |
+| `presentation/` | shared projection and formatting used by more than one screen |
+| `screens/hub/` | §3.1–§3.5 |
+| `screens/workspace/` | §3.6 |
+| `screens/agent_popup/` | §3.6.1, the floating agent surface and its terminal attachment |
+| `screens/jobs/` | §3.7 |
+| `dialogs/` | §3.8–§3.10, plus the `ActiveDialog` entity the shell mounts |
+| `terminal/` | the painted cell grid, its geometry, selection and prepared presentation |
+| `views/` | domain views composed from the kit: rows, lists, the detail panel, the watch pane |
+| `watches/` | the read-only subagent output mirror and its catch-up cursors |
 
-The placeholder files under `screens/` are meant to be **replaced wholesale**. Keep the
-constructor, the render signature and the focus rule; everything else is yours.
+Each of those roots holds the type and its composition only. Preparation, lifecycle, actions and
+tests live in sibling modules — `screens/hub/{projection,cache,navigation,actions,composition}`,
+`screens/workspace/{model,lifecycle,terminal,native,chrome,actions}` and so on.
 
 ---
 
 ## 2. The extension points
 
+The shell mounts the Hub and the Jobs panel as plain screens, drives the Workspace and the agent
+popup in two phases, and mounts dialogs as an entity.
+
 ```rust
-// screens/hub.rs
+// screens/hub.rs — prepares inside render through its own cached projection
 impl HubScreen {
     pub fn new(cx: &mut App) -> Self;
     pub fn render(
@@ -48,28 +53,38 @@ impl HubScreen {
     ) -> AnyElement;
 }
 
-// screens/workspace.rs — same shape
-impl WorkspaceScreen { pub fn new(cx: &mut App) -> Self; pub fn render(/* … */) -> AnyElement; }
-
 // screens/jobs.rs — same shape, rendered into the overlay layer
 impl JobsPanel { pub fn new(cx: &mut App) -> Self; pub fn render(/* … */) -> AnyElement; }
 
+// screens/workspace.rs and screens/agent_popup.rs — two phases
+impl WorkspaceScreen {
+    /// Attachment, requests, focus and teardown. Called before the frame is composed.
+    pub(crate) fn synchronize(&mut self, state: &Entity<AppState>, bridge: &Bridge,
+                              window: &mut Window, cx: &mut App);
+    /// Composes what `synchronize` prepared. Issues no request, reconciles no resource.
+    pub(crate) fn render_prepared(/* same arguments as `render` */) -> AnyElement;
+}
+
+// dialogs/host.rs — the shell mounts one entity, not a render call
+pub struct ActiveDialog;                       // observes `AppState.overlay` and the draft host
+impl ActiveDialog {
+    pub fn new(state: Entity<AppState>, bridge: Bridge, focus: FocusHandle,
+               cx: &mut Context<Self>) -> Self;
+}
+
 // dialogs/mod.rs
-pub enum Dialogs { CreateWorktree, CloneRepo, Confirm, NewContext, EditContext,
-                   AssignRepo, Settings, Help, Quit, QuitDaemon }
+pub enum Dialogs { CreateWorktree, CloneRepo, Confirm, NewContext, EditContext, AssignRepo,
+                   EditHooks, Settings, RenameTerminal, Help, Quit, QuitDaemon }
 impl Dialogs {
     pub const fn context_name(&self) -> &'static str;   // the `Dialog > <name>` word
-    pub const fn title(&self) -> &'static str;
-    pub fn render(
-        &self,
-        state: &Entity<AppState>,
-        bridge: &Bridge,
-        focus: &FocusHandle,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement;
+    fn render(/* state, bridge, focus, window, cx */) -> AnyElement;   // called by ActiveDialog
 }
 ```
+
+**Render prepares nothing.** A render function composes already-prepared data. Filesystem access,
+request initiation, expensive projection and focus or lifecycle reconciliation belong in
+`synchronize`, in an observation, or in a background task — never in `render`. Drafts are entities
+released with the window; there is no global draft store.
 
 Rules that come with those signatures:
 
@@ -83,8 +98,9 @@ Rules that come with those signatures:
 3. **The daemon is only reachable through `Bridge`** (§4). Clone it into your listeners.
 4. **Do not draw the context bar, the status bar, the banner or the toasts.** The shell owns all
    four, on every screen, at the same pixel positions (§2.1).
-5. `Dialogs` variants may grow payloads (`Confirm(ConfirmState)`, …). The variant **names** and
-   the strings from `context_name()` are frozen, because `keymap.rs` binds against them.
+5. The `Dialogs` variant **names** and the strings from `context_name()` are stable, because
+   `keymap.rs` binds against them. A dialog's own data lives in its draft entity, not in the
+   variant: `Confirm` reads the pending `ConfirmRequest` that `dialogs::request_confirm` staged.
 
 ### What the shell already handles for you
 
@@ -218,7 +234,8 @@ construction; there is no synchronous path and there must not be one.
 
 ## 5. The state mirror
 
-`AppState` (`state.rs`) is the single source of truth on the client. The parts a screen touches:
+`AppState` (`state.rs`, with its reducers in `state/{connection,navigation,notifications,snapshot,terminal}.rs`)
+is the single source of truth on the client. The parts a screen touches:
 
 | Field | Meaning |
 | --- | --- |
@@ -230,15 +247,18 @@ construction; there is no synchronous path and there must not be one.
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
+| `watches: Watches` | the read-only subagent mirror and its per-session pane state |
 | `daemon: DaemonLink` | §3.12; `refuses_mutations()` and `drops_terminal_keys()` are the two questions a screen asks |
 
 `agent_popup: Option<AgentPopupState>` is screen-independent. Its `Terminal` / `Prefix` / `Scroll`
 submodes reuse the existing `TERMINAL` / `^S` / `SCROLL` status words; it does not add a ninth mode
 word. An ordinary dialog above it temporarily shows `DIALOG`, then reveals the popup's prior word.
 
-Pure helpers worth reusing rather than re-deriving: `move_cursor`, `clamp_cursor`, `half_page`,
-`push_toast`, `expire_toasts`, `latest_failed_job`, `running_jobs`, `parse_percent`,
-`chip_counts`, `breadcrumb`, `filter_escape`, `reconnect_backoff`.
+Pure helpers worth reusing rather than re-deriving, all re-exported from `state`:
+`move_cursor`, `clamp_cursor`, `half_page` and `filter_escape` (`state/navigation.rs`);
+`push_toast`, `expire_toasts`, `dwell_for`, `latest_failed_job` and `running_jobs`
+(`state/notifications.rs`); `breadcrumb` and `ChipCounts` (`state/snapshot.rs`);
+`reconnect_backoff` (`state/connection.rs`); `parse_percent` (`presentation/jobs.rs`).
 
 `MirrorGrid::apply` already ignores a diff that arrives before the first full frame or out of
 sequence, and resizes on a full frame; paint from `lines`, `cursor`, `viewport` and `modes` and
@@ -266,10 +286,9 @@ innermost one and always runs first.
 
 A listener that does part of the work and expects the shell to do the rest must therefore end
 with `cx.propagate()`. There is no "also run the outer handler" by default, and the failure is
-silent: the key is consumed and nothing else happens. This is what made `J` / `q` / `Esc`
-unable to close the Jobs panel — the panel reset its own state and never handed `jobs::Close`
-back to `Shell::close_jobs`. Any comment that says "the shell owns …" is a promise that the
-listener calls `cx.propagate()`.
+silent: the key is consumed and nothing else happens. Any comment that says "the shell owns …"
+is a promise that the listener calls `cx.propagate()` — a panel that resets its own state and
+keeps `jobs::Close` can never be closed.
 
 The mirror-image rule holds too: a listener that fully handles an action and must stop an
 outer one from *also* acting calls `cx.stop_propagation()` explicitly, so both directions are
@@ -338,8 +357,8 @@ escaping below the 16 MiB frame limit. Pending events reuse that bounded history
 Output events coalesce on a 50 ms daemon tick; finish flushes pending output before
 `WatchExited`. Finished watches expire 30 minutes after completion. Dismissal,
 TTL, terminal close, and session kill emit `WatchDismissed`; none of the watch
-operations signal a child. Closing a running pane in phase 2 should hide it
-locally; `DismissWatch` is only for completed watches.
+operations signal a child. Closing a running pane hides it locally; `DismissWatch`
+is only for completed watches.
 
 AppendWatchOutput and FinishWatch require the starting connection (otherwise
 `Conflict`), preventing reconnected wrappers from modifying an unrelated reused

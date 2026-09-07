@@ -107,7 +107,7 @@ pub fn parse(input: &[u8]) -> Result<Diff> {
 
 /// Renders a parsed diff into an applicable unified patch.
 #[must_use]
-pub fn render(diff: &Diff) -> Vec<u8> {
+pub(crate) fn render(diff: &Diff) -> Vec<u8> {
     let mut output = Vec::new();
     for file in &diff.files {
         for header in &file.headers {
@@ -141,7 +141,7 @@ pub fn render(diff: &Diff) -> Vec<u8> {
 }
 
 /// Parses `git diff-tree --name-status -z` output.
-pub fn commit_files(input: &[u8]) -> Result<Vec<CommitFile>> {
+pub(crate) fn commit_files(input: &[u8]) -> Result<Vec<CommitFile>> {
     let fields: Vec<&[u8]> = input
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
@@ -271,41 +271,21 @@ fn parse_hunk_line(hunk: &mut Hunk, line: &[u8], remaining: &mut Remaining) {
         None => (LineKind::Context, line),
         _ => (LineKind::Other, line),
     };
-    remaining.consume(kind);
+    let old = || hunk.old.start + (hunk.old.count - remaining.old);
+    let new = || hunk.new.start + (hunk.new.count - remaining.new);
     let (old_no, new_no) = match kind {
-        LineKind::Context => {
-            let old = next_old(hunk);
-            let new = next_new(hunk);
-            (Some(old), Some(new))
-        }
-        LineKind::Removed => (Some(next_old(hunk)), None),
-        LineKind::Added => (None, Some(next_new(hunk))),
+        LineKind::Context => (Some(old()), Some(new())),
+        LineKind::Removed => (Some(old()), None),
+        LineKind::Added => (None, Some(new())),
         LineKind::NoNewline | LineKind::Other => (None, None),
     };
+    remaining.consume(kind);
     hunk.lines.push(DiffLine {
         kind,
         content: content.to_vec(),
         old_no,
         new_no,
     });
-}
-
-fn next_old(hunk: &Hunk) -> u32 {
-    hunk.old.start
-        + hunk
-            .lines
-            .iter()
-            .filter(|line| matches!(line.kind, LineKind::Context | LineKind::Removed))
-            .count() as u32
-}
-
-fn next_new(hunk: &Hunk) -> u32 {
-    hunk.new.start
-        + hunk
-            .lines
-            .iter()
-            .filter(|line| matches!(line.kind, LineKind::Context | LineKind::Added))
-            .count() as u32
 }
 
 fn parse_header_path(value: &[u8]) -> Option<PathBuf> {
@@ -343,6 +323,51 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::{commit_files, parse, render};
     use crate::{DiffKind, LineKind};
+
+    #[test]
+    fn numbers_and_round_trips_a_large_mixed_hunk() {
+        use std::fmt::Write;
+
+        const GROUPS: u32 = 20_000;
+        let mut patch = format!(
+            "diff --git a/large b/large\n--- a/large\n+++ b/large\n@@ -11,{} +21,{} @@\n",
+            GROUPS * 2,
+            GROUPS * 2
+        );
+        for index in 0..GROUPS {
+            writeln!(patch, " context {index}\n-old {index}\n+new {index}").unwrap();
+        }
+        patch.push_str("\\ No newline at end of file\n");
+        let parsed = parse(patch.as_bytes()).unwrap();
+        let hunk = &parsed.files[0].hunks[0];
+        assert_eq!(hunk.lines.len(), GROUPS as usize * 3 + 1);
+        for (index, lines) in hunk.lines[..hunk.lines.len() - 1]
+            .chunks_exact(3)
+            .enumerate()
+        {
+            let offset = index as u32 * 2;
+            assert_eq!(
+                (lines[0].old_no, lines[0].new_no),
+                (Some(11 + offset), Some(21 + offset))
+            );
+            assert_eq!(
+                (lines[1].old_no, lines[1].new_no),
+                (Some(12 + offset), None)
+            );
+            assert_eq!(
+                (lines[2].old_no, lines[2].new_no),
+                (None, Some(22 + offset))
+            );
+        }
+        assert_eq!(
+            (
+                hunk.lines.last().unwrap().old_no,
+                hunk.lines.last().unwrap().new_no
+            ),
+            (None, None)
+        );
+        assert_eq!(render(&parsed), patch.as_bytes());
+    }
 
     #[test]
     fn parses_mode_changes_renames_binaries_and_no_newline_markers() {
@@ -443,7 +468,7 @@ mod tests {
             b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
         let diff = parse(fixture).expect("parse diff");
         assert_eq!(render(&diff), fixture);
-        assert!(diff.to_text_lossy().contains("+TWO"));
+        assert!(String::from_utf8_lossy(&render(&diff)).contains("+TWO"));
     }
 
     #[test]

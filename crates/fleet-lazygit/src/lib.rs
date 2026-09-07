@@ -1,28 +1,25 @@
 //! A native lazygit clone: `fleet-git` for the plumbing, `fleet-ui-kit` for the design system,
 //! gpui for the window.
 //!
-//! The crate is one gpui view ([`root::Lazygit`]) over one state struct ([`state::GitUiState`]).
-//! Every `git` call happens on a dedicated Tokio thread ([`bridge::GitBridge`]) and comes back as
-//! an event, so the foreground thread never blocks on a subprocess.
+//! Embedders use [`root::Lazygit`] and [`root::LazygitEvent`]. Git operations and diff
+//! preparation run off the foreground thread.
 
 #![warn(missing_docs)]
 
 use std::path::PathBuf;
 
 use fleet_ui_kit::{KitAssets, Theme, ThemeMode};
-use gpui::{
-    App, AppContext, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
-pub mod actions;
-pub mod bridge;
+mod actions;
+mod bridge;
 pub mod drive;
 pub mod keymap;
-pub mod overlays;
-pub mod panels;
+mod overlays;
+mod panels;
 pub mod root;
-pub mod state;
-pub mod views;
+mod state;
+mod views;
 
 /// The window's default size.
 const DEFAULT_SIZE: (f32, f32) = (1280.0, 800.0);
@@ -76,7 +73,7 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
                     }
                     let _ignored = window.update(cx, |view, window, cx| {
                         window.activate_window();
-                        window.focus(&view.focus_handle(cx), cx);
+                        view.set_active(true, window, cx);
                     });
                     cx.activate(true);
                     // Developer-only: drive the GUI from a script file (see `drive`).

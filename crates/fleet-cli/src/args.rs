@@ -109,7 +109,7 @@ pub struct WatchListArgs {
 pub struct WatchTailArgs {
     /// Numeric daemon-local watch ID.
     pub id: fleet_core::watches::WatchId,
-    /// Poll every 250 ms until exit, preserving stdout/stderr channels.
+    /// Follow the watch until it exits, preserving stdout/stderr channels.
     #[arg(long)]
     pub follow: bool,
 }
@@ -443,11 +443,7 @@ mod tests {
             );
         }
     }
-}
 
-#[cfg(test)]
-mod exec_tests {
-    use super::*;
     #[test]
     fn watch_commands_parse_options_and_reject_invalid_ids() {
         assert_eq!(

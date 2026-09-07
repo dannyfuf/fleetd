@@ -39,7 +39,9 @@ impl JobCtx {
                 command,
                 self.cancel.clone(),
                 Arc::new(move |line| {
-                    let _ignored = context.progress(line);
+                    if let Err(error) = context.progress(line) {
+                        tracing::warn!(%error, job = %context.id, "failed to record child progress");
+                    }
                 }),
             )
             .await
@@ -55,6 +57,7 @@ impl JobCtx {
         if self.cancel.is_cancelled() {
             return Err(crate::DaemonError::Cancelled);
         }
+        self.manager.flush_log(&self.id)?;
         shell.run_detached(command, log_path).await
     }
 }

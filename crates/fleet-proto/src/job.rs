@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use fleet_core::ids::JobId;
+use fleet_core::ids::JobId;
 
 /// Kind of durable daemon background work.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -93,37 +93,26 @@ pub struct JobRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_round_trip;
 
     #[test]
-    fn job_enums_round_trip() {
+    fn job_kinds_and_statuses_round_trip() {
         for kind in [
             JobKind::Clone,
             JobKind::Import,
             JobKind::Custom("other".to_owned()),
         ] {
-            let json = serde_json::to_string(&kind).unwrap_or_else(|error| panic!("{error}"));
-            let decoded: JobKind =
-                serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(decoded, kind);
+            assert_round_trip(kind);
         }
-        let status = JobStatus::Failed {
+        assert_round_trip(JobStatus::Failed {
             error: "boom".to_owned(),
-        };
-        let json = serde_json::to_string(&status).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: JobStatus =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, status);
-
-        let status = JobStatus::Cancelling;
-        let json = serde_json::to_string(&status).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: JobStatus =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, status);
+        });
+        assert_round_trip(JobStatus::Cancelling);
     }
 
     #[test]
     fn job_record_round_trips_retryability() {
-        let record = JobRecord {
+        assert_round_trip(JobRecord {
             id: JobId::try_from("job-round-trip").unwrap_or_else(|error| panic!("{error}")),
             kind: JobKind::Import,
             target: "~/.swarm".to_owned(),
@@ -135,10 +124,6 @@ mod tests {
             finished_at: None,
             cancellable: true,
             retryable: true,
-        };
-        let json = serde_json::to_string(&record).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: JobRecord =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, record);
+        });
     }
 }

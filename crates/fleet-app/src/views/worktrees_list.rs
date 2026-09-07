@@ -1,39 +1,26 @@
-//! The Hub's worktrees list (UX-SPEC §3.3).
-//!
-//! One row answers *which branch is alive, which needs attention, which can I throw away*, in
-//! the §2.9 column ladder and with the §2.5 glyph vocabulary. Everything §3.3 lists as omitted
-//! (`WorktreeId`, `path`, `ahead`/`behind`, `published`, PR title …) is reachable through `i`,
-//! `I` or the delete confirm instead.
-//!
-//! Two invariants are encoded in the model half rather than left to the renderer:
-//!
-//! * **Cursor stability (§3.3).** [`sort_rows`] is called only on an explicit user action; a
-//!   background event changes a row's glyph *in place* because the sort key never moves.
-//! * **Absence of knowledge (§1.3).** A row with no inspection keeps its session glyph and
-//!   simply carries no derived mark; it never renders a `none`-looking blank.
+//! Prepared worktree rows and responsive list composition.
 
 use std::collections::HashMap;
 
 use fleet_core::{
-    github::InspectionPrState,
-    ids::{HostId, RepoId, WorktreeId},
+    ids::{RepoId, WorktreeId},
     model::Worktree,
-    sessions::{AgentActivity, Session, SessionKind, SessionState, WorktreeStatus},
+    sessions::{AgentActivity, SessionState},
 };
-use fleet_proto::{
-    job::{JobKind, JobRecord, JobStatus},
-    snapshot::HostStatus,
-};
+use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{
-    AgeLabel, ColumnAlign, ColumnLadder, DegradedChip, EmptyState, Freshness, Icon, IconSize,
+    ActiveTheme, AgeLabel, ColumnLadder, DegradedChip, EmptyState, Freshness, Icon, IconSize,
     KeepAliveChips, KeepAliveLabel, ListView, Pane, PaneBorder, PaneHeader, PrBadge, PrBadgeState,
     ResolvedColumn, Row, RowColumn, StatusGlyph, StatusKind, Text, Tone, Truncate, truncate,
 };
-use gpui::{
-    AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, Window, div, prelude::*,
-};
+use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
-use crate::screens::hub::{Inspected, age_secs};
+use crate::{
+    presentation::{
+        KeepAliveStyle, age_secs, contains_folded, inspection_badge, keep_alive_icon, row_glyph,
+    },
+    views::{detail::Inspected, first_run::EmptySurface},
+};
 
 /// Character budget of the `owner/name` column (§2.9 column 3).
 const REPO_BUDGET: usize = 14;
@@ -71,42 +58,22 @@ pub struct WorktreeRow {
     pub pr: Option<(u64, PrBadgeState)>,
     /// Whether the derived marks are older than 10 minutes (§2.6).
     pub stale_marks: bool,
+    inspected_age: Option<i64>,
     /// Age of `lastOpenedAt ?? createdAt`, in seconds.
     pub age: Option<i64>,
 }
 
-/// The icon a keep-alive label carries: an agent, a port, or the generic bolt (§3.3).
-#[must_use]
-pub fn keep_alive_icon(label: &str) -> Icon {
-    let lowered = label.to_lowercase();
-    if lowered.starts_with(':') || lowered.contains("port") {
-        Icon::Server
-    } else if lowered.contains("claude")
-        || lowered.contains("opencode")
-        || lowered.contains("agent")
-    {
-        Icon::Bot
-    } else {
-        Icon::Zap
-    }
-}
-
-/// The badge a worktree's inspected pull request renders as.
-///
-/// A **closed, unmerged** PR gets no badge at all: §2.5 [D-3] reserves the blank cell for "this
-/// column does not apply to this row", and `PrBadgeState` deliberately has no closed rendering.
-#[must_use]
-pub fn inspection_badge(state: InspectionPrState) -> Option<PrBadgeState> {
-    match state {
-        InspectionPrState::Open => Some(PrBadgeState::Review),
-        InspectionPrState::Merged => Some(PrBadgeState::Merged),
-        InspectionPrState::Closed => None,
+impl WorktreeRow {
+    fn marks_stale(&self, age_offset: i64) -> bool {
+        self.inspected_age
+            .map(|age| Freshness::from_secs(age.saturating_add(age_offset).max(0)))
+            .is_some_and(|freshness| freshness == Freshness::Stale)
     }
 }
 
 /// The phase word a running job on this row shows instead of percentages (§3.3).
 #[must_use]
-pub fn job_phase(job: &JobRecord) -> SharedString {
+fn job_phase(job: &JobRecord) -> SharedString {
     if let Some(progress) = job.progress.as_deref().filter(|line| !line.is_empty()) {
         return SharedString::from(progress.to_owned());
     }
@@ -120,101 +87,21 @@ pub fn job_phase(job: &JobRecord) -> SharedString {
     })
 }
 
-/// The running job that owns a worktree row, if any.
-fn job_for<'a>(id: &WorktreeId, jobs: &'a [JobRecord]) -> Option<&'a JobRecord> {
-    jobs.iter().find(|job| {
-        matches!(job.status, JobStatus::Running | JobStatus::Queued)
-            && job.target == id.as_str()
-            && matches!(
-                job.kind,
-                JobKind::CreateWorktree
-                    | JobKind::DeleteWorktree
-                    | JobKind::PostCreateHooks
-                    | JobKind::Prune
-            )
-    })
-}
-
-/// Whether a queued or running row-level job currently owns this worktree.
-#[must_use]
-pub fn has_running_job(id: &WorktreeId, jobs: &[JobRecord]) -> bool {
-    job_for(id, jobs).is_some()
-}
-
-/// Whether the worktree's session was put to sleep rather than merely detached (§2.5).
-fn is_slept(id: &WorktreeId, sessions: &[Session]) -> bool {
-    sessions.iter().any(|session| {
-        matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == id)
-            && session.slept_at.is_some()
-    })
-}
-
-/// Whether a host's last probe failed (`cloud-off`, forces the session to `unknown`).
-fn host_unreachable(host: Option<&HostId>, hosts: &[HostStatus]) -> bool {
-    host.is_some_and(|host| {
-        hosts
-            .iter()
-            .any(|status| &status.id == host && !status.reachable)
-    })
-}
-
-/// Maps session and recognized-agent activity to the shared primary status glyph.
-///
-/// Recognized activity deliberately outranks attachment and sleep state on every surface.
-#[must_use]
-pub fn session_glyph(
-    session: SessionState,
-    slept: bool,
-    agent_activity: AgentActivity,
-) -> StatusKind {
-    match agent_activity {
-        AgentActivity::Working => return StatusKind::AgentWorking,
-        AgentActivity::Idle => return StatusKind::AgentFinished,
-        AgentActivity::Unknown => {}
-    }
-    match session {
-        SessionState::Attached => StatusKind::Attached,
-        SessionState::Detached if slept => StatusKind::Sleeping,
-        SessionState::Detached => StatusKind::DetachedAwake,
-        SessionState::Unknown => StatusKind::Unknown,
-        SessionState::None => StatusKind::NoSession,
-    }
-}
-
-/// The §2.5 glyph of one row, in the priority the spec fixes.
-#[must_use]
-pub fn row_glyph(
-    session: SessionState,
-    slept: bool,
-    agent_activity: AgentActivity,
-    degraded: bool,
-    unreachable: bool,
-    job: bool,
-) -> StatusKind {
-    if unreachable {
-        return StatusKind::HostUnreachable;
-    }
-    if degraded {
-        return StatusKind::Degraded;
-    }
-    if job {
-        return StatusKind::JobRunning;
-    }
-    session_glyph(session, slept, agent_activity)
+pub(crate) fn owns_row(job: &JobRecord) -> bool {
+    matches!(job.status, JobStatus::Running | JobStatus::Queued)
+        && matches!(
+            job.kind,
+            JobKind::CreateWorktree
+                | JobKind::DeleteWorktree
+                | JobKind::PostCreateHooks
+                | JobKind::Prune
+        )
 }
 
 /// Everything the model needs from the snapshot to build the rows.
 pub struct RowInputs<'a> {
-    /// The worktrees of the current scope.
+    /// The worktrees of the current scope, in the order the rows will appear.
     pub worktrees: Vec<&'a Worktree>,
-    /// Runtime statuses, keyed by worktree.
-    pub statuses: &'a [WorktreeStatus],
-    /// Daemon sessions, for the awake / slept distinction.
-    pub sessions: &'a [Session],
-    /// Host reachability probes.
-    pub hosts: &'a [HostStatus],
-    /// Every job, for the running-phase rendering.
-    pub jobs: &'a [JobRecord],
     /// The client's inspection cache.
     pub inspections: &'a HashMap<WorktreeId, Inspected>,
     /// The current epoch second, so the model stays pure.
@@ -223,17 +110,28 @@ pub struct RowInputs<'a> {
 
 /// Builds one row per worktree, in the order the caller supplied them.
 #[must_use]
-pub fn build_rows(inputs: &RowInputs<'_>) -> Vec<WorktreeRow> {
+pub fn build_rows(
+    inputs: &RowInputs<'_>,
+    index: &crate::presentation::SnapshotIndex<'_>,
+) -> Vec<WorktreeRow> {
     inputs
         .worktrees
         .iter()
         .map(|worktree| {
-            let status = inputs
-                .statuses
+            let status = index.status(&worktree.id);
+            let unreachable = worktree
+                .host
+                .as_ref()
+                .is_some_and(|host| index.host(host).is_some_and(|host| !host.reachable));
+            let job = index
+                .jobs_for_target(worktree.id.as_str())
                 .iter()
-                .find(|status| status.worktree_id == worktree.id);
-            let unreachable = host_unreachable(worktree.host.as_ref(), inputs.hosts);
-            let job = job_for(&worktree.id, inputs.jobs);
+                .copied()
+                .find(|job| owns_row(job));
+            let slept = index
+                .sessions_for_worktree(&worktree.id)
+                .iter()
+                .any(|session| session.slept_at.is_some());
             // §3.3 *Loading (cold)*: until the daemon reports a status the glyph is
             // `circle-help`, never the `none` dot (§1.3).
             let session = status.map_or(SessionState::Unknown, |status| status.session);
@@ -252,7 +150,7 @@ pub fn build_rows(inputs: &RowInputs<'_>) -> Vec<WorktreeRow> {
                 repo: worktree.repo_id.clone(),
                 glyph: row_glyph(
                     session,
-                    is_slept(&worktree.id, inputs.sessions),
+                    slept,
                     status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                     worktree.degraded.is_some(),
                     unreachable,
@@ -288,6 +186,7 @@ pub fn build_rows(inputs: &RowInputs<'_>) -> Vec<WorktreeRow> {
                         .and_then(|pr| inspection_badge(pr.state).map(|state| (pr.number, state)))
                 },
                 stale_marks,
+                inspected_age,
                 age: worktree
                     .last_opened_at
                     .as_deref()
@@ -319,24 +218,24 @@ pub fn matches(row: &WorktreeRow, query: &str) -> bool {
         return true;
     }
     let needle = query.to_lowercase();
-    row.branch.to_lowercase().contains(&needle)
-        || row.repo_label.to_lowercase().contains(&needle)
+    contains_folded(&row.branch, &needle)
+        || contains_folded(&row.repo_label, &needle)
         || row
             .host
             .as_ref()
-            .is_some_and(|host| host.to_lowercase().contains(&needle))
+            .is_some_and(|host| contains_folded(host, &needle))
         || row
             .keep_alive
             .iter()
-            .any(|label| label.to_lowercase().contains(&needle))
+            .any(|label| contains_folded(label, &needle))
 }
 
 /// Everything the list needs to draw itself.
-pub struct ListProps {
+pub struct ListProps<Rows = Vec<WorktreeRow>> {
     /// A live filter editor that replaces the ordinary pane header.
     pub header_override: Option<AnyElement>,
     /// The rows, already sorted and filtered.
-    pub rows: Vec<WorktreeRow>,
+    pub rows: Rows,
     /// Cursor index into `rows`.
     pub cursor: usize,
     /// Whether the list owns the keyboard.
@@ -360,8 +259,15 @@ pub struct ListProps {
 }
 
 /// Renders the worktrees pane: header, rows and the §3.13 empty states.
+///
+/// `age_offset` ages the prepared rows by the seconds elapsed since the projection was built,
+/// so a clock tick re-labels the age column without rebuilding the model.
 #[must_use]
-pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement {
+pub fn render(
+    props: ListProps<impl AsRef<[WorktreeRow]> + 'static>,
+    scroll: &UniformListScrollHandle,
+    age_offset: i64,
+) -> AnyElement {
     let ListProps {
         rows,
         header_override,
@@ -381,7 +287,7 @@ pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement 
         .scope(scope.clone())
         .total(total);
     if filter.is_some() {
-        header = header.shown(rows.len());
+        header = header.shown(rows.as_ref().len());
     }
     if let Some(query) = filter.clone() {
         header = header.filter_chip(query);
@@ -389,9 +295,9 @@ pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement 
     if let Some(age) = stale {
         header = header.stale(age);
     }
-    if !rows.is_empty() {
+    if !rows.as_ref().is_empty() {
         let first = cursor.saturating_sub(cursor % visible_rows.max(1)) + 1;
-        let last = (first + visible_rows.max(1) - 1).min(rows.len());
+        let last = (first + visible_rows.max(1) - 1).min(rows.as_ref().len());
         header = header.range(first, last);
     }
 
@@ -401,22 +307,23 @@ pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement 
             .into_any_element()
     } else {
         match (filter.clone(), scope_is_all) {
-            (Some(query), _) => crate::views::first_run::empty_state("filter", Some(&query)),
-            (None, true) => crate::views::first_run::empty_state("worktrees", None),
-            (None, false) => crate::views::first_run::empty_state("worktrees-repo", Some(&scope)),
+            (Some(query), _) => EmptySurface::Filter.render(Some(&query)),
+            (None, true) => EmptySurface::Worktrees.render(None),
+            (None, false) => EmptySurface::WorktreesRepo.render(Some(&scope)),
         }
     };
 
     let columns = columns(pane_ch, scope_is_all);
-    let body_rows = rows.clone();
+    let row_count = rows.as_ref().len();
+    let body_rows = rows;
     let list = ListView::new(
         "hub-worktrees",
-        rows.len(),
-        move |index, is_cursor, window, cx| {
-            let Some(row) = body_rows.get(index) else {
+        row_count,
+        move |index, is_cursor, _window, cx| {
+            let Some(row) = body_rows.as_ref().get(index) else {
                 return div().into_any_element();
             };
-            worktree_row(row, is_cursor, focused, pane_ch, &columns, window, cx)
+            worktree_row(row, is_cursor, focused, pane_ch, &columns, age_offset, cx)
         },
     )
     .cursor(cursor)
@@ -432,30 +339,10 @@ pub fn render(props: ListProps, scroll: &UniformListScrollHandle) -> AnyElement 
         .into_any_element()
 }
 
-/// The §2.9 columns at this pane width.
-///
-/// The ladder resolves five of the six rules on its own; the sixth — *the repo prefix is shown
-/// when the scope is `All` **or** the pane is at least 110 ch* — needs the scope, which the kit
-/// deliberately knows nothing about, so it is applied here.
+/// Resolve columns with the repository cell forced on in All scope.
 #[must_use]
 pub fn columns(pane_ch: f32, scope_is_all: bool) -> Vec<ResolvedColumn> {
-    let mut columns = ColumnLadder::worktrees().resolve(pane_ch);
-    if scope_is_all && !columns.iter().any(|column| column.key.as_ref() == "repo") {
-        let after_branch = columns
-            .iter()
-            .position(|column| column.key.as_ref() == "branch")
-            .map_or(0, |index| index + 1);
-        columns.insert(
-            after_branch,
-            ResolvedColumn {
-                key: SharedString::new_static("repo"),
-                width: Some(fleet_ui_kit::theme::ch(REPO_BUDGET as f32)),
-                min_width: None,
-                align: ColumnAlign::Left,
-            },
-        );
-    }
-    columns
+    ColumnLadder::worktrees_in_scope(scope_is_all).resolve(pane_ch)
 }
 
 /// One list row, built strictly from the resolved §2.9 columns.
@@ -465,7 +352,7 @@ fn worktree_row(
     focused: bool,
     pane_ch: f32,
     columns: &[ResolvedColumn],
-    window: &mut Window,
+    age_offset: i64,
     cx: &mut App,
 ) -> AnyElement {
     let mut element = Row::new()
@@ -481,7 +368,7 @@ fn worktree_row(
     for column in columns {
         let cell: Option<AnyElement> = match column.key.as_ref() {
             "glyph" => None,
-            "branch" => Some(branch_cell(row, cx)),
+            "branch" => Some(branch_cell(row, age_offset, cx)),
             "repo" => Some(
                 Text::data_small(truncate(
                     row.repo_label.as_ref(),
@@ -492,34 +379,35 @@ fn worktree_row(
                 .into_any_element(),
             ),
             "keepalive" => Some(keep_alive_cell(row, pane_ch)),
-            "pr" => row.pr.map(|(number, state)| {
-                PrBadge::new(number, state)
-                    .stale(row.stale_marks)
-                    .into_any_element()
-            }),
-            "age" => Some(age_cell(row, window, cx)),
+            "pr" => Some(row.pr.map_or_else(
+                || div().into_any_element(),
+                |(number, state)| {
+                    PrBadge::new(number, state)
+                        .stale(row.marks_stale(age_offset))
+                        .into_any_element()
+                },
+            )),
+            "age" => Some(age_cell(row, age_offset, cx)),
             _ => None,
         };
         let Some(cell) = cell else {
             continue;
         };
-        let mut wrapped = match column.width {
-            Some(width) => RowColumn::fixed(width, cell),
-            None => RowColumn::flex(cell),
-        };
-        wrapped = wrapped.align(column.align);
-        element = element.column(wrapped);
+        element = element.column(RowColumn::resolved(column, cell));
     }
     element.into_any_element()
 }
 
 /// `feat/payroll-fix ✎ ☁devbox` — the dirty mark and the host chip ride with the branch.
-fn branch_cell(row: &WorktreeRow, cx: &mut App) -> AnyElement {
-    use fleet_ui_kit::ActiveTheme;
+fn branch_cell(row: &WorktreeRow, age_offset: i64, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
     let warning = Tone::Warning.color(theme);
     let secondary = Tone::Secondary.color(theme);
-    let dirty_opacity = if row.stale_marks { 0.55 } else { 1.0 };
+    let dirty_opacity = if row.marks_stale(age_offset) {
+        theme.metrics.stale_opacity
+    } else {
+        1.0
+    };
     div()
         .flex()
         .items_center()
@@ -564,11 +452,12 @@ fn keep_alive_cell(row: &WorktreeRow, pane_ch: f32) -> AnyElement {
     if row.host_unreachable {
         return Text::ui("offline").tone(Tone::Warning).into_any_element();
     }
-    KeepAliveChips::new(
-        row.keep_alive
-            .iter()
-            .map(|label| KeepAliveLabel::with_icon(label.clone(), keep_alive_icon(label))),
-    )
+    KeepAliveChips::new(row.keep_alive.iter().map(|label| {
+        KeepAliveLabel::with_icon(
+            label.clone(),
+            keep_alive_icon(label, KeepAliveStyle::Worktree),
+        )
+    }))
     .max_visible(3)
     .width_ch(KeepAliveChips::from_pane_ch(pane_ch))
     .into_any_element()
@@ -576,13 +465,12 @@ fn keep_alive_cell(row: &WorktreeRow, pane_ch: f32) -> AnyElement {
 
 /// Column 6: the age, or nothing while a job phase owns the row; an errored inspection
 /// prefixes an amber `triangle-alert` and the row stays operable (§3.3).
-fn age_cell(row: &WorktreeRow, _window: &mut Window, cx: &mut App) -> AnyElement {
-    use fleet_ui_kit::ActiveTheme;
+fn age_cell(row: &WorktreeRow, age_offset: i64, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
     let warning = Tone::Warning.color(theme);
     let label = match (row.phase.is_some(), row.age) {
         (true, _) => AgeLabel::none(),
-        (false, Some(seconds)) => AgeLabel::from_secs(seconds),
+        (false, Some(seconds)) => AgeLabel::from_secs(seconds.saturating_add(age_offset).max(0)),
         (false, None) => AgeLabel::none(),
     };
     div()
@@ -606,13 +494,19 @@ fn age_cell(row: &WorktreeRow, _window: &mut Window, cx: &mut App) -> AnyElement
 mod tests {
     use fleet_core::inspection::WorktreeInspection;
     use fleet_core::{
-        github::InspectionPullRequest,
+        github::{InspectionPrState, InspectionPullRequest},
         ids::WorktreeId,
         model::Degraded,
         sessions::{SessionState, WorktreeStatus},
     };
 
     use super::*;
+
+    use fleet_proto::snapshot::Snapshot;
+
+    // `session_glyph` and `inspection_badge` live in `crate::presentation`; the row builder is
+    // their only consumer with a full case table, so the table is asserted here.
+    use crate::presentation::session_glyph;
 
     fn worktree(slug: &str, opened: Option<&str>, created: &str) -> Worktree {
         Worktree {
@@ -666,22 +560,44 @@ mod tests {
         }
     }
 
-    fn inputs<'a>(
-        worktrees: Vec<&'a Worktree>,
-        statuses: &'a [WorktreeStatus],
-        inspections: &'a HashMap<WorktreeId, Inspected>,
-        jobs: &'a [JobRecord],
-    ) -> RowInputs<'a> {
-        RowInputs {
+    /// A snapshot carrying exactly what a row build reads, so the tests exercise the same
+    /// `SnapshotIndex` path production uses.
+    fn snapshot(
+        worktrees: Vec<Worktree>,
+        statuses: Vec<WorktreeStatus>,
+        jobs: Vec<JobRecord>,
+    ) -> Snapshot {
+        Snapshot {
+            generated_at: String::new(),
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
             worktrees,
+            active_context: None,
+            sessions: Vec::new(),
             statuses,
-            sessions: &[],
-            hosts: &[],
+            pools: Vec::new(),
+            hosts: Vec::new(),
             jobs,
-            inspections,
-            // 2026-09-04T12:00:00Z
-            now: 1_788_523_200,
+            daemon: fleet_proto::snapshot::DaemonInfo {
+                version: String::new(),
+                pid: 1,
+                started_at: String::new(),
+                home: String::new(),
+            },
         }
+    }
+
+    fn rows(snapshot: &Snapshot, inspections: &HashMap<WorktreeId, Inspected>) -> Vec<WorktreeRow> {
+        build_rows(
+            &RowInputs {
+                worktrees: snapshot.worktrees.iter().collect(),
+                inspections,
+                // 2026-09-04T12:00:00Z
+                now: 1_788_523_200,
+            },
+            &crate::presentation::SnapshotIndex::new(snapshot),
+        )
     }
 
     #[test]
@@ -693,43 +609,6 @@ mod tests {
         sort_rows(&mut rows);
         let slugs: Vec<&str> = rows.iter().map(|row| row.slug.as_str()).collect();
         assert_eq!(slugs, vec!["c", "a", "b"]);
-    }
-
-    #[test]
-    fn glyph_priority_keeps_health_and_jobs_above_agent_activity() {
-        assert_eq!(
-            row_glyph(
-                SessionState::Attached,
-                false,
-                AgentActivity::Working,
-                true,
-                true,
-                true
-            ),
-            StatusKind::HostUnreachable
-        );
-        assert_eq!(
-            row_glyph(
-                SessionState::Attached,
-                false,
-                AgentActivity::Working,
-                true,
-                false,
-                true
-            ),
-            StatusKind::Degraded
-        );
-        assert_eq!(
-            row_glyph(
-                SessionState::Attached,
-                false,
-                AgentActivity::Working,
-                false,
-                false,
-                true
-            ),
-            StatusKind::JobRunning
-        );
     }
 
     #[test]
@@ -768,7 +647,8 @@ mod tests {
             worktree.id.clone(),
             Inspected::ready(inspection(&worktree.id, true, "2026-09-04T11:59:30Z")),
         );
-        let rows = build_rows(&inputs(vec![&worktree], &[], &cache, &[]));
+        let snapshot = snapshot(vec![worktree], Vec::new(), Vec::new());
+        let rows = rows(&snapshot, &cache);
         assert!(rows[0].dirty);
         assert_eq!(rows[0].pr, Some((412, PrBadgeState::Review)));
         assert!(!rows[0].stale_marks);
@@ -782,7 +662,8 @@ mod tests {
             worktree.id.clone(),
             Inspected::ready(inspection(&worktree.id, true, "2026-09-04T11:30:00Z")),
         );
-        let rows = build_rows(&inputs(vec![&worktree], &[], &cache, &[]));
+        let snapshot = snapshot(vec![worktree], Vec::new(), Vec::new());
+        let rows = rows(&snapshot, &cache);
         assert!(rows[0].stale_marks);
     }
 
@@ -791,7 +672,8 @@ mod tests {
         let worktree = worktree("a", None, "2026-09-01T10:00:00Z");
         let mut cache = HashMap::new();
         cache.insert(worktree.id.clone(), Inspected::failed("gh unavailable"));
-        let rows = build_rows(&inputs(vec![&worktree], &[], &cache, &[]));
+        let snapshot = snapshot(vec![worktree], Vec::new(), Vec::new());
+        let rows = rows(&snapshot, &cache);
         assert!(!rows[0].dirty);
         assert_eq!(rows[0].pr, None);
         assert!(rows[0].inspect_error);
@@ -814,7 +696,8 @@ mod tests {
             retryable: false,
         }];
         let cache = HashMap::new();
-        let rows = build_rows(&inputs(vec![&worktree], &[], &cache, &jobs));
+        let snapshot = snapshot(vec![worktree], Vec::new(), jobs);
+        let rows = rows(&snapshot, &cache);
         assert_eq!(rows[0].glyph, StatusKind::JobRunning);
         assert_eq!(rows[0].phase.as_deref(), Some("copying files\u{2026}"));
         assert!(!rows[0].deleting);
@@ -831,7 +714,8 @@ mod tests {
             log_path: "/tmp/hooks.log".to_owned(),
         });
         let cache = HashMap::new();
-        let rows = build_rows(&inputs(vec![&worktree], &[], &cache, &[]));
+        let snapshot = snapshot(vec![worktree], Vec::new(), Vec::new());
+        let rows = rows(&snapshot, &cache);
         assert!(rows[0].degraded);
         assert_eq!(rows[0].glyph, StatusKind::Degraded);
     }
@@ -848,7 +732,8 @@ mod tests {
             agent_activity_changed_at: None,
         }];
         let cache = HashMap::new();
-        let rows = build_rows(&inputs(vec![&worktree], &statuses, &cache, &[]));
+        let snapshot = snapshot(vec![worktree], statuses, Vec::new());
+        let rows = rows(&snapshot, &cache);
         assert!(matches(&rows[0], "rut"));
         assert!(matches(&rows[0], "payroll"));
         assert!(matches(&rows[0], "claude"));
@@ -869,7 +754,8 @@ mod tests {
     fn a_worktree_with_no_status_yet_is_unknown_not_none() {
         let worktree = worktree("a", None, "2026-09-01T10:00:00Z");
         let cache = HashMap::new();
-        let rows = build_rows(&inputs(vec![&worktree], &[], &cache, &[]));
+        let snapshot = snapshot(vec![worktree], Vec::new(), Vec::new());
+        let rows = rows(&snapshot, &cache);
         assert_eq!(rows[0].glyph, StatusKind::Unknown);
     }
 
@@ -901,12 +787,5 @@ mod tests {
             .map(|column| column.key.to_string())
             .collect();
         assert_eq!(keys, vec!["glyph", "branch", "pr", "age"]);
-    }
-
-    #[test]
-    fn keep_alive_icons_distinguish_agents_from_ports() {
-        assert_eq!(keep_alive_icon(":3000"), Icon::Server);
-        assert_eq!(keep_alive_icon("claude"), Icon::Bot);
-        assert_eq!(keep_alive_icon("build"), Icon::Zap);
     }
 }

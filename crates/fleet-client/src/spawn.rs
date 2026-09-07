@@ -9,7 +9,8 @@ use std::{
     time::Duration,
 };
 
-use fleet_proto::{error::ProtoError, paths::pid_path};
+use fleet_core::paths::FleetHome;
+use fleet_proto::error::ProtoError;
 use thiserror::Error;
 use tokio::time::{Instant, timeout};
 
@@ -94,12 +95,26 @@ pub async fn ensure_daemon(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
     configure_detached(&mut command);
-    let mut child = command.spawn()?;
+    // A regular thread keeps reaping ownership after startup, cancellation, and runtime shutdown.
+    let (exited_tx, mut exited) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("fleetd-reaper".into())
+        .spawn(move || {
+            let status = command.spawn().and_then(|mut child| child.wait());
+            if let Err(error) = &status {
+                tracing::warn!(%error, "Fleet daemon child could not be spawned or reaped");
+            }
+            let _ = exited_tx.send(status);
+        })?;
 
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Err(SpawnError::Exited { status });
+        match exited.try_recv() {
+            Ok(status) => return Err(SpawnError::Exited { status: status? }),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                return Err(io::Error::other("Fleet daemon reaper stopped unexpectedly").into());
+            }
         }
         if let Some(client) = probe_before(home, deadline).await {
             return Ok(client);
@@ -174,7 +189,7 @@ async fn wait_until_stopped(home: &Path, pid: Option<u32>, timeout_after: Durati
     let deadline = Instant::now() + timeout_after;
     loop {
         let process_stopped = pid.is_none_or(|pid| !process_is_alive(pid));
-        if process_stopped && !fleet_proto::paths::socket_path(home).exists() {
+        if process_stopped && !FleetHome::new(home).socket_path().exists() {
             return true;
         }
         if Instant::now() >= deadline {
@@ -185,7 +200,7 @@ async fn wait_until_stopped(home: &Path, pid: Option<u32>, timeout_after: Durati
 }
 
 fn live_pid(home: &Path) -> Result<Option<u32>, io::Error> {
-    let contents = match fs::read_to_string(pid_path(home)) {
+    let contents = match fs::read_to_string(FleetHome::new(home).pid_path()) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -243,5 +258,60 @@ fn configure_detached(command: &mut Command) {
                 Ok(())
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn daemon_reaper_survives_startup_cancellation() {
+        let home = TempDir::new().unwrap();
+        let executable = home.path().join("fake-fleetd");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$2/started\"\nsleep 0.3\nexit 7\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let daemon_home = home.path().to_path_buf();
+        let startup =
+            tokio::spawn(async move { ensure_daemon(daemon_home, Some(executable)).await });
+        let pid = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = fs::read_to_string(home.path().join("started"))
+                    && let Ok(pid) = pid.parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        startup.abort();
+        assert!(startup.await.unwrap_err().is_cancelled());
+        timeout(Duration::from_secs(2), async {
+            while process_is_alive(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled startup left an unreaped daemon child");
+    }
+
+    #[tokio::test]
+    async fn daemon_startup_reports_the_reaped_exit_status() {
+        let home = TempDir::new().unwrap();
+        let error = ensure_daemon(home.path(), Some(PathBuf::from("/usr/bin/false")))
+            .await
+            .unwrap_err();
+        let SpawnError::Exited { status } = error else {
+            panic!("expected child exit status, got {error}");
+        };
+        assert_eq!(status.code(), Some(1));
     }
 }

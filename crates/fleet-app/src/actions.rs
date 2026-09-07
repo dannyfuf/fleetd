@@ -1,15 +1,10 @@
-//! GPUI actions shared across screens and modes.
+//! GPUI action names shared by keys, menus, and command surfaces.
 //!
 //! There is exactly **one action per row of `docs/KEYMAP.md`**, and the keystrokes that reach
-//! them live in [`crate::keymap`]. Actions are grouped into namespaces that mirror the key
-//! contexts of the keymap, so the same word (`Open`, `Delete`, `Cancel`) can mean different
-//! things in disjoint panes without colliding: gpui registers an action under
-//! `namespace::Name`.
-//!
-//! Nothing here holds state. A handler in [`crate::shell`] reduces the action against
-//! [`crate::state::AppState`], and screens read the result.
+//! them live in [`crate::keymap`]; registered names remain stable across refactors. Namespaces
+//! mirror the key contexts of the keymap, so the same word (`Open`, `Delete`, `Cancel`) can mean
+//! different things in disjoint panes without colliding: gpui registers `namespace::Name`.
 
-/// Actions in the `fleet` namespace.
 pub mod fleet {
     use gpui::actions;
 
@@ -44,7 +39,6 @@ pub mod fleet {
     );
 }
 
-/// Actions in the `hub` namespace.
 pub mod hub {
     use gpui::actions;
 
@@ -119,7 +113,6 @@ pub mod hub {
     );
 }
 
-/// Actions in the `repos` namespace.
 pub mod repos {
     use gpui::actions;
 
@@ -142,7 +135,6 @@ pub mod repos {
     );
 }
 
-/// Actions in the `worktrees` namespace.
 pub mod worktrees {
     use gpui::actions;
 
@@ -175,7 +167,6 @@ pub mod worktrees {
     );
 }
 
-/// Actions in the `prs` namespace.
 pub mod prs {
     use gpui::actions;
 
@@ -204,7 +195,6 @@ pub mod prs {
     );
 }
 
-/// Actions in the `workspace` namespace.
 pub mod workspace {
     use gpui::actions;
 
@@ -240,7 +230,6 @@ pub mod agent {
     );
 }
 
-/// Actions in the `prefix` namespace.
 pub mod prefix {
     use gpui::actions;
 
@@ -311,7 +300,6 @@ pub mod prefix {
     );
 }
 
-/// Actions in the `scroll` namespace.
 pub mod scroll {
     use gpui::actions;
 
@@ -360,7 +348,6 @@ pub mod scroll {
     );
 }
 
-/// Actions in the `filter` namespace.
 pub mod filter {
     use gpui::actions;
 
@@ -385,7 +372,6 @@ pub mod filter {
     );
 }
 
-/// Actions in the `palette` namespace.
 pub mod palette {
     use gpui::actions;
 
@@ -410,7 +396,6 @@ pub mod palette {
     );
 }
 
-/// Actions in the `jobs` namespace.
 pub mod jobs {
     use gpui::actions;
 
@@ -447,7 +432,6 @@ pub mod jobs {
     );
 }
 
-/// Actions in the `dialog` namespace.
 pub mod dialog {
     use gpui::actions;
 
@@ -484,7 +468,6 @@ pub mod dialog {
     );
 }
 
-/// Actions in the `confirm` namespace.
 pub mod confirm {
     use gpui::actions;
 
@@ -505,7 +488,6 @@ pub mod confirm {
     );
 }
 
-/// Actions in the `create_worktree` namespace.
 pub mod create_worktree {
     use gpui::actions;
 
@@ -522,7 +504,6 @@ pub mod create_worktree {
     );
 }
 
-/// Actions in the `context_dialog` namespace.
 pub mod context_dialog {
     use gpui::actions;
 
@@ -535,7 +516,6 @@ pub mod context_dialog {
     );
 }
 
-/// Actions in the `settings` namespace.
 pub mod settings {
     use gpui::actions;
 
@@ -560,7 +540,6 @@ pub mod settings {
     );
 }
 
-/// Actions in the `quit_dialog` namespace.
 pub mod quit_dialog {
     use gpui::actions;
 
@@ -579,7 +558,6 @@ pub mod quit_dialog {
     );
 }
 
-/// Actions in the `quit_daemon_dialog` namespace.
 pub mod quit_daemon_dialog {
     use gpui::actions;
 
@@ -594,7 +572,6 @@ pub mod quit_daemon_dialog {
     );
 }
 
-/// Actions in the `help` namespace.
 pub mod help {
     use gpui::actions;
 
@@ -607,7 +584,6 @@ pub mod help {
     );
 }
 
-/// Actions in the `daemon` namespace.
 pub mod daemon {
     use gpui::actions;
 
@@ -628,7 +604,6 @@ pub mod daemon {
     );
 }
 
-/// Actions in the `first_run` namespace.
 pub mod first_run {
     use gpui::actions;
 

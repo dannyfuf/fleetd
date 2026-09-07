@@ -80,28 +80,18 @@ impl CommandLog {
     }
 
     pub(crate) fn started(&self, record: CommandRecord) {
-        self.push(record.clone());
+        self.store(record.clone());
         let _ = self.events.send(CommandEvent::Started(record));
     }
 
     pub(crate) fn finished(&self, record: CommandRecord) {
-        let mut recent = self
-            .recent
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(existing) = recent.iter_mut().find(|item| item.id == record.id) {
-            *existing = record.clone();
-        } else if self.capacity > 0 {
-            if recent.len() == self.capacity {
-                recent.pop_front();
-            }
-            recent.push_back(record.clone());
-        }
-        drop(recent);
+        self.store(record.clone());
         let _ = self.events.send(CommandEvent::Finished(record));
     }
 
-    fn push(&self, record: CommandRecord) {
+    /// Updates the record with the same id, or appends it, dropping the oldest
+    /// record once the history is full.
+    fn store(&self, record: CommandRecord) {
         if self.capacity == 0 {
             return;
         }
@@ -109,6 +99,10 @@ impl CommandLog {
             .recent
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if let Some(existing) = recent.iter_mut().find(|item| item.id == record.id) {
+            *existing = record;
+            return;
+        }
         if recent.len() == self.capacity {
             recent.pop_front();
         }

@@ -30,7 +30,7 @@
 //! binds them; the banner states them, and inside the Workspace they must be passed already
 //! prefixed (`^s r`), because terminal mode owns every bare key.
 
-use gpui::{App, SharedString, Window, div, prelude::*, px};
+use gpui::{App, SharedString, Window, div, prelude::*};
 
 use crate::{
     components::KeyHintRow,
@@ -91,11 +91,6 @@ impl Banner {
         self.hints = Some(hints);
         self
     }
-
-    /// The tone this banner renders in.
-    pub fn resolved_tone(&self) -> Tone {
-        self.tone
-    }
 }
 
 impl RenderOnce for Banner {
@@ -109,8 +104,8 @@ impl RenderOnce for Banner {
             .size_full()
             .px(theme.space.lg)
             .bg(self.tone.fill(theme))
-            .border_b(px(1.0))
-            .border_color(color.opacity(0.35))
+            .border_b(theme.metrics.hairline)
+            .border_color(color.opacity(theme.metrics.banner_border_opacity))
             .children(
                 self.icon
                     .map(|i| i.el().size(IconSize::Medium).color(color)),

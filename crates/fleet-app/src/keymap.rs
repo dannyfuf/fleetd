@@ -31,7 +31,7 @@
 //!   query untypable, because bindings outrank the text input. Only `Esc` closes the palette;
 //!   see `docs/APP-CONTRACTS.md`.
 
-use gpui::{Action, App, KeyBinding, KeybindingKeystroke, Keystroke};
+use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, Keystroke};
 
 use crate::actions::fleet::Cancel;
 use crate::actions::{
@@ -57,16 +57,24 @@ pub struct BindingSpec {
 
 macro_rules! key_table {
     ($( $keys:literal, $context:literal => $action:expr ; )*) => {
-        /// Every binding, ready for [`gpui::App::bind_keys`].
-        ///
-        /// # Panics
-        ///
-        /// Panics when a keystroke or context predicate in the table is malformed. The
-        /// `key_table_is_well_formed` test builds the whole table, so a malformed row cannot
-        /// reach a release build.
+        thread_local! {
+            static PARSED_BINDINGS: Vec<(BindingSpec, KeyBinding)> = {
+                let mut bindings = Vec::new();
+                $(
+                    let spec = BindingSpec { keys: $keys, context: $context, action: Action::name(&$action) };
+                    match parse_binding(spec, Action::boxed_clone(&$action)) {
+                        Ok(binding) => bindings.push((spec, binding)),
+                        Err(error) => tracing::error!(keys = $keys, context = $context, %error, "invalid built-in key binding"),
+                    }
+                )*
+                bindings
+            };
+        }
+
+        /// Validated bindings, parsed once on the UI thread.
         #[must_use]
         pub fn bindings() -> Vec<KeyBinding> {
-            vec![$( KeyBinding::new($keys, $action, Some($context)) ),*]
+            PARSED_BINDINGS.with(|bindings| bindings.iter().map(|(_, binding)| binding.clone()).collect())
         }
 
         /// The same table as data: keystrokes, context and action name.
@@ -75,11 +83,16 @@ macro_rules! key_table {
         /// binding and its documentation can never drift apart.
         #[must_use]
         pub fn table() -> Vec<BindingSpec> {
-            vec![$( BindingSpec {
+            cached_table().to_vec()
+        }
+
+        fn cached_table() -> &'static [BindingSpec] {
+            static TABLE: std::sync::OnceLock<Vec<BindingSpec>> = std::sync::OnceLock::new();
+            TABLE.get_or_init(|| vec![$( BindingSpec {
                 keys: $keys,
                 context: $context,
                 action: Action::name(&$action),
-            } ),*]
+            } ),*])
         }
 
         /// Resolves one keystroke against one exact key context.
@@ -93,31 +106,43 @@ macro_rules! key_table {
             context: &str,
             keystroke: &Keystroke,
         ) -> Option<Box<dyn Action>> {
-            $(
-                if context == $context && !$keys.contains(' ') {
-                    let parsed = Keystroke::parse($keys).unwrap_or_else(|error| {
-                        panic!("invalid key-table keystroke {:?}: {error}", $keys)
-                    });
-                    let target = KeybindingKeystroke::from_keystroke(parsed);
-                    if keystroke.should_match(&target) {
-                        return Some(Action::boxed_clone(&$action));
+            PARSED_BINDINGS.with(|bindings| {
+                bindings.iter().find_map(|(spec, binding)| {
+                    if spec.context == context && binding.keystrokes().len() == 1
+                        && keystroke.should_match(&binding.keystrokes()[0])
+                    {
+                        Some(binding.action().boxed_clone())
+                    } else {
+                        None
                     }
-                }
-            )*
-            None
+                })
+            })
         }
     };
+}
+
+fn parse_binding(spec: BindingSpec, action: Box<dyn Action>) -> Result<KeyBinding, String> {
+    let predicate =
+        KeyBindingContextPredicate::parse(spec.context).map_err(|error| error.to_string())?;
+    KeyBinding::load(
+        spec.keys,
+        action,
+        Some(predicate.into()),
+        false,
+        None,
+        &DummyKeyboardMapper,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// The root key context. Present on every screen, including the daemon surfaces.
 pub const ROOT_CONTEXT: &str = "Fleet";
 
 key_table! {
-    // ---------------------------------------------------------------- global (§KEYMAP global)
+
     "ctrl-q",       "Fleet" => Quit;
     "ctrl-shift-q", "Fleet" => QuitAndStopDaemon;
 
-    // ---------------------------------------------------------------- Hub, all panes
     "j",            "Hub" => hub::MoveDown;
     "down",         "Hub" => hub::MoveDown;
     "k",            "Hub" => hub::MoveUp;
@@ -167,7 +192,6 @@ key_table! {
     "b",            "Hub" => hub::OpenInBrowser;
     "escape",       "Hub" => Cancel;
 
-    // ---------------------------------------------------------------- Hub › Repos
     "enter",        "Hub > Repos" => repos::Open;
     "o",            "Hub > Repos" => repos::Open;
     "l",            "Hub > Repos" => repos::Open;
@@ -177,7 +201,6 @@ key_table! {
     "e",            "Hub > Repos" => repos::EditHooks;
     "m",            "Hub > Repos" => repos::MoveToContext;
 
-    // ---------------------------------------------------------------- Hub › Worktrees
     "enter",        "Hub > Worktrees" => worktrees::Open;
     "o",            "Hub > Worktrees" => worktrees::Open;
     "O",            "Hub > Worktrees" => worktrees::OpenKeepAwake;
@@ -191,7 +214,6 @@ key_table! {
     "y",            "Hub > Worktrees" => worktrees::CopyPath;
     "Y",            "Hub > Worktrees" => worktrees::CopyBranch;
 
-    // ---------------------------------------------------------------- Hub › Pull requests
     "tab",          "Hub > Prs" => prs::NextTab;
     "l",            "Hub > Prs" => prs::NextTab;
     "shift-tab",    "Hub > Prs" => prs::PrevTab;
@@ -206,19 +228,16 @@ key_table! {
     "p",            "Hub > Prs" => prs::Back;
     "q",            "Hub > Prs" => prs::Back;
 
-    // ---------------------------------------------------------------- Workspace › Terminal
     "ctrl-s",       "Workspace > Terminal" => workspace::EnterPrefix;
     "cmd-c",        "Workspace > Terminal" => workspace::CopySelection;
     "cmd-v",        "Workspace > Terminal" => workspace::PasteClipboard;
 
-    // ---------------------------------------------------------------- Workspace › Native
     // A `fleet://` tab is a terminal as far as this table is concerned: exactly one app key,
     // and every other keystroke belongs to whatever is inside the tab. The consumer is a gpui
     // view rather than a PTY, so the keys fall through to *its* bindings — which live under
     // its own root context, nested inside this one — instead of through `on_key_down`.
     "ctrl-s",       "Workspace > Native" => workspace::EnterPrefix;
 
-    // ---------------------------------------------------------------- Workspace › Prefix
     "ctrl-s",       "Workspace > Prefix" => prefix::SendLiteral;
     "s",            "Workspace > Prefix" => prefix::GoHub;
     "S",            "Workspace > Prefix" => prefix::SleepAndGoHub;
@@ -262,7 +281,6 @@ key_table! {
     "cmd-home",       "Workspace > Terminal" => scroll::TerminalTop;
     "cmd-end",        "Workspace > Terminal" => scroll::TerminalBottom;
 
-    // ---------------------------------------------------------------- Workspace › Scroll
     "j",            "Workspace > Scroll" => scroll::LineDown;
     "k",            "Workspace > Scroll" => scroll::LineUp;
     "ctrl-d",       "Workspace > Scroll" => scroll::HalfPageDown;
@@ -280,7 +298,6 @@ key_table! {
     "i",            "Workspace > Scroll" => scroll::Exit;
     "escape",       "Workspace > Scroll" => scroll::Escape;
 
-    // ---------------------------------------------------------------- Floating agent popup
     // Agent is the persistent popup context; its Terminal / Prefix / Scroll children mirror
     // Workspace terminal mechanics without changing the Workspace underneath.
     "ctrl-q",       "Agent" => agent::Hide;
@@ -323,7 +340,6 @@ key_table! {
     "i",            "Agent > Scroll" => scroll::Exit;
     "escape",       "Agent > Scroll" => scroll::Escape;
 
-    // ---------------------------------------------------------------- Filter
     "enter",        "Filter" => filter::Accept;
     "escape",       "Filter" => filter::Escape;
     "ctrl-n",       "Filter" => filter::CursorDown;
@@ -334,7 +350,6 @@ key_table! {
     "ctrl-w",       "Filter" => filter::DeleteWord;
     "ctrl-u",       "Filter" => filter::Clear;
 
-    // ---------------------------------------------------------------- Palette
     "enter",        "Palette" => palette::Run;
     "escape",       "Palette" => palette::Close;
     "ctrl-n",       "Palette" => palette::CursorDown;
@@ -345,7 +360,6 @@ key_table! {
     "ctrl-w",       "Palette" => palette::DeleteWord;
     "ctrl-u",       "Palette" => palette::Clear;
 
-    // ---------------------------------------------------------------- Jobs panel
     "J",            "Jobs" => jobs::Close;
     "escape",       "Jobs" => jobs::Close;
     "q",            "Jobs" => jobs::Close;
@@ -364,7 +378,6 @@ key_table! {
     "f",            "Jobs" => jobs::CycleFilter;
     "escape",       "Jobs > Log" => jobs::CollapseLog;
 
-    // ---------------------------------------------------------------- Dialogs, shared frame
     "enter",        "Dialog" => dialog::Confirm;
     "escape",       "Dialog" => dialog::Cancel;
     "tab",          "Dialog" => dialog::NextField;
@@ -381,12 +394,10 @@ key_table! {
     "left",         "Dialog" => dialog::CursorLeft;
     "right",        "Dialog" => dialog::CursorRight;
 
-    // ---------------------------------------------------------------- Dialog › Create worktree
     "left",         "Dialog > Create" => create_worktree::HostPrev;
     "right",        "Dialog > Create" => create_worktree::HostNext;
     "alt-enter",    "Dialog > Create" => create_worktree::CreateWithoutOpening;
 
-    // ---------------------------------------------------------------- Dialog › Confirm
     "y",            "Dialog > Confirm" => confirm::Accept;
     "enter",        "Dialog > Confirm" => confirm::Accept;
     "Y",            "Dialog > Confirm" => confirm::AcceptStrong;
@@ -396,14 +407,11 @@ key_table! {
     "I",            "Dialog > Confirm" => confirm::Recheck;
     "s",            "Dialog > Confirm" => confirm::ToggleKeep;
 
-    // ---------------------------------------------------------------- Dialog › New / Edit context
     "ctrl-d",       "Dialog > Context" => context_dialog::Delete;
 
-    // ---------------------------------------------------------------- Dialog › Assign repo
     "j",            "Dialog > Assign" => dialog::CursorDown;
     "k",            "Dialog > Assign" => dialog::CursorUp;
 
-    // ---------------------------------------------------------------- Dialog › Settings
     "space",        "Dialog > Settings" => settings::Toggle;
     "h",            "Dialog > Settings" => settings::CyclePrev;
     "l",            "Dialog > Settings" => settings::CycleNext;
@@ -415,23 +423,19 @@ key_table! {
     "E",            "Dialog > Settings" => settings::OpenConfigFile;
     "D",            "Dialog > Settings" => settings::RunDoctor;
 
-    // ---------------------------------------------------------------- Dialog › Help
     "escape",       "Dialog > Help" => help::Close;
     "?",            "Dialog > Help" => help::Close;
 
-    // ---------------------------------------------------------------- Dialog › Quit
     "y",            "Dialog > Quit" => quit_dialog::Accept;
     "n",            "Dialog > Quit" => quit_dialog::Reject;
     "escape",       "Dialog > Quit" => quit_dialog::Reject;
     "J",            "Dialog > Quit" => quit_dialog::OpenJobs;
     "W",            "Dialog > Quit" => quit_dialog::NeverWarn;
 
-    // ---------------------------------------------------------------- Dialog › Quit and stop daemon
     "Y",            "Dialog > QuitDaemon" => quit_daemon_dialog::Accept;
     "n",            "Dialog > QuitDaemon" => quit_daemon_dialog::Reject;
     "escape",       "Dialog > QuitDaemon" => quit_daemon_dialog::Reject;
 
-    // ---------------------------------------------------------------- Daemon › Down (§3.12 B)
     "r",            "Daemon > Down" => daemon::Retry;
     "L",            "Daemon > Down" => daemon::OpenLog;
     "D",            "Daemon > Down" => daemon::RunDoctor;
@@ -439,12 +443,10 @@ key_table! {
     "L",            "Daemon > Doctor" => daemon::OpenLog;
     "escape",       "Daemon > Doctor" => daemon::DismissBanner;
 
-    // ---------------------------------------------------------------- Daemon › Banner (§3.12 C)
     "r",            "Daemon > Banner" => daemon::Reconnect;
     "l",            "Daemon > Banner" => daemon::OpenLog;
     "escape",       "Daemon > Banner" => daemon::DismissBanner;
 
-    // ---------------------------------------------------------------- First run
     "i",            "FirstRun" => first_run::Import;
     "N",            "FirstRun" => hub::NewContext;
     "n",            "FirstRun" => repos::Clone;
@@ -630,26 +632,18 @@ mod tests {
     /// `Dialog > Confirm` bindings as well as its own.
     #[test]
     fn the_embedded_pane_shares_no_context_word_with_the_app() {
-        let pane_words: HashSet<&str> = fleet_lazygit::keymap::table()
-            .into_iter()
-            .flat_map(|spec| {
-                spec.context
-                    .split('>')
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-            })
-            .collect();
-        let app_words: HashSet<&str> = table()
-            .into_iter()
-            .flat_map(|spec| {
-                spec.context
-                    .split('>')
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-            })
-            .collect();
+        fn context_words(contexts: impl Iterator<Item = &'static str>) -> HashSet<&'static str> {
+            contexts
+                .flat_map(|context| context.split('>').map(str::trim))
+                .collect()
+        }
+
+        let pane_words = context_words(
+            fleet_lazygit::keymap::table()
+                .into_iter()
+                .map(|spec| spec.context),
+        );
+        let app_words = context_words(table().into_iter().map(|spec| spec.context));
         let shared: Vec<_> = pane_words.intersection(&app_words).copied().collect();
         assert!(
             shared.is_empty(),
@@ -812,5 +806,42 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_bindings_return_errors_without_panicking() {
+        for spec in [
+            BindingSpec {
+                keys: "not-a-valid-key-modifier-x",
+                context: "Fleet",
+                action: "fleet::Cancel",
+            },
+            BindingSpec {
+                keys: "escape",
+                context: "(",
+                action: "fleet::Cancel",
+            },
+        ] {
+            assert!(parse_binding(spec, Box::new(Cancel)).is_err());
+        }
+    }
+
+    #[test]
+    fn repeated_lookup_reuses_the_validated_bindings() {
+        let storage = PARSED_BINDINGS.with(|bindings| bindings.as_ptr());
+        for spec in cached_table()
+            .iter()
+            .filter(|spec| !spec.keys.contains(' '))
+        {
+            let keystroke = Keystroke::parse(spec.keys).unwrap();
+            let action = action_for_keystroke(spec.context, &keystroke).unwrap();
+            assert_eq!(action.name(), spec.action);
+        }
+        assert_eq!(storage, PARSED_BINDINGS.with(|bindings| bindings.as_ptr()));
     }
 }

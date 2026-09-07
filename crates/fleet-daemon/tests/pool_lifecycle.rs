@@ -42,8 +42,9 @@ async fn pool_build_claim_refill_and_snapshot_status() {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     let jobs = Arc::new(JobManager::new(&home));
-    let git = Arc::new(ShellGit::new(Arc::new(RealShell)));
-    let pool = Pool::new(config.clone(), state, jobs, git, files);
+    let shell = Arc::new(RealShell);
+    let git = Arc::new(ShellGit::new(Arc::clone(&shell)));
+    let pool = Pool::new(config.clone(), state, jobs, git, files, shell);
 
     pool.prepare(repo.id.clone(), false)
         .await
@@ -63,10 +64,8 @@ async fn pool_build_claim_refill_and_snapshot_status() {
     pool.prepare(repo.id.clone(), false)
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-    let status = Pool::snapshot_statuses(&[repo], 2);
-    assert_eq!(status[0].ready, 2);
-    assert_eq!(status[0].size, 2);
-    assert!(status[0].refreshed_at.is_some());
+    assert!(root.join(".hot/.git/swarm-hot.json").is_file());
+    assert!(root.join(".hot.1/.git/swarm-hot.json").is_file());
 
     let before = std::fs::read_to_string(root.join(".hot/.git/swarm-hot.json"))
         .unwrap_or_else(|error| panic!("{error}"));

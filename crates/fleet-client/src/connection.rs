@@ -10,13 +10,12 @@ use std::{
     time::Duration,
 };
 
-use fleet_core::ids::TerminalId;
+use fleet_core::{ids::TerminalId, paths::FleetHome};
 use fleet_proto::{
     PROTOCOL_VERSION,
     codec::FleetCodec,
     error::{ErrorKind, ProtoError},
     event::{Event, EventKind},
-    paths::socket_path,
     request::{Request, RequestBody},
     response::{Response, ResponseBody},
 };
@@ -88,7 +87,7 @@ struct Command {
 
 #[derive(Debug)]
 struct Pending {
-    body: RequestBody,
+    effect: ConnectionEffect,
     response: Option<oneshot::Sender<Result<ResponseBody, ProtoError>>>,
 }
 
@@ -120,7 +119,7 @@ impl Client {
         let state = ConnectionState::default();
         let established = establish(&home, &state).await?;
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let events = broadcast::Sender::new(EVENT_CAPACITY);
         let inner = Arc::new(ClientInner {
             commands,
             events: events.clone(),
@@ -222,71 +221,61 @@ async fn run_connection(
     }
 
     loop {
-        while let Some(command) = queued.pop_front() {
-            if command_is_expired(&command) {
-                fail_command(command, "Fleet daemon request timed out while reconnecting");
-                continue;
-            }
-            if let Err(error) = send_command(&mut transport, command, &mut pending).await {
-                tracing::debug!(%error, "Fleet daemon connection was lost while sending");
-                fail_pending(&mut pending, "Fleet daemon connection was lost");
-                match reconnect(
-                    &home,
-                    &state,
-                    &mut commands,
-                    &mut queued,
-                    &mut backoff,
-                    &events,
-                )
-                .await
-                {
-                    Some(new_transport) => transport = new_transport,
-                    None => return,
+        'connected: loop {
+            if let Some(command) = queued.pop_front() {
+                if command_is_expired(&command) {
+                    fail_command(command, "Fleet daemon request timed out while reconnecting");
+                    continue;
+                }
+                if let Err(error) = send_command(&mut transport, command, &mut pending).await {
+                    tracing::debug!(%error, "Fleet daemon connection was lost while sending");
+                    break 'connected;
                 }
                 continue;
+            }
+
+            tokio::select! {
+                command = commands.recv() => {
+                    let Some(command) = command else {
+                        fail_pending(&mut pending, "Fleet client was dropped");
+                        return;
+                    };
+                    if let Err(error) = send_command(&mut transport, command, &mut pending).await {
+                        tracing::debug!(%error, "Fleet daemon connection was lost while sending");
+                        break 'connected;
+                    }
+                }
+                incoming = transport.next() => {
+                    match incoming {
+                        Some(Ok(value)) => {
+                            if handle_incoming(value, &mut pending, &mut state, &events) {
+                                fail_pending(&mut pending, "Fleet daemon is shutting down");
+                                return;
+                            }
+                        }
+                        Some(Err(error)) => {
+                            tracing::debug!(%error, "Fleet daemon connection decoding failed");
+                            break 'connected;
+                        }
+                        None => break 'connected,
+                    }
+                }
             }
         }
 
-        tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    fail_pending(&mut pending, "Fleet client was dropped");
-                    return;
-                };
-                if let Err(error) = send_command(&mut transport, command, &mut pending).await {
-                    tracing::debug!(%error, "Fleet daemon connection was lost while sending");
-                    fail_pending(&mut pending, "Fleet daemon connection was lost");
-                    match reconnect(&home, &state, &mut commands, &mut queued, &mut backoff, &events).await {
-                        Some(new_transport) => transport = new_transport,
-                        None => return,
-                    }
-                }
-            }
-            incoming = transport.next() => {
-                match incoming {
-                    Some(Ok(value)) => {
-                        if handle_incoming(value, &mut pending, &mut state, &events) {
-                            fail_pending(&mut pending, "Fleet daemon is shutting down");
-                            return;
-                        }
-                    }
-                    Some(Err(error)) => {
-                        tracing::debug!(%error, "Fleet daemon connection decoding failed");
-                        fail_pending(&mut pending, "Fleet daemon connection was lost");
-                        match reconnect(&home, &state, &mut commands, &mut queued, &mut backoff, &events).await {
-                            Some(new_transport) => transport = new_transport,
-                            None => return,
-                        }
-                    }
-                    None => {
-                        fail_pending(&mut pending, "Fleet daemon connection was lost");
-                        match reconnect(&home, &state, &mut commands, &mut queued, &mut backoff, &events).await {
-                            Some(new_transport) => transport = new_transport,
-                            None => return,
-                        }
-                    }
-                }
-            }
+        fail_pending(&mut pending, "Fleet daemon connection was lost");
+        match reconnect(
+            &home,
+            &state,
+            &mut commands,
+            &mut queued,
+            &mut backoff,
+            &events,
+        )
+        .await
+        {
+            Some(new_transport) => transport = new_transport,
+            None => return,
         }
     }
 }
@@ -297,11 +286,11 @@ async fn send_command(
     pending: &mut HashMap<u64, Pending>,
 ) -> Result<(), fleet_proto::codec::CodecError> {
     let id = command.request.id;
-    let body = command.request.body.clone();
+    let effect = ConnectionEffect::from(&command.request.body);
     pending.insert(
         id,
         Pending {
-            body,
+            effect,
             response: command.response,
         },
     );
@@ -319,7 +308,7 @@ fn handle_incoming(
             Ok(response) => {
                 if let Some(request) = pending.remove(&response.id) {
                     if response.result.is_ok() {
-                        update_connection_state(state, &request.body);
+                        request.effect.apply(state);
                     }
                     let shutting_down = matches!(response.result, Ok(ResponseBody::ShuttingDown));
                     if let Some(sender) = request.response {
@@ -334,11 +323,7 @@ fn handle_incoming(
     }
 
     match serde_json::from_value::<Event>(value) {
-        Ok(event) => {
-            let shutting_down = event == Event::DaemonShuttingDown;
-            let _ = events.send(event);
-            shutting_down
-        }
+        Ok(event) => publish(events, event),
         Err(error) => {
             tracing::warn!(%error, "ignored malformed Fleet event");
             false
@@ -346,37 +331,69 @@ fn handle_incoming(
     }
 }
 
-fn update_connection_state(state: &mut ConnectionState, body: &RequestBody) {
-    match body {
-        RequestBody::Subscribe { events } => state.subscriptions.clone_from(events),
-        RequestBody::Unsubscribe => state.subscriptions.clear(),
-        RequestBody::AttachTerminal {
-            terminal,
-            cols,
-            rows,
-        } => {
-            state.attachments.insert(
+#[derive(Debug)]
+enum ConnectionEffect {
+    None,
+    Subscribe(Vec<EventKind>),
+    Unsubscribe,
+    Attach(TerminalId, Attachment),
+    Detach(TerminalId),
+    Resize(TerminalId, Attachment),
+}
+
+impl From<&RequestBody> for ConnectionEffect {
+    fn from(body: &RequestBody) -> Self {
+        match body {
+            RequestBody::Subscribe { events } => Self::Subscribe(events.clone()),
+            RequestBody::Unsubscribe => Self::Unsubscribe,
+            RequestBody::AttachTerminal {
+                terminal,
+                cols,
+                rows,
+            } => Self::Attach(
                 *terminal,
                 Attachment {
                     cols: *cols,
                     rows: *rows,
                 },
-            );
+            ),
+            RequestBody::DetachTerminal { terminal } | RequestBody::CloseTerminal { terminal } => {
+                Self::Detach(*terminal)
+            }
+            RequestBody::ResizeTerminal {
+                terminal,
+                cols,
+                rows,
+            } => Self::Resize(
+                *terminal,
+                Attachment {
+                    cols: *cols,
+                    rows: *rows,
+                },
+            ),
+            _ => Self::None,
         }
-        RequestBody::DetachTerminal { terminal } | RequestBody::CloseTerminal { terminal } => {
-            state.attachments.remove(terminal);
-        }
-        RequestBody::ResizeTerminal {
-            terminal,
-            cols,
-            rows,
-        } => {
-            if let Some(attachment) = state.attachments.get_mut(terminal) {
-                attachment.cols = *cols;
-                attachment.rows = *rows;
+    }
+}
+
+impl ConnectionEffect {
+    fn apply(self, state: &mut ConnectionState) {
+        match self {
+            Self::None => {}
+            Self::Subscribe(events) => state.subscriptions = events,
+            Self::Unsubscribe => state.subscriptions.clear(),
+            Self::Attach(terminal, attachment) => {
+                state.attachments.insert(terminal, attachment);
+            }
+            Self::Detach(terminal) => {
+                state.attachments.remove(&terminal);
+            }
+            Self::Resize(terminal, size) => {
+                if let Some(attachment) = state.attachments.get_mut(&terminal) {
+                    *attachment = size;
+                }
             }
         }
-        _ => {}
     }
 }
 
@@ -438,7 +455,7 @@ async fn reconnect(
 }
 
 async fn establish(home: &Path, state: &ConnectionState) -> Result<Established, ConnectError> {
-    let socket = UnixStream::connect(socket_path(home)).await?;
+    let socket = UnixStream::connect(FleetHome::new(home).socket_path()).await?;
     let mut transport = Framed::new(socket, FleetCodec::new());
     let mut buffered_events = Vec::new();
     exchange(
@@ -530,9 +547,15 @@ async fn exchange(
 fn publish_events(buffered: Vec<Event>, events: &broadcast::Sender<Event>) -> bool {
     let mut shutting_down = false;
     for event in buffered {
-        shutting_down |= event == Event::DaemonShuttingDown;
-        let _ = events.send(event);
+        shutting_down |= publish(events, event);
     }
+    shutting_down
+}
+
+/// Delivers one daemon event and reports whether the daemon announced its shutdown.
+fn publish(events: &broadcast::Sender<Event>, event: Event) -> bool {
+    let shutting_down = matches!(event, Event::DaemonShuttingDown);
+    let _ = events.send(event);
     shutting_down
 }
 
@@ -602,7 +625,7 @@ mod tests {
 
     #[test]
     fn create_requests_are_not_bound_by_the_generic_rpc_deadline() {
-        let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
+        let repo = RepoId::try_from("acme/api").unwrap();
         assert!(
             request_timeout(&RequestBody::CreateWorktree {
                 repo,

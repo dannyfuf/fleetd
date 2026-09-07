@@ -188,12 +188,27 @@ impl Files for RealFiles {
 
     fn remove_detached(&self, path: &Path) -> DaemonResult<()> {
         self.guard_strict_descendant(path)?;
-        Command::new("rm")
-            .arg("-rf")
-            .arg(path)
-            .spawn()
-            .map_err(|error| DaemonError::fs(path, error))?;
-        Ok(())
+        let path = path.to_path_buf();
+        let (started, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("fleet-remove".to_owned())
+            .spawn(move || {
+                match Command::new("rm").arg("-rf").arg(&path).spawn() {
+                    Ok(mut child) => {
+                        let _ = started.send(Ok(()));
+                        match child.wait() {
+                            Ok(status) if status.success() => {}
+                            Ok(status) => tracing::warn!(%status, path = %path.display(), "detached removal failed"),
+                            Err(error) => tracing::warn!(%error, path = %path.display(), "failed to reap detached removal"),
+                        }
+                    }
+                    Err(error) => { let _ = started.send(Err(DaemonError::fs(path, error))); }
+                }
+            })
+            .map_err(|error| DaemonError::Join(format!("removal thread: {error}")))?;
+        receiver
+            .recv()
+            .map_err(|error| DaemonError::Join(format!("removal startup: {error}")))?
     }
 
     fn remove_file(&self, path: &Path) -> DaemonResult<()> {
@@ -238,7 +253,7 @@ impl Files for RealFiles {
     }
 }
 
-fn absolute_lexical(path: &Path) -> PathBuf {
+pub(crate) fn absolute_lexical(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

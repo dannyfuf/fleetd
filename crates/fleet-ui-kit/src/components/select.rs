@@ -96,11 +96,6 @@ impl Select {
         self.options = Some(options.into_any_element());
         self
     }
-
-    /// Whether the control is currently rejecting its value.
-    pub fn is_invalid(&self) -> bool {
-        self.invalid.is_some()
-    }
 }
 
 impl RenderOnce for Select {
@@ -110,9 +105,9 @@ impl RenderOnce for Select {
         let disabled = self.disabled;
         let focused = self.focused && !disabled;
         let shown = if empty {
-            self.placeholder.clone().unwrap_or_default()
+            self.placeholder.unwrap_or_default()
         } else {
-            self.value.clone()
+            self.value
         };
         let border = if self.invalid.is_some() {
             theme.colors.danger
@@ -139,9 +134,9 @@ impl RenderOnce for Select {
                     .px(theme.space.md)
                     .rounded(theme.radii.sm)
                     .bg(theme.colors.bg)
-                    .border_1()
+                    .border(theme.metrics.hairline)
                     .border_color(border)
-                    .when(disabled, |el| el.opacity(0.4))
+                    .when(disabled, |el| el.opacity(theme.metrics.dimmed_opacity))
                     .child(
                         div()
                             .flex()
@@ -182,13 +177,13 @@ impl RenderOnce for Select {
                         .w_full()
                         .rounded(theme.radii.sm)
                         .bg(theme.colors.elevated)
-                        .border_1()
+                        .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
                         .shadow(theme.sheet_shadow())
                         .overflow_hidden()
                         .child(
                             FocusRing::pane(focused)
-                                .child(div().flex().flex_col().w_full().children(self.options)),
+                                .content(div().flex().flex_col().w_full().children(self.options)),
                         ),
                 )
             })

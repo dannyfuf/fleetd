@@ -117,11 +117,13 @@ pub struct WatchBuffer {
     chunk_limit: usize,
     next_seq: u64,
 }
+
 impl Default for WatchBuffer {
     fn default() -> Self {
         Self::new(1024 * 1024, 20_000)
     }
 }
+
 impl WatchBuffer {
     /// Sets byte and chunk retention limits. Oversized chunks are dropped whole.
     #[must_use]
@@ -134,6 +136,7 @@ impl WatchBuffer {
             next_seq: 0,
         }
     }
+
     /// Appends a chunk and evicts oldest chunks until both limits hold.
     pub fn append(&mut self, stream: WatchStream, text: String) {
         let chunk = WatchChunk {
@@ -150,46 +153,51 @@ impl WatchBuffer {
             }
         }
     }
-    /// Oldest available cursor, or next_seq when empty.
+
+    /// Oldest available cursor, or [`Self::next_seq`] when empty.
     #[must_use]
     pub fn first_retained_seq(&self) -> u64 {
-        self.chunks.front().map_or(self.next_seq, |c| c.seq)
+        self.chunks.front().map_or(self.next_seq, |chunk| chunk.seq)
     }
+
     /// Cursor to use for the next catch-up request.
     #[must_use]
     pub const fn next_seq(&self) -> u64 {
         self.next_seq
     }
-    /// Copies retained chunks at or after the inclusive cursor.
+
+    /// Copies retained chunks at or after the inclusive cursor. Sequence numbers ascend,
+    /// so the cursor is located by search rather than by scanning the whole history.
     #[must_use]
     pub fn tail(&self, from_seq: Option<u64>) -> Vec<WatchChunk> {
-        self.chunks
-            .iter()
-            .filter(|c| c.seq >= from_seq.unwrap_or(0))
-            .cloned()
-            .collect()
+        let from_seq = from_seq.unwrap_or(0);
+        let start = self.chunks.partition_point(|chunk| chunk.seq < from_seq);
+        self.chunks.range(start..).cloned().collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn retention_preserves_cursors_and_drops_oversized_chunks() {
-        let mut b = WatchBuffer::new(5, 2);
-        b.append(WatchStream::Stdout, "abc".into());
-        b.append(WatchStream::Stderr, "def".into());
-        assert_eq!(b.first_retained_seq(), 1);
-        assert_eq!(b.tail(Some(1))[0].text, "def");
-        assert!(b.tail(Some(2)).is_empty());
-        b.append(WatchStream::Stdout, "123456".into());
-        assert!(b.tail(None).is_empty());
-        assert_eq!(b.first_retained_seq(), 3);
-        assert_eq!(b.next_seq(), 3);
+        let mut buffer = WatchBuffer::new(5, 2);
+        buffer.append(WatchStream::Stdout, "abc".into());
+        buffer.append(WatchStream::Stderr, "def".into());
+        assert_eq!(buffer.first_retained_seq(), 1);
+        assert_eq!(buffer.tail(Some(1))[0].text, "def");
+        assert!(buffer.tail(Some(2)).is_empty());
+        buffer.append(WatchStream::Stdout, "123456".into());
+        assert!(buffer.tail(None).is_empty());
+        assert_eq!(buffer.first_retained_seq(), 3);
+        assert_eq!(buffer.next_seq(), 3);
         for _ in 0..3 {
-            b.append(WatchStream::Stdout, String::new());
+            buffer.append(WatchStream::Stdout, String::new());
         }
-        assert_eq!(b.first_retained_seq(), 4);
-        assert_eq!(b.tail(None).len(), 2);
+        assert_eq!(buffer.first_retained_seq(), 4);
+        assert_eq!(buffer.tail(None).len(), 2);
+        assert_eq!(buffer.tail(Some(5))[0].seq, 5);
+        assert!(buffer.tail(Some(6)).is_empty());
     }
 }

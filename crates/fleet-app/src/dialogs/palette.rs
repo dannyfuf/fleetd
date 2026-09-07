@@ -1,23 +1,10 @@
 //! §3.9 Command palette (`:`) — *jump to anything by name, or do the thing whose key I do not
-//! remember*.
-//!
-//! Three sections in a fixed order — `GO` (objects), `DO` (valid commands only) and `CONTEXT` —
-//! capped at [`ROW_CAP`] rows so `Enter` is predictable: the top match never moves below the
-//! fold. Every `DO` row carries its bound key, right-aligned, read out of
-//! [`crate::keymap::table`], so the palette teaches itself out of the loop.
-//!
-//! An invalid command is **not listed at all**, never greyed, because a greyed row costs a `j`.
-//! A destructive command is prefixed with `triangle-alert` and still routed through its confirm
-//! dialog — the palette never bypasses §1.7.
-//!
-//! `q` is deliberately not bound here (`docs/APP-CONTRACTS.md` §3): gpui dispatches bindings
-//! before a text input sees the key, so binding `q` would make the query untypable.
 
 use fleet_core::{
     ids::{ContextId, JobId, RepoId, SessionId, WorktreeId},
     sessions::{AgentActivity, SessionKind, SessionState},
 };
-use fleet_proto::{request::RequestBody, response::ResponseBody};
+use fleet_proto::{request::RequestBody, snapshot::Snapshot};
 use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
@@ -25,9 +12,11 @@ use crate::{
     actions::{fleet, palette as palette_actions},
     bridge::Bridge,
     dialogs::{
-        ConfirmRequest, Dialogs, TextInput, notify, request_confirm, step, type_into, with_host,
+        ConfirmRequest, DialogHost, Dialogs, clear_all, notify, open_session, open_worktree,
+        request_confirm, step, type_into, with_host,
     },
     keymap,
+    presentation::{FuzzyQuery, SnapshotIndex, pretty_keys},
     screens::workspace::status_kind,
     state::{AppState, HubTab, Overlay, RepoScope, Screen, latest_failed_job, running_jobs},
 };
@@ -41,9 +30,12 @@ pub const IDLE_ROWS: usize = 5;
 #[derive(Debug, Clone, Default)]
 pub struct PaletteState {
     /// The query.
-    pub query: TextInput,
+    pub(crate) query: TextFieldState,
     /// The flat cursor across all sections.
-    pub cursor: usize,
+    pub(crate) cursor: usize,
+    rows: std::rc::Rc<[Entry]>,
+    total: usize,
+    prepared_query: Option<String>,
 }
 
 /// What a palette row does when `Enter` runs it.
@@ -67,25 +59,25 @@ pub enum Run {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// Which section it belongs to.
-    pub section: PaletteSectionKind,
+    pub(crate) section: PaletteSectionKind,
     /// The row label, which is also what the query matches against.
-    pub label: String,
+    pub(crate) label: String,
     /// The muted right-hand description.
-    pub detail: Option<String>,
+    pub(crate) detail: Option<String>,
     /// The bound key, right-aligned.
-    pub key: Option<String>,
+    pub(crate) key: Option<String>,
     /// Whether the row is prefixed with `triangle-alert`.
-    pub destructive: bool,
+    pub(crate) destructive: bool,
     /// The glyph, when it is not derived from a session state.
-    pub icon: Icon,
+    pub(crate) icon: Icon,
     /// The §2.5 glyph this row wears, for `GO` rows.
     ///
     /// It is a resolved [`StatusKind`] and not a raw [`SessionState`] on purpose: `detached`
     /// alone cannot tell `circle` from `moon`, and §5 invariant 1 requires the palette to
     /// draw exactly the glyph the Hub draws for the same worktree.
-    pub status: Option<StatusKind>,
+    pub(crate) status: Option<StatusKind>,
     /// What `Enter` does.
-    pub run: Run,
+    pub(crate) run: Run,
 }
 
 /// Every command the palette can run.
@@ -295,25 +287,20 @@ impl Command {
 /// The key bound to an action, formatted for the right-hand column.
 #[must_use]
 pub fn key_for(action: &str) -> Option<String> {
-    keymap::table()
-        .into_iter()
-        .find(|spec| spec.action == action)
-        .map(|spec| super::help::pretty_keys(spec.keys))
-}
-
-/// Whether `query`'s characters appear in `label`, in order and case-insensitively.
-#[must_use]
-pub fn matches(label: &str, query: &str) -> bool {
-    if query.trim().is_empty() {
-        return true;
-    }
-    let label = label.to_ascii_lowercase();
-    let mut chars = label.chars();
-    query
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .all(|wanted| chars.any(|actual| actual == wanted))
+    static HINTS: std::sync::OnceLock<std::collections::HashMap<&'static str, String>> =
+        std::sync::OnceLock::new();
+    HINTS
+        .get_or_init(|| {
+            let mut hints = std::collections::HashMap::new();
+            for spec in keymap::table() {
+                hints
+                    .entry(spec.action)
+                    .or_insert_with(|| pretty_keys(spec.keys));
+            }
+            hints
+        })
+        .get(action)
+        .cloned()
 }
 
 /// The §2.5 detail wording a `GO` row carries on its right.
@@ -333,151 +320,200 @@ pub fn session_detail(session: SessionState, slept: bool) -> &'static str {
 }
 
 /// Every candidate row, in section order, before the cap.
+///
+/// Filtering runs on the borrowed snapshot strings, so a row is only built once it has
+/// survived the query and the section's idle cap — this runs on every keystroke.
 #[must_use]
 pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
-    let mut rows = Vec::new();
     let sessions_only = query.trim() == "sessions";
     let effective_query = if sessions_only { "" } else { query };
     let idle = effective_query.trim().is_empty();
-    if let Some(snapshot) = state.snapshot.as_ref() {
-        // GO: sessions first, because reaching one from inside another is the point (§3.9).
-        let mut go: Vec<Entry> = Vec::new();
-        for session in &snapshot.sessions {
-            // §5 invariant 1: the row wears the Hub's glyph and the Hub's wording for the same
-            // worktree, so both are resolved from the one `WorktreeStatus` the Hub reads.
-            // `slept_at` alone cannot tell `attached` from `running, detached` — it only tells
-            // `awake` from `sleeping` — and reading it as "attached" is how the palette came to
-            // call a detached session green.
-            let worktree = match &session.kind {
-                SessionKind::Worktree(id) => snapshot
-                    .worktrees
-                    .iter()
-                    .find(|worktree| &worktree.id == id),
-                SessionKind::Agent { .. } => None,
-            };
-            let slept = session.slept_at.is_some();
-            let runtime_status = worktree.and_then(|worktree| {
-                snapshot
-                    .statuses
-                    .iter()
-                    .find(|status| status.worktree_id == worktree.id)
-            });
-            let agent_activity = runtime_status.map_or_else(
-                || state.session_agent_activity(&session.id),
-                |status| status.agent_activity,
-            );
-            let session_state = runtime_status.map_or(
-                // An agent session has no `WorktreeStatus`; the session record itself is
-                // then the only evidence, and it can only say awake or slept.
-                if slept {
-                    SessionState::Detached
-                } else {
-                    SessionState::Attached
-                },
-                |status| status.session,
-            );
-            let degraded = worktree.is_some_and(|worktree| worktree.degraded.is_some());
-            go.push(Entry {
-                section: PaletteSectionKind::Go,
-                // §3.9 lists worktrees by their `WorktreeId`; a session id is a different id
-                // scheme and mixing the two in one section makes the list unreadable.
-                label: worktree.map_or_else(
-                    || session.id.as_str().to_owned(),
-                    |worktree| worktree.id.as_str().to_owned(),
-                ),
-                detail: Some(session_detail(session_state, slept).to_owned()),
-                key: None,
-                destructive: false,
-                icon: Icon::GitBranch,
-                status: Some(status_kind(session_state, slept, agent_activity, degraded)),
-                run: Run::OpenSession(session.id.clone()),
-            });
-        }
-        for worktree in &snapshot.worktrees {
-            if snapshot
-                .sessions
-                .iter()
-                .any(|session| session.id.as_str() == worktree.session)
-            {
-                continue;
-            }
-            // §1.3: until the daemon reports a status the state is `unknown`, never a false
-            // `none` — the same rule the worktrees list follows.
-            let status = snapshot
-                .statuses
-                .iter()
-                .find(|status| status.worktree_id == worktree.id);
-            let session = status.map_or(SessionState::Unknown, |status| status.session);
-            go.push(Entry {
-                section: PaletteSectionKind::Go,
-                label: worktree.id.as_str().to_owned(),
-                detail: Some(session_detail(session, false).to_owned()),
-                key: None,
-                destructive: false,
-                icon: Icon::GitBranch,
-                status: Some(status_kind(
-                    session,
-                    false,
-                    status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
-                    worktree.degraded.is_some(),
-                )),
-                run: Run::OpenWorktree(worktree.id.clone()),
-            });
-        }
-        for repo in &snapshot.repos {
-            go.push(Entry {
-                section: PaletteSectionKind::Go,
-                label: repo.id.as_str().to_owned(),
-                detail: Some("repo".to_owned()),
-                key: None,
-                destructive: false,
-                icon: Icon::FolderGit2,
-                status: None,
-                run: Run::SelectRepo(repo.id.clone()),
-            });
-        }
-        go.retain(|entry| matches!(&entry.run, Run::OpenSession(_)) || !sessions_only);
-        go.retain(|entry| matches(&entry.label, effective_query));
-        if idle {
-            go.truncate(IDLE_ROWS);
-        }
-        rows.extend(go);
+    let matcher = FuzzyQuery::new(effective_query);
+    let Some(snapshot) = state.snapshot.as_ref() else {
+        return Vec::new();
+    };
+    let index = SnapshotIndex::new(snapshot);
+    // §3.9 shows only the first `IDLE_ROWS` of each section until a query narrows it.
+    let limit = if idle { IDLE_ROWS } else { usize::MAX };
 
-        // DO: valid commands, then the jobs worth cancelling.
-        let mut commands: Vec<Entry> = Command::ALL
-            .iter()
-            .copied()
-            .filter(|command| command.valid(state))
-            .map(|command| Entry {
-                section: PaletteSectionKind::Do,
-                label: command.label().to_owned(),
-                detail: None,
-                key: key_for(command.action()),
-                destructive: command.destructive(),
-                icon: command.icon(),
-                status: None,
-                run: Run::Command(command),
-            })
-            .collect();
-        for job in running_jobs(&snapshot.jobs) {
-            if !job.cancellable {
-                continue;
-            }
-            commands.push(Entry {
-                section: PaletteSectionKind::Do,
-                label: format!("Cancel job: {} {}", super::quit::kind_word(job), job.target),
-                detail: None,
-                key: key_for("fleet::OpenJobs"),
-                destructive: false,
-                icon: Icon::CircleStop,
-                status: None,
-                run: Run::CancelJob(job.id.clone()),
-            });
+    let mut rows = go_rows(state, snapshot, &index, &matcher, sessions_only, limit);
+    if !sessions_only {
+        rows.extend(do_rows(state, snapshot, &matcher, limit));
+        rows.extend(context_rows(snapshot, &matcher));
+    }
+    rows
+}
+
+/// GO: sessions first, because reaching one from inside another is the point (§3.9).
+fn go_rows(
+    state: &AppState,
+    snapshot: &Snapshot,
+    index: &SnapshotIndex<'_>,
+    matcher: &FuzzyQuery,
+    sessions_only: bool,
+    limit: usize,
+) -> Vec<Entry> {
+    let mut rows: Vec<Entry> = Vec::new();
+    for session in &snapshot.sessions {
+        if rows.len() == limit {
+            return rows;
         }
-        if let Some(failed) = latest_failed_job(&snapshot.jobs) {
-            commands.push(Entry {
+        // §5 invariant 1: the row wears the Hub's glyph and the Hub's wording for the same
+        // worktree, so both are resolved from the one `WorktreeStatus` the Hub reads.
+        // `slept_at` alone cannot tell `attached` from `running, detached` — it only tells
+        // `awake` from `sleeping` — and reading it as "attached" is how the palette came to
+        // call a detached session green.
+        let worktree = match &session.kind {
+            SessionKind::Worktree(id) => index.worktree(id),
+            SessionKind::Agent { .. } => None,
+        };
+        // §3.9 lists worktrees by their `WorktreeId`; a session id is a different id scheme
+        // and mixing the two in one section makes the list unreadable.
+        let label = worktree.map_or_else(|| session.id.as_str(), |worktree| worktree.id.as_str());
+        if !matcher.matches(label) {
+            continue;
+        }
+        let slept = session.slept_at.is_some();
+        let runtime_status = worktree.and_then(|worktree| index.status(&worktree.id));
+        let agent_activity = runtime_status.map_or_else(
+            || state.session_agent_activity(&session.id),
+            |status| status.agent_activity,
+        );
+        let session_state = runtime_status.map_or(
+            // An agent session has no `WorktreeStatus`; the session record itself is then the
+            // only evidence, and it can only say awake or slept.
+            if slept {
+                SessionState::Detached
+            } else {
+                SessionState::Attached
+            },
+            |status| status.session,
+        );
+        let degraded = worktree.is_some_and(|worktree| worktree.degraded.is_some());
+        rows.push(Entry {
+            section: PaletteSectionKind::Go,
+            label: label.to_owned(),
+            detail: Some(session_detail(session_state, slept).to_owned()),
+            key: None,
+            destructive: false,
+            icon: Icon::GitBranch,
+            status: Some(status_kind(session_state, slept, agent_activity, degraded)),
+            run: Run::OpenSession(session.id.clone()),
+        });
+    }
+    if sessions_only {
+        return rows;
+    }
+
+    let attached: std::collections::HashSet<&str> = snapshot
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect();
+    for worktree in &snapshot.worktrees {
+        if rows.len() == limit {
+            return rows;
+        }
+        if attached.contains(worktree.session.as_str()) || !matcher.matches(worktree.id.as_str()) {
+            continue;
+        }
+        // §1.3: until the daemon reports a status the state is `unknown`, never a false
+        // `none` — the same rule the worktrees list follows.
+        let status = index.status(&worktree.id);
+        let session = status.map_or(SessionState::Unknown, |status| status.session);
+        rows.push(Entry {
+            section: PaletteSectionKind::Go,
+            label: worktree.id.as_str().to_owned(),
+            detail: Some(session_detail(session, false).to_owned()),
+            key: None,
+            destructive: false,
+            icon: Icon::GitBranch,
+            status: Some(status_kind(
+                session,
+                false,
+                status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
+                worktree.degraded.is_some(),
+            )),
+            run: Run::OpenWorktree(worktree.id.clone()),
+        });
+    }
+    for repo in &snapshot.repos {
+        if rows.len() == limit {
+            return rows;
+        }
+        if !matcher.matches(repo.id.as_str()) {
+            continue;
+        }
+        rows.push(Entry {
+            section: PaletteSectionKind::Go,
+            label: repo.id.as_str().to_owned(),
+            detail: Some("repo".to_owned()),
+            key: None,
+            destructive: false,
+            icon: Icon::FolderGit2,
+            status: None,
+            run: Run::SelectRepo(repo.id.clone()),
+        });
+    }
+    rows
+}
+
+/// DO: valid commands, then the jobs worth cancelling.
+fn do_rows(
+    state: &AppState,
+    snapshot: &Snapshot,
+    matcher: &FuzzyQuery,
+    limit: usize,
+) -> Vec<Entry> {
+    let mut rows: Vec<Entry> = Vec::new();
+    for command in Command::ALL.iter().copied() {
+        if rows.len() == limit {
+            return rows;
+        }
+        if !command.valid(state) || !matcher.matches(command.label()) {
+            continue;
+        }
+        rows.push(Entry {
+            section: PaletteSectionKind::Do,
+            label: command.label().to_owned(),
+            detail: None,
+            key: key_for(command.action()),
+            destructive: command.destructive(),
+            icon: command.icon(),
+            status: None,
+            run: Run::Command(command),
+        });
+    }
+    for job in running_jobs(&snapshot.jobs) {
+        if rows.len() == limit {
+            return rows;
+        }
+        if !job.cancellable {
+            continue;
+        }
+        let label = format!("Cancel job: {} {}", super::quit::kind_word(job), job.target);
+        if !matcher.matches(&label) {
+            continue;
+        }
+        rows.push(Entry {
+            section: PaletteSectionKind::Do,
+            label,
+            detail: None,
+            key: key_for("fleet::OpenJobs"),
+            destructive: false,
+            icon: Icon::CircleStop,
+            status: None,
+            run: Run::CancelJob(job.id.clone()),
+        });
+    }
+    if rows.len() < limit
+        && let Some(failed) = latest_failed_job(&snapshot.jobs)
+    {
+        let label = format!("Show failed job: {}", failed.title);
+        if matcher.matches(&label) {
+            rows.push(Entry {
                 section: PaletteSectionKind::Do,
-                label: format!("Show failed job: {}", failed.title),
+                label,
                 detail: None,
                 key: key_for("fleet::FocusStickyError"),
                 destructive: false,
@@ -486,58 +522,56 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
                 run: Run::Command(Command::JobsPanel),
             });
         }
-        commands.retain(|entry| !sessions_only && matches(&entry.label, effective_query));
-        if idle {
-            commands.truncate(IDLE_ROWS);
-        }
-        rows.extend(commands);
-
-        // CONTEXT: the digit that switches to it is the key hint.
-        let mut contexts: Vec<Entry> = snapshot
-            .contexts
-            .iter()
-            .enumerate()
-            .map(|(index, context)| Entry {
-                section: PaletteSectionKind::Context,
-                label: context.name.clone(),
-                detail: None,
-                key: (index < 9).then(|| (index + 1).to_string()),
-                destructive: false,
-                icon: Icon::Boxes,
-                status: None,
-                run: Run::SwitchContext(context.id.clone()),
-            })
-            .collect();
-        contexts.retain(|entry| !sessions_only && matches(&entry.label, effective_query));
-        rows.extend(contexts);
     }
     rows
 }
 
-// ---------------------------------------------------------------------------- rendering
+/// CONTEXT: the digit that switches to it is the key hint, so the position is the one before
+/// filtering.
+fn context_rows(snapshot: &Snapshot, matcher: &FuzzyQuery) -> Vec<Entry> {
+    snapshot
+        .contexts
+        .iter()
+        .enumerate()
+        .filter(|(_, context)| matcher.matches(&context.name))
+        .map(|(index, context)| Entry {
+            section: PaletteSectionKind::Context,
+            label: context.name.clone(),
+            detail: None,
+            key: (index < 9).then(|| (index + 1).to_string()),
+            destructive: false,
+            icon: Icon::Boxes,
+            status: None,
+            run: Run::SwitchContext(context.id.clone()),
+        })
+        .collect()
+}
 
-/// Renders the palette overlay (§3.9).
-///
-/// The shell routes [`crate::state::Overlay::Palette`] here; the element is the palette card
-/// inside the kit's top-anchored [`fleet_ui_kit::Overlay`].
-pub fn render(
+/// Renders the palette overlay (§3.9): the palette card inside the kit's top-anchored
+/// [`fleet_ui_kit::Overlay`].
+pub(super) fn render(
     state: &Entity<AppState>,
     bridge: &Bridge,
     focus: &FocusHandle,
+    host: &Entity<DialogHost>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    seed(state, cx);
-    let (query, cursor) = with_host(cx, |host| (host.palette.query.clone(), host.palette.cursor));
-    let app = state.read(cx);
-    let rows = candidates(app, query.value());
-    let total = rows.len();
+    let (query, cursor, rows, total) = {
+        let draft = &host.read(cx).palette;
+        (
+            draft.query.clone(),
+            draft.cursor,
+            draft.rows.clone(),
+            draft.total,
+        )
+    };
 
-    let mut card = fleet_ui_kit::Palette::new(query.value().to_owned())
+    let mut card = fleet_ui_kit::Palette::new(query.text().to_owned())
         .cursor(cursor)
         .cap(ROW_CAP)
         .total(total)
-        .empty(format!("Nothing matches \"{}\".", query.value()));
+        .empty(format!("Nothing matches \"{}\".", query.text()));
     for kind in [
         PaletteSectionKind::Go,
         PaletteSectionKind::Do,
@@ -582,7 +616,7 @@ pub fn render(
         .on_key_down({
             let state = state.clone();
             move |event, _window, cx| {
-                let typed = with_host(cx, |host| {
+                let typed = with_host(&state, cx, |host| {
                     let typed = type_into(&mut host.palette.query, event);
                     if typed {
                         host.palette.cursor = 0;
@@ -605,7 +639,7 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &palette_actions::Backspace, _window, cx| {
-                if with_host(cx, |host| host.palette.query.backspace()) {
+                if with_host(&state, cx, |host| host.palette.query.backspace()) {
                     notify(&state, cx);
                 }
             }
@@ -613,7 +647,7 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &palette_actions::DeleteWord, _window, cx| {
-                if with_host(cx, |host| host.palette.query.delete_word()) {
+                if with_host(&state, cx, |host| host.palette.query.delete_word_before()) {
                     notify(&state, cx);
                 }
             }
@@ -621,7 +655,7 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &palette_actions::Clear, _window, cx| {
-                if with_host(cx, |host| host.palette.query.clear()) {
+                if with_host(&state, cx, |host| clear_all(&mut host.palette.query)) {
                     notify(&state, cx);
                 }
             }
@@ -634,45 +668,60 @@ pub fn render(
                 .top(top)
                 .width(width)
                 .scrim(true)
-                .child(card),
+                .content(card),
         )
         .into_any_element()
 }
 
 /// Resets the draft the first time the open palette is rendered.
-fn seed(state: &Entity<AppState>, cx: &mut App) {
+pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let seed = state.update(cx, |app, _| app.palette_seed.take());
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         if !host.palette_open {
             host.palette = PaletteState::default();
             if let Some(seed) = seed {
-                host.palette.query = TextInput::new(seed);
+                host.palette.query = TextFieldState::from_text(seed);
             }
             host.palette_open = true;
         }
     });
+    refresh(state, cx);
+}
+
+pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
+    let query = with_host(state, cx, |host| host.palette.query.text().to_owned());
+    let rows = candidates(state.read(cx), &query);
+    let total = rows.len();
+    let rows = rows.into_iter().take(ROW_CAP).collect();
+    with_host(state, cx, |host| {
+        host.palette.rows = rows;
+        host.palette.total = total;
+        host.palette.prepared_query = Some(query);
+    });
+}
+
+pub(super) fn refresh_query(state: &Entity<AppState>, cx: &mut App) {
+    let changed = with_host(state, cx, |host| {
+        host.palette_open
+            && host.palette.prepared_query.as_deref() != Some(host.palette.query.text())
+    });
+    if changed {
+        refresh(state, cx);
+    }
 }
 
 fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    let len = {
-        let query = with_host(cx, |host| host.palette.query.value().to_owned());
-        candidates(state.read(cx), &query).len().min(ROW_CAP)
-    };
-    with_host(cx, |host| {
-        host.palette.cursor = step(host.palette.cursor, delta, len);
+    with_host(state, cx, |host| {
+        host.palette.cursor = step(host.palette.cursor, delta, host.palette.rows.len());
     });
     notify(state, cx);
 }
 
 /// `Enter`: close the palette, then do what the row says.
 fn run_selected(state: &Entity<AppState>, bridge: &Bridge, window: &mut Window, cx: &mut App) {
-    let query = with_host(cx, |host| host.palette.query.value().to_owned());
-    let cursor = with_host(cx, |host| host.palette.cursor);
-    let Some(entry) = candidates(state.read(cx), &query)
-        .into_iter()
-        .take(ROW_CAP)
-        .nth(cursor)
-    else {
+    let Some(entry) = with_host(state, cx, |host| {
+        host.palette.rows.get(host.palette.cursor).cloned()
+    }) else {
         return;
     };
     state.update(cx, |app, cx| {
@@ -695,30 +744,6 @@ fn run_selected(state: &Entity<AppState>, bridge: &Bridge, window: &mut Window, 
         Run::CancelJob(job) => bridge.send(RequestBody::CancelJob { job }),
         Run::Command(command) => run_command(command, state, bridge, window, cx),
     }
-}
-
-fn open_session(session: SessionId, state: &Entity<AppState>, cx: &mut App) {
-    state.update(cx, |app, cx| {
-        app.touch_session(session.clone());
-        app.screen = Screen::Workspace { session };
-        cx.notify();
-    });
-}
-
-fn open_worktree(id: WorktreeId, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let reply = bridge.request(RequestBody::EnsureSession {
-        worktree: Some(id),
-        agent: None,
-        sleep_previous: true,
-    });
-    let state = state.clone();
-    cx.spawn(async move |cx| {
-        let Ok(Ok(ResponseBody::Session(session))) = reply.recv().await else {
-            return;
-        };
-        cx.update(|cx| open_session(session.id, &state, cx));
-    })
-    .detach();
 }
 
 /// Runs one command. Destructive rows open their confirm rather than acting (§3.9).
@@ -877,13 +902,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_subsequence_query_matches_and_an_empty_one_matches_everything() {
-        assert!(matches("payroll#feat-payroll-fix", "pay fix"));
-        assert!(matches("Clone repo", ""));
-        assert!(!matches("Clone repo", "zzz"));
-    }
-
-    #[test]
     fn every_command_has_a_label_and_a_bound_key() {
         for command in Command::ALL {
             assert!(!command.label().is_empty());
@@ -1018,5 +1036,32 @@ mod tests {
     fn the_section_order_is_fixed() {
         assert!(PaletteSectionKind::Go < PaletteSectionKind::Do);
         assert!(PaletteSectionKind::Do < PaletteSectionKind::Context);
+    }
+    #[gpui::test]
+    fn palette_seeding_and_cursor_motion_reuse_prepared_matches(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/palette", std::time::Instant::now());
+            state.snapshot = Some(go_snapshot(SessionState::Detached, false));
+            state.palette_seed = Some("sessions".into());
+            state
+        });
+        let before = cx.update(|cx| {
+            seed(&state, cx);
+            with_host(&state, cx, |host| {
+                assert_eq!(host.palette.query.text(), "sessions");
+                assert!(!host.palette.rows.is_empty());
+                host.palette.rows.clone()
+            })
+        });
+        cx.update(|cx| {
+            move_cursor(&state, 1, cx);
+            let after = with_host(&state, cx, |host| host.palette.rows.clone());
+            assert!(std::rc::Rc::ptr_eq(&before, &after));
+            with_host(&state, cx, |host| host.palette.query.insert("missing"));
+            super::super::notify(&state, cx);
+            let after = with_host(&state, cx, |host| host.palette.rows.clone());
+            assert!(after.is_empty());
+            assert!(!std::rc::Rc::ptr_eq(&before, &after));
+        });
     }
 }

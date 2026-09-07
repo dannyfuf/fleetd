@@ -6,32 +6,47 @@ ordinary `cargo` commands use the correct compiler automatically.
 
 ## Common commands
 
-Run the project commands through the checked-in `Makefile`:
+Run the project commands through the checked-in `Makefile` (`make help` lists them):
 
 ```sh
-make check       # type-check every workspace crate
-make build       # build every workspace crate
-make run-app     # launch the native Fleet app
-make run-daemon  # run the fleetd stub
-make test        # test every workspace crate
-make fmt         # format the workspace
-make clippy      # lint all targets and features with warnings denied
+make run         # build the workspace and open Fleet (ARGS="..." is forwarded)
+make run-release # the same with the release profile
+make restart     # restart fleetd from this build — run it after changing daemon code
+make daemon      # restart fleetd and follow its log
+make build       # build the workspace
+make check       # cargo check --workspace --all-targets
+make test        # cargo test --workspace
+make fmt         # cargo fmt --all
+make lint        # fmt --check plus Clippy with warnings denied
+make doctor      # build Fleet and run its diagnostics
+make bootstrap   # install and verify the pinned Zig toolchain
 ```
 
-After rebuilding `fleetd`, restart the already-running daemon with:
+`make run` does **not** restart the daemon: an already-running `fleetd` keeps its terminal
+sessions across an app rebuild. Restarting is explicit, through `make restart` or:
 
 ```sh
 fleet daemon restart
 ```
 
-The command requests a graceful shutdown, falls back to `SIGTERM` when the daemon cannot answer,
-waits for its socket to disappear, and starts the newly built sibling `fleetd` binary.
+That command requests a graceful shutdown, falls back to `SIGTERM` when the daemon cannot answer,
+waits for its socket to disappear, and starts the newly built sibling `fleetd` binary. PTYs do not
+survive it.
 
 Direct Cargo equivalents work as usual. Build artifacts use Cargo's default target directory,
 `target/` inside this repository. Sharing that repository-local directory between commands in
 the same worktree is supported. Do not point multiple worktrees at one external
 `CARGO_TARGET_DIR`: Cargo's relative dep-info paths can make one worktree accept another's stale
 artifacts. Give parallel worktrees separate target directories when an override is necessary.
+
+## Lints and formatting
+
+`rustfmt.toml` selects edition 2024 and its style edition, so `cargo fmt` is the only formatter.
+`Cargo.toml` inherits a hazard-only Clippy list into every crate (`dbg_macro`, `todo`,
+`unimplemented`, `declare_interior_mutable_const`, `disallowed_methods`); Clippy's `style`,
+`complexity`, `perf` and `correctness` groups stay at warn and are enforced by `-D warnings` in
+`make clippy`. `clippy.toml` holds the disallowed-method list. Nothing in that policy grants an
+allowance — it only raises what a warning would let slip.
 
 Daemon-discovered subagent watches are configured by `discoveredWatches` in
 `config.json`: `enabled` defaults true, `intervalMs` defaults 2000, and `processes`
@@ -92,8 +107,9 @@ can wait on `done shot <path>` instead of sleeping. Keystrokes go through
 `Window::dispatch_keystroke`, so they take the same path as real input: bindings resolve against
 the focus chain of `docs/KEYMAP.md`.
 
-The driver lives in `crates/fleet-app/src/drive.rs` and is wired from `shell::run` right after the
-window opens. When `FLEET_DRIVE` is unset no task is spawned and the app is unaffected.
+The driver lives in `crates/fleet-app/src/drive.rs` and is started from
+`shell/root/bootstrap.rs` right after the window opens. When `FLEET_DRIVE` is unset no task is
+spawned and the app is unaffected.
 
 ## Logs
 
@@ -111,17 +127,13 @@ RUST_LOG=fleet_app=debug ./target/debug/fleet > /tmp/fleet-gui/app.log 2>&1
 | --- | --- |
 | `fleet-core` | Pure domain types, schemas, validation, and helpers. |
 | `fleet-proto` | Client/daemon wire messages, framing, terminal updates, and socket paths. |
+| `fleet-git` | Git plumbing over the real `git` binary: model, reads, mutations, rebase, watch. |
 | `fleet-term` | Daemon-owned PTYs, VT engines, terminal host, and key encoding. |
 | `fleet-daemon` | Stores, adapters, services, jobs, and the `fleetd` socket server. |
 | `fleet-client` | Async daemon connection, spawning, request APIs, events, and terminal attach. |
 | `fleet-ui-kit` | Domain-independent GPUI theme, assets, icons, and components. |
 | `fleet-cli` | Clap commands plus JSON and human output. |
-| `fleet-app` | The `fleet` GPUI app, state mirror, screens, dialogs, and terminal rendering. |
+| `fleet-app` | The `fleet` GPUI app: shell, state mirror, screens, dialogs, terminal rendering. |
+| `fleet-lazygit` | The `fleet://lazygit` git UI, embedded in `fleet-app` and standalone. |
 
-## Parallel ownership rule
-
-Only edit files in your assigned module. Never edit `lib.rs` or `mod.rs` except to add `pub use`
-re-exports of public items from your own module. The complete module tree is predeclared so agents
-can implement separate files without creating shared-file conflicts. Because `cargo fmt -p` still
-formats an entire crate, parallel work should run `rustfmt` on owned files and leave the workspace
-wide `cargo fmt --all` pass to integration.
+`docs/ARCHITECTURE.md` describes how they fit together; `docs/decisions/` records why.

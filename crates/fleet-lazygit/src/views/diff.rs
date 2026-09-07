@@ -1,15 +1,14 @@
 //! The diff renderer: file-header cards, hunk separators, tinted rows, syntax colours and
 //! word-level marks, virtualised over `gpui::uniform_list`.
 //!
-//! Three layers compose per payload row, in this order, exactly as Zed's editor does it:
+//! Three layers compose per payload row, in this order:
 //!
 //! 1. **Row tint** — a wash derived from the theme background and the ANSI hue that already
 //!    names this diff colour, so no new `ColorTokens` field is needed and both theme modes are
-//!    correct for free. The alphas are Zed's filled-hunk ladder (0.12 dark / 0.16 light); the
-//!    gutter step is lighter than the row, which is Pierre's `--mix-light: 91%` vs `88%`.
+//!    correct for free. The gutter step is lighter than the row, so the columns read as a rail.
 //! 2. **Syntax runs** from [`super::syntax`], as `HighlightStyle { color }`.
 //! 3. **Word marks** from [`super::intraline`], as `HighlightStyle { background_color }` — a
-//!    stronger wash on top of the already-tinted row, Pierre's `[data-diff-span]`.
+//!    stronger wash on top of the already-tinted row.
 //!
 //! Layers 2 and 3 *must* go through [`gpui::combine_highlights`] before reaching
 //! `StyledText::with_default_highlights`, which walks a monotonic cursor and panics on an
@@ -37,37 +36,23 @@ use super::Ansi;
 use super::diff_model::{DiffModel, DiffRow, DiffViewMode, FileMeta, RowKind, marker};
 use super::syntax::Bucket;
 
-/// The height of one rendered diff row, in pixels.
-pub const ROW_H: f32 = 18.0;
-
-/// How wide the thin position scrollbar is.
-const SCROLLBAR_W: f32 = 5.0;
-
-/// The shortest the scrollbar thumb is allowed to get.
-const THUMB_MIN: f32 = 24.0;
-
-/// How many pixels one `H` / `L` press moves the payload sideways.
-pub const H_STEP: f32 = 4.0 * CH;
-
 /// The width of the `+` / `-` sign column, in characters.
 const SIGN_CH: f32 = 1.0;
 
 /// The gap between the sign column and the code, in characters.
 const SIGN_GAP_CH: f32 = 1.0;
 
-// ---------------------------------------------------------------------------- tints
-
 /// The three washes one diff colour contributes.
 #[derive(Clone, Copy, Debug)]
-pub struct DiffTints {
+pub(crate) struct DiffTints {
     /// Behind the whole row.
-    pub row: Hsla,
+    pub(crate) row: Hsla,
     /// Behind the line-number gutters — one step lighter, so the columns read as a rail.
-    pub gutter: Hsla,
+    pub(crate) gutter: Hsla,
     /// Behind the words that actually changed.
-    pub emphasis: Hsla,
+    pub(crate) emphasis: Hsla,
     /// The 2 px bar at the very left edge, and the `+` / `-` sign.
-    pub marker: Hsla,
+    pub(crate) marker: Hsla,
 }
 
 /// Derives the washes for one diff colour from the theme, rather than adding tokens.
@@ -76,7 +61,7 @@ pub struct DiffTints {
 /// so `bg.blend(hue.opacity(a))` is an opaque tinted background — Zed's own
 /// `flattened_background_color` idiom.
 #[must_use]
-pub fn tints(theme: &Theme, ansi: Ansi) -> DiffTints {
+pub(crate) fn tints(theme: &Theme, ansi: Ansi) -> DiffTints {
     let hue = ansi.color(theme);
     let (row, emphasis, gutter) = match theme.mode {
         ThemeMode::Dark => (0.12, 0.26, 0.08),
@@ -101,7 +86,7 @@ fn row_tints(theme: &Theme, kind: RowKind) -> Option<DiffTints> {
 
 /// The colour a file's status glyph and counts use.
 #[must_use]
-pub fn kind_color(theme: &Theme, kind: DiffKind) -> Hsla {
+pub(crate) fn kind_color(theme: &Theme, kind: DiffKind) -> Hsla {
     match kind {
         DiffKind::Added => Ansi::Green.color(theme),
         DiffKind::Deleted => Ansi::Red.color(theme),
@@ -112,7 +97,7 @@ pub fn kind_color(theme: &Theme, kind: DiffKind) -> Hsla {
 
 /// The glyph a file's status shows.
 #[must_use]
-pub fn kind_icon(kind: DiffKind) -> Icon {
+pub(crate) fn kind_icon(kind: DiffKind) -> Icon {
     match kind {
         DiffKind::Added => Icon::Plus,
         DiffKind::Deleted => Icon::Minus,
@@ -123,13 +108,10 @@ pub fn kind_icon(kind: DiffKind) -> Icon {
     }
 }
 
-// ---------------------------------------------------------------------------- text
-
 /// The one `TextStyle` every payload line is shaped with.
 ///
-/// Ligatures are off: a face that renders `!=` as a single glyph silently moves the column grid,
-/// which `TerminalGrid` already learned the hard way. `WhiteSpace::Nowrap` short-circuits
-/// `TextLayout`'s wrap machinery entirely.
+/// Ligatures are off: a face that renders `!=` as a single glyph silently moves the column grid.
+/// `WhiteSpace::Nowrap` short-circuits `TextLayout`'s wrap machinery entirely.
 fn line_style(theme: &Theme, color: Hsla) -> TextStyle {
     TextStyle {
         color,
@@ -155,7 +137,7 @@ fn mono(element: gpui::Div, theme: &Theme) -> gpui::Div {
 
 /// One payload line, syntax-coloured with its changed words marked.
 fn payload(
-    text: &str,
+    text: &SharedString,
     runs: &[(Range<usize>, Bucket)],
     words: &[Range<usize>],
     base: Hsla,
@@ -188,24 +170,22 @@ fn payload(
     // `with_default_highlights` panics on the first overlap between a syntax run and a word mark.
     let highlights: Vec<(Range<usize>, HighlightStyle)> =
         combine_highlights(syntax, marks).collect();
-    StyledText::new(SharedString::from(text.to_owned()))
+    StyledText::new(text.clone())
         .with_default_highlights(&style, highlights)
         .into_any_element()
 }
 
-// ---------------------------------------------------------------------------- rows
-
 /// How a row is selected, and where the payload is scrolled to.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct RowStyle {
+pub(crate) struct RowStyle {
     /// Whether the row is inside the current selection.
-    pub selected: bool,
+    pub(crate) selected: bool,
     /// Whether the row is the cursor itself, which also earns the 2 px left bar.
-    pub cursor: bool,
+    pub(crate) cursor: bool,
     /// Whether the panel owning this list has the keyboard.
-    pub focused: bool,
+    pub(crate) focused: bool,
     /// Horizontal payload offset, in pixels.
-    pub h_scroll: f32,
+    pub(crate) h_scroll: f32,
 }
 
 /// The background of a row, with the selection composited over the diff tint rather than
@@ -233,7 +213,7 @@ fn gutter(number: Option<u32>, digits: usize, tint: Option<Hsla>, theme: &Theme)
         .flex()
         .items_center()
         .justify_end()
-        .pr(px(4.0))
+        .pr(theme.space.xs)
         .text_color(theme.colors.text_muted);
     if let Some(tint) = tint {
         cell = cell.bg(tint);
@@ -265,7 +245,7 @@ fn line_row(
 ) -> AnyElement {
     let theme = cx.theme();
     let Some(row) = model.rows.get(index) else {
-        return div().h(px(ROW_H)).into_any_element();
+        return div().h(theme.metrics.diff_row_h).into_any_element();
     };
     let tints = row_tints(theme, row.kind);
     let base = match row.kind {
@@ -280,7 +260,7 @@ fn line_row(
         .flex_row()
         .items_center()
         .w_full()
-        .h(px(ROW_H))
+        .h(theme.metrics.diff_row_h)
         .overflow_hidden();
     if let Some(background) = background(theme, tints.map(|tint| tint.row), style) {
         element = element.bg(background);
@@ -299,8 +279,8 @@ fn line_row(
                 .absolute()
                 .left_0()
                 .top_0()
-                .w(px(2.0))
-                .h(px(ROW_H))
+                .w(theme.metrics.focus_ring_w)
+                .h(theme.metrics.diff_row_h)
                 .bg(bar),
         );
     }
@@ -329,7 +309,9 @@ fn line_row(
                 .min_w_0()
                 .pl(ch(SIGN_GAP_CH))
                 .overflow_hidden()
-                .child(
+                .child(if let Some(line) = model.long_lines.get(&index) {
+                    line.element(style.h_scroll, theme.text.data.line_height)
+                } else {
                     mono(div(), theme)
                         .ml(px(-style.h_scroll))
                         .flex_none()
@@ -340,8 +322,9 @@ fn line_row(
                             base,
                             tints.map(|tint| tint.emphasis),
                             theme,
-                        )),
-                ),
+                        ))
+                        .into_any_element()
+                }),
         )
         .into_any_element()
 }
@@ -358,7 +341,7 @@ fn header_head(meta: &FileMeta, style: RowStyle, cx: &App) -> AnyElement {
         .flex_row()
         .items_center()
         .w_full()
-        .h(px(ROW_H))
+        .h(theme.metrics.diff_row_h)
         .gap(theme.space.xs)
         .px(theme.space.sm)
         .overflow_hidden()
@@ -399,7 +382,7 @@ fn header_foot(meta: &FileMeta, style: RowStyle, cx: &App) -> AnyElement {
         .flex_row()
         .items_center()
         .w_full()
-        .h(px(ROW_H))
+        .h(theme.metrics.diff_row_h)
         .gap(theme.space.sm)
         .px(theme.space.sm)
         .overflow_hidden()
@@ -446,7 +429,7 @@ fn hunk_row(row: &DiffRow, index: usize, style: RowStyle, cx: &App) -> AnyElemen
         .flex_row()
         .items_center()
         .w_full()
-        .h(px(ROW_H))
+        .h(theme.metrics.diff_row_h)
         .gap(theme.space.sm)
         .px(theme.space.sm)
         .overflow_hidden()
@@ -458,8 +441,8 @@ fn hunk_row(row: &DiffRow, index: usize, style: RowStyle, cx: &App) -> AnyElemen
                     .absolute()
                     .left_0()
                     .top_0()
-                    .w(px(2.0))
-                    .h(px(ROW_H))
+                    .w(theme.metrics.focus_ring_w)
+                    .h(theme.metrics.diff_row_h)
                     .bg(theme.colors.cursor_bar),
             )
             .relative();
@@ -493,20 +476,25 @@ fn spacer(cx: &App) -> AnyElement {
     div()
         .flex_1()
         .min_w_0()
-        .h(px(ROW_H))
+        .h(theme.metrics.diff_row_h)
         // `pattern_slash`'s period is chosen to divide the row height an integral number of
         // times, so the hatching does not drift from row to row — Zed's `spacer_pattern_period`.
         .bg(gpui::pattern_slash(
             theme.colors.border,
             2.0,
-            ROW_H / 3.0 - 2.0,
+            f32::from(theme.metrics.diff_row_h) / 3.0 - 2.0,
         ))
         .into_any_element()
 }
 
 /// One row of the unified layout.
 #[must_use]
-pub fn unified_row(model: &DiffModel, index: usize, style: RowStyle, cx: &App) -> AnyElement {
+pub(crate) fn unified_row(
+    model: &DiffModel,
+    index: usize,
+    style: RowStyle,
+    cx: &App,
+) -> AnyElement {
     let Some(row) = model.rows.get(index) else {
         return div().into_any_element();
     };
@@ -533,7 +521,7 @@ fn note_row(row: &DiffRow, style: RowStyle, cx: &App) -> AnyElement {
         .flex_row()
         .items_center()
         .w_full()
-        .h(px(ROW_H))
+        .h(theme.metrics.diff_row_h)
         .px(theme.space.sm)
         .overflow_hidden();
     if let Some(background) = background(theme, None, style) {
@@ -546,7 +534,7 @@ fn note_row(row: &DiffRow, style: RowStyle, cx: &App) -> AnyElement {
 
 /// One row of the split layout: old on the left, new on the right, hairline between.
 #[must_use]
-pub fn split_row(model: &DiffModel, index: usize, style: RowStyle, cx: &App) -> AnyElement {
+pub(crate) fn split_row(model: &DiffModel, index: usize, style: RowStyle, cx: &App) -> AnyElement {
     let Some(&layout) = model.split.get(index) else {
         return div().into_any_element();
     };
@@ -575,20 +563,18 @@ pub fn split_row(model: &DiffModel, index: usize, style: RowStyle, cx: &App) -> 
         .flex_row()
         .items_center()
         .w_full()
-        .h(px(ROW_H))
+        .h(theme.metrics.diff_row_h)
         .child(column(layout.left, Gutters::Old))
         .child(
             div()
                 .w(theme.metrics.hairline)
-                .h(px(ROW_H))
+                .h(theme.metrics.diff_row_h)
                 .flex_none()
                 .bg(theme.colors.border),
         )
         .child(column(layout.right, Gutters::New))
         .into_any_element()
 }
-
-// ---------------------------------------------------------------------------- the view
 
 /// A thin position indicator on the right edge of a diff list.
 ///
@@ -599,6 +585,8 @@ pub fn split_row(model: &DiffModel, index: usize, style: RowStyle, cx: &App) -> 
 struct Scrollbar {
     thumb: Hsla,
     track: Hsla,
+    width: Pixels,
+    thumb_min: Pixels,
 }
 
 impl UniformListDecoration for Scrollbar {
@@ -617,21 +605,24 @@ impl UniformListDecoration for Scrollbar {
         if content <= viewport || viewport <= 0.0 {
             return div().into_any_element();
         }
-        let height = (viewport * viewport / content).max(THUMB_MIN).min(viewport);
+        let height = (viewport * viewport / content)
+            .max(f32::from(self.thumb_min))
+            .min(viewport);
         let progress = (-f32::from(scroll_offset.y) / (content - viewport)).clamp(0.0, 1.0);
         // The decoration is prepainted in *scrolled* coordinates, so undoing the offset pins the
         // bar to the viewport instead of letting it ride away with the content.
         let anchor = bounds.origin - scroll_offset;
-        let left = anchor.x + bounds.size.width - px(SCROLLBAR_W);
+        let left = anchor.x + bounds.size.width - self.width;
         let track = Bounds {
             origin: point(left, anchor.y),
-            size: size(px(SCROLLBAR_W), bounds.size.height),
+            size: size(self.width, bounds.size.height),
         };
         let thumb = Bounds {
             origin: point(left, anchor.y + px(progress * (viewport - height))),
-            size: size(px(SCROLLBAR_W), px(height)),
+            size: size(self.width, px(height)),
         };
         let track_color = self.track;
+        let width = self.width;
         let thumb_color = self.thumb;
         // A `canvas` rather than absolutely positioned `div`s: as the root of its own layout
         // pass the decoration has no containing block for a percentage or an inset to resolve
@@ -642,7 +633,7 @@ impl UniformListDecoration for Scrollbar {
                 window.paint_quad(fill(track, track_color));
                 window.paint_quad(quad(
                     thumb,
-                    Corners::all(px(SCROLLBAR_W / 2.0)).clamp_radii_for_quad_size(thumb.size),
+                    Corners::all(width / 2.0).clamp_radii_for_quad_size(thumb.size),
                     thumb_color,
                     Edges::default(),
                     transparent_black(),
@@ -658,20 +649,20 @@ impl UniformListDecoration for Scrollbar {
 
 /// What a rendered diff list needs to know beyond its model.
 #[derive(Clone)]
-pub struct ViewState {
+pub(crate) struct ViewState {
     /// The cursor row, when this list has one.
-    pub cursor: Option<usize>,
+    pub(crate) cursor: Option<usize>,
     /// The selected row range, inclusive, when a staging selection is active.
-    pub range: Option<(usize, usize)>,
+    pub(crate) range: Option<(usize, usize)>,
     /// Whether the owning panel has the keyboard.
-    pub focused: bool,
+    pub(crate) focused: bool,
     /// Horizontal payload offset, in pixels.
-    pub h_scroll: f32,
+    pub(crate) h_scroll: f32,
     /// The list's scroll handle. Owned by the view, so the offset survives re-renders and the
     /// periodic refresh — case 1 of gpui's scroll-state persistence rule.
-    pub scroll: UniformListScrollHandle,
+    pub(crate) scroll: UniformListScrollHandle,
     /// Whether to draw the position indicator.
-    pub scrollbar: bool,
+    pub(crate) scrollbar: bool,
 }
 
 /// The virtualised diff list.
@@ -680,7 +671,7 @@ pub struct ViewState {
 /// `overflow.y = Scroll` and, given `track_scroll`, owns a persistent offset — so the wheel
 /// scrolls this list whether or not its panel holds the keyboard.
 #[must_use]
-pub fn diff_list(
+pub(crate) fn diff_list(
     id: impl Into<ElementId>,
     model: Rc<DiffModel>,
     state: ViewState,
@@ -692,6 +683,8 @@ pub fn diff_list(
     }
     let theme = cx.theme();
     let scrollbar = Scrollbar {
+        width: theme.metrics.diff_scrollbar_w,
+        thumb_min: theme.metrics.diff_thumb_min_h,
         // Zed's recipe: blend the thumb onto the backdrop rather than trusting a token to be
         // legible on it. `scroll_thumb` alone is a hairline colour and disappears at 5 px.
         thumb: theme.colors.bg.blend(theme.colors.text_muted.opacity(0.55)),
@@ -739,7 +732,7 @@ pub fn diff_list(
 /// of a long line. The old renderer had no clamp at all and happily scrolled past the longest
 /// line into blank rows.
 #[must_use]
-pub fn max_h_scroll(model: &DiffModel, viewport_w: f32) -> f32 {
+pub(crate) fn max_h_scroll(model: &DiffModel, viewport_w: f32) -> f32 {
     let column = match model.mode {
         DiffViewMode::Unified => viewport_w,
         DiffViewMode::Split => viewport_w / 2.0,
@@ -750,7 +743,7 @@ pub fn max_h_scroll(model: &DiffModel, viewport_w: f32) -> f32 {
 /// Everything left of the code on a unified payload row, in pixels: both line-number gutters,
 /// the sign column and the gap after it.
 #[must_use]
-pub fn gutter_width(model: &DiffModel) -> f32 {
+pub(crate) fn gutter_width(model: &DiffModel) -> f32 {
     (model.digits as f32 + 1.0) * 2.0 * CH + (SIGN_CH + SIGN_GAP_CH) * CH
 }
 

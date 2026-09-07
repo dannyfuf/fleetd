@@ -4,7 +4,7 @@ The Git backend for Fleet's native lazygit clone. It shells out to `git` with
 explicit argv (never through a shell, never through `git2`/`gix`), preserves
 Git's exact bytes, and hands the UI owned, typed snapshots.
 
-See [API.md](API.md) for the complete list of public types and signatures.
+`cargo doc -p fleet-git --open` lists the public types and signatures.
 
 ## Design rules
 
@@ -77,7 +77,6 @@ for file in &diff.files {
         }
     }
 }
-println!("{}", diff.to_text_lossy());   // renders back to a unified patch
 ```
 
 Hunk bodies are framed by the counts in their `@@` header, so a patch whose
@@ -151,7 +150,7 @@ Pass the helper path (the UI's own executable, or the `fleet-git-seqedit`
 binary this crate ships) to each rebase call:
 
 ```rust
-use fleet_git::{MoveDirection, ObjectId, RebaseAction, RebaseBase, RebasePlan, TodoEdit};
+use fleet_git::{MoveDirection, ObjectId};
 
 let helper = std::env::current_exe()?;
 let oid = ObjectId::from("a1b2c3d");
@@ -162,24 +161,11 @@ repository.drop_commit(&oid, &helper).await?;
 repository.reword_commit(&oid, "clearer subject", &helper).await?;
 repository.move_commit(&oid, MoveDirection::Up, &helper).await?;   // Up == toward HEAD
 repository.edit_commit(&oid, &helper).await?;                      // pauses the rebase
-
-// Or drive the todo file directly.
-repository
-    .interactive_rebase(
-        RebasePlan {
-            base: RebaseBase::Reference("HEAD~5".to_owned()),
-            onto: None,
-            edits: vec![
-                TodoEdit::Change { oid: oid.clone(), action: RebaseAction::Fixup { flag: None } },
-                TodoEdit::Move { oids: vec![oid], offset: -1 },
-            ],
-            autostash: true,
-            keep_empty: true,
-        },
-        &helper,
-    )
-    .await?;
 ```
+
+These are the whole rebase surface: the todo-file plan itself is an internal
+encoding, so a new operation is added as a method here rather than assembled by
+a caller.
 
 A rebase that stops on conflicts returns `GitError::Conflict`; resolve with
 `resolve_conflict` / `stage_paths` and then `rebase_continue`, `rebase_skip`, or

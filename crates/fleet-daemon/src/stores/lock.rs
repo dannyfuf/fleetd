@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::{DaemonError, DaemonResult};
+use crate::{DaemonError, DaemonResult, adapters::process::pid_is_alive};
 
 /// Cross-process `state.json.lock` guard using swarm's PID-file semantics.
 #[derive(Debug)]
@@ -23,8 +23,7 @@ impl StateLock {
         Self::acquire_with_timeout(path, Duration::from_secs(3))
     }
 
-    /// Acquires a PID lock with a caller-selected timeout, primarily for deterministic tests.
-    pub fn acquire_with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> DaemonResult<Self> {
+    fn acquire_with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> DaemonResult<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| DaemonError::fs(parent, error))?;
@@ -59,12 +58,6 @@ impl StateLock {
             }
         }
     }
-
-    /// Returns the lock file path.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
 }
 
 impl Drop for StateLock {
@@ -93,15 +86,6 @@ fn lock_is_stale(path: &Path) -> DaemonResult<bool> {
     Ok(age >= Duration::from_secs(1))
 }
 
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    // SAFETY: signal zero checks process existence without delivering a signal.
-    let result = unsafe { libc::kill(pid.cast_signed(), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +108,6 @@ mod tests {
         let path = temp.path().join("state.json.lock");
         fs::write(&path, "4294967295\n").unwrap_or_else(|error| panic!("{error}"));
         let guard = StateLock::acquire(&path).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(guard.path(), path);
+        assert_eq!(guard.path, path);
     }
 }

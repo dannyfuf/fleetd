@@ -5,63 +5,65 @@
 //! never a `fleet-core` type, and they read every color, size and duration from
 //! [`crate::theme::Theme`].
 
-pub mod age_label;
-pub mod app_frame;
-pub mod badge;
-pub mod banner;
-pub mod chip;
-pub mod column_ladder;
-pub mod confirm_dialog;
-pub mod context_bar;
-pub mod cycler;
-pub mod daemon_dot;
-pub mod daemon_splash;
-pub mod degraded_chip;
-pub mod dialog;
-pub mod divider;
-pub mod doctor_table;
-pub mod empty_state;
-pub mod exit_strip;
-pub mod fact_list;
-pub mod fact_row;
-pub mod filter_bar;
-pub mod freshness_stamp;
-pub mod fuzzy_list;
-pub mod job_row;
-pub mod job_ticker;
-pub mod keep_alive_chips;
-pub mod key_hint;
-pub mod key_value_list;
-pub mod list_view;
-pub mod log_view;
-pub mod mode_word;
-pub mod number_field;
-pub mod overlay;
-pub mod palette;
-pub mod pane;
-pub mod pane_header;
-pub mod pr_badge;
-pub mod prefix_hint;
-pub mod row;
-pub mod scroll_pill;
-pub mod section_header;
-pub mod segmented_tabs;
-pub mod select;
-pub mod sheet;
-pub mod skeleton_rows;
-pub mod spinner;
-pub mod split_layout;
-pub mod status_bar;
-pub mod status_dot;
-pub mod status_glyph;
-pub mod sticky_error_slot;
-pub mod terminal_grid;
-pub mod terminal_modes;
-pub mod terminal_tab_strip;
-pub mod text_field;
-pub mod toast_stack;
-pub mod toggle;
-pub mod veil;
+mod age_label;
+mod app_frame;
+mod badge;
+mod banner;
+mod chip;
+mod column_ladder;
+mod confirm_dialog;
+mod context_bar;
+mod control;
+mod cycler;
+mod daemon_dot;
+mod daemon_splash;
+mod degraded_chip;
+mod dialog;
+mod divider;
+mod doctor_table;
+mod empty_state;
+mod exit_strip;
+mod fact_list;
+mod fact_row;
+mod filter_bar;
+mod freshness_stamp;
+mod fuzzy_list;
+mod job_row;
+mod job_ticker;
+mod keep_alive_chips;
+mod key_hint;
+mod key_value_list;
+mod list_view;
+mod log_view;
+mod mode_word;
+mod navigation;
+mod number_field;
+mod overlay;
+mod palette;
+mod pane;
+mod pane_header;
+mod pr_badge;
+mod prefix_hint;
+mod row;
+mod scroll_pill;
+mod section_header;
+mod segmented_tabs;
+mod select;
+mod sheet;
+mod skeleton_rows;
+mod spinner;
+mod split_layout;
+mod status_bar;
+mod status_dot;
+mod status_glyph;
+mod sticky_error_slot;
+mod terminal_grid;
+mod terminal_modes;
+mod terminal_tab_strip;
+mod text_field;
+mod toast_stack;
+mod toggle;
+mod veil;
 
 pub use crate::focus::{FocusRing, FocusRingKind};
 
@@ -72,7 +74,7 @@ pub use banner::Banner;
 pub use chip::Chip;
 pub use column_ladder::{ColumnLadder, ColumnSpec, ColumnWidth, ResolvedColumn};
 pub use confirm_dialog::ConfirmDialog;
-pub use context_bar::{ContextBar, ContextTab, TRAFFIC_LIGHT_INSET};
+pub use context_bar::{ContextBar, ContextTab};
 pub use cycler::Cycler;
 pub use daemon_dot::{DaemonDot, DaemonState};
 pub use daemon_splash::{DaemonSplash, DaemonSplashKind};
@@ -124,22 +126,13 @@ pub use status_glyph::{StatusGlyph, StatusKind};
 pub use sticky_error_slot::StickyErrorSlot;
 pub use terminal_grid::{
     CellMetrics, CellWidth, CursorShape, GridCell, GridCursor, GridRow, GridSelection,
-    TerminalGrid, UnderlineStyle,
+    TerminalGrid, TerminalGridCache, UnderlineStyle,
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalTab, TerminalTabKind, TerminalTabStrip};
 pub use text_field::{
-    TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
+    EditEffect, TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
 };
 pub use toast_stack::{COALESCE_WINDOW_MS, Toast, ToastDuration, ToastStack};
 pub use toggle::Toggle;
 pub use veil::Veil;
-
-/// `Modal` is the same surface as [`Dialog`]: scrim + card + 44 px header + 44 px footer.
-/// The alias exists so a view that thinks in "modal" finds the right type.
-pub type Modal = Dialog;
-
-/// `TabBar` is the same surface as [`SegmentedTabs`]. The Workspace's terminal strip is a
-/// different component ([`TerminalTabStrip`]) because its tabs carry indices, activity dots
-/// and exit codes.
-pub type TabBar = SegmentedTabs;

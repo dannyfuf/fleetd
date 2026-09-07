@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     path::Path,
-    sync::{Arc, Weak},
+    sync::Arc,
     time::Duration,
 };
 
@@ -11,14 +11,15 @@ use fleet_core::{
     agents::recognized_agent,
     ids::{SessionId, TerminalId, WorktreeId},
     sessions::{KeptTerminal, Session},
-    sleep::{KeepAliveKind, KeepAliveRule, match_keep_alive},
+    sleep::{CompiledSleepPolicy, KeepAliveKind, KeepAliveRule},
 };
 use fleet_proto::response::{KeepAliveRuleMatch, SleepKept, SleepResult};
 
 use crate::{
     DaemonError, DaemonResult,
     adapters::process::{ListeningPort, Process, ProcessInfo},
-    services::sessions::{SessionRuntime, shared_runtime},
+    error::remote_unsupported,
+    services::sessions::{SessionRuntime, Sessions},
     stores::{config::ConfigStore, state::StateStore},
 };
 
@@ -32,26 +33,26 @@ pub struct Sleep {
 }
 
 impl Sleep {
-    /// Creates the sleep service and starts best-effort foreground-command polling.
+    /// Creates the sleep service over the terminal registry it observes.
     #[must_use]
     pub fn new(
         config: Arc<ConfigStore>,
         state: Arc<StateStore>,
         process: Arc<dyn Process>,
+        sessions: &Sessions,
     ) -> Self {
-        let runtime = shared_runtime(&state);
+        let runtime = Arc::clone(&sessions.runtime);
         runtime.register_process(Arc::clone(&process));
-        start_status_poller(
-            Arc::downgrade(&runtime),
-            Arc::clone(&config),
-            Arc::clone(&process),
-        );
         Self {
             config,
             state,
             process,
             runtime,
         }
+    }
+
+    pub(super) async fn refresh_observations(&self) -> DaemonResult<()> {
+        refresh_observations(&self.runtime, &self.config, self.process.as_ref()).await
     }
 
     /// Applies keep-alive rules and editor `:qa` grace handling to a session.
@@ -63,9 +64,7 @@ impl Sleep {
                 .keys()
                 .any(|host| session.as_str().starts_with(&format!("{host}/")))
             {
-                return Err(DaemonError::Unsupported(
-                    "remote hosts are not supported yet".to_owned(),
-                ));
+                return Err(remote_unsupported());
             }
         }
         apply_session(&self.runtime, &self.config, self.process.as_ref(), &session).await
@@ -80,9 +79,7 @@ impl Sleep {
             .find(|entry| entry.id == worktree)
             .ok_or_else(|| DaemonError::NotFound(worktree.to_string()))?;
         if worktree.host.is_some() {
-            return Err(DaemonError::Unsupported(
-                "remote hosts are not supported yet".to_owned(),
-            ));
+            return Err(remote_unsupported());
         }
         let session = SessionId::try_from(worktree.session.as_str())
             .map_err(|error| DaemonError::Validation(error.to_string()))?;
@@ -91,7 +88,7 @@ impl Sleep {
 
     /// Counts current process matches for configured keep-alive rules.
     pub async fn match_keep_alive_rules(&self) -> DaemonResult<Vec<KeepAliveRuleMatch>> {
-        let config = self.config.load().await?;
+        let (config, policy) = self.config.load_with_sleep_policy().await?;
         let snapshot = match self.process.snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -113,7 +110,8 @@ impl Sleep {
             .sleep
             .keep_alive
             .iter()
-            .map(|rule| match_rule_count(rule, &snapshot, ports.as_ref()))
+            .enumerate()
+            .map(|(index, rule)| match_rule_count(&policy, index, rule, &snapshot, ports.as_ref()))
             .collect())
     }
 }
@@ -127,7 +125,7 @@ pub(crate) async fn apply_session(
     let Some(session) = runtime.session(session_id) else {
         return Ok(empty_result());
     };
-    let config = config_store.load().await?;
+    let (config, policy) = config_store.load_with_sleep_policy().await?;
     if !config.sleep.enabled {
         let kept = session
             .terminals
@@ -145,50 +143,20 @@ pub(crate) async fn apply_session(
         });
     }
 
-    let observations = observe_session(&session, process).await?;
-    for terminal in &session.terminals {
-        if terminal.is_native() {
-            // Nothing to observe: the client draws this tab and no process belongs to it.
-            continue;
-        }
-        let observation = observations.get(&terminal.id);
-        let labels = observation.map_or_else(Vec::new, |observation| {
-            match_keep_alive(
-                &config.sleep.keep_alive,
-                &observation.commands,
-                &observation.ports,
-            )
-        });
-        let foreground = observation.and_then(Observation::foreground_command);
-        let agent = observation
-            .and_then(|observation| {
-                observation
-                    .commands
-                    .iter()
-                    .find_map(|command| recognized_agent(command))
-            })
-            .map(str::to_owned);
-        runtime.update_observation(terminal.id, foreground, labels, agent);
-    }
+    let sessions = std::slice::from_ref(&session);
+    let observations = observe_sessions(sessions, process).await?;
+    let keep_alive = publish_observations(runtime, &policy, sessions, &observations);
 
     let mut kept = Vec::new();
     let mut closable = Vec::new();
     for terminal in session.terminals.iter().rev() {
         if terminal.is_native() {
-            // Idle by construction: no keep-alive rule can match a tab with no process, and
-            // there is no editor to ask to save. It closes with the rest, and `ensure` puts it
-            // back — exactly what a `lazygit` PTY did before it was native.
+            // Client-drawn tabs have no process that can keep a session awake.
             closable.push((terminal.id, terminal.name.clone()));
             continue;
         }
         let observation = observations.get(&terminal.id);
-        let labels = observation.map_or_else(Vec::new, |observation| {
-            match_keep_alive(
-                &config.sleep.keep_alive,
-                &observation.commands,
-                &observation.ports,
-            )
-        });
+        let labels = keep_alive.get(&terminal.id).map_or(&[][..], Vec::as_slice);
         if !labels.is_empty() {
             kept.push(SleepKept {
                 window: terminal.name.clone(),
@@ -266,18 +234,15 @@ impl Observation {
     }
 }
 
-async fn observe_session(
-    session: &Session,
-    process: &dyn Process,
-) -> DaemonResult<HashMap<TerminalId, Observation>> {
-    observe_sessions(std::slice::from_ref(session), process).await
-}
-
 async fn observe_sessions(
     sessions: &[Session],
     process: &dyn Process,
 ) -> DaemonResult<HashMap<TerminalId, Observation>> {
     let snapshot = process.snapshot().await?;
+    let mut children = HashMap::<u32, Vec<usize>>::new();
+    for (index, entry) in snapshot.iter().enumerate() {
+        children.entry(entry.parent_pid).or_default().push(index);
+    }
     let mut observations = HashMap::new();
     let mut all_pids = BTreeSet::new();
     for terminal in sessions.iter().flat_map(|session| &session.terminals) {
@@ -287,7 +252,7 @@ async fn observe_sessions(
         };
         if let Some(shell_pid) = terminal.shell_pid {
             all_pids.insert(shell_pid);
-            observation.processes = descendants_from_snapshot(&snapshot, shell_pid);
+            observation.processes = descendants_from_snapshot(&snapshot, &children, shell_pid);
             observation.commands = observation
                 .processes
                 .iter()
@@ -314,20 +279,28 @@ async fn observe_sessions(
     Ok(observations)
 }
 
-fn descendants_from_snapshot(snapshot: &[ProcessInfo], root: u32) -> Vec<ProcessInfo> {
-    let mut parents = BTreeSet::from([root]);
+fn descendants_from_snapshot(
+    snapshot: &[ProcessInfo],
+    children: &HashMap<u32, Vec<usize>>,
+    root: u32,
+) -> Vec<ProcessInfo> {
+    let mut visited = BTreeSet::from([root]);
+    let mut pending = children
+        .get(&root)
+        .into_iter()
+        .flatten()
+        .map(|index| (0_usize, *index))
+        .collect::<BTreeSet<_>>();
     let mut descendants = Vec::new();
-    loop {
-        let mut changed = false;
-        for entry in snapshot {
-            if parents.contains(&entry.parent_pid) && !parents.contains(&entry.pid) {
-                parents.insert(entry.pid);
-                descendants.push(entry.clone());
-                changed = true;
-            }
+    while let Some((pass, index)) = pending.pop_first() {
+        let entry = &snapshot[index];
+        if !visited.insert(entry.pid) {
+            continue;
         }
-        if !changed {
-            break;
+        descendants.push(entry.clone());
+        // Preserve the original repeated-scan order, including children before their parents.
+        for child in children.get(&entry.pid).into_iter().flatten() {
+            pending.insert((pass + usize::from(*child <= index), *child));
         }
     }
     descendants
@@ -369,6 +342,8 @@ fn empty_result() -> SleepResult {
 }
 
 fn match_rule_count(
+    policy: &CompiledSleepPolicy,
+    rule_index: usize,
     rule: &KeepAliveRule,
     snapshot: &[ProcessInfo],
     ports: Result<&Vec<ListeningPort>, &DaemonError>,
@@ -382,24 +357,21 @@ fn match_rule_count(
     }
     match rule.kind {
         KeepAliveKind::Process => {
-            if has_obvious_regex_error(&rule.pattern) {
+            if let Some(diagnostic) = policy
+                .diagnostics()
+                .iter()
+                .find(|diagnostic| diagnostic.rule_index == rule_index)
+            {
                 return KeepAliveRuleMatch {
                     rule_id: rule.id.clone(),
                     count: 0,
-                    error: Some(format!("invalid process pattern `{}`", rule.pattern)),
+                    error: Some(diagnostic.error.to_string()),
                 };
             }
-            let count = snapshot
-                .iter()
-                .filter(|entry| {
-                    !match_keep_alive(
-                        std::slice::from_ref(rule),
-                        std::slice::from_ref(&entry.command),
-                        &[],
-                    )
-                    .is_empty()
-                })
-                .count();
+            let count = policy.count_process_matches(
+                rule_index,
+                snapshot.iter().map(|entry| entry.command.as_str()),
+            );
             KeepAliveRuleMatch {
                 rule_id: rule.id.clone(),
                 count: u64::try_from(count).unwrap_or(u64::MAX),
@@ -421,68 +393,8 @@ fn match_rule_count(
     }
 }
 
-fn has_obvious_regex_error(pattern: &str) -> bool {
-    let mut square = 0_i64;
-    let mut round = 0_i64;
-    let mut escaped = false;
-    for character in pattern.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' => escaped = true,
-            '[' => square += 1,
-            ']' => {
-                square -= 1;
-                if square < 0 {
-                    return true;
-                }
-            }
-            '(' if square == 0 => round += 1,
-            ')' if square == 0 => {
-                round -= 1;
-                if round < 0 {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    escaped || square != 0 || round != 0
-}
-
 fn terminal_io_error(terminal: TerminalId, error: impl std::fmt::Display) -> DaemonError {
     DaemonError::Process(format!("terminal `{terminal}`: {error}"))
-}
-
-fn start_status_poller(
-    runtime: Weak<SessionRuntime>,
-    config: Arc<ConfigStore>,
-    process: Arc<dyn Process>,
-) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    handle.spawn(async move {
-        loop {
-            let delay = config
-                .load()
-                .await
-                .map(|config| config.ui.status_refresh_ms.max(500))
-                .ok()
-                .and_then(|millis| u64::try_from(millis).ok())
-                .map(Duration::from_millis)
-                .unwrap_or_else(|| Duration::from_secs(2));
-            tokio::time::sleep(delay).await;
-            let Some(runtime) = runtime.upgrade() else {
-                break;
-            };
-            if let Err(error) = refresh_observations(&runtime, &config, process.as_ref()).await {
-                tracing::warn!(%error, "failed to refresh terminal process observations");
-            }
-        }
-    });
 }
 
 async fn refresh_observations(
@@ -490,33 +402,101 @@ async fn refresh_observations(
     config_store: &ConfigStore,
     process: &dyn Process,
 ) -> DaemonResult<()> {
-    let config = config_store.load().await?;
     let sessions = runtime.sessions();
-    let observations = observe_sessions(&sessions, process).await?;
-    for session in sessions {
-        for terminal in session.terminals {
-            let observation = observations.get(&terminal.id);
-            let labels = observation.map_or_else(Vec::new, |observation| {
-                match_keep_alive(
-                    &config.sleep.keep_alive,
-                    &observation.commands,
-                    &observation.ports,
-                )
-            });
-            runtime.update_observation(
-                terminal.id,
-                observation.and_then(Observation::foreground_command),
-                labels,
-                observation
-                    .and_then(|observation| {
-                        observation
-                            .commands
-                            .iter()
-                            .find_map(|command| recognized_agent(command))
-                    })
-                    .map(str::to_owned),
-            );
-        }
+    if sessions.is_empty() {
+        return Ok(());
     }
+    let (_, policy) = config_store.load_with_sleep_policy().await?;
+    let observations = observe_sessions(&sessions, process).await?;
+    publish_observations(runtime, &policy, &sessions, &observations);
     Ok(())
+}
+
+/// Publishes the foreground command, keep-alive labels, and recognized agent of every
+/// terminal, and returns the labels so a caller deciding closability does not re-match
+/// the policy it just evaluated.
+fn publish_observations(
+    runtime: &SessionRuntime,
+    policy: &CompiledSleepPolicy,
+    sessions: &[Session],
+    observations: &HashMap<TerminalId, Observation>,
+) -> HashMap<TerminalId, Vec<String>> {
+    let mut keep_alive = HashMap::new();
+    for terminal in sessions.iter().flat_map(|session| &session.terminals) {
+        let observation = observations.get(&terminal.id);
+        let labels = observation.map_or_else(Vec::new, |observation| {
+            policy.match_keep_alive(&observation.commands, &observation.ports)
+        });
+        let agent = observation
+            .and_then(|observation| {
+                observation
+                    .commands
+                    .iter()
+                    .find_map(|command| recognized_agent(command))
+            })
+            .map(str::to_owned);
+        runtime.update_observation(
+            terminal.id,
+            observation.and_then(Observation::foreground_command),
+            labels.clone(),
+            agent,
+        );
+        keep_alive.insert(terminal.id, labels);
+    }
+    keep_alive
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        adapters::{clock::SystemClock, process::RealProcess},
+        testing::fakes::{FakeFiles, FakeShell},
+    };
+
+    #[tokio::test]
+    async fn idle_observation_does_not_run_process_queries() {
+        let temp = tempfile::tempdir().unwrap();
+        let files = Arc::new(FakeFiles::new(
+            temp.path().join("trash"),
+            vec![temp.path().join("worktrees")],
+        ));
+        let config = Arc::new(ConfigStore::new(temp.path(), files.clone()));
+        let state = Arc::new(StateStore::new(temp.path(), files, Arc::new(SystemClock)));
+        let shell = Arc::new(FakeShell::new());
+        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+        let sleep = Sleep::new(
+            config,
+            state,
+            Arc::new(RealProcess::new(shell.clone())),
+            &sessions,
+        );
+        sleep.refresh_observations().await.unwrap();
+        sleep.refresh_observations().await.unwrap();
+        assert_eq!(shell.calls().len(), 0);
+    }
+
+    #[test]
+    fn indexed_descendants_keep_scan_order_for_unordered_process_tables() {
+        let snapshot = [(4, 3), (2, 1), (5, 2), (3, 2), (6, 3), (99, 90)]
+            .into_iter()
+            .map(|(pid, parent_pid)| ProcessInfo {
+                pid,
+                parent_pid,
+                command: pid.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let mut children = HashMap::<u32, Vec<usize>>::new();
+        for (index, entry) in snapshot.iter().enumerate() {
+            children.entry(entry.parent_pid).or_default().push(index);
+        }
+        let descendants = descendants_from_snapshot(&snapshot, &children, 1);
+        assert_eq!(
+            descendants
+                .iter()
+                .map(|entry| entry.pid)
+                .collect::<Vec<_>>(),
+            [2, 5, 3, 6, 4]
+        );
+    }
 }

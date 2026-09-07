@@ -1,4 +1,5 @@
 #!/bin/sh
+agent=${0##*/}
 # Canonicalize PATH directories so symlinks and relative entries cannot recurse.
 shim_dir=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd) || exit 127
 real=
@@ -9,16 +10,17 @@ while [ -n "$rest" ]; do
     [ -n "$dir" ] || dir=.
     canonical=$(CDPATH= cd -P -- "$dir" 2>/dev/null && pwd) || continue
     [ "$canonical" = "$shim_dir" ] && continue
-    if [ -f "$canonical/codex" ] && [ -x "$canonical/codex" ]; then
-        real=$canonical/codex
+    if [ -f "$canonical/$agent" ] && [ -x "$canonical/$agent" ]; then
+        real=$canonical/$agent
         break
     fi
 done
 if [ -z "$real" ]; then
-    echo 'fleet shim: codex not found outside the shim directory' >&2
+    printf 'fleet shim: %s not found outside the shim directory\n' "$agent" >&2
     exit 127
 fi
-if [ "${FLEET_TERMINAL_ID+x}" = x ] && [ "${FLEET_WATCH+x}" != x ] && ! [ -t 1 ]; then
-    exec "${FLEET_BIN:-fleet}" exec --watch --label codex -- "$real" "$@"
+if [ "${FLEET_TERMINAL_ID+x}" = x ] && [ "${FLEET_WATCH+x}" != x ] && ! [ -t 1 ] &&
+    command -v "${FLEET_BIN:-fleet}" >/dev/null 2>&1; then
+    exec "${FLEET_BIN:-fleet}" exec --watch --label "$agent" -- "$real" "$@"
 fi
 exec "$real" "$@"

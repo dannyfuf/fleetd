@@ -252,37 +252,29 @@ pub enum ResponseBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{PROTOCOL_VERSION, assert_round_trip, error::ErrorKind};
 
     #[test]
-    fn response_body_and_result_round_trip() {
-        let response = Response {
+    fn successful_and_failed_results_round_trip() {
+        assert_round_trip(Response {
             id: 9,
             result: Ok(ResponseBody::Version {
                 version: "fleet 0.1.0".to_owned(),
-                protocol: crate::PROTOCOL_VERSION,
+                protocol: PROTOCOL_VERSION,
             }),
-        };
-        let json = serde_json::to_string(&response).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: Response =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, response);
-
-        let response = Response {
+        });
+        assert_round_trip(Response {
             id: 10,
             result: Err(ProtoError {
-                kind: crate::error::ErrorKind::Validation,
+                kind: ErrorKind::Validation,
                 message: "bad input".to_owned(),
             }),
-        };
-        let json = serde_json::to_string(&response).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: Response =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, response);
+        });
     }
 
     #[test]
-    fn new_response_types_round_trip() {
-        let responses = vec![
+    fn payload_carrying_bodies_round_trip() {
+        let bodies = vec![
             ResponseBody::RemoteRepos(RepoCache {
                 fetched_at: "2026-09-04T12:00:00Z".to_owned(),
                 repos: Vec::new(),
@@ -307,11 +299,11 @@ mod tests {
                 error: None,
             }]),
         ];
-        for response in responses {
-            let json = serde_json::to_string(&response).unwrap_or_else(|error| panic!("{error}"));
-            let decoded: ResponseBody =
-                serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(decoded, response);
+        for (id, body) in bodies.into_iter().enumerate() {
+            assert_round_trip(Response {
+                id: id as u64,
+                result: Ok(body),
+            });
         }
     }
 }

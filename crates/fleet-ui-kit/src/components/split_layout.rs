@@ -9,7 +9,7 @@
 //! carries `min_w_0` / `min_h_0` so its content ellipsizes instead of pushing the fixed side
 //! out of place.
 
-use gpui::{AnyElement, App, Pixels, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Pixels, Window, div, prelude::*};
 
 use crate::theme::ActiveTheme;
 
@@ -95,7 +95,7 @@ impl RenderOnce for SplitLayout {
         let leading_size = self.leading_size;
         let trailing_size = self.trailing_size;
 
-        let region = |size: Option<Pixels>, child: Option<AnyElement>| {
+        let region = |size: Option<Pixels>, child: AnyElement| {
             div()
                 .flex()
                 .min_w_0()
@@ -107,7 +107,7 @@ impl RenderOnce for SplitLayout {
                     None if horizontal => el.flex_1().h_full(),
                     None => el.flex_1().w_full(),
                 })
-                .children(child)
+                .child(child)
         };
 
         div()
@@ -122,16 +122,16 @@ impl RenderOnce for SplitLayout {
                     el.flex_col()
                 }
             })
-            .child(region(leading_size, self.leading))
+            .children(self.leading.map(|child| region(leading_size, child)))
             .when(divider, |el| {
                 el.child(div().flex_none().bg(theme.colors.border).map(|el| {
                     if horizontal {
-                        el.w(px(1.0)).h_full()
+                        el.w(theme.metrics.hairline).h_full()
                     } else {
-                        el.h(px(1.0)).w_full()
+                        el.h(theme.metrics.hairline).w_full()
                     }
                 }))
             })
-            .child(region(trailing_size, self.trailing))
+            .children(self.trailing.map(|child| region(trailing_size, child)))
     }
 }

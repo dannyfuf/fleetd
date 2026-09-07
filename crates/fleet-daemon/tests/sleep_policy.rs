@@ -117,7 +117,7 @@ async fn keeps_matching_process_and_closes_idle_terminal() {
         command: "/usr/local/bin/claude --resume".to_owned(),
     }]);
     let process: Arc<dyn Process> = fake.clone();
-    let sleep = Sleep::new(config, state, process);
+    let sleep = Sleep::new(config, state, process, &sessions);
     let result = sleep
         .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
         .await
@@ -127,15 +127,7 @@ async fn keeps_matching_process_and_closes_idle_terminal() {
     assert_eq!(result.kept[0].reason, "claude");
     assert_eq!(result.closed, vec!["idle"]);
     assert!(!result.session_killed);
-    assert_eq!(
-        sessions
-            .list()
-            .await
-            .unwrap_or_else(|error| panic!("{error}"))[0]
-            .terminals
-            .len(),
-        1
-    );
+    assert_eq!(sessions.snapshot()[0].terminals.len(), 1);
     sessions
         .kill(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
         .await
@@ -168,7 +160,7 @@ async fn listening_port_keeps_terminal_and_missing_session_is_empty() {
         port: 4_321,
     }]);
     let process: Arc<dyn Process> = fake;
-    let sleep = Sleep::new(config, state, process);
+    let sleep = Sleep::new(config, state, process, &sessions);
     let result = sleep
         .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
         .await
@@ -212,20 +204,14 @@ async fn no_matches_kills_session_once() {
         .unwrap_or_else(|error| panic!("{error}"));
     let fake = Arc::new(FakeProcess::default());
     let process: Arc<dyn Process> = fake;
-    let sleep = Sleep::new(config, state, process);
+    let sleep = Sleep::new(config, state, process, &sessions);
     let result = sleep
         .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(result.closed, vec!["idle"]);
     assert!(result.session_killed);
-    assert!(
-        sessions
-            .list()
-            .await
-            .unwrap_or_else(|error| panic!("{error}"))
-            .is_empty()
-    );
+    assert!(sessions.snapshot().is_empty());
 }
 
 /// Sleep treats a `fleet://` tab as idle: no process, so nothing can keep it alive.
@@ -269,7 +255,7 @@ async fn a_native_tab_is_idle_and_never_keeps_a_session_awake() {
         port: 4_000,
     }]);
     let process: Arc<dyn Process> = fake;
-    let sleep = Sleep::new(config, state, process);
+    let sleep = Sleep::new(config, state, process, &sessions);
     let result = sleep
         .session(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
         .await
@@ -286,13 +272,111 @@ async fn a_native_tab_is_idle_and_never_keeps_a_session_awake() {
     assert!(!result.session_killed);
 
     // A session that is *only* a native tab sleeps away completely.
-    let remaining = sessions
-        .list()
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
+    let remaining = sessions.snapshot();
     assert_eq!(remaining[0].terminals.len(), 1);
     sessions
         .kill(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
         .await
         .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[tokio::test]
+async fn rule_counts_use_parser_diagnostics_and_refresh_after_config_changes() {
+    let (_temp, config, state, _) = stores(Vec::new()).await;
+    config
+        .update(serde_json::json!({"sleep": {"keepAlive": [
+            {"id": "same", "label": "same", "kind": "process", "pattern": "claude"},
+            {"id": "same", "label": "same", "kind": "process", "pattern": "cargo"},
+            {"id": "same", "label": "same", "kind": "process", "pattern": "\\q"},
+            {"id": "off", "label": "off", "kind": "process", "pattern": "[", "enabled": false},
+            {"id": "bracket", "label": "bracket", "kind": "process", "pattern": "]"}
+        ]}}))
+        .await
+        .unwrap();
+    let fake = Arc::new(FakeProcess::default());
+    fake.set_snapshot(vec![
+        ProcessInfo {
+            pid: 50_010,
+            parent_pid: 1,
+            command: "CLAUDE ]".to_owned(),
+        },
+        ProcessInfo {
+            pid: 50_011,
+            parent_pid: 1,
+            command: "cargo test".to_owned(),
+        },
+        ProcessInfo {
+            pid: 50_012,
+            parent_pid: 1,
+            command: "cargo build".to_owned(),
+        },
+    ]);
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let sleep = Sleep::new(Arc::clone(&config), state, fake, &sessions);
+    for _ in 0..2 {
+        let matches = sleep.match_keep_alive_rules().await.unwrap();
+        assert_eq!(
+            matches.iter().map(|entry| entry.count).collect::<Vec<_>>(),
+            [1, 2, 0, 0, 1]
+        );
+        let error = matches[2].error.as_deref().unwrap();
+        assert!(error.contains("unrecognized escape sequence"), "{error}");
+        assert!(
+            matches
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != 2)
+                .all(|(_, entry)| entry.error.is_none())
+        );
+    }
+    config
+        .update(serde_json::json!({"sleep": {"keepAlive": [
+            {"id": "same", "label": "same", "kind": "process", "pattern": "cargo"}
+        ]}}))
+        .await
+        .unwrap();
+    let matches = sleep.clone().match_keep_alive_rules().await.unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].count, 2);
+    assert!(matches[0].error.is_none());
+}
+
+#[tokio::test]
+async fn sleeping_uses_changed_rules_without_recreating_the_service() {
+    let (_temp, config, state, worktree) = stores(vec![WindowConfig {
+        name: "worker".to_owned(),
+        command: "/bin/sh -c 'sleep 30'".to_owned(),
+    }])
+    .await;
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let session = sessions.ensure(Some(worktree), None, false).await.unwrap();
+    let fake = Arc::new(FakeProcess::default());
+    fake.set_snapshot(vec![ProcessInfo {
+        pid: 50_020,
+        parent_pid: session.terminals[0].shell_pid.unwrap(),
+        command: "claude".to_owned(),
+    }]);
+    let sleep = Sleep::new(Arc::clone(&config), state, fake, &sessions);
+    let session_id = SessionId::try_from("repo/feature").unwrap();
+    assert_eq!(
+        sleep.session(session_id.clone()).await.unwrap().kept[0].reason,
+        "claude"
+    );
+    config
+        .update(serde_json::json!({"sleep": {"keepAlive": [
+            {"id": "worker", "label": "renamed", "kind": "process", "pattern": "claude"}
+        ]}}))
+        .await
+        .unwrap();
+    assert_eq!(
+        sleep.session(session_id.clone()).await.unwrap().kept[0].reason,
+        "renamed"
+    );
+    config
+        .update(serde_json::json!({"sleep": {"keepAlive": []}}))
+        .await
+        .unwrap();
+    let result = sleep.session(session_id).await.unwrap();
+    assert!(result.kept.is_empty());
+    assert!(result.session_killed);
 }

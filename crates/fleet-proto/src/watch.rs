@@ -1,4 +1,5 @@
 //! Watch catch-up response.
+
 use fleet_core::watches::{Watch, WatchChunk};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,7 @@ pub struct WatchTail {
 mod tests {
     use super::*;
     use crate::{
+        assert_round_trip,
         event::{Event, EventKind},
         request::RequestBody,
         response::ResponseBody,
@@ -29,12 +31,6 @@ mod tests {
         watches::{WatchId, WatchSource, WatchStatus, WatchStream},
     };
 
-    fn round_trip<T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
-        value: T,
-    ) {
-        let json = serde_json::to_string(&value).unwrap();
-        assert_eq!(serde_json::from_str::<T>(&json).unwrap(), value);
-    }
     #[test]
     fn all_watch_requests_responses_and_events_round_trip() {
         let id = WatchId(1);
@@ -83,38 +79,38 @@ mod tests {
             },
             RequestBody::DismissWatch { watch: id },
         ] {
-            round_trip(request);
+            assert_round_trip(request);
         }
-        round_trip(ResponseBody::WatchStarted(id));
-        round_trip(ResponseBody::Watches(vec![watch.clone()]));
-        round_trip(ResponseBody::WatchTail(WatchTail {
+        assert_round_trip(ResponseBody::WatchStarted(id));
+        assert_round_trip(ResponseBody::Watches(vec![watch.clone()]));
+        assert_round_trip(ResponseBody::WatchTail(WatchTail {
             watch: watch.clone(),
             chunks: chunks.clone(),
             first_retained_seq: 0,
             next_seq: 1,
         }));
-        round_trip(Event::WatchStarted(watch.clone()));
-        round_trip(Event::WatchOutput { watch: id, chunks });
-        round_trip(Event::WatchExited(Watch {
+        assert_round_trip(Event::WatchStarted(watch.clone()));
+        assert_round_trip(Event::WatchOutput { watch: id, chunks });
+        assert_round_trip(Event::WatchExited(Watch {
             status: WatchStatus::Exited {
                 code: None,
                 signal: Some(9),
             },
             ..watch
         }));
-        round_trip(Event::WatchDismissed(id));
+        assert_round_trip(Event::WatchDismissed(id));
         for kind in [
             EventKind::WatchStarted,
             EventKind::WatchOutput,
             EventKind::WatchExited,
             EventKind::WatchDismissed,
         ] {
-            round_trip(kind);
+            assert_round_trip(kind);
         }
     }
 
     #[test]
-    fn watch_fields_are_camel_case_and_missing_new_fields_default_to_cooperative() {
+    fn watch_fields_are_camel_case_and_omitted_fields_default_to_cooperative() {
         let value = serde_json::json!({
             "id": 1,
             "session": "repo/main",

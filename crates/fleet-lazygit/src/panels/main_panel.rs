@@ -1,6 +1,5 @@
 //! The main panel: diffs, staging mode, conflicts, the status summary and the command log.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use fleet_git::{Commit, CommitFile, ConflictFile, Diff, DiffSide, ObjectId};
@@ -8,18 +7,26 @@ use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::{
     Divider, EmptyState, KeyHintRow, ListView, Pane, PaneBorder, PaneHeader, SectionHeader,
 };
-use gpui::{AnyElement, Context, ScrollWheelEvent, SharedString, div, px};
+use gpui::{AnyElement, App, Context, Pixels, ScrollWheelEvent, div, px};
 
 use crate::root::{Lazygit, SLOT_MAIN, SLOT_PATCH, SLOT_SECONDARY};
 use crate::state::{MainContent, PanelId};
-use crate::views::diff::{ROW_H, ViewState, diff_list};
+use crate::views::diff::{ViewState, diff_list};
 use crate::views::diff_model::DiffViewMode;
 use crate::views::rows;
 
 /// How many command-log rows the band shows (lazygit's `commandLogSize`).
 const LOG_ROWS: usize = 8;
-/// The height of the command-log band: eight 16 px rows under a 30 px header.
-pub(crate) const LOG_H: f32 = 30.0 + 8.0 * 16.0;
+
+/// The height of the command-log band: [`LOG_ROWS`] `data_small` rows under one pane header.
+///
+/// Read from the theme rather than frozen as a constant, because `measure`'s row budget and the
+/// band this function sizes have to stay the same number under any theme.
+#[must_use]
+pub(crate) fn log_band_h(cx: &App) -> Pixels {
+    let theme = cx.theme();
+    theme.metrics.pane_header_h + theme.text.data_small.line_height * LOG_ROWS as f32
+}
 
 impl Lazygit {
     /// The right column: the main panel over the command log.
@@ -33,7 +40,7 @@ impl Lazygit {
         if self.state.show_command_log {
             column = column.child(
                 div()
-                    .h(px(LOG_H))
+                    .h(log_band_h(cx))
                     .flex_none()
                     .min_h_0()
                     .child(self.command_log_pane(cx)),
@@ -75,7 +82,9 @@ impl Lazygit {
             (MainContent::CommitFiles { oid, .. }, _) => {
                 format!("Commit files · {}", crate::state::short_oid(oid))
             }
-            (MainContent::BranchDiff { name, .. }, _) => format!("Log · {name}"),
+            // `diff_branch` diffs the merge base with the branch tip, so the panel holds a diff
+            // rather than a commit list.
+            (MainContent::BranchDiff { name, .. }, _) => format!("Diff · {name}"),
             (MainContent::StashDiff { index, .. }, _) => format!("Stash · stash@{{{index}}}"),
             (MainContent::RemoteInfo { name }, _) => format!("Remote · {name}"),
             (MainContent::TagInfo { name }, _) => format!("Tag · {name}"),
@@ -98,24 +107,7 @@ impl Lazygit {
             MainContent::FileDiff {
                 unstaged, staged, ..
             } => self.file_diff_body(unstaged.clone(), staged.clone(), cx),
-            MainContent::CommitDiff { diff, files, .. } => {
-                let extra: Vec<SharedString> = files
-                    .iter()
-                    .map(|file| SharedString::from(file.path.display().to_string()))
-                    .collect();
-                let list = self.main_diff_list(diff.clone(), None, cx);
-                if extra.is_empty() {
-                    list
-                } else {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .size_full()
-                        .min_h_0()
-                        .child(div().flex_1().min_h_0().child(list))
-                        .into_any_element()
-                }
-            }
+            MainContent::CommitDiff { diff, .. } => self.main_diff_list(diff.clone(), None, cx),
             MainContent::BranchDiff { diff, .. } | MainContent::StashDiff { diff, .. } => {
                 self.main_diff_list(diff.clone(), None, cx)
             }
@@ -139,7 +131,7 @@ impl Lazygit {
     /// lazygit's sub-commits view: a ref's log over the selected commit's patch.
     fn sub_commits_body(
         &self,
-        commits: &[Commit],
+        commits: &Arc<[Commit]>,
         shown: Option<&ObjectId>,
         diff: Option<Arc<Diff>>,
         cx: &mut Context<Self>,
@@ -149,7 +141,8 @@ impl Lazygit {
         let now = super::now_seconds();
         let copied = self.state.copied.clone();
         let budget = self.budget(2 + 9 + 3 + 4);
-        let painted: Rc<Vec<Commit>> = Rc::new(commits.to_vec());
+        let columns = rows::CommitColumns::resolve(self.side_ch as f32);
+        let painted = commits.clone();
         let list = ListView::new(
             "lazygit-sub-commits",
             painted.len(),
@@ -161,6 +154,7 @@ impl Lazygit {
                 rows::commit_row(
                     commit,
                     now,
+                    &columns,
                     rows::CommitStyle {
                         budget,
                         merged: false,
@@ -194,7 +188,7 @@ impl Lazygit {
         &self,
         oid: &ObjectId,
         subject: &str,
-        files: &[CommitFile],
+        files: &Arc<[CommitFile]>,
         on_header: bool,
         diff: Option<Arc<Diff>>,
         cx: &mut Context<Self>,
@@ -203,7 +197,7 @@ impl Lazygit {
         let cursor = self.state.cursors.main.index();
         let budget = self.budget(3);
         let header = format!("{}  {subject}", crate::state::short_oid(oid));
-        let painted: Rc<Vec<CommitFile>> = Rc::new(files.to_vec());
+        let painted = files.clone();
         let list = ListView::new(
             "lazygit-commit-files",
             painted.len() + 1,
@@ -264,7 +258,7 @@ impl Lazygit {
             .size_full()
             .min_h_0()
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                let delta = event.delta.pixel_delta(px(ROW_H));
+                let delta = event.delta.pixel_delta(cx.theme().metrics.diff_row_h);
                 // Only the dominant axis acts, which is the axis lock trackpads need: without
                 // it diagonal drift makes sideways panning unusable.
                 if delta.x.abs() > delta.y.abs() {
@@ -282,7 +276,7 @@ impl Lazygit {
         diff: Option<Arc<Diff>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let model = self.slot_model(SLOT_PATCH, diff.as_ref(), self.state.diff_mode, Some(cx));
+        let model = self.slot_model(SLOT_PATCH, diff.as_ref(), self.state.diff_mode);
         if model.is_empty() {
             return EmptyState::new("No changes to show.")
                 .action("")
@@ -334,13 +328,13 @@ impl Lazygit {
             }
             None => {
                 let has_unstaged = unstaged.as_ref().is_some_and(|diff| !diff.files.is_empty());
+                if !has_unstaged && has_staged {
+                    // Nothing left in the worktree: the panel shows the staged half instead.
+                    return self.main_diff_list(staged, None, cx);
+                }
                 let main = self.main_diff_list(unstaged, None, cx);
                 if !has_staged {
                     return main;
-                }
-                if !has_unstaged {
-                    // Nothing left in the worktree: the panel shows the staged half instead.
-                    return self.main_diff_list(staged, None, cx);
                 }
                 self.side_by_side(main, self.secondary_list(staged, "Staged changes", cx))
             }
@@ -370,7 +364,7 @@ impl Lazygit {
         range: Option<(usize, usize)>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let model = self.slot_model(SLOT_MAIN, diff.as_ref(), self.main_mode(), Some(cx));
+        let model = self.slot_model(SLOT_MAIN, diff.as_ref(), self.main_mode());
         if model.is_empty() {
             return EmptyState::new("No changes to show.")
                 .action("")
@@ -400,12 +394,7 @@ impl Lazygit {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let model = self.slot_model(
-            SLOT_SECONDARY,
-            diff.as_ref(),
-            DiffViewMode::Unified,
-            Some(cx),
-        );
+        let model = self.slot_model(SLOT_SECONDARY, diff.as_ref(), DiffViewMode::Unified);
         if model.is_empty() {
             return div().into_any_element();
         }
@@ -429,7 +418,7 @@ impl Lazygit {
             .min_h_0()
             .child(
                 div()
-                    .px(px(8.0))
+                    .px(cx.theme().space.sm)
                     .flex_none()
                     .child(SectionHeader::new(label)),
             )
@@ -484,8 +473,7 @@ impl Lazygit {
             .state
             .remotes()
             .iter()
-            .find(|remote| remote.name == name)
-            .cloned();
+            .find(|remote| remote.name == name);
         let mut column = div()
             .flex()
             .flex_col()
@@ -494,10 +482,10 @@ impl Lazygit {
             .gap(theme.space.xs)
             .child(Text::data(name.to_owned()).color(crate::views::Ansi::Green.color(theme)));
         if let Some(remote) = remote {
-            if let Some(url) = remote.fetch_url {
+            if let Some(url) = &remote.fetch_url {
                 column = column.child(Text::data(format!("fetch  {url}")).muted());
             }
-            if let Some(url) = remote.push_url {
+            if let Some(url) = &remote.push_url {
                 column = column.child(Text::data(format!("push   {url}")).muted());
             }
         }
@@ -506,12 +494,7 @@ impl Lazygit {
 
     fn tag_body(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let tag = self
-            .state
-            .tags()
-            .iter()
-            .find(|tag| tag.name == name)
-            .cloned();
+        let tag = self.state.tags().iter().find(|tag| tag.name == name);
         let mut column = div()
             .flex()
             .flex_col()
@@ -522,7 +505,9 @@ impl Lazygit {
         if let Some(tag) = tag {
             column = column
                 .child(Text::data(crate::state::short_oid(&tag.oid)).muted())
-                .child(Text::data(tag.subject).color(crate::views::Ansi::Yellow.color(theme)));
+                .child(
+                    Text::data(tag.subject.clone()).color(crate::views::Ansi::Yellow.color(theme)),
+                );
         }
         column.into_any_element()
     }
@@ -545,19 +530,33 @@ impl Lazygit {
                 .into_any_element();
         }
         let index = section.min(file.conflicts.len() - 1);
-        let conflict = &file.conflicts[index];
-        let side = |label: &str, content: &[u8], color| {
-            let mut column = div()
+        let Some((ours, theirs)) = self.conflict_lines(&file, index) else {
+            return EmptyState::new("Reading the conflict…")
+                .action("")
+                .into_any_element();
+        };
+        let side = |label: &'static str,
+                    lines: Arc<[gpui::SharedString]>,
+                    color,
+                    scroll: &gpui::UniformListScrollHandle| {
+            let row_h = theme.text.data.line_height + theme.space.xxs;
+            let list = ListView::new(label, lines.len(), move |index, _, _, _| {
+                div()
+                    .h(row_h)
+                    .child(Text::data(lines[index].clone()).color(color))
+                    .into_any_element()
+            })
+            .row_height(row_h)
+            .track_scroll(scroll);
+            div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_w_0()
+                .min_h_0()
                 .gap(theme.space.xxs)
-                .child(Text::label(label.to_owned()));
-            for line in String::from_utf8_lossy(content).lines() {
-                column = column.child(Text::data(line.to_owned()).color(color).flex_none());
-            }
-            column
+                .child(Text::label(label))
+                .child(div().flex_1().min_h_0().child(list))
         };
         div()
             .flex()
@@ -584,13 +583,15 @@ impl Lazygit {
                     .overflow_hidden()
                     .child(side(
                         "ours",
-                        &conflict.ours,
+                        ours,
                         crate::views::Ansi::Green.color(theme),
+                        &self.scroll_conflict_ours,
                     ))
                     .child(side(
                         "theirs",
-                        &conflict.theirs,
+                        theirs,
                         crate::views::Ansi::Cyan.color(theme),
+                        &self.scroll_conflict_theirs,
                     )),
             )
             .child(
@@ -630,7 +631,7 @@ impl Lazygit {
             };
             column = column.child(
                 div()
-                    .h(px(16.0))
+                    .h(theme.text.data_small.line_height)
                     .w_full()
                     .flex_none()
                     .whitespace_nowrap()

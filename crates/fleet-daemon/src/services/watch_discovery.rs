@@ -1,7 +1,7 @@
 //! Cheap, read-only discovery and log tailing for agent subprocesses.
 
 use crate::{
-    DaemonResult,
+    DaemonError, DaemonResult,
     adapters::process::{Process, ProcessInfo},
     stores::config::ConfigStore,
 };
@@ -39,6 +39,8 @@ const HELPER_PATTERNS: &[&str] = &[
 #[derive(Default)]
 struct DiscoveryState {
     environments: BTreeMap<u32, Vec<(String, String)>>,
+    rules: Vec<DiscoveredWatchRule>,
+    patterns: Arc<[Regex]>,
     tracked: BTreeMap<u32, Tracked>,
 }
 
@@ -52,6 +54,7 @@ struct Companion {
     json_file: PathBuf,
     log_file: PathBuf,
     offset: u64,
+    pending_utf8: Vec<u8>,
     identity: Option<(u64, u64)>,
 }
 
@@ -79,6 +82,7 @@ pub(crate) struct WatchDiscovery {
     watches: Watches,
     temp_dir: PathBuf,
     state: Arc<Mutex<DiscoveryState>>,
+    helpers: Arc<[Regex]>,
 }
 
 impl WatchDiscovery {
@@ -95,6 +99,10 @@ impl WatchDiscovery {
             watches,
             temp_dir: std::env::temp_dir(),
             state: Arc::new(Mutex::new(DiscoveryState::default())),
+            helpers: HELPER_PATTERNS
+                .iter()
+                .filter_map(|pattern| Regex::new(pattern).ok())
+                .collect(),
         }
     }
 
@@ -109,9 +117,12 @@ impl WatchDiscovery {
         if !config.discovered_watches.enabled {
             return Ok(());
         }
+        let sessions = self.sessions.snapshot();
+        if sessions.is_empty() {
+            return Ok(());
+        }
         let snapshot = self.process.snapshot().await?;
-        self.discover(&config, &self.sessions.snapshot(), &snapshot)
-            .await
+        self.discover(&config, &sessions, &snapshot).await
     }
 
     async fn discover(
@@ -127,11 +138,18 @@ impl WatchDiscovery {
         self.lock()
             .environments
             .retain(|pid, _| live_pids.contains(pid));
-        let patterns = enabled_patterns(&config.discovered_watches.processes);
-        let helpers = HELPER_PATTERNS
+        let patterns = {
+            let mut state = self.lock();
+            if state.rules != config.discovered_watches.processes {
+                state.patterns = enabled_patterns(&config.discovered_watches.processes).into();
+                state.rules.clone_from(&config.discovered_watches.processes);
+            }
+            Arc::clone(&state.patterns)
+        };
+        let parents = snapshot
             .iter()
-            .filter_map(|pattern| Regex::new(pattern).ok())
-            .collect::<Vec<_>>();
+            .map(|process| (process.pid, process.parent_pid))
+            .collect::<BTreeMap<_, _>>();
         let candidates = snapshot
             .iter()
             .filter(|process| {
@@ -140,7 +158,8 @@ impl WatchDiscovery {
                     .any(|pattern| pattern.is_match(&process.command))
             })
             .filter(|process| {
-                !helpers
+                !self
+                    .helpers
                     .iter()
                     .any(|pattern| pattern.is_match(&process.command))
             })
@@ -154,7 +173,7 @@ impl WatchDiscovery {
             .collect::<BTreeSet<_>>();
 
         for candidate in candidates {
-            if has_matching_ancestor(candidate.pid, &candidate_pids, snapshot) {
+            if has_matching_ancestor(candidate.pid, &candidate_pids, &parents) {
                 continue;
             }
             if self.watches.watch_for_pid(candidate.pid).is_some() {
@@ -162,15 +181,28 @@ impl WatchDiscovery {
             }
             let environment = self.environment(candidate.pid).await;
             let Some((session, terminal)) =
-                resolve_ownership(&candidate, &environment, sessions, snapshot, config)
+                resolve_ownership(&candidate, &environment, sessions, &parents, config)
             else {
                 continue;
             };
-            let companion =
-                companion_from_command(&candidate.command, &environment, &self.temp_dir);
-            let job = companion
-                .as_ref()
-                .and_then(|companion| read_job(&companion.json_file));
+            let command = candidate.command.clone();
+            let temp_dir = self.temp_dir.clone();
+            let (companion, job) = tokio::task::spawn_blocking(move || {
+                let mut companion = companion_from_command(&command, &environment, &temp_dir);
+                let job = companion
+                    .as_ref()
+                    .and_then(|companion| read_job(&companion.json_file));
+                if let Some(companion) = &mut companion {
+                    if let Some(log_file) = job.as_ref().and_then(|job| job.log_file.as_ref()) {
+                        companion.log_file = log_file.clone();
+                    }
+                    companion.offset = initial_offset(&companion.log_file);
+                    companion.identity = file_identity(&companion.log_file);
+                }
+                (companion, job)
+            })
+            .await
+            .map_err(|error| DaemonError::Join(error.to_string()))?;
             let label = companion.as_ref().map_or_else(
                 || command_basename(&candidate.command),
                 |companion| companion_label(&companion.job_id, job.as_ref()),
@@ -208,16 +240,6 @@ impl WatchDiscovery {
             let Some(watch_id) = self.watches.start_discovered(watch, initial_output) else {
                 continue;
             };
-            let companion = companion.map(|mut companion| {
-                if let Some(job) = &job
-                    && let Some(log_file) = &job.log_file
-                {
-                    companion.log_file = log_file.clone();
-                }
-                companion.offset = initial_offset(&companion.log_file);
-                companion.identity = file_identity(&companion.log_file);
-                companion
-            });
             self.lock().tracked.insert(
                 candidate.pid,
                 Tracked {
@@ -246,6 +268,8 @@ impl WatchDiscovery {
                 None => continue,
             };
             let mut terminal_code = None;
+            let alive = self.process.is_alive(pid);
+            let mut has_more = false;
             if let Some(companion) = &mut tracked.companion {
                 let job = read_job(&companion.json_file);
                 if let Some(job) = &job {
@@ -254,6 +278,7 @@ impl WatchDiscovery {
                     {
                         companion.log_file = log_file.clone();
                         companion.offset = initial_offset(log_file);
+                        companion.pending_utf8.clear();
                         companion.identity = file_identity(log_file);
                     }
                     let _ = self.watches.update_discovered(
@@ -266,13 +291,25 @@ impl WatchDiscovery {
                 let identity = file_identity(&companion.log_file);
                 if companion.identity.is_some() && identity != companion.identity {
                     companion.offset = 0;
+                    companion.pending_utf8.clear();
                 }
                 companion.identity = identity;
-                if let Some(text) = read_appended(&companion.log_file, &mut companion.offset) {
-                    let _ = self.watches.append_discovered(tracked.watch, text);
+                if let Some((text, remaining)) = read_appended(
+                    &companion.log_file,
+                    &mut companion.offset,
+                    &mut companion.pending_utf8,
+                    terminal_code.is_some() || !alive,
+                ) {
+                    has_more = remaining;
+                    if !text.is_empty() {
+                        let _ = self.watches.append_discovered(tracked.watch, text);
+                    }
                 }
             }
-            let alive = self.process.is_alive(pid);
+            if has_more {
+                self.lock().tracked.insert(pid, tracked);
+                continue;
+            }
             if let Some(code) = terminal_code {
                 let _ = self.watches.finish_discovered(tracked.watch, Some(code));
                 self.lock().environments.remove(&pid);
@@ -299,7 +336,10 @@ impl WatchDiscovery {
                         }
                         elapsed = Duration::ZERO;
                     }
-                    self.poll_once();
+                    let discovery = self.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || discovery.poll_once()).await {
+                        tracing::warn!(%error, "discovered watch log polling failed");
+                    }
                     elapsed = elapsed.saturating_add(LOG_POLL);
                 }
             }
@@ -325,7 +365,7 @@ fn resolve_ownership<'a>(
     candidate: &ProcessInfo,
     environment: &[(String, String)],
     sessions: &'a [Session],
-    snapshot: &[ProcessInfo],
+    parents: &BTreeMap<u32, u32>,
     config: &Config,
 ) -> Option<(&'a Session, &'a Terminal)> {
     if let Some(session_id) =
@@ -340,7 +380,7 @@ fn resolve_ownership<'a>(
         }
         return select_terminal(session, config).map(|terminal| (session, terminal));
     }
-    terminal_ancestor(candidate, sessions, snapshot)
+    terminal_ancestor(candidate, sessions, parents)
 }
 
 fn select_terminal<'a>(session: &'a Session, config: &Config) -> Option<&'a Terminal> {
@@ -355,12 +395,8 @@ fn select_terminal<'a>(session: &'a Session, config: &Config) -> Option<&'a Term
 fn terminal_ancestor<'a>(
     candidate: &ProcessInfo,
     sessions: &'a [Session],
-    snapshot: &[ProcessInfo],
+    parents: &BTreeMap<u32, u32>,
 ) -> Option<(&'a Session, &'a Terminal)> {
-    let parents = snapshot
-        .iter()
-        .map(|process| (process.pid, process.parent_pid))
-        .collect::<BTreeMap<_, _>>();
     let mut pid = candidate.parent_pid;
     while pid != 0 {
         for session in sessions {
@@ -383,11 +419,11 @@ fn terminal_ancestor<'a>(
     None
 }
 
-fn has_matching_ancestor(pid: u32, candidates: &BTreeSet<u32>, snapshot: &[ProcessInfo]) -> bool {
-    let parents = snapshot
-        .iter()
-        .map(|process| (process.pid, process.parent_pid))
-        .collect::<BTreeMap<_, _>>();
+fn has_matching_ancestor(
+    pid: u32,
+    candidates: &BTreeSet<u32>,
+    parents: &BTreeMap<u32, u32>,
+) -> bool {
     let mut current = pid;
     while let Some(parent) = parents.get(&current) {
         if candidates.contains(parent) {
@@ -466,6 +502,7 @@ fn companion_from_command(
         log_file: jobs.join(format!("{job_id}.log")),
         job_id,
         offset: 0,
+        pending_utf8: Vec::new(),
         identity: None,
     })
 }
@@ -526,7 +563,15 @@ fn hex_prefix(bytes: &[u8], digits: usize) -> String {
 }
 
 fn read_job(path: &Path) -> Option<CompanionJob> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    let file = File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(INITIAL_LOG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > INITIAL_LOG_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn companion_label(job_id: &str, job: Option<&CompanionJob>) -> String {
@@ -576,17 +621,40 @@ fn file_identity(_path: &Path) -> Option<(u64, u64)> {
     None
 }
 
-fn read_appended(path: &Path, offset: &mut u64) -> Option<String> {
+fn read_appended(
+    path: &Path,
+    offset: &mut u64,
+    pending: &mut Vec<u8>,
+    finished: bool,
+) -> Option<(String, bool)> {
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     if length < *offset {
         *offset = 0;
+        pending.clear();
     }
     file.seek(SeekFrom::Start(*offset)).ok()?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    *offset = length;
-    (!bytes.is_empty()).then(|| String::from_utf8_lossy(&bytes).into_owned())
+    file.take(INITIAL_LOG_BYTES).read_to_end(&mut bytes).ok()?;
+    *offset = offset.saturating_add(bytes.len() as u64);
+    let has_more = *offset < length;
+    pending.extend_from_slice(&bytes);
+    let mut consumed = pending.len();
+    let mut rest = pending.as_slice();
+    while let Err(error) = std::str::from_utf8(rest) {
+        match error.error_len() {
+            Some(invalid) => rest = &rest[error.valid_up_to() + invalid..],
+            None => {
+                if !finished || has_more {
+                    consumed -= rest.len() - error.valid_up_to();
+                }
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&pending[..consumed]).into_owned();
+    pending.drain(..consumed);
+    Some((text, has_more))
 }
 
 #[cfg(test)]
@@ -604,6 +672,50 @@ mod tests {
     };
     use std::{fs::OpenOptions, io::Write};
     use tempfile::TempDir;
+
+    #[test]
+    fn log_reads_are_bounded_and_keep_split_utf8_until_completed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("output.log");
+        let prefix = "x".repeat(INITIAL_LOG_BYTES as usize - 1);
+        std::fs::write(&path, format!("{prefix}€tail")).unwrap();
+        let mut offset = 0;
+        let mut pending = Vec::new();
+        let (first, more) = read_appended(&path, &mut offset, &mut pending, true).unwrap();
+        assert_eq!(first, prefix);
+        assert!(more);
+        assert_eq!(offset, INITIAL_LOG_BYTES);
+        let (second, more) = read_appended(&path, &mut offset, &mut pending, true).unwrap();
+        assert_eq!(second, "€tail");
+        assert!(!more);
+        assert!(pending.is_empty());
+        let (empty, _) = read_appended(&path, &mut offset, &mut pending, false).unwrap();
+        assert!(empty.is_empty());
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0xe2])
+            .unwrap();
+        assert!(
+            read_appended(&path, &mut offset, &mut pending, false)
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0x82, 0xac])
+            .unwrap();
+        assert_eq!(
+            read_appended(&path, &mut offset, &mut pending, false)
+                .unwrap()
+                .0,
+            "€"
+        );
+    }
 
     struct Harness {
         _temp: TempDir,
@@ -921,8 +1033,27 @@ mod tests {
                 .any(|chunk| chunk.text == "after rotation\n")
         );
 
+        OpenOptions::new()
+            .append(true)
+            .open(&log_file)
+            .unwrap()
+            .write_all(&vec![b'x'; INITIAL_LOG_BYTES as usize + 10])
+            .unwrap();
         write_job(&json_file, &log_file, "failed", "rescue");
         h.discovery.poll_once();
+        assert_eq!(
+            h.watches.watch_for_pid(800).unwrap().status,
+            WatchStatus::Running
+        );
+        h.discovery.poll_once();
+        assert!(
+            h.watches
+                .tail(watch.id, None)
+                .unwrap()
+                .chunks
+                .iter()
+                .any(|chunk| chunk.text == "x".repeat(10))
+        );
         assert_eq!(
             h.watches.watch_for_pid(800).unwrap().status,
             WatchStatus::Exited {

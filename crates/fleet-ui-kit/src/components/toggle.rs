@@ -6,7 +6,7 @@
 
 use gpui::{App, Pixels, SharedString, Window, div, prelude::*};
 
-use crate::{components::FocusRing, text::Text, theme::ActiveTheme, tone::Tone};
+use crate::{text::Text, theme::ActiveTheme, tone::Tone};
 
 /// A checkbox.
 #[derive(IntoElement)]
@@ -67,13 +67,13 @@ impl Toggle {
         self
     }
 
-    /// The literal box, so a test can assert the state without rendering.
-    pub fn box_text(&self) -> &'static str {
+    /// The bracket glyph for the controlled checked state.
+    fn box_text(&self) -> &'static str {
         if self.checked { "[x]" } else { "[ ]" }
     }
 
     /// The tone of the box: a checked box is a value, an unchecked one is chrome.
-    pub fn box_tone(&self) -> Tone {
+    fn box_tone(&self) -> Tone {
         if self.disabled {
             Tone::Muted
         } else if self.checked {
@@ -112,12 +112,7 @@ impl RenderOnce for Toggle {
                     .map(|detail| Text::ui(detail).faint().ellipsize()),
             );
 
-        div()
-            .w_full()
-            .h(theme.metrics.row_h)
-            .when(focused, |el| el.bg(theme.colors.row_selected))
-            .when(disabled, |el| el.opacity(0.4))
-            .child(FocusRing::cursor_row(focused).child(body))
+        super::control::cursor_row(theme, focused, disabled, body)
     }
 }
 

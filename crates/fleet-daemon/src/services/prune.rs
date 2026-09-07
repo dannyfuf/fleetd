@@ -1,6 +1,6 @@
 //! Safe stale-worktree pruning workflow.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use fleet_core::{
@@ -16,8 +16,11 @@ use fleet_proto::{
 use crate::{
     DaemonError, DaemonResult,
     jobs::{JobCtx, JobManager},
-    services::{inspect::Inspect, worktrees::Worktrees},
-    stores::state::StateStore,
+    services::{
+        awaited::{JobDelivery, git_error},
+        inspect::Inspect,
+        worktrees::Worktrees,
+    },
 };
 
 /// Deletion boundary used after prune eligibility has been decided.
@@ -44,27 +47,6 @@ impl WorktreeDeleter for Worktrees {
     }
 }
 
-#[derive(Clone)]
-struct RegistryDeleter {
-    state: Arc<StateStore>,
-}
-
-#[async_trait]
-impl WorktreeDeleter for RegistryDeleter {
-    async fn delete(&self, id: WorktreeId) -> DaemonResult<()> {
-        self.state
-            .transaction(move |state| {
-                let before = state.worktrees.len();
-                state.worktrees.retain(|worktree| worktree.id != id);
-                if state.worktrees.len() == before {
-                    return Err(DaemonError::NotFound(format!("worktree {id}")));
-                }
-                Ok(())
-            })
-            .await
-    }
-}
-
 /// Safe-prune service using one inspection pass followed by sequential deletions.
 #[derive(Clone)]
 pub struct Prune {
@@ -74,26 +56,9 @@ pub struct Prune {
 }
 
 impl Prune {
-    /// Creates a facade-compatible prune service.
-    ///
-    /// The frozen facade does not supply `Worktrees`; use [`Self::with_deleter`] when wiring the
-    /// complete deletion service. This fallback still makes the registry mutation transactionally.
+    /// Creates the prune service over the deletion boundary it drives.
     #[must_use]
-    pub fn new(state: Arc<StateStore>, jobs: Arc<JobManager>, inspect: Inspect) -> Self {
-        Self {
-            jobs,
-            inspect,
-            deleter: Arc::new(RegistryDeleter { state }),
-        }
-    }
-
-    /// Creates a prune service using the full worktree-deletion boundary.
-    #[must_use]
-    pub fn with_deleter(
-        jobs: Arc<JobManager>,
-        inspect: Inspect,
-        deleter: Arc<dyn WorktreeDeleter>,
-    ) -> Self {
+    pub fn new(jobs: Arc<JobManager>, inspect: Inspect, deleter: Arc<dyn WorktreeDeleter>) -> Self {
         Self {
             jobs,
             inspect,
@@ -110,34 +75,22 @@ impl Prune {
         repo: Option<RepoId>,
     ) -> DaemonResult<PruneResult> {
         let service = self.clone();
-        let target = format!("prune-{}", uuid::Uuid::new_v4());
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let sender = Arc::new(Mutex::new(Some(sender)));
+        let (delivery, awaited) = JobDelivery::job_gets_copy(git_error);
         self.jobs.submit(
             JobKind::Prune,
-            target,
+            format!("prune-{}", uuid::Uuid::new_v4()),
             "Prune worktrees",
             true,
             true,
             move |context| async move {
-                let result = service
-                    .prune_inner(dry_run, fetch, kill_sessions, repo, &context)
-                    .await;
-                let outcome = result
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(|error| DaemonError::Git(error.to_string()));
-                if let Some(sender) = sender
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
-                    let _ignored = sender.send(result);
-                }
-                outcome
+                delivery.finish(
+                    service
+                        .prune_inner(dry_run, fetch, kill_sessions, repo, &context)
+                        .await,
+                )
             },
         );
-        receiver.await.map_err(|_| DaemonError::Cancelled)?
+        awaited.wait().await
     }
 
     async fn prune_inner(
@@ -208,19 +161,14 @@ fn skip_reason(inspection: &WorktreeInspection, kill_sessions: bool) -> Option<S
         SessionState::Unknown => return Some("status unknown".to_owned()),
         SessionState::None | SessionState::Detached => {}
     }
-    let unique = inspection
-        .unique_commits
-        .ok_or_else(|| "unique commit count unavailable".to_owned())
-        .err();
-    if unique.is_some() {
-        return unique;
-    }
+    let Some(unique_commits) = inspection.unique_commits else {
+        return Some("unique commit count unavailable".to_owned());
+    };
     if !inspection.merged {
-        return Some(match inspection.unique_commits {
-            Some(0) => "not merged".to_owned(),
-            Some(1) => "1 unique commit, not merged".to_owned(),
-            Some(count) => format!("{count} unique commits, not merged"),
-            None => "unique commit count unavailable".to_owned(),
+        return Some(match unique_commits {
+            0 => "not merged".to_owned(),
+            1 => "1 unique commit, not merged".to_owned(),
+            count => format!("{count} unique commits, not merged"),
         });
     }
     if !kill_sessions && !inspection.running.is_empty() {

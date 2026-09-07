@@ -14,6 +14,7 @@ use std::{
 
 const RETENTION: Duration = Duration::from_secs(30 * 60);
 
+/// One watch plus the output retained for it and the connection that may write to it.
 struct Entry {
     watch: Watch,
     output: WatchBuffer,
@@ -21,6 +22,8 @@ struct Entry {
     owner: Option<u64>,
     finished_at: Option<Instant>,
 }
+
+/// Every watch in the daemon, indexed by the session and terminal it belongs to.
 #[derive(Default)]
 struct Registry {
     entries: BTreeMap<WatchId, Entry>,
@@ -42,6 +45,7 @@ pub(crate) struct WatchOwner {
     pub(crate) id: u64,
     watches: Watches,
 }
+
 impl Drop for WatchOwner {
     fn drop(&mut self) {
         self.watches.disconnect(self.id);
@@ -49,43 +53,53 @@ impl Drop for WatchOwner {
 }
 
 impl Watches {
+    /// Publishes watch lifecycle events onto the daemon-wide bus.
     pub(crate) fn with_events(&self, events: BroadcastBus) {
         self.lock().events = Some(events);
     }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Registry> {
         self.registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// Issues the token one connection uses to write to the watches it started.
     pub(crate) fn owner(&self) -> WatchOwner {
-        let mut r = self.lock();
-        r.next_owner += 1;
+        let mut registry = self.lock();
+        registry.next_owner += 1;
         WatchOwner {
-            id: r.next_owner,
+            id: registry.next_owner,
             watches: self.clone(),
         }
     }
+
+    /// Registers a watch a client drives itself; its output arrives over the socket.
     pub(crate) fn start(&self, owner: u64, mut watch: Watch) -> WatchId {
         watch.source = WatchSource::Cooperative;
         watch.log_file = None;
-        self.insert(Some(owner), watch, None)
+        self.lock().insert(Some(owner), watch, None)
     }
+
+    /// Registers a watch discovered from a running process, ignoring a PID already watched.
     pub(crate) fn start_discovered(
         &self,
         watch: Watch,
         initial_output: Option<String>,
     ) -> Option<WatchId> {
         let pid = watch.pid?;
-        let mut r = self.lock();
-        if r.entries.values().any(|entry| entry.watch.pid == Some(pid)) {
+        let mut registry = self.lock();
+        if registry
+            .entries
+            .values()
+            .any(|entry| entry.watch.pid == Some(pid))
+        {
             return None;
         }
-        Some(r.insert(None, watch, initial_output))
+        Some(registry.insert(None, watch, initial_output))
     }
-    fn insert(&self, owner: Option<u64>, watch: Watch, initial_output: Option<String>) -> WatchId {
-        let mut r = self.lock();
-        r.insert(owner, watch, initial_output)
-    }
+
+    /// Returns the watch observing `pid`, if discovery already registered one.
     pub(crate) fn watch_for_pid(&self, pid: u32) -> Option<Watch> {
         self.lock()
             .entries
@@ -93,15 +107,17 @@ impl Watches {
             .find(|entry| entry.watch.pid == Some(pid))
             .map(|entry| entry.watch.clone())
     }
+
+    /// Upserts a discovered watch's label and log file, republishing only real changes.
     pub(crate) fn update_discovered(
         &self,
         id: WatchId,
         label: String,
         log_file: Option<std::path::PathBuf>,
     ) -> DaemonResult<()> {
-        let mut r = self.lock();
+        let mut registry = self.lock();
         let changed = {
-            let entry = r.entry(id)?;
+            let entry = registry.entry(id)?;
             if entry.watch.source != WatchSource::Discovered {
                 return Err(DaemonError::Conflict("watch is not discovered".into()));
             }
@@ -115,20 +131,24 @@ impl Watches {
         };
         if let Some(watch) = changed {
             // Duplicate starts are metadata upserts in clients and do not reopen a hidden pane.
-            r.publish(Event::WatchStarted(watch));
+            registry.publish(Event::WatchStarted(watch));
         }
         Ok(())
     }
+
+    /// Records the exit of a discovered watch.
     pub(crate) fn finish_discovered(&self, id: WatchId, code: Option<i32>) -> DaemonResult<()> {
-        let mut r = self.lock();
-        if r.entry(id)?.watch.source != WatchSource::Discovered {
+        let mut registry = self.lock();
+        if registry.entry(id)?.watch.source != WatchSource::Discovered {
             return Err(DaemonError::Conflict("watch is not discovered".into()));
         }
-        r.finish(id, code, None, Instant::now())
+        registry.finish(id, code, None, Instant::now())
     }
+
+    /// Appends discovered output, dropping anything that arrives after the exit.
     pub(crate) fn append_discovered(&self, id: WatchId, text: String) -> DaemonResult<()> {
-        let mut r = self.lock();
-        let entry = r.entry(id)?;
+        let mut registry = self.lock();
+        let entry = registry.entry(id)?;
         if entry.watch.source != WatchSource::Discovered {
             return Err(DaemonError::Conflict("watch is not discovered".into()));
         }
@@ -138,9 +158,10 @@ impl Watches {
         entry.output.append(WatchStream::Stdout, text);
         Ok(())
     }
+    /// Rejects writes from any connection but the one that started a cooperative watch.
     pub(crate) fn require_owner(&self, id: WatchId, owner: u64) -> DaemonResult<()> {
-        let r = self.lock();
-        let entry = r
+        let registry = self.lock();
+        let entry = registry
             .entries
             .get(&id)
             .ok_or_else(|| DaemonError::NotFound(format!("watch {id}")))?;
@@ -157,6 +178,7 @@ impl Watches {
         Ok(())
     }
 
+    /// Appends output to a watch the calling connection started.
     pub(crate) fn append_owned(
         &self,
         id: WatchId,
@@ -168,6 +190,7 @@ impl Watches {
         self.append(id, stream, text)
     }
 
+    /// Records the exit of a watch the calling connection started.
     pub(crate) fn finish_owned(
         &self,
         id: WatchId,
@@ -181,8 +204,8 @@ impl Watches {
 
     /// Appends while Running; completed watches reject further output.
     pub fn append(&self, id: WatchId, stream: WatchStream, text: String) -> DaemonResult<()> {
-        let mut r = self.lock();
-        let entry = r.entry(id)?;
+        let mut registry = self.lock();
+        let entry = registry.entry(id)?;
         if entry.watch.status != WatchStatus::Running {
             return Err(DaemonError::Conflict("watch has finished".into()));
         }
@@ -196,18 +219,19 @@ impl Watches {
     /// Returns watches in registration order for one session.
     #[must_use]
     pub fn list(&self, session: &SessionId) -> Vec<Watch> {
-        let r = self.lock();
-        r.sessions
+        let registry = self.lock();
+        registry
+            .sessions
             .get(session)
             .into_iter()
             .flatten()
-            .filter_map(|id| r.entries.get(id).map(|e| e.watch.clone()))
+            .filter_map(|id| registry.entries.get(id).map(|entry| entry.watch.clone()))
             .collect()
     }
     /// Takes an atomic metadata and retained-output snapshot.
     pub fn tail(&self, id: WatchId, from_seq: Option<u64>) -> DaemonResult<WatchTail> {
-        let mut r = self.lock();
-        let entry = r.entry(id)?;
+        let mut registry = self.lock();
+        let entry = registry.entry(id)?;
         Ok(WatchTail {
             watch: entry.watch.clone(),
             chunks: entry.output.tail(from_seq),
@@ -217,50 +241,63 @@ impl Watches {
     }
     /// Removes only completed watches; Running returns Conflict.
     pub fn dismiss(&self, id: WatchId) -> DaemonResult<()> {
-        let mut r = self.lock();
-        if r.entry(id)?.watch.status == WatchStatus::Running {
+        let mut registry = self.lock();
+        if registry.entry(id)?.watch.status == WatchStatus::Running {
             return Err(DaemonError::Conflict(
                 "cannot dismiss a running watch".into(),
             ));
         }
-        r.remove(id);
+        registry.remove(id);
         Ok(())
     }
+
+    /// Forgets every watch of a closed terminal, running or not.
     pub(crate) fn remove_terminal(&self, terminal: TerminalId) {
-        let mut r = self.lock();
-        let ids = r.terminals.get(&terminal).cloned().unwrap_or_default();
+        let mut registry = self.lock();
+        let ids = registry
+            .terminals
+            .get(&terminal)
+            .cloned()
+            .unwrap_or_default();
         for id in ids {
-            r.remove(id);
+            registry.remove(id);
         }
     }
+
+    /// Marks a departed connection's still-running watches interrupted.
     fn disconnect(&self, owner: u64) {
-        let mut r = self.lock();
-        let ids: Vec<_> = r
+        let mut registry = self.lock();
+        let ids = registry
             .entries
             .iter()
-            .filter(|(_, e)| e.owner == Some(owner) && e.watch.status == WatchStatus::Running)
+            .filter(|(_, entry)| {
+                entry.owner == Some(owner) && entry.watch.status == WatchStatus::Running
+            })
             .map(|(id, _)| *id)
-            .collect();
+            .collect::<Vec<_>>();
         for id in ids {
-            let _ = r.finish(id, None, Some(9), Instant::now());
+            let _ignored = registry.finish(id, None, Some(9), Instant::now());
         }
     }
     /// Flushes coalesced output and expires completed watches.
     pub fn tick(&self, now: Instant) {
-        let mut r = self.lock();
-        let ids: Vec<_> = r.entries.keys().copied().collect();
+        let mut registry = self.lock();
+        let ids = registry.entries.keys().copied().collect::<Vec<_>>();
         for id in ids {
-            if r.entries
+            if registry
+                .entries
                 .get(&id)
-                .and_then(|e| e.finished_at)
+                .and_then(|entry| entry.finished_at)
                 .is_some_and(|at| now.saturating_duration_since(at) >= RETENTION)
             {
-                r.remove(id);
+                registry.remove(id);
             } else {
-                r.flush(id);
+                registry.flush(id);
             }
         }
     }
+
+    /// Ticks every 50 ms until the daemon shuts down.
     pub(crate) async fn run(self, shutdown: tokio_util::sync::CancellationToken) {
         let mut interval = tokio::time::interval(Duration::from_millis(50));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -272,6 +309,7 @@ impl Watches {
         }
     }
 }
+
 impl Registry {
     fn insert(
         &mut self,

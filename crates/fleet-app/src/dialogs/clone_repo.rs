@@ -1,8 +1,4 @@
 //! §3.8.2 Clone repo — *find a GitHub repo by typing a few letters and get it cloning*.
-//!
-//! Search is debounced by [`DEBOUNCE`] and runs on the daemon; the input never waits for it.
-//! `Esc` aborts the pending search and closes the dialog, and a clone that has already
-//! started keeps running in fleetd — §3.8.2 is explicit that the two are different things.
 
 use std::time::Duration;
 
@@ -14,7 +10,8 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
 use crate::{
     actions::dialog,
     bridge::Bridge,
-    dialogs::{TextInput, age_label, notify, now_epoch, root, step, type_into, with_host},
+    dialogs::{DialogHost, field, notify, root, step, type_into, with_host},
+    presentation::{age_label, now_unix},
     state::AppState,
 };
 
@@ -24,30 +21,30 @@ pub const DEBOUNCE: Duration = Duration::from_millis(150);
 pub const RESULT_ROWS: usize = 8;
 
 /// The Clone dialog's draft.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CloneState {
     /// The context the repository is cloned into.
-    pub context: Option<ContextId>,
+    pub(crate) context: Option<ContextId>,
     /// That context's display name, for the header.
-    pub context_name: String,
+    pub(crate) context_name: String,
     /// The owners the search is scoped to.
-    pub owners: Vec<String>,
+    pub(crate) owners: Vec<String>,
     /// The search input.
-    pub query: TextInput,
+    pub(crate) query: TextFieldState,
     /// The ranked results, capped at [`RESULT_ROWS`].
-    pub results: Vec<RemoteRepo>,
+    pub(crate) results: Vec<RemoteRepo>,
     /// Which result carries the cursor.
-    pub cursor: usize,
+    pub(crate) cursor: usize,
     /// Whether a search is in flight.
-    pub searching: bool,
+    pub(crate) searching: bool,
     /// The verbatim `gh` failure, when the last search failed.
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     /// When the results came out of a cache rather than a live query.
-    pub cached_at: Option<String>,
+    pub(crate) cached_at: Option<String>,
     /// `github.cloneProtocol`: the footer names it and `Enter` clones with it.
-    pub protocol: CloneProtocol,
+    pub(crate) protocol: CloneProtocol,
     /// Bumps on every keystroke; a late answer to a superseded query is dropped.
-    pub seq: u64,
+    pub(crate) seq: u64,
 }
 
 impl Default for CloneState {
@@ -56,7 +53,7 @@ impl Default for CloneState {
             context: None,
             context_name: String::new(),
             owners: Vec::new(),
-            query: TextInput::default(),
+            query: TextFieldState::default(),
             results: Vec::new(),
             cursor: 0,
             searching: false,
@@ -74,7 +71,7 @@ impl CloneState {
     #[must_use]
     pub fn rows(&self) -> Vec<RemoteRepo> {
         let mut rows = Vec::with_capacity(RESULT_ROWS);
-        if let Some(manual) = manual_entry(self.query.value())
+        if let Some(manual) = manual_entry(self.query.text())
             && !self
                 .results
                 .iter()
@@ -82,8 +79,12 @@ impl CloneState {
         {
             rows.push(manual);
         }
-        rows.extend(self.results.iter().cloned());
-        rows.truncate(RESULT_ROWS);
+        rows.extend(
+            self.results
+                .iter()
+                .take(RESULT_ROWS.saturating_sub(rows.len()))
+                .cloned(),
+        );
         rows
     }
 
@@ -164,8 +165,6 @@ pub fn manual_entry(query: &str) -> Option<RemoteRepo> {
     })
 }
 
-// ---------------------------------------------------------------------------- seeding
-
 /// Fills the draft from the snapshot. No search runs until something is typed.
 pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let mut draft = CloneState::default();
@@ -189,7 +188,7 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
             }
         }
     }
-    let seq = with_host(cx, |host| {
+    let seq = with_host(state, cx, |host| {
         draft.seq = host.clone.seq.wrapping_add(1);
         host.clone = draft;
         host.clone.seq
@@ -198,13 +197,16 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     // effective configuration rather than assuming SSH. The answer lands before the user can
     // finish typing a repository name, and a late one for a superseded opening is dropped.
     let reply = bridge.request(RequestBody::GetConfig);
-    let state = state.clone();
-    cx.spawn(async move |cx| {
+    let weak_state = state.downgrade();
+    let task = cx.spawn(async move |cx| {
         let Ok(Ok(ResponseBody::Config(config))) = reply.recv().await else {
             return;
         };
         cx.update(|cx| {
-            let changed = with_host(cx, |host| {
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            let changed = with_host(&state, cx, |host| {
                 if host.clone.seq != seq || host.clone.protocol == config.github.clone_protocol {
                     return false;
                 }
@@ -215,24 +217,24 @@ pub(crate) fn seed(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 notify(&state, cx);
             }
         });
-    })
-    .detach();
+    });
+    crate::dialogs::retain_task(state, cx, "clone-config", task);
 }
 
 /// Issues the debounced search for the current query.
 fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let (seq, query, owners) = with_host(cx, |host| {
+    let (seq, query, owners) = with_host(state, cx, |host| {
         host.clone.seq = host.clone.seq.wrapping_add(1);
         host.clone.searching = !host.clone.query.is_empty();
         (
             host.clone.seq,
-            host.clone.query.value().to_owned(),
+            host.clone.query.text().to_owned(),
             host.clone.owners.clone(),
         )
     });
-    notify(state, cx);
     if query.trim().is_empty() || owners.is_empty() {
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
+            host.tasks.remove("clone-search");
             if host.clone.seq == seq {
                 host.clone.results.clear();
                 host.clone.searching = false;
@@ -241,35 +243,31 @@ fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         notify(state, cx);
         return;
     }
-    let state = state.clone();
+    notify(state, cx);
+    let weak_state = state.downgrade();
     let bridge = bridge.clone();
-    cx.spawn(async move |cx| {
+    let task = cx.spawn(async move |cx| {
         cx.background_executor().timer(DEBOUNCE).await;
-        if cx.update(|cx| with_host(cx, |host| host.clone.seq != seq)) {
+        if cx.update(|cx| {
+            weak_state
+                .upgrade()
+                .is_none_or(|state| with_host(&state, cx, |host| host.clone.seq != seq))
+        }) {
             return;
         }
-        let mut results: Vec<RemoteRepo> = Vec::new();
-        let mut error: Option<String> = None;
-        let mut cached_at: Option<String> = None;
-        for owner in owners {
-            let reply = bridge.request(RequestBody::SearchRemoteRepos {
-                owner,
-                query: query.clone(),
-            });
-            match reply.recv().await {
-                Ok(Ok(ResponseBody::RemoteRepos(cache))) => {
-                    let RepoCache { fetched_at, repos } = cache;
-                    cached_at.get_or_insert(fetched_at);
-                    results.extend(repos);
-                }
-                Ok(Err(failure)) => error = Some(failure.message),
-                Ok(Ok(_)) => {}
-                Err(_) => return,
-            }
-        }
-        results.truncate(RESULT_ROWS);
+        let Some(SearchResults {
+            results,
+            error,
+            cached_at,
+        }) = search_owners(&owners, &query, |request| bridge.request(request)).await
+        else {
+            return;
+        };
         cx.update(|cx| {
-            let live = with_host(cx, |host| {
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            let live = with_host(&state, cx, |host| {
                 if host.clone.seq != seq {
                     return false;
                 }
@@ -284,47 +282,74 @@ fn schedule_search(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 notify(&state, cx);
             }
         });
-    })
-    .detach();
+    });
+    crate::dialogs::retain_task(state, cx, "clone-search", task);
 }
 
-// ---------------------------------------------------------------------------- rendering
+struct SearchResults {
+    results: Vec<RemoteRepo>,
+    error: Option<String>,
+    cached_at: Option<String>,
+}
 
-/// Renders the dialog (§3.8.2).
-pub(crate) fn render(
-    state: &Entity<AppState>,
-    bridge: &Bridge,
-    focus: &FocusHandle,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let gap = cx.theme().space.md;
-    let draft = with_host(cx, |host| host.clone.clone());
-    let offline = !state.read(cx).daemon.is_connected();
-    let now = now_epoch();
-    let rows = draft.rows();
+async fn search_owners(
+    owners: &[String],
+    query: &str,
+    request: impl Fn(
+        RequestBody,
+    )
+        -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>>,
+) -> Option<SearchResults> {
+    let mut results: Vec<RemoteRepo> = Vec::new();
+    let mut error: Option<String> = None;
+    let mut cached_at: Option<String> = None;
+    // Submit bounded batches in owner order and consume replies in that same order.
+    for owners in owners.chunks(3) {
+        let replies: Vec<_> = owners
+            .iter()
+            .map(|owner| {
+                request(RequestBody::SearchRemoteRepos {
+                    owner: owner.clone(),
+                    query: query.to_owned(),
+                })
+            })
+            .collect();
+        for reply in replies {
+            match reply.recv().await {
+                Ok(Ok(ResponseBody::RemoteRepos(cache))) => {
+                    let RepoCache { fetched_at, repos } = cache;
+                    cached_at.get_or_insert(fetched_at);
+                    results.extend(
+                        repos
+                            .into_iter()
+                            .take(RESULT_ROWS.saturating_sub(results.len())),
+                    );
+                }
+                Ok(Err(failure)) => error = Some(failure.message),
+                Ok(Ok(_)) => {}
+                Err(_) => return None,
+            }
+        }
+    }
+    Some(SearchResults {
+        results,
+        error,
+        cached_at,
+    })
+}
 
-    // §3.8.2: the field carries a search affordance (the magnifier), not a sentence. The one
-    // instruction is the *idle* body line below, which also names the context; printing it
-    // twice, once with `this context` and once with the real name, says nothing extra.
-    let search_field = TextField::new(draft.query.value().to_owned())
-        .icon(if draft.searching {
-            Icon::LoaderCircle
-        } else {
-            Icon::Search
-        })
-        .caret(draft.query.caret())
-        .focused(true);
-
-    let empty: AnyElement = if let Some(message) = draft.error.clone() {
-        div()
+/// What the result list shows instead of rows: the failure, the invitation, or the miss.
+fn no_results(draft: &CloneState) -> AnyElement {
+    if let Some(message) = draft.error.clone() {
+        return div()
             .flex()
             .flex_col()
             .child(Text::ui(message).tone(Tone::Danger).ellipsize())
             .child(KeyHintRow::new().key("r", "retry"))
-            .into_any_element()
-    } else if draft.query.is_empty() {
-        Text::ui(format!(
+            .into_any_element();
+    }
+    if draft.query.is_empty() {
+        return Text::ui(format!(
             "Type to search GitHub repos in {}'s owners.",
             if draft.context_name.is_empty() {
                 "this context"
@@ -333,16 +358,19 @@ pub(crate) fn render(
             }
         ))
         .muted()
+        .into_any_element();
+    }
+    if draft.searching {
+        return Text::ui("Searching\u{2026}").muted().into_any_element();
+    }
+    Text::ui(format!("Nothing matches \"{}\".", draft.query.text()))
+        .muted()
         .into_any_element()
-    } else if draft.searching {
-        Text::ui("Searching\u{2026}").muted().into_any_element()
-    } else {
-        Text::ui(format!("Nothing matches \"{}\".", draft.query.value()))
-            .muted()
-            .into_any_element()
-    };
+}
 
-    let list = FuzzyList::new(rows.iter().map(|repo| {
+/// One row per candidate repository: visibility, name, description and last push.
+fn results_list(draft: &CloneState, rows: &[RemoteRepo], now: i64) -> FuzzyList {
+    FuzzyList::new(rows.iter().map(|repo| {
         let mut item = FuzzyItem::new(repo.full_name.clone()).leading(
             if repo.is_private {
                 Icon::Lock
@@ -363,7 +391,36 @@ pub(crate) fn render(
     .cursor(draft.cursor)
     .cap(RESULT_ROWS)
     .under_text_field(true)
-    .empty(empty);
+    .empty(no_results(draft))
+}
+
+/// Renders the dialog (§3.8.2).
+pub(crate) fn render(
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    focus: &FocusHandle,
+    host: &Entity<DialogHost>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let gap = cx.theme().space.md;
+    let draft = &host.read(cx).clone;
+    let offline = !state.read(cx).daemon.is_connected();
+    let now = now_unix();
+    let rows = draft.rows();
+
+    // §3.8.2: the field carries a search affordance (the magnifier), not a sentence. The one
+    // instruction is the *idle* body line below, which also names the context; printing it
+    // twice, once with `this context` and once with the real name, says nothing extra.
+    let search_field = field(&draft.query)
+        .icon(if draft.searching {
+            Icon::LoaderCircle
+        } else {
+            Icon::Search
+        })
+        .focused(true);
+
+    let list = results_list(draft, &rows, now);
 
     let mut body = div().flex().flex_col().gap(gap).child(search_field);
     if offline && let Some(cached) = draft.cached_at.as_ref() {
@@ -374,7 +431,7 @@ pub(crate) fn render(
 
     let card = Dialog::new("Clone repo")
         .icon(Icon::CloudDownload)
-        .width(super::Dialogs::CloneRepo.width())
+        .width(super::Dialogs::CloneRepo.width(cx))
         .height(px(420.0))
         .subtitle(format!("\u{00b7} into context \"{}\"", draft.context_name))
         .body(body)
@@ -386,100 +443,49 @@ pub(crate) fn render(
         )
         .primary("\u{23ce} Clone");
 
+    let cancel_state = state.clone();
     let confirm_state = state.clone();
     let confirm_bridge = bridge.clone();
 
-    root(focus)
-        .on_key_down({
-            let state = state.clone();
-            let bridge = bridge.clone();
-            move |event, _window, cx| {
-                if with_host(cx, |host| type_into(&mut host.clone.query, event)) {
-                    schedule_search(&state, &bridge, cx);
-                }
+    super::input::actions(root(focus), state, |host| &mut host.clone.query, {
+        let bridge = bridge.clone();
+        move |state, cx| schedule_search(state, &bridge, cx)
+    })
+    .on_key_down({
+        let state = state.clone();
+        let bridge = bridge.clone();
+        move |event, _window, cx| {
+            if with_host(&state, cx, |host| type_into(&mut host.clone.query, event)) {
+                schedule_search(&state, &bridge, cx);
             }
-        })
-        .on_action({
-            let state = state.clone();
-            let bridge = bridge.clone();
-            move |_: &dialog::Backspace, _window, cx| {
-                if with_host(cx, |host| host.clone.query.backspace()) {
-                    schedule_search(&state, &bridge, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            let bridge = bridge.clone();
-            move |_: &dialog::DeleteWord, _window, cx| {
-                if with_host(cx, |host| host.clone.query.delete_word()) {
-                    schedule_search(&state, &bridge, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            let bridge = bridge.clone();
-            move |_: &dialog::ClearInput, _window, cx| {
-                if with_host(cx, |host| host.clone.query.clear()) {
-                    schedule_search(&state, &bridge, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorDown, _window, cx| move_cursor(&state, 1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorUp, _window, cx| move_cursor(&state, -1, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| {
-                with_host(cx, |host| host.clone.query.home());
-                notify(&state, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| {
-                with_host(cx, |host| host.clone.query.end());
-                notify(&state, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| {
-                with_host(cx, |host| host.clone.query.left());
-                notify(&state, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| {
-                with_host(cx, |host| host.clone.query.right());
-                notify(&state, cx);
-            }
-        })
-        .on_action(move |_: &dialog::Confirm, _window, cx| {
-            submit(&confirm_state, &confirm_bridge, cx);
-        })
-        .on_action(move |_: &dialog::Cancel, _window, cx| {
-            // §3.8.2: `Esc` aborts the search request only. Bumping the sequence orphans the
-            // pending answer; a `CloneJob` already accepted by the daemon is untouched.
-            with_host(cx, |host| {
-                host.clone.seq = host.clone.seq.wrapping_add(1);
-                host.clone.searching = false;
-            });
-            cx.propagate();
-        })
-        .child(card)
-        .into_any_element()
+        }
+    })
+    .on_action({
+        let state = state.clone();
+        move |_: &dialog::CursorDown, _window, cx| move_cursor(&state, 1, cx)
+    })
+    .on_action({
+        let state = state.clone();
+        move |_: &dialog::CursorUp, _window, cx| move_cursor(&state, -1, cx)
+    })
+    .on_action(move |_: &dialog::Confirm, _window, cx| {
+        submit(&confirm_state, &confirm_bridge, cx);
+    })
+    .on_action(move |_: &dialog::Cancel, _window, cx| {
+        // §3.8.2: `Esc` aborts the search request only. Bumping the sequence orphans the
+        // pending answer; a `CloneJob` already accepted by the daemon is untouched.
+        with_host(&cancel_state, cx, |host| {
+            host.clone.seq = host.clone.seq.wrapping_add(1);
+            host.clone.searching = false;
+        });
+        cx.propagate();
+    })
+    .child(card)
+    .into_any_element()
 }
 
 fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let len = host.clone.rows().len();
         host.clone.cursor = step(host.clone.cursor, delta, len);
     });
@@ -489,12 +495,12 @@ fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
 /// `Enter`: hand the clone to the daemon and close; the rail shows a `⟳` row from the moment
 /// the job is persisted (§3.8.2).
 fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let Some((repo, context)) = with_host(cx, |host| {
+    let Some((repo, context)) = with_host(state, cx, |host| {
         Some((host.clone.selected()?, host.clone.context.clone()?))
     }) else {
         return;
     };
-    let protocol = with_host(cx, |host| host.clone.protocol);
+    let protocol = with_host(state, cx, |host| host.clone.protocol);
     let url = clone_url(&repo, protocol);
     bridge.send(RequestBody::CloneRepo {
         owner: repo.owner,
@@ -591,7 +597,7 @@ mod tests {
     #[test]
     fn the_manual_row_never_duplicates_a_result() {
         let state = CloneState {
-            query: TextInput::new("bukhr/payroll"),
+            query: TextFieldState::from_text("bukhr/payroll"),
             results: vec![repo("bukhr/payroll")],
             ..CloneState::default()
         };
@@ -601,7 +607,7 @@ mod tests {
     #[test]
     fn results_are_capped_at_eight_rows() {
         let state = CloneState {
-            query: TextInput::new("pay"),
+            query: TextFieldState::from_text("pay"),
             results: (0..12).map(|n| repo(&format!("acme/pay{n}"))).collect(),
             ..CloneState::default()
         };
@@ -610,5 +616,61 @@ mod tests {
             state.selected().map(|repo| repo.full_name),
             Some("acme/pay0".to_owned())
         );
+    }
+    #[gpui::test]
+    async fn owner_searches_are_bounded_and_preserve_result_order(cx: &mut gpui::TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+        let pending = Rc::new(RefCell::new(Vec::new()));
+        let requested = pending.clone();
+        let task = cx.spawn(async move |_| {
+            search_owners(
+                &["one".into(), "two".into(), "three".into(), "four".into()],
+                "pay",
+                |request| {
+                    let RequestBody::SearchRemoteRepos { owner, .. } = request else {
+                        panic!("search request");
+                    };
+                    let (sender, receiver) = async_channel::bounded(1);
+                    requested.borrow_mut().push((owner, sender));
+                    receiver
+                },
+            )
+            .await
+            .expect("search results")
+        });
+        cx.run_until_parked();
+        assert_eq!(pending.borrow().len(), 3);
+        let replies: Vec<_> = pending
+            .borrow()
+            .iter()
+            .map(|(owner, reply)| (owner.clone(), reply.clone()))
+            .collect();
+        for (owner, reply) in replies.into_iter().rev() {
+            reply
+                .try_send(Ok(ResponseBody::RemoteRepos(RepoCache {
+                    fetched_at: owner.clone(),
+                    repos: vec![repo(&format!("{owner}/pay"))],
+                })))
+                .unwrap();
+        }
+        cx.run_until_parked();
+        assert_eq!(pending.borrow().len(), 4);
+        let (owner, reply) = pending.borrow()[3].clone();
+        reply
+            .try_send(Ok(ResponseBody::RemoteRepos(RepoCache {
+                fetched_at: owner.clone(),
+                repos: vec![repo(&format!("{owner}/pay"))],
+            })))
+            .unwrap();
+        let found = task.await;
+        assert_eq!(
+            found
+                .results
+                .iter()
+                .map(|repo| repo.full_name.as_str())
+                .collect::<Vec<_>>(),
+            ["one/pay", "two/pay", "three/pay", "four/pay"]
+        );
+        assert_eq!(found.cached_at.as_deref(), Some("one"));
     }
 }

@@ -163,18 +163,99 @@ mod tests {
         );
     }
 
+    fn context(name: &str) -> fleet_core::model::Context {
+        fleet_core::model::Context {
+            id: fleet_core::ids::ContextId::try_from(name).expect("valid context ID"),
+            name: name.to_owned(),
+            owners: Vec::new(),
+            created_at: "2026-09-06T00:00:00Z".to_owned(),
+        }
+    }
+
     #[tokio::test]
-    async fn transaction_persists_valid_changes_and_releases_lock() {
-        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    async fn transaction_persists_changes_and_returns_the_operation_result() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = store(&temp);
+        let selected = store
+            .transaction(|state| {
+                let context = context("team");
+                let id = context.id.clone();
+                state.contexts.push(context);
+                state.active_context_id = Some(id.clone());
+                Ok(id)
+            })
+            .await
+            .expect("commit context");
+        let loaded = store.load().await.expect("reload state");
+        assert_eq!(loaded.contexts, [context("team")]);
+        assert_eq!(loaded.active_context_id.as_ref(), Some(&selected));
+        assert!(!store.lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_operations_and_invalid_state_leave_persisted_data_unchanged() {
+        let temp = tempfile::tempdir().expect("temp dir");
         let store = store(&temp);
         store
             .transaction(|state| {
-                state.version = 1;
+                state.contexts.push(context("team"));
                 Ok(())
             })
             .await
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert!(store.path().exists());
-        assert!(!store.path.with_file_name("state.json.lock").exists());
+            .expect("initial state");
+        let before = std::fs::read(store.path()).expect("read before");
+        let failed: DaemonResult<()> = store
+            .transaction(|state| {
+                state.contexts.clear();
+                Err(DaemonError::Conflict("operation failed".to_owned()))
+            })
+            .await;
+        assert!(matches!(failed, Err(DaemonError::Conflict(_))));
+        assert_eq!(
+            std::fs::read(store.path()).expect("read after error"),
+            before
+        );
+        let invalid = store
+            .transaction(|state| {
+                state.contexts.push(context("team"));
+                Ok(())
+            })
+            .await;
+        assert!(matches!(invalid, Err(DaemonError::Validation(_))));
+        assert_eq!(
+            std::fs::read(store.path()).expect("read after validation"),
+            before
+        );
+        assert!(!store.lock_path.exists());
+    }
+
+    #[tokio::test]
+    async fn independent_stores_preserve_both_concurrent_transactions() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let first = store(&temp);
+        let second = store(&temp);
+        let (one, two) = tokio::join!(
+            first.transaction(|state| {
+                state.contexts.push(context("one"));
+                Ok(())
+            }),
+            second.transaction(|state| {
+                state.contexts.push(context("two"));
+                Ok(())
+            }),
+        );
+        one.expect("first transaction");
+        two.expect("second transaction");
+        let mut names = first
+            .load()
+            .await
+            .expect("reload")
+            .contexts
+            .into_iter()
+            .map(|context| context.name)
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["one", "two"]);
+        assert!(!first.lock_path.exists());
     }
 }

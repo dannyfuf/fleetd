@@ -36,7 +36,7 @@ pub fn local_branches(input: &[u8]) -> Result<Vec<Branch>> {
 pub fn remote_branches(input: &[u8]) -> Result<Vec<RemoteBranchGroup>> {
     let mut groups: BTreeMap<String, Vec<RemoteBranch>> = BTreeMap::new();
     for fields in records(input, 5, "remote branches")? {
-        let name = text(fields[0]).to_owned();
+        let name = text(fields[0]);
         if name.ends_with("/HEAD") {
             continue;
         }
@@ -47,7 +47,7 @@ pub fn remote_branches(input: &[u8]) -> Result<Vec<RemoteBranchGroup>> {
             .entry(remote.to_owned())
             .or_default()
             .push(RemoteBranch {
-                name: name.clone(),
+                name: name.to_owned(),
                 branch: branch.to_owned(),
                 oid: ObjectId(text(fields[1]).to_owned()),
                 subject: text(fields[2]).to_owned(),
@@ -167,14 +167,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_annotated_and_lightweight_tags() {
+    fn parses_tag_records_with_missing_optional_fields() {
         let input: &[u8] = b"v1\x00aaa\x001700000000\x00release one\x00\nv2\x00\x00\x00\x00\n";
         let parsed = tags(input).expect("parse tags");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name, "v1");
         assert_eq!(parsed[0].oid.as_str(), "aaa");
         assert_eq!(parsed[0].created_at, 1_700_000_000);
-        // A lightweight tag has no peeled object; the reader fills it in later.
+        // Missing object/timestamp fields remain accepted by the parser.
         assert_eq!(parsed[1].oid.as_str(), "");
         assert_eq!(parsed[1].created_at, 0);
     }

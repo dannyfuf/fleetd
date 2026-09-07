@@ -90,15 +90,12 @@ pub fn validate_state(state: &State) -> Result<(), StateValidationError> {
         return Err(StateValidationError::UnsupportedVersion(state.version));
     }
 
-    let contexts = collect_unique(
-        "context",
-        state.contexts.iter().map(|context| context.id.clone()),
-    )?;
-    let repos = collect_unique("repository", state.repos.iter().map(|repo| repo.id.clone()))?;
-    let clone_ids = collect_unique("clone", state.clones.iter().map(|clone| clone.id.clone()))?;
-    let _worktrees = collect_unique(
+    let contexts = collect_unique("context", state.contexts.iter().map(|context| &context.id))?;
+    let repos = collect_unique("repository", state.repos.iter().map(|repo| &repo.id))?;
+    collect_unique("clone", state.clones.iter().map(|clone| &clone.id))?;
+    collect_unique(
         "worktree",
-        state.worktrees.iter().map(|worktree| worktree.id.clone()),
+        state.worktrees.iter().map(|worktree| &worktree.id),
     )?;
 
     if let Some(active) = &state.active_context_id
@@ -129,20 +126,19 @@ pub fn validate_state(state: &State) -> Result<(), StateValidationError> {
             ));
         }
     }
-    drop(clone_ids);
     Ok(())
 }
 
-fn collect_unique<T>(
+fn collect_unique<'a, T>(
     entity: &'static str,
-    values: impl Iterator<Item = T>,
-) -> Result<HashSet<T>, StateValidationError>
+    values: impl Iterator<Item = &'a T>,
+) -> Result<HashSet<&'a T>, StateValidationError>
 where
-    T: Eq + std::hash::Hash + ToString + Clone,
+    T: 'a + Eq + std::hash::Hash + ToString,
 {
     let mut ids = HashSet::new();
     for id in values {
-        if !ids.insert(id.clone()) {
+        if !ids.insert(id) {
             return Err(StateValidationError::DuplicateId {
                 entity,
                 id: id.to_string(),

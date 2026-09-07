@@ -16,7 +16,8 @@ Guiding rules:
 3. **Clean and minimal.** Each view shows exactly what the user needs to decide the next
    action, nothing more. Icons (Lucide) are used to replace words, not to decorate.
 4. **Contracts before code.** `fleet-core`, `fleet-proto`, the `VtEngine` trait and the
-   `fleet-ui-kit` component API are frozen before parallel implementation starts.
+   `fleet-ui-kit` component API are the seams everything else is written against; changing one
+   is a deliberate, workspace-wide change, not a local edit.
 
 ## Processes and binaries
 
@@ -36,25 +37,27 @@ so `fleet import --from-swarm` can copy `~/.swarm/{config,state}.json` verbatim.
 crates/
   fleet-core      domain types, ids + validation, config/state schemas + defaults, pure helpers   (no I/O)
   fleet-proto     client<->daemon wire protocol: Request/Response/Event, Snapshot, Job, terminal Frame/Cell, codec
-  fleet-term      Pty (portable-pty) + VtEngine trait + GhosttyEngine (libghostty-vt) + TerminalHost thread (daemon side)
-  fleet-daemon    bin `fleetd`: adapters (shell/git/gh/files/process), stores (config/state+lock), services, jobs, socket server
-  fleet-client    async client: connect/spawn daemon, request/response, event stream, terminal attach   (tokio)
-  fleet-ui-kit    design system: tokens, theme, icons (Lucide SVG via AssetSource), reusable components   (no domain deps)
+  fleet-git       git plumbing over the real `git` binary: model, read, mutation, rebase, parse, watch
+  fleet-term      pty (portable-pty) + VtEngine trait + GhosttyEngine (libghostty-vt) + terminal host thread (daemon side)
+  fleet-daemon    bin `fleetd`: adapters (shell/git/gh/files/process/logs), stores (config/state+lock), services, jobs, socket server
+  fleet-client    async client: connect/spawn daemon, api/, event stream, terminal attach, watches   (tokio)
+  fleet-ui-kit    design system: tokens, theme, icons (Lucide SVG via AssetSource), components   (no domain deps)
   fleet-cli       clap parser, JSON envelopes, human output; uses fleet-client
-  fleet-app       bin `fleet`: GPUI app (state mirror, keymap/modes, views, terminal element) + CLI entry
+  fleet-app       bin `fleet`: GPUI app (shell, state mirror, bridge, keymap, screens, dialogs, views, terminal) + CLI entry
+  fleet-lazygit   bin `fleet-lazygit` and the `fleet://lazygit` native tab: git UI over fleet-git and fleet-ui-kit
 ```
 
-Dependency direction: `core <- proto <- {term, client, cli} <- {daemon, app}`; `ui-kit` depends only on gpui.
+Dependency direction: `core <- proto <- {term, client, cli} <- {daemon, app}`; `ui-kit` depends
+only on gpui; `lazygit` depends on `git` and `ui-kit`, never on `core` or `proto`.
 
-Toolchain decisions (verified on this machine, see `docs/research/`):
+Inside the two GPUI crates the module layout follows responsibility, not screen count. `fleet-app`
+splits `shell/`, `state/`, `bridge/`, `presentation/`, `screens/{hub,workspace,agent_popup,jobs}/`,
+`dialogs/`, `views/`, `terminal/` and `watches/`; each of those roots holds the type and its
+composition, with preparation, actions, lifecycle and tests in siblings. `fleet-lazygit` splits
+`root/`, `state/`, `panels/`, `views/`, `bridge/` and `drive/` the same way.
 
-- gpui comes from the Zed monorepo git tag **`v1.18.1`** (`gpui` + `gpui_platform` with
-  `font-kit`), Rust **1.97.1** pinned in `rust-toolchain.toml`. crates.io `gpui 0.2.2` is
-  11 months stale and is not used.
-- Terminal emulation is **`libghostty-vt`** (crates.io, safe wrapper over Ghostty's public
-  lib-vt; builds Ghostty from vendored source with a pinned Zig). It runs **inside the daemon**.
-  The `VtEngine` trait isolates it; `alacritty_terminal` is the documented fallback.
-- The client never hosts a native NSView; it paints the cell grid itself with gpui primitives.
+The load-bearing choices behind this map — the GPUI pin, terminal emulation, the in-house design
+system, the native git UI and the diff pipeline — are recorded in `docs/decisions/`.
 
 ## Daemon (`fleetd`)
 
@@ -65,11 +68,16 @@ Toolchain decisions (verified on this machine, see `docs/research/`):
   validation with serde, `state.json.lock` cross-process lock, transaction API, broken-state
   quarantine) — semantics exactly as in the inventory.
 - **Adapters** (traits + real impls + fakes for tests): `Shell`, `Git`, `Github`, `Files`
-  (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`.
+  (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`, `Logs`.
   Exact git/gh command lines are those in the inventory §7.
-- **Services**: `Contexts`, `Repos` (clone jobs, discovery cache), `Worktrees` (prepared-copy
-  pool, claim/create, publish-intent recovery, delete, inspect, prune), `Github` (PR tabs,
-  caches, TTLs), `Sessions` (see below), `Sleep`, `Doctor`.
+- **Services**: `Contexts`, `Repos` (clone jobs, discovery cache), `Worktrees` (creation,
+  publication, recovery, trash, hooks) with the prepared-copy `Pool`, `Inspect`, `Prune`,
+  `Github` (PR tabs, caches, TTLs), `Sessions` (registry, lifecycle, host bridge, observations),
+  `Hosts`, `Sleep`, `Watches` and `WatchDiscovery`, `AgentActivity`, `Awaited`, `Doctor`,
+  `Import`, `Update`. `services/composition.rs` wires them, `dispatch.rs` routes requests,
+  `snapshots.rs` builds the broadcast snapshot, and `maintenance.rs` owns the periodic sweeps.
+  Revision-keyed caches in `services/cache.rs` let unchanged inventories be reused instead of
+  rebuilt per request.
 - **Jobs**: `JobManager` runs every long operation as a `Job` (id, kind, target, status,
   last progress line, log path, timestamps, cancellable). Per-repo mutexes, pool concurrency 2,
   GitHub concurrency 4, cancellation tokens. Job state is broadcast as events; logs go to
@@ -188,9 +196,12 @@ CLI JSON envelope remains version 1.
   `ctrl-s` inside a terminal), `Scroll` (copy/scrollback mode), `Filter`, `Palette`, `Dialog`.
   Implemented as gpui key contexts + actions; see `docs/KEYMAP.md`.
 - **Screens**: `Hub` (contexts / repos / worktrees or PRs / detail / status bar), `Workspace`
-  (session terminals with a tab strip and a compact session header), `Jobs` panel (overlay),
-  dialogs (Create, Clone, Confirm, Context, Assign, Settings, Help), Palette, Filter.
+  (session terminals with a tab strip, a compact session header and the subagent watch pane),
+  the floating agent popup, the `Jobs` panel, the dialogs, Palette and Filter.
   See `docs/UX-SPEC.md` for the per-view content and placement decisions.
+- **Render discipline**: a screen prepares in `synchronize` — attachment, requests, focus and
+  resource reconciliation — and `render_prepared` only composes what is already prepared. Render
+  performs no filesystem access and starts no request. See `docs/APP-CONTRACTS.md`.
 - **Design system**: `fleet-ui-kit` — see `docs/DESIGN-SYSTEM.md`. Views compose only kit
   components; no ad-hoc styling in `fleet-app`.
 
@@ -213,7 +224,7 @@ operation owns, signals, or kills the observed process.
 
 ```text
 piped child stdout/stderr -> fleet exec tee -> original stdout/stderr (raw bytes)
-                                         -> AppendWatchOutput -> bounded watch registry -> WatchOutput events / TailWatch -> phase 2 Workspace pane
+                                         -> AppendWatchOutput -> bounded watch registry -> WatchOutput events / TailWatch -> Workspace watch pane
 
 one ps snapshot / 2 s -> candidate regexes -> Fleet env or PTY ancestry -> discovered watch
 companion job JSON/log / 500 ms -----------------------------> metadata, exit, output

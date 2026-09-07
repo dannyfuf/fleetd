@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use fleet_daemon::{
     adapters::shell::ShellResult,
-    jobs::JobManager,
     services::doctor::Doctor,
     stores::config::ConfigStore,
-    testing::fakes::{FakeFiles, FakeGit, FakeGithub, FakeShell, FixedClock},
+    testing::fakes::{FakeFiles, FakeGithub, FakeShell},
 };
 
 #[tokio::test]
@@ -65,14 +64,8 @@ async fn doctor_reports_local_runtime_and_probes_remote_hosts() {
             stderr: "warning\nPermission denied (publickey)\n".to_owned(),
         },
     );
-    let git = Arc::new(FakeGit::new(shell.clone()));
     let github = Arc::new(FakeGithub::new(shell.clone()));
-    let now = chrono::Utc::now();
-    let jobs = Arc::new(JobManager::with_clock(
-        &home,
-        Arc::new(FixedClock::new(now)),
-    ));
-    let doctor = Doctor::new(jobs, config, shell, git, github, files);
+    let doctor = Doctor::new(config, shell, github, files);
 
     let checks = doctor
         .check()

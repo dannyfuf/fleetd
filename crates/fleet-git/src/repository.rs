@@ -11,7 +11,7 @@ use std::{
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{
-    CommandEvent, CommandRecord, GitCommand, GitError, RepoPaths, Result, Runner,
+    CommandEvent, CommandRecord, GitError, RepoPaths, Result, Runner, command::GitCommand,
     model::CommandKind,
 };
 
@@ -40,7 +40,7 @@ impl Repository {
     /// Discovers a worktree using an injected runner.
     pub async fn discover_with_runner(path: impl AsRef<Path>, runner: Arc<Runner>) -> Result<Self> {
         let supplied = path.as_ref().to_path_buf();
-        let cwd = discovery_directory(&supplied);
+        let cwd = discovery_directory(&supplied).await;
         let command = GitCommand::new(&cwd, CommandKind::Read)
             .args([
                 "rev-parse",
@@ -89,10 +89,7 @@ impl Repository {
     /// Sets the context width used by every subsequent diff read, clamped to
     /// `0..=`[`MAX_DIFF_CONTEXT`].
     ///
-    /// Carried on the repository rather than threaded through the six `diff_*` signatures on
-    /// purpose: a patch built from a displayed hunk must be applied against a diff read with
-    /// the *same* `-U`, and one shared value is the only way that cannot drift. It also keeps
-    /// every existing caller and test compiling unchanged.
+    /// Display reads and partial-patch construction share this context width.
     pub fn set_diff_context(&self, lines: u32) {
         self.diff_context
             .store(lines.min(MAX_DIFF_CONTEXT), Ordering::Relaxed);
@@ -102,12 +99,6 @@ impl Repository {
     #[must_use]
     pub fn paths(&self) -> &RepoPaths {
         &self.paths
-    }
-
-    /// Returns the repository's shared runner.
-    #[must_use]
-    pub fn runner(&self) -> &Arc<Runner> {
-        &self.runner
     }
 
     /// Subscribes to this repository's command events.
@@ -127,8 +118,11 @@ impl Repository {
     }
 }
 
-fn discovery_directory(path: &Path) -> PathBuf {
-    if path.is_file() {
+async fn discovery_directory(path: &Path) -> PathBuf {
+    if tokio::fs::metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file())
+    {
         path.parent().unwrap_or(path).to_path_buf()
     } else {
         path.to_path_buf()

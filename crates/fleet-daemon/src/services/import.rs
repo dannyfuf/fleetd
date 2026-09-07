@@ -23,16 +23,6 @@ pub trait ImportNotifier: Send + Sync {
     async fn snapshot_changed(&self) -> DaemonResult<()>;
 }
 
-#[derive(Debug)]
-struct NoopNotifier;
-
-#[async_trait]
-impl ImportNotifier for NoopNotifier {
-    async fn snapshot_changed(&self) -> DaemonResult<()> {
-        Ok(())
-    }
-}
-
 /// Imports a version-one swarm home into an empty Fleet home.
 #[derive(Clone)]
 pub struct Import {
@@ -42,7 +32,7 @@ pub struct Import {
     state: Arc<StateStore>,
     jobs: Arc<JobManager>,
     files: Arc<dyn Files>,
-    notifier: Arc<dyn ImportNotifier>,
+    notifier: Option<Arc<dyn ImportNotifier>>,
 }
 
 impl Import {
@@ -63,14 +53,14 @@ impl Import {
             state,
             jobs,
             files,
-            notifier: Arc::new(NoopNotifier),
+            notifier: None,
         }
     }
 
     /// Adds the snapshot notification boundary used by the daemon facade.
     #[must_use]
     pub fn with_notifier(mut self, notifier: Arc<dyn ImportNotifier>) -> Self {
-        self.notifier = notifier;
+        self.notifier = Some(notifier);
         self
     }
 
@@ -88,7 +78,7 @@ impl Import {
         let config_store = Arc::clone(&self.config);
         let state_store = Arc::clone(&self.state);
         let files = Arc::clone(&self.files);
-        let notifier = Arc::clone(&self.notifier);
+        let notifier = self.notifier.clone();
         let id = self.jobs.submit(
             JobKind::Import,
             swarm_home.display().to_string(),
@@ -148,15 +138,15 @@ impl Import {
                         Ok(())
                     })
                     .await?;
-                notifier.snapshot_changed().await?;
+                if let Some(notifier) = notifier {
+                    notifier.snapshot_changed().await?;
+                }
                 context.progress("swarm import complete")?;
                 Ok(())
             },
         );
         self.jobs
-            .list()
-            .into_iter()
-            .find(|record| record.id == id)
+            .record(&id)
             .ok_or_else(|| DaemonError::NotFound(format!("job {id}")))
     }
 }

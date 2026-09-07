@@ -1,10 +1,14 @@
 //! Configuration loading, default merging, and atomic persistence.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use fleet_core::{
     config::{Config, merge_config, validate_config},
     paths::FleetHome,
+    sleep::CompiledSleepPolicy,
 };
 use serde_json::Value;
 
@@ -17,6 +21,7 @@ pub struct ConfigStore {
     path: PathBuf,
     files: Arc<dyn Files>,
     gate: Arc<tokio::sync::Mutex<()>>,
+    sleep_policy: Arc<Mutex<Arc<CompiledSleepPolicy>>>,
 }
 
 impl ConfigStore {
@@ -30,6 +35,7 @@ impl ConfigStore {
             path,
             files,
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            sleep_policy: Arc::new(Mutex::new(Arc::new(CompiledSleepPolicy::new(&[])))),
         }
     }
 
@@ -42,6 +48,20 @@ impl ConfigStore {
         tokio::task::spawn_blocking(move || load_sync(&home, &path, files.as_ref()))
             .await
             .map_err(|error| DaemonError::Join(error.to_string()))?
+    }
+
+    /// Loads rules and retains their compiled matcher across sleep requests and polls.
+    /// Each caller keeps an immutable snapshot while process observation is in flight.
+    pub(crate) async fn load_with_sleep_policy(
+        &self,
+    ) -> DaemonResult<(Config, Arc<CompiledSleepPolicy>)> {
+        let config = self.load().await?;
+        let mut policy = self
+            .sleep_policy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::make_mut(&mut policy).update(&config.sleep.keep_alive);
+        Ok((config, Arc::clone(&policy)))
     }
 
     /// Validates and atomically saves a complete configuration.
@@ -147,5 +167,31 @@ mod tests {
         let config = store.load().await.unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.github.pr_ttl_seconds, 12);
         assert_eq!(config.github.cache_ttl_seconds, 3_600);
+    }
+
+    #[tokio::test]
+    async fn sleep_policy_reuses_rules_and_preserves_in_flight_snapshots() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let store = store(&temp);
+        let (_, initial) = store.load_with_sleep_policy().await.unwrap();
+        let initial_address = Arc::as_ptr(&initial);
+        drop(initial);
+        let (_, initial) = store.clone().load_with_sleep_policy().await.unwrap();
+        assert_eq!(initial_address, Arc::as_ptr(&initial));
+
+        store
+            .update(serde_json::json!({"sleep": {"keepAlive": []}}))
+            .await
+            .unwrap();
+        let (_, updated) = store.load_with_sleep_policy().await.unwrap();
+        let commands = vec!["claude".to_owned()];
+        assert!(updated.match_keep_alive(&commands, &[]).is_empty());
+        assert_eq!(initial.match_keep_alive(&commands, &[]), ["claude"]);
+
+        // Reloads also pick up edits made outside ConfigStore.
+        std::fs::write(store.path(), r#"{"sleep":{"keepAlive":[{"id":"broken","label":"broken","kind":"process","pattern":"\\q"}]}}"#).unwrap();
+        let (_, invalid) = store.load_with_sleep_policy().await.unwrap();
+        assert_eq!(invalid.diagnostics().len(), 1);
+        assert!(updated.diagnostics().is_empty());
     }
 }

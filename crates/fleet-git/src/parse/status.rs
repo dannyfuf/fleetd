@@ -79,7 +79,7 @@ fn conflict(x: u8, y: u8) -> Option<ConflictKind> {
     }
 }
 
-pub(crate) fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+pub(super) fn bytes_to_path(bytes: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt};

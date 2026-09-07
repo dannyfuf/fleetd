@@ -3,12 +3,13 @@
 //! Every rendering decision — glyph, tone, column text — is a free function over a `&FileStatus`,
 //! `&Branch` or `&Commit`, so it can be unit tested without opening a window.
 
-pub mod diff;
-pub mod diff_model;
-pub mod file_tree;
-pub mod intraline;
-pub mod rows;
-pub mod syntax;
+pub(crate) mod diff;
+pub(crate) mod diff_model;
+pub(crate) mod file_tree;
+pub(crate) mod intraline;
+pub(crate) mod long_line;
+pub(crate) mod rows;
+pub(crate) mod syntax;
 
 use fleet_ui_kit::Theme;
 use gpui::Hsla;
@@ -17,7 +18,7 @@ use gpui::Hsla;
 /// faithful mapping is the theme's terminal palette, not the semantic tokens, which stay reserved
 /// for Fleet-level state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ansi {
+pub(crate) enum Ansi {
     /// `style.FgRed` — unstaged, unpushed, removed, destructive.
     Red,
     /// `style.FgGreen` — staged, merged, added.
@@ -35,7 +36,7 @@ pub enum Ansi {
 impl Ansi {
     /// The resolved colour for the installed theme.
     #[must_use]
-    pub fn color(self, theme: &Theme) -> Hsla {
+    pub(crate) fn color(self, theme: &Theme) -> Hsla {
         let index = match self {
             Ansi::Red => 1,
             Ansi::Green => 2,

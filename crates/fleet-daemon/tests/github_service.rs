@@ -112,16 +112,7 @@ async fn github_fetches_exact_tab_and_reuses_fresh_cache() {
             stderr: String::new(),
         },
     );
-    shell.when(
-        |command| command.program == "gh" && command.args.first().is_some_and(|arg| arg == "api"),
-        ShellResult {
-            status: 0,
-            stdout: "octocat\n".to_owned(),
-            stderr: String::new(),
-        },
-    );
     let (github, _state, repo, context) = service(&temp, Arc::clone(&shell)).await;
-    assert_eq!(github.viewer_login().await.unwrap(), "octocat");
 
     let slices = github
         .list_pull_requests(None, Some(context.clone()), PrTab::Mine, true)

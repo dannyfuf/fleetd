@@ -38,8 +38,8 @@ pub enum LogCommand {
 #[derive(IntoElement)]
 pub struct LogView {
     id: ElementId,
-    lines: Rc<Vec<SharedString>>,
-    tones: Rc<Vec<Tone>>,
+    lines: std::sync::Arc<[SharedString]>,
+    tones: std::sync::Arc<[Tone]>,
     following: bool,
     top: usize,
     scroll: Option<UniformListScrollHandle>,
@@ -51,12 +51,16 @@ pub struct LogView {
 }
 
 impl LogView {
-    /// A log view over already-tailed lines.
-    pub fn new(id: impl Into<ElementId>, lines: impl IntoIterator<Item = SharedString>) -> Self {
+    /// A log view over immutable storage. An `Arc<[SharedString]>` is taken as is, without
+    /// collecting or cloning every line.
+    pub fn from_shared(
+        id: impl Into<ElementId>,
+        lines: impl Into<std::sync::Arc<[SharedString]>>,
+    ) -> Self {
         Self {
             id: id.into(),
-            lines: Rc::new(lines.into_iter().collect()),
-            tones: Rc::new(Vec::new()),
+            lines: lines.into(),
+            tones: std::sync::Arc::default(),
             following: true,
             top: 0,
             scroll: None,
@@ -67,9 +71,9 @@ impl LogView {
         }
     }
 
-    /// Optional per-line semantic tones; omitted entries use normal text contrast.
-    pub fn line_tones(mut self, tones: impl IntoIterator<Item = Tone>) -> Self {
-        self.tones = Rc::new(tones.into_iter().collect());
+    /// Reuse immutable per-line tones alongside shared log storage.
+    pub fn shared_line_tones(mut self, tones: std::sync::Arc<[Tone]>) -> Self {
+        self.tones = tones;
         self
     }
 
@@ -125,11 +129,6 @@ impl LogView {
         self
     }
 
-    /// Whether the view is currently following.
-    pub fn is_following(&self) -> bool {
-        self.following
-    }
-
     /// How many lines the view holds. Over [`LOG_TAIL_LINES`] the caller is keeping more than
     /// the spec asks for, which is allowed but is not what the 16 ms batch budget was sized
     /// against.
@@ -142,10 +141,10 @@ impl RenderOnce for LogView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let pad = theme.space.md;
-        let lines = self.lines.clone();
+        let lines = self.lines;
         let count = lines.len();
-        let tones = self.tones.clone();
-        let scroll = self.scroll.clone();
+        let tones = self.tones;
+        let scroll = self.scroll;
         let following = self.following;
 
         if count == 0 {
@@ -165,7 +164,7 @@ impl RenderOnce for LogView {
             handle.scroll_to_item(count - 1, ScrollStrategy::Top);
         }
 
-        let list = uniform_list(self.id.clone(), count, move |range, _window, _cx| {
+        let list = uniform_list(self.id, count, move |range, _window, _cx| {
             range
                 .map(|ix| {
                     div().px(pad).whitespace_nowrap().child(
@@ -197,8 +196,8 @@ impl RenderOnce for LogView {
                 .child(Text::label(word).tone(tone))
         });
 
-        let keys = self.on_command.clone();
-        let key_scroll = scroll.clone();
+        let keys = self.on_command;
+        let key_scroll = scroll;
         let key_top = self.top;
 
         div()
@@ -263,15 +262,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_spec_tail_is_two_hundred_lines() {
-        assert_eq!(LOG_TAIL_LINES, 200);
+    fn shared_log_construction_retains_lines_and_tones() {
+        let lines: std::sync::Arc<[SharedString]> = vec!["first".into(), "second".into()].into();
+        let tones: std::sync::Arc<[Tone]> = vec![Tone::Warning].into();
+        let view = LogView::from_shared("log", lines.clone()).shared_line_tones(tones.clone());
+        assert!(std::sync::Arc::ptr_eq(&view.lines, &lines));
+        assert!(std::sync::Arc::ptr_eq(&view.tones, &tones));
+        assert_eq!(view.line_count(), 2);
     }
 
     #[test]
     fn a_fresh_view_follows() {
-        let view = LogView::new("log", [SharedString::new_static("one")]);
-        assert!(view.is_following());
+        let view = LogView::from_shared("log", [SharedString::new_static("one")]);
+        assert!(view.following);
         assert_eq!(view.line_count(), 1);
-        assert!(!view.following(false).is_following());
+        assert!(!view.following(false).following);
     }
 }

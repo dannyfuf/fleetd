@@ -20,47 +20,49 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fleet_git::FileStatus;
+use gpui::SharedString;
 
 use crate::state::{has_staged, has_unstaged, short_status};
 
 /// One rendered row of the Files pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileRow {
+pub(crate) struct FileRow {
     /// The full path from the worktree root: the file, or the directory the row stands for.
-    pub path: PathBuf,
+    pub(crate) path: PathBuf,
     /// What the row prints after the glyph. A compressed chain keeps its joined segments
     /// (`src/app/deep`); every other row is one path component; a flat-mode row is the full path.
-    pub name: String,
+    pub(crate) name: SharedString,
     /// Visual depth — two spaces of indent each. A compressed chain counts as one level.
-    pub depth: usize,
+    pub(crate) depth: usize,
     /// Whether this is a directory row.
-    pub is_dir: bool,
+    pub(crate) is_dir: bool,
     /// Whether a directory row is collapsed. Always `false` on a file row.
-    pub collapsed: bool,
+    pub(crate) collapsed: bool,
     /// Index into `RepoSnapshot::files`, on a file row.
-    pub file: Option<usize>,
+    pub(crate) file: Option<usize>,
     /// The path a renamed file came from, so the row can print `old → new`.
-    pub previous: Option<PathBuf>,
+    pub(crate) previous: Option<PathBuf>,
     /// Every file path at or under this row, in row order. A file row holds just its own.
-    pub children: Vec<PathBuf>,
+    pub(crate) children: Vec<PathBuf>,
     /// Anything staged at or under this row (lazygit's `GetHasStagedChanges`).
-    pub staged: bool,
+    pub(crate) staged: bool,
     /// Anything unstaged at or under this row (lazygit's `GetHasUnstagedChanges`).
-    pub unstaged: bool,
+    pub(crate) unstaged: bool,
     /// Anything conflicted at or under this row.
-    pub conflict: bool,
+    pub(crate) conflict: bool,
     /// The two status characters. A file row carries git's own; a directory row carries the
     /// aggregate of its descendants, which lazygit computes but does **not** print — on a
     /// directory it draws the collapse arrow instead and lets the name colour carry the state.
-    pub status: [char; 2],
+    pub(crate) status: [char; 2],
 }
 
 impl FileRow {
     /// The `▼` / `▶` a directory row prints in the glyph column.
     #[must_use]
-    pub fn arrow(&self) -> &'static str {
+    pub(crate) fn arrow(&self) -> &'static str {
         if self.collapsed {
             COLLAPSED_ARROW
         } else {
@@ -70,19 +72,19 @@ impl FileRow {
 }
 
 /// `pkg/gui/presentation/files.go:17`.
-pub const EXPANDED_ARROW: &str = "▼";
+pub(crate) const EXPANDED_ARROW: &str = "▼";
 /// `pkg/gui/presentation/files.go:18`.
-pub const COLLAPSED_ARROW: &str = "▶";
+pub(crate) const COLLAPSED_ARROW: &str = "▶";
 
 /// The Files pane's row model: tree or flat, plus the set of collapsed directories.
 #[derive(Clone, Debug)]
-pub struct FileTree {
+pub(crate) struct FileTree {
     /// `gui.showFileTree`, lazygit's default is `true`.
     tree_mode: bool,
     /// Collapsed directory paths, kept across refreshes so a snapshot never re-opens one.
     collapsed: HashSet<PathBuf>,
     /// The flattened rows the pane renders.
-    rows: Vec<FileRow>,
+    rows: Arc<[FileRow]>,
 }
 
 impl Default for FileTree {
@@ -90,50 +92,32 @@ impl Default for FileTree {
         Self {
             tree_mode: true,
             collapsed: HashSet::new(),
-            rows: Vec::new(),
+            rows: Arc::default(),
         }
     }
 }
 
 impl FileTree {
-    /// The rows to render, top to bottom.
-    #[must_use]
-    pub fn rows(&self) -> &[FileRow] {
-        &self.rows
-    }
-
     /// One row.
     #[must_use]
-    pub fn row(&self, index: usize) -> Option<&FileRow> {
+    pub(crate) fn row(&self, index: usize) -> Option<&FileRow> {
         self.rows.get(index)
     }
 
     /// How many rows there are.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.rows.len()
     }
 
-    /// Whether the pane has no rows.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    /// Whether the tree layout is on (`false` is lazygit's flat layout).
-    #[must_use]
-    pub fn tree_mode(&self) -> bool {
-        self.tree_mode
-    }
-
     /// Flips tree and flat layout and rebuilds. Not persisted, as in lazygit.
-    pub fn toggle_mode(&mut self, files: &[FileStatus]) {
+    pub(crate) fn toggle_mode(&mut self, files: &[FileStatus]) {
         self.tree_mode = !self.tree_mode;
         self.rebuild(files);
     }
 
     /// Collapses or expands one directory. A file path is ignored.
-    pub fn toggle_collapsed(&mut self, path: &Path, files: &[FileStatus]) {
+    pub(crate) fn toggle_collapsed(&mut self, path: &Path, files: &[FileStatus]) {
         if !self.collapsed.remove(path) {
             self.collapsed.insert(path.to_path_buf());
         }
@@ -141,7 +125,7 @@ impl FileTree {
     }
 
     /// Collapses every directory (`-`).
-    pub fn collapse_all(&mut self, files: &[FileStatus]) {
+    pub(crate) fn collapse_all(&mut self, files: &[FileStatus]) {
         for path in all_directories(files) {
             self.collapsed.insert(path);
         }
@@ -149,7 +133,7 @@ impl FileTree {
     }
 
     /// Expands every directory (`=`).
-    pub fn expand_all(&mut self, files: &[FileStatus]) {
+    pub(crate) fn expand_all(&mut self, files: &[FileStatus]) {
         self.collapsed.clear();
         self.rebuild(files);
     }
@@ -159,7 +143,7 @@ impl FileTree {
     /// Collapsing a directory hides the row the cursor was on, and lazygit then leaves the
     /// cursor on the directory that swallowed it rather than jumping to the top.
     #[must_use]
-    pub fn index_of(&self, path: &Path) -> Option<usize> {
+    pub(crate) fn index_of(&self, path: &Path) -> Option<usize> {
         if let Some(index) = self.rows.iter().position(|row| row.path == path) {
             return Some(index);
         }
@@ -172,12 +156,17 @@ impl FileTree {
     }
 
     /// Rebuilds the rows from a snapshot's files, keeping the collapse set.
-    pub fn rebuild(&mut self, files: &[FileStatus]) {
+    pub(crate) fn rebuild(&mut self, files: &[FileStatus]) {
         self.rows = if self.tree_mode {
             tree_rows(files, &self.collapsed)
         } else {
             flat_rows(files)
-        };
+        }
+        .into();
+    }
+
+    pub(crate) fn shared_rows(&self) -> Arc<[FileRow]> {
+        self.rows.clone()
     }
 }
 
@@ -188,6 +177,7 @@ struct Node {
     dirs: BTreeMap<String, Node>,
     /// Files directly in this directory: `(name, index into files)`, alphabetical.
     files: BTreeMap<String, usize>,
+    aggregate: Aggregate,
 }
 
 fn insert(node: &mut Node, components: &[String], index: usize) {
@@ -207,16 +197,14 @@ fn components(path: &Path) -> Vec<String> {
 }
 
 /// Every directory path the files imply, so collapse-all can name them all.
-fn all_directories(files: &[FileStatus]) -> Vec<PathBuf> {
-    let mut out = Vec::new();
+fn all_directories(files: &[FileStatus]) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
     for file in files {
         let mut prefix = PathBuf::new();
         let parts = components(&file.path);
         for part in parts.iter().take(parts.len().saturating_sub(1)) {
             prefix.push(part);
-            if !out.contains(&prefix) {
-                out.push(prefix.clone());
-            }
+            out.insert(prefix.clone());
         }
     }
     out
@@ -229,7 +217,9 @@ fn compress<'a>(name: &str, node: &'a Node, path: &Path) -> (String, PathBuf, &'
     let mut path = path.to_path_buf();
     let mut node = node;
     while node.files.is_empty() && node.dirs.len() == 1 {
-        let (child_name, child) = node.dirs.iter().next().expect("one child");
+        let Some((child_name, child)) = node.dirs.iter().next() else {
+            break;
+        };
         name = format!("{name}/{child_name}");
         path = path.join(child_name);
         node = child;
@@ -237,7 +227,40 @@ fn compress<'a>(name: &str, node: &'a Node, path: &Path) -> (String, PathBuf, &'
     (name, path, node)
 }
 
-/// Depth-first flatten. Returns the rows, and the aggregate of the subtree it just walked.
+/// Aggregate before emission, so collapsed subtrees create no discarded rows.
+fn aggregate(node: &mut Node, files: &[FileStatus]) {
+    let mut total = Aggregate::default();
+    for child in node.dirs.values_mut() {
+        aggregate(child, files);
+        total.merge(&child.aggregate);
+    }
+    for index in node.files.values() {
+        let file = &files[*index];
+        total.paths.push(file.path.clone());
+        total.staged |= has_staged(file);
+        total.unstaged |= has_unstaged(file);
+        total.conflict |= file.conflict.is_some();
+    }
+    node.aggregate = total;
+}
+
+fn file_row(name: String, index: usize, depth: usize, file: &FileStatus) -> FileRow {
+    FileRow {
+        path: file.path.clone(),
+        name: name.into(),
+        depth,
+        is_dir: false,
+        collapsed: false,
+        file: Some(index),
+        previous: file.previous_path.clone(),
+        children: vec![file.path.clone()],
+        staged: has_staged(file),
+        unstaged: has_unstaged(file),
+        conflict: file.conflict.is_some(),
+        status: short_status(file),
+    }
+}
+
 fn walk(
     node: &Node,
     path: &Path,
@@ -245,74 +268,32 @@ fn walk(
     files: &[FileStatus],
     collapsed: &HashSet<PathBuf>,
     out: &mut Vec<FileRow>,
-) -> Aggregate {
-    let mut total = Aggregate::default();
+) {
     for (name, child) in &node.dirs {
         let (name, child_path, child) = compress(name, child, &path.join(name));
         let is_collapsed = collapsed.contains(&child_path);
-        // The directory's own row goes in first, then its subtree fills in what it aggregates.
-        let slot = out.len();
+        let aggregate = &child.aggregate;
         out.push(FileRow {
             path: child_path.clone(),
-            name,
+            name: name.into(),
             depth,
             is_dir: true,
             collapsed: is_collapsed,
             file: None,
             previous: None,
-            children: Vec::new(),
-            staged: false,
-            unstaged: false,
-            conflict: false,
+            children: aggregate.paths.clone(),
+            staged: aggregate.staged,
+            unstaged: aggregate.unstaged,
+            conflict: aggregate.conflict,
             status: [' ', ' '],
         });
-        // A collapsed directory hides its rows but still has to know what is under it, so it is
-        // walked into a scratch buffer that is thrown away.
-        let mut nested = Vec::new();
-        let aggregate = walk(
-            child,
-            &child_path,
-            depth + 1,
-            files,
-            collapsed,
-            if is_collapsed { &mut nested } else { &mut *out },
-        );
-        let row = &mut out[slot];
-        row.children = aggregate.paths.clone();
-        row.staged = aggregate.staged;
-        row.unstaged = aggregate.unstaged;
-        row.conflict = aggregate.conflict;
-        row.status = aggregate.status();
-        total.merge(aggregate);
+        if !is_collapsed {
+            walk(child, &child_path, depth + 1, files, collapsed, out);
+        }
     }
     for (name, index) in &node.files {
-        let file = &files[*index];
-        let staged = has_staged(file);
-        let unstaged = has_unstaged(file);
-        let conflict = file.conflict.is_some();
-        out.push(FileRow {
-            path: file.path.clone(),
-            name: name.clone(),
-            depth,
-            is_dir: false,
-            collapsed: false,
-            file: Some(*index),
-            previous: file.previous_path.clone(),
-            children: vec![file.path.clone()],
-            staged,
-            unstaged,
-            conflict,
-            status: short_status(file),
-        });
-        total.merge(Aggregate {
-            paths: vec![file.path.clone()],
-            staged,
-            unstaged,
-            conflict,
-            untracked: !is_tracked(file),
-        });
+        out.push(file_row(name.clone(), *index, depth, &files[*index]));
     }
-    total
 }
 
 /// What a subtree contributes to the directory above it.
@@ -322,31 +303,14 @@ struct Aggregate {
     staged: bool,
     unstaged: bool,
     conflict: bool,
-    untracked: bool,
 }
 
 impl Aggregate {
-    fn merge(&mut self, other: Aggregate) {
-        self.paths.extend(other.paths);
+    fn merge(&mut self, other: &Aggregate) {
+        self.paths.extend(other.paths.iter().cloned());
         self.staged |= other.staged;
         self.unstaged |= other.unstaged;
         self.conflict |= other.conflict;
-        self.untracked |= other.untracked;
-    }
-
-    /// The two characters a directory would print if lazygit printed any: the index column is
-    /// `M` when anything below is staged, the worktree column `?` when anything below is
-    /// untracked and `M` when anything below is merely modified.
-    fn status(&self) -> [char; 2] {
-        let index = if self.staged { 'M' } else { ' ' };
-        let worktree = if self.untracked {
-            '?'
-        } else if self.unstaged {
-            'M'
-        } else {
-            ' '
-        };
-        [index, worktree]
     }
 }
 
@@ -360,6 +324,7 @@ fn tree_rows(files: &[FileStatus], collapsed: &HashSet<PathBuf>) -> Vec<FileRow>
     for (index, file) in files.iter().enumerate() {
         insert(&mut root, &components(&file.path), index);
     }
+    aggregate(&mut root, files);
     let mut rows = Vec::new();
     walk(&root, Path::new(""), 0, files, collapsed, &mut rows);
     rows
@@ -368,15 +333,26 @@ fn tree_rows(files: &[FileStatus], collapsed: &HashSet<PathBuf>) -> Vec<FileRow>
 /// lazygit's `BuildFlatTreeFromFiles`: the tree's leaves, then stably re-sorted so merge
 /// conflicts come first, then tracked files, then untracked ones.
 fn flat_rows(files: &[FileStatus]) -> Vec<FileRow> {
-    let mut rows: Vec<FileRow> = tree_rows(files, &HashSet::new())
-        .into_iter()
-        .filter(|row| !row.is_dir)
-        .map(|mut row| {
-            row.depth = 0;
-            row.name = row.path.to_string_lossy().into_owned();
-            row
-        })
-        .collect();
+    fn collect(node: &Node, files: &[FileStatus], rows: &mut Vec<FileRow>) {
+        for child in node.dirs.values() {
+            collect(child, files, rows);
+        }
+        for index in node.files.values() {
+            let file = &files[*index];
+            rows.push(file_row(
+                file.path.to_string_lossy().into_owned(),
+                *index,
+                0,
+                file,
+            ));
+        }
+    }
+    let mut root = Node::default();
+    for (index, file) in files.iter().enumerate() {
+        insert(&mut root, &components(&file.path), index);
+    }
+    let mut rows = Vec::with_capacity(files.len());
+    collect(&root, files, &mut rows);
     rows.sort_by_key(|row| {
         let file = row.file.map(|index| &files[index]);
         if row.conflict {
@@ -424,7 +400,7 @@ mod tests {
     }
 
     fn shape(tree: &FileTree) -> Vec<String> {
-        tree.rows()
+        tree.shared_rows()
             .iter()
             .map(|row| {
                 format!(
@@ -484,7 +460,7 @@ mod tests {
         let root = tree.row(0).unwrap();
         assert_eq!(root.path, PathBuf::from("src"));
         assert!(root.staged && root.unstaged && !root.conflict);
-        assert_eq!(root.status, ['M', '?']);
+        assert!(root.staged && root.unstaged);
         assert_eq!(
             root.children,
             vec![
@@ -496,7 +472,7 @@ mod tests {
         let deep = tree.row(1).unwrap();
         assert_eq!(deep.path, PathBuf::from("src/deep"));
         assert!(!deep.staged && deep.unstaged);
-        assert_eq!(deep.status, [' ', '?']);
+        assert!(!deep.staged && deep.unstaged);
     }
 
     #[test]
@@ -549,21 +525,25 @@ mod tests {
         ];
         let mut tree = tree(&files);
         tree.toggle_mode(&files);
-        assert!(!tree.tree_mode());
+        assert!(!tree.tree_mode);
         assert_eq!(
             shape(&tree),
             vec!["src/app/one.txt", "top.txt", "src/app/new.txt"]
         );
-        assert!(tree.rows().iter().all(|row| !row.is_dir && row.depth == 0));
+        assert!(
+            tree.shared_rows()
+                .iter()
+                .all(|row| !row.is_dir && row.depth == 0)
+        );
         tree.toggle_mode(&files);
-        assert!(tree.tree_mode());
+        assert!(tree.tree_mode);
     }
 
     #[test]
     fn every_file_row_points_back_at_its_status() {
         let files = [modified("src/app/one.txt"), staged("top.txt")];
         let tree = tree(&files);
-        for row in tree.rows().iter().filter(|row| !row.is_dir) {
+        for row in tree.shared_rows().iter().filter(|row| !row.is_dir) {
             let index = row.file.expect("a file row carries its index");
             assert_eq!(files[index].path, row.path);
         }

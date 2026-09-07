@@ -17,7 +17,7 @@
 //! [`super::SkeletonRows`] in the body, empty is [`super::EmptyState`] in the body, and an
 //! error is a glyph on the row it belongs to — never a tint on the container.
 
-use gpui::{AnyElement, App, Pixels, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Pixels, Window, div, prelude::*};
 
 use crate::{focus::FocusRing, theme::ActiveTheme};
 
@@ -178,13 +178,14 @@ impl RenderOnce for Pane {
             .when(self.raised, |el| el.bg(theme.colors.surface))
             .map(|el| match self.border {
                 PaneBorder::None => el,
-                PaneBorder::Left => el.border_l(px(1.0)).border_color(border),
-                PaneBorder::Right => el.border_r(px(1.0)).border_color(border),
-                PaneBorder::Horizontal => {
-                    el.border_l(px(1.0)).border_r(px(1.0)).border_color(border)
-                }
+                PaneBorder::Left => el.border_l(theme.metrics.hairline).border_color(border),
+                PaneBorder::Right => el.border_r(theme.metrics.hairline).border_color(border),
+                PaneBorder::Horizontal => el
+                    .border_l(theme.metrics.hairline)
+                    .border_r(theme.metrics.hairline)
+                    .border_color(border),
             })
-            .child(FocusRing::pane(self.focused).child(content))
+            .child(FocusRing::pane(self.focused).content(content))
             .when_some(self.scroll_fraction, |el, (offset, visible)| {
                 if visible >= 1.0 {
                     return el;

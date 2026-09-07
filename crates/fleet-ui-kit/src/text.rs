@@ -9,7 +9,7 @@ use gpui::{App, Div, FontWeight, Hsla, Pixels, SharedString, Window, div, prelud
 use crate::{
     theme::{ActiveTheme, FontRole, Theme, TypeStyle},
     tone::Tone,
-    truncate::{Truncate, truncate},
+    truncate::Truncate,
 };
 
 /// One of the type roles of the design system.
@@ -193,7 +193,9 @@ impl Text {
     /// The string this run will render, after the `ch` budget is applied.
     pub fn resolved_text(&self) -> SharedString {
         match self.budget {
-            Some((budget, mode)) => truncate(self.text.as_ref(), budget, mode),
+            Some((budget, mode)) => {
+                crate::truncate::truncate_shared(self.text.clone(), budget, mode)
+            }
             None => self.text.clone(),
         }
     }
@@ -219,7 +221,7 @@ impl RenderOnce for Text {
         let style = self.role.style(theme);
         let color = self.color.unwrap_or_else(|| self.tone.color(theme));
         let mut text = self.resolved_text();
-        if style.uppercase {
+        if style.uppercase && text.chars().flat_map(char::to_uppercase).ne(text.chars()) {
             text = SharedString::from(text.to_uppercase());
         }
 
