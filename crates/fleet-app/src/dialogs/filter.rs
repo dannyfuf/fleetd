@@ -1,95 +1,30 @@
 //! §3.10 Filter bar (`/`) — *narrow this list without moving it*.
-//!
-//! The filter **replaces the pane header in place**: 30 px, same row, no overlay, no reflow.
-//! Two pieces make that work and they live in different places:
-//!
-//! * [`bar`] and [`retained_chip`] are what the focused pane draws in its header row, so the
-//!   list that owns the header owns the pixels;
-//! * [`render`] is the invisible keyboard host the shell puts in the overlay layer while
-//!   `Overlay::Filter` is open — it carries the typing, the two `ctrl-n`/`ctrl-p` keys that
-//!   move the **list** cursor while you are still typing, and the `Enter` that opens the
-//!   highlighted row.
-//!
-//! **[D-15]**: `Esc` in the Hub never quits. The two stages — leave the input keeping the
-//! filter, then clear it — are [`crate::state::filter_escape`] and belong to the shell.
 
-use fleet_core::{ids::WorktreeId, model::Worktree};
-use fleet_proto::{request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::{Icon, prelude::*};
+use fleet_ui_kit::prelude::*;
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::filter as filter_actions,
-    bridge::Bridge,
-    dialogs::{notify, typed_char},
-    state::{AppState, HubPane, HubTab, RepoScope, Screen},
+    dialogs::typed_char,
+    presentation::{filter_counts, filter_target},
+    screens::hub::HubCtx,
+    state::{AppState, HubPane, HubTab, Screen},
 };
 
-/// Whether a row survives the filter.
-///
-/// The match is a case-insensitive substring, not a subsequence: a list filter that hides rows
-/// you can see the letters of is worse than one that asks for the letters in order.
-#[must_use]
-pub fn matches(haystack: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    haystack
-        .to_ascii_lowercase()
-        .contains(&query.to_ascii_lowercase())
-}
-
-/// The worktrees the Hub shows: scoped to the selected repo, then filtered.
-#[must_use]
-pub fn visible_worktrees(state: &AppState) -> Vec<&Worktree> {
-    let Some(snapshot) = state.snapshot.as_ref() else {
-        return Vec::new();
-    };
-    snapshot
-        .worktrees
-        .iter()
-        .filter(|worktree| match &state.scope {
-            RepoScope::All => true,
-            RepoScope::Repo(repo) => &worktree.repo_id == repo,
-        })
-        .filter(|worktree| matches(worktree.id.as_str(), &state.filter.query))
-        .collect()
-}
+#[cfg(test)]
+use super::host::{SessionTransport, open_worktree};
+#[cfg(test)]
+use crate::{
+    presentation::{DisplayedPr, DisplayedTarget},
+    state::RepoScope,
+};
+#[cfg(test)]
+use fleet_proto::{request::RequestBody, response::ResponseBody};
 
 /// How many rows the focused list shows, and how many it has in total (`2/12`).
 #[must_use]
-pub fn counts(state: &AppState) -> (usize, usize) {
-    let Some(snapshot) = state.snapshot.as_ref() else {
-        return (0, 0);
-    };
-    match (state.hub_pane, &state.screen) {
-        (HubPane::Repos, _) => {
-            let total = snapshot.repos.len();
-            let shown = snapshot
-                .repos
-                .iter()
-                .filter(|repo| matches(repo.id.as_str(), &state.filter.query))
-                .count();
-            (shown, total)
-        }
-        (
-            HubPane::List,
-            Screen::Hub {
-                tab: HubTab::Worktrees,
-            },
-        ) => {
-            let total = snapshot
-                .worktrees
-                .iter()
-                .filter(|worktree| match &state.scope {
-                    RepoScope::All => true,
-                    RepoScope::Repo(repo) => &worktree.repo_id == repo,
-                })
-                .count();
-            (visible_worktrees(state).len(), total)
-        }
-        _ => (0, 0),
-    }
+fn counts(state: &AppState) -> (usize, usize) {
+    filter_counts(state)
 }
 
 /// The header row while the input owns the keyboard (§3.10, line 2 of the mock).
@@ -99,38 +34,20 @@ pub fn bar(state: &AppState) -> FilterBar {
     FilterBar::new(state.filter.query.clone(), shown, total).focused(state.filter.editing)
 }
 
-/// The `⌕rut` chip a restored pane header carries while a filter is retained (§3.10, line 3).
-///
-/// A hidden active filter is the classic "where did my rows go" bug, so the chip is not
-/// optional: draw it whenever [`crate::state::FilterState::is_active`] and the input is gone.
-#[must_use]
-pub fn retained_chip(state: &AppState) -> Option<Chip> {
-    (state.filter.is_active() && !state.filter.editing)
-        .then(|| Chip::labeled(Icon::Search, state.filter.query.clone()).tone(Tone::Accent))
-}
-
-/// The empty-result body: `Nothing matches "<filter>".` plus `esc clear` (§3.10 States).
-#[must_use]
-pub fn empty_state(state: &AppState) -> EmptyState {
-    EmptyState::new(format!("Nothing matches \"{}\".", state.filter.query)).action("esc  clear")
-}
-
-// ---------------------------------------------------------------------------- keyboard host
-
 /// The invisible element that owns Filter mode's keyboard.
 ///
 /// It draws nothing: the bar itself lives in the pane header, which is the whole point of
 /// §3.10 ("no overlay, no reflow"). The shell renders this in the overlay layer so the
 /// `Filter` key context really does shadow the list behind it.
-pub fn render(
+pub(crate) fn render(
     state: &Entity<AppState>,
-    bridge: &Bridge,
+    hub: HubCtx,
     focus: &FocusHandle,
     _window: &mut Window,
     _cx: &mut App,
 ) -> AnyElement {
     let accept_state = state.clone();
-    let accept_bridge = bridge.clone();
+    let accept_hub = hub;
     div()
         .track_focus(focus)
         .size_full()
@@ -141,9 +58,8 @@ pub fn render(
                     return;
                 };
                 state.update(cx, |app, cx| {
-                    app.filter.query.push_str(&text);
-                    app.cursors.worktrees = 0;
-                    app.cursors.repos = 0;
+                    app.filter.query.push_str(text);
+                    reset_cursor(app);
                     cx.notify();
                 });
             }
@@ -184,7 +100,7 @@ pub fn render(
             move |_: &filter_actions::CursorUp, _window, cx| move_cursor(&state, -1, cx)
         })
         .on_action(move |_: &filter_actions::Accept, _window, cx| {
-            accept(&accept_state, &accept_bridge, cx);
+            accept(&accept_state, &accept_hub, cx);
         })
         .into_any_element()
 }
@@ -194,7 +110,13 @@ pub fn render(
 pub fn delete_word(query: &str) -> String {
     let trimmed = query.trim_end();
     match trimmed.rfind(char::is_whitespace) {
-        Some(index) => trimmed[..=index].to_owned(),
+        Some(index) => {
+            let end = trimmed[index..]
+                .chars()
+                .next()
+                .map_or(index, |ch| index + ch.len_utf8());
+            trimmed[..end].to_owned()
+        }
         None => String::new(),
     }
 }
@@ -203,41 +125,57 @@ pub fn delete_word(query: &str) -> String {
 fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     state.update(cx, |app, cx| {
         let (shown, _) = counts(app);
-        match app.hub_pane {
-            HubPane::Repos => {
-                app.cursors.repos = crate::state::move_cursor(app.cursors.repos, delta, shown);
+        match (app.hub_pane, &app.screen) {
+            (HubPane::Repos, _) => {
+                app.cursors.repos = crate::state::move_cursor(app.cursors.repos, delta, shown)
             }
-            HubPane::List => {
+            (
+                HubPane::List,
+                Screen::Hub {
+                    tab: HubTab::Worktrees,
+                },
+            ) => {
                 app.cursors.worktrees =
-                    crate::state::move_cursor(app.cursors.worktrees, delta, shown);
+                    crate::state::move_cursor(app.cursors.worktrees, delta, shown)
             }
+            (HubPane::List, Screen::Hub { tab: HubTab::Prs }) => match app.pr_tab {
+                fleet_core::github::PrTab::Mine => {
+                    app.cursors.prs_mine =
+                        crate::state::move_cursor(app.cursors.prs_mine, delta, shown)
+                }
+                fleet_core::github::PrTab::Review => {
+                    app.cursors.prs_review =
+                        crate::state::move_cursor(app.cursors.prs_review, delta, shown)
+                }
+            },
+            // The board owns its own filter and its own cursor keys, and the Workspace has no
+            // Hub list at all: neither is reachable from the Hub's filter overlay.
+            (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => {}
         }
         cx.notify();
     });
-    notify(state, cx);
+}
+
+fn reset_cursor(app: &mut AppState) {
+    match (app.hub_pane, &app.screen) {
+        (HubPane::Repos, _) => app.cursors.repos = 0,
+        (
+            HubPane::List,
+            Screen::Hub {
+                tab: HubTab::Worktrees,
+            },
+        ) => app.cursors.worktrees = 0,
+        (HubPane::List, Screen::Hub { tab: HubTab::Prs }) => match app.pr_tab {
+            fleet_core::github::PrTab::Mine => app.cursors.prs_mine = 0,
+            fleet_core::github::PrTab::Review => app.cursors.prs_review = 0,
+        },
+        (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => {}
+    }
 }
 
 /// `Enter`: open the highlighted row straight from the input, so `/rut⏎` is a complete open.
-fn accept(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let target = {
-        let app = state.read(cx);
-        match app.hub_pane {
-            HubPane::Repos => app
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .repos
-                        .iter()
-                        .filter(|repo| matches(repo.id.as_str(), &app.filter.query))
-                        .nth(app.cursors.repos)
-                })
-                .map(|repo| Target::Repo(repo.id.clone())),
-            HubPane::List => visible_worktrees(app)
-                .get(app.cursors.worktrees)
-                .map(|worktree| Target::Worktree(worktree.id.clone())),
-        }
-    };
+fn accept(state: &Entity<AppState>, hub: &HubCtx, cx: &mut App) {
+    let target = filter_target(state.read(cx));
     let Some(target) = target else {
         // §3.10: with no match, `Enter` is inert.
         return;
@@ -248,66 +186,91 @@ fn accept(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         app.filter = crate::state::FilterState::default();
         cx.notify();
     });
+    hub.activate_filter_target(target, cx);
+}
+
+#[cfg(test)]
+fn accept_for_test<T: SessionTransport>(state: &Entity<AppState>, bridge: &T, cx: &mut App) {
+    let Some(target) = filter_target(state.read(cx)) else {
+        return;
+    };
+    state.update(cx, |app, cx| {
+        app.close_overlay();
+        app.filter = crate::state::FilterState::default();
+        cx.notify();
+    });
     match target {
-        Target::Repo(repo) => {
+        DisplayedTarget::AllRepos => select_repo(state, RepoScope::All, cx),
+        DisplayedTarget::Repo(repo) => select_repo(state, RepoScope::Repo(repo), cx),
+        DisplayedTarget::CloneFailed { job, .. } => {
             state.update(cx, |app, cx| {
-                app.scope = RepoScope::Repo(repo);
-                app.hub_pane = HubPane::List;
+                app.open_overlay(crate::state::Overlay::Jobs);
+                app.jobs_focus = job;
                 cx.notify();
             });
         }
-        Target::Worktree(id) => open_worktree(id, state, bridge, cx),
+        DisplayedTarget::Worktree(id) => open_worktree(id, state, bridge, cx),
+        DisplayedTarget::PullRequest(_) => {}
     }
 }
 
-/// What `Enter` opens, resolved before the state is mutated.
-enum Target {
-    Repo(fleet_core::ids::RepoId),
-    Worktree(WorktreeId),
-}
-
-fn open_worktree(id: WorktreeId, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let reply = bridge.request(RequestBody::EnsureSession {
-        worktree: Some(id),
-        agent: None,
-        sleep_previous: true,
+#[cfg(test)]
+fn select_repo(state: &Entity<AppState>, scope: RepoScope, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        app.scope = scope;
+        app.cursors.worktrees = 0;
+        app.hub_pane = HubPane::List;
+        cx.notify();
     });
-    let state = state.clone();
-    cx.spawn(async move |cx| {
-        let Ok(Ok(ResponseBody::Session(session))) = reply.recv().await else {
-            return;
-        };
-        cx.update(|cx| {
-            state.update(cx, |app, cx| {
-                app.touch_session(session.id.clone());
-                app.screen = Screen::Workspace {
-                    session: session.id.clone(),
-                };
-                cx.notify();
-            });
-        });
-    })
-    .detach();
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
-    use crate::state::{FilterEscape, FilterState, filter_escape};
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
 
     use super::*;
 
-    #[test]
-    fn matching_is_case_insensitive_and_substring() {
-        assert!(matches("buk/payroll#fix-RUT", "rut"));
-        assert!(matches("anything", ""));
-        assert!(!matches("buk/payroll", "zzz"));
+    type TestReplySender =
+        async_channel::Sender<Result<ResponseBody, fleet_proto::error::ProtoError>>;
+
+    #[derive(Clone, Default)]
+    struct FakeTransport {
+        requests: Rc<RefCell<Vec<RequestBody>>>,
+        replies: Rc<RefCell<VecDeque<TestReplySender>>>,
+    }
+
+    impl SessionTransport for FakeTransport {
+        fn send(&self, body: RequestBody) {
+            self.requests.borrow_mut().push(body);
+        }
+
+        fn request(
+            &self,
+            body: RequestBody,
+        ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>> {
+            let (sender, receiver) = async_channel::bounded(1);
+            self.requests.borrow_mut().push(body);
+            self.replies.borrow_mut().push_back(sender);
+            receiver
+        }
+    }
+
+    fn displayed_repo(
+        kind: crate::presentation::DisplayedRepoKind,
+        repo: Option<&str>,
+        job: Option<&str>,
+    ) -> crate::presentation::DisplayedRepo {
+        crate::presentation::DisplayedRepo {
+            kind,
+            repo: repo.map(|id| id.parse().expect("repo id")),
+            job: job.map(|id| id.parse().expect("job id")),
+        }
     }
 
     #[test]
     fn delete_word_eats_the_trailing_word_only() {
         assert_eq!(delete_word("feat rut "), "feat ");
+        assert_eq!(delete_word("feat\u{2003}rut "), "feat\u{2003}");
         assert_eq!(delete_word("feat"), "");
         assert_eq!(delete_word(""), "");
     }
@@ -316,29 +279,92 @@ mod tests {
     fn counts_are_zero_without_a_snapshot() {
         let state = AppState::new("/tmp/fleet", Instant::now());
         assert_eq!(counts(&state), (0, 0));
-        assert!(visible_worktrees(&state).is_empty());
     }
 
     #[test]
-    fn the_retained_chip_appears_only_after_the_input_is_left() {
+    fn filter_targets_all_and_pull_requests_from_displayed_rows() {
         let mut state = AppState::new("/tmp/fleet", Instant::now());
-        state.filter = FilterState {
-            query: "rut".to_owned(),
-            editing: true,
-        };
-        assert!(retained_chip(&state).is_none(), "still typing");
-        state.filter.editing = false;
-        assert!(
-            retained_chip(&state).is_some(),
-            "filter is hidden otherwise"
-        );
-        state.filter.query.clear();
-        assert!(retained_chip(&state).is_none());
+        state.displayed_hub.repos = vec![
+            displayed_repo(crate::presentation::DisplayedRepoKind::All, None, None),
+            displayed_repo(
+                crate::presentation::DisplayedRepoKind::Repo,
+                Some("acme/api"),
+                None,
+            ),
+        ];
+        state.displayed_hub.repo_total = 3;
+        state.hub_pane = HubPane::Repos;
+        assert_eq!(counts(&state), (2, 3));
+        assert_eq!(filter_target(&state), Some(DisplayedTarget::AllRepos));
+
+        state.hub_pane = HubPane::List;
+        state.screen = Screen::Hub { tab: HubTab::Prs };
+        state.displayed_hub.prs = vec![DisplayedPr {
+            repo: "acme/api".parse().expect("repo id"),
+            number: 42,
+            local: Some("acme/api#topic".parse().expect("worktree id")),
+        }];
+        state.displayed_hub.pr_total = 4;
+        assert_eq!(counts(&state), (1, 4));
+        assert!(matches!(
+            filter_target(&state),
+            Some(DisplayedTarget::PullRequest(DisplayedPr { number: 42, .. }))
+        ));
     }
 
-    #[test]
-    fn escape_is_two_staged_and_never_quits() {
-        assert_eq!(filter_escape(true), FilterEscape::LeaveInput);
-        assert_eq!(filter_escape(false), FilterEscape::ClearFilter);
+    #[gpui::test]
+    fn filter_accepts_clone_failed_like_hub(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.hub_pane = HubPane::Repos;
+            state.overlay = Some(crate::state::Overlay::Filter);
+            state.displayed_hub.repos = vec![displayed_repo(
+                crate::presentation::DisplayedRepoKind::CloneFailed,
+                Some("acme/api"),
+                Some("clone-job"),
+            )];
+            state
+        });
+        let transport = FakeTransport::default();
+
+        cx.update(|cx| accept_for_test(&state, &transport, cx));
+
+        cx.read(|cx| {
+            let app = state.read(cx);
+            assert!(matches!(app.overlay, Some(crate::state::Overlay::Jobs)));
+            assert_eq!(
+                app.jobs_focus.as_ref().map(|job| job.as_str()),
+                Some("clone-job")
+            );
+            assert_eq!(app.cursors.worktrees, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn filter_repo_activation_resets_worktree_cursor(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.hub_pane = HubPane::Repos;
+            state.cursors.worktrees = 7;
+            state.displayed_hub.repos = vec![displayed_repo(
+                crate::presentation::DisplayedRepoKind::Repo,
+                Some("acme/api"),
+                None,
+            )];
+            state
+        });
+        let transport = FakeTransport::default();
+
+        cx.update(|cx| accept_for_test(&state, &transport, cx));
+
+        cx.read(|cx| {
+            let app = state.read(cx);
+            assert_eq!(
+                app.scope,
+                RepoScope::Repo("acme/api".parse().expect("repo id"))
+            );
+            assert_eq!(app.cursors.worktrees, 0);
+            assert_eq!(app.hub_pane, HubPane::List);
+        });
     }
 }

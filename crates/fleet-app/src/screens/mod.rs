@@ -1,7 +1,7 @@
 //! Top-level Fleet screens and navigation boundaries.
 
-pub mod agent_popup;
-pub mod board;
-pub mod hub;
-pub mod jobs;
-pub mod workspace;
+pub(crate) mod agent_popup;
+pub(crate) mod board;
+pub(crate) mod hub;
+pub(crate) mod jobs;
+pub(crate) mod workspace;

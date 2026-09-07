@@ -9,7 +9,7 @@ use gpui::{App, Div, FontWeight, Hsla, Pixels, SharedString, Window, div, prelud
 use crate::{
     theme::{ActiveTheme, FontRole, Theme, TypeStyle},
     tone::Tone,
-    truncate::{Truncate, truncate},
+    truncate::Truncate,
 };
 
 /// One of the type roles of the design system.
@@ -192,9 +192,24 @@ impl Text {
 
     /// The string this run will render, after the `ch` budget is applied.
     pub fn resolved_text(&self) -> SharedString {
+        self.resolved_text_in(&Theme::default())
+    }
+
+    /// The string this run will render under `theme`, after role casing and the `ch` budget.
+    pub fn resolved_text_in(&self, theme: &Theme) -> SharedString {
+        let text = if self.role.style(theme).uppercase {
+            let uppercase = self.text.to_uppercase();
+            if uppercase == self.text.as_ref() {
+                self.text.clone()
+            } else {
+                SharedString::from(uppercase)
+            }
+        } else {
+            self.text.clone()
+        };
         match self.budget {
-            Some((budget, mode)) => truncate(self.text.as_ref(), budget, mode),
-            None => self.text.clone(),
+            Some((budget, mode)) => crate::truncate::truncate_shared(text, budget, mode),
+            None => text,
         }
     }
 }
@@ -218,10 +233,7 @@ impl RenderOnce for Text {
         let theme = cx.theme();
         let style = self.role.style(theme);
         let color = self.color.unwrap_or_else(|| self.tone.color(theme));
-        let mut text = self.resolved_text();
-        if style.uppercase {
-            text = SharedString::from(text.to_uppercase());
-        }
+        let text = self.resolved_text_in(theme);
 
         let mut el: Div = styled_with(div(), style, theme).text_color(color);
         if let Some(weight) = self.weight {
@@ -243,5 +255,26 @@ impl RenderOnce for Text {
             el = el.flex_none();
         }
         el.child(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uppercase_expansion_stays_within_budget() {
+        let text = Text::label("straße").truncate_at(6, Truncate::Tail);
+        assert_eq!(text.resolved_text(), "STRAS…");
+    }
+
+    #[test]
+    fn uppercase_follows_theme_token_for_every_role() {
+        let mut theme = Theme::default();
+        theme.text.label.uppercase = false;
+        theme.text.ui.uppercase = true;
+
+        assert_eq!(Text::label("Label").resolved_text_in(&theme), "Label");
+        assert_eq!(Text::ui("straße").resolved_text_in(&theme), "STRASSE");
     }
 }

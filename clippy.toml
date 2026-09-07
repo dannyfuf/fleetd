@@ -1,0 +1,5 @@
+# Fleet uses blocking process APIs on dedicated Tokio/PTY threads. Process and
+# timer restrictions belong at those ownership boundaries, not across the workspace.
+disallowed-methods = [
+    { path = "serde_json::from_reader", reason = "Read into a buffer, then use serde_json::from_slice to avoid per-byte reader overhead." },
+]

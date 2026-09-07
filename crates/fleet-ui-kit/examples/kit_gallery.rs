@@ -8,12 +8,17 @@
 //! cargo run -p fleet-ui-kit --example kit_gallery
 //! ```
 
-use fleet_ui_kit::KitAssets;
+pub mod support;
+const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
+    label_width: 150.0,
+    column: false,
+    divided: false,
+    compact: false,
+};
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Menu, MenuItem,
-    SharedString, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
-    actions, div, px, size,
+    AnyElement, App, Context, FocusHandle, Focusable, KeyBinding, SharedString,
+    UniformListScrollHandle, Window, actions, div, px,
 };
 
 actions!(kit_gallery, [ToggleTheme, Quit]);
@@ -49,50 +54,7 @@ impl Focusable for Gallery {
     }
 }
 
-// ---------------------------------------------------------------- layout helpers
-
-fn section(title: &str, t: &Theme, children: Vec<AnyElement>) -> AnyElement {
-    let theme = t;
-    div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .gap(theme.space.md)
-        .pb(theme.space.xl)
-        .child(SectionHeader::new(title.to_string()))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .gap(theme.space.md)
-                .children(children),
-        )
-        .into_any_element()
-}
-
-fn labeled(label: &str, t: &Theme, child: impl IntoElement) -> AnyElement {
-    let theme = t;
-    div()
-        .flex()
-        .items_start()
-        .w_full()
-        .gap(theme.space.md)
-        .child(Text::hint(label.to_string()).faint().w(px(150.0)))
-        .child(div().flex().flex_1().min_w_0().items_center().child(child))
-        .into_any_element()
-}
-
-fn strip(t: &Theme, children: Vec<AnyElement>) -> AnyElement {
-    let theme = t;
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(theme.space.md)
-        .children(children)
-        .into_any_element()
-}
+use support::layout::strip;
 
 fn box_of(t: &Theme, height: gpui::Pixels, child: impl IntoElement) -> AnyElement {
     let theme = t;
@@ -102,14 +64,12 @@ fn box_of(t: &Theme, height: gpui::Pixels, child: impl IntoElement) -> AnyElemen
         .h(height)
         .rounded(theme.radii.sm)
         .bg(theme.colors.surface)
-        .border_1()
+        .border(theme.metrics.hairline)
         .border_color(theme.colors.border)
         .overflow_hidden()
         .child(child)
         .into_any_element()
 }
-
-// ---------------------------------------------------------------- sections
 
 fn colors_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
@@ -125,7 +85,7 @@ fn colors_section(cx: &mut App) -> AnyElement {
                     .w_full()
                     .rounded(t.radii.sm)
                     .bg(color)
-                    .border_1()
+                    .border(t.metrics.hairline)
                     .border_color(t.colors.border),
             )
             .child(Text::hint(name).faint())
@@ -163,7 +123,7 @@ fn colors_section(cx: &mut App) -> AnyElement {
                         .size(px(24.0))
                         .rounded(t.radii.xs)
                         .bg(t.terminal.color(ix))
-                        .border_1()
+                        .border(t.metrics.hairline)
                         .border_color(t.colors.border),
                 )
                 .child(Text::hint(ix.to_string()).faint())
@@ -172,9 +132,9 @@ fn colors_section(cx: &mut App) -> AnyElement {
         .collect();
 
     let children = vec![
-        labeled("color roles", &t, strip(&t, roles)),
-        labeled("terminal ansi", &t, strip(&t, ansi)),
-        labeled(
+        LAYOUT.labeled("color roles", &t, strip(&t, roles)),
+        LAYOUT.labeled("terminal ansi", &t, strip(&t, ansi)),
+        LAYOUT.labeled(
             "terminal default",
             &t,
             strip(
@@ -187,36 +147,36 @@ fn colors_section(cx: &mut App) -> AnyElement {
             ),
         ),
     ];
-    section("colors", &t, children)
+    LAYOUT.section("colors", &t, children)
 }
 
 fn type_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let children = vec![
-        labeled(
+        LAYOUT.labeled(
             "ui 13/18",
             &t,
             Text::ui("feat/payroll-fix — the branch you think in"),
         ),
-        labeled(
+        LAYOUT.labeled(
             "ui_strong 13/18",
             &t,
             Text::ui_strong("Fix RUT validation on payroll import"),
         ),
-        labeled("title 15/20", &t, Text::title("New worktree")),
-        labeled(
+        LAYOUT.labeled("title 15/20", &t, Text::title("New worktree")),
+        LAYOUT.labeled(
             "data 12.5/18",
             &t,
             Text::data("~/.fleet/worktrees/buk/payroll/feat-payroll-fix"),
         ),
-        labeled(
+        LAYOUT.labeled(
             "data_small 11.5/16",
             &t,
             Text::data_small("Receiving objects: 40% (81/202)"),
         ),
-        labeled("label 11/14", &t, Text::label("worktrees")),
-        labeled("hint mono 11/14", &t, Text::hint("⏎ open · esc cancel")),
-        labeled(
+        LAYOUT.labeled("label 11/14", &t, Text::label("worktrees")),
+        LAYOUT.labeled("hint mono 11/14", &t, Text::hint("⏎ open · esc cancel")),
+        LAYOUT.labeled(
             "truncate head/middle/tail",
             &t,
             strip(
@@ -231,7 +191,7 @@ fn type_section(cx: &mut App) -> AnyElement {
             ),
         ),
     ];
-    section("type", &t, children)
+    LAYOUT.section("type", &t, children)
 }
 
 fn icons_section(cx: &mut App) -> AnyElement {
@@ -260,10 +220,10 @@ fn icons_section(cx: &mut App) -> AnyElement {
         ],
     );
     let children = vec![
-        labeled("sizes 12 / 14 / 16 + spinner", &t, sizes),
+        LAYOUT.labeled("sizes 12 / 14 / 16 + spinner", &t, sizes),
         strip(&t, icons),
     ];
-    section("icons (lucide, stroke 1.5)", &t, children)
+    LAYOUT.section("icons (lucide, stroke 1.5)", &t, children)
 }
 
 fn glyphs_section(cx: &mut App) -> AnyElement {
@@ -310,14 +270,14 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
         .collect();
 
     let children = vec![
-        labeled("status glyphs", &t, strip(&t, glyphs)),
-        labeled("pr badges", &t, strip(&t, badges)),
-        labeled(
+        LAYOUT.labeled("status glyphs", &t, strip(&t, glyphs)),
+        LAYOUT.labeled("pr badges", &t, strip(&t, badges)),
+        LAYOUT.labeled(
             "pr badge, stale (>10 min)",
             &t,
             PrBadge::new(412, PrBadgeState::CiFail).stale(true),
         ),
-        labeled(
+        LAYOUT.labeled(
             "chips",
             &t,
             strip(
@@ -351,7 +311,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "badges",
             &t,
             strip(
@@ -372,7 +332,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "status dots",
             &t,
             strip(
@@ -385,7 +345,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "daemon dot",
             &t,
             strip(
@@ -401,7 +361,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "keep-alive / degraded",
             &t,
             strip(
@@ -421,7 +381,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "age labels",
             &t,
             strip(
@@ -434,7 +394,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "freshness ladder",
             &t,
             strip(
@@ -451,7 +411,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "mode words",
             &t,
             strip(
@@ -468,7 +428,7 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "key hints",
             &t,
             KeyHintRow::new()
@@ -476,9 +436,9 @@ fn glyphs_section(cx: &mut App) -> AnyElement {
                 .key("^s x", "close")
                 .key("esc", "cancel"),
         ),
-        labeled("divider", &t, div().w_full().child(Divider::horizontal())),
+        LAYOUT.labeled("divider", &t, div().w_full().child(Divider::horizontal())),
     ];
-    section("vocabulary", &t, children)
+    LAYOUT.section("vocabulary", &t, children)
 }
 
 fn facts_section(cx: &mut App) -> AnyElement {
@@ -496,7 +456,7 @@ fn facts_section(cx: &mut App) -> AnyElement {
         Fact::safe("PR #412 open (not merged)"),
     ]);
     let children = vec![
-        labeled(
+        LAYOUT.labeled(
             "key/value list",
             &t,
             KeyValueList::titled("safety")
@@ -511,9 +471,9 @@ fn facts_section(cx: &mut App) -> AnyElement {
                 )
                 .row("warning", FactValue::warning("gh unavailable")),
         ),
-        labeled("fact list · compact (y)", &t, compact),
-        labeled("fact list · expanded (Y)", &t, expanded),
-        labeled(
+        LAYOUT.labeled("fact list · compact (y)", &t, compact),
+        LAYOUT.labeled("fact list · expanded (Y)", &t, expanded),
+        LAYOUT.labeled(
             "doctor table",
             &t,
             DoctorTable::new([
@@ -531,7 +491,7 @@ fn facts_section(cx: &mut App) -> AnyElement {
                 ),
             ]),
         ),
-        labeled(
+        LAYOUT.labeled(
             "empty state",
             &t,
             box_of(
@@ -540,13 +500,13 @@ fn facts_section(cx: &mut App) -> AnyElement {
                 EmptyState::new("No worktrees yet.").action("n  create one"),
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "skeleton rows",
             &t,
             box_of(&t, px(120.0), SkeletonRows::new(4)),
         ),
     ];
-    section("facts and tables", &t, children)
+    LAYOUT.section("facts and tables", &t, children)
 }
 
 fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -> AnyElement {
@@ -674,10 +634,10 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
     );
 
     let children = vec![
-        labeled("row states", &t, states),
-        labeled("list view (virtualized)", &t, list),
-        labeled("job rows", &t, jobs),
-        labeled(
+        LAYOUT.labeled("row states", &t, states),
+        LAYOUT.labeled("list view (virtualized)", &t, list),
+        LAYOUT.labeled("job rows", &t, jobs),
+        LAYOUT.labeled(
             "ticker / sticky error",
             &t,
             strip(
@@ -691,7 +651,7 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "column ladder (worktrees @ 138 / 93 / 60 ch)",
             &t,
             strip(
@@ -713,7 +673,7 @@ fn rows_section(cx: &mut App, cursor: usize, scroll: &UniformListScrollHandle) -
             ),
         ),
     ];
-    section("rows and lists", &t, children)
+    LAYOUT.section("rows and lists", &t, children)
 }
 
 fn structure_section(cx: &mut App) -> AnyElement {
@@ -773,7 +733,10 @@ fn structure_section(cx: &mut App) -> AnyElement {
     let filtered = box_of(
         &t,
         t.metrics.pane_header_h,
-        PaneHeader::new("worktrees").filter(FilterBar::new("rut", 2, 12)),
+        PaneHeader::new("worktrees")
+            .shown(2)
+            .total(12)
+            .query_slot(FilterBar::new("rut", 2, 12).query_slot()),
     );
     let retained = box_of(
         &t,
@@ -836,14 +799,14 @@ fn structure_section(cx: &mut App) -> AnyElement {
     );
 
     let children = vec![
-        labeled("context bar", &t, bars),
-        labeled("status bar", &t, status),
-        labeled("status bar · error", &t, status_error),
-        labeled("panes + split", &t, pane),
-        labeled("pane header · filtering", &t, filtered),
-        labeled("pane header · retained", &t, retained),
-        labeled("pane header · stale", &t, stale),
-        labeled(
+        LAYOUT.labeled("context bar", &t, bars),
+        LAYOUT.labeled("status bar", &t, status),
+        LAYOUT.labeled("status bar · error", &t, status_error),
+        LAYOUT.labeled("panes + split", &t, pane),
+        LAYOUT.labeled("pane header · filtering", &t, filtered),
+        LAYOUT.labeled("pane header · retained", &t, retained),
+        LAYOUT.labeled("pane header · stale", &t, stale),
+        LAYOUT.labeled(
             "banner",
             &t,
             box_of(
@@ -855,7 +818,7 @@ fn structure_section(cx: &mut App) -> AnyElement {
             ),
         ),
     ];
-    section("structure", &t, children)
+    LAYOUT.section("structure", &t, children)
 }
 
 fn terminal_section(cx: &mut App) -> AnyElement {
@@ -886,7 +849,7 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     let grid = box_of(
         &t,
         px(96.0),
-        TerminalGrid::new(rows)
+        TerminalGrid::from_shared(rows)
             .cursor(GridCursor {
                 row: 1,
                 col: 34,
@@ -898,38 +861,53 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     );
 
     // Every cell attribute, so a regression in the proto -> kit conversion is visible here.
-    let attr_cell =
-        |text: &str, f: fn(GridCell) -> GridCell| f(GridCell::new(text.to_string(), &t));
-    let attrs_row = GridRow::new([
-        attr_cell("bold ", |c| c.bold(true)),
-        attr_cell("dim ", |c| c.dim(true)),
-        attr_cell("italic ", |c| c.italic(true)),
-        attr_cell("under ", |c| c.underline(UnderlineStyle::Single)),
-        attr_cell("double ", |c| c.underline(UnderlineStyle::Double)),
-        attr_cell("curly ", |c| c.underline(UnderlineStyle::Curly)),
-        attr_cell("strike ", |c| c.strikethrough(true)),
-        attr_cell("blink ", |c| c.blink(true)),
-        attr_cell("hidden ", |c| c.invisible(true)),
-    ]);
-    let attrs_row_2 = GridRow::new([
-        attr_cell("inverse", |c| c.inverse(true)),
-        GridCell::new(" ", &t),
-        GridCell::new("err", &t)
-            .underline(UnderlineStyle::Curly)
-            .underline_color(t.colors.danger),
-        GridCell::new(" ", &t),
-        GridCell::new("\u{5e83}", &t).width(CellWidth::Wide),
-        GridCell::new("", &t).width(CellWidth::Spacer),
-        GridCell::new("\u{3044}", &t).width(CellWidth::Wide),
-        GridCell::new("", &t).width(CellWidth::Spacer),
-        GridCell::new(" wide + spacer", &t),
-    ]);
-    let attrs = box_of(&t, px(56.0), TerminalGrid::new([attrs_row, attrs_row_2]));
+    let attr_cells = |text: &str, style: fn(GridCell) -> GridCell| {
+        text.chars()
+            .map(|ch| style(GridCell::new(ch.to_string(), &t)))
+            .collect::<Vec<_>>()
+    };
+    let attrs_row = GridRow::new(
+        [
+            attr_cells("bold ", |c| c.bold(true)),
+            attr_cells("dim ", |c| c.dim(true)),
+            attr_cells("italic ", |c| c.italic(true)),
+            attr_cells("under ", |c| c.underline(UnderlineStyle::Single)),
+            attr_cells("double ", |c| c.underline(UnderlineStyle::Double)),
+            attr_cells("curly ", |c| c.underline(UnderlineStyle::Curly)),
+            attr_cells("strike ", |c| c.strikethrough(true)),
+            attr_cells("blink ", |c| c.blink(true)),
+            attr_cells("hidden ", |c| c.invisible(true)),
+        ]
+        .into_iter()
+        .flatten(),
+    );
+    let attrs_row_2 = GridRow::new(
+        attr_cells("inverse ", |c| c.inverse(true))
+            .into_iter()
+            .chain("err".chars().map(|ch| {
+                GridCell::new(ch.to_string(), &t)
+                    .underline(UnderlineStyle::Curly)
+                    .underline_color(t.colors.danger)
+            }))
+            .chain([
+                GridCell::new(" ", &t),
+                GridCell::new("広", &t).width(CellWidth::Wide),
+                GridCell::new("", &t).width(CellWidth::Spacer),
+                GridCell::new("い", &t).width(CellWidth::Wide),
+                GridCell::new("", &t).width(CellWidth::Spacer),
+            ])
+            .chain(attr_cells(" wide + spacer", |c| c)),
+    );
+    let attrs = box_of(
+        &t,
+        px(56.0),
+        TerminalGrid::from_shared([attrs_row, attrs_row_2]),
+    );
 
     let unfocused = box_of(
         &t,
         px(38.0),
-        TerminalGrid::new([GridRow::new(
+        TerminalGrid::from_shared([GridRow::new(
             "hollow cursor \u{2014} terminal not focused"
                 .chars()
                 .map(|c| GridCell::new(c.to_string(), &t)),
@@ -949,7 +927,7 @@ fn terminal_section(cx: &mut App) -> AnyElement {
         div().flex().size_full().bg(t.terminal.background).children(
             [CursorShape::Block, CursorShape::Bar, CursorShape::Underline].map(|shape| {
                 div().w(px(120.0)).h_full().child(
-                    TerminalGrid::new([GridRow::new(
+                    TerminalGrid::from_shared([GridRow::new(
                         "  shape".chars().map(|c| GridCell::new(c.to_string(), &t)),
                     )])
                     .cursor(GridCursor {
@@ -1011,7 +989,7 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     let veiled = box_of(
         &t,
         px(72.0),
-        Veil::new(true).child(
+        Veil::new(true).content(
             div()
                 .size_full()
                 .bg(t.terminal.background)
@@ -1021,14 +999,14 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     );
 
     let children = vec![
-        labeled("terminal grid", &t, grid),
-        labeled("cell attributes", &t, attrs),
-        labeled("cursor shapes", &t, cursor_shapes),
-        labeled("unfocused cursor", &t, unfocused),
-        labeled("tab strip", &t, strip_el),
-        labeled("scroll pill + prefix hint", &t, overlays),
-        labeled("scrollback badge", &t, badge),
-        labeled(
+        LAYOUT.labeled("terminal grid", &t, grid),
+        LAYOUT.labeled("cell attributes", &t, attrs),
+        LAYOUT.labeled("cursor shapes", &t, cursor_shapes),
+        LAYOUT.labeled("unfocused cursor", &t, unfocused),
+        LAYOUT.labeled("tab strip", &t, strip_el),
+        LAYOUT.labeled("scroll pill + prefix hint", &t, overlays),
+        LAYOUT.labeled("scrollback badge", &t, badge),
+        LAYOUT.labeled(
             "vt modes",
             &t,
             strip(
@@ -1046,32 +1024,34 @@ fn terminal_section(cx: &mut App) -> AnyElement {
                 ],
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "exit strip",
             &t,
             box_of(&t, t.metrics.strip_h, ExitStrip::new(1)),
         ),
-        labeled(
+        LAYOUT.labeled(
             "exit strip (signal, no code)",
             &t,
             box_of(&t, t.metrics.strip_h, ExitStrip::new(None)),
         ),
-        labeled("veil (daemon lost)", &t, veiled),
-        labeled(
+        LAYOUT.labeled("veil (daemon lost)", &t, veiled),
+        LAYOUT.labeled(
             "log view",
             &t,
             box_of(
                 &t,
                 px(96.0),
-                LogView::new(
+                LogView::from_shared(
                     "gallery-log",
-                    (0..40).map(|i| {
-                        SharedString::from(format!("[{i:03}] remote: Counting objects\u{2026}"))
-                    }),
+                    (0..40)
+                        .map(|i| {
+                            SharedString::from(format!("[{i:03}] remote: Counting objects\u{2026}"))
+                        })
+                        .collect::<Vec<_>>(),
                 ),
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "daemon splash (cold start)",
             &t,
             box_of(
@@ -1080,7 +1060,7 @@ fn terminal_section(cx: &mut App) -> AnyElement {
                 DaemonSplash::starting("Starting fleetd\u{2026}").detail("~/.fleet/fleetd.sock"),
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "daemon splash (will not start)",
             &t,
             box_of(
@@ -1103,13 +1083,13 @@ fn terminal_section(cx: &mut App) -> AnyElement {
             ),
         ),
     ];
-    section("terminal", &t, children)
+    LAYOUT.section("terminal", &t, children)
 }
 
 fn input_section(cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let children = vec![
-        labeled(
+        LAYOUT.labeled(
             "text field",
             &t,
             div().flex().flex_col().w(px(360.0)).child(
@@ -1119,7 +1099,7 @@ fn input_section(cx: &mut App) -> AnyElement {
                     .preview("→ buk/payroll#feat-rut-validator"),
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "text field · invalid",
             &t,
             div().flex().flex_col().w(px(360.0)).child(
@@ -1128,7 +1108,7 @@ fn input_section(cx: &mut App) -> AnyElement {
                     .invalid("branch cannot contain \"..\""),
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "text field · placeholder",
             &t,
             div().flex().flex_col().w(px(360.0)).child(
@@ -1137,12 +1117,12 @@ fn input_section(cx: &mut App) -> AnyElement {
                     .icon(Icon::Search),
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "cycler",
             &t,
             Cycler::labeled("host", "local").has_prev(false),
         ),
-        labeled(
+        LAYOUT.labeled(
             "toggles",
             &t,
             div()
@@ -1157,7 +1137,7 @@ fn input_section(cx: &mut App) -> AnyElement {
                         .disabled(true),
                 ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "number fields",
             &t,
             div()
@@ -1176,7 +1156,7 @@ fn input_section(cx: &mut App) -> AnyElement {
                         .min(500),
                 ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "segmented tabs",
             &t,
             SegmentedTabs::new([
@@ -1185,7 +1165,7 @@ fn input_section(cx: &mut App) -> AnyElement {
             ])
             .active(0),
         ),
-        labeled(
+        LAYOUT.labeled(
             "select + fuzzy list",
             &t,
             div().w(px(420.0)).child(
@@ -1204,7 +1184,7 @@ fn input_section(cx: &mut App) -> AnyElement {
                     ),
             ),
         ),
-        labeled(
+        LAYOUT.labeled(
             "fuzzy list · two-line",
             &t,
             div().w(px(420.0)).child(
@@ -1221,7 +1201,7 @@ fn input_section(cx: &mut App) -> AnyElement {
             ),
         ),
     ];
-    section("input", &t, children)
+    LAYOUT.section("input", &t, children)
 }
 
 fn overlays_section(cx: &mut App) -> AnyElement {
@@ -1285,7 +1265,7 @@ fn overlays_section(cx: &mut App) -> AnyElement {
     let palette = box_of(
         &t,
         px(320.0),
-        Overlay::new().top(px(12.0)).width(px(560.0)).child(
+        Overlay::new().top(px(12.0)).width(px(560.0)).content(
             Palette::new("pay fix")
                 .total(63)
                 .section(PaletteSection::new(
@@ -1326,7 +1306,7 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                 div()
                     .flex()
                     .flex_col()
-                    .p(px(12.0))
+                    .p(t.space.md)
                     .child(
                         SectionHeader::new("jobs")
                             .trailing(Text::hint("⟳2 running · ✕1 failed").faint()),
@@ -1353,7 +1333,7 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                     ),
             )
             .footer(
-                div().p(px(12.0)).child(
+                div().p(t.space.md).child(
                     KeyHintRow::new()
                         .key("⏎", "log")
                         .key("c", "cancel")
@@ -1377,14 +1357,14 @@ fn overlays_section(cx: &mut App) -> AnyElement {
     );
 
     let children = vec![
-        labeled("dialog", &t, dialog),
-        labeled("confirm · compact", &t, confirm_compact),
-        labeled("confirm · expanded", &t, confirm_expanded),
-        labeled("palette (overlay)", &t, palette),
-        labeled("sheet (jobs)", &t, sheet),
-        labeled("toast stack", &t, toasts),
+        LAYOUT.labeled("dialog", &t, dialog),
+        LAYOUT.labeled("confirm · compact", &t, confirm_compact),
+        LAYOUT.labeled("confirm · expanded", &t, confirm_expanded),
+        LAYOUT.labeled("palette (overlay)", &t, palette),
+        LAYOUT.labeled("sheet (jobs)", &t, sheet),
+        LAYOUT.labeled("toast stack", &t, toasts),
     ];
-    section("overlays", &t, children)
+    LAYOUT.section("overlays", &t, children)
 }
 
 // ---------------------------------------------------------------- board
@@ -1567,13 +1547,13 @@ fn board_section(cx: &mut App) -> AnyElement {
         );
 
     let children = vec![
-        labeled("kanban board", &t, box_of(&t, px(360.0), board)),
-        labeled("card tiles", &t, tiles),
-        labeled("priority glyphs", &t, priorities),
-        labeled("markdown", &t, markdown),
-        labeled("text areas", &t, text_areas),
+        LAYOUT.labeled("kanban board", &t, box_of(&t, px(360.0), board)),
+        LAYOUT.labeled("card tiles", &t, tiles),
+        LAYOUT.labeled("priority glyphs", &t, priorities),
+        LAYOUT.labeled("markdown", &t, markdown),
+        LAYOUT.labeled("text areas", &t, text_areas),
     ];
-    section("board", &t, children)
+    LAYOUT.section("board", &t, children)
 }
 
 impl Render for Gallery {
@@ -1635,52 +1615,17 @@ impl Render for Gallery {
 }
 
 fn main() {
-    gpui_platform::application()
-        .with_assets(KitAssets)
-        .run(|cx: &mut App| {
-            Theme::init(ThemeMode::Dark, cx);
+    support::runtime::run(
+        "fleet-ui-kit gallery",
+        (1280.0, 800.0),
+        Quit,
+        |cx| {
             cx.bind_keys([
                 KeyBinding::new("t", ToggleTheme, None),
                 KeyBinding::new("q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
             ]);
-            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-            cx.set_menus(vec![Menu {
-                name: "fleet-ui-kit".into(),
-                items: vec![MenuItem::action("Quit", Quit)],
-                disabled: false,
-            }]);
-            cx.on_window_closed(|cx: &mut App, _window_id| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("fleet-ui-kit gallery".into()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    |_window, cx| {
-                        let view: Entity<Gallery> = cx.new(Gallery::new);
-                        view
-                    },
-                )
-                .expect("failed to open the gallery window");
-
-            window
-                .update(cx, |view, window, cx| {
-                    window.focus(&view.focus_handle(cx), cx);
-                })
-                .ok();
-
-            cx.activate(true);
-        });
+        },
+        Gallery::new,
+    );
 }

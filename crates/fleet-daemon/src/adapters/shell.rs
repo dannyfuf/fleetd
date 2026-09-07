@@ -13,10 +13,13 @@ use tokio::{
     fs::OpenOptions,
     io::{AsyncBufReadExt, BufReader},
     process::Command,
+    task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::{DaemonError, DaemonResult};
+
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A fully specified process invocation without shell interpolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,13 +210,22 @@ impl Shell for RealShell {
             .process_group(0)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
-        let child = process
+        let mut child = process
             .spawn()
             .map_err(|error| DaemonError::Shell(format!("{description}: {error}")))?;
         let pid = child
             .id()
             .ok_or_else(|| DaemonError::Shell(format!("{description}: child has no pid")))?;
-        drop(child);
+        // A detached child survives runtime shutdown; while running, the daemon reaps it.
+        tokio::spawn(async move {
+            match child.wait().await {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!(pid, %status, %description, "detached command failed"),
+                Err(error) => {
+                    tracing::warn!(pid, %error, %description, "failed to reap detached command")
+                }
+            }
+        });
         Ok(DetachedProcess { pid })
     }
 
@@ -227,6 +239,7 @@ impl Shell for RealShell {
         let timeout = command.timeout;
         let mut process = build_command(&command);
         process
+            .process_group(0)
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -241,33 +254,106 @@ impl Shell for RealShell {
             .stderr
             .take()
             .ok_or_else(|| DaemonError::Shell("streaming child stderr unavailable".to_owned()))?;
-        let stdout_task = stream_lines(stdout, Arc::clone(&on_line));
-        let stderr_task = stream_lines(stderr, on_line);
-        let wait = async {
-            tokio::select! {
-                () = cancel.cancelled() => {
-                    child.kill().await.map_err(|error| DaemonError::Shell(format!("{description}: {error}")))?;
-                    let _status = child.wait().await;
-                    Err(DaemonError::Cancelled)
-                }
-                status = child.wait() => status
-                    .map(|status| ShellResult {
-                        status: status.code().unwrap_or(-1),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    })
-                    .map_err(|error| DaemonError::Shell(format!("{description}: {error}"))),
+        let pid = child
+            .id()
+            .ok_or_else(|| DaemonError::Shell(format!("{description}: child has no pid")))?;
+        let mut drains = JoinSet::new();
+        let stdout_callback = Arc::clone(&on_line);
+        drains.spawn(async move { ("stdout", stream_lines(stdout, stdout_callback).await) });
+        drains.spawn(async move { ("stderr", stream_lines(stderr, on_line).await) });
+
+        let deadline = async {
+            match timeout {
+                Some(timeout) => tokio::time::sleep(timeout).await,
+                None => std::future::pending().await,
             }
         };
-        let result = if let Some(timeout) = timeout {
-            tokio::time::timeout(timeout, wait)
-                .await
-                .map_err(|_| DaemonError::Timeout(subcommand(&command)))?
-        } else {
-            wait.await
+        tokio::pin!(deadline);
+        let completion = tokio::select! {
+            () = cancel.cancelled() => StreamingCompletion::Cancelled,
+            status = child.wait() => StreamingCompletion::Exited(status),
+            () = &mut deadline => StreamingCompletion::TimedOut,
         };
-        let (_stdout_result, _stderr_result) = tokio::join!(stdout_task, stderr_task);
-        result
+
+        match completion {
+            StreamingCompletion::Exited(status) => {
+                let status = status
+                    .map_err(|error| DaemonError::Shell(format!("{description}: {error}")))?;
+                finish_streams(&mut drains, &description).await?;
+                Ok(ShellResult {
+                    status: status.code().unwrap_or(-1),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+            StreamingCompletion::Cancelled => {
+                terminate_process_group(&mut child, pid, &description).await?;
+                let _ignored = finish_streams(&mut drains, &description).await;
+                Err(DaemonError::Cancelled)
+            }
+            StreamingCompletion::TimedOut => {
+                terminate_process_group(&mut child, pid, &description).await?;
+                let _ignored = finish_streams(&mut drains, &description).await;
+                Err(DaemonError::Timeout(subcommand(&command)))
+            }
+        }
+    }
+}
+
+enum StreamingCompletion {
+    Exited(std::io::Result<std::process::ExitStatus>),
+    Cancelled,
+    TimedOut,
+}
+
+async fn terminate_process_group(
+    child: &mut tokio::process::Child,
+    pid: u32,
+    description: &str,
+) -> DaemonResult<()> {
+    let group_pid = i32::try_from(pid)
+        .map_err(|_| DaemonError::Shell(format!("{description}: invalid child pid {pid}")))?;
+    // SAFETY: the child was placed in a process group whose id equals its pid; a negative id
+    // targets that group and SIGKILL cannot be caught by descendants holding inherited pipes.
+    let killed = unsafe { libc::kill(-group_pid, libc::SIGKILL) };
+    let kill_error = std::io::Error::last_os_error();
+    if killed != 0 && kill_error.raw_os_error() != Some(libc::ESRCH) {
+        let _ignored = child.kill().await;
+        return Err(DaemonError::Shell(format!(
+            "{description}: kill process group {pid}: {kill_error}"
+        )));
+    }
+    tokio::time::timeout(STREAM_DRAIN_TIMEOUT, child.wait())
+        .await
+        .map_err(|_| DaemonError::Shell(format!("{description}: child did not exit after kill")))?
+        .map_err(|error| DaemonError::Shell(format!("{description}: reap child: {error}")))?;
+    Ok(())
+}
+
+async fn finish_streams(
+    drains: &mut JoinSet<(&'static str, std::io::Result<()>)>,
+    description: &str,
+) -> DaemonResult<()> {
+    let result = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, async {
+        while let Some(joined) = drains.join_next().await {
+            let (name, result) = joined.map_err(|error| {
+                DaemonError::Shell(format!("{description}: stream task failed: {error}"))
+            })?;
+            result.map_err(|error| {
+                DaemonError::Shell(format!("{description}: read {name}: {error}"))
+            })?;
+        }
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            drains.abort_all();
+            Err(DaemonError::Shell(format!(
+                "{description}: stream drain timed out"
+            )))
+        }
     }
 }
 
@@ -307,14 +393,15 @@ fn describe(command: &ShellCommand) -> String {
         .join(" ")
 }
 
-async fn stream_lines<R>(reader: R, on_line: LineCallback)
+async fn stream_lines<R>(reader: R, on_line: LineCallback) -> std::io::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    while let Some(line) = lines.next_line().await? {
         on_line(line);
     }
+    Ok(())
 }
 
 fn concise_output<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
@@ -328,6 +415,13 @@ fn concise_output<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use tokio::io::{AsyncRead, ReadBuf};
+
     use super::*;
 
     /// A failure whose text is persisted (`board.sync.last_error`) and printed by the job log,
@@ -361,6 +455,98 @@ mod tests {
         let message = error.to_string();
         assert!(!message.contains("ana@example.com"), "{message}");
         assert!(message.contains("fleet-no-such-program"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn verbose_child_cannot_deadlock() {
+        let lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&lines);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            RealShell.run_streaming(
+                ShellCommand::new("sh").args(["-c", "yes fleet | head -n 20000"]),
+                CancellationToken::new(),
+                Arc::new(move |_| {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }),
+            ),
+        )
+        .await
+        .expect("verbose command completes before deadline")
+        .expect("verbose command succeeds");
+        assert!(result.success());
+        assert_eq!(lines.load(std::sync::atomic::Ordering::Relaxed), 20_000);
+    }
+
+    #[tokio::test]
+    async fn cancel_kills_descendants_and_bounds_drain() {
+        let cancel = CancellationToken::new();
+        let (pid_sender, mut pid_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            RealShell
+                .run_streaming(
+                    ShellCommand::new("sh").args(["-c", "sleep 30 & echo $!; wait"]),
+                    task_cancel,
+                    Arc::new(move |line| {
+                        if let Ok(pid) = line.parse() {
+                            let _ignored = pid_sender.send(pid);
+                        }
+                    }),
+                )
+                .await
+        });
+        let descendant = tokio::time::timeout(Duration::from_secs(2), pid_receiver.recv())
+            .await
+            .expect("descendant pid is reported")
+            .expect("pid channel remains open");
+
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("cancellation bounds child and pipe cleanup")
+            .expect("streaming task does not panic");
+        assert!(matches!(result, Err(DaemonError::Cancelled)));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while crate::adapters::process::pid_is_alive(descendant)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !crate::adapters::process::pid_is_alive(descendant),
+            "descendant survived cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_read_failure_fails_command() {
+        let error = stream_lines(BrokenReader::default(), Arc::new(|_| {}))
+            .await
+            .expect_err("read failure must propagate");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    }
+
+    #[derive(Default)]
+    struct BrokenReader {
+        emitted_line: bool,
+    }
+
+    impl AsyncRead for BrokenReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.emitted_line {
+                Poll::Ready(Err(std::io::Error::other("injected read failure")))
+            } else {
+                self.emitted_line = true;
+                buffer.put_slice(b"partial output\n");
+                Poll::Ready(Ok(()))
+            }
+        }
     }
 
     #[test]

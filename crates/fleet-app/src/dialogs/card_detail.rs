@@ -20,7 +20,8 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
 use crate::{
     actions::{card_detail as card_actions, dialog},
     bridge::Bridge,
-    dialogs::{Dialogs, notify, now_epoch, root, typed_char, with_host},
+    dialogs::{DialogHost, Dialogs, notify, root, typed_char, with_host},
+    presentation::now_unix,
     screens::board,
     state::AppState,
     views::board_card_detail::{self as detail, PropertyTarget},
@@ -148,7 +149,7 @@ pub fn card<'a>(state: &'a AppState, draft: &CardDetailState) -> Option<&'a Card
 
 pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let card_id = crate::screens::board::selected_card(state.read(cx)).map(|card| card.id.clone());
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_detail = CardDetailState {
             card_id,
             revision: host.card_detail.revision.wrapping_add(1),
@@ -162,17 +163,18 @@ pub fn render(
     state: &Entity<AppState>,
     bridge: &Bridge,
     focus: &FocusHandle,
+    _host: &Entity<DialogHost>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let mut draft = with_host(cx, |host| host.card_detail.clone());
+    let mut draft = with_host(state, cx, |host| host.card_detail.clone());
     let Some((board, card)) = state.read(cx).board().and_then(|view| {
         card(state.read(cx), &draft).map(|card| (view.board.clone(), card.clone()))
     }) else {
-        return missing(state, focus);
+        return missing(state, focus, cx);
     };
     let (board, card) = (&board, &card);
-    let now = now_epoch();
+    let now = now_unix();
     let theme = cx.theme().clone();
     // Borrowed, never cloned: this runs on every frame, and the card set of a real board
     // carries every comment and activity entry on it.
@@ -180,7 +182,7 @@ pub fn render(
         detail::property_rows(&view.board, &view.cards, card, now)
     });
     draft.property_row = draft.property_row.min(rows.len().saturating_sub(1));
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_detail.property_row = draft.property_row
     });
 
@@ -291,9 +293,9 @@ pub fn render(
             .key("esc", "close")
     };
 
-    let mut dialog_card = Dialog::new(Dialogs::CardDetail.title())
-        .icon(Dialogs::CardDetail.icon())
-        .width(Dialogs::CardDetail.width())
+    let mut dialog_card = Dialog::new("Card detail")
+        .icon(Icon::FilePen)
+        .width(Dialogs::CardDetail.width(cx))
         .height(px(DETAIL_HEIGHT))
         .subtitle(format!("\u{00b7} {}", card.display_key(board)))
         .body(body)
@@ -312,7 +314,7 @@ pub fn render(
                 let Some(text) = typed_char(event) else {
                     return;
                 };
-                if type_text(&state, &text, cx) {
+                if type_text(&state, text, cx) {
                     cx.stop_propagation();
                 }
             }
@@ -529,7 +531,7 @@ pub fn render(
 }
 
 /// The card went away while the dialog was open — say so instead of showing an empty card.
-fn missing(state: &Entity<AppState>, focus: &FocusHandle) -> AnyElement {
+fn missing(state: &Entity<AppState>, focus: &FocusHandle, cx: &App) -> AnyElement {
     let state = state.clone();
     root(focus)
         .on_action(move |_: &dialog::Cancel, _window, cx| {
@@ -540,9 +542,9 @@ fn missing(state: &Entity<AppState>, focus: &FocusHandle) -> AnyElement {
             cx.stop_propagation();
         })
         .child(
-            Dialog::new(Dialogs::CardDetail.title())
-                .icon(Dialogs::CardDetail.icon())
-                .width(Dialogs::CardDetail.width())
+            Dialog::new("Card detail")
+                .icon(Icon::FilePen)
+                .width(Dialogs::CardDetail.width(cx))
                 .body(EmptyState::new("That card is no longer on this board."))
                 .hint_row(KeyHintRow::new().key("esc", "close")),
         )
@@ -553,7 +555,7 @@ fn missing(state: &Entity<AppState>, focus: &FocusHandle) -> AnyElement {
 
 /// Types into the open buffer. Returns whether there was one to type into.
 fn type_text(state: &Entity<AppState>, text: &str, cx: &mut App) -> bool {
-    let typed = with_host(cx, |host| {
+    let typed = with_host(state, cx, |host| {
         if !host.card_detail.is_editing() {
             return false;
         }
@@ -573,7 +575,7 @@ fn edit_buffer(
     cx: &mut App,
     edit: impl FnOnce(&mut TextAreaState),
 ) -> bool {
-    let edited = with_host(cx, |host| {
+    let edited = with_host(state, cx, |host| {
         if !host.card_detail.is_editing() {
             return false;
         }
@@ -589,12 +591,12 @@ fn edit_buffer(
 
 /// Opens a text surface.
 fn begin(state: &Entity<AppState>, surface: CardEdit, text: String, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     // `render` builds the left pane as: conflict banner (only when there is one), title,
     // description, comments, comment editor.
     let comment_item =
         3 + usize::from(card(state.read(cx), &draft).is_some_and(|card| card.conflict.is_some()));
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_detail.begin(surface, text, comment_item);
     });
     notify(state, cx);
@@ -603,7 +605,7 @@ fn begin(state: &Entity<AppState>, surface: CardEdit, text: String, cx: &mut App
 
 /// Moves the property selection.
 fn move_row(state: &Entity<AppState>, delta: isize, len: usize, cx: &mut App) {
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_detail.property_row =
             crate::dialogs::step(host.card_detail.property_row, delta, len);
     });
@@ -616,7 +618,7 @@ fn move_row(state: &Entity<AppState>, delta: isize, len: usize, cx: &mut App) {
 /// `Enter`: a newline inside a multi-line edit, a save inside the title, otherwise the picker
 /// or worktree the selected property row points at.
 fn enter(state: &Entity<AppState>, bridge: &Bridge, targets: &[detail::PropertyRow], cx: &mut App) {
-    match with_host(cx, |host| host.card_detail.edit) {
+    match with_host(state, cx, |host| host.card_detail.edit) {
         Some(CardEdit::Title) => {
             commit_edit(state, bridge, cx);
             return;
@@ -627,7 +629,7 @@ fn enter(state: &Entity<AppState>, bridge: &Bridge, targets: &[detail::PropertyR
         }
         None => {}
     }
-    let row = with_host(cx, |host| host.card_detail.property_row);
+    let row = with_host(state, cx, |host| host.card_detail.property_row);
     let selected = targets.get(row);
     match selected.map(|row| &row.target) {
         Some(PropertyTarget::Pick(kind)) => {
@@ -640,20 +642,20 @@ fn enter(state: &Entity<AppState>, bridge: &Bridge, targets: &[detail::PropertyR
             // later. This surface's scrim covers the toast stack, so the sentence goes on the
             // dialog's own error line — the same place every other refusal here lands.
             if let Some(message) = board::readonly_message(state.read(cx), kind) {
-                with_host(cx, |host| host.card_detail.error = Some(message));
+                with_host(state, cx, |host| host.card_detail.error = Some(message));
                 notify(state, cx);
                 cx.stop_propagation();
                 return;
             }
             let kind = kind.clone();
-            crate::dialogs::with_host(cx, |host| {
+            crate::dialogs::with_host(state, cx, |host| {
                 host.card_picker.kind = kind;
                 host.card_picker.then_worktree = false;
             });
             board::open_dialog(state, Dialogs::CardPicker, cx);
         }
         Some(PropertyTarget::Worktree) => {
-            let draft = with_host(cx, |host| host.card_detail.clone());
+            let draft = with_host(state, cx, |host| host.card_detail.clone());
             let Some((id, card_id)) = card(state.read(cx), &draft)
                 .and_then(|card| Some((card.worktree_id.clone()?, card.id.clone())))
             else {
@@ -673,7 +675,7 @@ fn enter(state: &Entity<AppState>, bridge: &Bridge, targets: &[detail::PropertyR
                 format!("{} is read-only on {backend} boards", row.label)
             });
             if let Some(message) = message {
-                with_host(cx, |host| host.card_detail.error = Some(message));
+                with_host(state, cx, |host| host.card_detail.error = Some(message));
                 notify(state, cx);
             }
         }
@@ -692,7 +694,7 @@ fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     if board::refuses(state, cx) {
         return;
     }
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     if draft.saving.is_some() {
         return;
     }
@@ -702,7 +704,7 @@ fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let text = draft.area.text().trim().to_owned();
     let request = match surface {
         CardEdit::Title if text.is_empty() => {
-            with_host(cx, |host| {
+            with_host(state, cx, |host| {
                 host.card_detail.error = Some("A card needs a title.".to_owned());
             });
             notify(state, cx);
@@ -723,7 +725,7 @@ fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
             },
         },
         CardEdit::Comment if text.is_empty() => {
-            with_host(cx, |host| host.card_detail.cancel());
+            with_host(state, cx, |host| host.card_detail.cancel());
             notify(state, cx);
             return;
         }
@@ -733,7 +735,7 @@ fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         },
     };
     let revision = draft.revision;
-    with_host(cx, |host| host.card_detail.saving = Some(revision));
+    with_host(state, cx, |host| host.card_detail.saving = Some(revision));
     let reply = bridge.request(request);
     let state = state.clone();
     cx.spawn(async move |cx| {
@@ -744,7 +746,7 @@ fn commit_edit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
             Err(error) => Err(format!("Card save channel closed: {error}")),
         };
         cx.update(|cx| {
-            with_host(cx, |host| {
+            with_host(&state, cx, |host| {
                 host.card_detail
                     .finish_save(revision, result.as_ref().err().cloned())
             });
@@ -766,7 +768,7 @@ fn start_worktree(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     if board::refuses(state, cx) {
         return;
     }
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     let Some(card) = card(state.read(cx), &draft).cloned() else {
         return;
     };
@@ -779,13 +781,13 @@ fn start_worktree(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         // context the picker's only row is the "No repository" clear row, whose Enter answers
         // "Pick a repository" forever — a dialog with no way to succeed.
         if !board::has_repo_in_context(state.read(cx)) {
-            with_host(cx, |host| {
+            with_host(state, cx, |host| {
                 host.card_detail.error = Some(board::NO_REPO_IN_CONTEXT.to_owned());
             });
             notify(state, cx);
             return;
         }
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.card_picker.kind = crate::dialogs::card_picker::PickerKind::Repo;
             host.card_picker.then_worktree = true;
         });
@@ -809,14 +811,14 @@ fn resolve(
     if board::refuses(state, cx) {
         return;
     }
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     let Some(card) = card(state.read(cx), &draft) else {
         return;
     };
     if card.conflict.is_none() {
         // §8 gives every board key an answer; a key that neither acts nor says anything reads
         // as broken.
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.card_detail.error = Some(NO_CONFLICT.to_owned());
         });
         notify(state, cx);
@@ -841,7 +843,7 @@ fn resolve(
 
 /// `esc` — discard an open edit, else close the dialog.
 pub fn close(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
-    let editing = with_host(cx, |host| {
+    let editing = with_host(state, cx, |host| {
         let editing = host.card_detail.is_editing();
         if editing {
             host.card_detail.cancel();
@@ -860,7 +862,7 @@ pub fn close(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
 
 /// `i` — edit the title.
 pub fn edit_title(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     let Some(title) = card(state.read(cx), &draft).map(|card| card.title.clone()) else {
         return;
     };
@@ -869,7 +871,7 @@ pub fn edit_title(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
 
 /// `d` — edit the description.
 pub fn edit_description(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     let Some(description) = card(state.read(cx), &draft).map(|card| card.description.clone())
     else {
         return;
@@ -879,7 +881,7 @@ pub fn edit_description(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App
 
 /// `c` — write a comment.
 pub fn add_comment(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     if card(state.read(cx), &draft).is_none() {
         // The dialog is rendering `missing()`; an edit opened over it takes the keyboard and
         // the first `Esc` only cancels a buffer nothing is showing.
@@ -916,7 +918,7 @@ pub fn create_worktree(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) 
 /// The dialog stays open: the browser is another window, and closing the card the user is
 /// reading to show it somewhere else loses the place they were in.
 pub fn open_remote(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_detail.clone());
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     let Some(card) = card(state.read(cx), &draft) else {
         return;
     };
@@ -927,7 +929,7 @@ pub fn open_remote(state: &Entity<AppState>, _bridge: &Bridge, cx: &mut App) {
         // different fact from a card with no remote issue at all, and only one of them names
         // the setting that fixes it.
         let refusal = board::no_remote_reason(card);
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.card_detail.error = Some(refusal.to_owned());
         });
         notify(state, cx);
@@ -955,21 +957,18 @@ pub fn save(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 }
 
 /// How many property rows the shown card has.
-fn property_count(state: &Entity<AppState>, cx: &App) -> usize {
+fn property_count(state: &Entity<AppState>, cx: &mut App) -> usize {
     property_targets(state, cx).len()
 }
 
 /// The property rows of the shown card, for the palette-driven entry points.
-fn property_targets(state: &Entity<AppState>, cx: &App) -> Vec<detail::PropertyRow> {
-    let host = cx.try_global::<crate::dialogs::DialogHost>();
-    let Some(draft) = host.map(|host| host.card_detail.clone()) else {
-        return Vec::new();
-    };
+fn property_targets(state: &Entity<AppState>, cx: &mut App) -> Vec<detail::PropertyRow> {
+    let draft = with_host(state, cx, |host| host.card_detail.clone());
     let app = state.read(cx);
     let (Some(view), Some(card)) = (app.board(), card(app, &draft)) else {
         return Vec::new();
     };
-    detail::property_rows(&view.board, &view.cards, card, now_epoch())
+    detail::property_rows(&view.board, &view.cards, card, now_unix())
 }
 
 #[cfg(test)]

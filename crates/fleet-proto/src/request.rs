@@ -1,5 +1,7 @@
 //! Client-to-daemon request messages.
 
+use std::path::PathBuf;
+
 use fleet_core::{
     board::{BackendRef, BoardPatch, CardDraft, CardPatch, ConflictResolution},
     config::Agent,
@@ -10,6 +12,7 @@ use fleet_core::{
     },
     model::RepoHooks,
     sessions::AgentActivity,
+    watches::{WatchId, WatchStream},
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,29 +145,29 @@ pub enum RequestBody {
     /// Register a child watch under an existing terminal.
     StartWatch {
         /// Parent terminal.
-        terminal: fleet_core::ids::TerminalId,
+        terminal: TerminalId,
         /// Display label.
         label: String,
         /// Child argv.
         command: Vec<String>,
         /// Child working directory.
-        cwd: Option<std::path::PathBuf>,
+        cwd: Option<PathBuf>,
         /// Child process id.
         pid: Option<u32>,
     },
     /// Append a lossy display copy of child output.
     AppendWatchOutput {
         /// Watch identifier.
-        watch: fleet_core::watches::WatchId,
+        watch: WatchId,
         /// Original channel.
-        stream: fleet_core::watches::WatchStream,
+        stream: WatchStream,
         /// Output text.
         text: String,
     },
     /// Report child completion.
     FinishWatch {
         /// Watch identifier.
-        watch: fleet_core::watches::WatchId,
+        watch: WatchId,
         /// Normal exit code.
         code: Option<i32>,
         /// Terminating signal.
@@ -178,14 +181,14 @@ pub enum RequestBody {
     /// Catch up from an inclusive sequence cursor.
     TailWatch {
         /// Watch identifier.
-        watch: fleet_core::watches::WatchId,
+        watch: WatchId,
         /// Inclusive cursor; None returns all retained output.
         from_seq: Option<u64>,
     },
     /// Remove a finished watch. Running watches return Conflict; no process is killed.
     DismissWatch {
         /// Watch identifier.
-        watch: fleet_core::watches::WatchId,
+        watch: WatchId,
     },
 
     /// Negotiate the protocol immediately after connecting.
@@ -331,6 +334,9 @@ pub enum RequestBody {
         kill_sessions: bool,
         /// Optional repository filter.
         repo: Option<RepoId>,
+        /// Exact worktrees approved by the caller; absent preserves legacy repo-wide pruning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ids: Option<Vec<WorktreeId>>,
     },
     /// Hard-kill a worktree session.
     KillWorktree {
@@ -568,6 +574,8 @@ pub enum RequestBody {
     ImportFromSwarm,
     /// Run dependency and environment diagnostics.
     Doctor,
+    /// Replace quarantined state with a validated empty state, retaining the archived file.
+    ResetState,
     /// Start a Fleet self-update job.
     Update,
     /// Check daemon liveness.
@@ -584,41 +592,32 @@ pub enum RequestBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        assert_round_trip,
+        terminal::{Key, KeyAction, Modifiers},
+    };
 
     #[test]
-    fn request_body_round_trips() {
-        let body = RequestBody::AttachTerminal {
-            terminal: TerminalId(4),
-            cols: 120,
-            rows: 40,
-        };
-        let json = serde_json::to_string(&body).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: RequestBody =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, body);
-
-        let body = RequestBody::SetConfig {
-            patch: serde_json::json!({"agent":"opencode"}),
-        };
-        let json = serde_json::to_string(&body).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: RequestBody =
-            serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, body);
-    }
-
-    #[test]
-    fn new_contract_variants_round_trip() {
+    fn request_bodies_round_trip() {
         let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
         let job = JobId::try_from("job-1").unwrap_or_else(|error| panic!("{error}"));
         let bodies = vec![
+            RequestBody::AttachTerminal {
+                terminal: TerminalId(4),
+                cols: 120,
+                rows: 40,
+            },
+            RequestBody::SetConfig {
+                patch: serde_json::json!({"agent":"opencode"}),
+            },
             RequestBody::ScrollOrKeyTerminal {
                 terminal: TerminalId(8),
                 scroll: ScrollCommand::Pages(-1),
                 key: KeyEvent {
-                    key: crate::terminal::Key::PageUp,
-                    mods: crate::terminal::Modifiers::SHIFT,
+                    key: Key::PageUp,
+                    mods: Modifiers::SHIFT,
                     text: None,
-                    action: crate::terminal::KeyAction::Press,
+                    action: KeyAction::Press,
                 },
             },
             RequestBody::WheelTerminal {
@@ -627,7 +626,7 @@ mod tests {
                     steps: -3,
                     col: 12,
                     row: 8,
-                    mods: crate::terminal::Modifiers::SHIFT | crate::terminal::Modifiers::SUPER,
+                    mods: Modifiers::SHIFT | Modifiers::SUPER,
                 },
             },
             RequestBody::ListBaseRefs {
@@ -642,9 +641,7 @@ mod tests {
             RequestBody::RestoreTrash {
                 entry: "123-api".to_owned(),
             },
-            RequestBody::RefreshStatuses {
-                repo: Some(repo.clone()),
-            },
+            RequestBody::RefreshStatuses { repo: Some(repo) },
             RequestBody::SetAgentActivity {
                 session: SessionId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
                 terminal_id: TerminalId(8),
@@ -658,10 +655,7 @@ mod tests {
             RequestBody::ImportFromSwarm,
         ];
         for body in bodies {
-            let json = serde_json::to_string(&body).unwrap_or_else(|error| panic!("{error}"));
-            let decoded: RequestBody =
-                serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(decoded, body);
+            assert_round_trip(body);
         }
     }
 }

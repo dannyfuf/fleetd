@@ -37,6 +37,8 @@ async fn fixture() -> Fixture {
         .load()
         .await
         .unwrap_or_else(|error| panic!("{error}"));
+    effective.agent_commands.claude = "/bin/sleep 30".to_owned();
+    effective.agent_commands.opencode = "/bin/sleep 30".to_owned();
     effective.windows = vec![
         WindowConfig {
             name: "one".to_owned(),
@@ -102,26 +104,7 @@ async fn fixture() -> Fixture {
 
 #[tokio::test]
 async fn ensured_terminals_receive_their_registered_ids_in_the_pty_environment() {
-    // Isolate SHELL from both user startup files and concurrently running tests.
-    if std::env::var_os("FLEET_TEST_PTY_ENV_CHILD").is_none() {
-        let output = std::process::Command::new(
-            std::env::current_exe().unwrap_or_else(|error| panic!("{error}")),
-        )
-        .args([
-            "--exact",
-            "ensured_terminals_receive_their_registered_ids_in_the_pty_environment",
-            "--nocapture",
-        ])
-        .env("FLEET_TEST_PTY_ENV_CHILD", "1")
-        .env("SHELL", "/bin/sh")
-        .output()
-        .unwrap_or_else(|error| panic!("{error}"));
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if isolated_test("ensured_terminals_receive_their_registered_ids_in_the_pty_environment") {
         return;
     }
     let fixture = fixture().await;
@@ -165,10 +148,7 @@ async fn ensured_terminals_receive_their_registered_ids_in_the_pty_environment()
         }
     })
     .await;
-    let registered = sessions
-        .list()
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
+    let registered = sessions.snapshot();
     sessions
         .kill(created.id.clone())
         .await
@@ -187,6 +167,9 @@ async fn ensured_terminals_receive_their_registered_ids_in_the_pty_environment()
 
 #[tokio::test]
 async fn ensure_reuses_layout_and_attachment_drives_status() {
+    if isolated_test("ensure_reuses_layout_and_attachment_drives_status") {
+        return;
+    }
     let fixture = fixture().await;
     let sessions = Sessions::new(fixture.config, fixture.state);
     let created = sessions
@@ -270,6 +253,9 @@ async fn ensure_reuses_layout_and_attachment_drives_status() {
 
 #[tokio::test]
 async fn terminal_lifecycle_preserves_identity_and_removes_last_session() {
+    if isolated_test("terminal_lifecycle_preserves_identity_and_removes_last_session") {
+        return;
+    }
     let fixture = fixture().await;
     let sessions = Sessions::new(fixture.config, fixture.state);
     let session = sessions
@@ -291,13 +277,7 @@ async fn terminal_lifecycle_preserves_identity_and_removes_last_session() {
         .close_terminal(session.terminals[1].id)
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-    assert!(
-        sessions
-            .list()
-            .await
-            .unwrap_or_else(|error| panic!("{error}"))
-            .is_empty()
-    );
+    assert!(sessions.snapshot().is_empty());
 
     let agent = sessions
         .ensure(None, Some(fleet_core::config::Agent::Claude), false)
@@ -313,6 +293,9 @@ async fn terminal_lifecycle_preserves_identity_and_removes_last_session() {
 
 #[tokio::test]
 async fn concurrent_agent_ensures_create_one_named_terminal() {
+    if isolated_test("concurrent_agent_ensures_create_one_named_terminal") {
+        return;
+    }
     let fixture = fixture().await;
     let sessions = Sessions::new(fixture.config, fixture.state);
 
@@ -324,10 +307,7 @@ async fn concurrent_agent_ensures_create_one_named_terminal() {
     let second = second.unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(first.id, second.id);
 
-    let sessions_snapshot = sessions
-        .list()
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
+    let sessions_snapshot = sessions.snapshot();
     let agent_session = sessions_snapshot
         .iter()
         .find(|session| session.id == first.id)
@@ -349,6 +329,9 @@ async fn concurrent_agent_ensures_create_one_named_terminal() {
 
 #[tokio::test]
 async fn remote_worktrees_are_rejected_with_stable_message() {
+    if isolated_test("remote_worktrees_are_rejected_with_stable_message") {
+        return;
+    }
     let fixture = fixture().await;
     let mut state = fixture
         .state
@@ -378,6 +361,9 @@ async fn remote_worktrees_are_rejected_with_stable_message() {
 /// so a native tab that lived outside the list would renumber every tab after it.
 #[tokio::test]
 async fn a_native_window_is_a_tab_without_a_process() {
+    if isolated_test("a_native_window_is_a_tab_without_a_process") {
+        return;
+    }
     let fixture = fixture().await;
     let mut effective = fixture
         .config
@@ -486,6 +472,9 @@ async fn a_native_window_is_a_tab_without_a_process() {
 
 #[tokio::test]
 async fn restart_keeps_frame_sequences_monotonic() {
+    if isolated_test("restart_keeps_frame_sequences_monotonic") {
+        return;
+    }
     use std::time::Duration;
     let fixture = fixture().await;
     let mut config = fixture.config.load().await.unwrap();
@@ -518,7 +507,7 @@ async fn restart_keeps_frame_sequences_monotonic() {
     );
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if sessions.list().await.unwrap().iter().any(|session| {
+            if sessions.snapshot().iter().any(|session| {
                 session.terminals.iter().any(|entry| {
                     entry.id == terminal && matches!(entry.status, TerminalStatus::Exited { .. })
                 })
@@ -552,4 +541,130 @@ async fn restart_keeps_frame_sequences_monotonic() {
         last_sequence
     );
     sessions.kill(session.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn immediate_exit_is_registered() {
+    if isolated_test("immediate_exit_is_registered") {
+        return;
+    }
+    use std::time::Duration;
+
+    let fixture = fixture().await;
+    let mut config = fixture.config.load().await.unwrap();
+    config.windows = vec![WindowConfig {
+        name: "immediate".into(),
+        command: "exit 23".into(),
+    }];
+    fixture.config.save(config).await.unwrap();
+    let sessions = Sessions::new(fixture.config, fixture.state);
+    let session = sessions
+        .ensure(Some(fixture.worktree), None, false)
+        .await
+        .unwrap();
+    let terminal = session.terminals[0].id;
+
+    let code = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(code) = sessions.snapshot().iter().find_map(|session| {
+                session.terminals.iter().find_map(|entry| {
+                    (entry.id == terminal).then_some(&entry.status).and_then(
+                        |status| match status {
+                            TerminalStatus::Exited { code } => Some(*code),
+                            TerminalStatus::Starting | TerminalStatus::Running => None,
+                        },
+                    )
+                })
+            }) {
+                break code;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("immediate exit was not applied to registered metadata");
+
+    assert_eq!(code, Some(23));
+    sessions.kill(session.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn new_and_restart_transitions_serialize() {
+    if isolated_test("new_and_restart_transitions_serialize") {
+        return;
+    }
+
+    let fixture = fixture().await;
+    let sessions = Sessions::new(fixture.config, fixture.state);
+    let session = sessions
+        .ensure(Some(fixture.worktree), None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let cwd = session.cwd.clone();
+    let first = sessions.new_terminal(
+        session.id.clone(),
+        "raced".to_owned(),
+        "/bin/sh -c 'sleep 30'".to_owned(),
+        cwd.clone(),
+    );
+    let second = sessions.new_terminal(
+        session.id.clone(),
+        "raced".to_owned(),
+        "/bin/sh -c 'sleep 30'".to_owned(),
+        cwd,
+    );
+
+    let outcomes = tokio::join!(first, second);
+    let outcomes = [outcomes.0, outcomes.1];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(result, Err(DaemonError::Conflict(_))))
+            .count(),
+        1
+    );
+    let registered = sessions
+        .snapshot()
+        .into_iter()
+        .find(|entry| entry.id == session.id)
+        .unwrap_or_else(|| panic!("session disappeared"));
+    assert_eq!(
+        registered
+            .terminals
+            .iter()
+            .filter(|terminal| terminal.name == "raced")
+            .count(),
+        1
+    );
+    sessions
+        .kill(session.id)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+fn isolated_test(name: &str) -> bool {
+    if std::env::var("FLEET_SESSION_TEST").as_deref() == Ok(name) {
+        return false;
+    }
+    let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let output = std::process::Command::new(
+        std::env::current_exe().unwrap_or_else(|error| panic!("{error}")),
+    )
+    .args(["--exact", name, "--nocapture"])
+    .env_clear()
+    .env("FLEET_SESSION_TEST", name)
+    .env("FLEET_TEST_PTY_ENV_CHILD", "1")
+    .env("SHELL", "/bin/sh")
+    .env("HOME", home.path())
+    .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    .output()
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }

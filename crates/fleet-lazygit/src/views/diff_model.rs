@@ -1,24 +1,11 @@
-//! The flattened, cached diff model: one row per rendered line, built once per `Arc<Diff>`.
-//!
-//! The old renderer re-flattened the whole patch on every render and several times per
-//! keystroke, which put a `String` allocation per diff line on the hot path and made anything
-//! heavier — word diff, syntax highlighting — impossible. [`DiffModel`] is therefore built once,
-//! keyed by [`ModelKey`], and every consumer borrows it.
-//!
-//! Three invariants hold the rest of the crate together:
-//!
-//! * **`(file, hunk, line)` identity survives.** `state::hunk_range`, `state::selection_hunks`
-//!   and `fleet_git::PatchSelection` are all keyed on that triple, so [`DiffRow`] keeps it
-//!   exactly as the previous model did. The staging contract does not change.
-//! * **Rows are uniform height.** `gpui::uniform_list` measures one row and extrapolates, so a
-//!   taller file-header card would corrupt the scroll position. The header is therefore *two
-//!   rows*, which is why Zed spells its own `FILE_HEADER_HEIGHT` in rows rather than pixels.
-//! * **Unified rows are the source of truth.** Split view is a second, thinner layout
-//!   ([`SplitRow`]) that *indexes* the unified rows, so syntax runs, word spans and staging
-//!   coordinates are computed once and shared by both modes.
+//! Prepared diff rows preserve unified `(file, hunk, line)` staging coordinates.
+//! Split rows index those same rows; all rows have one uniform height.
 
-use std::cell::RefCell;
+use gpui::SharedString;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fleet_git::{Diff, DiffKind, LineKind};
 
@@ -27,7 +14,7 @@ use super::syntax::{self, Runs};
 
 /// Which layout the model was flattened for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum DiffViewMode {
+pub(crate) enum DiffViewMode {
     /// One column, `-` then `+`. lazygit's shape, and the one the staging cursor models.
     #[default]
     Unified,
@@ -38,7 +25,7 @@ pub enum DiffViewMode {
 impl DiffViewMode {
     /// The other mode.
     #[must_use]
-    pub fn toggled(self) -> Self {
+    pub(crate) fn toggled(self) -> Self {
         match self {
             DiffViewMode::Unified => DiffViewMode::Split,
             DiffViewMode::Split => DiffViewMode::Unified,
@@ -48,7 +35,7 @@ impl DiffViewMode {
 
 /// What a rendered diff row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RowKind {
+pub(crate) enum RowKind {
     /// The top half of a file-header card.
     FileHeader,
     /// The bottom half of a file-header card. Two rows, because `uniform_list` needs one height.
@@ -67,50 +54,38 @@ pub enum RowKind {
     Other,
 }
 
-impl RowKind {
-    /// How deep this row sits in the file → hunk → line hierarchy.
-    #[must_use]
-    pub fn depth(self) -> usize {
-        match self {
-            RowKind::FileHeader | RowKind::FileHeaderFoot => 0,
-            RowKind::HunkHeader => 1,
-            _ => 2,
-        }
-    }
-}
-
 /// One rendered row of a diff, plus the coordinates a patch selection needs.
 #[derive(Clone, Debug)]
-pub struct DiffRow {
+pub(crate) struct DiffRow {
     /// What kind of line this is.
-    pub kind: RowKind,
+    pub(crate) kind: RowKind,
     /// The line's text, without the `+`/`-` marker and with tabs already expanded.
-    pub text: String,
+    pub(crate) text: SharedString,
     /// Line number on the old side.
-    pub old_no: Option<u32>,
+    pub(crate) old_no: Option<u32>,
     /// Line number on the new side.
-    pub new_no: Option<u32>,
+    pub(crate) new_no: Option<u32>,
     /// Index into `Diff::files`.
-    pub file: usize,
+    pub(crate) file: usize,
     /// Index into `DiffFile::hunks`, for every row inside a hunk.
-    pub hunk: Option<usize>,
+    pub(crate) hunk: Option<usize>,
     /// Index into `Hunk::lines`, for payload rows only.
-    pub line: Option<usize>,
+    pub(crate) line: Option<usize>,
     /// Byte ranges of the words that changed, relative to [`DiffRow::text`].
-    pub words: Vec<Range<usize>>,
+    pub(crate) words: Vec<Range<usize>>,
 }
 
 impl DiffRow {
     /// Whether the row is an addition or a removal, i.e. selectable for staging.
     #[must_use]
-    pub fn is_change(&self) -> bool {
+    pub(crate) fn is_change(&self) -> bool {
         matches!(self.kind, RowKind::Added | RowKind::Removed)
     }
 
     fn blank(kind: RowKind, file: usize, text: String) -> Self {
         Self {
             kind,
-            text,
+            text: text.into(),
             old_no: None,
             new_no: None,
             file,
@@ -125,140 +100,116 @@ impl DiffRow {
 ///
 /// `None` on a side is Zed's `Block::Spacer` — alignment filler, drawn hatched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SplitRow {
+pub(crate) struct SplitRow {
     /// The unified row shown in the old-side column.
-    pub left: Option<usize>,
+    pub(crate) left: Option<usize>,
     /// The unified row shown in the new-side column.
-    pub right: Option<usize>,
+    pub(crate) right: Option<usize>,
     /// Whether the row spans both columns: file headers, hunk separators and notes.
-    pub full: bool,
+    pub(crate) full: bool,
 }
 
 /// Everything a file-header card shows, computed once.
 #[derive(Clone, Debug)]
-pub struct FileMeta {
+pub(crate) struct FileMeta {
     /// The path as displayed: the new path, or the old one for a deletion.
-    pub path: String,
+    pub(crate) path: String,
     /// The previous path, for a rename or copy.
-    pub old_path: Option<String>,
+    pub(crate) old_path: Option<String>,
     /// The file-level change kind.
-    pub kind: DiffKind,
+    pub(crate) kind: DiffKind,
     /// Whether git called it binary.
-    pub binary: bool,
+    pub(crate) binary: bool,
     /// How many lines this file adds. Not in `fleet_git`; counted here.
-    pub added: u32,
+    pub(crate) added: u32,
     /// How many lines this file removes.
-    pub removed: u32,
+    pub(crate) removed: u32,
     /// `100644 → 100755`, when the mode changed.
-    pub mode: Option<String>,
+    pub(crate) mode: Option<String>,
     /// The grammar name for the payload lines, when one is recognised.
-    pub language: Option<String>,
+    pub(crate) language: Option<String>,
 }
 
-/// Whether the background syntax pass has run for this model.
+/// Allocation identity is valid while the owner retains the source Arc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyntaxState {
-    /// Nobody has asked yet.
-    Idle,
-    /// A background pass is in flight; rows render plain until it lands.
-    Running,
-    /// [`SyntaxRuns::runs`] is populated.
-    Ready,
-}
-
-/// Per-row syntax runs, filled in by the background pass.
-#[derive(Debug)]
-pub struct SyntaxRuns {
-    /// One entry per unified row; empty for rows with no highlighting.
-    pub runs: Vec<Runs>,
-    /// Where the background pass is.
-    pub state: SyntaxState,
-}
-
-/// What a cached [`DiffModel`] was built from.
-///
-/// The `Arc` pointer alone would be ambiguous after a free-and-reallocate, so the shape of the
-/// patch is folded in too: a model rebuilt for a different patch that happens to land on the
-/// same address still misses the cache.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModelKey {
-    /// `Arc::as_ptr` of the diff this model was built from.
-    pub diff: usize,
-    /// How many files it had.
-    pub files: usize,
-    /// How many payload lines it had.
-    pub lines: usize,
-    /// Which layout it was flattened for.
-    pub mode: DiffViewMode,
+pub(crate) struct ModelKey {
+    diff: usize,
+    mode: DiffViewMode,
 }
 
 impl ModelKey {
-    /// The key for a patch and a layout.
-    #[must_use]
-    pub fn new(diff: &std::sync::Arc<Diff>, mode: DiffViewMode) -> Self {
+    pub(crate) fn new(diff: &Arc<Diff>, mode: DiffViewMode) -> Self {
         Self {
-            diff: std::sync::Arc::as_ptr(diff) as usize,
-            files: diff.files.len(),
-            lines: diff
-                .files
-                .iter()
-                .flat_map(|file| file.hunks.iter())
-                .map(|hunk| hunk.lines.len())
-                .sum(),
+            diff: Arc::as_ptr(diff) as usize,
             mode,
         }
     }
 }
 
 /// How wide a tab expands to. Two, matching Pierre's `--diffs-tab-size`.
-pub const TAB_WIDTH: usize = 2;
+pub(crate) const TAB_WIDTH: usize = 2;
 
 /// The rendered model of one patch.
 #[derive(Debug)]
-pub struct DiffModel {
+pub(crate) struct DiffModel {
+    pub(crate) long_lines: std::collections::HashMap<usize, Arc<super::long_line::LongLine>>,
     /// One row per rendered line, in unified order. Always built, in both modes.
-    pub rows: Vec<DiffRow>,
+    pub(crate) rows: Vec<DiffRow>,
     /// The split layout, indexing [`DiffModel::rows`]. Empty in unified mode.
-    pub split: Vec<SplitRow>,
+    pub(crate) split: Vec<SplitRow>,
     /// One entry per `Diff::files`.
-    pub files: Vec<FileMeta>,
+    pub(crate) files: Vec<FileMeta>,
     /// Which layout this model was flattened for.
-    pub mode: DiffViewMode,
-    /// The longest payload line, in characters — the horizontal scroll extent.
-    pub widest: usize,
+    pub(crate) mode: DiffViewMode,
+    /// Fallback payload widths in scalar columns, one per rendered code column.
+    pub(crate) payload_columns: [usize; 2],
+    /// Font-measured payload advances, filled on the first render of this model.
+    pub(crate) payload_advances: Cell<Option<[f32; 2]>>,
     /// How many characters one line-number gutter needs.
-    pub digits: usize,
+    pub(crate) digits: usize,
     /// Syntax runs, filled in off the foreground thread.
-    pub syntax: RefCell<SyntaxRuns>,
+    syntax: RefCell<Vec<Runs>>,
 }
 
 impl DiffModel {
     /// An empty model, for "no changes to show".
     #[must_use]
-    pub fn empty(mode: DiffViewMode) -> Self {
+    pub(crate) fn empty(mode: DiffViewMode) -> Self {
         Self {
+            long_lines: Default::default(),
             rows: Vec::new(),
             split: Vec::new(),
             files: Vec::new(),
             mode,
-            widest: 0,
+            payload_columns: [0; 2],
+            payload_advances: Cell::new(None),
             digits: 1,
-            syntax: RefCell::new(SyntaxRuns {
-                runs: Vec::new(),
-                state: SyntaxState::Ready,
-            }),
+            syntax: RefCell::new(Vec::new()),
         }
     }
 
     /// Flattens a patch.
     #[must_use]
-    pub fn build(diff: &Diff, mode: DiffViewMode) -> Self {
+    #[cfg(test)]
+    pub(crate) fn build(diff: &Diff, mode: DiffViewMode) -> Self {
+        Self::build_cancellable(diff, mode, &AtomicBool::new(false))
+            .unwrap_or_else(|| Self::empty(mode))
+    }
+
+    pub(crate) fn build_cancellable(
+        diff: &Diff,
+        mode: DiffViewMode,
+        cancelled: &AtomicBool,
+    ) -> Option<Self> {
         let mut rows: Vec<DiffRow> = Vec::new();
         let mut files: Vec<FileMeta> = Vec::new();
         let mut split: Vec<SplitRow> = Vec::new();
         let mut highest = 0u32;
 
         for (file_index, file) in diff.files.iter().enumerate() {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
             files.push(meta(file));
             let header = rows.len();
             rows.push(DiffRow::blank(
@@ -271,19 +222,21 @@ impl DiffModel {
                 file_index,
                 String::new(),
             ));
-            split.push(SplitRow {
-                left: Some(header),
-                right: None,
-                full: true,
-            });
-            split.push(SplitRow {
-                left: Some(header + 1),
-                right: None,
-                full: true,
-            });
+            if mode == DiffViewMode::Split {
+                split.push(SplitRow {
+                    left: Some(header),
+                    right: None,
+                    full: true,
+                });
+                split.push(SplitRow {
+                    left: Some(header + 1),
+                    right: None,
+                    full: true,
+                });
+            }
 
             if file.binary {
-                push_full(&mut rows, &mut split, |rows| {
+                push_full(&mut rows, &mut split, mode, |rows| {
                     rows.push(DiffRow::blank(
                         RowKind::Note,
                         file_index,
@@ -300,13 +253,16 @@ impl DiffModel {
                     }
                     _ => "No content change".to_owned(),
                 };
-                push_full(&mut rows, &mut split, |rows| {
+                push_full(&mut rows, &mut split, mode, |rows| {
                     rows.push(DiffRow::blank(RowKind::Note, file_index, note));
                 });
                 continue;
             }
 
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                if cancelled.load(Ordering::Relaxed) {
+                    return None;
+                }
                 let text = format!(
                     "@@ -{},{} +{},{} @@{}",
                     hunk.old.start,
@@ -318,7 +274,7 @@ impl DiffModel {
                 let separator = rows.len();
                 rows.push(DiffRow {
                     kind: RowKind::HunkHeader,
-                    text,
+                    text: text.into(),
                     old_no: None,
                     new_no: None,
                     file: file_index,
@@ -326,14 +282,19 @@ impl DiffModel {
                     line: None,
                     words: Vec::new(),
                 });
-                split.push(SplitRow {
-                    left: Some(separator),
-                    right: None,
-                    full: true,
-                });
+                if mode == DiffViewMode::Split {
+                    split.push(SplitRow {
+                        left: Some(separator),
+                        right: None,
+                        full: true,
+                    });
+                }
 
                 let first_line = rows.len();
                 for (line_index, line) in hunk.lines.iter().enumerate() {
+                    if line_index % 256 == 0 && cancelled.load(Ordering::Relaxed) {
+                        return None;
+                    }
                     highest = highest
                         .max(line.old_no.unwrap_or(0))
                         .max(line.new_no.unwrap_or(0));
@@ -344,7 +305,7 @@ impl DiffModel {
                             LineKind::Context => RowKind::Context,
                             LineKind::NoNewline | LineKind::Other => RowKind::Other,
                         },
-                        text: expand_tabs(&String::from_utf8_lossy(&line.content)),
+                        text: expand_tabs(&String::from_utf8_lossy(&line.content)).into(),
                         old_no: line.old_no,
                         new_no: line.new_no,
                         file: file_index,
@@ -355,11 +316,15 @@ impl DiffModel {
                 }
 
                 // Word-level marks: block pairing, then `similar` inside each pair.
-                for block in intraline::change_blocks(hunk) {
+                let blocks = intraline::change_blocks(hunk);
+                for block in &blocks {
                     if !block.pairable() {
                         continue;
                     }
                     for (old_line, new_line) in block.pairs() {
+                        if cancelled.load(Ordering::Relaxed) {
+                            return None;
+                        }
                         let old_row = first_line + old_line;
                         let new_row = first_line + new_line;
                         let Some((removed, added)) =
@@ -373,19 +338,16 @@ impl DiffModel {
                 }
 
                 if mode == DiffViewMode::Split {
-                    layout_split(&mut split, hunk, first_line);
+                    layout_split(&mut split, hunk, first_line, &blocks);
                 }
             }
         }
 
-        let widest = rows
-            .iter()
-            .map(|row| row.text.chars().count())
-            .max()
-            .unwrap_or(0);
+        let payload_columns = payload_columns(&rows, &split, mode);
         let digits = highest.to_string().len().max(2);
         let count = rows.len();
-        Self {
+        Some(Self {
+            long_lines: Default::default(),
             rows,
             split: if mode == DiffViewMode::Split {
                 split
@@ -394,18 +356,16 @@ impl DiffModel {
             },
             files,
             mode,
-            widest,
+            payload_columns,
+            payload_advances: Cell::new(None),
             digits,
-            syntax: RefCell::new(SyntaxRuns {
-                runs: vec![Vec::new(); count],
-                state: SyntaxState::Idle,
-            }),
-        }
+            syntax: RefCell::new(vec![Vec::new(); count]),
+        })
     }
 
     /// How many rows the list shows in this model's mode.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self.mode {
             DiffViewMode::Unified => self.rows.len(),
             DiffViewMode::Split => self.split.len(),
@@ -414,18 +374,19 @@ impl DiffModel {
 
     /// Whether there is nothing to render.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
     /// The syntax runs for one unified row, or an empty slice while the pass is in flight.
     #[must_use]
-    pub fn runs_for(&self, row: usize) -> Runs {
-        let syntax = self.syntax.borrow();
-        if syntax.state != SyntaxState::Ready {
-            return Vec::new();
-        }
-        syntax.runs.get(row).cloned().unwrap_or_default()
+    pub(crate) fn runs_for(
+        &self,
+        row: usize,
+    ) -> std::cell::Ref<'_, [(Range<usize>, syntax::Bucket)]> {
+        std::cell::Ref::map(self.syntax.borrow(), |syntax| {
+            syntax.get(row).map(Vec::as_slice).unwrap_or_default()
+        })
     }
 
     /// The background highlighting jobs for this model: one per side per hunk.
@@ -434,14 +395,14 @@ impl DiffModel {
     /// two separate parsers; context lines belong to both and are parsed twice, with the new
     /// side's answer winning in [`DiffModel::apply_syntax`].
     #[must_use]
-    pub fn syntax_jobs(&self) -> Vec<syntax::Job> {
+    pub(crate) fn syntax_jobs(&self) -> Vec<syntax::Job> {
         let mut jobs: Vec<syntax::Job> = Vec::new();
-        let mut old_side: Vec<(usize, String)> = Vec::new();
-        let mut new_side: Vec<(usize, String)> = Vec::new();
+        let mut old_side: Vec<(usize, SharedString)> = Vec::new();
+        let mut new_side: Vec<(usize, SharedString)> = Vec::new();
         let mut language: Option<String> = None;
         let flush = |jobs: &mut Vec<syntax::Job>,
-                     old_side: &mut Vec<(usize, String)>,
-                     new_side: &mut Vec<(usize, String)>,
+                     old_side: &mut Vec<(usize, SharedString)>,
+                     new_side: &mut Vec<(usize, SharedString)>,
                      language: &Option<String>| {
             if let Some(language) = language {
                 for lines in [std::mem::take(old_side), std::mem::take(new_side)] {
@@ -458,7 +419,16 @@ impl DiffModel {
             }
         };
 
+        let mut count = 0;
         for (index, row) in self.rows.iter().enumerate() {
+            if count >= syntax::MAX_LINES {
+                break;
+            }
+            count += match row.kind {
+                RowKind::Added | RowKind::Removed => 1,
+                RowKind::Context => 2,
+                _ => 0,
+            };
             match row.kind {
                 RowKind::FileHeader => {
                     flush(&mut jobs, &mut old_side, &mut new_side, &language);
@@ -484,25 +454,48 @@ impl DiffModel {
     }
 
     /// Installs the result of a background pass.
-    pub fn apply_syntax(&self, runs: Vec<(usize, Runs)>) {
+    pub(crate) fn apply_syntax(&self, runs: Vec<(usize, Runs)>) {
         let mut syntax = self.syntax.borrow_mut();
         for (row, line) in runs {
-            if let Some(slot) = syntax.runs.get_mut(row) {
+            if let Some(slot) = syntax.get_mut(row) {
                 *slot = line;
             }
         }
-        syntax.state = SyntaxState::Ready;
     }
+}
 
-    /// Marks a background pass as started, and reports whether this call is the one that started
-    /// it — so a re-render does not spawn a second pass over the same model.
-    pub fn claim_syntax(&self) -> bool {
-        let mut syntax = self.syntax.borrow_mut();
-        if syntax.state == SyntaxState::Idle {
-            syntax.state = SyntaxState::Running;
-            return true;
+pub(crate) fn is_panned_payload(kind: RowKind) -> bool {
+    matches!(
+        kind,
+        RowKind::Added | RowKind::Removed | RowKind::Context | RowKind::Other
+    )
+}
+
+fn payload_columns(rows: &[DiffRow], split: &[SplitRow], mode: DiffViewMode) -> [usize; 2] {
+    let width = |index: usize| {
+        rows.get(index)
+            .filter(|row| is_panned_payload(row.kind))
+            .map_or(0, |row| row.text.chars().count())
+    };
+    match mode {
+        DiffViewMode::Unified => [
+            rows.iter()
+                .filter(|row| is_panned_payload(row.kind))
+                .map(|row| row.text.chars().count())
+                .max()
+                .unwrap_or(0),
+            0,
+        ],
+        DiffViewMode::Split => {
+            split
+                .iter()
+                .filter(|layout| !layout.full)
+                .fold([0, 0], |mut widest, layout| {
+                    widest[0] = widest[0].max(layout.left.map_or(0, width));
+                    widest[1] = widest[1].max(layout.right.map_or(0, width));
+                    widest
+                })
         }
-        false
     }
 }
 
@@ -510,55 +503,53 @@ impl DiffModel {
 fn push_full(
     rows: &mut Vec<DiffRow>,
     split: &mut Vec<SplitRow>,
+    mode: DiffViewMode,
     build: impl FnOnce(&mut Vec<DiffRow>),
 ) {
     let at = rows.len();
     build(rows);
-    split.push(SplitRow {
-        left: Some(at),
-        right: None,
-        full: true,
-    });
+    if mode == DiffViewMode::Split {
+        split.push(SplitRow {
+            left: Some(at),
+            right: None,
+            full: true,
+        });
+    }
 }
 
 /// Lays one hunk out side by side, with filler rows where one side is shorter.
 ///
 /// Zed's `determine_spacer` compares wrap rows because it soft-wraps; we do not, so comparing
 /// row counts inside each change block is the whole algorithm.
-fn layout_split(split: &mut Vec<SplitRow>, hunk: &fleet_git::Hunk, first_line: usize) {
-    let mut index = 0usize;
-    while index < hunk.lines.len() {
-        match hunk.lines[index].kind {
-            LineKind::Context | LineKind::NoNewline | LineKind::Other => {
-                let row = first_line + index;
-                split.push(SplitRow {
-                    left: Some(row),
-                    right: Some(row),
-                    full: false,
-                });
-                index += 1;
-            }
-            LineKind::Removed | LineKind::Added => {
-                let mut removed = Vec::new();
-                let mut added = Vec::new();
-                while index < hunk.lines.len() && hunk.lines[index].kind == LineKind::Removed {
-                    removed.push(first_line + index);
-                    index += 1;
-                }
-                while index < hunk.lines.len() && hunk.lines[index].kind == LineKind::Added {
-                    added.push(first_line + index);
-                    index += 1;
-                }
-                for slot in 0..removed.len().max(added.len()) {
-                    split.push(SplitRow {
-                        left: removed.get(slot).copied(),
-                        right: added.get(slot).copied(),
-                        full: false,
-                    });
-                }
-            }
+fn layout_split(
+    split: &mut Vec<SplitRow>,
+    hunk: &fleet_git::Hunk,
+    first_line: usize,
+    blocks: &[intraline::ChangeBlock],
+) {
+    let shared = |split: &mut Vec<SplitRow>, range: Range<usize>| {
+        split.extend(range.map(|index| SplitRow {
+            left: Some(first_line + index),
+            right: Some(first_line + index),
+            full: false,
+        }));
+    };
+    let mut cursor = 0;
+    for block in blocks {
+        let Some(&start) = block.removed.first().or(block.added.first()) else {
+            continue;
+        };
+        shared(split, cursor..start);
+        for slot in 0..block.removed.len().max(block.added.len()) {
+            split.push(SplitRow {
+                left: block.removed.get(slot).map(|index| first_line + index),
+                right: block.added.get(slot).map(|index| first_line + index),
+                full: false,
+            });
         }
+        cursor = start + block.removed.len() + block.added.len();
     }
+    shared(split, cursor..hunk.lines.len());
 }
 
 fn meta(file: &fleet_git::DiffFile) -> FileMeta {
@@ -602,7 +593,7 @@ fn meta(file: &fleet_git::DiffFile) -> FileMeta {
 /// Zed never lets a `\t` reach the shaper, and neither can we: a tab inside a `StyledText` would
 /// shift every highlight range that follows it off its glyph.
 #[must_use]
-pub fn expand_tabs(text: &str) -> String {
+pub(crate) fn expand_tabs(text: &str) -> String {
     if !text.contains('\t') {
         return text.to_owned();
     }
@@ -623,7 +614,7 @@ pub fn expand_tabs(text: &str) -> String {
 
 /// The `+` / `-` / ` ` marker lazygit prints in the sign column.
 #[must_use]
-pub fn marker(kind: RowKind) -> &'static str {
+pub(crate) fn marker(kind: RowKind) -> &'static str {
     match kind {
         RowKind::Added => "+",
         RowKind::Removed => "-",
@@ -649,7 +640,7 @@ mod tests {
         "diff --git a/demo.ts b/demo.ts\n",
         "--- a/demo.ts\n",
         "+++ b/demo.ts\n",
-        "@@ -1,3 +1,4 @@\n",
+        "@@ -1,2 +1,3 @@\n",
         " const one = 1;\n",
         "-const two = 2;\n",
         "+const two = 3;\n",
@@ -660,6 +651,15 @@ mod tests {
     fn model(mode: DiffViewMode) -> DiffModel {
         let diff = parse::diff::parse(PATCH).expect("parses");
         DiffModel::build(&diff, mode)
+    }
+
+    #[test]
+    fn cancelled_model_work_produces_no_rows() {
+        let diff = parse::diff::parse(PATCH).unwrap();
+        assert!(
+            DiffModel::build_cancellable(&diff, DiffViewMode::Unified, &AtomicBool::new(true))
+                .is_none()
+        );
     }
 
     #[test]
@@ -746,10 +746,8 @@ mod tests {
     }
 
     #[test]
-    fn syntax_is_claimed_once_and_applied_by_row() {
+    fn syntax_is_applied_by_unified_row() {
         let model = model(DiffViewMode::Unified);
-        assert!(model.claim_syntax());
-        assert!(!model.claim_syntax());
         assert!(model.runs_for(5).is_empty());
         model.apply_syntax(vec![(5, plain_runs(&model.rows[5].text))]);
         assert_eq!(model.runs_for(5).len(), 1);

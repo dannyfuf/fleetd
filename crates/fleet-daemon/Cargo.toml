@@ -3,33 +3,41 @@ name = "fleet-daemon"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "fleetd"
 path = "src/main.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
-fleet-core = { path = "../fleet-core" }
-fleet-proto = { path = "../fleet-proto" }
-fleet-term = { path = "../fleet-term" }
-futures-util = { version = "0.3", features = ["sink"] }
-libc = "0.2"
+fleet-core.workspace = true
+fleet-proto.workspace = true
+fleet-term.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
+libc.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
-shell-words = "1"
+sha2.workspace = true
+shell-words.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
 tracing.workspace = true
-tracing-appender = "0.2"
+tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+fleet-daemon = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

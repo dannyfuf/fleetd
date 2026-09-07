@@ -6,7 +6,6 @@ pub mod config;
 pub mod github;
 pub mod ids;
 pub mod inspection;
-pub mod log;
 pub mod model;
 pub mod paths;
 pub mod sessions;

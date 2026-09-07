@@ -10,12 +10,12 @@
 //!
 //! ## Keyboard
 //!
-//! The dialog owns no keys — it cannot, because [`gpui::RenderOnce`] holds no state. The view
+//! The caller owns dialog actions and focus. The view
 //! binds `Esc` to close, `Enter` to the primary action, and the keys its own
 //! [`super::KeyHintRow`] advertises. What the component guarantees is that every one of those
 //! keys is *stated* in the footer.
 
-use gpui::{AnyElement, App, Pixels, SharedString, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, App, Pixels, SharedString, Window, deferred, div, prelude::*};
 
 use crate::{
     components::{KeyHintRow, OverlayLayer},
@@ -31,7 +31,7 @@ pub struct Dialog {
     icon: Option<Icon>,
     title: SharedString,
     subtitle: Option<SharedString>,
-    width: Pixels,
+    width: Option<Pixels>,
     height: Option<Pixels>,
     tone: Tone,
     body: Option<AnyElement>,
@@ -41,16 +41,13 @@ pub struct Dialog {
 }
 
 impl Dialog {
-    /// The default card width (560 px): create, clone and the expanded confirm.
-    pub const DEFAULT_WIDTH: Pixels = px(560.0);
-
     /// A dialog with a title.
     pub fn new(title: impl Into<SharedString>) -> Self {
         Self {
             icon: None,
             title: title.into(),
             subtitle: None,
-            width: Self::DEFAULT_WIDTH,
+            width: None,
             height: None,
             tone: Tone::Default,
             body: None,
@@ -74,7 +71,7 @@ impl Dialog {
 
     /// The card width. §3.8 fixes one per dialog: 460 / 480 / 520 / 560 / 720 / 880.
     pub fn width(mut self, width: Pixels) -> Self {
-        self.width = width;
+        self.width = Some(width);
         self
     }
 
@@ -146,7 +143,7 @@ impl RenderOnce for Dialog {
             .gap(theme.space.sm)
             .h(theme.metrics.dialog_header_h)
             .px(theme.space.lg)
-            .border_b(px(1.0))
+            .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .children(
                 self.icon
@@ -179,7 +176,7 @@ impl RenderOnce for Dialog {
             .flex_col()
             .flex_none()
             .w_full()
-            .border_t(px(1.0))
+            .border_t(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .children(error_line)
             .child(
@@ -208,13 +205,13 @@ impl RenderOnce for Dialog {
                     div()
                         .flex()
                         .flex_col()
-                        .w(self.width)
+                        .w(self.width.unwrap_or(theme.metrics.dialog_w))
                         .when_some(self.height, |el, h| el.h(h))
                         .max_h_full()
                         .min_h_0()
                         .rounded(theme.radii.lg)
                         .bg(theme.colors.elevated)
-                        .border_1()
+                        .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
                         .shadow(theme.dialog_shadow())
                         .overflow_hidden()

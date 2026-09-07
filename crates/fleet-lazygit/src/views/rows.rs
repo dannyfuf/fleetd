@@ -3,15 +3,15 @@
 //! `selected` and `cursor` are separate on purpose: a side panel keeps its highlighted row when
 //! focus moves elsewhere, which is lazygit's `HighlightInactive` behaviour exactly.
 
-use fleet_git::{Branch, Commit, FileStatus, ReflogEntry, Remote, RemoteBranch, StashEntry, Tag};
+use fleet_git::{Branch, Commit, ReflogEntry, Remote, RemoteBranch, StashEntry, Tag};
 use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::theme::ch;
-use fleet_ui_kit::{ColumnAlign, Row, RowColumn};
-use gpui::{AnyElement, App, Hsla, div};
+use fleet_ui_kit::{ColumnAlign, ColumnLadder, ColumnSpec, ResolvedColumn, Row, RowColumn};
+use gpui::{AnyElement, App, Hsla, SharedString, div};
 
 use super::Ansi;
 use super::file_tree::FileRow;
-use crate::state::{has_staged, has_unstaged, recency, short_oid, upstream_status};
+use crate::state::{recency, short_oid, upstream_status};
 
 /// Finishes a row, painting the cursor row of an **unfocused** pane in the dimmer background.
 ///
@@ -29,13 +29,26 @@ fn finish(row: Row, selected: bool, focused: bool, cx: &App) -> AnyElement {
     row.into_any_element()
 }
 
-/// lazygit's three file-name colours: green fully staged, yellow partially staged, default
-/// otherwise. There is no special case for conflicts, deletions or untracked files.
-///
-/// A directory row is coloured from the same two flags, aggregated over its descendants, which
-/// is the only place a directory's status shows: lazygit prints no status characters on one.
-#[must_use]
-pub fn name_color(staged: bool, unstaged: bool, cx: &App) -> Hsla {
+/// One porcelain status character, static for every kind [`crate::state::short_status`] names, so
+/// a repainted row allocates nothing.
+fn status_glyph(status: char) -> SharedString {
+    match status {
+        ' ' => SharedString::new_static(" "),
+        '?' => SharedString::new_static("?"),
+        'A' => SharedString::new_static("A"),
+        'M' => SharedString::new_static("M"),
+        'D' => SharedString::new_static("D"),
+        'R' => SharedString::new_static("R"),
+        'C' => SharedString::new_static("C"),
+        'T' => SharedString::new_static("T"),
+        'U' => SharedString::new_static("U"),
+        '!' => SharedString::new_static("!"),
+        // `ChangeKind::Unknown` carries git's own byte through.
+        other => SharedString::from(other.to_string()),
+    }
+}
+
+fn name_color(staged: bool, unstaged: bool, cx: &App) -> Hsla {
     let theme = cx.theme();
     if staged && !unstaged {
         Ansi::Green.color(theme)
@@ -46,19 +59,13 @@ pub fn name_color(staged: bool, unstaged: bool, cx: &App) -> Hsla {
     }
 }
 
-/// lazygit's three file-name colours for a working-tree file.
-#[must_use]
-pub fn file_name_color(file: &FileStatus, cx: &App) -> Hsla {
-    name_color(has_staged(file), has_unstaged(file), cx)
-}
-
 /// One Files-pane row: two spaces of indent per depth, then either the two independently
 /// coloured status characters of a file or the `▼` / `▶` of a directory, then the name.
 ///
 /// The line shapes are `pkg/gui/presentation/files.go:143`-`:179` exactly — no line art, no
 /// status characters on a directory, and the indent sitting *before* the glyph column.
 #[must_use]
-pub fn file_tree_row(
+pub(crate) fn file_tree_row(
     row: &FileRow,
     budget: usize,
     selected: bool,
@@ -92,8 +99,8 @@ pub fn file_tree_row(
         div()
             .flex()
             .flex_row()
-            .child(Text::data(first.to_string()).color(first_color))
-            .child(Text::data(second.to_string()).color(second_color))
+            .child(Text::data(status_glyph(first)).color(first_color))
+            .child(Text::data(status_glyph(second)).color(second_color))
             .into_any_element()
     };
     let indent = ch(2.0 * row.depth as f32);
@@ -104,17 +111,15 @@ pub fn file_tree_row(
         .child(div().w(indent).flex_none())
         .child(glyph);
 
-    let label = match &row.previous {
+    let label: SharedString = match &row.previous {
         // lazygit shortens a rename that did not leave its directory to the bare file name.
         Some(previous) if previous.parent() == row.path.parent() => format!(
             "{} → {}",
-            previous
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            previous.file_name().unwrap_or_default().to_string_lossy(),
             row.name
-        ),
-        Some(previous) => format!("{} → {}", previous.display(), row.name),
+        )
+        .into(),
+        Some(previous) => format!("{} → {}", previous.display(), row.name).into(),
         None => row.name.clone(),
     };
     let budget = budget.saturating_sub(2 * row.depth).max(8);
@@ -134,7 +139,7 @@ pub fn file_tree_row(
 
 /// One local branch: recency, name, upstream divergence.
 #[must_use]
-pub fn branch_row(
+pub(crate) fn branch_row(
     branch: &Branch,
     now: i64,
     budget: usize,
@@ -179,7 +184,7 @@ pub fn branch_row(
 
 /// The one-cell graph glyph: `◎` for a merge, `○` otherwise.
 #[must_use]
-pub fn graph_glyph(commit: &Commit) -> &'static str {
+pub(crate) fn graph_glyph(commit: &Commit) -> &'static str {
     if commit.parents.len() > 1 {
         "◎"
     } else {
@@ -187,22 +192,49 @@ pub fn graph_glyph(commit: &Commit) -> &'static str {
     }
 }
 
-/// What a commit row needs beyond the commit itself.
+/// The commit-row column ladder, resolved for one pane width.
+///
+/// Resolved once per list rather than per row: the ladder drops columns as the pane narrows, and
+/// re-deriving that (and re-cloning five column keys) on every visible row of every frame is the
+/// most expensive thing a commit row would otherwise do.
+#[derive(Clone, Debug)]
+pub(crate) struct CommitColumns {
+    columns: Vec<ResolvedColumn>,
+    /// Characters the dropped columns free up, added to the subject budget.
+    reclaimed: usize,
+}
+
+impl CommitColumns {
+    /// Resolves the ladder for a pane `pane_ch` monospace columns wide.
+    #[must_use]
+    pub(crate) fn resolve(pane_ch: f32) -> Self {
+        let columns = commit_columns().resolve(pane_ch);
+        let reclaimed = [("graph", 2), ("author", 3), ("age", 4)]
+            .into_iter()
+            .filter(|(key, _)| !columns.iter().any(|column| column.key == *key))
+            .map(|(_, width)| width)
+            .sum();
+        Self { columns, reclaimed }
+    }
+}
+
+/// What a commit row needs beyond the commit itself and its columns.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CommitStyle {
+pub(crate) struct CommitStyle {
     /// Characters the subject column may spend before the ellipsis.
-    pub budget: usize,
+    pub(crate) budget: usize,
     /// Reachable from a main branch: the sha turns green.
-    pub merged: bool,
+    pub(crate) merged: bool,
     /// Marked with `c` for a later paste: the sha turns cyan.
-    pub copied: bool,
+    pub(crate) copied: bool,
 }
 
 /// One commit: graph glyph, short sha coloured by push state, author initials, age, subject.
 #[must_use]
-pub fn commit_row(
+pub(crate) fn commit_row(
     commit: &Commit,
     now: i64,
+    columns: &CommitColumns,
     style: CommitStyle,
     selected: bool,
     focused: bool,
@@ -214,6 +246,7 @@ pub fn commit_row(
         merged,
         copied,
     } = style;
+    let budget = budget + columns.reclaimed;
     // lazygit's single most recognisable signal: unpushed red, pushed yellow, merged green.
     let hash_color = if copied {
         Ansi::Cyan.color(theme)
@@ -224,17 +257,17 @@ pub fn commit_row(
     } else {
         Ansi::Red.color(theme)
     };
-    let decorations: Vec<String> = commit
-        .decorations
-        .iter()
-        .filter(|decoration| !decoration.is_empty())
-        .cloned()
-        .collect();
     // The decorations are capped at half the row's budget and pinned, so they can never squeeze
     // the subject out; the subject then takes what is left and ellipsizes. The flex row needs
     // `min_w_0` for that — without it the column overflows and the text is sliced mid-word with
     // no ellipsis at all.
-    let decoration_text = decorations.join(" ");
+    let mut decoration_text = String::new();
+    for decoration in commit.decorations.iter().filter(|text| !text.is_empty()) {
+        if !decoration_text.is_empty() {
+            decoration_text.push(' ');
+        }
+        decoration_text.push_str(decoration);
+    }
     let mut subject = div()
         .flex()
         .flex_row()
@@ -259,38 +292,55 @@ pub fn commit_row(
             .ellipsize(),
     );
 
-    let row = Row::new()
+    let mut row = Row::new()
         .selected(selected && focused)
-        .cursor(selected && focused)
-        .column(RowColumn::fixed_ch(
-            2.0,
-            Text::data(graph_glyph(commit)).color(hash_color),
-        ))
-        .column(RowColumn::fixed_ch(
-            9.0,
-            Text::data(short_oid(&commit.oid)).color(hash_color),
-        ))
-        .column(RowColumn::fixed_ch(
-            3.0,
-            Text::data(initials(&commit.author_name)).muted(),
-        ))
-        .column(
-            RowColumn::fixed_ch(
-                4.0,
-                Text::data(crate::state::time_ago(
-                    now.saturating_sub(commit.committed_at),
-                ))
-                .faint(),
-            )
-            .align(ColumnAlign::Right),
-        )
-        .column(RowColumn::flex(subject));
+        .cursor(selected && focused);
+    let mut subject = Some(subject);
+    for column in &columns.columns {
+        let element = match column.key.as_ref() {
+            "graph" => Text::data(graph_glyph(commit))
+                .color(hash_color)
+                .into_any_element(),
+            "hash" => Text::data(short_oid(&commit.oid))
+                .color(hash_color)
+                .into_any_element(),
+            "author" => Text::data(initials(&commit.author_name))
+                .muted()
+                .into_any_element(),
+            "age" => Text::data(crate::state::time_ago(
+                now.saturating_sub(commit.committed_at),
+            ))
+            .faint()
+            .into_any_element(),
+            "subject" => match subject.take() {
+                Some(subject) => subject.into_any_element(),
+                None => continue,
+            },
+            _ => continue,
+        };
+        row = row.column(RowColumn::resolved(column, element));
+    }
     finish(row, selected, focused, cx)
+}
+
+fn commit_columns() -> &'static ColumnLadder {
+    static COLUMNS: std::sync::OnceLock<ColumnLadder> = std::sync::OnceLock::new();
+    COLUMNS.get_or_init(|| {
+        ColumnLadder::new([
+            ColumnSpec::fixed("graph", 2.0).shown_from(36.0),
+            ColumnSpec::fixed("hash", 9.0),
+            ColumnSpec::fixed("author", 3.0).shown_from(44.0),
+            ColumnSpec::fixed("age", 4.0)
+                .shown_from(36.0)
+                .align(ColumnAlign::Right),
+            ColumnSpec::flex("subject", 8.0),
+        ])
+    })
 }
 
 /// lazygit's two-character author column.
 #[must_use]
-pub fn initials(name: &str) -> String {
+pub(crate) fn initials(name: &str) -> String {
     let mut words = name.split_whitespace();
     match (words.next(), words.next()) {
         (Some(first), Some(second)) => {
@@ -306,7 +356,12 @@ pub fn initials(name: &str) -> String {
 
 /// One reflog entry.
 #[must_use]
-pub fn reflog_row(entry: &ReflogEntry, selected: bool, focused: bool, cx: &App) -> AnyElement {
+pub(crate) fn reflog_row(
+    entry: &ReflogEntry,
+    selected: bool,
+    focused: bool,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let row = Row::new()
         .selected(selected && focused)
@@ -327,7 +382,7 @@ pub fn reflog_row(entry: &ReflogEntry, selected: bool, focused: bool, cx: &App) 
 
 /// One stash entry, rendered as `stash@{n}: subject`.
 #[must_use]
-pub fn stash_row(entry: &StashEntry, selected: bool, focused: bool, cx: &App) -> AnyElement {
+pub(crate) fn stash_row(entry: &StashEntry, selected: bool, focused: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let row = Row::new()
         .selected(selected && focused)
@@ -344,7 +399,7 @@ pub fn stash_row(entry: &StashEntry, selected: bool, focused: bool, cx: &App) ->
 
 /// One tag.
 #[must_use]
-pub fn tag_row(tag: &Tag, selected: bool, focused: bool, cx: &App) -> AnyElement {
+pub(crate) fn tag_row(tag: &Tag, selected: bool, focused: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let row = Row::new()
         .selected(selected && focused)
@@ -363,7 +418,12 @@ pub fn tag_row(tag: &Tag, selected: bool, focused: bool, cx: &App) -> AnyElement
 
 /// The header row of the commit-files view: the commit itself, whose patch is the whole commit.
 #[must_use]
-pub fn commit_files_header_row(label: &str, selected: bool, focused: bool, cx: &App) -> AnyElement {
+pub(crate) fn commit_files_header_row(
+    label: &str,
+    selected: bool,
+    focused: bool,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let row = Row::new()
         .selected(selected && focused)
@@ -382,7 +442,7 @@ pub fn commit_files_header_row(label: &str, selected: bool, focused: bool, cx: &
 
 /// One file of a commit, with its `A`/`M`/`D` status character.
 #[must_use]
-pub fn commit_file_row(
+pub(crate) fn commit_file_row(
     file: &fleet_git::CommitFile,
     budget: usize,
     selected: bool,
@@ -419,7 +479,7 @@ pub fn commit_file_row(
 
 /// One remote, with its branch count.
 #[must_use]
-pub fn remote_row(
+pub(crate) fn remote_row(
     remote: &Remote,
     branches: usize,
     selected: bool,
@@ -442,7 +502,7 @@ pub fn remote_row(
 
 /// One remote branch.
 #[must_use]
-pub fn remote_branch_row(
+pub(crate) fn remote_branch_row(
     branch: &RemoteBranch,
     budget: usize,
     selected: bool,

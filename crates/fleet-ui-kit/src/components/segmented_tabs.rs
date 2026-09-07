@@ -113,18 +113,12 @@ impl SegmentedTabs {
 
     /// `Tab` / `l`: the next tab, wrapping — two tabs must be reachable with one repeated key.
     pub fn next_index(active: usize, len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        if active + 1 >= len { 0 } else { active + 1 }
+        super::navigation::next(active, len)
     }
 
     /// `S-Tab` / `h`: the previous tab, wrapping.
     pub fn prev_index(active: usize, len: usize) -> usize {
-        if len == 0 {
-            return 0;
-        }
-        if active == 0 { len - 1 } else { active - 1 }
+        super::navigation::previous(active, len)
     }
 }
 

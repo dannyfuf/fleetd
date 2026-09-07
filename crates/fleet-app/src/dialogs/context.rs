@@ -1,12 +1,11 @@
 //! §3.8.4 New / Edit context.
-//!
-//! Two fields and one derived id. `owners` carries the app's **only** teaching line, because
-//! it is the one field whose purpose is not guessable from its name.
-//!
-//! **[D-11]**: `ctrl-d` here deletes the context, routed through the expanded `Y` confirm of
-//! §3.8.3 rather than deleting anything itself.
 
-use fleet_core::{ids::ContextId, slug::normalize_context_id};
+use fleet_core::{
+    ids::ContextId,
+    model::{Repo, Worktree},
+    sessions::{Session, SessionKind},
+    slug::normalize_context_id,
+};
 use fleet_proto::request::RequestBody;
 use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
@@ -15,7 +14,8 @@ use crate::{
     actions::{context_dialog, dialog},
     bridge::Bridge,
     dialogs::{
-        ConfirmRequest, Dialogs, TextInput, notify, request_confirm, root, type_into, with_host,
+        ConfirmRequest, DialogHost, Dialogs, field, notify, request_confirm, root, type_into,
+        with_host,
     },
     state::{AppState, Overlay},
 };
@@ -31,36 +31,37 @@ pub enum Field {
 }
 
 /// The New / Edit context draft.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ContextState {
     /// The context being edited, or `None` when creating one.
-    pub editing: Option<ContextId>,
-    /// Whether the id is read-only because repositories already live in this context.
-    pub id_locked: bool,
+    pub(crate) editing: Option<ContextId>,
     /// The display name.
-    pub name: TextInput,
+    pub(crate) name: TextFieldState,
     /// The comma-separated owner list.
-    pub owners: TextInput,
+    pub(crate) owners: TextFieldState,
     /// Which field owns the keyboard.
-    pub field: Field,
+    pub(crate) field: Field,
     /// Every existing context id, for the duplicate check.
-    pub existing: Vec<String>,
+    pub(crate) existing: Vec<String>,
     /// How many repositories, worktrees and sessions a delete would cascade to.
-    pub cascade: (usize, usize, usize),
+    pub(crate) cascade: (usize, usize, usize),
 }
 
 impl ContextState {
     /// The `ContextId` the typed name produces (§1 slugify rules).
     #[must_use]
     pub fn preview_id(&self) -> String {
-        normalize_context_id(self.name.value())
+        self.editing.as_ref().map_or_else(
+            || normalize_context_id(self.name.text()),
+            |id| id.as_str().to_owned(),
+        )
     }
 
     /// The owners, split and trimmed the way the daemon stores them.
     #[must_use]
     pub fn owner_list(&self) -> Vec<String> {
         self.owners
-            .value()
+            .text()
             .split(',')
             .map(str::trim)
             .filter(|owner| !owner.is_empty())
@@ -91,13 +92,38 @@ impl ContextState {
     /// Whether `Enter` may create or save.
     #[must_use]
     pub fn can_submit(&self) -> bool {
-        !self.preview_id().is_empty()
+        !self.name.text().trim().is_empty()
+            && !self.preview_id().is_empty()
             && self.duplicate().is_none()
             && ContextId::try_from(self.preview_id()).is_ok()
     }
 }
 
-// ---------------------------------------------------------------------------- seeding
+fn cascade_counts(
+    context: &ContextId,
+    repos: &[Repo],
+    worktrees: &[Worktree],
+    sessions: &[Session],
+) -> (usize, usize, usize) {
+    let context_repos = repos
+        .iter()
+        .filter(|repo| &repo.context_id == context)
+        .collect::<Vec<_>>();
+    let context_worktrees = worktrees
+        .iter()
+        .filter(|worktree| context_repos.iter().any(|repo| repo.id == worktree.repo_id))
+        .collect::<Vec<_>>();
+    let session_count = sessions
+        .iter()
+        .filter(|session| {
+            let SessionKind::Worktree(id) = &session.kind else {
+                return false;
+            };
+            context_worktrees.iter().any(|worktree| worktree.id == *id)
+        })
+        .count();
+    (context_repos.len(), context_worktrees.len(), session_count)
+}
 
 /// Fills the draft: empty for `N`, the active context's values for `E`.
 pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
@@ -117,27 +143,38 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App, editing: bool) {
                     .find(|entry| Some(&entry.id) == app.active_context())
             {
                 draft.editing = Some(context.id.clone());
-                draft.name = TextInput::new(context.name.clone());
-                draft.owners = TextInput::new(context.owners.join(", "));
-                let repos: Vec<_> = snapshot
-                    .repos
-                    .iter()
-                    .filter(|repo| repo.context_id == context.id)
-                    .collect();
-                let worktrees = snapshot
-                    .worktrees
-                    .iter()
-                    .filter(|worktree| repos.iter().any(|repo| repo.id == worktree.repo_id))
-                    .count();
-                draft.id_locked = !repos.is_empty();
-                draft.cascade = (repos.len(), worktrees, snapshot.sessions.len());
+                draft.name = TextFieldState::from_text(context.name.clone());
+                draft.owners = TextFieldState::from_text(context.owners.join(", "));
+                draft.cascade = cascade_counts(
+                    &context.id,
+                    &snapshot.repos,
+                    &snapshot.worktrees,
+                    &snapshot.sessions,
+                );
             }
         }
     }
-    with_host(cx, |host| host.context = draft);
+    with_host(state, cx, |host| host.context = draft);
 }
 
-// ---------------------------------------------------------------------------- rendering
+/// The name input, carrying either the collision or the id it would produce.
+fn name_field(draft: &ContextState, duplicate: Option<&str>) -> TextField {
+    let input = field(&draft.name)
+        .label("Name")
+        .placeholder("Buk HR")
+        .focused(draft.field == Field::Name);
+    let preview_id = draft.preview_id();
+    match (duplicate, draft.editing.is_some(), preview_id.is_empty()) {
+        (Some(message), _, _) => input.invalid(message.to_owned()),
+        // §1.2 zero-suppression: with no name there is no id to preview, and a bare `→` with
+        // nothing after it is a dangling arrow, not information.
+        (None, _, true) => input,
+        // §3.8.4: once repos exist the id is read-only outright, and saying so beats a
+        // disabled-looking input.
+        (None, true, false) => input.preview(format!("\u{2192} {preview_id} (id is fixed)")),
+        (None, false, false) => input.preview(format!("\u{2192} {preview_id}")),
+    }
+}
 
 /// Renders the dialog (§3.8.4).
 pub(crate) fn render(
@@ -145,46 +182,27 @@ pub(crate) fn render(
     state: &Entity<AppState>,
     bridge: &Bridge,
     focus: &FocusHandle,
+    host: &Entity<DialogHost>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.md;
-    let draft = with_host(cx, |host| host.context.clone());
+    let draft = &host.read(cx).context;
     let editing = draft.editing.clone();
     let duplicate = draft.duplicate();
-
-    let mut name_field = TextField::new(draft.name.value().to_owned())
-        .label("Name")
-        .placeholder("Buk HR")
-        .caret(draft.name.caret())
-        .focused(draft.field == Field::Name);
-    let preview_id = draft.preview_id();
-    name_field = match (&duplicate, draft.id_locked, preview_id.is_empty()) {
-        (Some(message), _, _) => name_field.invalid(message.clone()),
-        // §1.2 zero-suppression: with no name there is no id to preview, and a bare `→` with
-        // nothing after it is a dangling arrow, not information.
-        (None, _, true) => name_field,
-        // §3.8.4: once repos exist the id is read-only outright, and saying so beats a
-        // disabled-looking input.
-        (None, true, false) => name_field.preview(format!(
-            "\u{2192} {preview_id} (id is fixed once repos exist)"
-        )),
-        (None, false, false) => name_field.preview(format!("\u{2192} {preview_id}")),
-    };
-
-    let owners_field = TextField::new(draft.owners.value().to_owned())
-        .label("Owners")
-        .placeholder("bukhr, dannyfuf")
-        .caret(draft.owners.caret())
-        .focused(draft.field == Field::Owners)
-        .preview("GitHub orgs/users used to scope PRs");
 
     let body = div()
         .flex()
         .flex_col()
         .gap(gap)
-        .child(name_field)
-        .child(owners_field);
+        .child(name_field(draft, duplicate.as_deref()))
+        .child(
+            field(&draft.owners)
+                .label("Owners")
+                .placeholder("bukhr, dannyfuf")
+                .focused(draft.field == Field::Owners)
+                .preview("GitHub orgs/users used to scope PRs"),
+        );
 
     let mut hints = KeyHintRow::new()
         .key("\u{21e5}", "field")
@@ -198,7 +216,7 @@ pub(crate) fn render(
         "New context"
     })
     .icon(Icon::Boxes)
-    .width(dialog_kind.width())
+    .width(dialog_kind.width(cx))
     .body(body)
     .hint_row(hints)
     .primary(if editing.is_some() {
@@ -219,91 +237,47 @@ pub(crate) fn render(
     let confirm_bridge = bridge.clone();
     let delete_state = state.clone();
 
-    root(focus)
-        .on_key_down({
-            let state = state.clone();
-            move |event, _window, cx| {
-                let changed = with_host(cx, |host| match host.context.field {
-                    Field::Name => type_into(&mut host.context.name, event),
-                    Field::Owners => type_into(&mut host.context.owners, event),
-                });
-                if changed {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::NextField, _window, cx| toggle_field(&state, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::PrevField, _window, cx| toggle_field(&state, cx)
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::Backspace, _window, cx| {
-                if edit(cx, TextInput::backspace) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::DeleteWord, _window, cx| {
-                if edit(cx, TextInput::delete_word) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::ClearInput, _window, cx| {
-                if edit(cx, TextInput::clear) {
-                    notify(&state, cx);
-                }
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| {
-                move_caret(cx, TextInput::home);
+    super::input::actions(
+        root(focus),
+        state,
+        |host| match host.context.field {
+            Field::Name => &mut host.context.name,
+            Field::Owners => &mut host.context.owners,
+        },
+        notify,
+    )
+    .on_key_down({
+        let state = state.clone();
+        move |event, _window, cx| {
+            let changed = with_host(&state, cx, |host| match host.context.field {
+                Field::Name => type_into(&mut host.context.name, event),
+                Field::Owners => type_into(&mut host.context.owners, event),
+            });
+            if changed {
                 notify(&state, cx);
             }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| {
-                move_caret(cx, TextInput::end);
-                notify(&state, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| {
-                move_caret(cx, TextInput::left);
-                notify(&state, cx);
-            }
-        })
-        .on_action({
-            let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| {
-                move_caret(cx, TextInput::right);
-                notify(&state, cx);
-            }
-        })
-        .on_action(move |_: &dialog::Confirm, _window, cx| {
-            submit(&confirm_state, &confirm_bridge, cx);
-        })
-        .on_action(move |_: &context_dialog::Delete, _window, cx| {
-            open_delete_confirm(&delete_state, cx);
-        })
-        .child(card)
-        .into_any_element()
+        }
+    })
+    .on_action({
+        let state = state.clone();
+        move |_: &dialog::NextField, _window, cx| toggle_field(&state, cx)
+    })
+    .on_action({
+        let state = state.clone();
+        move |_: &dialog::PrevField, _window, cx| toggle_field(&state, cx)
+    })
+    .on_action(move |_: &dialog::Confirm, _window, cx| {
+        submit(&confirm_state, &confirm_bridge, cx);
+    })
+    .on_action(move |_: &context_dialog::Delete, _window, cx| {
+        open_delete_confirm(&delete_state, cx);
+    })
+    .child(card)
+    .into_any_element()
 }
 
 fn toggle_field(state: &Entity<AppState>, cx: &mut App) {
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.context.field = match host.context.field {
             Field::Name => Field::Owners,
             Field::Owners => Field::Name,
@@ -312,31 +286,15 @@ fn toggle_field(state: &Entity<AppState>, cx: &mut App) {
     notify(state, cx);
 }
 
-/// Applies a mutating edit to whichever field has focus.
-fn edit(cx: &mut App, apply: impl FnOnce(&mut TextInput) -> bool) -> bool {
-    with_host(cx, |host| match host.context.field {
-        Field::Name => apply(&mut host.context.name),
-        Field::Owners => apply(&mut host.context.owners),
-    })
-}
-
-/// Applies a caret move to whichever field has focus.
-fn move_caret(cx: &mut App, apply: impl FnOnce(&mut TextInput)) {
-    with_host(cx, |host| match host.context.field {
-        Field::Name => apply(&mut host.context.name),
-        Field::Owners => apply(&mut host.context.owners),
-    });
-}
-
 /// `Enter`: create or save. A duplicate id makes it inert (§3.8.4).
 fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let Some((editing, name, owners)) = with_host(cx, |host| {
+    let Some((editing, name, owners)) = with_host(state, cx, |host| {
         if !host.context.can_submit() {
             return None;
         }
         Some((
             host.context.editing.clone(),
-            host.context.name.value().to_owned(),
+            host.context.name.text().to_owned(),
             host.context.owner_list(),
         ))
     }) else {
@@ -358,10 +316,10 @@ fn submit(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 
 /// `ctrl-d`: hand the delete to the expanded `Y` confirm instead of doing it here.
 fn open_delete_confirm(state: &Entity<AppState>, cx: &mut App) {
-    let Some((context, name, cascade)) = with_host(cx, |host| {
+    let Some((context, name, cascade)) = with_host(state, cx, |host| {
         Some((
             host.context.editing.clone()?,
-            host.context.name.value().to_owned(),
+            host.context.name.text().to_owned(),
             host.context.cascade,
         ))
     }) else {
@@ -390,11 +348,11 @@ mod tests {
     #[test]
     fn the_id_preview_is_the_slugified_name() {
         let mut draft = ContextState {
-            name: TextInput::new("Buk HR"),
+            name: TextFieldState::from_text("Buk HR"),
             ..ContextState::default()
         };
         assert_eq!(draft.preview_id(), "buk-hr");
-        draft.name = TextInput::new("  ");
+        draft.name = TextFieldState::from_text("  ");
         assert_eq!(draft.preview_id(), "");
         assert!(!draft.can_submit());
     }
@@ -402,7 +360,7 @@ mod tests {
     #[test]
     fn owners_are_split_on_commas_and_trimmed() {
         let draft = ContextState {
-            owners: TextInput::new(" bukhr ,dannyfuf, "),
+            owners: TextFieldState::from_text(" bukhr ,dannyfuf, "),
             ..ContextState::default()
         };
         assert_eq!(draft.owner_list(), vec!["bukhr", "dannyfuf"]);
@@ -411,7 +369,7 @@ mod tests {
     #[test]
     fn a_duplicate_id_blocks_enter_but_editing_its_own_id_does_not() {
         let mut draft = ContextState {
-            name: TextInput::new("Buk"),
+            name: TextFieldState::from_text("Buk"),
             existing: vec!["buk".to_owned()],
             ..ContextState::default()
         };
@@ -428,10 +386,94 @@ mod tests {
     #[test]
     fn empty_owners_are_allowed() {
         let draft = ContextState {
-            name: TextInput::new("Personal"),
+            name: TextFieldState::from_text("Personal"),
             ..ContextState::default()
         };
         assert!(draft.owner_list().is_empty());
         assert!(draft.can_submit());
+    }
+
+    #[test]
+    fn editing_keeps_persisted_context_id() {
+        let draft = ContextState {
+            editing: ContextId::try_from("buk-hr").ok(),
+            name: TextFieldState::from_text("People Operations"),
+            existing: vec!["buk-hr".to_owned(), "people-operations".to_owned()],
+            ..ContextState::default()
+        };
+        assert_eq!(draft.preview_id(), "buk-hr");
+        assert_eq!(draft.duplicate(), None);
+        assert!(draft.can_submit());
+    }
+
+    #[test]
+    fn cascade_counts_only_context_sessions() {
+        use fleet_core::{
+            config::Agent,
+            ids::{RepoId, SessionId, WorktreeId},
+            sessions::agent_session_id,
+        };
+
+        let context = ContextId::try_from("one").unwrap();
+        let other_context = ContextId::try_from("two").unwrap();
+        let repo = |id: &str, context_id: ContextId| Repo {
+            id: RepoId::try_from(id).unwrap(),
+            owner: "acme".to_owned(),
+            name: id.rsplit('/').next().unwrap_or(id).to_owned(),
+            url: String::new(),
+            context_id,
+            default_branch: "main".to_owned(),
+            path: String::new(),
+            cloned_at: String::new(),
+            hooks: Default::default(),
+        };
+        let repos = vec![
+            repo("acme/one", context.clone()),
+            repo("acme/two", other_context),
+        ];
+        let worktree = |id: &str, repo_id: &str| Worktree {
+            id: WorktreeId::try_from(id).unwrap(),
+            repo_id: RepoId::try_from(repo_id).unwrap(),
+            slug: "feature".to_owned(),
+            branch: "feature".to_owned(),
+            base_ref: "origin/main".to_owned(),
+            path: String::new(),
+            session: id.to_owned(),
+            host: None,
+            created_at: String::new(),
+            last_opened_at: None,
+            degraded: None,
+        };
+        let worktrees = vec![
+            worktree("acme/one#feature", "acme/one"),
+            worktree("acme/two#feature", "acme/two"),
+        ];
+        let session = |id: &str, kind| Session {
+            id: SessionId::try_from(id).unwrap(),
+            kind,
+            cwd: String::new(),
+            terminals: Vec::new(),
+            active_terminal: None,
+            slept_at: None,
+            kept_terminals: Vec::new(),
+        };
+        let sessions = vec![
+            session(
+                "acme/one#feature",
+                SessionKind::Worktree(worktrees[0].id.clone()),
+            ),
+            session(
+                "acme/two#feature",
+                SessionKind::Worktree(worktrees[1].id.clone()),
+            ),
+            session(
+                agent_session_id(Agent::Claude).unwrap().as_str(),
+                SessionKind::Agent(Agent::Claude),
+            ),
+        ];
+        assert_eq!(
+            cascade_counts(&context, &repos, &worktrees, &sessions),
+            (1, 1, 1)
+        );
     }
 }

@@ -115,7 +115,7 @@ impl RenderOnce for PrBadge {
             .flex_none()
             .items_center()
             .gap(theme.space.xs)
-            .when(self.stale, |el| el.opacity(0.55))
+            .when(self.stale, |el| el.opacity(theme.metrics.stale_opacity))
             .children(
                 self.number
                     .map(|number| Text::data(format!("#{number}")).muted()),

@@ -13,7 +13,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{board as board_actions, dialog},
     bridge::Bridge,
-    dialogs::{Dialogs, notify, root, typed_char, with_host},
+    dialogs::{DialogHost, Dialogs, notify, root, typed_char, with_host},
     screens::board,
     state::AppState,
 };
@@ -102,7 +102,7 @@ impl CardCreateState {
 
 pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
     let board_id = state.read(cx).board().map(|view| view.board.id.clone());
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_create = CardCreateState {
             generation: host.card_create.generation.wrapping_add(1),
             board_id,
@@ -116,11 +116,12 @@ pub fn render(
     state: &Entity<AppState>,
     bridge: &Bridge,
     focus: &FocusHandle,
+    _host: &Entity<DialogHost>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.md;
-    let draft = with_host(cx, |host| host.card_create.clone());
+    let draft = with_host(state, cx, |host| host.card_create.clone());
     let board_name = state
         .read(cx)
         .board()
@@ -152,9 +153,9 @@ pub fn render(
                 .focused(draft.field == Field::Description),
         );
 
-    let mut card = Dialog::new(Dialogs::CardCreate.title())
-        .icon(Dialogs::CardCreate.icon())
-        .width(Dialogs::CardCreate.width())
+    let mut card = Dialog::new("New card")
+        .icon(Icon::Plus)
+        .width(Dialogs::CardCreate.width(cx))
         .body(body)
         .hint_row(
             KeyHintRow::new()
@@ -194,9 +195,9 @@ pub fn render(
                 let Some(text) = typed_char(event) else {
                     return;
                 };
-                with_host(cx, |host| {
+                with_host(&state, cx, |host| {
                     host.card_create.error = None;
-                    host.card_create.edit(|area| area.insert(&text));
+                    host.card_create.edit(|area| area.insert(text));
                 });
                 notify(&state, cx);
                 cx.stop_propagation();
@@ -205,7 +206,9 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &dialog::NextField, _window, cx| {
-                if with_host(cx, |host| host.card_create.field == Field::Description) {
+                if with_host(&state, cx, |host| {
+                    host.card_create.field == Field::Description
+                }) {
                     edit(&state, cx, TextAreaState::insert_tab);
                 } else {
                     cycle_field(&state, cx);
@@ -290,7 +293,9 @@ pub fn render(
             }
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
-            if with_host(cx, |host| host.card_create.field == Field::Description) {
+            if with_host(&submit_state, cx, |host| {
+                host.card_create.field == Field::Description
+            }) {
                 edit(&submit_state, cx, TextAreaState::insert_newline);
             } else {
                 submit(false, &submit_state, &submit_bridge, cx);
@@ -307,7 +312,7 @@ pub fn render(
 
 /// `Tab` / `S-Tab`: two fields, so both keys do the same thing.
 fn cycle_field(state: &Entity<AppState>, cx: &mut App) {
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_create.field = match host.card_create.field {
             Field::Title => Field::Description,
             Field::Description => Field::Title,
@@ -318,7 +323,7 @@ fn cycle_field(state: &Entity<AppState>, cx: &mut App) {
 
 /// Runs a text edit against the focused field and repaints.
 fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextAreaState)) {
-    with_host(cx, |host| host.card_create.edit(edit));
+    with_host(state, cx, |host| host.card_create.edit(edit));
     notify(state, cx);
     cx.stop_propagation();
 }
@@ -326,7 +331,7 @@ fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextAreaS
 /// Creates the card; `open_after` also opens its detail once the daemon answers.
 fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let current_board = state.read(cx).board().map(|view| view.board.id.clone());
-    let Some((board_id, draft, generation)) = with_host(cx, |host| {
+    let Some((board_id, draft, generation)) = with_host(state, cx, |host| {
         let draft = &mut host.card_create;
         if draft.saving || draft.board_id.is_none() || draft.board_id != current_board {
             return None;
@@ -366,7 +371,7 @@ fn submit(open_after: bool, state: &Entity<AppState>, bridge: &Bridge, cx: &mut 
             {
                 return;
             }
-            let completed = with_host(cx, |host| {
+            let completed = with_host(&handle, cx, |host| {
                 host.card_create
                     .finish_save(generation, answer.as_ref().err().cloned())
             });

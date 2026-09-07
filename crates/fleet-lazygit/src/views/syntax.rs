@@ -1,31 +1,20 @@
-//! Syntax highlighting for diff payload lines, on TextMate grammars.
+//! Syntax highlighting for diff payload lines.
 //!
-//! `syntect` 5.3 with `two-face`'s curated grammar set (213 syntaxes, TypeScript and TSX
-//! included) rather than tree-sitter, for one decisive reason: syntect is the only engine of the
-//! two with **resumable per-line state**. `ParseState` and `HighlightState` both `Clone`, so a
-//! stream of lines can be parsed one line at a time and stopped anywhere — which is exactly the
-//! shape of a diff, where we hold hunks rather than whole files. Pierre (`diffs.com`) makes the
-//! same choice with Shiki's TextMate grammars for the same reason.
+//! syntect rather than tree-sitter because a diff is never a whole file: its `ParseState` and
+//! `HighlightState` are `Clone` and advance one line at a time, so a hunk's partial line stream
+//! can be parsed from a carried-over state and stopped anywhere. A tree-sitter parse wants the
+//! complete text.
 //!
-//! Two deliberate simplifications, both because a diff is not a file:
-//!
-//! * **Per-hunk, two-stream parsing.** A hunk's `-` and `+` lines interleave two different
-//!   versions of the file; feeding them to one parser corrupts its state inside a block comment
-//!   or a multi-line string. Each hunk is therefore parsed twice — once over its *old* side
-//!   (context + removed) and once over its *new* side (context + added) — with a fresh
-//!   `ParseState` per hunk, since the lines above the hunk are not in the patch at all.
-//! * **Buckets, not colours.** The highlighter yields a [`Bucket`] per span, not an `Hsla`, so
-//!   the work can happen on a background thread with no `Theme` in hand and the colours resolve
-//!   against the live theme at paint time. Eight buckets, deliberately: Zed's One Dark spends
-//!   eight hues on 46 token categories, and inside a diff the row tint is already carrying
-//!   information.
+//! Per-hunk old/new parsers keep syntax state separate. Theme-independent buckets
+//! resolve colors at paint time. Cancellation is checked between lines.
 
 use std::ops::Range;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use fleet_ui_kit::Theme;
-use gpui::Hsla;
+use gpui::{Hsla, SharedString};
 use syntect::highlighting::{
     Color, Highlighter, RangedHighlightIterator, Style, StyleModifier, Theme as SyntectTheme,
     ThemeItem, ThemeSettings,
@@ -36,14 +25,14 @@ use super::Ansi;
 
 /// Lines longer than this are not highlighted at all — Pierre's `tokenizeMaxLineLength`, and the
 /// reason a minified bundle in a diff does not stall the highlighter.
-pub const MAX_LINE_LEN: usize = 1_000;
+pub(crate) const MAX_LINE_LEN: usize = 1_000;
 
 /// How many payload lines one background pass will highlight before giving up. Past this the
 /// diff is a bulk import, not something anyone reads a token at a time.
-pub const MAX_LINES: usize = 40_000;
+pub(crate) const MAX_LINES: usize = 40_000;
 
 /// How long one background pass may run before it stops and leaves the rest plain.
-pub const BUDGET: Duration = Duration::from_millis(1_500);
+pub(crate) const BUDGET: Duration = Duration::from_millis(1_500);
 
 /// The eight colour buckets a scope can land in, plus plain text.
 ///
@@ -51,7 +40,7 @@ pub const BUDGET: Duration = Duration::from_millis(1_500);
 /// [`bucket_theme`]) and decoded again without a scope-name lookup on the hot path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[repr(u8)]
-pub enum Bucket {
+pub(crate) enum Bucket {
     /// No rule matched: ordinary code.
     #[default]
     Plain = 0,
@@ -95,7 +84,7 @@ impl Bucket {
     /// (`views/mod.rs`), so a theme change moves the syntax palette with it and no new
     /// `ColorTokens` field is needed.
     #[must_use]
-    pub fn color(self, theme: &Theme) -> Hsla {
+    pub(crate) fn color(self, theme: &Theme) -> Hsla {
         match self {
             Bucket::Plain => theme.colors.text,
             Bucket::Comment => theme.colors.text_muted,
@@ -176,7 +165,13 @@ fn bucket_theme() -> &'static SyntectTheme {
             .iter()
             .filter_map(|(bucket, selectors)| {
                 Some(ThemeItem {
-                    scope: selectors.parse().ok()?,
+                    scope: match selectors.parse() {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            tracing::error!(%error, selectors, "invalid diff syntax selector");
+                            return None;
+                        }
+                    },
                     style: StyleModifier {
                         foreground: Some(sentinel(*bucket)),
                         background: None,
@@ -203,7 +198,7 @@ fn bucket_theme() -> &'static SyntectTheme {
 /// Extension first, then the whole file name as a token, which is how `Dockerfile` and
 /// `Makefile` resolve.
 #[must_use]
-pub fn language_for_path(path: &str) -> Option<String> {
+pub(crate) fn language_for_path(path: &str) -> Option<String> {
     let set = syntax_set();
     let name = path.rsplit('/').next().unwrap_or(path);
     if let Some(extension) = name.rsplit_once('.').map(|(_, extension)| extension)
@@ -221,15 +216,15 @@ fn syntax_by_name(name: &str) -> Option<&'static SyntaxReference> {
 
 /// One contiguous stream of lines to highlight: one side of one hunk.
 #[derive(Clone, Debug)]
-pub struct Job {
+pub(crate) struct Job {
     /// The grammar name, from [`language_for_path`].
-    pub language: String,
+    pub(crate) language: String,
     /// `(row index in the model, the line's text)`, in file order.
-    pub lines: Vec<(usize, String)>,
+    pub(crate) lines: Vec<(usize, SharedString)>,
 }
 
 /// The highlight runs for one line, as byte ranges into that line's text.
-pub type Runs = Vec<(Range<usize>, Bucket)>;
+pub(crate) type Runs = Vec<(Range<usize>, Bucket)>;
 
 /// Highlights every job, returning `(row index, runs)` pairs.
 ///
@@ -237,19 +232,31 @@ pub type Runs = Vec<(Range<usize>, Bucket)>;
 /// [`BUDGET`] or [`MAX_LINES`] is spent and returns what it has, so a pathological diff
 /// degrades to plain text instead of pinning a core.
 #[must_use]
-pub fn run(jobs: &[Job]) -> Vec<(usize, Runs)> {
+#[cfg(test)]
+pub(crate) fn run(jobs: &[Job]) -> Vec<(usize, Runs)> {
+    run_cancellable(jobs, &AtomicBool::new(false))
+}
+
+pub(crate) fn run_cancellable(jobs: &[Job], cancelled: &AtomicBool) -> Vec<(usize, Runs)> {
     let set = syntax_set();
     let highlighter = Highlighter::new(bucket_theme());
     let started = Instant::now();
     let mut out = Vec::new();
     let mut seen = 0usize;
+    let mut diagnosed = false;
     for job in jobs {
+        if cancelled.load(Ordering::Relaxed) {
+            return out;
+        }
         let Some(syntax) = syntax_by_name(&job.language) else {
             continue;
         };
         let mut parse = ParseState::new(syntax);
         let mut state = syntect::highlighting::HighlightState::new(&highlighter, ScopeStack::new());
         for (row, text) in &job.lines {
+            if cancelled.load(Ordering::Relaxed) {
+                return out;
+            }
             seen += 1;
             if seen > MAX_LINES || started.elapsed() > BUDGET {
                 tracing::warn!(
@@ -264,10 +271,17 @@ pub fn run(jobs: &[Job]) -> Vec<(usize, Runs)> {
             }
             // `*_newlines` grammars expect the terminator; the range it produces is past the
             // end of the text we render, so it is dropped below.
-            let mut line = text.clone();
+            let mut line = text.to_string();
             line.push('\n');
-            let Ok(ops) = parse.parse_line(&line, set) else {
-                continue;
+            let ops = match parse.parse_line(&line, set) {
+                Ok(ops) => ops,
+                Err(error) => {
+                    if !diagnosed {
+                        tracing::warn!(%error, language = job.language, row, "diff syntax parser failed");
+                        diagnosed = true;
+                    }
+                    break;
+                }
             };
             let mut runs: Runs = Vec::new();
             for (style, _, range) in
@@ -309,6 +323,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fixed_scope_selectors_are_valid() {
+        for (_, selector) in RULES {
+            assert!(
+                selector
+                    .parse::<syntect::highlighting::ScopeSelectors>()
+                    .is_ok(),
+                "{selector}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_syntax_work_publishes_no_runs() {
+        let jobs = [Job {
+            language: "Rust".into(),
+            lines: vec![(0, "fn main() {}".into())],
+        }];
+        assert!(run_cancellable(&jobs, &AtomicBool::new(true)).is_empty());
+    }
+
+    #[test]
     fn detects_the_languages_that_matter() {
         for (path, expected) in [
             ("src/app.ts", "TypeScript"),
@@ -346,8 +381,8 @@ mod tests {
         let job = Job {
             language: "TypeScript".to_owned(),
             lines: vec![
-                (0, "// a comment".to_owned()),
-                (1, "const name: string = \"hello\";".to_owned()),
+                (0, "// a comment".into()),
+                (1, "const name: string = \"hello\";".into()),
             ],
         };
         let runs = run(&[job]);
@@ -381,7 +416,7 @@ mod tests {
         let long = "x".repeat(MAX_LINE_LEN + 1);
         let runs = run(&[Job {
             language: "Rust".to_owned(),
-            lines: vec![(0, long)],
+            lines: vec![(0, long.into())],
         }]);
         assert!(runs.is_empty());
     }
@@ -390,7 +425,7 @@ mod tests {
     fn an_unknown_grammar_yields_nothing() {
         let runs = run(&[Job {
             language: "Not A Grammar".to_owned(),
-            lines: vec![(0, "fn main() {}".to_owned())],
+            lines: vec![(0, "fn main() {}".into())],
         }]);
         assert!(runs.is_empty());
     }

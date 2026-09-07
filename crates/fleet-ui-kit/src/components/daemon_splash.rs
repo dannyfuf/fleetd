@@ -127,7 +127,7 @@ impl RenderOnce for DaemonSplash {
                     .py(theme.space.sm)
                     .rounded(theme.radii.sm)
                     .bg(theme.colors.surface)
-                    .border_1()
+                    .border(theme.metrics.hairline)
                     .border_color(theme.colors.border)
                     .children(
                         self.log_lines

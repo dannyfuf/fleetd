@@ -94,7 +94,7 @@ depending on row state — same key, same pane, same mode, different blast radiu
 | `n` | create worktree (dialog) |
 | `d` | delete worktree (confirm shows dirty/unique-commit/session facts from inspect) |
 | `u` | undo the last delete while its `trash/<epochms>-<slug>` entry still exists [A6] |
-| `x` | prune eligible worktrees of selected repo (dry-run preview → confirm) |
+| `x` | prune eligible worktrees of selected repo (dry-run preview → confirm exact reviewed DELETE rows) |
 | `s` | sleep session |
 | `K` | kill session (confirm) |
 | `I` | inspect (refresh safety facts as a job) |

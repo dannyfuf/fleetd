@@ -36,9 +36,15 @@ impl IdError {
 macro_rules! string_id {
     ($name:ident, $kind:literal, $validate:expr) => {
         #[doc = concat!("A validated ", $kind, ".")]
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-        #[serde(try_from = "String", into = "String")]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+        #[serde(try_from = "String")]
         pub struct $name(String);
+
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(&self.0)
+            }
+        }
 
         impl $name {
             #[doc = concat!("Returns the string representation of this ", $kind, ".")]
@@ -61,7 +67,8 @@ macro_rules! string_id {
             type Error = IdError;
 
             fn try_from(value: &str) -> Result<Self, Self::Error> {
-                Self::try_from(value.to_owned())
+                ($validate)(value)?;
+                Ok(Self(value.to_owned()))
             }
         }
 
@@ -252,15 +259,6 @@ impl SessionId {
             session_component(slug)
         ))
     }
-
-    /// Constructs a local proxy session name for a remote daemon session.
-    pub fn proxy(host: &HostId, remote_session: &SessionId) -> Result<Self, IdError> {
-        Self::try_from(format!(
-            "{}/{}",
-            session_component(host.as_str()),
-            session_component(remote_session.as_str())
-        ))
-    }
 }
 
 fn session_component(value: &str) -> String {
@@ -338,19 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn constructs_session_names() {
+    fn local_session_names_replace_dots_and_colons() {
         let local =
             SessionId::local("pay.roll:api", "feat:one").unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(local.as_str(), "pay-roll-api/feat-one");
-        let host = HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}"));
-        let proxy = SessionId::proxy(&host, &local).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(proxy.as_str(), "devbox/pay-roll-api/feat-one");
-
-        let legacy_remote =
-            SessionId::try_from("api/feat.one:two").unwrap_or_else(|error| panic!("{error}"));
-        let proxy =
-            SessionId::proxy(&host, &legacy_remote).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(proxy.as_str(), "devbox/api/feat-one-two");
+        assert!(SessionId::local("repo", "").is_err());
     }
 
     #[test]

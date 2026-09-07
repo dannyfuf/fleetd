@@ -305,7 +305,7 @@ impl RenderOnce for CardTile {
                         on_click(event, window, cx)
                     })
             })
-            .child(FocusRing::cursor_row(focused).child(body))
+            .child(FocusRing::cursor_row(focused).content(body))
     }
 }
 

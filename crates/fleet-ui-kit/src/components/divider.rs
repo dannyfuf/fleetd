@@ -49,16 +49,20 @@ impl RenderOnce for Divider {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let pad = theme.space.lg;
-        let base = div().bg(theme.colors.border).flex_none();
+        let rule = div().bg(theme.colors.border).size_full();
         match self.axis {
-            DividerAxis::Horizontal => base
+            DividerAxis::Horizontal => div()
+                .flex_none()
                 .h(theme.metrics.hairline)
                 .w_full()
-                .when(self.inset, |el| el.mx(pad)),
-            DividerAxis::Vertical => base
+                .when(self.inset, |el| el.px(pad))
+                .child(rule),
+            DividerAxis::Vertical => div()
+                .flex_none()
                 .w(theme.metrics.hairline)
                 .h_full()
-                .when(self.inset, |el| el.my(pad)),
+                .when(self.inset, |el| el.py(pad))
+                .child(rule),
         }
     }
 }

@@ -371,28 +371,20 @@ pub enum ScrollCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_round_trip;
 
     #[test]
     fn all_terminal_enums_round_trip() {
-        macro_rules! round_trip {
-            ($value:expr, $ty:ty) => {{
-                let value = $value;
-                let json = serde_json::to_string(&value).unwrap_or_else(|error| panic!("{error}"));
-                let decoded: $ty =
-                    serde_json::from_str(&json).unwrap_or_else(|error| panic!("{error}"));
-                assert_eq!(decoded, value);
-            }};
-        }
-        round_trip!(Color::Rgb { r: 1, g: 2, b: 3 }, Color);
-        round_trip!(CellWidth::Wide, CellWidth);
-        round_trip!(CursorShape::Bar, CursorShape);
-        round_trip!(Key::Char('é'), Key);
-        round_trip!(KeyAction::Repeat, KeyAction);
-        round_trip!(MouseButton::Other(4), MouseButton);
-        round_trip!(MouseEventKind::Drag, MouseEventKind);
-        round_trip!(ScrollCommand::Lines(-3), ScrollCommand);
-        round_trip!(CellAttrs::BOLD | CellAttrs::ITALIC, CellAttrs);
-        round_trip!(Modifiers::CTRL | Modifiers::ALT, Modifiers);
+        assert_round_trip(Color::Rgb { r: 1, g: 2, b: 3 });
+        assert_round_trip(CellWidth::Wide);
+        assert_round_trip(CursorShape::Bar);
+        assert_round_trip(Key::Char('é'));
+        assert_round_trip(KeyAction::Repeat);
+        assert_round_trip(MouseButton::Other(4));
+        assert_round_trip(MouseEventKind::Drag);
+        assert_round_trip(ScrollCommand::Lines(-3));
+        assert_round_trip(CellAttrs::BOLD | CellAttrs::ITALIC);
+        assert_round_trip(Modifiers::CTRL | Modifiers::ALT);
     }
 
     #[test]

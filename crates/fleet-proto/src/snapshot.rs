@@ -91,30 +91,22 @@ pub struct Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assert_round_trip;
 
     #[test]
     fn snapshot_status_types_round_trip() {
-        let pool = PoolStatus {
+        assert_round_trip(PoolStatus {
             repo: RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
             ready: 1,
             size: 2,
             refreshed_at: Some("2026-09-04T12:00:00Z".to_owned()),
-        };
-        let encoded = serde_json::to_string(&pool).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: PoolStatus =
-            serde_json::from_str(&encoded).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, pool);
-
-        let host = HostStatus {
+        });
+        assert_round_trip(HostStatus {
             id: HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}")),
             reachable: false,
             checked_at: "2026-09-04T12:00:00Z".to_owned(),
             error: Some("ssh timed out".to_owned()),
-        };
-        let encoded = serde_json::to_string(&host).unwrap_or_else(|error| panic!("{error}"));
-        let decoded: HostStatus =
-            serde_json::from_str(&encoded).unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(decoded, host);
+        });
     }
 }
 

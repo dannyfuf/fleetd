@@ -5,7 +5,8 @@ pub mod engine;
 pub mod ghostty;
 #[cfg(feature = "ghostty")]
 pub mod host;
-pub mod keys;
+#[cfg(feature = "ghostty")]
+mod keys;
 pub mod pty;
 
 pub use engine::{EngineError, EngineEvent, VtEngine};

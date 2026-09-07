@@ -13,7 +13,7 @@ use fleet_ui_kit::{
 };
 use gpui::{AnyElement, App, SharedString, div, prelude::*, px};
 
-use crate::dialogs::{age_label, card_picker::PickerKind};
+use crate::{dialogs::card_picker::PickerKind, presentation::age_label};
 
 /// How many activity entries §8 shows.
 pub const ACTIVITY_ROWS: usize = 10;

@@ -87,15 +87,8 @@ impl KeepAliveChips {
 
     /// Resolve the ladder from the owning pane's width in `ch` (§3.3 column 4).
     pub fn from_pane_ch(pane_ch: f32) -> f32 {
-        if pane_ch >= 104.0 {
-            18.0
-        } else if pane_ch >= 88.0 {
-            14.0
-        } else if pane_ch >= 72.0 {
-            10.0
-        } else {
-            0.0
-        }
+        super::column_ladder::resolve_steps(super::column_ladder::KEEP_ALIVE_STEPS, pane_ch)
+            .unwrap_or(0.0)
     }
 
     /// Hide the leading `zap`.
@@ -125,11 +118,13 @@ impl KeepAliveChips {
     /// truncated label from colliding with the next column.
     pub fn resolved_text(&self) -> SharedString {
         let (visible, overflow) = self.visible();
-        let mut text = visible
-            .iter()
-            .map(|label| label.label.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut text = String::new();
+        for (index, label) in visible.iter().enumerate() {
+            if index > 0 {
+                text.push_str(", ");
+            }
+            text.push_str(&label.label);
+        }
         if overflow > 0 {
             text.push_str(&format!(" +{overflow}"));
         }
@@ -171,10 +166,10 @@ impl RenderOnce for KeepAliveChips {
             });
 
         if self.show_kind_icons {
-            let (visible, overflow) = self.visible();
-            let labels: Vec<_> = visible.to_vec();
+            let shown = self.labels.len().min(self.max_visible);
+            let overflow = self.labels.len() - shown;
             return base
-                .children(labels.into_iter().map(|label| {
+                .children(self.labels.into_iter().take(shown).map(|label| {
                     div()
                         .flex()
                         .flex_none()

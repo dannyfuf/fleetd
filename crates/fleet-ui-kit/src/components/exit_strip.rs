@@ -4,7 +4,7 @@
 //! silently swallow one. Every key on this strip carries its `^s` prefix ([D-8]): in Terminal
 //! mode a bare `r` goes to the PTY, so a hint that reads `r restart` is a lie.
 
-use gpui::{App, Window, div, prelude::*, px};
+use gpui::{App, Window, div, prelude::*};
 
 use crate::{
     components::KeyHintRow,
@@ -81,7 +81,7 @@ impl RenderOnce for ExitStrip {
             .flex_none()
             .px(theme.space.md)
             .bg(tone.fill(theme))
-            .border_t(px(1.0))
+            .border_t(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(
                 div().flex_none().child(
@@ -91,7 +91,7 @@ impl RenderOnce for ExitStrip {
                         .color(tone.color(theme)),
                 ),
             )
-            .child(Text::ui(message).tone(tone).flex_none())
+            .child(Text::ui(message).tone(tone).ellipsize())
             // The keys are the point of the strip; if anything has to be clipped on a narrow
             // window it is the sentence, not the way out of it.
             .child(div().flex_1().min_w_0())

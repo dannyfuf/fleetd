@@ -52,9 +52,17 @@ impl Fact {
         }
     }
 
+    /// Whether this fact must be presented as a reason to stop.
+    ///
+    /// Unknown dominates the raw risk flag so even a struct literal with conflicting public
+    /// flags cannot present an unknown fact as safe.
+    fn is_risk(&self) -> bool {
+        self.risk || self.unknown
+    }
+
     /// The glyph for this fact.
     pub fn icon(&self) -> Icon {
-        if self.risk {
+        if self.is_risk() {
             Icon::TriangleAlert
         } else {
             Icon::CircleCheck
@@ -63,7 +71,7 @@ impl Fact {
 
     /// The tone for this fact.
     pub fn tone(&self) -> Tone {
-        if self.risk {
+        if self.is_risk() {
             Tone::Warning
         } else {
             Tone::Success
@@ -131,14 +139,14 @@ impl FactList {
 
     /// Risks first, safe facts after; stable within each group.
     pub fn ordered(&self) -> Vec<&Fact> {
-        let mut out: Vec<&Fact> = self.facts.iter().filter(|f| f.risk).collect();
-        out.extend(self.facts.iter().filter(|f| !f.risk));
+        let mut out: Vec<&Fact> = self.facts.iter().filter(|f| f.is_risk()).collect();
+        out.extend(self.facts.iter().filter(|f| !f.is_risk()));
         out
     }
 
     /// True when every fact is known and benign, so the compact confirm applies.
     pub fn is_compact(&self) -> bool {
-        !self.loading && self.facts.iter().all(|f| !f.risk && !f.unknown)
+        !self.loading && self.facts.iter().all(|f| !f.is_risk())
     }
 
     /// `Y` when any decisive fact is unknown or the facts are still loading, else `y`.
@@ -152,7 +160,7 @@ impl FactList {
 
     /// How many facts are reasons to stop.
     pub fn risk_count(&self) -> usize {
-        self.facts.iter().filter(|fact| fact.risk).count()
+        self.facts.iter().filter(|fact| fact.is_risk()).count()
     }
 
     /// How many decisive facts could not be determined. Any of them forces `Y`.
@@ -211,5 +219,26 @@ impl RenderOnce for FactList {
                 )
             })
             .children(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_dominates_conflicting_risk_state() {
+        let fact = Fact {
+            text: "inspection unavailable".into(),
+            risk: false,
+            unknown: true,
+        };
+        let list = FactList::from_facts([fact.clone()]);
+
+        assert_eq!(fact.icon(), Icon::TriangleAlert);
+        assert_eq!(fact.tone(), Tone::Warning);
+        assert_eq!(list.risk_count(), 1);
+        assert!(!list.is_compact());
+        assert_eq!(list.confirm_key(), ConfirmKey::Upper);
     }
 }

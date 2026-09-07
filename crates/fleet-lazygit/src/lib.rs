@@ -1,28 +1,28 @@
 //! A native lazygit clone: `fleet-git` for the plumbing, `fleet-ui-kit` for the design system,
 //! gpui for the window.
 //!
-//! The crate is one gpui view ([`root::Lazygit`]) over one state struct ([`state::GitUiState`]).
-//! Every `git` call happens on a dedicated Tokio thread ([`bridge::GitBridge`]) and comes back as
-//! an event, so the foreground thread never blocks on a subprocess.
+//! Embedders use [`root::Lazygit`] and [`root::LazygitEvent`]. Git operations and diff
+//! preparation run off the foreground thread.
 
 #![warn(missing_docs)]
 
-use std::path::PathBuf;
-
-use fleet_ui_kit::{KitAssets, Theme, ThemeMode};
-use gpui::{
-    App, AppContext, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
 };
 
-pub mod actions;
-pub mod bridge;
+use fleet_ui_kit::{KitAssets, Theme, ThemeMode};
+use gpui::{App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+
+mod actions;
+mod bridge;
 pub mod drive;
 pub mod keymap;
-pub mod overlays;
-pub mod panels;
+mod overlays;
+mod panels;
 pub mod root;
-pub mod state;
-pub mod views;
+mod state;
+mod views;
 
 /// The window's default size.
 const DEFAULT_SIZE: (f32, f32) = (1280.0, 800.0);
@@ -34,6 +34,8 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
     init_tracing();
     tracing::info!(path = %path.display(), "fleet-lazygit: starting");
 
+    let startup_error = Arc::new(Mutex::new(None));
+    let reported_startup_error = startup_error.clone();
     gpui_platform::application()
         .with_assets(KitAssets)
         .run(move |cx: &mut App| {
@@ -76,7 +78,7 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
                     }
                     let _ignored = window.update(cx, |view, window, cx| {
                         window.activate_window();
-                        window.focus(&view.focus_handle(cx), cx);
+                        view.set_active(true, window, cx);
                     });
                     cx.activate(true);
                     // Developer-only: drive the GUI from a script file (see `drive`).
@@ -89,11 +91,25 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
                 Err(error) => {
                     tracing::error!(%error, "fleet-lazygit: could not open the window");
                     eprintln!("fleet-lazygit: could not open the window: {error}");
+                    if let Ok(mut startup_error) = reported_startup_error.lock() {
+                        *startup_error = Some(error.to_string());
+                    }
                     cx.quit();
                 }
             }
         });
-    Ok(())
+    let startup_error = startup_error
+        .lock()
+        .map_err(|_| anyhow::anyhow!("fleet-lazygit: startup error state was poisoned"))?
+        .take();
+    startup_result(startup_error)
+}
+
+fn startup_result(error: Option<String>) -> anyhow::Result<()> {
+    match error {
+        Some(error) => Err(anyhow::anyhow!("could not open the window: {error}")),
+        None => Ok(()),
+    }
 }
 
 /// Installs a stderr `tracing` subscriber honouring `$RUST_LOG`. Errors are swallowed so an
@@ -105,4 +121,20 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_creation_failure_returns_error() {
+        let error = startup_result(Some("display unavailable".to_owned()))
+            .expect_err("window creation failure must reach main");
+        assert_eq!(
+            error.to_string(),
+            "could not open the window: display unavailable"
+        );
+        assert!(startup_result(None).is_ok());
+    }
 }

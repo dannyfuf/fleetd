@@ -1,16 +1,12 @@
 //! Conversion helpers for terminal input events.
 
-#[cfg(feature = "ghostty")]
 use fleet_proto::terminal::{
     Key, KeyAction, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-#[cfg(feature = "ghostty")]
 use libghostty_vt::{key, mouse};
 
 /// Converts Fleet modifier flags into Ghostty modifier flags.
-#[cfg(feature = "ghostty")]
-#[must_use]
-pub fn ghostty_modifiers(modifiers: Modifiers) -> key::Mods {
+fn ghostty_modifiers(modifiers: Modifiers) -> key::Mods {
     let mut result = key::Mods::empty();
     if modifiers.contains(Modifiers::SHIFT) {
         result |= key::Mods::SHIFT;
@@ -28,8 +24,9 @@ pub fn ghostty_modifiers(modifiers: Modifiers) -> key::Mods {
 }
 
 /// Builds a Ghostty key event from the wire-level Fleet event.
-#[cfg(feature = "ghostty")]
-pub fn ghostty_key_event(event: &KeyEvent) -> Result<key::Event<'static>, libghostty_vt::Error> {
+pub(crate) fn ghostty_key_event(
+    event: &KeyEvent,
+) -> Result<key::Event<'static>, libghostty_vt::Error> {
     let mut result = key::Event::new()?;
     let text = event.text.clone().or_else(|| match event.key {
         Key::Char(character) => Some(character.to_string()),
@@ -60,8 +57,7 @@ pub fn ghostty_key_event(event: &KeyEvent) -> Result<key::Event<'static>, libgho
 }
 
 /// Builds a Ghostty mouse event using one-pixel cells as the geometry unit.
-#[cfg(feature = "ghostty")]
-pub fn ghostty_mouse_event(
+pub(crate) fn ghostty_mouse_event(
     event: &MouseEvent,
 ) -> Result<mouse::Event<'static>, libghostty_vt::Error> {
     let mut result = mouse::Event::new()?;
@@ -85,7 +81,6 @@ pub fn ghostty_mouse_event(
     Ok(result)
 }
 
-#[cfg(feature = "ghostty")]
 fn ghostty_key(key: Key) -> key::Key {
     match key {
         Key::Enter => key::Key::Enter,
@@ -118,7 +113,6 @@ fn ghostty_key(key: Key) -> key::Key {
     }
 }
 
-#[cfg(feature = "ghostty")]
 fn ascii_key(character: char) -> key::Key {
     match character.to_ascii_lowercase() {
         'a' => key::Key::A,
@@ -173,7 +167,6 @@ fn ascii_key(character: char) -> key::Key {
     }
 }
 
-#[cfg(feature = "ghostty")]
 fn ghostty_mouse_button(button: MouseButton) -> mouse::Button {
     match button {
         MouseButton::Left => mouse::Button::Left,

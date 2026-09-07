@@ -7,10 +7,19 @@ use fleet_core::{
     state::default_state,
 };
 use fleet_daemon::{
-    adapters::{clock::SystemClock, files::RealFiles, git::ShellGit, shell::RealShell},
+    adapters::{
+        Adapters,
+        board::BoardBackends,
+        clock::{Clock, SystemClock},
+        files::RealFiles,
+        git::ShellGit,
+        process::RealProcess,
+        shell::{RealShell, Shell, ShellResult},
+    },
     jobs::JobManager,
-    services::worktrees::Worktrees,
+    services::{sessions::Sessions, worktrees::Worktrees},
     stores::{config::ConfigStore, state::StateStore},
+    testing::fakes::{FakeGithub, FakeShell},
 };
 use serde_json::json;
 
@@ -44,15 +53,14 @@ async fn worktrees_create_delete_and_restore_are_atomic() {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     let jobs = Arc::new(JobManager::new(&home));
-    let git = Arc::new(ShellGit::new(Arc::new(RealShell)));
-    let worktrees =
-        Worktrees::new(config, state.clone(), jobs, files, git).with_shell(Arc::new(RealShell));
+    let adapters = adapters_with_stubbed_github(files);
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let worktrees = Worktrees::new(config, state.clone(), jobs, &adapters, sessions);
 
     let (created, worktree, _post_create_job) = worktrees
         .create(
             repo.id,
             "feature".to_owned(),
-            None,
             None,
             None,
             RepoHooks::default(),
@@ -73,7 +81,6 @@ async fn worktrees_create_delete_and_restore_are_atomic() {
         .create(
             RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
             "feature".to_owned(),
-            None,
             None,
             None,
             RepoHooks::default(),
@@ -154,7 +161,6 @@ async fn worktrees_create_delete_and_restore_are_atomic() {
         .create(
             RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
             "hooked".to_owned(),
-            None,
             None,
             None,
             RepoHooks {
@@ -329,4 +335,30 @@ fn git_output(cwd: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Real Git, filesystem, and shell adapters with `gh pr view` answered from a fixture so
+/// pull-request creation runs its production path without network access.
+fn adapters_with_stubbed_github(files: Arc<RealFiles>) -> Adapters {
+    let gh = Arc::new(FakeShell::new());
+    gh.when(
+        |command| command.program == "gh",
+        ShellResult {
+            status: 0,
+            stdout: r#"{"number":7,"title":"Add feature","url":"https://github.com/acme/api/pull/7","author":{"login":"octocat"},"headRefName":"pr/7","baseRefName":"main","isDraft":false,"isCrossRepository":false,"headRepository":{"name":"api","nameWithOwner":"acme/api"},"headRepositoryOwner":{"login":"acme"},"reviewDecision":null,"statusCheckRollup":[],"additions":1,"deletions":0,"labels":[],"updatedAt":"2026-09-04T00:00:00Z"}"#
+                .to_owned(),
+            stderr: String::new(),
+        },
+    );
+    let shell: Arc<dyn Shell> = Arc::new(RealShell);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    Adapters {
+        board_backends: BoardBackends::system(Arc::clone(&shell), Arc::clone(&clock)),
+        git: Arc::new(ShellGit::new(Arc::clone(&shell))),
+        github: Arc::new(FakeGithub::new(gh)),
+        process: Arc::new(RealProcess::new(Arc::clone(&shell))),
+        files,
+        shell,
+        clock,
+    }
 }

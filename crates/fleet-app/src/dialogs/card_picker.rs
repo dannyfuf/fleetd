@@ -22,7 +22,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 use crate::{
     actions::{dialog, settings as settings_actions},
     bridge::Bridge,
-    dialogs::{Dialogs, TextInput, notify, root, step, type_into, with_host},
+    dialogs::{DialogHost, Dialogs, notify, root, step, type_into, with_host},
     screens::board,
     state::AppState,
 };
@@ -162,17 +162,17 @@ impl CardPickerState {
     }
 
     /// The query as an editable buffer.
-    fn input(&self) -> TextInput {
-        let mut input = TextInput::new(self.query.clone());
-        for _ in self.caret..input.caret() {
-            input.left();
+    fn input(&self) -> TextFieldState {
+        let mut input = TextFieldState::from_text(self.query.clone());
+        for _ in self.caret..input.caret_chars() {
+            input.move_left();
         }
         input
     }
 
-    fn set_input(&mut self, input: &TextInput) {
-        self.query = input.value().to_owned();
-        self.caret = input.caret();
+    fn set_input(&mut self, input: &TextFieldState) {
+        self.query = input.text().to_owned();
+        self.caret = input.caret_chars();
     }
 }
 
@@ -344,7 +344,7 @@ pub fn candidates(state: &AppState, draft: &CardPickerState) -> Vec<PickerOption
     let query = draft.query.trim();
     let mut rows: Vec<PickerOption> = options(state, &draft.kind)
         .into_iter()
-        .filter(|option| crate::dialogs::filter::matches(&option.label, query))
+        .filter(|option| crate::presentation::contains_folded(&option.label, &query.to_lowercase()))
         .collect();
     if accepts_free_text(&draft.kind, schema)
         && !query.is_empty()
@@ -439,7 +439,7 @@ fn current_value(card: &fleet_core::board::Card, kind: &PickerKind) -> Option<St
 }
 
 pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
-    let target = with_host(cx, |host| host.card_picker.card_id.clone());
+    let target = with_host(state, cx, |host| host.card_picker.card_id.clone());
     let card = state
         .read(cx)
         .board()
@@ -449,7 +449,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
                 .and_then(|id| view.cards.iter().find(|card| &card.id == id))
         })
         .cloned();
-    let kind_now = with_host(cx, |host| host.card_picker.kind.clone());
+    let kind_now = with_host(state, cx, |host| host.card_picker.kind.clone());
     // The cursor opens on the value the card already holds. Leaving it at `0` makes `Enter` on a
     // picker the user opened only to look at a write: `s` would move the card to the board's
     // first column — a transition pushed to the real issue on a linked board — and `p` would set
@@ -473,7 +473,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
         (None, Some(current)) if accepts_free_text(&kind_now, schema) => current.clone(),
         _ => String::new(),
     };
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let kind = host.card_picker.kind.clone();
         let then_worktree = host.card_picker.then_worktree;
         let then_detail = host.card_picker.then_detail;
@@ -510,10 +510,11 @@ pub fn render(
     state: &Entity<AppState>,
     bridge: &Bridge,
     focus: &FocusHandle,
+    _host: &Entity<DialogHost>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let draft = with_host(cx, |host| host.card_picker.clone());
+    let draft = with_host(state, cx, |host| host.card_picker.clone());
     let rows = candidates(state.read(cx), &draft);
     let schema = property_kind(state.read(cx), &draft.kind);
     let invalid = free_text_error(&draft.kind, draft.query.trim(), schema);
@@ -575,9 +576,9 @@ pub fn render(
             .key("esc", "cancel")
     };
 
-    let mut card = Dialog::new(Dialogs::CardPicker.title())
-        .icon(Dialogs::CardPicker.icon())
-        .width(Dialogs::CardPicker.width())
+    let mut card = Dialog::new("Card property")
+        .icon(Icon::ArrowRightLeft)
+        .width(Dialogs::CardPicker.width(cx))
         .subtitle(format!("\u{00b7} {label}"))
         .body(div().flex().flex_col().child(field).child(list))
         .hint_row(hints)
@@ -593,7 +594,7 @@ pub fn render(
         .on_key_down({
             let state = state.clone();
             move |event, _window, cx| {
-                let typed = with_host(cx, |host| {
+                let typed = with_host(&state, cx, |host| {
                     let mut input = host.card_picker.input();
                     if !type_into(&mut input, event) {
                         return false;
@@ -630,11 +631,19 @@ pub fn render(
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::CursorLeft, _window, cx| edit_query(&state, cx, TextInput::left)
+            move |_: &dialog::CursorLeft, _window, cx| {
+                edit_query(&state, cx, |input| {
+                    let _moved = input.move_left();
+                })
+            }
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::CursorRight, _window, cx| edit_query(&state, cx, TextInput::right)
+            move |_: &dialog::CursorRight, _window, cx| {
+                edit_query(&state, cx, |input| {
+                    let _moved = input.move_right();
+                })
+            }
         })
         .on_action({
             let state = state.clone();
@@ -648,7 +657,7 @@ pub fn render(
             let state = state.clone();
             move |_: &dialog::DeleteWord, _window, cx| {
                 edit_query(&state, cx, |input| {
-                    input.delete_word();
+                    input.delete_word_before();
                 });
             }
         })
@@ -662,11 +671,19 @@ pub fn render(
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::LineStart, _window, cx| edit_query(&state, cx, TextInput::home)
+            move |_: &dialog::LineStart, _window, cx| {
+                edit_query(&state, cx, |input| {
+                    let _moved = input.move_to_start();
+                })
+            }
         })
         .on_action({
             let state = state.clone();
-            move |_: &dialog::LineEnd, _window, cx| edit_query(&state, cx, TextInput::end)
+            move |_: &dialog::LineEnd, _window, cx| {
+                edit_query(&state, cx, |input| {
+                    let _moved = input.move_to_end();
+                })
+            }
         })
         .on_action({
             let state = state.clone();
@@ -688,17 +705,17 @@ pub fn render(
 }
 
 fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_picker.clone());
+    let draft = with_host(state, cx, |host| host.card_picker.clone());
     let len = candidates(state.read(cx), &draft).len();
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_picker.cursor = step(host.card_picker.cursor, delta, len);
     });
     notify(state, cx);
     cx.stop_propagation();
 }
 
-fn edit_query(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextInput)) {
-    with_host(cx, |host| {
+fn edit_query(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextFieldState)) {
+    with_host(state, cx, |host| {
         let mut input = host.card_picker.input();
         edit(&mut input);
         host.card_picker.set_input(&input);
@@ -711,7 +728,7 @@ fn edit_query(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut Tex
 
 /// `space`: toggle the highlighted value of a multi-select.
 fn toggle(state: &Entity<AppState>, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_picker.clone());
+    let draft = with_host(state, cx, |host| host.card_picker.clone());
     if !draft
         .kind
         .is_multi_select(property_kind(state.read(cx), &draft.kind))
@@ -726,7 +743,7 @@ fn toggle(state: &Entity<AppState>, cx: &mut App) {
     else {
         return;
     };
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.card_picker.toggle_value(&option.value);
     });
     notify(state, cx);
@@ -735,7 +752,7 @@ fn toggle(state: &Entity<AppState>, cx: &mut App) {
 
 /// `Enter`: turn the selection into a request, send it, and close.
 fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let draft = with_host(cx, |host| host.card_picker.clone());
+    let draft = with_host(state, cx, |host| host.card_picker.clone());
     let Some(card_id) = draft.card_id.clone() else {
         return;
     };
@@ -746,7 +763,7 @@ fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     {
         // A reload can drop the card out from under an open picker. Every other refusal in this
         // dialog says so; returning silently makes `Enter` a dead key with nothing to read.
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.card_picker.error = Some("That card is no longer on this board".into());
         });
         notify(state, cx);
@@ -754,7 +771,7 @@ fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     }
     let schema = property_kind(state.read(cx), &draft.kind);
     if let Some(message) = free_text_error(&draft.kind, draft.query.trim(), schema) {
-        with_host(cx, |host| host.card_picker.error = Some(message));
+        with_host(state, cx, |host| host.card_picker.error = Some(message));
         notify(state, cx);
         return;
     }
@@ -769,7 +786,7 @@ fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     // A kind whose values are a fixed list takes no typed one: falling back to the query would
     // send a status or label the board does not have and wait for the daemon to say so.
     if chosen.is_none() && !multi && !accepts_free_text(&draft.kind, schema) {
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.card_picker.error = Some("No match \u{2014} pick a value".into());
         });
         notify(state, cx);
@@ -778,14 +795,14 @@ fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     let value = chosen.unwrap_or_else(|| draft.query.trim().to_owned());
 
     if draft.then_worktree && value.is_empty() {
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.card_picker.error = Some("Pick a repository".into())
         });
         notify(state, cx);
         return;
     }
     let Some(request) = request_for(&draft, &card_id, &value, schema) else {
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.card_picker.error = Some(format!("`{value}` is not a valid value"));
         });
         notify(state, cx);
@@ -813,7 +830,7 @@ fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
 }
 
 fn close(state: &Entity<AppState>, cx: &mut App) {
-    let then_detail = with_host(cx, |host| {
+    let then_detail = with_host(state, cx, |host| {
         let dialog = host.card_picker.return_dialog();
         if dialog.is_some() {
             host.open = dialog.clone();

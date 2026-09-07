@@ -12,13 +12,16 @@ use fleet_core::{
 use fleet_daemon::{
     DaemonError,
     adapters::{
+        Adapters,
         board::{BoardBackends, LocalBackend},
         files::RealFiles,
-        shell::ShellResult,
+        github::GhCli,
+        process::RealProcess,
+        shell::{Shell, ShellResult},
     },
     jobs::JobManager,
     server::BroadcastBus,
-    services::{boards::Boards, worktrees::Worktrees},
+    services::{boards::Boards, sessions::Sessions, worktrees::Worktrees},
     stores::{board::BoardStore, config::ConfigStore, state::StateStore},
     testing::fakes::{FakeBackend, FakeBackendCall, FakeGit, FakeShell, FakeShellCall, FixedClock},
 };
@@ -111,16 +114,24 @@ impl Fixture {
                 stderr: String::new(),
             },
         );
-        let worktrees = Arc::new(
-            Worktrees::new(
-                config,
-                state.clone(),
-                jobs.clone(),
-                files.clone(),
-                Arc::new(FakeGit::new(shell.clone())),
-            )
-            .with_shell(shell.clone()),
-        );
+        let real_shell: Arc<dyn Shell> = shell.clone();
+        let adapters = Adapters {
+            board_backends: BoardBackends::system(Arc::clone(&real_shell), clock.clone()),
+            git: Arc::new(FakeGit::new(shell.clone())),
+            github: Arc::new(GhCli::new(Arc::clone(&real_shell))),
+            process: Arc::new(RealProcess::new(Arc::clone(&real_shell))),
+            files: files.clone(),
+            shell: real_shell,
+            clock: clock.clone(),
+        };
+        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+        let worktrees = Arc::new(Worktrees::new(
+            config,
+            state.clone(),
+            jobs.clone(),
+            &adapters,
+            sessions,
+        ));
         let store = Arc::new(BoardStore::new(home.clone(), files));
         let backend = Arc::new(FakeBackend::new("fake", caps));
         let events = BroadcastBus::default();

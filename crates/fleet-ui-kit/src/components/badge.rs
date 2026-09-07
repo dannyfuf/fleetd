@@ -76,7 +76,8 @@ impl RenderOnce for Badge {
             })
             .when(self.style == BadgeStyle::Filled, |el| el.bg(fill))
             .when(self.style == BadgeStyle::Outlined, |el| {
-                el.border_1().border_color(theme.colors.border)
+                el.border(theme.metrics.hairline)
+                    .border_color(theme.colors.border)
             })
             .child(Text::ui(self.text).color(color))
     }

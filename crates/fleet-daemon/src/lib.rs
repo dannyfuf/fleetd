@@ -6,6 +6,7 @@ pub mod jobs;
 pub mod server;
 pub mod services;
 pub mod stores;
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 pub use error::{DaemonError, DaemonResult};

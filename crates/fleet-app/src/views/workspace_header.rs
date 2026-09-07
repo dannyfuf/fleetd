@@ -1,11 +1,4 @@
-//! The Workspace's 30 px session header (UX-SPEC §3.6).
-//!
-//! One line that answers *am I in the right worktree?* — the branch, the repository, the remote
-//! host when there is one and the pull-request badge when there is one — and, on the right, the
-//! facts the Hub row shows for the same session: its status glyph, what `sleep` would keep
-//! alive, and how much background work is running, because the Hub chrome is not visible here.
-//!
-//! `ctrl-s z` hides this header entirely; the Workspace draws a 2 px amber bar instead.
+//! Session identity, terminal modes, and activity composed above the Workspace tabs.
 
 use fleet_ui_kit::{
     ActiveTheme, Chip, Icon, IconSize, KeepAliveChips, KeepAliveLabel, PrBadge, PrBadgeState,
@@ -29,7 +22,7 @@ const KEEP_ALIVE_VISIBLE: usize = 3;
 /// its pull request or its jobs are known, and a header that appears one field at a time is
 /// less useful than one that reserves the space and fills it in.
 #[derive(IntoElement)]
-pub struct WorkspaceHeader {
+pub(crate) struct WorkspaceHeader {
     branch: SharedString,
     repo: Option<SharedString>,
     host: Option<SharedString>,
@@ -46,7 +39,7 @@ pub struct WorkspaceHeader {
 impl WorkspaceHeader {
     /// A header for a branch.
     #[must_use]
-    pub fn new(branch: impl Into<SharedString>) -> Self {
+    pub(crate) fn new(branch: impl Into<SharedString>) -> Self {
         Self {
             branch: branch.into(),
             repo: None,
@@ -64,14 +57,14 @@ impl WorkspaceHeader {
 
     /// The `owner/name` the worktree belongs to.
     #[must_use]
-    pub fn repo(mut self, repo: impl Into<SharedString>) -> Self {
+    pub(crate) fn repo(mut self, repo: impl Into<SharedString>) -> Self {
         self.repo = Some(repo.into());
         self
     }
 
     /// The remote host the worktree lives on, and whether the last probe reached it.
     #[must_use]
-    pub fn host(mut self, host: impl Into<SharedString>, reachable: bool) -> Self {
+    pub(crate) fn host(mut self, host: impl Into<SharedString>, reachable: bool) -> Self {
         self.host = Some(host.into());
         self.host_reachable = reachable;
         self
@@ -79,28 +72,28 @@ impl WorkspaceHeader {
 
     /// The pull request this branch has, when one is known.
     #[must_use]
-    pub fn pr(mut self, number: u64, state: PrBadgeState) -> Self {
+    pub(crate) fn pr(mut self, number: u64, state: PrBadgeState) -> Self {
         self.pr = Some((number, state));
         self
     }
 
     /// The session's status glyph, identical to the one the Hub row shows.
     #[must_use]
-    pub fn status(mut self, status: StatusKind) -> Self {
+    pub(crate) fn status(mut self, status: StatusKind) -> Self {
         self.status = status;
         self
     }
 
     /// The keep-alive labels `sleep` would preserve.
     #[must_use]
-    pub fn keep_alive(mut self, labels: impl IntoIterator<Item = SharedString>) -> Self {
+    pub(crate) fn keep_alive(mut self, labels: impl IntoIterator<Item = SharedString>) -> Self {
         self.keep_alive = labels.into_iter().collect();
         self
     }
 
     /// How many jobs are running and how many failed, for the far-right chip.
     #[must_use]
-    pub fn jobs(mut self, running: usize, failed: usize) -> Self {
+    pub(crate) fn jobs(mut self, running: usize, failed: usize) -> Self {
         self.running_jobs = running;
         self.failed_jobs = failed;
         self
@@ -111,14 +104,14 @@ impl WorkspaceHeader {
     /// They live here and never over the grid: the cells are live output and §3.6 allows only
     /// the scroll overlays and the prefix hint on top of them.
     #[must_use]
-    pub fn modes(mut self, modes: impl IntoIterator<Item = TerminalMode>) -> Self {
+    pub(crate) fn modes(mut self, modes: impl IntoIterator<Item = TerminalMode>) -> Self {
         self.modes = modes.into_iter().collect();
         self
     }
 
     /// Replace the branch line with `waking…` while a slept session's PTYs respawn.
     #[must_use]
-    pub fn waking(mut self, waking: bool) -> Self {
+    pub(crate) fn waking(mut self, waking: bool) -> Self {
         self.waking = waking;
         self
     }
@@ -156,7 +149,7 @@ impl RenderOnce for WorkspaceHeader {
             .flex_none()
             .px(theme.space.md)
             .bg(theme.colors.bg)
-            .border_b(gpui::px(1.0))
+            .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
             .child(
                 Icon::GitBranch
@@ -167,7 +160,7 @@ impl RenderOnce for WorkspaceHeader {
             .child(if self.waking {
                 Text::ui("waking\u{2026}").tone(Tone::Secondary)
             } else {
-                Text::ui(self.branch).truncate_at(BRANCH_BUDGET, Truncate::Middle)
+                Text::data(self.branch).truncate_at(BRANCH_BUDGET, Truncate::Middle)
             })
             .children(self.repo.map(|repo| {
                 Text::ui(repo)
@@ -194,8 +187,14 @@ impl RenderOnce for WorkspaceHeader {
             .child(TerminalModes::new(self.modes).glyphs_only())
             .child(StatusGlyph::new(self.status).id("workspace-header-status"))
             .child(
-                KeepAliveChips::new(self.keep_alive.into_iter().map(KeepAliveLabel::new))
-                    .max_visible(KEEP_ALIVE_VISIBLE),
+                KeepAliveChips::new(self.keep_alive.into_iter().map(|label| {
+                    let icon = crate::presentation::keep_alive_icon(
+                        &label,
+                        crate::presentation::KeepAliveStyle::Terminal,
+                    );
+                    KeepAliveLabel::with_icon(label, icon)
+                }))
+                .max_visible(KEEP_ALIVE_VISIBLE),
             )
             .child(jobs_chip)
     }

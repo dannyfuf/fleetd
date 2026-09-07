@@ -16,7 +16,7 @@
 //! [`Palette::flat_len`] give it the two numbers it needs to move that cursor with
 //! [`FuzzyList::next_cursor`] / [`FuzzyList::prev_cursor`] on `ctrl-n` / `ctrl-p`.
 
-use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use crate::{
     components::{FuzzyItem, FuzzyList, KeyHintRow, TextField},
@@ -51,12 +51,9 @@ impl PaletteSectionKind {
 /// One palette row.
 pub struct PaletteRow {
     icon: Option<Icon>,
-    label: SharedString,
-    detail: Option<SharedString>,
-    key: Option<SharedString>,
+    item: FuzzyItem,
     destructive: bool,
     leading: Option<AnyElement>,
-    matches: Vec<usize>,
 }
 
 impl PaletteRow {
@@ -64,12 +61,9 @@ impl PaletteRow {
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
             icon: None,
-            label: label.into(),
-            detail: None,
-            key: None,
+            item: FuzzyItem::new(label),
             destructive: false,
             leading: None,
-            matches: Vec::new(),
         }
     }
 
@@ -87,20 +81,20 @@ impl PaletteRow {
 
     /// The muted right-hand description (`session attached`, `PR · mine`, `repo`).
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
-        self.detail = Some(detail.into());
+        self.item = self.item.trailing(detail);
         self
     }
 
     /// The bound key, right-aligned.
     pub fn key(mut self, key: impl Into<SharedString>) -> Self {
-        self.key = Some(key.into());
+        self.item = self.item.key(key);
         self
     }
 
     /// The character indices of the label the ranker matched (§3.9 allows a weight bump and
     /// nothing louder).
     pub fn matches(mut self, matches: impl IntoIterator<Item = usize>) -> Self {
-        self.matches = matches.into_iter().collect();
+        self.item = self.item.matches(matches);
         self
     }
 
@@ -112,7 +106,7 @@ impl PaletteRow {
 
     /// The [`FuzzyItem`] this row renders as.
     fn into_item(self, secondary: gpui::Hsla) -> FuzzyItem {
-        let mut item = FuzzyItem::new(self.label).matches(self.matches);
+        let mut item = self.item;
         if self.destructive {
             // §3.9: "Destructive commands — prefixed with `triangle-alert`". Recolouring the
             // action's own glyph is not that prefix: a red `trash` still reads as "delete",
@@ -127,12 +121,6 @@ impl PaletteRow {
                     .size(crate::icons::IconSize::Large)
                     .color(secondary),
             );
-        }
-        if let Some(detail) = self.detail {
-            item = item.trailing(detail);
-        }
-        if let Some(key) = self.key {
-            item = item.key(key);
         }
         item
     }
@@ -321,7 +309,7 @@ impl RenderOnce for Palette {
                     .items_center()
                     .w_full()
                     .px(theme.space.sm)
-                    .border_b(px(1.0))
+                    .border_b(theme.metrics.hairline)
                     .border_color(theme.colors.border)
                     .child(
                         // The query line carries neither a preview nor a validation message,
@@ -348,7 +336,7 @@ impl RenderOnce for Palette {
                     .h(theme.metrics.section_header_h)
                     .px(theme.space.md)
                     .py(theme.space.xs)
-                    .border_t(px(1.0))
+                    .border_t(theme.metrics.hairline)
                     .border_color(theme.colors.border)
                     .child(Text::hint(format!("{shown} of {total}")).tone(Tone::Muted))
                     .child(Text::hint("\u{b7}").faint())

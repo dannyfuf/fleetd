@@ -42,7 +42,7 @@ impl Veil {
     }
 
     /// The surface being veiled.
-    pub fn child(mut self, child: impl IntoElement) -> Self {
+    pub fn content(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
         self
     }

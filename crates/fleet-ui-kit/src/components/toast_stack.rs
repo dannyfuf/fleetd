@@ -20,9 +20,9 @@
 //!    letting a transient red line exist.
 //!
 //! Dwell is the caller's timer: it owns the `Vec<Toast>` and removes an entry when
-//! [`ToastDuration::millis`] has elapsed. `RenderOnce` cannot hold a timer.
+//! [`ToastDuration::millis`] has elapsed. The stack draws the supplied live entries.
 
-use gpui::{App, SharedString, Window, deferred, div, prelude::*, px};
+use gpui::{App, SharedString, Window, deferred, div, prelude::*};
 
 use crate::{
     components::OverlayLayer,
@@ -96,19 +96,10 @@ impl Toast {
 
     /// Set the tone.
     ///
-    /// [`Tone::Danger`] is coerced to [`Tone::Warning`]: §2.7 forbids an error toast, and a
-    /// silently amber toast is a smaller failure than a red one that vanishes after 3.2 s.
-    /// Debug builds assert instead, so the mistake is caught in the gallery.
+    /// [`Tone::Danger`] is rejected without panicking and coerced to [`Tone::Warning`]: §2.7
+    /// forbids an error toast, while callers still need a recoverable presentation path.
     pub fn tone(mut self, tone: Tone) -> Self {
-        debug_assert!(
-            tone != Tone::Danger,
-            "a toast is never Tone::Danger: errors are sticky (UX spec §2.7 / §1.8)"
-        );
-        self.tone = if tone == Tone::Danger {
-            Tone::Warning
-        } else {
-            tone
-        };
+        self.tone = allowed_tone(tone);
         self
     }
 
@@ -130,7 +121,7 @@ impl Toast {
 pub struct ToastStack {
     toasts: Vec<Toast>,
     max: usize,
-    bottom_inset: gpui::Pixels,
+    bottom_inset: Option<gpui::Pixels>,
 }
 
 impl ToastStack {
@@ -142,7 +133,7 @@ impl ToastStack {
         Self {
             toasts: toasts.into_iter().collect(),
             max: Self::MAX,
-            bottom_inset: px(12.0),
+            bottom_inset: None,
         }
     }
 
@@ -154,7 +145,7 @@ impl ToastStack {
 
     /// Distance from the edges of the layer the stack is placed in. 12 px by §2.2.
     pub fn bottom_inset(mut self, inset: gpui::Pixels) -> Self {
-        self.bottom_inset = inset;
+        self.bottom_inset = Some(inset);
         self
     }
 
@@ -180,6 +171,8 @@ impl ToastStack {
     /// from the last occurrence: three copies of `Path copied` read `Path copied ×3` and stay
     /// up 1.6 s after the third one, not after the first.
     pub fn push_at(toasts: &mut Vec<Toast>, toast: Toast, max: usize, now_ms: u64) {
+        let mut toast = toast;
+        toast.raised_at_ms = now_ms;
         if let Some(existing) = toasts.iter_mut().find(|t| {
             t.text == toast.text && now_ms.saturating_sub(t.raised_at_ms) <= COALESCE_WINDOW_MS
         }) {
@@ -194,13 +187,21 @@ impl ToastStack {
         }
     }
 
-    /// The line a toast renders, `×n` suffix included. Exposed for tests.
-    pub fn resolved_text(toast: &Toast) -> SharedString {
+    /// The line a toast renders, `×n` suffix included.
+    fn resolved_text(toast: &Toast) -> SharedString {
         if toast.count > 1 {
             SharedString::from(format!("{} \u{d7}{}", toast.text, toast.count))
         } else {
             toast.text.clone()
         }
+    }
+}
+
+fn allowed_tone(tone: Tone) -> Tone {
+    if tone == Tone::Danger {
+        Tone::Warning
+    } else {
+        tone
     }
 }
 
@@ -229,14 +230,10 @@ impl RenderOnce for ToastStack {
                 .flex_col()
                 .justify_end()
                 .items_end()
-                .p(self.bottom_inset)
+                .p(self.bottom_inset.unwrap_or(theme.metrics.toast_inset))
                 .gap(theme.space.sm)
                 .children(visible.into_iter().map(|toast| {
-                    let tone = if toast.tone == Tone::Danger {
-                        Tone::Warning
-                    } else {
-                        toast.tone
-                    };
+                    let tone = allowed_tone(toast.tone);
                     let color = tone.color(theme);
                     let text = ToastStack::resolved_text(&toast);
                     div()
@@ -249,7 +246,7 @@ impl RenderOnce for ToastStack {
                         .py(theme.space.sm)
                         .rounded(theme.radii.md)
                         .bg(theme.colors.elevated)
-                        .border_1()
+                        .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
                         .shadow(theme.sheet_shadow())
                         .occlude()
@@ -263,5 +260,36 @@ impl RenderOnce for ToastStack {
         )
         .with_priority(OverlayLayer::Toast.priority())
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_at_stamps_new_and_coalesced_toasts() {
+        let mut toasts = Vec::new();
+        ToastStack::push_at(&mut toasts, Toast::new("Path copied"), ToastStack::MAX, 400);
+        assert_eq!(toasts[0].raised_at_ms, 400);
+
+        ToastStack::push_at(&mut toasts, Toast::new("Path copied"), ToastStack::MAX, 900);
+        assert_eq!(toasts[0].raised_at_ms, 900);
+        assert_eq!(toasts[0].count, 2);
+
+        ToastStack::push_at(
+            &mut toasts,
+            Toast::new("Path copied"),
+            ToastStack::MAX,
+            2_000,
+        );
+        assert_eq!(toasts.len(), 2);
+        assert_eq!(toasts[1].raised_at_ms, 2_000);
+    }
+
+    #[test]
+    fn danger_is_rejected_without_panicking() {
+        let toast = Toast::new("failure").tone(Tone::Danger);
+        assert_eq!(toast.tone, Tone::Warning);
     }
 }

@@ -1,22 +1,21 @@
 //! Pure construction of Fleet's on-disk layout and compatibility marker records.
 
-use std::{
-    fmt::Display,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     github::PrTab,
-    ids::{BoardId, JobId, RepoId, WorktreeId},
+    ids::{BoardId, RepoId, WorktreeId},
 };
 
 /// Prepared-copy freshness marker file name retained for swarm compatibility.
-pub const HOT_MARKER_FILE: &str = "swarm-hot.json";
+const HOT_MARKER_FILE: &str = "swarm-hot.json";
 /// Worktree publish-intent marker file name retained for swarm compatibility.
-pub const CREATING_MARKER_FILE: &str = "swarm-creating.json";
+const CREATING_MARKER_FILE: &str = "swarm-creating.json";
+/// Repository clone publish-intent marker file name.
+pub const CLONE_PUBLISH_MARKER_FILE: &str = ".fleet-clone-publish.json";
 
 /// Root of Fleet's persistent filesystem layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,8 +69,7 @@ impl FleetHome {
         self.root.join("worktrees")
     }
     /// Returns the cache root.
-    #[must_use]
-    pub fn cache_dir(&self) -> PathBuf {
+    fn cache_dir(&self) -> PathBuf {
         self.root.join("cache")
     }
     /// Returns the GitHub cache root.
@@ -98,30 +96,15 @@ impl FleetHome {
     pub fn ssh_cache_dir(&self) -> PathBuf {
         self.cache_dir().join("ssh")
     }
-    /// Returns the cached Node executable path record.
-    #[must_use]
-    pub fn node_cache_path(&self) -> PathBuf {
-        self.cache_dir().join("node-bin")
-    }
     /// Returns the logs directory.
     #[must_use]
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
-    /// Returns the structured application log path.
-    #[must_use]
-    pub fn app_log_path(&self) -> PathBuf {
-        self.logs_dir().join("swarm.log")
-    }
     /// Returns the background jobs log directory.
     #[must_use]
     pub fn jobs_log_dir(&self) -> PathBuf {
         self.logs_dir().join("jobs")
-    }
-    /// Returns one background job's log path.
-    #[must_use]
-    pub fn job_log_path(&self, job: &JobId) -> PathBuf {
-        self.jobs_log_dir().join(format!("{job}.log"))
     }
     /// Returns the recoverable deletion directory.
     #[must_use]
@@ -162,26 +145,16 @@ pub fn slot_pid_path(repo_worktrees_dir: impl AsRef<Path>, slot: usize) -> PathB
         .join(format!("{}.staging.pid", slot_name(slot)))
 }
 
-/// Returns a private worktree creation attempt path.
-#[must_use]
-pub fn attempt_path(
-    repo_worktrees_dir: impl AsRef<Path>,
-    slug: &str,
-    attempt: impl Display,
-) -> PathBuf {
-    repo_worktrees_dir
-        .as_ref()
-        .join(format!("{slug}.creating-{attempt}"))
-}
-
-/// Returns a private worktree creation attempt path for a UUID.
+/// Returns the private path a worktree creation attempt builds into before publishing.
 #[must_use]
 pub fn uuid_attempt_path(
     repo_worktrees_dir: impl AsRef<Path>,
     slug: &str,
     attempt: Uuid,
 ) -> PathBuf {
-    attempt_path(repo_worktrees_dir, slug, attempt)
+    repo_worktrees_dir
+        .as_ref()
+        .join(format!("{slug}.creating-{attempt}"))
 }
 
 /// Returns the prepared-copy marker path inside a copy's `.git` directory.
@@ -194,6 +167,15 @@ pub fn hot_marker_path(copy: impl AsRef<Path>) -> PathBuf {
 #[must_use]
 pub fn creating_marker_path(worktree: impl AsRef<Path>) -> PathBuf {
     worktree.as_ref().join(".git").join(CREATING_MARKER_FILE)
+}
+
+/// Returns the publish-intent marker path inside a cloned repository's `.git` directory.
+#[must_use]
+pub fn clone_publish_marker_path(repository: impl AsRef<Path>) -> PathBuf {
+    repository
+        .as_ref()
+        .join(".git")
+        .join(CLONE_PUBLISH_MARKER_FILE)
 }
 
 fn slot_name(slot: usize) -> String {
@@ -255,6 +237,10 @@ mod tests {
             home.pr_cache_path(&repo, PrTab::Review),
             PathBuf::from("/tmp/.fleet/cache/github/prs/acme/api/review.json")
         );
+        assert_eq!(
+            clone_publish_marker_path("/tmp/repo"),
+            PathBuf::from("/tmp/repo/.git/.fleet-clone-publish.json")
+        );
     }
 
     #[test]
@@ -272,8 +258,8 @@ mod tests {
             PathBuf::from("/w/acme/api/.hot.staging.pid")
         );
         assert_eq!(
-            attempt_path("/w/acme/api", "feat", "uuid"),
-            PathBuf::from("/w/acme/api/feat.creating-uuid")
+            uuid_attempt_path("/w/acme/api", "feat", Uuid::nil()),
+            PathBuf::from("/w/acme/api/feat.creating-00000000-0000-0000-0000-000000000000")
         );
         assert_eq!(
             hot_marker_path("/w/acme/api/.hot"),

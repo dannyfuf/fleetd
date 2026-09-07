@@ -1,6 +1,6 @@
 //! Safe stale-worktree pruning workflow.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use fleet_core::{
@@ -15,53 +15,34 @@ use fleet_proto::{
 
 use crate::{
     DaemonError, DaemonResult,
-    jobs::{JobCtx, JobManager},
-    services::{inspect::Inspect, worktrees::Worktrees},
-    stores::state::StateStore,
+    jobs::{JobCtx, JobManager, JobPolicy},
+    services::{
+        awaited::{JobDelivery, copy_error},
+        inspect::Inspect,
+        sessions::{Sessions, TransitionLockClaim},
+        worktrees::Worktrees,
+    },
 };
 
 /// Deletion boundary used after prune eligibility has been decided.
 #[async_trait]
 pub trait WorktreeDeleter: Send + Sync {
     /// Deletes one worktree, including its runtime session and on-disk copy.
-    async fn delete(&self, id: WorktreeId) -> DaemonResult<()>;
+    async fn delete(
+        &self,
+        id: WorktreeId,
+        lifecycle: Option<TransitionLockClaim>,
+    ) -> DaemonResult<()>;
 }
 
 #[async_trait]
 impl WorktreeDeleter for Worktrees {
-    async fn delete(&self, id: WorktreeId) -> DaemonResult<()> {
-        let mut results = self.delete(vec![id.clone()]).await?;
-        let result = results
-            .pop()
-            .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))?;
-        if result.ok {
-            Ok(())
-        } else {
-            Err(DaemonError::Conflict(result.reason.unwrap_or_else(|| {
-                format!("worktree {id} was not deleted")
-            })))
-        }
-    }
-}
-
-#[derive(Clone)]
-struct RegistryDeleter {
-    state: Arc<StateStore>,
-}
-
-#[async_trait]
-impl WorktreeDeleter for RegistryDeleter {
-    async fn delete(&self, id: WorktreeId) -> DaemonResult<()> {
-        self.state
-            .transaction(move |state| {
-                let before = state.worktrees.len();
-                state.worktrees.retain(|worktree| worktree.id != id);
-                if state.worktrees.len() == before {
-                    return Err(DaemonError::NotFound(format!("worktree {id}")));
-                }
-                Ok(())
-            })
-            .await
+    async fn delete(
+        &self,
+        id: WorktreeId,
+        lifecycle: Option<TransitionLockClaim>,
+    ) -> DaemonResult<()> {
+        self.delete_one(id, None, lifecycle).await.map(|_| ())
     }
 }
 
@@ -70,33 +51,23 @@ impl WorktreeDeleter for RegistryDeleter {
 pub struct Prune {
     jobs: Arc<JobManager>,
     inspect: Inspect,
+    sessions: Sessions,
     deleter: Arc<dyn WorktreeDeleter>,
 }
 
 impl Prune {
-    /// Creates a facade-compatible prune service.
-    ///
-    /// The frozen facade does not supply `Worktrees`; use [`Self::with_deleter`] when wiring the
-    /// complete deletion service. This fallback still makes the registry mutation transactionally.
+    /// Creates the prune service over the deletion boundary it drives.
     #[must_use]
-    pub fn new(state: Arc<StateStore>, jobs: Arc<JobManager>, inspect: Inspect) -> Self {
-        Self {
-            jobs,
-            inspect,
-            deleter: Arc::new(RegistryDeleter { state }),
-        }
-    }
-
-    /// Creates a prune service using the full worktree-deletion boundary.
-    #[must_use]
-    pub fn with_deleter(
+    pub fn new(
         jobs: Arc<JobManager>,
         inspect: Inspect,
+        sessions: Sessions,
         deleter: Arc<dyn WorktreeDeleter>,
     ) -> Self {
         Self {
             jobs,
             inspect,
+            sessions,
             deleter,
         }
     }
@@ -108,36 +79,66 @@ impl Prune {
         fetch: bool,
         kill_sessions: bool,
         repo: Option<RepoId>,
+        reviewed_ids: Option<Vec<WorktreeId>>,
     ) -> DaemonResult<PruneResult> {
+        let repos = repo
+            .iter()
+            .cloned()
+            .chain(
+                reviewed_ids
+                    .iter()
+                    .flatten()
+                    .filter_map(|id| RepoId::try_from(id.repo()).ok()),
+            )
+            .collect::<Vec<_>>();
         let service = self.clone();
+        let (delivery, awaited) = JobDelivery::job_gets_copy(copy_error);
         let target = format!("prune-{}", uuid::Uuid::new_v4());
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let sender = Arc::new(Mutex::new(Some(sender)));
-        self.jobs.submit(
-            JobKind::Prune,
-            target,
-            "Prune worktrees",
-            true,
-            true,
-            move |context| async move {
-                let result = service
-                    .prune_inner(dry_run, fetch, kill_sessions, repo, &context)
-                    .await;
-                let outcome = result
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(|error| DaemonError::Git(error.to_string()));
-                if let Some(sender) = sender
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
-                    let _ignored = sender.send(result);
-                }
-                outcome
-            },
-        );
-        receiver.await.map_err(|_| DaemonError::Cancelled)?
+        if repos.is_empty() {
+            self.jobs.submit_for_all_repos(
+                JobKind::Prune,
+                target,
+                "Prune worktrees",
+                JobPolicy::new(true, true),
+                move |context| async move {
+                    delivery.finish(
+                        service
+                            .prune_inner(
+                                dry_run,
+                                fetch,
+                                kill_sessions,
+                                repo,
+                                reviewed_ids,
+                                &context,
+                            )
+                            .await,
+                    )
+                },
+            )?;
+        } else {
+            self.jobs.submit_for_repos(
+                repos,
+                JobKind::Prune,
+                target,
+                "Prune worktrees",
+                JobPolicy::new(true, true),
+                move |context| async move {
+                    delivery.finish(
+                        service
+                            .prune_inner(
+                                dry_run,
+                                fetch,
+                                kill_sessions,
+                                repo,
+                                reviewed_ids,
+                                &context,
+                            )
+                            .await,
+                    )
+                },
+            )?;
+        }
+        awaited.wait().await
     }
 
     async fn prune_inner(
@@ -146,12 +147,20 @@ impl Prune {
         fetch: bool,
         kill_sessions: bool,
         repo: Option<RepoId>,
+        reviewed_ids: Option<Vec<WorktreeId>>,
         context: &JobCtx,
     ) -> DaemonResult<PruneResult> {
         context.progress("inspecting prune candidates")?;
+        if reviewed_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(PruneResult {
+                dry_run,
+                deleted: Vec::new(),
+                skipped: Vec::new(),
+            });
+        }
         let inspections = self
             .inspect
-            .inspect_inner(Vec::new(), repo, fetch, context)
+            .inspect_inner(reviewed_ids.unwrap_or_default(), repo, fetch, context)
             .await?;
         let mut eligible = Vec::new();
         let mut skipped = Vec::new();
@@ -181,10 +190,47 @@ impl Prune {
             if context.cancel.is_cancelled() {
                 return Err(DaemonError::Cancelled);
             }
-            context.progress(format!("deleting {}", inspection.worktree_id))?;
-            match self.deleter.delete(inspection.worktree_id.clone()).await {
-                Ok(()) => deleted.push(inspection.worktree_id),
-                Err(error) => skipped.push(skipped_result(inspection, error.to_string())),
+            let lock = self.jobs.repo_lock(&inspection.repo_id);
+            let _guard = lock.lock().await;
+            let lifecycle = self
+                .sessions
+                .claim_worktree_lifecycle(inspection.worktree_id.clone())
+                .await;
+            context.progress(format!("revalidating {}", inspection.worktree_id))?;
+            let fresh = self
+                .inspect
+                .inspect_inner(
+                    vec![inspection.worktree_id.clone()],
+                    Some(inspection.repo_id.clone()),
+                    false,
+                    context,
+                )
+                .await;
+            let fresh = match fresh {
+                Ok(mut inspections) => inspections.pop().ok_or_else(|| {
+                    DaemonError::NotFound(format!("worktree {}", inspection.worktree_id))
+                }),
+                Err(error) => Err(error),
+            };
+            let fresh = match fresh {
+                Ok(fresh) => fresh,
+                Err(error) => {
+                    skipped.push(skipped_result(inspection, error.to_string()));
+                    continue;
+                }
+            };
+            if let Some(reason) = skip_reason(&fresh, kill_sessions) {
+                skipped.push(skipped_result(fresh, reason));
+                continue;
+            }
+            context.progress(format!("deleting {}", fresh.worktree_id))?;
+            match self
+                .deleter
+                .delete(fresh.worktree_id.clone(), Some(lifecycle))
+                .await
+            {
+                Ok(()) => deleted.push(fresh.worktree_id),
+                Err(error) => skipped.push(skipped_result(fresh, error.to_string())),
             }
         }
         context.progress(format!("deleted {} worktrees", deleted.len()))?;
@@ -208,19 +254,14 @@ fn skip_reason(inspection: &WorktreeInspection, kill_sessions: bool) -> Option<S
         SessionState::Unknown => return Some("status unknown".to_owned()),
         SessionState::None | SessionState::Detached => {}
     }
-    let unique = inspection
-        .unique_commits
-        .ok_or_else(|| "unique commit count unavailable".to_owned())
-        .err();
-    if unique.is_some() {
-        return unique;
-    }
+    let Some(unique_commits) = inspection.unique_commits else {
+        return Some("unique commit count unavailable".to_owned());
+    };
     if !inspection.merged {
-        return Some(match inspection.unique_commits {
-            Some(0) => "not merged".to_owned(),
-            Some(1) => "1 unique commit, not merged".to_owned(),
-            Some(count) => format!("{count} unique commits, not merged"),
-            None => "unique commit count unavailable".to_owned(),
+        return Some(match unique_commits {
+            0 => "not merged".to_owned(),
+            1 => "1 unique commit, not merged".to_owned(),
+            count => format!("{count} unique commits, not merged"),
         });
     }
     if !kill_sessions && !inspection.running.is_empty() {

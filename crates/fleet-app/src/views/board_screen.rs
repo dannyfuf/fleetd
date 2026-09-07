@@ -236,7 +236,7 @@ impl HeaderFacts {
                 .sync
                 .last_synced_at
                 .as_deref()
-                .map(|at| crate::dialogs::age_label(at, now)),
+                .map(|at| crate::presentation::age_label(at, now)),
             // Archived cards are in no column and reachable by no key: counting them would
             // put a chip in the header for rows the board never shows.
             dirty: view
@@ -502,7 +502,11 @@ fn header(
         .total(total)
         .trailing(trailing);
     if props.filter_editing {
-        header = header.filter(FilterBar::new(props.filter.to_owned(), shown, total).focused(true));
+        header = header.query_slot(
+            FilterBar::new(props.filter.to_owned(), shown, total)
+                .focused(true)
+                .query_slot(),
+        );
     } else if !props.filter.is_empty() {
         header = header.filter_chip(props.filter.to_owned());
     }

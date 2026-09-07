@@ -1,30 +1,21 @@
-//! The bridge between gpui's foreground executor and `fleet-git`'s Tokio runtime.
-//!
-//! gpui owns the main thread and is not a Tokio runtime; every `fleet_git::Repository` method is
-//! `async` and shells out to `git`. [`GitBridge::start`] therefore parks a multi-threaded Tokio
-//! runtime on **one** background thread, owns the `Repository` and its [`RepoWatcher`] there, and
-//! exchanges two `async-channel` streams with the UI:
-//!
-//! ```text
-//!   gpui foreground                background thread (tokio)
-//!   ──────────────                 ─────────────────────────
-//!   GitBridge::send(request) ────▶ Repository::… ──▶ git
-//!   GitUiState  ◀──GitEvent─────── snapshots, diffs, command log, fs changes
-//! ```
-//!
-//! Nothing else in the crate talks to `fleet-git`, and the UI thread never blocks: every send is
-//! a `try_send` on an unbounded channel.
+//! Serial Git operations with independent watcher and command-log forwarding.
 
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+pub(crate) use tests::channel_bridge;
+
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
 use async_channel::{Receiver, Sender};
 use fleet_git::{
-    ChangeEvent, CommandEvent, Commit, CommitFile, CommitOptions, ConflictChoice, ConflictFile,
-    Diff, DiffSide, FetchRequest, MergeOptions, MoveDirection, MutationResult, ObjectId,
-    PatchAction, PatchSelection, PullRequest, PushRequest, Ref, RepoSnapshot, Repository,
-    ResetMode, SnapshotOptions, StashOptions,
+    ChangeEvent, ChangeKind, CommandEvent, Commit, CommitFile, CommitOptions, ConflictChoice,
+    ConflictFile, Diff, DiffSide, FetchRequest, FileStatus, MergeOptions, MoveDirection,
+    MutationResult, ObjectId, PatchAction, PatchSelection, PullRequest, PushRequest, Ref,
+    RepoSnapshot, Repository, ResetMode, SnapshotOptions, StashOptions,
 };
 
 /// A mutation the UI asked for. Each variant carries everything the worker needs.
@@ -40,14 +31,14 @@ pub enum Mutation {
     UnstageAll,
     /// Discard worktree changes for the given paths.
     Discard(Vec<PathBuf>),
-    /// Discard every worktree change.
-    DiscardAll,
     /// Stage, unstage or discard a hunk/line selection.
     Patch {
         /// The selection to apply.
         selection: PatchSelection,
         /// What to do with it.
         action: PatchAction,
+        /// The exact diff from which the positional selection was made.
+        displayed: Arc<Diff>,
     },
     /// Commit the index.
     Commit {
@@ -97,6 +88,10 @@ pub enum Mutation {
     CherryPickContinue,
     /// Abort the in-progress cherry-pick.
     CherryPickAbort,
+    /// Continue the in-progress revert.
+    RevertContinue,
+    /// Abort the in-progress revert.
+    RevertAbort,
     /// Cherry-pick commits onto HEAD.
     CherryPick(Vec<ObjectId>),
     /// Revert one commit.
@@ -143,8 +138,13 @@ pub enum Mutation {
     StashApply(usize),
     /// Apply and drop a stash entry.
     StashPop(usize),
-    /// Drop a stash entry.
-    StashDrop(usize),
+    /// Drop the stash entry that still has the reviewed object identity.
+    StashDrop {
+        /// Mutable stash-list index shown to the user.
+        index: usize,
+        /// Object identity shown at confirmation time.
+        oid: ObjectId,
+    },
     /// Create a branch from a stash entry.
     StashBranch {
         /// New branch name.
@@ -243,6 +243,19 @@ pub enum GitRequest {
     Shutdown,
 }
 
+/// Stable identity of a read request and the content slot its result belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadIdentity {
+    Snapshot,
+    FileDiff(PathBuf),
+    CommitDiff(ObjectId),
+    BranchDiff(String),
+    RefCommits(String),
+    CommitFileDiff { oid: ObjectId, path: PathBuf },
+    StashDiff(usize),
+    Conflict(PathBuf),
+}
+
 /// A message from the git thread to the UI.
 #[derive(Debug)]
 pub enum GitEvent {
@@ -274,7 +287,7 @@ pub enum GitEvent {
         /// Its diff.
         diff: Arc<Diff>,
         /// Its changed files.
-        files: Vec<CommitFile>,
+        files: Arc<[CommitFile]>,
     },
     /// A branch's diff.
     BranchDiff {
@@ -288,7 +301,7 @@ pub enum GitEvent {
         /// The ref that was logged.
         reference: String,
         /// Its commits, newest first.
-        commits: Vec<Commit>,
+        commits: Arc<[Commit]>,
     },
     /// One commit's patch for one path.
     CommitFileDiff {
@@ -334,13 +347,22 @@ pub enum GitEvent {
     ReadFailed {
         /// Which read.
         label: String,
+        /// Exact content slot the read was intended to fill.
+        identity: ReadIdentity,
         /// The git error, stderr included.
         message: String,
     },
+    /// A queued read was replaced before execution.
+    ReadSuperseded,
     /// One command-log event.
     Command(Box<CommandEvent>),
     /// The command-log broadcast dropped events; the log is re-seeded from `recent_commands`.
     CommandsReseeded(Vec<fleet_git::CommandRecord>),
+    /// The native watcher failed at runtime; a full refresh is also delivered.
+    WatcherFailed {
+        /// The retained backend failure.
+        message: String,
+    },
     /// The watcher saw the worktree change.
     Changed(Box<ChangeEvent>),
 }
@@ -350,10 +372,14 @@ pub enum GitEvent {
 pub struct GitBridge {
     requests: Sender<GitRequest>,
     events: Receiver<GitEvent>,
+    event_tx: Sender<GitEvent>,
 }
 
 impl GitBridge {
-    /// Parks a multi-threaded Tokio runtime on one background thread and opens the repository.
+    /// Parks a current-thread Tokio runtime on one background thread and opens the repository.
+    ///
+    /// Every Git operation is a child process the worker awaits, so one thread multiplexes them
+    /// all; only `tokio::fs` probes need real threads, and the runtime caps those at two.
     #[must_use]
     pub fn start(path: PathBuf) -> Self {
         let (requests, request_rx) = async_channel::unbounded();
@@ -367,7 +393,11 @@ impl GitBridge {
                 message: format!("could not start the git thread: {error}"),
             });
         }
-        Self { requests, events }
+        Self {
+            requests,
+            events,
+            event_tx,
+        }
     }
 
     /// The stream the root view drains in one `cx.spawn` loop.
@@ -378,13 +408,75 @@ impl GitBridge {
 
     /// Fire-and-forget: every outcome arrives as an event.
     pub fn send(&self, request: GitRequest) {
-        let _ignored = self.requests.try_send(request);
+        if let Err(error) = self.requests.try_send(request) {
+            let Some(event) = disconnected_event(error.into_inner()) else {
+                return;
+            };
+            let _ignored = self.event_tx.try_send(event);
+        }
+    }
+}
+
+fn disconnected_event(request: GitRequest) -> Option<GitEvent> {
+    const MESSAGE: &str = "git worker disconnected before accepting the request";
+    match request {
+        GitRequest::Mutate { label, .. } => Some(GitEvent::Failed {
+            label,
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::Snapshot => Some(GitEvent::ReadFailed {
+            label: "refresh".to_owned(),
+            identity: ReadIdentity::Snapshot,
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::FileDiff(path) => Some(GitEvent::ReadFailed {
+            label: "diff".to_owned(),
+            identity: ReadIdentity::FileDiff(path),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::PathsDiff { key, .. } => Some(GitEvent::ReadFailed {
+            label: "diff".to_owned(),
+            identity: ReadIdentity::FileDiff(key),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::CommitDiff(oid) => Some(GitEvent::ReadFailed {
+            label: "commit diff".to_owned(),
+            identity: ReadIdentity::CommitDiff(oid),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::BranchDiff(name) => Some(GitEvent::ReadFailed {
+            label: "branch diff".to_owned(),
+            identity: ReadIdentity::BranchDiff(name),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::RefCommits { reference, .. } => Some(GitEvent::ReadFailed {
+            label: "ref commits".to_owned(),
+            identity: ReadIdentity::RefCommits(reference),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::CommitFileDiff { oid, path } => Some(GitEvent::ReadFailed {
+            label: "commit file diff".to_owned(),
+            identity: ReadIdentity::CommitFileDiff { oid, path },
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::StashDiff(index) => Some(GitEvent::ReadFailed {
+            label: "stash diff".to_owned(),
+            identity: ReadIdentity::StashDiff(index),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::Conflict(path) => Some(GitEvent::ReadFailed {
+            label: "conflict".to_owned(),
+            identity: ReadIdentity::Conflict(path),
+            message: MESSAGE.to_owned(),
+        }),
+        GitRequest::SetDiffContext(_) | GitRequest::Shutdown => None,
     }
 }
 
 /// Builds the runtime and blocks on the worker loop.
 fn run_thread(path: PathBuf, requests: Receiver<GitRequest>, events: Sender<GitEvent>) {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(2)
         .enable_all()
         .build()
     {
@@ -424,7 +516,7 @@ async fn run(path: PathBuf, requests: &Receiver<GitRequest>, events: &Sender<Git
     let helper = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fleet-lazygit"));
     let mut commands = repository.subscribe_commands();
     let watcher = fleet_git::watch::RepoWatcher::new(repository.paths());
-    let (_watcher, changes) = match watcher {
+    let (watcher, changes) = match watcher {
         Ok((watcher, changes)) => (Some(watcher), Some(changes)),
         Err(error) => {
             tracing::warn!(%error, "fleet-lazygit: the filesystem watcher did not start");
@@ -432,6 +524,8 @@ async fn run(path: PathBuf, requests: &Receiver<GitRequest>, events: &Sender<Git
         }
     };
 
+    let worker = process_requests(&repository, &helper, requests, events);
+    tokio::pin!(worker);
     loop {
         let change_next = async {
             match &changes {
@@ -440,14 +534,7 @@ async fn run(path: PathBuf, requests: &Receiver<GitRequest>, events: &Sender<Git
             }
         };
         tokio::select! {
-            request = requests.recv() => match request {
-                Ok(GitRequest::Shutdown) | Err(_) => return,
-                Ok(request) => {
-                    if !serve(&repository, &helper, request, events).await {
-                        return;
-                    }
-                }
-            },
+            _ = &mut worker => return,
             command = commands.recv() => match command {
                 Ok(event) => {
                     if events.send(GitEvent::Command(Box::new(event))).await.is_err() {
@@ -465,6 +552,11 @@ async fn run(path: PathBuf, requests: &Receiver<GitRequest>, events: &Sender<Git
             },
             change = change_next => match change {
                 Some(change) => {
+                    if let Some(error) = watcher.as_ref().and_then(fleet_git::watch::RepoWatcher::take_error)
+                        && events.send(GitEvent::WatcherFailed { message: error.to_string() }).await.is_err()
+                    {
+                        return;
+                    }
                     if events.send(GitEvent::Changed(Box::new(change))).await.is_err() {
                         return;
                     }
@@ -475,60 +567,179 @@ async fn run(path: PathBuf, requests: &Receiver<GitRequest>, events: &Sender<Git
     }
 }
 
+/// Coalesce only within a run of reads. Mutations, context changes and shutdown are barriers.
+fn enqueue(queue: &mut VecDeque<GitRequest>, request: GitRequest) -> bool {
+    let mut superseded = false;
+    if let Some(key) = read_key(&request) {
+        let previous = queue
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, pending)| read_key(pending).is_some())
+            .find(|(_, pending)| read_key(pending) == Some(key))
+            .map(|(index, _)| index);
+        if let Some(index) = previous {
+            queue.remove(index);
+            superseded = key != 0;
+        }
+    }
+    queue.push_back(request);
+    superseded
+}
+
+fn read_key(request: &GitRequest) -> Option<u8> {
+    match request {
+        GitRequest::Snapshot => Some(0),
+        GitRequest::FileDiff(_) | GitRequest::PathsDiff { .. } => Some(1),
+        GitRequest::CommitDiff(_) => Some(2),
+        GitRequest::BranchDiff(_) => Some(3),
+        GitRequest::RefCommits { .. } => Some(4),
+        GitRequest::CommitFileDiff { .. } => Some(5),
+        GitRequest::StashDiff(_) => Some(6),
+        GitRequest::Conflict(_) => Some(7),
+        _ => None,
+    }
+}
+
+async fn process_requests(
+    repository: &Repository,
+    helper: &Path,
+    requests: &Receiver<GitRequest>,
+    events: &Sender<GitEvent>,
+) {
+    let mut queue = VecDeque::new();
+    let mut cache = ReadCache::default();
+    loop {
+        if queue.is_empty() {
+            let Ok(request) = requests.recv().await else {
+                return;
+            };
+            queue.push_back(request);
+        }
+        let mut superseded = 0;
+        for _ in 0..256 {
+            let Ok(request) = requests.try_recv() else {
+                break;
+            };
+            superseded += usize::from(enqueue(&mut queue, request));
+        }
+        for _ in 0..superseded {
+            if events.send(GitEvent::ReadSuperseded).await.is_err() {
+                return;
+            }
+        }
+        let Some(request) = queue.pop_front() else {
+            continue;
+        };
+        if !serve(repository, helper, request, events, &mut cache).await {
+            return;
+        }
+    }
+}
+
+#[derive(Default)]
+struct ReadCache {
+    commits: VecDeque<(ObjectId, Arc<Diff>, Arc<[CommitFile]>)>,
+    files: VecDeque<(ObjectId, PathBuf, Arc<Diff>)>,
+    /// The untracked entries of the last snapshot this worker sent, or `None` before the first.
+    ///
+    /// A worktree diff only consults status to tell an untracked path from a tracked one, so the
+    /// untracked subset is the whole input. Requests are served in order, so this is exactly the
+    /// status the UI selected the path from — the refresh boundary `diff_file_with_status`
+    /// documents — and reusing it drops one `git status` per diff request.
+    untracked: Option<Vec<FileStatus>>,
+}
+
+impl ReadCache {
+    const CAPACITY: usize = 8;
+
+    fn trim(&mut self) {
+        self.commits.truncate(Self::CAPACITY);
+        self.files.truncate(Self::CAPACITY);
+    }
+}
+
 /// Serves one request. Returns `false` when the UI has gone away.
 async fn serve(
     repository: &Repository,
     helper: &Path,
     request: GitRequest,
     events: &Sender<GitEvent>,
+    cache: &mut ReadCache,
 ) -> bool {
     match request {
         GitRequest::Shutdown => false,
-        GitRequest::Snapshot => send_snapshot(repository, events).await,
+        GitRequest::Snapshot => send_snapshot(repository, events, cache).await,
         GitRequest::FileDiff(path) => {
-            let unstaged = repository.diff_file(&path, DiffSide::Unstaged).await;
-            let staged = repository.diff_file(&path, DiffSide::Staged).await;
-            match (unstaged, staged) {
-                (Ok(unstaged), Ok(staged)) => events
-                    .send(GitEvent::FileDiff {
-                        path,
-                        unstaged: Arc::new(unstaged),
-                        staged: Arc::new(staged),
-                    })
-                    .await
-                    .is_ok(),
-                (Err(error), _) | (_, Err(error)) => fail(events, "diff", &describe(&error)).await,
-            }
+            let (unstaged, staged) = match &cache.untracked {
+                Some(status) => (
+                    repository
+                        .diff_file_with_status(&path, DiffSide::Unstaged, status)
+                        .await,
+                    repository
+                        .diff_file_with_status(&path, DiffSide::Staged, status)
+                        .await,
+                ),
+                None => (
+                    repository.diff_file(&path, DiffSide::Unstaged).await,
+                    repository.diff_file(&path, DiffSide::Staged).await,
+                ),
+            };
+            send_file_diff(events, path, unstaged, staged).await
         }
         GitRequest::PathsDiff { key, paths } => {
-            let unstaged = repository.diff_paths(&paths, DiffSide::Unstaged).await;
-            let staged = repository.diff_paths(&paths, DiffSide::Staged).await;
-            match (unstaged, staged) {
-                (Ok(unstaged), Ok(staged)) => events
-                    .send(GitEvent::FileDiff {
-                        path: key,
-                        unstaged: Arc::new(unstaged),
-                        staged: Arc::new(staged),
-                    })
-                    .await
-                    .is_ok(),
-                (Err(error), _) | (_, Err(error)) => fail(events, "diff", &describe(&error)).await,
-            }
+            let (unstaged, staged) = match &cache.untracked {
+                Some(status) => (
+                    repository
+                        .diff_paths_with_status(&paths, DiffSide::Unstaged, status)
+                        .await,
+                    repository
+                        .diff_paths_with_status(&paths, DiffSide::Staged, status)
+                        .await,
+                ),
+                None => (
+                    repository.diff_paths(&paths, DiffSide::Unstaged).await,
+                    repository.diff_paths(&paths, DiffSide::Staged).await,
+                ),
+            };
+            send_file_diff(events, key, unstaged, staged).await
         }
         GitRequest::CommitDiff(oid) => {
+            if let Some((_, diff, files)) =
+                cache.commits.iter().find(|(cached, _, _)| *cached == oid)
+            {
+                return events
+                    .send(GitEvent::CommitDiff {
+                        oid,
+                        diff: diff.clone(),
+                        files: files.clone(),
+                    })
+                    .await
+                    .is_ok();
+            }
             let diff = repository.diff_commit(&oid, &[]).await;
             let files = repository.commit_files(&oid).await;
             match (diff, files) {
-                (Ok(diff), Ok(files)) => events
-                    .send(GitEvent::CommitDiff {
-                        oid,
-                        diff: Arc::new(diff),
-                        files,
-                    })
-                    .await
-                    .is_ok(),
+                (Ok(diff), Ok(files)) => {
+                    let diff = Arc::new(diff);
+                    let files: Arc<[CommitFile]> = files.into();
+                    cache
+                        .commits
+                        .push_front((oid.clone(), diff.clone(), files.clone()));
+                    cache.trim();
+                    events
+                        .send(GitEvent::CommitDiff { oid, diff, files })
+                        .await
+                        .is_ok()
+                }
                 (Err(error), _) | (_, Err(error)) => {
-                    fail(events, "commit diff", &describe(&error)).await
+                    fail(
+                        events,
+                        ReadIdentity::CommitDiff(oid),
+                        "commit diff",
+                        &describe(&error),
+                    )
+                    .await
                 }
             }
         }
@@ -541,7 +752,15 @@ async fn serve(
                     })
                     .await
                     .is_ok(),
-                Err(error) => fail(events, "branch diff", &describe(&error)).await,
+                Err(error) => {
+                    fail(
+                        events,
+                        ReadIdentity::BranchDiff(name),
+                        "branch diff",
+                        &describe(&error),
+                    )
+                    .await
+                }
             }
         }
         GitRequest::RefCommits {
@@ -555,29 +774,68 @@ async fn serve(
                 .await
             {
                 Ok(commits) => events
-                    .send(GitEvent::RefCommits { reference, commits })
+                    .send(GitEvent::RefCommits {
+                        reference,
+                        commits: commits.into(),
+                    })
                     .await
                     .is_ok(),
-                Err(error) => fail(events, "ref commits", &describe(&error)).await,
+                Err(error) => {
+                    fail(
+                        events,
+                        ReadIdentity::RefCommits(reference),
+                        "ref commits",
+                        &describe(&error),
+                    )
+                    .await
+                }
             }
         }
         GitRequest::CommitFileDiff { oid, path } => {
+            if let Some((_, _, diff)) = cache
+                .files
+                .iter()
+                .find(|(cached, cached_path, _)| *cached == oid && *cached_path == path)
+            {
+                return events
+                    .send(GitEvent::CommitFileDiff {
+                        oid,
+                        path,
+                        diff: diff.clone(),
+                    })
+                    .await
+                    .is_ok();
+            }
             match repository
                 .diff_commit(&oid, std::slice::from_ref(&path))
                 .await
             {
-                Ok(diff) => events
-                    .send(GitEvent::CommitFileDiff {
-                        oid,
-                        path,
-                        diff: Arc::new(diff),
-                    })
+                Ok(diff) => {
+                    let diff = Arc::new(diff);
+                    cache
+                        .files
+                        .push_front((oid.clone(), path.clone(), diff.clone()));
+                    cache.trim();
+                    events
+                        .send(GitEvent::CommitFileDiff { oid, path, diff })
+                        .await
+                        .is_ok()
+                }
+                Err(error) => {
+                    fail(
+                        events,
+                        ReadIdentity::CommitFileDiff { oid, path },
+                        "commit file diff",
+                        &describe(&error),
+                    )
                     .await
-                    .is_ok(),
-                Err(error) => fail(events, "commit file diff", &describe(&error)).await,
+                }
             }
         }
         GitRequest::SetDiffContext(lines) => {
+            // Widening the context invalidates every stored patch, but not the status behind them.
+            cache.commits.clear();
+            cache.files.clear();
             repository.set_diff_context(lines);
             true
         }
@@ -589,7 +847,15 @@ async fn serve(
                 })
                 .await
                 .is_ok(),
-            Err(error) => fail(events, "stash diff", &describe(&error)).await,
+            Err(error) => {
+                fail(
+                    events,
+                    ReadIdentity::StashDiff(index),
+                    "stash diff",
+                    &describe(&error),
+                )
+                .await
+            }
         },
         GitRequest::Conflict(path) => match repository.conflicted_file(&path).await {
             Ok(file) => events
@@ -599,7 +865,15 @@ async fn serve(
                 })
                 .await
                 .is_ok(),
-            Err(error) => fail(events, "conflict", &describe(&error)).await,
+            Err(error) => {
+                fail(
+                    events,
+                    ReadIdentity::Conflict(path),
+                    "conflict",
+                    &describe(&error),
+                )
+                .await
+            }
         },
         GitRequest::Mutate { label, mutation } => {
             let result = apply(repository, helper, *mutation).await;
@@ -618,18 +892,59 @@ async fn serve(
             }
             // Refresh after every mutation, successful or not: a failed command can still have
             // moved the index (a partially applied patch, a merge that left conflicts).
-            send_snapshot(repository, events).await
+            send_snapshot(repository, events, cache).await
         }
     }
 }
 
-async fn send_snapshot(repository: &Repository, events: &Sender<GitEvent>) -> bool {
-    match repository.snapshot(SnapshotOptions::default()).await {
-        Ok(snapshot) => events
-            .send(GitEvent::Snapshot(Box::new(snapshot)))
+async fn send_file_diff(
+    events: &Sender<GitEvent>,
+    path: PathBuf,
+    unstaged: fleet_git::Result<Diff>,
+    staged: fleet_git::Result<Diff>,
+) -> bool {
+    match (unstaged, staged) {
+        (Ok(unstaged), Ok(staged)) => events
+            .send(GitEvent::FileDiff {
+                path,
+                unstaged: Arc::new(unstaged),
+                staged: Arc::new(staged),
+            })
             .await
             .is_ok(),
-        Err(error) => fail(events, "refresh", &describe(&error)).await,
+        (Err(error), _) | (_, Err(error)) => {
+            fail(
+                events,
+                ReadIdentity::FileDiff(path),
+                "diff",
+                &describe(&error),
+            )
+            .await
+        }
+    }
+}
+
+async fn send_snapshot(
+    repository: &Repository,
+    events: &Sender<GitEvent>,
+    cache: &mut ReadCache,
+) -> bool {
+    match repository.snapshot(SnapshotOptions::default()).await {
+        Ok(snapshot) => {
+            cache.untracked = Some(
+                snapshot
+                    .files
+                    .iter()
+                    .filter(|file| file.worktree == ChangeKind::Untracked)
+                    .cloned()
+                    .collect(),
+            );
+            events
+                .send(GitEvent::Snapshot(Box::new(snapshot)))
+                .await
+                .is_ok()
+        }
+        Err(error) => fail(events, ReadIdentity::Snapshot, "refresh", &describe(&error)).await,
     }
 }
 
@@ -652,10 +967,16 @@ fn describe(error: &fleet_git::GitError) -> String {
 
 /// Reports a failed **read**. Mutations report through [`GitEvent::Failed`] instead, because only
 /// they own an in-progress guard and an escalation dialog.
-async fn fail(events: &Sender<GitEvent>, label: &str, message: &str) -> bool {
+async fn fail(
+    events: &Sender<GitEvent>,
+    identity: ReadIdentity,
+    label: &str,
+    message: &str,
+) -> bool {
     events
         .send(GitEvent::ReadFailed {
             label: label.to_owned(),
+            identity,
             message: message.to_owned(),
         })
         .await
@@ -673,9 +994,14 @@ async fn apply(
         Mutation::StageAll => repository.stage_all().await,
         Mutation::UnstageAll => repository.unstage_all().await,
         Mutation::Discard(paths) => repository.discard_paths(&paths).await,
-        Mutation::DiscardAll => repository.discard_all().await,
-        Mutation::Patch { selection, action } => {
-            repository.apply_patch_selection(selection, action).await
+        Mutation::Patch {
+            selection,
+            action,
+            displayed,
+        } => {
+            repository
+                .apply_patch_selection_verified(selection, action, displayed.as_ref())
+                .await
         }
         Mutation::Commit { message, options } => repository.commit(&message, options).await,
         Mutation::Checkout(reference) => repository.checkout(&reference).await,
@@ -695,6 +1021,8 @@ async fn apply(
         Mutation::MergeAbort => repository.merge_abort().await,
         Mutation::CherryPickContinue => repository.cherry_pick_continue().await,
         Mutation::CherryPickAbort => repository.cherry_pick_abort().await,
+        Mutation::RevertContinue => repository.revert_continue().await,
+        Mutation::RevertAbort => repository.revert_abort().await,
         Mutation::CherryPick(oids) => repository.cherry_pick(&oids).await,
         Mutation::Revert(oid) => repository.revert(&oid).await,
         Mutation::Reset { to, mode } => repository.reset(&to, mode).await,
@@ -724,7 +1052,7 @@ async fn apply(
         Mutation::StashPush(options) => repository.stash_push(options).await,
         Mutation::StashApply(index) => repository.stash_apply(index).await,
         Mutation::StashPop(index) => repository.stash_pop(index).await,
-        Mutation::StashDrop(index) => repository.stash_drop(index).await,
+        Mutation::StashDrop { index, oid } => repository.stash_drop_verified(index, &oid).await,
         Mutation::StashBranch { name, index } => repository.stash_branch(&name, index).await,
         Mutation::Fetch(request) => repository.fetch(request).await,
         Mutation::Pull(request) => repository.pull(request).await,

@@ -705,16 +705,19 @@ impl Boards {
         base: Option<String>,
         host: Option<HostId>,
     ) -> DaemonResult<(Card, Worktree, bool)> {
+        // The same refusal `CreateWorktree` gives: nothing below this line can reach a remote
+        // host, and silently creating the worktree locally would link the card to the wrong one.
+        if host.is_some() {
+            return Err(DaemonError::Unsupported(
+                "remote hosts are not supported yet".to_owned(),
+            ));
+        }
         // Own the entire create-and-link transaction independently of the socket request.
         let service = self.clone();
         let card = card.clone();
-        tokio::spawn(async move {
-            service
-                .create_and_link_worktree(&card, repo, base, host)
-                .await
-        })
-        .await
-        .map_err(|error| DaemonError::Join(error.to_string()))?
+        tokio::spawn(async move { service.create_and_link_worktree(&card, repo, base).await })
+            .await
+            .map_err(|error| DaemonError::Join(error.to_string()))?
     }
 
     async fn create_and_link_worktree(
@@ -722,7 +725,6 @@ impl Boards {
         card: &CardId,
         repo: Option<RepoId>,
         base: Option<String>,
-        host: Option<HostId>,
     ) -> DaemonResult<(Card, Worktree, bool)> {
         let (mut guard, mut doc, mut index) = self.card_document(card).await?;
         if doc.cards[index].archived {
@@ -801,7 +803,6 @@ impl Boards {
                         slug.clone(),
                         Some(slug.clone()),
                         base,
-                        host,
                         repo.hooks.clone(),
                     )
                     .await

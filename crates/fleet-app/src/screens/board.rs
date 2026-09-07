@@ -80,7 +80,7 @@ impl BoardScreen {
 
         let click_state = state.clone();
         let click_bridge = bridge.clone();
-        let now = dialogs::now_epoch();
+        let now = crate::presentation::now_unix();
         let app = state.read(cx);
         // The chip states which system the board mirrors, so it reads the registry's label and
         // not `jira` — the key a config file uses. Resolved before the borrow of `app.board`
@@ -132,7 +132,7 @@ impl BoardScreen {
                         if !app.board.filter_editing {
                             return false;
                         }
-                        app.board.filter.push_str(&text);
+                        app.board.filter.push_str(text);
                         app.board.focus.row = 0;
                         app.clamp_board_focus();
                         cx.notify();
@@ -428,14 +428,16 @@ impl Refusal {
             matches!(
                 state.read(cx).overlay,
                 Some(Overlay::Dialog(Dialogs::CardDetail))
-            ) && dialogs::with_host(cx, |host| host.card_detail.card_id.as_ref() == Some(card))
+            ) && dialogs::with_host(state, cx, |host| {
+                host.card_detail.card_id.as_ref() == Some(card)
+            })
         };
         match self {
             Self::Sticky => fail(state, message, cx),
             // The detail can be closed and reopened on another card before a slow refusal
             // lands: card A's message on card B's dialog names a card the user did not touch.
             Self::CardDetail(card) if showing(&card, cx) => {
-                dialogs::with_host(cx, |host| host.card_detail.error = Some(message));
+                dialogs::with_host(state, cx, |host| host.card_detail.error = Some(message));
                 state.update(cx, |_, cx| cx.notify());
             }
             // The reply can arrive after the detail closed, and the next open reseeds the
@@ -605,7 +607,7 @@ pub(crate) fn request_worktree_reporting(
 pub fn open_dialog(state: &Entity<AppState>, dialog: Dialogs, cx: &mut App) {
     let from_detail = state.read(cx).overlay == Some(Overlay::Dialog(Dialogs::CardDetail));
     let selected = selected_card(state.read(cx)).map(|card| card.id.clone());
-    dialogs::with_host(cx, |host| {
+    dialogs::with_host(state, cx, |host| {
         if dialog == Dialogs::CardPicker {
             host.card_picker.card_id = picker_target(selected, from_detail, &host.card_detail);
             host.card_picker.then_detail = from_detail;
@@ -665,7 +667,7 @@ fn open_picker(state: &Entity<AppState>, kind: PickerKind, cx: &mut App) {
         toast_readonly(state, message, cx);
         return;
     }
-    dialogs::with_host(cx, |host| {
+    dialogs::with_host(state, cx, |host| {
         host.card_picker.kind = kind;
         host.card_picker.then_worktree = false;
     });
@@ -890,7 +892,7 @@ pub fn create_worktree(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) 
             needs(state, NO_REPO_IN_CONTEXT, cx);
             return;
         }
-        dialogs::with_host(cx, |host| {
+        dialogs::with_host(state, cx, |host| {
             host.card_picker.kind = PickerKind::Repo;
             host.card_picker.then_worktree = true;
         });

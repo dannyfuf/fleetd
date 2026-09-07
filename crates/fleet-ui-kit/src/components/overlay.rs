@@ -99,7 +99,7 @@ impl Overlay {
     }
 
     /// The card.
-    pub fn child(mut self, child: impl IntoElement) -> Self {
+    pub fn content(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
         self
     }
@@ -135,7 +135,7 @@ impl RenderOnce for Overlay {
                         .min_h_0()
                         .rounded(theme.radii.lg)
                         .bg(theme.colors.elevated)
-                        .border_1()
+                        .border(theme.metrics.hairline)
                         .border_color(theme.colors.border_strong)
                         .shadow(theme.dialog_shadow())
                         .overflow_hidden()

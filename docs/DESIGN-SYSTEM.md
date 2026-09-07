@@ -47,7 +47,6 @@ Rust: `fleet_ui_kit::theme` — `ColorTokens`, `TerminalPalette`, `TypeScale`, `
 
 ```rust
 Theme::init(ThemeMode::Dark, cx);          // once, before any component renders
-Theme::init_from_system(window, cx);       // follow the OS appearance
 Theme::change(ThemeMode::Light, cx);       // explicit switch
 Theme::toggle(cx);                         // returns the new mode
 
@@ -211,6 +210,8 @@ nothing decays on a timer the user did not set.
 The smaller component metrics live here too: `hairline 1` · `dot_size 8` ·
 `dot_size_small 6` · `fact_label_w 104` · `doctor_check_w 120` · `doctor_status_w 64` ·
 `text_field_h 36` · `field_status_h 18` · `palette_input_h 44` · `number_field_w 96`.
+So do the Git UI's own dimensions: `status_pane_h 62` · `stash_pane_h 92` ·
+`overlay_help_w 640` · `editor_box_h 160` · `diff_caret_h 14`.
 The same token set owns the opacity ladder: `veil 0.55` · `dimmed 0.40` ·
 `refreshing 0.60` · `stale 0.55` · `skeleton 0.30` · `no_session 0.30`.
 
@@ -349,8 +350,9 @@ A component that cannot be in a state says so rather than pretending.
 
 #### `Theme` / tokens
 **Purpose.** One resolved token set per appearance, installed as a gpui `Global`.
-**API.** `Theme::{dark, light, for_mode, init, init_from_system, change, toggle, sync_system_appearance}`,
-`Theme::{shadow, dialog_shadow, sheet_shadow, faded}`, `ThemeMode::{from_appearance, toggled, is_dark}`,
+**API.** `Theme::{dark, light, for_mode, init, change, toggle, is_dark}`,
+`Theme::{resolve_mono_family, with_mono_family, shadow, dialog_shadow, sheet_shadow}`,
+`ThemeMode::{toggled, is_dark}`,
 `trait ActiveTheme { fn theme(&self) -> &Theme }`.
 **Usage rule.** Read the theme **inside** `render`, never cache it in a struct: the mode can
 change between frames. Clone it (`cx.theme().clone()`) only when a `'static` closure needs it.
@@ -430,11 +432,11 @@ detail panel" a property of the layout instead of a convention.
 the screen does).
 **Usage rule.** Pass every chip, including zero-valued ones — `Chip` suppresses itself. The
 84 px inset clears the macOS traffic lights; use 12 px on a platform without them.
-The default is exported as `TRAFFIC_LIGHT_INSET`.
+The default is `theme.metrics.traffic_light_inset`.
 
 #### `StatusBar`
 **Purpose.** Breadcrumb · mode word · job ticker · sticky error slot.
-**API.** `StatusBar::new().breadcrumb(..).breadcrumb_ch(usize).mode(Mode).mode_element(..)
+**API.** `StatusBar::new().breadcrumb(..).breadcrumb_ch(usize).mode(Mode)
 .ticker(..).error(..).trailing(..)`.
 **Variants.** With ticker · with error (the error **replaces** the ticker) · Workspace (breadcrumb
 is the session name).
@@ -460,17 +462,17 @@ the header, or the row shifts by a pixel and the illusion of "the list did not m
 #### `Sheet`
 **Purpose.** A right-docked, non-blocking panel (the Jobs panel).
 **API.** `Sheet::new(open: bool).expanded(bool).width(Pixels).header(..).body(..).footer(..)`;
-`.is_open()`, `.resolved_width()`.
+`.resolved_width(&Theme)`.
 **Variants.** 440 px · 640 px expanded for an inline log.
 **Usage rule.** Use a `Sheet`, not a `Dialog`, whenever the content is *about* the rows behind
 it. A centered modal would hide exactly what the jobs refer to.
 
-#### `Dialog` (alias `Modal`)
+#### `Dialog`
 **Purpose.** The shared modal frame: scrim + card + 44 px header + 44 px footer.
 **Anatomy.** header = icon + title + subtitle, no close button; footer = key hints on the left,
 the primary action **label** on the right.
 **API.** `Dialog::new(title).icon(Icon).subtitle(..).width(Pixels).height(Pixels).tone(Tone)
-.body(..).hints(..).primary("⏎ Create").error(..)`; `Dialog::DEFAULT_WIDTH`.
+.body(..).hints(..).hint_row(KeyHintRow).primary("⏎ Create").error(..).warning(..)`.
 **Widths.** 460 context/assign · 480 compact confirm · 520 quit · 560 create/clone/expanded
 confirm · 720 settings/prune · 880 help.
 **States.** default · error (red footer line, dialog stays open).
@@ -482,7 +484,7 @@ for anything destructive so the `y`/`Y` escalation is computed, not typed.
 
 #### `Overlay`
 **Purpose.** A centered floating layer used by the top-anchored palette and the Agent popup.
-**API.** `Overlay::new().top(Pixels).width(Pixels).scrim(bool).child(..)`.
+**API.** `Overlay::new().top(Pixels).width(Pixels).scrim(bool).layer(OverlayLayer).content(..)`.
 **Usage rule.** Default `top` is 120 px — the thinking position, not screen center. Leave
 `scrim` off and use `OverlayLayer::Anchored` for the palette: it is a jump, not a decision. The
 Agent popup is a modal floating surface, so it opts into the scrim and `OverlayLayer::Dialog`.
@@ -491,7 +493,7 @@ Agent popup is a modal floating surface, so it opts into the scrim and `OverlayL
 **Purpose.** Bottom-right transient acknowledgements, max 3.
 **API.** `Toast::new(text).icon(Icon).tone(Tone).short().raised_at(ms)`;
 `ToastStack::new(toasts).max(usize).bottom_inset(Pixels)`;
-`ToastStack::{MAX, is_visible, resolved_text}`, `COALESCE_WINDOW_MS`, and
+`ToastStack::{MAX, is_visible}`, `COALESCE_WINDOW_MS`, and
 `ToastStack::{push, push_at}` apply the coalescing law.
 **Variants.** 1.6 s short · 3.2 s normal · coalesced (`×n`).
 **Usage rule — the toast law.** *A toast is allowed only when there is no row and no pill that
@@ -541,14 +543,14 @@ that is the blank cell of §2.5.
 
 #### `ColumnLadder`
 **Purpose.** Resolve a `ch`-based responsive column set for the current pane width.
-**API.** `ColumnLadder::{new, worktrees, pull_requests}()`, `.column(ColumnSpec)`,
+**API.** `ColumnLadder::{new, worktrees}()`, `.column(ColumnSpec)`,
 `.resolve(pane_ch) -> Vec<ResolvedColumn>`, `.shows(key, pane_ch) -> bool`,
 `.width_ch(key, pane_ch)`, `.specs()`, `ColumnLadder::pane_ch(width, cx)`,
 `ColumnLadder::{worktrees_in_scope, pull_requests_for}`;
 `ColumnSpec::{fixed(key, ch), flex(key, min_ch), ladder(key, &[(pane_ch, ch)])}
 .align(..).shown_from(pane_ch).forced(bool)`.
 **Usage rule.** Measure the **pane**, not the window. `ColumnLadder::worktrees()` and
-`::pull_requests()` are the §2.9 ladders verbatim, including the two-step author breakpoint
+`::pull_requests_for()` are the §2.9 ladders verbatim, including the two-step author breakpoint
 (12 ch at 70 ch, 16 ch at 130 ch).
 
 #### `StatusGlyph`
@@ -692,9 +694,9 @@ theirs.
 below that holds **either** the derived preview **or** the validation message — never both, and
 the slot is always present.
 **API.** `TextField::new(value).label(..).placeholder(..).caret(usize).focused(bool).icon(Icon)
-.preview(..).invalid(message).mono(bool).height(Pixels).hide_status_line(bool)`; `.is_invalid()`.
-`TextFieldState` is the editing model. `TextInput` is its live, IME-safe entity and emits
-`TextInputEvent` under `TEXT_FIELD_KEY_CONTEXT`.
+.preview(..).invalid(message).mono(bool).height(Pixels).hide_status_line(bool)`.
+`TextFieldState` is the editing model. `TextInput` is its live, IME-safe entity — `.is_invalid()`
+reports its validation state — and emits `TextInputEvent` under `TEXT_FIELD_KEY_CONTEXT`.
 **States.** default · focused (accent border + caret) · placeholder (muted) · invalid (red
 border, red message) · disabled (not modelled: Fleet has no disabled inputs — a field that
 cannot be edited is rendered as a read-only `FactRow` with no box).
@@ -732,7 +734,7 @@ than completeness, and the footer says `9 of 63`.
 **Keyboard.** printable · `Backspace` · `ctrl-w` · `ctrl-u` · `ctrl-n`/`↓` and `ctrl-p`/`↑` move
 the **list** cursor while still typing · `Enter` opens the selected row · first `Esc` leaves the
 input keeping the filter · second `Esc` clears it. `Esc` **never** quits the app.
-**Usage rule.** Pass it into `PaneHeader::filter`, so it replaces the header in the same 30 px
+**Usage rule.** Pass it into `PaneHeader::query_slot`, so it replaces the header in the same 30 px
 row. A hidden active filter is the classic "where did my rows go" bug, so always show the
 retained chip afterwards.
 
@@ -748,7 +750,7 @@ hosts are configured).
 #### `Toggle`
 **Purpose.** `[x]` / `[ ]`.
 **API.** `Toggle::{new(checked), labeled(label, checked)}().detail(..).focused(bool).disabled(bool)
-.label_width(Pixels)`; `.box_text()`, `.box_tone()`.
+.label_width(Pixels)`.
 **Keyboard.** `Space`.
 **Usage rule.** Brackets, not a switch: the whole Settings dialog is a keyboard list, and a
 switch implies a pointer.
@@ -756,13 +758,13 @@ switch implies a pointer.
 #### `NumberField`
 **Purpose.** An integer with a unit suffix and a clamp.
 **API.** `NumberField::{new(value), labeled(label, value)}().unit(..).range(min, max).min(i64)
-.focused(bool).invalid(message).label_width(Pixels)`; `.clamp(i64)`, `.is_valid()`,
+.focused(bool).invalid(message).label_width(Pixels)`; `.clamp(i64)`, `.is_in_range()`,
 `.range_message()`, `.message()`.
 **States.** default · focused · invalid (out of range, red border).
 **Usage rule.** The clamp is part of the contract: §3.8.6 states minimums, and an out-of-range
 value must be refused at the field, not at save time.
 
-#### `SegmentedTabs` (alias `TabBar`)
+#### `SegmentedTabs`
 Parent Hub navigation uses `underlined(false)` for a selected background; PR sub-tabs retain
 underlines. `on_select` sends mouse selection through the same actions as keyboard navigation.
 **Purpose.** Underlined tabs with counts.
@@ -777,7 +779,7 @@ rows at full opacity.
 #### `Select`
 **Purpose.** A closed-list chooser that opens a `FuzzyList`.
 **API.** `Select::new(value).label(..).placeholder(..).open(bool).focused(bool).options(..)
-.disabled(bool).invalid(..).hint(..)`; `.is_invalid()`.
+.disabled(bool).invalid(..).hint(..)`.
 **Usage rule.** `Cycler` for 2–5 options, `Select` for a closed list, `FuzzyList` under a
 `TextField` for a searchable set.
 
@@ -788,7 +790,7 @@ consequence) · expanded 560 px (`⚠` title tone, target on its own line, one l
 stamp, consequence).
 **API.** `ConfirmDialog::new(title, FactList).target(..).consequence(..).stamp(FreshnessStamp)
 .icon(Icon).hints(KeyHintRow).action_label(..).width(Pixels).body(..).error(..)
-.force_confirm_key(ConfirmKey)`; `.is_compact()`, `.confirm_key()`, `.resolved_width()`.
+.force_confirm_key(ConfirmKey)`; `.is_compact()`, `.confirm_key()`, `.resolved_width(&Theme)`.
 **Keyboard.** `y`/`Y`/`Enter` confirm · `n`/`Esc`/`q` cancel · `I` re-check (delete) · `s` toggle
 the KEEP list (prune). Nothing else is bound, so muscle memory cannot misfire.
 **Usage rule.** No "don't ask again" checkbox, no second confirmation step, no countdown, no
@@ -815,12 +817,12 @@ commands are prefixed with `triangle-alert` and still routed through their confi
 **Purpose.** glyph · kind (7 ch) · target · elapsed · percent, plus a progress sub-line.
 **API.** `JobRow::new(JobStatus, kind, target).id(..).elapsed(..).percent(u8).progress(..)
 .retryable(bool).trailing_key(..).selected(bool).cursor(bool)`;
-`JobStatus::{Queued, Running, Cancelling, Cancelled, Done, Failed}` with `.icon() .tone()
-.has_progress()`.
+`JobStatus::{Queued, Running, Cancelling, Cancelled, Done, Failed}` with `.icon()` and `.tone()`.
 **Usage rule (`retryable`).** Renders §3.8.9's `(restartable)` / `(not restartable)` label in
 the quit-and-stop confirm. Leave it **unset** when retryability is unknown: a job that claims
-either is worse than one that says nothing. `JobStatus::Cancelling` has no `fleet-proto`
-counterpart yet — the proto enum must gain it or the kit state must go (P1 #7).
+either is worse than one that says nothing. `JobStatus::Cancelling` mirrors
+`fleet_proto::job::JobStatus::Cancelling`: cancellation was requested and shutdown is still in
+progress, which is not the same row as `Cancelled`.
 **Variants.** 30 px one-line (finished) · 44 px two-line (running, with the last stdout line).
 **Usage rule.** `kind` is a fixed 7-character slug (`clone`, `pool`, `hooks`, `prune`, `create`,
 `delete`, `fetch`, `prs`, `inspect`, `update`, `import`) so the column scans as a shape.
@@ -841,8 +843,9 @@ the red jobs chip until the Jobs panel has been opened.
 
 #### `LogView`
 **Purpose.** The tail of `logs/jobs/<id>.log`.
-**API.** `LogView::new(id, lines).following(bool).track_scroll(&handle).top(usize)
-.focus(&FocusHandle).on_command(Fn(LogCommand, ..)).empty(..).show_badge(bool)`;
+**API.** `LogView::from_shared(id, lines).shared_line_tones(..).following(bool)
+.track_scroll(&handle).top(usize).focus(&FocusHandle).on_command(Fn(LogCommand, ..))
+.empty(..).show_badge(bool)`;
 `.line_count()`, `LOG_TAIL_LINES = 200`, and
 `LogCommand::{ToggleFollow, Follow, ScrollTo(usize)}`.
 **Keyboard.** `f` toggles follow · `j`/`k` scroll · `G` re-enables follow · `Esc` collapses the
@@ -851,7 +854,8 @@ sheet back to 440 px.
 
 #### `TerminalGrid`
 **Purpose.** Paint the mirror cell grid.
-**API.** `TerminalGrid::new(rows).id(ElementId).cursor(GridCursor).selection(GridSelection)
+**API.** `TerminalGrid::from_shared(rows).cache(&TerminalGridCache).id(ElementId)
+.cursor(GridCursor).selection(GridSelection)
 .focused(bool).padding(Pixels).scrollback(offset, len).scroll_pill(ScrollPill)
 .modes([TerminalMode]).frame_size(cols, rows).dimmed(bool)
 .on_resize(Fn(cols, rows, &mut Window, &mut App))`; `.row_count()`, `.column_count()`.
@@ -956,8 +960,7 @@ signal-killed process has no exit code and the strip must not invent `128 + sign
 
 #### `Banner`
 **Purpose.** A 28 px full-width strip with a countdown and recovery keys.
-**API.** `Banner::{warning, danger}(text).icon(Icon).countdown(..).hints(KeyHintRow)`;
-`.resolved_tone()`.
+**API.** `Banner::{warning, danger}(text).icon(Icon).countdown(..).hints(KeyHintRow)`.
 **Usage rule.** After a daemon reconnect the banner must say, verbatim, *"fleetd restarted.
 Terminal sessions did not survive; worktrees, jobs and state are intact."* A warm "reconnected"
 banner that implies the agents came back is the single most damaging false reassurance in the
@@ -982,7 +985,7 @@ lost grow a labelled pill, because bad news must be readable.
 
 #### `Veil`
 **Purpose.** A 55 % scrim over **terminal grids only**, while the daemon is gone.
-**API.** `Veil::new(active).opacity(f32).child(..)`; `.drops_keys()`. Its default opacity comes
+**API.** `Veil::new(active).opacity(f32).content(..)`; `.drops_keys()`. Its default opacity comes
 from `Theme::metrics.veil_opacity`.
 **Usage rule.** Lists stay at 100 % and stay navigable — they are true, just frozen; only a live
 surface is veiled. Keys typed into a veiled grid are **dropped, not buffered**; the component

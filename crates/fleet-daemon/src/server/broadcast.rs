@@ -47,6 +47,10 @@ impl BroadcastBus {
         self.inner.sender.send(event).unwrap_or(0)
     }
 
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Creates an independent event receiver.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.inner.sender.subscribe()
@@ -92,10 +96,7 @@ impl BroadcastBus {
         {
             return;
         }
-        // Terminal metadata is reported by a blocking PTY-forwarder thread. Preserve the daemon
-        // runtime when services are attached so that thread can request a coalesced snapshot
-        // without calling `tokio::spawn` outside a reactor (which both panicked and left
-        // `snapshot_pending` stuck true forever).
+        // PTY event threads have no Tokio reactor; use the runtime attached by the daemon.
         let runtime = tokio::runtime::Handle::try_current().ok().or_else(|| {
             self.inner
                 .runtime

@@ -1,17 +1,83 @@
-use std::{path::Path, process::Command, sync::Arc};
+use std::{
+    path::Path,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
+use async_trait::async_trait;
 use fleet_core::{
     ids::{ContextId, RepoId},
     model::{Context, Repo, RepoHooks},
     state::default_state,
 };
 use fleet_daemon::{
-    adapters::{clock::SystemClock, files::RealFiles, git::ShellGit, shell::RealShell},
+    DaemonResult,
+    adapters::{
+        clock::SystemClock,
+        files::RealFiles,
+        git::ShellGit,
+        shell::{DetachedProcess, LineCallback, RealShell, Shell, ShellCommand, ShellResult},
+    },
     jobs::JobManager,
     services::pool::Pool,
     stores::{config::ConfigStore, state::StateStore},
 };
+use fleet_proto::job::JobKind;
 use serde_json::json;
+use tokio::sync::Barrier;
+use tokio_util::sync::CancellationToken;
+
+struct BlockingFirstFetch {
+    inner: RealShell,
+    fetches: AtomicUsize,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl BlockingFirstFetch {
+    fn new() -> Self {
+        Self {
+            inner: RealShell,
+            fetches: AtomicUsize::new(0),
+            entered: Arc::new(Barrier::new(2)),
+            release: Arc::new(Barrier::new(2)),
+        }
+    }
+}
+
+#[async_trait]
+impl Shell for BlockingFirstFetch {
+    async fn run(&self, command: ShellCommand) -> DaemonResult<ShellResult> {
+        if command.program == "git"
+            && command.args == ["fetch", "--prune", "origin"]
+            && self.fetches.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            self.entered.wait().await;
+            self.release.wait().await;
+        }
+        self.inner.run(command).await
+    }
+
+    async fn run_detached(
+        &self,
+        command: ShellCommand,
+        log_path: &Path,
+    ) -> DaemonResult<DetachedProcess> {
+        self.inner.run_detached(command, log_path).await
+    }
+
+    async fn run_streaming(
+        &self,
+        command: ShellCommand,
+        cancel: CancellationToken,
+        on_line: LineCallback,
+    ) -> DaemonResult<ShellResult> {
+        self.inner.run_streaming(command, cancel, on_line).await
+    }
+}
 
 #[tokio::test]
 async fn pool_build_claim_refill_and_snapshot_status() {
@@ -42,8 +108,9 @@ async fn pool_build_claim_refill_and_snapshot_status() {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     let jobs = Arc::new(JobManager::new(&home));
-    let git = Arc::new(ShellGit::new(Arc::new(RealShell)));
-    let pool = Pool::new(config.clone(), state, jobs, git, files);
+    let shell = Arc::new(RealShell);
+    let git = Arc::new(ShellGit::new(Arc::clone(&shell)));
+    let pool = Pool::new(config.clone(), state, jobs, git, files, shell);
 
     pool.prepare(repo.id.clone(), false)
         .await
@@ -63,10 +130,8 @@ async fn pool_build_claim_refill_and_snapshot_status() {
     pool.prepare(repo.id.clone(), false)
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-    let status = Pool::snapshot_statuses(&[repo], 2);
-    assert_eq!(status[0].ready, 2);
-    assert_eq!(status[0].size, 2);
-    assert!(status[0].refreshed_at.is_some());
+    assert!(root.join(".hot/.git/swarm-hot.json").is_file());
+    assert!(root.join(".hot.1/.git/swarm-hot.json").is_file());
 
     let before = std::fs::read_to_string(root.join(".hot/.git/swarm-hot.json"))
         .unwrap_or_else(|error| panic!("{error}"));
@@ -93,6 +158,82 @@ async fn pool_build_claim_refill_and_snapshot_status() {
     .unwrap_or_else(|error| panic!("{error}"));
     assert!(root.join(".hot").is_dir());
     assert!(!root.join(".hot.1").exists());
+}
+
+#[tokio::test]
+async fn force_runs_forced_successor() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let home = temp.path().join("fleet");
+    let repo_path = create_repository(temp.path());
+    let files = Arc::new(RealFiles::new(
+        home.join("trash"),
+        [home.join("repos"), home.join("worktrees")],
+    ));
+    let config = Arc::new(ConfigStore::new(&home, files.clone()));
+    config
+        .update(json!({
+            "reposDir": home.join("repos"),
+            "worktreesDir": home.join("worktrees"),
+            "hotPoolSize": 1,
+            "hotRefreshIntervalMs": 0
+        }))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let state = Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock)));
+    let repo = fixture_repo(&repo_path);
+    let mut persisted = default_state();
+    persisted.contexts.push(fixture_context());
+    persisted.repos.push(repo.clone());
+    state
+        .save(persisted)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let jobs = Arc::new(JobManager::new(&home));
+    let shell = Arc::new(BlockingFirstFetch::new());
+    let shell_adapter: Arc<dyn Shell> = shell.clone();
+    let pool = Pool::new(
+        config,
+        state,
+        Arc::clone(&jobs),
+        Arc::new(ShellGit::new(Arc::clone(&shell_adapter))),
+        files,
+        shell_adapter,
+    );
+
+    let ordinary = {
+        let pool = pool.clone();
+        let repo = repo.id.clone();
+        tokio::spawn(async move { pool.prepare(repo, false).await })
+    };
+    shell.entered.wait().await;
+    let forced = {
+        let pool = pool.clone();
+        let repo = repo.id.clone();
+        tokio::spawn(async move { pool.prepare(repo, true).await })
+    };
+    let mut forced_submitted = false;
+    for _ in 0..100 {
+        forced_submitted = jobs
+            .list()
+            .iter()
+            .any(|job| job.kind == JobKind::PoolRefresh);
+        if forced_submitted {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(forced_submitted, "forced successor was not submitted");
+    shell.release.wait().await;
+
+    ordinary
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    forced
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(shell.fetches.load(Ordering::SeqCst), 2);
 }
 
 fn fixture_context() -> Context {

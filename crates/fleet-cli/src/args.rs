@@ -67,7 +67,7 @@ pub enum Command {
     /// Report coding-agent lifecycle activity for the current Fleet terminal.
     AgentStatus(AgentStatusArgs),
     /// Run environment diagnostics.
-    Doctor,
+    Doctor(DoctorArgs),
     /// Import compatible swarm configuration and state.
     Import(ImportArgs),
     /// Start a Fleet self-update job.
@@ -111,7 +111,7 @@ pub struct WatchListArgs {
 pub struct WatchTailArgs {
     /// Numeric daemon-local watch ID.
     pub id: fleet_core::watches::WatchId,
-    /// Poll every 250 ms until exit, preserving stdout/stderr channels.
+    /// Follow the watch until it exits, preserving stdout/stderr channels.
     #[arg(long)]
     pub follow: bool,
 }
@@ -197,6 +197,17 @@ pub struct OpenArgs {
 pub struct JsonArgs {
     /// Emit a protocol-versioned JSON envelope.
     #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments accepted by `fleet doctor`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct DoctorArgs {
+    /// Replace quarantined state with an empty state while retaining its archived file.
+    #[arg(long)]
+    pub reset_state: bool,
+    /// Emit a protocol-versioned JSON envelope for a state reset.
+    #[arg(long, requires = "reset_state")]
     pub json: bool,
 }
 
@@ -390,6 +401,7 @@ mod tests {
             vec!["fleet", "agent", "opencode"],
             vec!["fleet", "agent-status", "finished", "--json"],
             vec!["fleet", "doctor"],
+            vec!["fleet", "doctor", "--reset-state", "--json"],
             vec!["fleet", "import", "--from-swarm"],
             vec!["fleet", "update"],
             vec!["fleet", "daemon", "restart"],
@@ -445,11 +457,7 @@ mod tests {
             );
         }
     }
-}
 
-#[cfg(test)]
-mod exec_tests {
-    use super::*;
     #[test]
     fn watch_commands_parse_options_and_reject_invalid_ids() {
         assert_eq!(

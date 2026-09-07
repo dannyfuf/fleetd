@@ -182,7 +182,7 @@ impl RenderOnce for KanbanColumn {
             .bg(theme.colors.surface)
             .border_1()
             .border_color(theme.colors.border)
-            .child(FocusRing::pane(self.focused).child(content))
+            .child(FocusRing::pane(self.focused).content(content))
     }
 }
 

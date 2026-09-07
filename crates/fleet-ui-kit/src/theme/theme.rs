@@ -1,8 +1,6 @@
 //! The `Theme` global: one token set, resolved for one appearance.
 
-use gpui::{
-    App, BoxShadow, Global, Hsla, Pixels, SharedString, Window, WindowAppearance, point, px,
-};
+use gpui::{App, BoxShadow, Global, Pixels, SharedString, point, px};
 
 use super::palette::TerminalPalette;
 use super::tokens::{
@@ -25,14 +23,6 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    /// Map the OS appearance onto a Fleet mode. Vibrant variants collapse onto their base.
-    pub fn from_appearance(appearance: WindowAppearance) -> Self {
-        match appearance {
-            WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeMode::Light,
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeMode::Dark,
-        }
-    }
-
     /// The other mode.
     pub fn toggled(self) -> Self {
         match self {
@@ -172,18 +162,21 @@ impl Theme {
         cx.set_global(Self::for_mode(mode).with_mono_family(mono));
     }
 
-    /// Install the theme global from the window's OS appearance.
-    pub fn init_from_system(window: &Window, cx: &mut App) {
-        Self::init(ThemeMode::from_appearance(window.appearance()), cx);
+    /// Change appearance while preserving typography, geometry and motion overrides.
+    pub fn change(mode: ThemeMode, cx: &mut App) {
+        let mut theme = cx.try_global::<Theme>().cloned().unwrap_or_else(|| {
+            Self::for_mode(mode).with_mono_family(Self::resolve_mono_family(cx))
+        });
+        theme.set_mode(mode);
+        cx.set_global(theme);
     }
 
-    /// Replace the theme global with another mode, keeping the resolved mono face.
-    pub fn change(mode: ThemeMode, cx: &mut App) {
-        let mono = cx.try_global::<Theme>().map_or_else(
-            || Self::resolve_mono_family(cx),
-            |theme| theme.font_mono.clone(),
-        );
-        cx.set_global(Self::for_mode(mode).with_mono_family(mono));
+    fn set_mode(&mut self, mode: ThemeMode) {
+        let appearance = Self::for_mode(mode);
+        self.mode = mode;
+        self.colors = appearance.colors;
+        self.terminal = appearance.terminal;
+        self.elevation = appearance.elevation;
     }
 
     /// Override the mono family, e.g. with the face [`Self::resolve_mono_family`] settled on.
@@ -198,11 +191,6 @@ impl Theme {
         let next = cx.global::<Theme>().mode.toggled();
         Self::change(next, cx);
         next
-    }
-
-    /// Follow the OS appearance.
-    pub fn sync_system_appearance(window: &Window, cx: &mut App) {
-        Self::change(ThemeMode::from_appearance(window.appearance()), cx);
     }
 
     /// Whether the installed theme is dark.
@@ -230,12 +218,6 @@ impl Theme {
     pub fn sheet_shadow(&self) -> Vec<BoxShadow> {
         self.shadow(self.elevation.sheet)
     }
-
-    /// Fade a token toward the background, used for the >10 min freshness ladder (55 %) and
-    /// the "deleting" row (40 %).
-    pub fn faded(&self, color: Hsla, factor: f32) -> Hsla {
-        color.opacity(factor)
-    }
 }
 
 impl Default for Theme {
@@ -256,5 +238,27 @@ pub trait ActiveTheme {
 impl ActiveTheme for App {
     fn theme(&self) -> &Theme {
         self.global::<Theme>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn appearance_changes_preserve_typography_and_geometry() {
+        let mut theme = Theme::dark();
+        theme.font_ui = "Custom UI".into();
+        theme.font_mono = "Custom Mono".into();
+        theme.metrics.row_h = px(42.0);
+        theme.text.ui.size = px(17.0);
+        let metrics = theme.metrics;
+        let text = theme.text;
+        theme.set_mode(ThemeMode::Light);
+        assert_eq!(theme.colors, ColorTokens::light());
+        assert_eq!(theme.terminal, TerminalPalette::light());
+        assert_eq!(theme.font_ui, "Custom UI");
+        assert_eq!(theme.font_mono, "Custom Mono");
+        assert_eq!(theme.metrics, metrics);
+        assert_eq!(theme.text, text);
     }
 }

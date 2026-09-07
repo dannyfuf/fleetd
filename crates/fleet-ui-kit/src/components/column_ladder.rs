@@ -106,6 +106,23 @@ impl ColumnSpec {
         self
     }
 
+    fn resolve(&self, pane_ch: f32) -> Option<ResolvedColumn> {
+        if !self.is_shown(pane_ch) {
+            return None;
+        }
+        let (width, min_width) = match self.width {
+            ColumnWidth::Ch(width) => (Some(ch(width)), None),
+            ColumnWidth::Flex { min_ch } => (None, Some(ch(min_ch))),
+            ColumnWidth::Ladder(steps) => (Some(ch(resolve_steps(steps, pane_ch)?)), None),
+        };
+        Some(ResolvedColumn {
+            key: self.key.clone(),
+            width,
+            min_width,
+            align: self.align,
+        })
+    }
+
     /// Whether this spec survives at `pane_ch`.
     pub fn is_shown(&self, pane_ch: f32) -> bool {
         self.forced || pane_ch >= self.min_pane_ch
@@ -164,47 +181,26 @@ impl ColumnLadder {
     pub fn resolve(&self, pane_ch: f32) -> Vec<ResolvedColumn> {
         self.specs
             .iter()
-            .filter(|spec| spec.is_shown(pane_ch))
-            .filter_map(|spec| match spec.width {
-                ColumnWidth::Ch(width) => Some(ResolvedColumn {
-                    key: spec.key.clone(),
-                    width: Some(ch(width)),
-                    min_width: None,
-                    align: spec.align,
-                }),
-                ColumnWidth::Flex { min_ch } => Some(ResolvedColumn {
-                    key: spec.key.clone(),
-                    width: None,
-                    min_width: Some(ch(min_ch)),
-                    align: spec.align,
-                }),
-                ColumnWidth::Ladder(steps) => steps
-                    .iter()
-                    .find(|(threshold, _)| pane_ch >= *threshold)
-                    .and_then(|(_, width)| {
-                        (*width > 0.0).then(|| ResolvedColumn {
-                            key: spec.key.clone(),
-                            width: Some(ch(*width)),
-                            min_width: None,
-                            align: spec.align,
-                        })
-                    }),
-            })
+            .filter_map(|spec| spec.resolve(pane_ch))
             .collect()
     }
 
     /// Whether a key survives at `pane_ch`.
     pub fn shows(&self, key: &str, pane_ch: f32) -> bool {
-        self.resolve(pane_ch).iter().any(|c| c.key.as_ref() == key)
+        self.specs
+            .iter()
+            .filter(|spec| spec.key == key)
+            .find_map(|spec| spec.resolve(pane_ch))
+            .is_some()
     }
 
-    /// The width one key resolves to at `pane_ch`, in `ch`. `None` when the column is dropped
-    /// or is the flex column.
+    /// The resolved width of one column in `ch`; absent for hidden or flexible columns.
     pub fn width_ch(&self, key: &str, pane_ch: f32) -> Option<f32> {
-        self.resolve(pane_ch)
-            .into_iter()
-            .find(|c| c.key.as_ref() == key)
-            .and_then(|c| c.width)
+        self.specs
+            .iter()
+            .filter(|spec| spec.key == key)
+            .find_map(|spec| spec.resolve(pane_ch))
+            .and_then(|column| column.width)
             .map(|width| width.as_f32() / CH)
     }
 
@@ -220,14 +216,13 @@ impl ColumnLadder {
     /// 110 ch, because in `All` scope the repo is the only thing that disambiguates two
     /// identically named branches.
     pub fn worktrees_in_scope(all_scope: bool) -> Self {
-        const KEEP_ALIVE: &[(f32, f32)] = &[(104.0, 18.0), (88.0, 14.0), (72.0, 10.0), (0.0, 0.0)];
         Self::new([
             ColumnSpec::fixed("glyph", 2.0).align(ColumnAlign::Center),
             ColumnSpec::flex("branch", 24.0),
             ColumnSpec::fixed("repo", 14.0)
                 .shown_from(110.0)
                 .forced(all_scope),
-            ColumnSpec::ladder("keepalive", KEEP_ALIVE),
+            ColumnSpec::ladder("keepalive", KEEP_ALIVE_STEPS),
             ColumnSpec::fixed("pr", 15.0).shown_from(60.0),
             ColumnSpec::fixed("age", 7.0)
                 .align(ColumnAlign::Right)
@@ -236,18 +231,12 @@ impl ColumnLadder {
     }
 
     /// The PR list ladder of §2.9, keyed
-    /// `presence`, `number`, `title`, `author`, `head`, `repo`, `state`, `age`.
+    /// `presence`, `number`, `title`, `author`, `head`, `repo`, `state`, `age`, for one tab and
+    /// one scope.
     ///
     /// The two-step author breakpoint (12 ch at 70 ch, 16 ch at 130 ch) is [D-5] and is the one
-    /// ladder the pixel-only port lost.
-    pub fn pull_requests() -> Self {
-        Self::pull_requests_for(true, true)
-    }
-
-    /// The PR ladder for one tab and one scope.
-    ///
-    /// §2.9: the `author` column is meaningful only in the `REVIEW` tab, and the `repo` column
-    /// needs both a wide pane **and** a multi-repo scope.
+    /// ladder the pixel-only port lost. §2.9: the `author` column is meaningful only in the
+    /// `REVIEW` tab, and the `repo` column needs both a wide pane **and** a multi-repo scope.
     pub fn pull_requests_for(review_tab: bool, multi_repo: bool) -> Self {
         const AUTHOR: &[(f32, f32)] = &[(130.0, 16.0), (70.0, 12.0), (0.0, 0.0)];
         let mut specs = vec![
@@ -270,6 +259,17 @@ impl ColumnLadder {
         );
         Self::new(specs)
     }
+}
+
+pub(super) const KEEP_ALIVE_STEPS: &[(f32, f32)] =
+    &[(104.0, 18.0), (88.0, 14.0), (72.0, 10.0), (0.0, 0.0)];
+
+pub(super) fn resolve_steps(steps: &[(f32, f32)], pane_ch: f32) -> Option<f32> {
+    steps
+        .iter()
+        .find(|(threshold, _)| pane_ch >= *threshold)
+        .map(|(_, width)| *width)
+        .filter(|width| *width > 0.0)
 }
 
 #[cfg(test)]
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn author_has_two_steps() {
-        let ladder = ColumnLadder::pull_requests();
+        let ladder = ColumnLadder::pull_requests_for(true, true);
         assert_eq!(ladder.width_ch("author", 140.0), Some(16.0));
         assert_eq!(ladder.width_ch("author", 80.0), Some(12.0));
         assert!(!ladder.shows("author", 60.0));
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn flex_columns_carry_their_minimum() {
-        let title = ColumnLadder::pull_requests()
+        let title = ColumnLadder::pull_requests_for(true, true)
             .resolve(140.0)
             .into_iter()
             .find(|c| c.key.as_ref() == "title")

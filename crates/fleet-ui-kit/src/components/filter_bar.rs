@@ -10,13 +10,14 @@
 //! `ctrl-w`, `ctrl-u`). `ctrl-n` / `↓` and `ctrl-p` / `↑` never reach the bar at all — they move
 //! the **list** cursor while the user keeps typing.
 
-use gpui::{App, SharedString, Window, div, prelude::*, px};
+use gpui::{App, SharedString, Window, div, prelude::*};
 
 use crate::{
     components::KeyHint,
+    components::text_field::FieldLine,
     icons::{Icon, IconSize},
-    text::Text,
-    theme::{ActiveTheme, Theme},
+    text::{Text, TextRole, styled_with},
+    theme::ActiveTheme,
     tone::Tone,
 };
 
@@ -62,6 +63,17 @@ impl FilterBar {
         self
     }
 
+    /// The unframed query content for [`super::PaneHeader::query_slot`].
+    /// The containing header owns padding, borders and match counts.
+    pub fn query_slot(self) -> impl IntoElement {
+        FilterQuery {
+            query: self.query,
+            placeholder: self.placeholder,
+            caret: self.caret,
+            focused: self.focused,
+        }
+    }
+
     /// Whether the filter matches nothing.
     pub fn is_empty_result(&self) -> bool {
         self.shown == 0
@@ -70,7 +82,7 @@ impl FilterBar {
     /// The tone of the `shown/total` counter: amber when the filter hides everything, so the
     /// count itself says "your rows did not vanish, they were filtered out".
     pub fn count_tone(&self) -> Tone {
-        if self.is_empty_result() {
+        if self.total > 0 && self.is_empty_result() {
             Tone::Warning
         } else {
             Tone::Muted
@@ -78,50 +90,14 @@ impl FilterBar {
     }
 }
 
-/// The 2 px accent caret, at the `ui` line height.
-fn caret_bar(theme: &Theme) -> gpui::Div {
-    div()
-        .flex_none()
-        .w(theme.metrics.focus_ring_w)
-        .h(theme.text.ui.line_height)
-        .bg(theme.colors.accent)
-}
-
 impl RenderOnce for FilterBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
         let count_tone = self.count_tone();
         let focused = self.focused;
-        let empty_query = self.query.is_empty();
-
-        // The caret splits the query so it sits between glyphs instead of after them.
-        let caret_chars = self
-            .caret
-            .unwrap_or_else(|| self.query.chars().count())
-            .min(self.query.chars().count());
-        let byte = self
-            .query
-            .char_indices()
-            .nth(caret_chars)
-            .map_or(self.query.len(), |(index, _)| index);
-        let (head, tail) = self.query.split_at(byte);
-
-        let query_area = if empty_query {
-            div()
-                .flex()
-                .items_center()
-                .min_w_0()
-                .children(focused.then(|| caret_bar(&theme)))
-                .child(Text::ui(self.placeholder.unwrap_or_default()).faint())
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .min_w_0()
-                .child(Text::ui(head.to_string()).ellipsize())
-                .children(focused.then(|| caret_bar(&theme)))
-                .child(Text::ui(tail.to_string()).ellipsize())
-        };
+        let shown = self.shown;
+        let total = self.total;
+        let query_area = self.query_slot();
 
         div()
             .flex()
@@ -132,35 +108,61 @@ impl RenderOnce for FilterBar {
             .px(theme.space.lg)
             .gap(theme.space.md)
             .bg(theme.colors.surface)
-            .border_b(px(1.0))
+            .border_b(theme.metrics.hairline)
             .border_color(theme.colors.border)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_center()
-                    .gap(theme.space.sm)
-                    .child(Icon::Search.el().size(IconSize::Medium).color(if focused {
-                        theme.colors.text_secondary
-                    } else {
-                        theme.colors.text_muted
-                    }))
-                    .child(query_area),
-            )
+            .child(query_area)
             .child(
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap(theme.space.md)
-                    .child(Text::label(format!("{}/{}", self.shown, self.total)).tone(count_tone))
+                    .child(Text::label(format!("{shown}/{total}")).tone(count_tone))
                     // Stage one of the two-stage `Esc`: leave the input, keep the filter.
                     // Stage two, from the retained chip, clears it.
                     .child(KeyHint::labeled(
                         "esc",
                         if focused { "leave" } else { "clear" },
                     )),
+            )
+    }
+}
+
+#[derive(IntoElement)]
+struct FilterQuery {
+    query: SharedString,
+    placeholder: Option<SharedString>,
+    caret: Option<usize>,
+    focused: bool,
+}
+
+impl RenderOnce for FilterQuery {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            query,
+            placeholder,
+            caret,
+            focused,
+        } = self;
+        let theme = cx.theme();
+        div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(theme.space.sm)
+            .child(Icon::Search.el().size(IconSize::Medium).color(if focused {
+                theme.colors.text_secondary
+            } else {
+                theme.colors.text_muted
+            }))
+            .child(
+                styled_with(div(), TextRole::Ui.style(theme), theme)
+                    .flex_1()
+                    .min_w_0()
+                    .h(theme.text.ui.line_height)
+                    .text_color(theme.colors.text)
+                    .child(FieldLine::new(query, placeholder, caret, focused)),
             )
     }
 }
@@ -179,5 +181,10 @@ mod tests {
     fn empty_result_is_about_the_shown_count_only() {
         assert!(FilterBar::new("", 0, 0).is_empty_result());
         assert!(!FilterBar::new("", 3, 3).is_empty_result());
+    }
+
+    #[test]
+    fn empty_unfiltered_source_is_neutral() {
+        assert_eq!(FilterBar::new("", 0, 0).count_tone(), Tone::Muted);
     }
 }

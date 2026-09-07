@@ -14,7 +14,7 @@ use gpui::{
 };
 use std::time::Duration;
 
-use crate::theme::ActiveTheme;
+use crate::{Tone, theme::ActiveTheme};
 
 macro_rules! lucide_icons {
     ($($variant:ident => $file:literal),* $(,)?) => {
@@ -158,16 +158,19 @@ impl IconSize {
 
 impl Icon {
     /// Start a builder for this glyph.
+    #[track_caller]
     pub fn el(self) -> IconElement {
         IconElement::new(self)
     }
 
     /// Shorthand for `self.el().size(size)`.
+    #[track_caller]
     pub fn size(self, size: IconSize) -> IconElement {
         self.el().size(size)
     }
 
     /// Shorthand for `self.el().color(color)`.
+    #[track_caller]
     pub fn color(self, color: Hsla) -> IconElement {
         self.el().color(color)
     }
@@ -182,27 +185,39 @@ pub struct IconElement {
     icon: Icon,
     size: IconSize,
     color: Option<Hsla>,
+    tone: Tone,
     opacity: Option<f32>,
     spinning: bool,
-    id: Option<ElementId>,
+    /// Seeded from the call site so a spinning glyph animates without an explicit id.
+    id: ElementId,
 }
 
 impl IconElement {
     /// A glyph at the default size and the primary text color.
+    #[track_caller]
     pub fn new(icon: Icon) -> Self {
         Self {
             icon,
             size: IconSize::default(),
             color: None,
+            tone: Tone::Default,
             opacity: None,
             spinning: false,
-            id: None,
+            id: std::panic::Location::caller().into(),
         }
     }
 
     /// Set the size.
     pub fn size(mut self, size: IconSize) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Resolve a semantic tint from the active theme at render time. The last of
+    /// [`Self::tone`] / [`Self::color`] to be called wins.
+    pub fn tone(mut self, tone: Tone) -> Self {
+        self.tone = tone;
+        self.color = None;
         self
     }
 
@@ -218,15 +233,15 @@ impl IconElement {
         self
     }
 
-    /// Rotate one turn per `Motion::spinner`. Requires [`IconElement::id`].
+    /// Rotate one turn per `Motion::spinner`. Repeated items must supply a scoped [`Self::id`].
     pub fn spinning(mut self, spinning: bool) -> Self {
         self.spinning = spinning;
         self
     }
 
-    /// Stable element id, required by the spin animation.
+    /// Override the call-site id. Repeated spinning glyphs need one id per item.
     pub fn id(mut self, id: impl Into<ElementId>) -> Self {
-        self.id = Some(id.into());
+        self.id = id.into();
         self
     }
 }
@@ -234,7 +249,7 @@ impl IconElement {
 impl RenderOnce for IconElement {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let mut color = self.color.unwrap_or(theme.colors.text);
+        let mut color = self.color.unwrap_or_else(|| self.tone.color(theme));
         if let Some(opacity) = self.opacity {
             color = color.opacity(opacity);
         }
@@ -245,13 +260,12 @@ impl RenderOnce for IconElement {
             .text_color(color);
 
         if self.spinning {
-            let id = self
-                .id
-                .unwrap_or_else(|| ElementId::from(SharedString::new_static("kit-spinner")));
             let duration = Duration::from_millis(theme.motion.spinner);
-            base.with_animation(id, gpui::Animation::new(duration).repeat(), |svg, delta| {
-                svg.with_transformation(Transformation::rotate(percentage(delta)))
-            })
+            base.with_animation(
+                self.id,
+                gpui::Animation::new(duration).repeat(),
+                |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+            )
             .into_any_element()
         } else {
             base.into_any_element()

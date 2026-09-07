@@ -18,16 +18,19 @@ use fleet_core::{board::*, ids::BoardId, model::Context, paths::FleetHome, state
 use fleet_daemon::{
     DaemonError, DaemonResult,
     adapters::{
+        Adapters,
         board::{
             BoardBackend, BoardBackends, JiraBackend, LocalBackend,
             jira::{JiraSettings, map::VIEW_FIELDS, map::view_fields},
         },
         files::RealFiles,
+        github::GhCli,
+        process::RealProcess,
         shell::{DetachedProcess, LineCallback, Shell, ShellCommand, ShellResult},
     },
     jobs::JobManager,
     server::BroadcastBus,
-    services::{boards::Boards, worktrees::Worktrees},
+    services::{boards::Boards, sessions::Sessions, worktrees::Worktrees},
     stores::{board::BoardStore, config::ConfigStore, state::StateStore},
     testing::fakes::{FakeGit, FakeShell, FakeShellCall, FixedClock},
 };
@@ -1685,16 +1688,24 @@ impl Fixture {
         ));
         let shell = signed_in();
         shell.when(|command| command.program == "git", ok("fixture-sha\n"));
-        let worktrees = Arc::new(
-            Worktrees::new(
-                config,
-                state.clone(),
-                jobs.clone(),
-                files.clone(),
-                Arc::new(FakeGit::new(shell.clone())),
-            )
-            .with_shell(shell.clone()),
-        );
+        let real_shell: Arc<dyn Shell> = shell.clone();
+        let adapters = Adapters {
+            board_backends: BoardBackends::system(Arc::clone(&real_shell), clock.clone()),
+            git: Arc::new(FakeGit::new(shell.clone())),
+            github: Arc::new(GhCli::new(Arc::clone(&real_shell))),
+            process: Arc::new(RealProcess::new(Arc::clone(&real_shell))),
+            files: files.clone(),
+            shell: real_shell,
+            clock: clock.clone(),
+        };
+        let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+        let worktrees = Arc::new(Worktrees::new(
+            config,
+            state.clone(),
+            jobs.clone(),
+            &adapters,
+            sessions,
+        ));
         let store = Arc::new(BoardStore::new(home.clone(), files));
         let boards = Boards::new(
             store,

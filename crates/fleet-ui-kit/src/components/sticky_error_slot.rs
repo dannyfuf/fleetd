@@ -76,7 +76,7 @@ impl RenderOnce for StickyErrorSlot {
         let color = theme.colors.danger;
         let on_activate = self.on_activate;
         let count = self.count;
-        let hover_bg = color.opacity(0.22);
+        let hover_bg = color.opacity(theme.metrics.error_hover_opacity);
 
         let body = div()
             .flex()
@@ -107,8 +107,7 @@ impl RenderOnce for StickyErrorSlot {
                 .id(id)
                 .hover(move |s| s.bg(hover_bg))
                 .when_some(on_activate, |el, on_activate| {
-                    el.cursor_pointer()
-                        .on_click(move |_, window, cx| on_activate(window, cx))
+                    super::control::on_activate(el, on_activate)
                 })
                 .into_any_element(),
             None => body.into_any_element(),

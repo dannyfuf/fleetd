@@ -4,21 +4,13 @@
 //! border. It is deliberately **not** a centered modal: the list behind it stays fully visible
 //! and fully readable, because the jobs it lists are about those rows.
 //!
-//! ## Why there is no slide animation
-//!
-//! §2.7 of the design system budgets 160 ms for the sheet slide, and `theme.motion.sheet`
-//! carries that number — but the transition belongs to the **caller**, not to the component:
-//! a [`gpui::RenderOnce`] holds no state, so it cannot know how far through the slide it is,
-//! and a component that restarted its own animation on every frame would jitter under the
-//! 16 ms job-progress updates the panel exists to show. The sheet therefore renders one
-//! settled position per frame; a view that wants the slide animates the width or the offset
-//! it passes in, over `theme.motion.sheet`.
+//! The caller owns opening and closing transitions; this component draws the supplied width.
 //!
 //! Place a sheet in [`super::AppFrame::body_overlay`], not in `overlay`: §3.7 pins it to the
 //! region *between* the context bar and the status bar, so both bars stay reachable while it
 //! is open.
 
-use gpui::{AnyElement, App, Pixels, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, App, Pixels, Window, deferred, div, prelude::*};
 
 use crate::{components::OverlayLayer, theme::ActiveTheme};
 
@@ -77,11 +69,6 @@ impl Sheet {
         self
     }
 
-    /// Whether this sheet renders anything at all.
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
     /// The width this sheet resolves to, given a theme. Exposed so a view can drive the
     /// slide without re-deriving the 440 / 640 rule.
     pub fn resolved_width(&self, theme: &crate::theme::Theme) -> Pixels {
@@ -109,7 +96,7 @@ impl RenderOnce for Sheet {
                     .h_full()
                     .w(width)
                     .bg(theme.colors.elevated)
-                    .border_l(px(1.0))
+                    .border_l(theme.metrics.hairline)
                     .border_color(theme.colors.border_strong)
                     .shadow(theme.sheet_shadow())
                     .overflow_hidden()
@@ -120,7 +107,7 @@ impl RenderOnce for Sheet {
                             .flex_col()
                             .flex_none()
                             .w_full()
-                            .border_b(px(1.0))
+                            .border_b(theme.metrics.hairline)
                             .border_color(theme.colors.border)
                             .child(header)
                     }))
@@ -140,7 +127,7 @@ impl RenderOnce for Sheet {
                             .flex_col()
                             .flex_none()
                             .w_full()
-                            .border_t(px(1.0))
+                            .border_t(theme.metrics.hairline)
                             .border_color(theme.colors.border)
                             .child(footer)
                     })),

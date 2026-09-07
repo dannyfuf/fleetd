@@ -28,7 +28,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
 use crate::{
     actions::{dialog, settings as settings_actions},
     bridge::Bridge,
-    dialogs::{Dialogs, TextInput, notify, root, step, typed_char, with_host},
+    dialogs::{DialogHost, Dialogs, notify, root, step, typed_char, with_host},
     state::AppState,
 };
 
@@ -42,7 +42,6 @@ pub const MAX_PREFIX: usize = 8;
 /// "this row must be filled in" — `docs/BOARD-JIRA.md` §5 names Jira's `project` row
 /// `Project key (required)` for exactly that reason. The marker is stripped from the label the
 /// row draws, because the row states the rule with its own `required` styling instead.
-pub use fleet_core::board::REQUIRED_MARKER;
 /// What a multi-select settings row is typed as, and split back on.
 const MULTI_SEPARATOR: char = ',';
 
@@ -57,7 +56,7 @@ const MULTI_SEPARATOR: char = ',';
 pub struct BackendRow {
     /// The JSON key inside `BackendRef.settings`.
     pub key: String,
-    /// What the row is called, with [`REQUIRED_MARKER`] already stripped.
+    /// What the row is called, with [`fleet_core::board::REQUIRED_MARKER`] already stripped.
     pub name: String,
     /// Which control the row draws and which JSON type it writes.
     pub kind: PropertyKind,
@@ -455,7 +454,7 @@ impl BoardSettingsState {
     }
 
     /// The text buffer of the focused row, when it has one.
-    fn input(&self) -> Option<TextInput> {
+    fn input(&self) -> Option<TextFieldState> {
         let value = match self.focused() {
             SettingRow::Name => self.name.clone(),
             SettingRow::Prefix => self.prefix.clone(),
@@ -468,28 +467,28 @@ impl BoardSettingsState {
             }
             _ => return None,
         };
-        let mut input = TextInput::new(value);
-        for _ in self.caret..input.caret() {
-            input.left();
+        let mut input = TextFieldState::from_text(value);
+        for _ in self.caret..input.caret_chars() {
+            input.move_left();
         }
         Some(input)
     }
 
-    fn set_input(&mut self, input: &TextInput) {
+    fn set_input(&mut self, input: &TextFieldState) {
         if self.saving {
             return;
         }
         match self.focused() {
-            SettingRow::Name => self.name = input.value().to_owned(),
+            SettingRow::Name => self.name = input.text().to_owned(),
             // The contract stores prefixes uppercase, so the field shows what it will store.
-            SettingRow::Prefix => self.prefix = input.value().to_uppercase(),
+            SettingRow::Prefix => self.prefix = input.text().to_uppercase(),
             SettingRow::BackendSetting(index) => match self.rows.get_mut(index) {
-                Some(row) => row.value = input.value().to_owned(),
+                Some(row) => row.value = input.text().to_owned(),
                 None => return,
             },
             _ => return,
         }
-        self.caret = input.caret();
+        self.caret = input.caret_chars();
         self.error = None;
     }
 
@@ -573,7 +572,7 @@ pub(crate) fn seed(state: &Entity<AppState>, cx: &mut App) {
             draft
         })
         .unwrap_or_default();
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let generation = host.board_settings.generation.wrapping_add(1);
         host.board_settings = BoardSettingsState {
             generation,
@@ -587,12 +586,13 @@ pub fn render(
     state: &Entity<AppState>,
     bridge: &Bridge,
     focus: &FocusHandle,
+    _host: &Entity<DialogHost>,
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = cx.theme().space.sm;
     adopt_late_schema(state, cx);
-    let draft = with_host(cx, |host| host.board_settings.clone());
+    let draft = with_host(state, cx, |host| host.board_settings.clone());
     let repos = repo_choices(state.read(cx));
     let repo_index = repo_position(&repos, draft.default_repo_id.as_ref());
     let repo_off_grid = !repo_listed(&repos, draft.default_repo_id.as_ref());
@@ -613,7 +613,7 @@ pub fn render(
     // rows there are. Only when it changes, for the reason the board screen gates the same
     // call: an unconditional reveal re-anchors the list on every render and takes the wheel
     // away from the user.
-    if let Some(row) = with_host(cx, |host| {
+    if let Some(row) = with_host(state, cx, |host| {
         (host.board_settings.revealed != Some(host.board_settings.row)).then(|| {
             host.board_settings.revealed = Some(host.board_settings.row);
             host.board_settings.row
@@ -709,9 +709,9 @@ pub fn render(
                 .map(|(index, row)| backend_element(row, &draft, index)),
         );
 
-    let mut card = Dialog::new(Dialogs::BoardSettings.title())
-        .icon(Dialogs::BoardSettings.icon())
-        .width(Dialogs::BoardSettings.width())
+    let mut card = Dialog::new("Board settings")
+        .icon(Icon::Settings2)
+        .width(Dialogs::BoardSettings.width(cx))
         .body(rows)
         .hint_row(
             KeyHintRow::new()
@@ -735,7 +735,7 @@ pub fn render(
                 let Some(text) = typed_char(event) else {
                     return;
                 };
-                if insert(&state, &text, cx) {
+                if insert(&state, text, cx) {
                     cx.stop_propagation();
                 }
             }
@@ -778,7 +778,7 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &dialog::CursorRight, _window, cx| {
-                if !caret(&state, cx, TextInput::right) {
+                if !caret(&state, cx, TextFieldState::move_right) {
                     cycle(&state, 1, "", cx);
                 }
             }
@@ -786,7 +786,7 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &dialog::CursorLeft, _window, cx| {
-                if !caret(&state, cx, TextInput::left) {
+                if !caret(&state, cx, TextFieldState::move_left) {
                     cycle(&state, -1, "", cx);
                 }
             }
@@ -807,7 +807,7 @@ pub fn render(
             let state = state.clone();
             move |_: &dialog::DeleteWord, _window, cx| {
                 edit(&state, cx, |input| {
-                    input.delete_word();
+                    input.delete_word_before();
                 });
             }
         })
@@ -822,13 +822,13 @@ pub fn render(
         .on_action({
             let state = state.clone();
             move |_: &dialog::LineStart, _window, cx| {
-                caret(&state, cx, TextInput::home);
+                caret(&state, cx, TextFieldState::move_to_start);
             }
         })
         .on_action({
             let state = state.clone();
             move |_: &dialog::LineEnd, _window, cx| {
-                caret(&state, cx, TextInput::end);
+                caret(&state, cx, TextFieldState::move_to_end);
             }
         })
         .on_action(move |_: &dialog::Confirm, _window, cx| {
@@ -846,7 +846,7 @@ pub fn render(
 /// as long as it stayed open. Rows are only ever built when there are none, so nothing the
 /// user has typed can be overwritten — and the cursor stays exactly where it was.
 fn adopt_late_schema(state: &Entity<AppState>, cx: &mut App) {
-    let (kind, empty) = with_host(cx, |host| {
+    let (kind, empty) = with_host(state, cx, |host| {
         (
             host.board_settings.backend_kind.clone(),
             host.board_settings.rows.is_empty(),
@@ -859,7 +859,7 @@ fn adopt_late_schema(state: &Entity<AppState>, cx: &mut App) {
     if schema.is_empty() {
         return;
     }
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let (row, caret) = (host.board_settings.row, host.board_settings.caret);
         host.board_settings.select_backend(&kind, &schema);
         host.board_settings.row = row;
@@ -964,7 +964,7 @@ fn repo_listed(repos: &[RepoId], current: Option<&RepoId>) -> bool {
 
 /// Types `text` into the focused row. Returns whether it landed anywhere.
 fn insert(state: &Entity<AppState>, text: &str, cx: &mut App) -> bool {
-    let typed = with_host(cx, |host| {
+    let typed = with_host(state, cx, |host| {
         // A number row refuses a letter, which is what leaves `h` and `l` their cycling
         // meaning there instead of typing an `h` no backend can parse.
         if host
@@ -993,7 +993,7 @@ fn move_row(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App)
         cx.stop_propagation();
         return;
     }
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let len = host.board_settings.rows().len();
         host.board_settings.row = step(host.board_settings.row, delta, len);
         host.board_settings.caret = host.board_settings.text_len();
@@ -1010,7 +1010,7 @@ fn cycle(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App) {
     }
     let app = state.read(cx);
     let repos = repo_choices(app);
-    let selected = with_host(cx, |host| host.board_settings.backend_kind.clone());
+    let selected = with_host(state, cx, |host| host.board_settings.backend_kind.clone());
     let kinds = backend_kinds(state.read(cx), &selected);
     let next_kind = kinds
         .iter()
@@ -1018,7 +1018,7 @@ fn cycle(state: &Entity<AppState>, delta: isize, literal: &str, cx: &mut App) {
         .map(|index| kinds[step(index, delta, kinds.len())].clone())
         .unwrap_or(selected);
     let schema = schema_for(state.read(cx), &next_kind);
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         let draft = &mut host.board_settings;
         if draft.saving {
             return;
@@ -1118,7 +1118,7 @@ fn cycle_backend_row(draft: &mut BoardSettingsState, index: usize, delta: isize)
 
 /// `space`: toggle the focused flag row; anywhere else it is a space.
 fn toggle(state: &Entity<AppState>, cx: &mut App) {
-    let toggled = with_host(cx, |host| {
+    let toggled = with_host(state, cx, |host| {
         if host.board_settings.saving {
             return false;
         }
@@ -1156,13 +1156,13 @@ fn toggle(state: &Entity<AppState>, cx: &mut App) {
 }
 
 /// Moves the caret of the focused text row. Returns whether there was one.
-fn caret(state: &Entity<AppState>, cx: &mut App, move_to: fn(&mut TextInput)) -> bool {
-    let moved = with_host(cx, |host| {
+fn caret(state: &Entity<AppState>, cx: &mut App, move_to: fn(&mut TextFieldState) -> bool) -> bool {
+    let moved = with_host(state, cx, |host| {
         let Some(mut input) = host.board_settings.input() else {
             return false;
         };
-        move_to(&mut input);
-        host.board_settings.caret = input.caret();
+        let _moved = move_to(&mut input);
+        host.board_settings.caret = input.caret_chars();
         true
     });
     if moved {
@@ -1172,8 +1172,8 @@ fn caret(state: &Entity<AppState>, cx: &mut App, move_to: fn(&mut TextInput)) ->
 }
 
 /// Runs a text edit against the focused row.
-fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextInput)) {
-    let edited = with_host(cx, |host| {
+fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextFieldState)) {
+    let edited = with_host(state, cx, |host| {
         let Some(mut input) = host.board_settings.input() else {
             return false;
         };
@@ -1189,7 +1189,7 @@ fn edit(state: &Entity<AppState>, cx: &mut App, edit: impl FnOnce(&mut TextInput
 
 /// `Enter`: send one `UpdateBoard` with everything the dialog changed.
 fn save(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
-    let draft = with_host(cx, |host| host.board_settings.clone());
+    let draft = with_host(state, cx, |host| host.board_settings.clone());
     // A save already in flight is answered by the reply it is waiting for; a board that changed
     // under the dialog is not answered by anything, and returning silently makes `Enter` a dead
     // key with nothing on the error line to read. `card_picker::apply` says so for the same case.
@@ -1201,14 +1201,14 @@ fn save(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         .board()
         .is_some_and(|view| Some(&view.board.id) == draft.board_id.as_ref())
     {
-        with_host(cx, |host| {
+        with_host(state, cx, |host| {
             host.board_settings.error = Some("That board is no longer loaded".into());
         });
         notify(state, cx);
         return;
     }
     if let Some(message) = draft.validate() {
-        with_host(cx, |host| host.board_settings.error = Some(message));
+        with_host(state, cx, |host| host.board_settings.error = Some(message));
         notify(state, cx);
         return;
     }
@@ -1247,7 +1247,7 @@ fn save(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         ..BoardPatch::default()
     };
 
-    with_host(cx, |host| {
+    with_host(state, cx, |host| {
         host.board_settings.saving = true;
         host.board_settings.error = None;
     });
@@ -1277,7 +1277,7 @@ fn save(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
             {
                 return;
             }
-            let completed = with_host(cx, |host| {
+            let completed = with_host(&handle, cx, |host| {
                 host.board_settings
                     .finish_save(generation, answer.as_ref().err().cloned())
             });
