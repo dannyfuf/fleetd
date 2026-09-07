@@ -160,11 +160,19 @@ impl Shell for RealShell {
         let output = if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, child.output())
                 .await
-                .map_err(|_| DaemonError::Timeout(description.clone()))?
+                .map_err(|_| DaemonError::Timeout(subcommand(&command)))?
         } else {
             child.output().await
         }
-        .map_err(|error| DaemonError::Shell(format!("{description}: {error}")))?;
+        .map_err(|error| {
+            // `subcommand`, for the reason a timeout uses it: a spawn failure that is not
+            // ENOENT is classified as transient and its message is persisted in
+            // `board.sync.last_error` and printed by the CLI and the app, so the full argv
+            // would publish an issue summary and an assignee's address to all three. The argv
+            // itself stays in the debug log.
+            tracing::debug!(command = %description, %error, "shell command failed");
+            DaemonError::Shell(format!("{}: {error}", subcommand(&command)))
+        })?;
         Ok(ShellResult {
             status: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -254,7 +262,7 @@ impl Shell for RealShell {
         let result = if let Some(timeout) = timeout {
             tokio::time::timeout(timeout, wait)
                 .await
-                .map_err(|_| DaemonError::Timeout(description))?
+                .map_err(|_| DaemonError::Timeout(subcommand(&command)))?
         } else {
             wait.await
         };
@@ -270,6 +278,26 @@ fn build_command(command: &ShellCommand) -> Command {
         process.current_dir(cwd);
     }
     process
+}
+
+/// What a timed-out call is named as: the program and its leading subcommands, never its
+/// values.
+///
+/// A timeout is the one failure whose text is persisted (`board.sync.last_error`) and printed
+/// by the job log, the CLI and the app. The full argv carries what the call was *about* — an
+/// issue summary, an assignee's email address, a branch name — into all three.
+fn subcommand(command: &ShellCommand) -> String {
+    std::iter::once(command.program.as_str())
+        .chain(
+            command
+                .args
+                .iter()
+                .map(String::as_str)
+                .take_while(|argument| !argument.starts_with('-'))
+                .take(3),
+        )
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn describe(command: &ShellCommand) -> String {
@@ -301,6 +329,39 @@ fn concise_output<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failure whose text is persisted (`board.sync.last_error`) and printed by the job log,
+    /// the CLI and the app: the argv it used to carry held issue summaries and assignee email
+    /// addresses. Both the timeout and the spawn failure are named by the subcommand alone —
+    /// a spawn failure that is not ENOENT is classified transient and reported the same way.
+    #[test]
+    fn a_failed_call_is_named_by_its_subcommand_and_not_by_its_values() {
+        let command = ShellCommand::new("acli").args([
+            "jira".to_owned(),
+            "workitem".to_owned(),
+            "edit".to_owned(),
+            "--key".to_owned(),
+            "SP-1".to_owned(),
+            "--summary".to_owned(),
+            "Pay the December bonus to ana@example.com".to_owned(),
+        ]);
+        assert_eq!(subcommand(&command), "acli jira workitem edit");
+        // The full argv survives for the debug log, which is the one place it belongs.
+        assert!(describe(&command).contains("ana@example.com"));
+        // A program that cannot be spawned at all reports the same trimmed name.
+        let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| panic!("{error}"));
+        let error = runtime
+            .block_on(
+                RealShell.run(
+                    ShellCommand::new("fleet-no-such-program")
+                        .args(["--summary".to_owned(), "ana@example.com".to_owned()]),
+                ),
+            )
+            .expect_err("a program that is not on PATH cannot run");
+        let message = error.to_string();
+        assert!(!message.contains("ana@example.com"), "{message}");
+        assert!(message.contains("fleet-no-such-program"), "{message}");
+    }
 
     #[test]
     fn detached_child_survives_runtime_shutdown() {
