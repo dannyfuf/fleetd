@@ -1029,6 +1029,7 @@ mod tests {
 
     fn snapshot_with_worktree() -> fleet_proto::snapshot::Snapshot {
         fleet_proto::snapshot::Snapshot {
+            boards: Vec::new(),
             generated_at: String::new(),
             contexts: Vec::new(),
             repos: Vec::new(),

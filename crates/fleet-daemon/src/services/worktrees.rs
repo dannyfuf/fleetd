@@ -436,12 +436,19 @@ mod tests {
             },
         );
         let shell_boundary: Arc<dyn Shell> = shell.clone();
+        let clock: Arc<dyn crate::adapters::clock::Clock> =
+            Arc::new(crate::adapters::clock::SystemClock);
         let adapters = Adapters {
+            board_backends: crate::adapters::board::BoardBackends::system(
+                shell_boundary.clone(),
+                Arc::clone(&clock),
+            ),
             git: Arc::new(ShellGit::new(shell_boundary.clone())),
             github: Arc::new(GhCli::new(shell_boundary.clone())),
             process: Arc::new(FakeProcess::default()),
             files: files_boundary,
             shell: shell_boundary,
+            clock,
         };
         let jobs = Arc::new(JobManager::new(&home));
         let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));

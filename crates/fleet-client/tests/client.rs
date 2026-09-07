@@ -1,11 +1,20 @@
-use std::{path::Path, time::Duration};
+use std::{future::Future, path::Path, time::Duration};
 
 use fleet_client::{Client, TerminalUpdate, ensure_daemon};
-use fleet_core::ids::TerminalId;
+use fleet_core::{
+    board::{
+        BackendDescriptor, BackendRef, BackendSchema, BoardPatch, BoardView, Card, CardDraft,
+        CardPatch, ConflictResolution, new_board, summarize,
+    },
+    ids::TerminalId,
+    model::{Context, Worktree},
+};
 use fleet_proto::{
     PROTOCOL_VERSION,
     codec::FleetCodec,
+    error::{ErrorKind, ProtoError},
     event::{Event, EventKind, ToastLevel},
+    job::{JobKind, JobRecord, JobStatus},
     request::{Request, RequestBody},
     response::{Response, ResponseBody},
     terminal::{
@@ -337,6 +346,314 @@ async fn ensure_daemon_reuses_a_healthy_daemon() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+async fn board_api_round_trips_over_the_unix_socket() {
+    timeout(Duration::from_secs(10), board_api_round_trips())
+        .await
+        .expect("board API round trip");
+}
+
+async fn board_api_round_trips() {
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let server = async {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport, None).await;
+        transport
+    };
+    let (client, mut transport) = tokio::join!(Client::connect(home.path()), server);
+    let client = client.unwrap();
+    let context = Context {
+        id: "work".parse().unwrap(),
+        name: "Work".into(),
+        owners: vec![],
+        created_at: "now".into(),
+    };
+    let board = new_board(&context, "now");
+    let card: Card = serde_json::from_value(serde_json::json!({
+        "id":"card-1", "boardId":"work", "number":1, "title":"Task", "statusId":"todo",
+        "createdAt":"now", "updatedAt":"now"
+    }))
+    .unwrap();
+    let view = BoardView {
+        board: board.clone(),
+        cards: vec![card.clone()],
+    };
+    let summary = summarize(&board, &view.cards);
+    let worktree: Worktree = serde_json::from_value(serde_json::json!({
+        "id":"acme/api#task", "repoId":"acme/api", "slug":"task", "branch":"task",
+        "baseRef":"main", "path":"/tmp/task", "session":"task", "createdAt":"now"
+    }))
+    .unwrap();
+    let job = JobRecord {
+        id: "sync-job".parse().unwrap(),
+        kind: JobKind::Custom("board.sync".into()),
+        target: board.id.to_string(),
+        title: "Sync board".into(),
+        status: JobStatus::Queued,
+        progress: None,
+        log_path: "/tmp/sync.log".into(),
+        started_at: "now".into(),
+        finished_at: None,
+        cancellable: true,
+        retryable: false,
+    };
+    // Each operation is checked at the socket boundary, including every argument and typed result.
+    macro_rules! check {
+        ($request:expr, $response:expr, $operation:expr, $expected:expr) => {
+            assert_eq!(
+                exchange(&mut transport, $request, Ok($response), $operation)
+                    .await
+                    .unwrap(),
+                $expected
+            );
+        };
+    }
+    check!(
+        RequestBody::ListBoards {
+            context_id: Some(context.id.clone())
+        },
+        ResponseBody::Boards(vec![summary.clone()]),
+        client.list_boards(Some(context.id.clone())),
+        vec![summary]
+    );
+    check!(
+        RequestBody::GetBoard {
+            board_id: board.id.clone()
+        },
+        ResponseBody::Board(view.clone()),
+        client.get_board(board.id.clone()),
+        view
+    );
+    check!(
+        RequestBody::EnsureBoard {
+            context_id: context.id.clone()
+        },
+        ResponseBody::Board(view.clone()),
+        client.ensure_board(context.id.clone()),
+        view
+    );
+    check!(
+        RequestBody::CreateBoard {
+            context_id: context.id.clone(),
+            name: Some("Team".into()),
+            prefix: Some("TM".into()),
+            backend: Some(BackendRef::default())
+        },
+        ResponseBody::Board(view.clone()),
+        client.create_board(
+            context.id.clone(),
+            Some("Team".into()),
+            Some("TM".into()),
+            Some(BackendRef::default())
+        ),
+        view
+    );
+    let board_patch = BoardPatch {
+        default_repo_id: Some(None),
+        ..Default::default()
+    };
+    check!(
+        RequestBody::UpdateBoard {
+            board_id: board.id.clone(),
+            patch: board_patch.clone()
+        },
+        ResponseBody::Board(view.clone()),
+        client.update_board(board.id.clone(), board_patch),
+        view
+    );
+    let draft = CardDraft {
+        title: "Task".into(),
+        ..Default::default()
+    };
+    check!(
+        RequestBody::CreateCard {
+            board_id: board.id.clone(),
+            draft: draft.clone()
+        },
+        ResponseBody::Card(card.clone()),
+        client.create_card(board.id.clone(), draft),
+        card
+    );
+    let patch = CardPatch {
+        assignee: Some(None),
+        estimate: Some(Some(3)),
+        ..Default::default()
+    };
+    check!(
+        RequestBody::UpdateCard {
+            card_id: card.id.clone(),
+            patch: patch.clone()
+        },
+        ResponseBody::Card(card.clone()),
+        client.update_card(card.id.clone(), patch),
+        card
+    );
+    check!(
+        RequestBody::MoveCard {
+            card_id: card.id.clone(),
+            status_id: card.status_id.clone(),
+            index: Some(2)
+        },
+        ResponseBody::Card(card.clone()),
+        client.move_card(card.id.clone(), card.status_id.clone(), Some(2)),
+        card
+    );
+    check!(
+        RequestBody::AddCardComment {
+            card_id: card.id.clone(),
+            body: "Hello".into()
+        },
+        ResponseBody::Card(card.clone()),
+        client.add_card_comment(card.id.clone(), "Hello".into()),
+        card
+    );
+    check!(
+        RequestBody::CreateWorktreeFromCard {
+            card_id: card.id.clone(),
+            repo_id: Some(worktree.repo_id.clone()),
+            base: Some("main".into()),
+            host: Some("devbox".parse().unwrap())
+        },
+        ResponseBody::CardWorktree {
+            card: card.clone(),
+            worktree: worktree.clone(),
+            created: true
+        },
+        client.create_worktree_from_card(
+            card.id.clone(),
+            Some(worktree.repo_id.clone()),
+            Some("main".into()),
+            Some("devbox".parse().unwrap())
+        ),
+        (card.clone(), worktree, true)
+    );
+    check!(
+        RequestBody::SyncBoard {
+            board_id: board.id.clone(),
+            full: false
+        },
+        ResponseBody::Job(job.clone()),
+        client.sync_board(board.id.clone(), false),
+        job.id
+    );
+    check!(
+        RequestBody::SyncBoard {
+            board_id: board.id.clone(),
+            full: true
+        },
+        ResponseBody::Job(job.clone()),
+        client.sync_board(board.id.clone(), true),
+        job.id
+    );
+    let descriptors = vec![BackendDescriptor {
+        kind: "local".into(),
+        label: "Local".into(),
+        capabilities: Default::default(),
+        settings_schema: vec![],
+    }];
+    check!(
+        RequestBody::ListBoardBackends {},
+        ResponseBody::BoardBackends(descriptors.clone()),
+        client.list_board_backends(),
+        descriptors
+    );
+    check!(
+        RequestBody::ResolveCardConflict {
+            card_id: card.id.clone(),
+            resolution: ConflictResolution::TakeRemote
+        },
+        ResponseBody::Card(card.clone()),
+        client.resolve_card_conflict(card.id.clone(), ConflictResolution::TakeRemote),
+        card
+    );
+    let schema = BackendSchema {
+        key_prefix: Some("EXT".into()),
+        ..Default::default()
+    };
+    check!(
+        RequestBody::DescribeBoardBackend {
+            board_id: board.id.clone()
+        },
+        ResponseBody::BoardBackendSchema(schema.clone()),
+        client.describe_board_backend(board.id.clone()),
+        schema
+    );
+    check!(
+        RequestBody::DeleteCard {
+            card_id: card.id.clone()
+        },
+        ResponseBody::Ack,
+        client.delete_card(card.id.clone()),
+        ()
+    );
+    check!(
+        RequestBody::DeleteBoard {
+            board_id: board.id.clone()
+        },
+        ResponseBody::Ack,
+        client.delete_board(board.id.clone()),
+        ()
+    );
+
+    let error = ProtoError {
+        kind: ErrorKind::NotFound,
+        message: "board missing".into(),
+    };
+    assert_eq!(
+        exchange(
+            &mut transport,
+            RequestBody::GetBoard {
+                board_id: board.id.clone()
+            },
+            Err(error.clone()),
+            client.get_board(board.id.clone())
+        )
+        .await
+        .unwrap_err(),
+        error
+    );
+    let unexpected = exchange(
+        &mut transport,
+        RequestBody::SyncBoard {
+            board_id: board.id.clone(),
+            full: false,
+        },
+        Ok(ResponseBody::Ack),
+        client.sync_board(board.id, false),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unexpected.kind, ErrorKind::Unknown);
+    assert!(unexpected.message.contains("sync_board"));
+}
+
+/// Answers the next request with `result` while `operation` runs, asserting what was sent.
+async fn exchange<T>(
+    transport: &mut ServerTransport,
+    expected: RequestBody,
+    result: Result<ResponseBody, ProtoError>,
+    operation: impl Future<Output = fleet_client::Result<T>>,
+) -> fleet_client::Result<T> {
+    let server = async {
+        let request = transport.next().await.unwrap().unwrap();
+        assert_eq!(request.body, expected);
+        transport
+            .send(
+                serde_json::to_value(Response {
+                    id: request.id,
+                    result,
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    };
+    let (_, result) = tokio::join!(server, operation);
+    result
+}
+
 async fn bind(home: &Path) -> UnixListener {
     UnixListener::bind(home.join("fleetd.sock")).unwrap()
 }
@@ -370,13 +687,14 @@ async fn authenticate(
     if let Some(expected) = expected_subscription {
         assert_eq!(events, expected);
     } else {
-        assert_eq!(events.len(), 13);
+        assert_eq!(events.len(), 14);
         for kind in [
             EventKind::WatchStarted,
             EventKind::WatchOutput,
             EventKind::WatchExited,
             EventKind::WatchDismissed,
             EventKind::AgentActivityChanged,
+            EventKind::BoardChanged,
         ] {
             assert!(events.contains(&kind));
         }

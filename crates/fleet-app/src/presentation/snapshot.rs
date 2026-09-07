@@ -137,6 +137,7 @@ mod tests {
         let mut duplicate = status.clone();
         duplicate.session = SessionState::Detached;
         let snapshot = Snapshot {
+            boards: Vec::new(),
             generated_at: String::new(),
             contexts: vec![context],
             repos: vec![repo],
@@ -179,6 +180,7 @@ mod tests {
     #[test]
     fn uuid_suffixed_jobs_are_indexed_by_domain_target() {
         let snapshot = Snapshot {
+            boards: Vec::new(),
             generated_at: String::new(),
             contexts: vec![],
             repos: vec![],

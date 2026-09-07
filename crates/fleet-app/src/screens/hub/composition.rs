@@ -12,24 +12,35 @@ impl HubScreen {
     ) -> AnyElement {
         self.bind(state, bridge, cx);
         let ctx = self.context(state, bridge);
-        let now = now_unix();
-        let viewport = window.viewport_size();
-        let width = f32::from(viewport.width);
-        let rows = visible_rows(f32::from(viewport.height), cx);
-        let model = self.hub.read(cx).prepared.clone();
-        let body = self.body(
-            state.read(cx),
-            self.hub.read(cx),
-            &model,
-            Viewport { width, rows },
-            now,
-            cx,
-        );
+        let on_board = matches!(state.read(cx).screen, Screen::Hub { tab: HubTab::Board });
+        // The board owns the whole body and its own keys, so the Hub's panes are not even
+        // composed while it is up (BOARD §8).
+        let body = if on_board {
+            self.board.render(state, bridge, focus, window, cx)
+        } else {
+            let now = now_unix();
+            let viewport = window.viewport_size();
+            let width = f32::from(viewport.width);
+            let rows = visible_rows(f32::from(viewport.height), cx);
+            let model = self.hub.read(cx).prepared.clone();
+            self.body(
+                state.read(cx),
+                self.hub.read(cx),
+                &model,
+                Viewport { width, rows },
+                now,
+                cx,
+            )
+        };
+        let tabs = hub_tabs(state.read(cx));
 
         div()
-            .track_focus(focus)
+            .when(!on_board, |el| el.track_focus(focus))
             .size_full()
-            .child(body)
+            .flex()
+            .flex_col()
+            .child(div().px(cx.theme().space.md).child(tabs))
+            .child(div().flex_1().min_h_0().child(body))
             .on_action(ctx.act(|ctx, _: &hub::MoveDown, window, cx| ctx.move_by(1, window, cx)))
             .on_action(ctx.act(|ctx, _: &hub::MoveUp, window, cx| ctx.move_by(-1, window, cx)))
             .on_action(

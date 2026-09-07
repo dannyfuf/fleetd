@@ -220,7 +220,7 @@ fn toggle_pr_screen_state(state: &mut AppState) -> bool {
     };
     let next = match tab {
         HubTab::Worktrees => HubTab::Prs,
-        HubTab::Prs => HubTab::Worktrees,
+        HubTab::Prs | HubTab::Board => HubTab::Worktrees,
     };
     route_to_hub(state, next);
     true

@@ -327,7 +327,7 @@ pub(super) fn parse_hooks(source: &str) -> Result<RepoHooks, ProtoError> {
     serde_json::from_value(value).map_err(|error| validation(format!("invalid hooks: {error}")))
 }
 
-fn parse_host(host: Option<&str>) -> Result<Option<HostId>, ProtoError> {
+pub(super) fn parse_host(host: Option<&str>) -> Result<Option<HostId>, ProtoError> {
     match host {
         None | Some("local") => Ok(None),
         Some(host) => parse_id(host).map(Some),

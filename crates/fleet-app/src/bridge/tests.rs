@@ -159,6 +159,7 @@ impl Drop for TestDaemon {
 
 fn empty_snapshot() -> Snapshot {
     Snapshot {
+        boards: Vec::new(),
         generated_at: String::new(),
         contexts: vec![],
         repos: vec![],

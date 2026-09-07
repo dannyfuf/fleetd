@@ -624,6 +624,26 @@ URL · `r` force refresh both tabs · `I` inspect the matching local worktree ·
 
 ---
 
+### 3.5.1 Hub — Board (`g b`)
+
+The board is the Hub's third tab, beside Worktrees and Pull requests, and its full contract —
+columns, card tiles, the card detail, the four board dialogs, and every key — lives in
+`docs/BOARD.md` §8. Three things it does differently from the rest of the Hub are stated here
+because they are cross-screen rules:
+
+- **The board owns the body and its own keys.** While it is up, the Hub's rail and list are not
+  composed at all, and the board's bindings shadow the inherited `Hub` ones (`docs/KEYMAP.md`
+  "Board and card detail").
+- **`/` is not the Hub's filter overlay.** The board's rows are cards in columns, not worktrees, so
+  it keeps its own query in `BoardState.filter` and publishes the `Filter` key context while the
+  input has the keyboard — which is what makes bare letters type instead of fire (§3.10's two-stage
+  `Esc` still applies: leave the input, then clear the filter).
+- **The breadcrumb names the card, live.** §2.2's third segment is derived when the status bar is
+  built rather than cached by the body's render, because the status bar is composed first and a
+  cached row would name the previously selected card.
+
+---
+
 ### 3.6 Workspace
 
 **Purpose:** *Be a terminal. Say only which terminal I am in, whether the session is healthy, and
@@ -1682,3 +1702,166 @@ reconcile on Workspace entry, session changes, reconnect, and event gaps as
 specified in `APP-CONTRACTS.md`. Daemon dismissal, TTL, and terminal/session cleanup
 remove the corresponding local watch. See that contract for duration recovery
 limits when an already-completed watch is first discovered.
+
+## Board
+
+*One board per context, one column per status, one key per edit* (BOARD §8).
+
+### Placement
+
+The board is the Hub's third screen tab (`g b`, tab label `Board`), rendered by
+`screens::board::BoardScreen` in the Hub's body. It replaces the worktrees list and the repos
+rail in place; the context bar above it is what scopes it, because the board shown is always
+`EnsureBoard(active_context)`. Switching context clears the board and re-ensures the new one.
+
+The `Board` tab carries the active context's `Snapshot.boards` summary: `open_count` as the tab
+count, and a `•` appended to the label when `conflict_count > 0`. The tab spins while a load is
+in flight.
+
+### The pane
+
+```text
+ BOARD · Fleet                                       8/12   FLT  ☁ jira  synced 3m  ⬆2  ⚠1  ⟳ syncing
+ ┌──────────── Backlog 4 ──┐ ┌──── In progress 2 ──┐ ┌──────── Done 6 ──┐
+ │ FLT-12                  │ │ FLT-7               │ │ FLT-3            │
+ │ Fix the login redirect  │ │ Ship the board      │ │ Adopt tokens     │
+ │ !! bug  DF  3 pt  ⌥     │ │ ! DF  ⌥ ●           │ │                  │
+```
+
+Header (`PaneHeader`): label `BOARD`, scope = board name, `shown/total` cards, then — right
+aligned — the prefix badge, the backend chip (hidden for `local`, because "local" is the absence
+of a backend, not a fact worth a chip), the `synced <age>` stamp, a dirty counter, a conflict
+counter, and the sync or refresh spinner. The chip reads the backend's **label** from the
+daemon's registry (`Jira (acli)`), not its registry key: the key is what a config file writes,
+the label is what the product is called. Until the registry answers — the first frames of a
+connection, or an older daemon — the raw kind stands in, because an empty chip reads as a broken
+header. A `board.sync` job in `Snapshot.jobs` is what makes the
+spinner appear; the board's own `sync.last_error` is drawn as a sticky row under the header, next
+to the load error, and neither ever hides the columns.
+
+Columns are `KanbanColumn`s in `board.statuses` order. The accent bar over each column is the
+status **category**, not its name: muted for `Backlog`, secondary for `Unstarted`, amber for
+`Started`, green for `Completed`, a strong border grey for `Canceled`; a status that carries an
+explicit token name in `color` overrides it. Cards are `CardTile`s from `ops::column_cards`, so
+the app never invents an order the daemon does not agree with.
+
+### States
+
+* **cold** — skeleton columns while the first `EnsureBoard` is in flight;
+* **failed** — the message verbatim in a sticky row plus `The board could not be loaded. · r reload`;
+* **no context, no daemon** — the two states where a load can never go out take the failed
+  shape rather than cold columns, because skeletons promise a request that was never sent:
+  `fleetd is not reachable`, and `No active context — pick one with 1–9 or gt / gT`.
+  Activating a context clears the board, which drops the message and asks again;
+* **empty board** — `No cards yet. · c new card`;
+* **empty column** — `No cards here.` inside the column;
+* **no match** — `Nothing matches "<query>". · esc clear`.
+
+### Keyboard
+
+`h`/`l` and `←`/`→` move between columns, `j`/`k` and `↓`/`↑` between cards; both clamp and never
+wrap (§5.11), and the focused column and card are always scrolled into view. Every §8 key is in
+`docs/KEYMAP.md`. Two rules are worth stating here:
+
+1. **The selection follows the card, not the index.** After any mutation the reducer applies the
+   `Card` the daemon returned and the focus moves to wherever that card now is — including the
+   column it was just moved to by `[` / `]`.
+2. **`/` publishes the `Filter` key context.** The board's filter is not the Hub's `FilterState`
+   (its rows are cards in columns, and `Overlay::Filter`'s `Enter` opens a worktree), so the board
+   owns `BoardState.filter`. While the input has the keyboard, `AppState::context_chain` returns
+   `["Filter", "BoardFilter"]` instead of `["Hub", "Board"]`: that is the only thing that makes `c`, `d`, `s` and
+   `w` type instead of fire. `Esc` is the two-stage §3.10 one — leave the input keeping the filter,
+   then clear it — and never quits.
+
+The filter is a case-insensitive substring over the six things a card is looked up by: title,
+display key, local key, label names, label ids and assignee. It is deliberately wider than
+`resolve_card`: a local key is not a *selector* on a mirrored card, but it is still something a
+reader can see on the tile and type here.
+
+### Mouse
+
+Clicking a tile focuses it; double-clicking opens its detail. Clicking a column focuses that
+column without moving the card selection.
+
+### Card detail
+
+An 880 px dialog, two panes, `Dialog > CardDetail`.
+
+*Left* — the card as prose: key, priority glyph and title; the conflict banner when the card has
+one (`K` keep local / `R` take remote); the description as `MarkdownText`, or a `TextArea` while
+`d` is editing it; the comments, each with author and age; a `TextArea` for the comment `c` is
+writing; and the last ten activity entries, newest first. The left pane scrolls; the right does
+not.
+
+*Right* — the card as facts: `Status, Priority, Assignee, Labels, Estimate, Due, Parent, Repo,
+Worktree`, then `Remote` / `URL` / `Synced` when the card is linked, then the board's custom
+properties in schema order. `j` / `k` select a row and `Enter` opens the picker that edits it; on
+the worktree row `Enter` opens that worktree's session instead. Unset values read as an en dash in
+the muted tone, never as an empty cell. `x` opens the card's remote issue in the browser and
+leaves the dialog open, because the browser is another window and closing the card the user is
+reading loses their place.
+
+A field the board's backend declared it cannot write back (`board.sync.readonly_fields`) reads in
+the secondary tone with a trailing lock glyph, and keeps its picker target: `Enter` still answers,
+with the sentence `<field> is read-only on <backend label> boards` on the dialog's error line. A
+row that silently did nothing would be indistinguishable from a broken key.
+
+The three text surfaces — title, description, comment — share **one** buffer, because at most one
+of them is ever open: `i`, `d`, `c` start an edit, `ctrl-s` saves it, `Esc` throws it away and a
+second `Esc` closes the dialog. While an edit is open the bare letters type, exactly as §3.8.6's
+text rows do.
+
+Nothing on this surface is optimistic. Every save sends its request and waits; the reducer applies
+the `Card` that comes back, and a refusal becomes a sticky line inside the dialog rather than a
+change the user believes happened.
+
+### The other three dialogs
+
+* **New card** (560 px) — a title `TextField` and an optional description `TextArea`. `Enter`
+  creates and closes; `ctrl-Enter` creates and opens the card it made. Nothing else is asked for,
+  because every other field has a one-letter picker on the board.
+* **Card property** (560 px) — one surface for every field: a query input over a `FuzzyList` of
+  the values that field can take. The open-ended kinds (assignee, estimate, due date, and `Text` /
+  `Number` / `Url` / `User` properties) offer the typed query itself as the first row. Estimates
+  must parse as numbers and dates as real `YYYY-MM-DD` days, and the field says which rule failed.
+  `Labels` and custom `MultiSelect` properties are the multi-selects: `space` toggles, `Enter`
+  applies the whole set.
+* **Board settings** (560 px) — name, prefix, default repository, start-on-worktree,
+  push-new-cards, conflict policy, then **Backend** and that backend's own settings. `Enter`
+  sends one `UpdateBoard`; the one setting the dialog does not show (`branchTemplate`) is carried
+  through unchanged. **Push new cards** is drawn disabled on a local board, where there is no
+  backend to file anything with; it defaults to **off**, so on a linked board it is the row that
+  says why a card made here has not become a remote issue. While it is open the status bar's
+  breadcrumb drops its row: the dialog edits the board, and the focused card is the one thing it
+  cannot change.
+
+  The backend rows are **generic**: the dialog knows no backend by name. `Backend` is a cycler
+  over the kinds the daemon registers, drawn by their labels, and every row under it is one entry
+  of that backend's `settings_schema` — the schema's `name` is the row label, its `key` is the
+  JSON key written into `BackendRef.settings`, and its `PropertyKind` decides the control: a text
+  field, a toggle, a number field that takes digits only, a cycler over a closed set, or a
+  comma-separated list for a multi-select. A schema name ending in `(required)` marks the row `∗`
+  and refuses an empty save before the request goes out; every other empty row **removes** its
+  key rather than writing `""`, because an absent optional key is `None` to a backend and an
+  empty string is a setting it has to honour. Keys the schema never names — the ones only
+  `fleet board set` writes — survive a pass through this dialog untouched.
+
+  Changing the kind starts from empty settings, exactly as the daemon does, and cycling back to
+  the board's own kind restores the settings it was opened with. A refusal keeps the dialog open
+  and shows the daemon's message verbatim: only the backend can say why a project key is wrong,
+  or why a linked board will not change kind.
+
+### Three facts the board states rather than hides
+
+`S` on a `local` board is refused by the daemon (`backend does not support pull`). That is a fact
+about the board, not a failure of the user's keystroke, so it is a toast rather than the sticky
+error slot. And `w` on a card with no repository, on a board with no default one, opens the
+repository picker first and creates the worktree from the same pick — one request, so the daemon
+can never see the create before the repo it needs.
+
+The third is **who owns a field**. On a board whose backend cannot write `priority` back, `p`
+does not open a picker whose `Enter` could only fail: it says
+`Priority is read-only on Jira (acli) boards` — a toast on the board, the dialog's own error line
+in the card detail, where the scrim covers the toast stack. The wording is assembled from the
+backend's own two answers, the field list it declared and the label the registry gave it, so
+`fleet-app` neither knows nor spells any backend's name.

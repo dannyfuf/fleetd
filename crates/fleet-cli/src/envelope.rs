@@ -1,6 +1,7 @@
 //! Stable protocol-versioned JSON output envelopes.
 
 use fleet_core::{
+    board::{BackendDescriptor, BackendSchema, Board, BoardSummary, Card},
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
     sessions::{AgentActivity, WorktreeStatus},
@@ -107,6 +108,63 @@ pub struct SleepEnvelope<'a> {
     pub session_killed: bool,
 }
 
+/// A complete board and its cards in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardEnvelope<'a> {
+    pub protocol: u32,
+    pub board: &'a Board,
+    pub cards: &'a [Card],
+}
+
+/// Board summaries in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardListEnvelope<'a> {
+    pub protocol: u32,
+    pub boards: &'a [BoardSummary],
+}
+
+/// One created, inspected, or updated card in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardCardEnvelope<'a> {
+    pub protocol: u32,
+    pub card: &'a Card,
+}
+
+/// A worktree created from a card, with the card it links, in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardWorktreeEnvelope<'a> {
+    pub protocol: u32,
+    pub created: bool,
+    pub card: &'a Card,
+    pub worktree: &'a Worktree,
+}
+
+/// A submitted board synchronization job and its completed result, in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardSyncEnvelope<'a> {
+    pub protocol: u32,
+    pub job_id: &'a fleet_core::ids::JobId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job: Option<&'a fleet_proto::job::JobRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<&'a BoardSummary>,
+}
+
+/// The registered board backend kinds in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardBackendsEnvelope<'a> {
+    pub protocol: u32,
+    pub backends: &'a [BackendDescriptor],
+}
+
+/// What one board's backend reports about itself, in a protocol-one envelope.
+#[derive(Debug, Serialize)]
+pub struct BoardBackendSchemaEnvelope<'a> {
+    pub protocol: u32,
+    pub schema: &'a BackendSchema,
+}
+
 /// A protocol-compatible error result.
 #[derive(Debug, Serialize)]
 pub struct ErrorEnvelope<'a> {
@@ -145,15 +203,41 @@ pub fn error_json(error: &ProtoError) -> String {
     })
 }
 
-/// Collapses arbitrary diagnostic text into the envelope's required single line.
+/// Collapses arbitrary text into the envelope's required single line, control bytes removed.
+///
+/// Whitespace collapses to one space; every other control character is dropped. Card titles,
+/// labels and assignees are printed through here, and an escape sequence in one of them would
+/// otherwise repaint the terminal, set its window title, or hide the rest of the line.
 #[must_use]
 pub fn single_line(message: &str) -> String {
-    message.split_whitespace().collect::<Vec<_>>().join(" ")
+    message
+        .split_whitespace()
+        .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Text a report prints across several lines, with the control bytes a terminal would obey
+/// removed: line breaks and tabs survive, escapes and carriage returns do not.
+#[must_use]
+pub fn safe_block(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_block_keeps_layout_and_drops_escapes() {
+        assert_eq!(
+            safe_block("one\n\ttwo \u{1b}[2Jthree\rfour"),
+            "one\n\ttwo [2Jthreefour"
+        );
+    }
 
     #[test]
     fn error_envelope_has_exact_protocol_shape_and_kind_name() {
@@ -170,5 +254,16 @@ mod tests {
     #[test]
     fn normalizes_diagnostics_to_a_single_line() {
         assert_eq!(single_line("first\n second\tthird"), "first second third");
+    }
+
+    #[test]
+    fn strips_the_control_bytes_a_terminal_would_obey() {
+        assert_eq!(
+            single_line("Evil \u{1b}[31mRED\u{1b}[0m \u{1b}]0;pwned\u{7}title"),
+            "Evil [31mRED[0m ]0;pwnedtitle"
+        );
+        // C1 controls are just as executable as C0 ones, and a word of nothing else is dropped.
+        assert_eq!(single_line("a \u{9b}31m b"), "a 31m b");
+        assert_eq!(single_line("a \u{7} b"), "a b");
     }
 }

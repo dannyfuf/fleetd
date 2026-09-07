@@ -3,9 +3,13 @@
 use std::path::PathBuf;
 
 use fleet_core::{
+    board::{BackendRef, BoardPatch, CardDraft, CardPatch, ConflictResolution},
     config::Agent,
     github::PrTab,
-    ids::{ContextId, HostId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
+    ids::{
+        BoardId, CardId, ContextId, HostId, JobId, RepoId, SessionId, StatusId, TerminalId,
+        WorktreeId,
+    },
     model::RepoHooks,
     sessions::AgentActivity,
     watches::{WatchId, WatchStream},
@@ -31,6 +35,113 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RequestBody {
+    /// List boards.
+    ListBoards {
+        /// Context id.
+        context_id: Option<ContextId>,
+    },
+    /// Get board.
+    GetBoard {
+        /// Board id.
+        board_id: BoardId,
+    },
+    /// Ensure board.
+    EnsureBoard {
+        /// Context id.
+        context_id: ContextId,
+    },
+    /// Create board.
+    CreateBoard {
+        /// Context id.
+        context_id: ContextId,
+        /// Name.
+        name: Option<String>,
+        /// Prefix.
+        prefix: Option<String>,
+        /// Backend.
+        backend: Option<BackendRef>,
+    },
+    /// Update board.
+    UpdateBoard {
+        /// Board id.
+        board_id: BoardId,
+        /// Patch.
+        patch: BoardPatch,
+    },
+    /// Delete board.
+    DeleteBoard {
+        /// Board id.
+        board_id: BoardId,
+    },
+    /// Create card.
+    CreateCard {
+        /// Board id.
+        board_id: BoardId,
+        /// Draft.
+        draft: CardDraft,
+    },
+    /// Update card.
+    UpdateCard {
+        /// Card id.
+        card_id: CardId,
+        /// Patch.
+        patch: CardPatch,
+    },
+    /// Move card.
+    MoveCard {
+        /// Card id.
+        card_id: CardId,
+        /// Status id.
+        status_id: StatusId,
+        /// Index.
+        index: Option<usize>,
+    },
+    /// Delete card.
+    DeleteCard {
+        /// Card id.
+        card_id: CardId,
+    },
+    /// Add card comment.
+    AddCardComment {
+        /// Card id.
+        card_id: CardId,
+        /// Body.
+        body: String,
+    },
+    /// Create worktree from card.
+    CreateWorktreeFromCard {
+        /// Card id.
+        card_id: CardId,
+        /// Repo id.
+        repo_id: Option<RepoId>,
+        /// Base.
+        base: Option<String>,
+        /// Host.
+        host: Option<HostId>,
+    },
+    /// Sync board.
+    SyncBoard {
+        /// Board id.
+        board_id: BoardId,
+        /// Ignore the stored incremental cursor and pull the complete remote set.
+        #[serde(default)]
+        full: bool,
+    },
+    /// Resolve card conflict.
+    ResolveCardConflict {
+        /// Card id.
+        card_id: CardId,
+        /// Resolution.
+        resolution: ConflictResolution,
+    },
+    /// Describe board backend.
+    DescribeBoardBackend {
+        /// Board id.
+        board_id: BoardId,
+    },
+    /// List the board backend kinds this daemon registers.
+    ListBoardBackends {},
+
     /// Register a child watch under an existing terminal.
     StartWatch {
         /// Parent terminal.
@@ -545,6 +656,43 @@ mod tests {
         ];
         for body in bodies {
             assert_round_trip(body);
+        }
+    }
+
+    #[test]
+    fn every_board_request_uses_contracted_snake_case_names() {
+        let requests = [
+            serde_json::json!({"type":"list_boards","context_id":null}),
+            serde_json::json!({"type":"get_board","board_id":"work"}),
+            serde_json::json!({"type":"ensure_board","context_id":"work"}),
+            serde_json::json!({"type":"create_board","context_id":"work","name":null,"prefix":null,"backend":null}),
+            serde_json::json!({"type":"update_board","board_id":"work","patch":{}}),
+            serde_json::json!({"type":"delete_board","board_id":"work"}),
+            serde_json::json!({"type":"create_card","board_id":"work","draft":{"title":"Task"}}),
+            serde_json::json!({"type":"update_card","card_id":"card-1","patch":{"assignee":null}}),
+            serde_json::json!({"type":"move_card","card_id":"card-1","status_id":"todo","index":1}),
+            serde_json::json!({"type":"delete_card","card_id":"card-1"}),
+            serde_json::json!({"type":"add_card_comment","card_id":"card-1","body":"Hello"}),
+            serde_json::json!({"type":"create_worktree_from_card","card_id":"card-1","repo_id":null,"base":null,"host":null}),
+            serde_json::json!({"type":"sync_board","board_id":"work"}),
+            serde_json::json!({"type":"resolve_card_conflict","card_id":"card-1","resolution":"take_remote"}),
+            serde_json::json!({"type":"describe_board_backend","board_id":"work"}),
+        ];
+        for json in requests {
+            let request: RequestBody =
+                serde_json::from_value(json.clone()).unwrap_or_else(|error| panic!("{error}"));
+            let encoded = serde_json::to_value(&request).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(encoded["type"], json["type"]);
+            let fields = encoded.as_object().expect("tagged request object");
+            for (key, value) in json.as_object().expect("fixture object") {
+                // A patch and a draft carry their own camelCase contract; only the variant's
+                // own fields are snake_case.
+                if key != "patch" && key != "draft" {
+                    assert_eq!(&encoded[key], value, "wire field {key}");
+                }
+            }
+            assert!(!fields.keys().any(|key| key.contains(char::is_uppercase)));
+            assert_round_trip(request);
         }
     }
 }

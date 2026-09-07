@@ -250,7 +250,21 @@ impl HubCtx {
         pr_navigation_matches(&state.screen, selected.as_ref(), key)
     }
 
+    /// Whether the Hub is showing the board, whose own keys own the screen (BOARD §8).
+    pub(super) fn on_board(&self, cx: &App) -> bool {
+        matches!(
+            self.state.read(cx).screen,
+            Screen::Hub { tab: HubTab::Board }
+        )
+    }
+
     pub(super) fn move_by(&self, delta: isize, _window: &mut Window, cx: &mut App) {
+        // The board replaced the worktrees pane: a shared cursor key must move the cards the
+        // user can see, not the hidden list underneath them.
+        if self.on_board(cx) {
+            crate::screens::board::move_rows(&self.state, delta, cx);
+            return;
+        }
         let model = self.model(cx);
         let len = self.cursor_len(&model, cx);
         let next = move_cursor(self.cursor_index(cx), delta, len);
@@ -258,6 +272,10 @@ impl HubCtx {
     }
 
     pub(super) fn move_to_end(&self, bottom: bool, _window: &mut Window, cx: &mut App) {
+        if self.on_board(cx) {
+            crate::screens::board::jump_rows(&self.state, bottom, cx);
+            return;
+        }
         let model = self.model(cx);
         let len = self.cursor_len(&model, cx);
         let next = if bottom { len.saturating_sub(1) } else { 0 };

@@ -1,6 +1,10 @@
 //! The window's dialog drafts, the card each dialog renders, and the entity the Shell mounts.
 
 mod assign_repo;
+mod board_settings;
+mod card_create;
+pub(crate) mod card_detail;
+pub(crate) mod card_picker;
 mod clone_repo;
 mod confirm;
 mod context;
@@ -44,6 +48,14 @@ const HELP_W: Pixels = px(880.0);
 /// Which dialog is open (§3.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dialogs {
+    /// Board settings (BOARD §8).
+    BoardSettings,
+    /// Card property (BOARD §8).
+    CardPicker,
+    /// New card (BOARD §8).
+    CardCreate,
+    /// Card detail (BOARD §8).
+    CardDetail,
     /// §3.8.1 Create worktree (`n` in the worktrees pane).
     CreateWorktree,
     /// §3.8.2 Clone repo (`n` in the repos pane).
@@ -78,6 +90,10 @@ impl Dialogs {
     #[must_use]
     pub const fn context_name(&self) -> &'static str {
         match self {
+            Self::BoardSettings => "BoardSettings",
+            Self::CardPicker => "CardPicker",
+            Self::CardCreate => "CardCreate",
+            Self::CardDetail => "CardDetail",
             Self::CreateWorktree => "Create",
             Self::CloneRepo => "Clone",
             Self::Confirm => "Confirm",
@@ -96,15 +112,19 @@ impl Dialogs {
     #[must_use]
     pub(crate) fn width(&self, cx: &App) -> Pixels {
         match self {
-            Self::CreateWorktree | Self::CloneRepo | Self::QuitDaemon | Self::EditHooks => {
-                cx.theme().metrics.dialog_w
-            }
+            Self::CreateWorktree
+            | Self::CloneRepo
+            | Self::QuitDaemon
+            | Self::EditHooks
+            | Self::BoardSettings
+            | Self::CardPicker
+            | Self::CardCreate => cx.theme().metrics.dialog_w,
             Self::Confirm => cx.theme().metrics.confirm_compact_w,
             Self::NewContext | Self::EditContext | Self::RenameTerminal | Self::AssignRepo => {
                 NARROW_W
             }
             Self::Settings => WIDE_W,
-            Self::Help => HELP_W,
+            Self::CardDetail | Self::Help => HELP_W,
             Self::Quit => PROMPT_W,
         }
     }
@@ -126,6 +146,10 @@ impl Dialogs {
         cx: &mut App,
     ) -> AnyElement {
         match self {
+            Self::BoardSettings => board_settings::render(state, bridge, focus, host, window, cx),
+            Self::CardPicker => card_picker::render(state, bridge, focus, host, window, cx),
+            Self::CardCreate => card_create::render(state, bridge, focus, host, window, cx),
+            Self::CardDetail => card_detail::render(state, bridge, focus, host, window, cx),
             Self::CreateWorktree => create_worktree::render(state, bridge, focus, host, window, cx),
             Self::CloneRepo => clone_repo::render(state, bridge, focus, host, window, cx),
             Self::Confirm => confirm::render(state, bridge, focus, host, window, cx),
@@ -150,6 +174,10 @@ pub(crate) fn seed(dialog: &Dialogs, state: &Entity<AppState>, bridge: &Bridge, 
     }
     with_host(state, cx, |host| host.open = Some(dialog.clone()));
     match dialog {
+        Dialogs::BoardSettings => board_settings::seed(state, cx),
+        Dialogs::CardPicker => card_picker::seed(state, cx),
+        Dialogs::CardCreate => card_create::seed(state, cx),
+        Dialogs::CardDetail => card_detail::seed(state, cx),
         Dialogs::CreateWorktree => create_worktree::seed(state, bridge, cx),
         Dialogs::CloneRepo => clone_repo::seed(state, bridge, cx),
         Dialogs::Confirm => confirm::seed(state, bridge, cx),
@@ -184,6 +212,30 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn every_dialog_has_a_key_context_word() {
+        for dialog in [
+            Dialogs::BoardSettings,
+            Dialogs::CardPicker,
+            Dialogs::CardCreate,
+            Dialogs::CardDetail,
+            Dialogs::CreateWorktree,
+            Dialogs::CloneRepo,
+            Dialogs::Confirm,
+            Dialogs::NewContext,
+            Dialogs::EditContext,
+            Dialogs::AssignRepo,
+            Dialogs::EditHooks,
+            Dialogs::Settings,
+            Dialogs::RenameTerminal,
+            Dialogs::Help,
+            Dialogs::Quit,
+            Dialogs::QuitDaemon,
+        ] {
+            assert!(!dialog.context_name().is_empty());
+        }
+    }
 
     #[test]
     fn both_context_dialogs_share_one_key_context() {

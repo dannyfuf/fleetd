@@ -50,6 +50,7 @@ impl Services {
         let statuses = merge_statuses(&state.worktrees, Some(&runtime_statuses));
         let hosts = self.hosts.snapshot(&config, &generated_at).await;
         Ok(Snapshot {
+            boards: self.boards.summaries().await,
             generated_at,
             contexts: state.contexts.clone(),
             repos: state.repos.clone(),

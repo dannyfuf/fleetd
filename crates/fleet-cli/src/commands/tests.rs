@@ -766,6 +766,7 @@ async fn create_waits_for_clone_snapshot_without_polling_and_preserves_the_envel
         let mut transport = Framed::new(socket, FleetCodec::new());
         authenticate(&mut transport).await;
         let mut snapshot = Snapshot {
+            boards: Vec::new(),
             generated_at: "now".into(),
             contexts: vec![context],
             repos: Vec::new(),

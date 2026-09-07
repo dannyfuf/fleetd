@@ -35,6 +35,7 @@ fn panel(filter: JobFilter) -> PanelState {
 fn app_with_jobs(home: &str, jobs: Vec<JobRecord>) -> AppState {
     let mut app = AppState::new(home, std::time::Instant::now());
     app.snapshot = Some(Snapshot {
+        boards: Vec::new(),
         generated_at: String::new(),
         contexts: vec![],
         repos: vec![],

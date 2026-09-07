@@ -9,7 +9,8 @@ use fleet_core::{
 use fleet_daemon::{
     adapters::{
         Adapters,
-        clock::SystemClock,
+        board::BoardBackends,
+        clock::{Clock, SystemClock},
         files::RealFiles,
         git::ShellGit,
         process::RealProcess,
@@ -350,11 +351,14 @@ fn adapters_with_stubbed_github(files: Arc<RealFiles>) -> Adapters {
         },
     );
     let shell: Arc<dyn Shell> = Arc::new(RealShell);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     Adapters {
+        board_backends: BoardBackends::system(Arc::clone(&shell), Arc::clone(&clock)),
         git: Arc::new(ShellGit::new(Arc::clone(&shell))),
         github: Arc::new(FakeGithub::new(gh)),
         process: Arc::new(RealProcess::new(Arc::clone(&shell))),
         files,
         shell,
+        clock,
     }
 }

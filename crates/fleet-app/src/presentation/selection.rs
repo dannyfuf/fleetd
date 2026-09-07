@@ -69,7 +69,9 @@ pub fn filter_counts(state: &AppState) -> (usize, usize) {
         (HubPane::List, Screen::Hub { tab: HubTab::Prs }) => {
             (state.displayed_hub.prs.len(), state.displayed_hub.pr_total)
         }
-        (HubPane::List, Screen::Workspace { .. }) => (0, 0),
+        // The board keeps its own filter and its own counts; neither the Hub's filter overlay
+        // nor the Workspace has a list here to count.
+        (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => (0, 0),
     }
 }
 
@@ -111,7 +113,7 @@ pub fn filter_target(state: &AppState) -> Option<DisplayedTarget> {
                 .cloned()
                 .map(DisplayedTarget::PullRequest)
         }
-        (HubPane::List, Screen::Workspace { .. }) => None,
+        (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => None,
     }
 }
 

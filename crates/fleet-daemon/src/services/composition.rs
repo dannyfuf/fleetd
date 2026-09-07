@@ -68,6 +68,18 @@ impl Services {
             &adapters,
             sessions.clone(),
         );
+        let boards = Arc::new(boards::Boards::new(
+            Arc::new(crate::stores::board::BoardStore::new(
+                fleet_core::paths::FleetHome::new(home.clone()),
+                Arc::clone(&adapters.files),
+            )),
+            Arc::clone(&state),
+            adapters.board_backends.clone(),
+            Arc::clone(&adapters.clock),
+            Arc::clone(&jobs),
+            Arc::new(worktrees.clone()),
+            events.clone(),
+        ));
         let pool = Pool::new(
             Arc::clone(&config),
             Arc::clone(&state),
@@ -138,6 +150,7 @@ impl Services {
             watches.clone(),
         );
         Self {
+            boards,
             hosts,
             home,
             started_at: chrono::Utc::now().to_rfc3339(),

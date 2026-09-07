@@ -16,6 +16,8 @@ pub enum HubTab {
     Worktrees,
     /// The pull-requests screen.
     Prs,
+    /// The active context's board.
+    Board,
 }
 
 /// The two top-level screens.
@@ -303,6 +305,12 @@ impl AppState {
         if self.is_first_run() {
             return vec!["FirstRun"];
         }
+        // §3.10 on the board: while its filter input owns the keyboard the bare letters must
+        // type, so the board publishes the same `Filter` context the Hub's filter overlay does
+        // instead of `Hub > Board`. Nothing else can shadow a whole context's letters.
+        if self.board_filter_owns_keys() {
+            return vec!["Filter", "BoardFilter"];
+        }
         let mut chain = match (self.agent_popup, &self.screen) {
             (Some(popup), _) => vec![
                 "Agent",
@@ -315,6 +323,7 @@ impl AppState {
             (None, Screen::Hub { tab }) => vec![
                 "Hub",
                 match (self.hub_pane, tab) {
+                    (_, HubTab::Board) => "Board",
                     (HubPane::Repos, _) => "Repos",
                     (HubPane::List, HubTab::Worktrees) => "Worktrees",
                     (HubPane::List, HubTab::Prs) => "Prs",
@@ -356,6 +365,9 @@ impl AppState {
                 AgentPopupMode::Prefix => Mode::Prefix,
                 AgentPopupMode::Scroll => Mode::Scroll,
             };
+        }
+        if self.board_filter_owns_keys() {
+            return Mode::Filter;
         }
         match self.screen {
             Screen::Hub { .. } => Mode::Normal,
@@ -567,6 +579,13 @@ impl AppState {
     /// `Esc` outside a dialog: clear the filter if any, else close the topmost overlay, else
     /// nothing. It never quits (§A13).
     pub fn cancel(&mut self) -> bool {
+        if self.overlay.is_none()
+            && self.agent_popup.is_none()
+            && matches!(self.screen, Screen::Hub { tab: HubTab::Board })
+            && self.board_filter_escape()
+        {
+            return true;
+        }
         if self.filter.is_active() || self.filter.editing {
             match filter_escape(self.filter.editing) {
                 FilterEscape::LeaveInput => {

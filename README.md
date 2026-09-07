@@ -70,6 +70,63 @@ Their errors use `{"protocol":1,"error":{"kind":"<kind>","message":"<message>"}}
 commands use human-readable output. This public envelope is separate from daemon IPC version 4;
 the bug-fix program did not change CLI envelope version 1.
 
+### Board
+
+Each context has one board, created on first use. `fleet board show` displays its
+columns and cards under a header naming the backend, its project, the age of the last
+sync, and the dirty and conflict counts; `fleet board list` lists board summaries.
+Use `fleet board create` with `--name`, `--prefix`, or `--backend local`, and
+`fleet board set` to change its name, prefix, default repository
+(`--default-repo owner/name`, `--clear-default-repo`), worktree-start setting,
+conflict policy, branch template (`--branch-template "{key}-{slug}"`), or whether new
+cards are pushed to the backend (`--push-new-cards`, off by default: a card created
+locally stays local). Board labels are created and removed there too, with
+`--add-label NAME` and `--remove-label <id|name>`: `--label` on `card new` and
+`card edit` only selects labels the board already carries, so add one to the board
+before a card can wear it.
+`fleet board sync --wait` waits for a remote backend's sync job and prints its
+counts and errors; `--full` ignores the incremental cursor and pulls the backend's
+complete set. Local boards do not support remote sync.
+
+`fleet board backends` lists the registered backend kinds with their capabilities and
+the setting keys each accepts; `fleet board describe` prints what the board's backend
+reports about itself: its statuses and their categories, labels, properties, people,
+and the fields it cannot write back. Editing a read-only field fails with the daemon's
+message.
+
+Point a board at a backend with `fleet board set --backend jira --setting project=SP
+--setting jql='sprint in openSprints()'`. `--setting` is repeatable and takes
+`key=value`; values parse as JSON when they are valid JSON (`8`, `true`,
+`["To Do","Done"]`) and stay strings otherwise, and `key=null` removes a key.
+`--backend` starts the settings from empty, so a kind change must supply everything the
+new kind needs in the same command; `--setting` without `--backend` keeps the kind and
+merges into the stored settings. Changing the *kind* of a board whose cards are already
+linked is refused; changing the settings of the same kind is not, and costs only the
+incremental cursor. `fleet board create` takes the same `--setting` flag
+alongside `--backend`.
+
+The `jira` backend mirrors one Jira project through the Atlassian CLI, so it needs
+`acli` on `PATH` and an authenticated session (`acli jira auth login`); Fleet never
+holds an API token. Priority, estimate, due date, and parent are read-only on a Jira
+board because `acli` cannot write them back.
+
+Card commands are `fleet board card new <title>`, `show <key|id>`,
+`edit <key|id>`, `move <key|id> <status> [--index N]`,
+`comment <key|id> <body>`, `delete <key|id>`,
+`worktree <key|id> [--repo owner/name] [--base REF] [--host H]`, and
+`resolve <key|id> keep-local|take-remote`. New/edit accept description, status,
+priority, labels, assignee, estimate, due date, and repository flags. `edit` alone
+also takes `--archive` and the `--clear-labels`, `--clear-assignee`,
+`--clear-estimate`, `--clear-due` and `--clear-repo` flags, which are the only way
+to unset a field; `new` refuses them, since a card is born with nothing to clear.
+
+Select a board with `--board <id>` or `--context <id>`; otherwise Fleet uses the
+active context. Card selectors accept a display key, a card ID, or — for a card with no
+remote issue — its local key.
+Every board command accepts `--json` for protocol 1 envelopes. In the app, `g b`
+opens the board, `c` creates a card, `enter` opens its detail, `x` opens the focused
+card's remote issue in the browser, and `F` runs a full sync.
+
 ### Agent hooks
 
 Fleet detects Claude Code, OpenCode, and Codex activity from terminal output by default. Explicit

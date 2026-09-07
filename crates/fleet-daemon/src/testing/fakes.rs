@@ -230,3 +230,176 @@ impl Clock for FixedClock {
         *lock(&self.now)
     }
 }
+
+/// Captured invocation of a scripted board backend.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FakeBackendCall {
+    /// Validated backend settings.
+    Validate(serde_json::Value),
+    /// Requested schema for a board.
+    Describe(fleet_core::board::Board),
+    /// Pulled a board with the supplied cursor.
+    Pull(fleet_core::board::Board, Option<String>),
+    /// Pushed operations and their current local cards.
+    Push(
+        fleet_core::board::Board,
+        Vec<fleet_core::board::Card>,
+        Vec<fleet_core::board::PushOp>,
+    ),
+}
+
+/// FIFO-scripted backend; exhausted queues return empty successful results.
+pub struct FakeBackend {
+    /// Registry key used by test boards.
+    pub kind: &'static str,
+    /// Advertised remote operations.
+    pub capabilities: fleet_core::board::BackendCapabilities,
+    /// Scripted validation results, consumed in order.
+    pub validate_responses:
+        Mutex<std::collections::VecDeque<Result<(), fleet_core::board::BoardError>>>,
+    /// Scripted schema descriptions, consumed in order.
+    pub describe_responses: Mutex<
+        std::collections::VecDeque<
+            Result<fleet_core::board::BackendSchema, fleet_core::board::BoardError>,
+        >,
+    >,
+    /// Scripted pull results, consumed in order.
+    pub pull_responses: Mutex<
+        std::collections::VecDeque<
+            Result<fleet_core::board::PullResult, fleet_core::board::BoardError>,
+        >,
+    >,
+    /// Scripted push results, consumed in order.
+    pub push_responses: Mutex<
+        std::collections::VecDeque<
+            Result<fleet_core::board::PushResult, fleet_core::board::BoardError>,
+        >,
+    >,
+    /// Ordered calls including all supplied arguments.
+    pub calls: Mutex<Vec<FakeBackendCall>>,
+}
+
+impl Default for FakeBackend {
+    fn default() -> Self {
+        Self {
+            kind: "fake",
+            capabilities: fleet_core::board::BackendCapabilities::default(),
+            validate_responses: Mutex::default(),
+            describe_responses: Mutex::default(),
+            pull_responses: Mutex::default(),
+            push_responses: Mutex::default(),
+            calls: Mutex::default(),
+        }
+    }
+}
+
+impl FakeBackend {
+    /// Creates a named scripted backend with explicit capabilities.
+    pub fn new(kind: &'static str, capabilities: fleet_core::board::BackendCapabilities) -> Self {
+        Self {
+            kind,
+            capabilities,
+            ..Self::default()
+        }
+    }
+    /// Copies the complete ordered invocation log.
+    pub fn calls(&self) -> Vec<FakeBackendCall> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    fn record(&self, call: FakeBackendCall) {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(call);
+    }
+}
+
+#[async_trait]
+impl crate::adapters::board::BoardBackend for FakeBackend {
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+    fn label(&self) -> &'static str {
+        "Fake"
+    }
+    fn capabilities(&self) -> fleet_core::board::BackendCapabilities {
+        self.capabilities
+    }
+    fn settings_schema(&self) -> Vec<fleet_core::board::PropertySchema> {
+        // One required row, as every remote backend has: it is what marks the setting that
+        // names the remote, and the service refuses to change that one under linked cards.
+        ["project", "filter"]
+            .into_iter()
+            .map(|key| fleet_core::board::PropertySchema {
+                key: key.into(),
+                name: if key == "project" {
+                    format!("Project {}", fleet_core::board::REQUIRED_MARKER)
+                } else {
+                    "Filter".into()
+                },
+                kind: fleet_core::board::PropertyKind::Text,
+                options: Vec::new(),
+                editable: true,
+                source: fleet_core::board::PropertySource::Backend,
+                show_on_card: false,
+            })
+            .collect()
+    }
+    async fn validate(
+        &self,
+        settings: &serde_json::Value,
+    ) -> Result<(), fleet_core::board::BoardError> {
+        self.record(FakeBackendCall::Validate(settings.clone()));
+        self.validate_responses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+            .unwrap_or(Ok(()))
+    }
+    async fn describe(
+        &self,
+        board: &fleet_core::board::Board,
+    ) -> Result<fleet_core::board::BackendSchema, fleet_core::board::BoardError> {
+        self.record(FakeBackendCall::Describe(board.clone()));
+        self.describe_responses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+            .unwrap_or_else(|| Ok(Default::default()))
+    }
+    async fn pull(
+        &self,
+        board: &fleet_core::board::Board,
+        cursor: Option<&str>,
+    ) -> Result<fleet_core::board::PullResult, fleet_core::board::BoardError> {
+        self.record(FakeBackendCall::Pull(
+            board.clone(),
+            cursor.map(str::to_owned),
+        ));
+        self.pull_responses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+            .unwrap_or_else(|| Ok(Default::default()))
+    }
+    async fn push(
+        &self,
+        board: &fleet_core::board::Board,
+        cards: &[fleet_core::board::Card],
+        ops: &[fleet_core::board::PushOp],
+    ) -> Result<fleet_core::board::PushResult, fleet_core::board::BoardError> {
+        self.record(FakeBackendCall::Push(
+            board.clone(),
+            cards.to_vec(),
+            ops.to_vec(),
+        ));
+        self.push_responses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+            .unwrap_or_else(|| Ok(Default::default()))
+    }
+}

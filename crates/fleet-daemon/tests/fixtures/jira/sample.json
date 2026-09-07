@@ -1,0 +1,38 @@
+[
+  {
+    "key": "SP-1",
+    "fields": {
+      "summary": "Payroll epic",
+      "status": { "name": "Done", "statusCategory": { "key": "done" } },
+      "labels": ["payroll"],
+      "assignee": { "accountId": "5b10a2844c", "displayName": "Danny Fuentes" }
+    }
+  },
+  {
+    "key": "SP-42",
+    "fields": {
+      "summary": "Rework the payroll export",
+      "status": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } },
+      "labels": ["payroll", "sector-publico"],
+      "assignee": { "accountId": "5b10ac8d82", "displayName": "Ana Rojas" }
+    }
+  },
+  {
+    "key": "SP-77",
+    "fields": {
+      "summary": "Retire the old exporter",
+      "status": { "name": "Backlog", "statusCategory": { "key": "new" } },
+      "labels": [],
+      "assignee": null
+    }
+  },
+  {
+    "key": "SP-78",
+    "fields": {
+      "summary": "Cancelled spike",
+      "status": { "name": "Cancelled", "statusCategory": { "key": "done" } },
+      "labels": ["spike"],
+      "assignee": null
+    }
+  }
+]

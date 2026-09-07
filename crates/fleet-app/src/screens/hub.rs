@@ -312,6 +312,7 @@ struct SelectionAnchors {
 
 /// The Hub screen.
 pub struct HubScreen {
+    board: super::board::BoardScreen,
     hub: Entity<HubState>,
     rail_scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
@@ -326,6 +327,7 @@ impl HubScreen {
     #[must_use]
     pub fn new(cx: &mut App) -> Self {
         Self {
+            board: super::board::BoardScreen::new(cx),
             hub: cx.new(|_| HubState::default()),
             rail_scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
@@ -397,9 +399,54 @@ pub(crate) struct HubCtx {
 /// `ctrl-d` / `ctrl-u` and the header's `first–last/total` range both depend on it, so it is
 /// derived from the live viewport and the theme's metrics rather than assumed.
 fn visible_rows(window_height: f32, cx: &App) -> usize {
-    let metrics = cx.theme().metrics;
+    row_capacity(window_height, cx.theme().metrics)
+}
+
+fn row_capacity(window_height: f32, metrics: fleet_ui_kit::theme::Metrics) -> usize {
     let chrome = f32::from(metrics.context_bar_h)
         + f32::from(metrics.status_bar_h)
-        + f32::from(metrics.pane_header_h);
+        + 2.0 * f32::from(metrics.pane_header_h);
     (((window_height - chrome).max(0.0) / f32::from(metrics.row_h).max(1.0)) as usize).max(2)
+}
+
+/// The Hub's screen tabs; summary counts are context scoped, independent of repo scope.
+fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
+    use fleet_ui_kit::{SegmentedTab, SegmentedTabs};
+    let summary = state.snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .boards
+            .iter()
+            .find(|board| Some(&board.context_id) == state.active_context())
+    });
+    let label = if summary.is_some_and(|board| board.conflict_count > 0) {
+        "Board •"
+    } else {
+        "Board"
+    };
+    let board = summary
+        .map_or_else(
+            || SegmentedTab::bare(label),
+            |summary| SegmentedTab::new(label, summary.open_count),
+        )
+        .loading(state.board.loading);
+    let active = match state.screen {
+        Screen::Hub { tab: HubTab::Prs } => 1,
+        Screen::Hub { tab: HubTab::Board } => 2,
+        _ => 0,
+    };
+    SegmentedTabs::new([
+        SegmentedTab::bare("Worktrees"),
+        SegmentedTab::bare("Pull requests"),
+        board,
+    ])
+    .active(active)
+    .underlined(false)
+    .on_select(|index, window, cx| {
+        let action: Box<dyn gpui::Action> = match index {
+            1 => Box::new(hub::GoPrs),
+            2 => Box::new(crate::actions::board::GoBoard),
+            _ => Box::new(hub::GoWorktrees),
+        };
+        window.dispatch_action(action, cx);
+    })
 }

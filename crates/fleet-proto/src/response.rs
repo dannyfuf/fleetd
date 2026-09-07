@@ -1,6 +1,7 @@
 //! Daemon-to-client request responses.
 
 use fleet_core::{
+    board::{BackendDescriptor, BackendSchema, BoardSummary, BoardView, Card},
     cache::RepoCache,
     config::Config,
     github::{PrTab, PullRequest},
@@ -204,7 +205,28 @@ pub struct KeepAliveRuleMatch {
 /// Every successful daemon result payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // BOARD.md requires inline Card and CardWorktree payloads.
 pub enum ResponseBody {
+    /// Board summaries for a context or all contexts.
+    Boards(Vec<BoardSummary>),
+    /// Full board document view.
+    Board(BoardView),
+    /// Created or changed card.
+    Card(Card),
+    /// Card and the worktree created from it.
+    CardWorktree {
+        /// Updated linked card.
+        card: Card,
+        /// Created or adopted worktree.
+        worktree: Worktree,
+        /// Whether this request created the worktree rather than reusing an existing one.
+        #[serde(default)]
+        created: bool,
+    },
+    /// Backend schema for a board.
+    BoardBackendSchema(BackendSchema),
+    /// Registered board backend kinds and their generic settings schemas.
+    BoardBackends(Vec<BackendDescriptor>),
     /// Registered watch identifier.
     WatchStarted(fleet_core::watches::WatchId),
     /// Session's current and recently completed watches.

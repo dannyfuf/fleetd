@@ -13,6 +13,88 @@ impl Services {
     ) -> DaemonResult<ResponseBody> {
         self.reject_remote_request(&body).await?;
         match body {
+            RequestBody::ListBoards { context_id } => Ok(ResponseBody::Boards(
+                self.boards.list(context_id.as_ref()).await?,
+            )),
+            RequestBody::GetBoard { board_id } => {
+                Ok(ResponseBody::Board(self.boards.get(&board_id).await?))
+            }
+            RequestBody::EnsureBoard { context_id } => {
+                Ok(ResponseBody::Board(self.boards.ensure(&context_id).await?))
+            }
+            RequestBody::CreateBoard {
+                context_id,
+                name,
+                prefix,
+                backend,
+            } => Ok(ResponseBody::Board(
+                self.boards
+                    .create(&context_id, name, prefix, backend)
+                    .await?,
+            )),
+            RequestBody::UpdateBoard { board_id, patch } => Ok(ResponseBody::Board(
+                self.boards.update(&board_id, patch).await?,
+            )),
+            RequestBody::DeleteBoard { board_id } => {
+                self.boards.delete(&board_id).await?;
+                Ok(ResponseBody::Ack)
+            }
+            RequestBody::CreateCard { board_id, draft } => Ok(ResponseBody::Card(
+                self.boards.create_card(&board_id, draft).await?,
+            )),
+            RequestBody::UpdateCard { card_id, patch } => Ok(ResponseBody::Card(
+                self.boards.update_card(&card_id, patch).await?,
+            )),
+            RequestBody::MoveCard {
+                card_id,
+                status_id,
+                index,
+            } => Ok(ResponseBody::Card(
+                self.boards.move_card(&card_id, &status_id, index).await?,
+            )),
+            RequestBody::DeleteCard { card_id } => {
+                self.boards.delete_card(&card_id).await?;
+                Ok(ResponseBody::Ack)
+            }
+            RequestBody::AddCardComment { card_id, body } => Ok(ResponseBody::Card(
+                self.boards.add_comment(&card_id, body).await?,
+            )),
+            RequestBody::CreateWorktreeFromCard {
+                card_id,
+                repo_id,
+                base,
+                host,
+            } => {
+                let (card, worktree, created) = self
+                    .boards
+                    .create_worktree_from_card(&card_id, repo_id, base, host)
+                    .await?;
+                Ok(ResponseBody::CardWorktree {
+                    card,
+                    worktree,
+                    created,
+                })
+            }
+            RequestBody::SyncBoard { board_id, full } => {
+                let job_id = self.boards.sync(&board_id, full).await?;
+                let job = self
+                    .jobs
+                    .record(&job_id)
+                    .ok_or_else(|| DaemonError::NotFound(format!("job {job_id}")))?;
+                Ok(ResponseBody::Job(job))
+            }
+            RequestBody::ResolveCardConflict {
+                card_id,
+                resolution,
+            } => Ok(ResponseBody::Card(
+                self.boards.resolve_conflict(&card_id, resolution).await?,
+            )),
+            RequestBody::DescribeBoardBackend { board_id } => Ok(ResponseBody::BoardBackendSchema(
+                self.boards.describe_backend(&board_id).await?,
+            )),
+            RequestBody::ListBoardBackends {} => {
+                Ok(ResponseBody::BoardBackends(self.boards.list_backends()))
+            }
             body @ RequestBody::StartWatch { .. } => Ok(ResponseBody::WatchStarted(
                 self.sessions.start_watch(owner, body)?,
             )),
@@ -381,6 +463,9 @@ impl Services {
             repositories.sort();
             repositories.dedup();
             if repositories.is_empty() {
+                // The board must go with its context: a stranded document would be adopted by
+                // the next context whose name derives the same id, resurrecting deleted cards.
+                self.boards.delete_for_context(&context).await?;
                 match self.contexts.delete(context.clone()).await {
                     Ok(()) => return Ok(()),
                     Err(DaemonError::Conflict(message))

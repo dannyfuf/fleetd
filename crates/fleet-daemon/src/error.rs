@@ -111,6 +111,31 @@ impl From<DaemonError> for ProtoError {
     }
 }
 
+impl From<fleet_core::board::BoardError> for DaemonError {
+    fn from(error: fleet_core::board::BoardError) -> Self {
+        use fleet_core::board::BoardError;
+        match error {
+            // The NotFound renderer already prefixes "not found:"; siblings read "repo x".
+            BoardError::BoardNotFound(id) => Self::NotFound(format!("board {id}")),
+            BoardError::CardNotFound(id) => Self::NotFound(format!("card {id}")),
+            BoardError::Duplicate(_) | BoardError::Conflicted(_) => {
+                Self::Conflict(error.to_string())
+            }
+            BoardError::Unsupported(_) => Self::Unsupported(error.to_string()),
+            // The backend's own sentence, once: `Shell` prints its own prefix, and a second
+            // "backend error:" inside it is noise the CLI shows verbatim.
+            BoardError::Backend(message) => Self::Shell(message.clone()),
+            // The CLI and the app print this one verbatim, so it must not be rewrapped:
+            // `Validation` renders the message as-is, exactly like `Invalid`.
+            BoardError::ReadOnlyField(_)
+            | BoardError::UnknownStatus(_)
+            | BoardError::UnknownLabel(_)
+            | BoardError::Invalid { .. }
+            | BoardError::UnknownBackend(_) => Self::Validation(error.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -68,6 +68,9 @@ impl AppState {
 
     /// Replaces the snapshot mirror and re-derives everything that hangs off it.
     pub fn apply_snapshot(&mut self, snapshot: Snapshot, now: Instant) {
+        if self.active_context() != snapshot.active_context.as_ref() {
+            self.clear_board();
+        }
         self.observe_snapshot_agent_activity(&snapshot, now);
         self.has_seen_non_empty_state |= !snapshot.contexts.is_empty()
             || !snapshot.repos.is_empty()
