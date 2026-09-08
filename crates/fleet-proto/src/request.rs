@@ -3,6 +3,9 @@
 use std::path::PathBuf;
 
 use fleet_core::{
+    agents::{
+        AgentKind, GateAnswer, GateId, ModelSelection, PermissionMode, Seq, ThreadId, UserInput,
+    },
     config::Agent,
     github::PrTab,
     ids::{ContextId, HostId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
@@ -31,6 +34,83 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RequestBody {
+    /// List persisted and live native-agent threads.
+    AgentThreadList,
+    /// Create and start a native-agent thread in a published worktree.
+    AgentThreadCreate {
+        /// Owning published worktree; the daemon resolves its canonical path.
+        worktree: WorktreeId,
+        /// Provider implementation to start.
+        provider: AgentKind,
+        /// Optional initial model.
+        model: Option<ModelSelection>,
+        /// Initial permission policy.
+        mode: PermissionMode,
+        /// Optional provider-native cursor to resume.
+        resume_cursor: Option<String>,
+        /// Optional display title.
+        title: Option<String>,
+    },
+    /// Open a thread and request its projection plus an event tail.
+    AgentThreadOpen {
+        /// Thread to open.
+        thread: ThreadId,
+        /// Return persisted events strictly after this sequence.
+        from_seq: Option<Seq>,
+    },
+    /// Release one client's interest in a native-agent thread.
+    AgentThreadClose {
+        /// Thread to close.
+        thread: ThreadId,
+    },
+    /// Send or steer user input.
+    AgentSend {
+        /// Target thread.
+        thread: ThreadId,
+        /// Text and attachments.
+        input: UserInput,
+    },
+    /// Interrupt the active turn.
+    AgentInterrupt {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Answer an open provider gate.
+    AgentRespond {
+        /// Target thread.
+        thread: ThreadId,
+        /// Gate being answered.
+        gate: GateId,
+        /// Provider-neutral answer.
+        answer: GateAnswer,
+    },
+    /// Change a thread's permission or plan mode.
+    AgentSetMode {
+        /// Target thread.
+        thread: ThreadId,
+        /// New mode.
+        mode: PermissionMode,
+    },
+    /// Change a thread's model selection.
+    AgentSetModel {
+        /// Target thread.
+        thread: ThreadId,
+        /// New model and optional effort/provider.
+        model: ModelSelection,
+    },
+    /// Record a client's last viewed event cursor.
+    AgentMarkSeen {
+        /// Target thread.
+        thread: ThreadId,
+        /// Last event visible to the client.
+        seq: Seq,
+    },
+    /// Stop a provider process while retaining its transcript.
+    AgentStop {
+        /// Target thread.
+        thread: ThreadId,
+    },
+
     /// Register a child watch under an existing terminal.
     StartWatch {
         /// Parent terminal.
@@ -286,11 +366,16 @@ pub enum RequestBody {
         number: u64,
     },
 
-    /// Ensure a worktree or agent session and its configured terminals exist.
+    /// Ensure a worktree, agent, or worktree-scoped agent session and its terminals exist.
+    ///
+    /// The three shapes are `worktree` alone (the worktree's configured terminals), `agent`
+    /// alone (the repository-level popup session in `repos_dir`), and both together — the
+    /// `NATIVE-AGENTS.md` §1/§2 `^s F` fallback, which runs the agent command *inside* the
+    /// named worktree. Neither is a validation error.
     EnsureSession {
-        /// Worktree workload, mutually exclusive with `agent`.
+        /// Worktree workload; with `agent`, the worktree the fallback runs in.
         worktree: Option<WorktreeId>,
-        /// Agent workload, mutually exclusive with `worktree`.
+        /// Agent workload; with `worktree`, the worktree-scoped terminal fallback.
         agent: Option<Agent>,
         /// Sleep the previously active worktree after switching.
         sleep_previous: bool,
@@ -490,7 +575,53 @@ mod tests {
     fn request_bodies_round_trip() {
         let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
         let job = JobId::try_from("job-1").unwrap_or_else(|error| panic!("{error}"));
+        let thread = ThreadId::new();
+        let model = ModelSelection {
+            model: "claude-sonnet-5".to_owned(),
+            effort: Some("high".to_owned()),
+            provider: None,
+        };
         let bodies = vec![
+            RequestBody::AgentThreadList,
+            RequestBody::AgentThreadCreate {
+                worktree: WorktreeId::try_from("acme/api#native-agents")
+                    .unwrap_or_else(|error| panic!("{error}")),
+                provider: AgentKind::Claude,
+                model: Some(model.clone()),
+                mode: PermissionMode::Ask,
+                resume_cursor: Some("session-1".to_owned()),
+                title: Some("native agents".to_owned()),
+            },
+            RequestBody::AgentThreadOpen {
+                thread,
+                from_seq: Some(Seq(41)),
+            },
+            RequestBody::AgentThreadClose { thread },
+            RequestBody::AgentSend {
+                thread,
+                input: UserInput {
+                    text: "inspect the failing test".to_owned(),
+                    attachments: Vec::new(),
+                },
+            },
+            RequestBody::AgentInterrupt { thread },
+            RequestBody::AgentRespond {
+                thread,
+                gate: GateId::new(),
+                answer: GateAnswer::Question {
+                    answers: vec![vec!["SQLite".to_owned()]],
+                },
+            },
+            RequestBody::AgentSetMode {
+                thread,
+                mode: PermissionMode::Plan,
+            },
+            RequestBody::AgentSetModel { thread, model },
+            RequestBody::AgentMarkSeen {
+                thread,
+                seq: Seq(42),
+            },
+            RequestBody::AgentStop { thread },
             RequestBody::AttachTerminal {
                 terminal: TerminalId(4),
                 cols: 120,

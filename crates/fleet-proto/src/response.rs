@@ -1,6 +1,7 @@
 //! Daemon-to-client request responses.
 
 use fleet_core::{
+    agents::{AgentThreadSummary, SeqEvent, ThreadProjection},
     cache::RepoCache,
     config::Config,
     github::{PrTab, PullRequest},
@@ -205,6 +206,19 @@ pub struct KeepAliveRuleMatch {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ResponseBody {
+    /// Current native-agent thread summaries.
+    AgentThreads(Vec<AgentThreadSummary>),
+    /// Summary of a newly allocated native-agent thread.
+    AgentThreadCreated(AgentThreadSummary),
+    /// Materialized thread state and the ordered persisted tail after it.
+    AgentThreadSnapshot {
+        /// Materialized reducer projection.
+        projection: ThreadProjection,
+        /// Events after the snapshot or requested cursor.
+        events_after: Vec<SeqEvent>,
+    },
+    /// A native-agent mutation was accepted.
+    AgentAck,
     /// Registered watch identifier.
     WatchStarted(fleet_core::watches::WatchId),
     /// Session's current and recently completed watches.
@@ -347,5 +361,33 @@ mod tests {
                 result: Ok(body),
             });
         }
+    }
+
+    #[test]
+    fn agent_response_bodies_round_trip() {
+        use fleet_core::{
+            agents::{AgentKind, PermissionMode, ThreadId, ThreadProjection},
+            ids::WorktreeId,
+        };
+
+        let projection = ThreadProjection::new(
+            ThreadId::new(),
+            WorktreeId::try_from("acme/api#native-agents")
+                .unwrap_or_else(|error| panic!("{error}")),
+            AgentKind::OpenCode,
+        );
+        let summary = projection.summary(Default::default());
+        for body in [
+            ResponseBody::AgentThreads(vec![summary.clone()]),
+            ResponseBody::AgentThreadCreated(summary),
+            ResponseBody::AgentThreadSnapshot {
+                projection,
+                events_after: Vec::new(),
+            },
+            ResponseBody::AgentAck,
+        ] {
+            assert_round_trip(body);
+        }
+        assert_round_trip(PermissionMode::Ask);
     }
 }

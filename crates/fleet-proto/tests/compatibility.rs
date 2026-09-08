@@ -46,7 +46,7 @@ fn request_wire_goldens() {
                 client: "fleet-test".to_owned(),
             },
         },
-        r#"{"id":1,"body":{"type":"hello","protocol":4,"client":"fleet-test"}}"#,
+        r#"{"id":1,"body":{"type":"hello","protocol":5,"client":"fleet-test"}}"#,
     );
     assert_frame(
         Request {
@@ -123,7 +123,7 @@ fn response_wire_goldens() {
                 server: "fleet-test".to_owned(),
             }),
         },
-        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":4,"server":"fleet-test"}}}}"#,
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":5,"server":"fleet-test"}}}}"#,
     );
     assert_frame(
         Response {
