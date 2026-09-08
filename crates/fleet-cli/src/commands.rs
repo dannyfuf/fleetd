@@ -1,12 +1,13 @@
 //! Command dispatch and daemon client orchestration.
 
+mod agents;
 mod jobs;
 mod sessions;
 mod watches;
 mod worktrees;
 
 use crate::{
-    args::{Cli, Command, DaemonCommand, VERSION_DISPLAY, WatchArgs, WatchCommand},
+    args::{AgentCommand, Cli, Command, DaemonCommand, VERSION_DISPLAY, WatchArgs, WatchCommand},
     envelope::{error_json, single_line},
 };
 use clap::{Parser, error::ErrorKind as ClapErrorKind};
@@ -16,7 +17,7 @@ use fleet_proto::{
     event::Event,
 };
 use jobs::{doctor, import_from_swarm, update};
-use sessions::{agent, agent_status, sleep};
+use sessions::{agent_status, sleep};
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -169,6 +170,18 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
             WatchCommand::List(arguments) => watch_list(client, arguments).await,
             WatchCommand::Tail(arguments) => watch_tail(client, arguments).await,
         },
+        Command::Agent(arguments) => match arguments.command {
+            AgentCommand::List => agents::list(client).await,
+            AgentCommand::New(arguments) => agents::new(client, arguments).await,
+            AgentCommand::Send(arguments) => agents::send(client, arguments).await,
+            AgentCommand::Respond(arguments) => agents::respond(client, arguments).await,
+            AgentCommand::Interrupt(arguments) => agents::interrupt(client, arguments).await,
+            AgentCommand::Stop(arguments) => agents::stop(client, arguments).await,
+            AgentCommand::Tail(arguments) => agents::tail(client, arguments).await,
+            // The PTY popup keeps a CLI surface: it is the documented fallback whenever a
+            // native provider reports itself unavailable (`NATIVE-AGENTS.md` §10).
+            AgentCommand::Terminal(arguments) => sessions::agent(client, arguments.agent).await,
+        },
         Command::Create(arguments) => create(client, arguments).await,
         Command::Open(arguments) => open(client, arguments).await,
         Command::List(arguments) => list(client, arguments).await,
@@ -179,7 +192,6 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
         Command::Status(arguments) => status(client, arguments).await,
         Command::Path(arguments) => path(client, arguments).await,
         Command::Sleep(arguments) => sleep(client, arguments).await,
-        Command::Agent(arguments) => agent(client, arguments.agent).await,
         Command::AgentStatus(arguments) => agent_status(client, arguments).await,
         Command::Doctor(arguments) => doctor(client, arguments).await,
         Command::Import(_) => import_from_swarm(client).await,
