@@ -24,6 +24,43 @@ use crate::{
     terminal::{KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
 
+/// Kind of peer opening a daemon protocol connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+    /// Native graphical application (and compatibility default).
+    #[default]
+    App,
+    /// Command-line client.
+    Cli,
+    /// Another daemon forwarding requests for its clients.
+    Proxy,
+}
+
+/// Metadata about the peer opening a daemon protocol connection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HelloClient {
+    /// Peer category.
+    #[serde(default)]
+    pub kind: ClientKind,
+    /// Identity of the forwarding daemon when `kind` is proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<HostId>,
+}
+
+impl From<&str> for HelloClient {
+    fn from(_value: &str) -> Self {
+        Self::default()
+    }
+}
+
+impl From<String> for HelloClient {
+    fn from(_value: String) -> Self {
+        Self::default()
+    }
+}
+
 /// A correlated client request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -274,8 +311,9 @@ pub enum RequestBody {
     Hello {
         /// Client protocol version.
         protocol: u32,
-        /// Client name and version.
-        client: String,
+        /// Client kind and proxy identity.
+        #[serde(default)]
+        client: HelloClient,
     },
     /// Fetch a complete daemon snapshot.
     GetSnapshot,
@@ -474,6 +512,18 @@ pub enum RequestBody {
         repo: RepoId,
         /// Pull request number.
         number: u64,
+        /// Remote host; absent means local/default placement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<HostId>,
+    },
+
+    /// Start a job that builds and installs Fleet on a configured host.
+    BootstrapHost {
+        /// Target configured host.
+        host: HostId,
+        /// Git ref to install, or the local build commit when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
     },
 
     /// Ensure a worktree, agent, or worktree-scoped agent session and its terminals exist.
@@ -692,6 +742,17 @@ mod tests {
             provider: None,
         };
         let bodies = vec![
+            RequestBody::Hello {
+                protocol: crate::PROTOCOL_VERSION,
+                client: HelloClient {
+                    kind: ClientKind::Proxy,
+                    host_id: Some(HostId::try_from("local-daemon").expect("host")),
+                },
+            },
+            RequestBody::BootstrapHost {
+                host: HostId::try_from("dev-box").expect("host"),
+                git_ref: Some("fix/remote-agents".to_owned()),
+            },
             RequestBody::AgentThreadList,
             RequestBody::AgentThreadCreate {
                 worktree: WorktreeId::try_from("acme/api#native-agents")
@@ -762,6 +823,11 @@ mod tests {
             RequestBody::ListBaseRefs {
                 repo: repo.clone(),
                 force: true,
+            },
+            RequestBody::CreateWorktreeFromPr {
+                repo: repo.clone(),
+                number: 42,
+                host: Some(HostId::try_from("dev-box").expect("host")),
             },
             RequestBody::SetRepoHooks {
                 repo: repo.clone(),

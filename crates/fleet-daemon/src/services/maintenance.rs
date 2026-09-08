@@ -109,6 +109,7 @@ impl Services {
     }
 
     pub(super) fn reconcile_runtime_config(&self, config: &Config) {
+        self.machines.rebuild(config);
         self.jobs
             .set_retention(Duration::from_millis(config.jobs.keep_finished_for));
         self.adapters.files.set_removable_roots(vec![

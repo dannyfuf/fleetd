@@ -2,13 +2,17 @@
 
 use fleet_core::{
     agents::{AgentThreadSummary, SeqEvent, ThreadId},
-    ids::{BoardId, SessionId, TerminalId},
+    ids::{BoardId, HostId, SessionId, TerminalId},
     sessions::{AgentActivity, Session},
     watches::{Watch, WatchChunk, WatchId},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{job::JobRecord, snapshot::Snapshot, terminal::FrameUpdate};
+use crate::{
+    job::JobRecord,
+    snapshot::{LinkState, Snapshot},
+    terminal::FrameUpdate,
+};
 
 /// Event families a client may subscribe to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,6 +46,10 @@ pub enum EventKind {
     TerminalExited,
     /// Terminal title changes.
     TerminalTitle,
+    /// A remote daemon link changed state.
+    HostLinkChanged,
+    /// An attached terminal should be reattached after recovery.
+    TerminalReattach,
     /// Transient daemon messages.
     Toast,
     /// Daemon shutdown notification.
@@ -128,6 +136,22 @@ pub enum Event {
         /// New title.
         title: String,
     },
+    /// A configured machine's remote daemon link changed state.
+    HostLinkChanged {
+        /// Configured host.
+        host: HostId,
+        /// New link state.
+        link: LinkState,
+        /// Remote daemon version when known.
+        version: Option<String>,
+        /// Link failure detail when down.
+        error: Option<String>,
+    },
+    /// A previously attached terminal should be attached again after recovery.
+    TerminalReattach {
+        /// Local terminal identifier.
+        terminal: TerminalId,
+    },
     /// A transient client-facing message.
     Toast {
         /// Message severity.
@@ -199,6 +223,15 @@ mod tests {
         });
         assert_round_trip(EventKind::Agent);
         assert_round_trip(EventKind::AgentSummary);
+        assert_round_trip(Event::HostLinkChanged {
+            host: HostId::try_from("dev-box").expect("host"),
+            link: LinkState::Ready,
+            version: Some("fleetd 0.1.0".to_owned()),
+            error: None,
+        });
+        assert_round_trip(Event::TerminalReattach {
+            terminal: TerminalId(9),
+        });
     }
 
     #[test]

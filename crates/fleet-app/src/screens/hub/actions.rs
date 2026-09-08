@@ -4,7 +4,7 @@ pub(super) fn copy_path_outcome(
     result: Result<ResponseBody, ProtoError>,
 ) -> Result<String, ProtoError> {
     match result {
-        Ok(ResponseBody::Path(path)) => Ok(path),
+        Ok(ResponseBody::Path { path, .. }) => Ok(path),
         Ok(_) => Err(client_error("daemon returned an unexpected path response")),
         Err(error) => Err(error),
     }
@@ -394,7 +394,11 @@ impl HubCtx {
         // for the length of the `gh` round trip.
         self.state.update(cx, |_, cx| cx.notify());
         self.ask(
-            RequestBody::CreateWorktreeFromPr { repo, number },
+            RequestBody::CreateWorktreeFromPr {
+                repo,
+                number,
+                host: None,
+            },
             cx,
             move |result, ctx, cx| {
                 let intent = ctx.hub.update(cx, |hub, _| hub.finish_pr_creation(&key));

@@ -52,6 +52,11 @@ impl Hosts {
             .map(|id| {
                 statuses.get(id).cloned().unwrap_or_else(|| HostStatus {
                     id: id.clone(),
+                    provider: provider_name(config.hosts.get(id)),
+                    version: None,
+                    link: link_state(config.hosts.get(id)),
+                    address: None,
+                    agent_binaries: None,
                     reachable: false,
                     checked_at: generated_at.to_owned(),
                     error: Some("probe pending".to_owned()),
@@ -98,6 +103,17 @@ impl Hosts {
         (
             HostStatus {
                 id: id.clone(),
+                provider: provider_name(Some(entry)),
+                version: version.clone(),
+                link: if matches!(entry, HostConfigEntry::Legacy { .. }) {
+                    fleet_proto::snapshot::LinkState::Legacy
+                } else if error.is_none() {
+                    fleet_proto::snapshot::LinkState::Ready
+                } else {
+                    fleet_proto::snapshot::LinkState::Down
+                },
+                address: None,
+                agent_binaries: None,
                 reachable: error.is_none(),
                 checked_at: chrono::Utc::now().to_rfc3339(),
                 error,
@@ -107,6 +123,9 @@ impl Hosts {
     }
 
     async fn remote_version(&self, entry: &HostConfigEntry) -> Result<Option<String>, String> {
+        let HostConfigEntry::Legacy { ssh, swarm_command } = entry else {
+            return Err("machine provider probe not implemented".to_owned());
+        };
         let mut directory = tokio::fs::DirBuilder::new();
         directory.recursive(true).mode(0o700);
         directory
@@ -126,8 +145,8 @@ impl Hosts {
                 "-o",
             ])
             .arg(format!("ControlPath={}/%C", self.ssh_cache_dir.display()))
-            .arg(&entry.ssh)
-            .arg(&entry.swarm_command)
+            .arg(ssh)
+            .arg(swarm_command)
             .args(["list", "--json"])
             .timeout(PROBE_TIMEOUT);
         let result = self.shell.run(command).await.map_err(|error| match error {
@@ -144,7 +163,7 @@ impl Hosts {
             return Err(if result.status == 255 {
                 detail
             } else {
-                format!("{}: {detail}", entry.swarm_command)
+                format!("{swarm_command}: {detail}")
             });
         }
         // Deserialize only the handshake fields; inventory is intentionally ignored.
@@ -164,6 +183,24 @@ impl Hosts {
     }
 }
 
+fn provider_name(entry: Option<&HostConfigEntry>) -> String {
+    match entry {
+        Some(HostConfigEntry::Tailscale { .. }) => "tailscale",
+        Some(HostConfigEntry::Command { .. }) => "command",
+        Some(HostConfigEntry::Legacy { .. }) => "legacy",
+        None => "unknown",
+    }
+    .to_owned()
+}
+
+fn link_state(entry: Option<&HostConfigEntry>) -> fleet_proto::snapshot::LinkState {
+    if matches!(entry, Some(HostConfigEntry::Legacy { .. })) {
+        fleet_proto::snapshot::LinkState::Legacy
+    } else {
+        fleet_proto::snapshot::LinkState::Down
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +215,7 @@ mod tests {
     fn host() -> (HostId, HostConfigEntry) {
         (
             HostId::try_from("dev-box").unwrap_or_else(|error| panic!("{error}")),
-            HostConfigEntry {
+            HostConfigEntry::Legacy {
                 ssh: "arch-dev".to_owned(),
                 swarm_command: "swarm".to_owned(),
             },

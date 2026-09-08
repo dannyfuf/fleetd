@@ -29,7 +29,11 @@ async fn reset_state_dispatch_reports_the_preserved_archive() {
     );
 
     let response = services.dispatch(RequestBody::ResetState).await.unwrap();
-    let ResponseBody::Path(archive) = response else {
+    let ResponseBody::Path {
+        path: archive,
+        host: None,
+    } = response
+    else {
         panic!("reset returned an unexpected response");
     };
 

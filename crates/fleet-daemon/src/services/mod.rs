@@ -7,7 +7,11 @@ use std::{
     time::Duration,
 };
 
-use fleet_core::{config::Config, ids::RepoId, paths::slot_path};
+use fleet_core::{
+    config::{Config, default_config},
+    ids::RepoId,
+    paths::slot_path,
+};
 use fleet_proto::{
     event::Event,
     request::RequestBody,
@@ -22,6 +26,7 @@ use crate::{
     adapters::{Adapters, files::Files},
     error::remote_unsupported,
     jobs::{JobCtx, JobManager},
+    machines::Machines,
     server::BroadcastBus,
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -29,15 +34,18 @@ use crate::{
 mod agent_activity;
 pub mod agents;
 pub mod boards;
+pub mod bootstrap;
 pub mod contexts;
 pub mod doctor;
 pub mod github;
 pub mod hosts;
 pub mod import;
 pub mod inspect;
+pub mod mirror;
 pub mod pool;
 pub mod prune;
 pub mod repos;
+pub mod router;
 pub mod sessions;
 pub mod sleep;
 pub mod update;
@@ -64,6 +72,7 @@ mod awaited;
 mod cache;
 mod composition;
 mod dispatch;
+pub use dispatch::RequestContext;
 mod hooks;
 mod maintenance;
 mod snapshots;
@@ -85,6 +94,14 @@ pub struct Services {
     pub pool: Pool,
     pub github: Github,
     pub hosts: Hosts,
+    /// Configured machine providers and their lazy remote endpoints.
+    pub machines: Arc<Machines>,
+    /// Cached authoritative remote snapshot fragments.
+    pub mirror: Arc<mirror::Mirror>,
+    /// Request target classifier and forwarding facade.
+    pub router: Arc<router::Router>,
+    /// Remote daemon bootstrap job service.
+    pub bootstrap: Arc<bootstrap::Bootstrap>,
     pub sessions: Sessions,
     /// Native structured coding-agent threads.
     pub agents: AgentService,
@@ -99,6 +116,7 @@ pub struct Services {
     pub update: Update,
     home: PathBuf,
     started_at: String,
+    daemon_id: String,
     inventory: Arc<tokio::sync::Mutex<snapshots::InventoryCache>>,
     pool_refreshed_at: Arc<RwLock<BTreeMap<RepoId, String>>>,
     /// Daemon-wide event bus shared by every service integration.
@@ -123,6 +141,27 @@ impl Services {
     pub fn version() -> String {
         format!("fleetd {}", env!("CARGO_PKG_VERSION"))
     }
+
+    /// Returns the stable identity persisted for this Fleet home.
+    #[must_use]
+    pub fn daemon_id(&self) -> &str {
+        &self.daemon_id
+    }
+}
+
+fn load_or_create_daemon_id(home: &Path) -> String {
+    let path = home.join("daemon-id");
+    if let Ok(value) = std::fs::read_to_string(&path) {
+        let value = value.trim();
+        if !value.is_empty() {
+            return value.to_owned();
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if std::fs::create_dir_all(home).is_ok() {
+        let _ = std::fs::write(path, format!("{id}\n"));
+    }
+    id
 }
 
 /// Directory holding every prepared copy and worktree of one repository.

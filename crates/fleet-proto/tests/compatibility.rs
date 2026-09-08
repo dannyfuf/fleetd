@@ -44,10 +44,10 @@ fn request_wire_goldens() {
             id: 1,
             body: RequestBody::Hello {
                 protocol: PROTOCOL_VERSION,
-                client: "fleet-test".to_owned(),
+                client: fleet_proto::request::HelloClient::default(),
             },
         },
-        r#"{"id":1,"body":{"type":"hello","protocol":6,"client":"fleet-test"}}"#,
+        r#"{"id":1,"body":{"type":"hello","protocol":7,"client":{"kind":"app"}}}"#,
     );
     assert_frame(
         Request {
@@ -167,7 +167,7 @@ fn response_wire_goldens() {
                 server: "fleet-test".to_owned(),
             }),
         },
-        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":6,"server":"fleet-test"}}}}"#,
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":7,"server":"fleet-test"}}}}"#,
     );
     assert_frame(
         Response {

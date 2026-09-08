@@ -31,7 +31,7 @@ impl Sessions {
                 }
                 let session_id = SessionId::try_from(worktree.session.as_str())
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;
-                let specs = default_terminals(&config, config.agent);
+                let specs = default_terminals(&config, config.agent, false);
                 (
                     session_id,
                     SessionKind::Worktree(worktree_id),

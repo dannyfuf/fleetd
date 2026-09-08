@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use fleet_proto::{
     codec::FleetCodec,
     event::{Event, EventKind},
-    request::{Request, RequestBody},
+    request::{HelloClient, Request, RequestBody},
     response::{
         DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response,
         ResponseBody,
@@ -120,9 +120,11 @@ impl Connection {
         #[cfg(test)]
         let mut last_request_read = self.last_request_read;
         let mut framed = Framed::new(self.stream, FleetCodec::<Outbound, Request>::new());
-        if !negotiate_hello_with_timeout(&mut framed, HANDSHAKE_TIMEOUT).await? {
+        let Some(client) =
+            negotiate_hello_with_timeout(&mut framed, HANDSHAKE_TIMEOUT, &self.services).await?
+        else {
             return Ok(());
-        }
+        };
 
         let (writer, mut reader) = framed.split();
         let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
@@ -188,6 +190,9 @@ impl Connection {
                         }
                         body => {
                             let services = Arc::clone(&self.services);
+                            let context = crate::services::RequestContext {
+                                client: client.clone(),
+                            };
                             #[cfg(test)]
                             let dispatch_gate = dispatch_gate.clone();
                             pending.push(Box::pin(async move {
@@ -195,7 +200,9 @@ impl Connection {
                                 if let Some(gate) = dispatch_gate {
                                     gate.cancelled().await;
                                 }
-                                let result = services.dispatch_owned(body, owner_id).await;
+                                let result = services
+                                    .dispatch_owned_with_context(body, owner_id, context)
+                                    .await;
                                 CompletedRequest { id, result, snapshot_changed, shutdown_request }
                             }));
                             #[cfg(test)]
@@ -334,26 +341,36 @@ impl Connection {
 /// Answers the mandatory opening Hello and reports whether the session may proceed.
 async fn negotiate_hello(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
-) -> DaemonResult<bool> {
+    services: &Services,
+) -> DaemonResult<Option<HelloClient>> {
     let Some(first) = framed.next().await else {
-        return Ok(false);
+        return Ok(None);
     };
     let first = first.map_err(|error| DaemonError::Protocol(error.to_string()))?;
-    let result = match first.body {
+    let (result, client) = match first.body {
         RequestBody::Hello {
             protocol: fleet_proto::PROTOCOL_VERSION,
-            ..
-        } => Ok(ResponseBody::Hello {
-            protocol: fleet_proto::PROTOCOL_VERSION,
-            server: Services::version(),
-        }),
-        RequestBody::Hello { protocol, .. } => Err(DaemonError::Unsupported(format!(
-            "unsupported protocol {protocol}; expected {}",
-            fleet_proto::PROTOCOL_VERSION
-        ))),
-        _ => Err(DaemonError::Protocol(
-            "Hello must be the first request".to_owned(),
-        )),
+            client,
+        } => (
+            Ok(ResponseBody::Hello {
+                protocol: fleet_proto::PROTOCOL_VERSION,
+                server: Services::version(),
+            }),
+            Some(client),
+        ),
+        RequestBody::Hello { protocol, .. } => (
+            Err(DaemonError::Unsupported(format!(
+                "unsupported protocol {protocol}; expected {}",
+                fleet_proto::PROTOCOL_VERSION
+            ))),
+            None,
+        ),
+        _ => (
+            Err(DaemonError::Protocol(
+                "Hello must be the first request".to_owned(),
+            )),
+            None,
+        ),
     };
     let accepted = result.is_ok();
     write_response(
@@ -362,16 +379,18 @@ async fn negotiate_hello(
             id: first.id,
             result: result.map_err(Into::into),
         },
+        services.daemon_id(),
     )
     .await?;
-    Ok(accepted)
+    Ok(accepted.then_some(client).flatten())
 }
 
 async fn negotiate_hello_with_timeout(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     timeout: Duration,
-) -> DaemonResult<bool> {
-    tokio::time::timeout(timeout, negotiate_hello(framed))
+    services: &Services,
+) -> DaemonResult<Option<HelloClient>> {
+    tokio::time::timeout(timeout, negotiate_hello(framed, services))
         .await
         .map_err(|_| DaemonError::Timeout("client Hello handshake".to_owned()))?
 }
@@ -533,6 +552,8 @@ fn event_kind(event: &Event) -> EventKind {
         Event::TerminalFrame(_) => EventKind::TerminalFrame,
         Event::TerminalExited { .. } => EventKind::TerminalExited,
         Event::TerminalTitle { .. } => EventKind::TerminalTitle,
+        Event::HostLinkChanged { .. } => EventKind::HostLinkChanged,
+        Event::TerminalReattach { .. } => EventKind::TerminalReattach,
         Event::Toast { .. } => EventKind::Toast,
         Event::DaemonShuttingDown => EventKind::DaemonShuttingDown,
     }
@@ -595,11 +616,17 @@ async fn enqueue_outbound(
 async fn write_response(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     response: Response,
+    daemon_id: &str,
 ) -> DaemonResult<()> {
     let message = if matches!(&response.result, Ok(ResponseBody::Hello { .. })) {
         Outbound::Hello(HelloResponse {
             response,
-            capabilities: vec![PRUNE_REVIEWED_IDS_CAPABILITY.to_owned()],
+            capabilities: vec![
+                PRUNE_REVIEWED_IDS_CAPABILITY.to_owned(),
+                fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
+            ],
+            daemon_id: daemon_id.to_owned(),
+            build_commit: option_env!("FLEET_BUILD_COMMIT").map(str::to_owned),
         })
     } else {
         Outbound::Response(response)
@@ -674,12 +701,17 @@ mod tests {
                     server: Services::version(),
                 }),
             },
-            capabilities: vec![PRUNE_REVIEWED_IDS_CAPABILITY.to_owned()],
+            capabilities: vec![
+                PRUNE_REVIEWED_IDS_CAPABILITY.to_owned(),
+                fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
+            ],
+            daemon_id: "test-daemon".to_owned(),
+            build_commit: None,
         });
         let hello = serde_json::to_value(hello).expect("serialize Hello");
         assert_eq!(
             hello["capabilities"],
-            serde_json::json!(["prune.reviewed_ids"])
+            serde_json::json!(["prune.reviewed_ids", "remote-machines"])
         );
 
         let identity = daemon_identity();
@@ -707,7 +739,7 @@ mod tests {
             let expected: serde_json::Value =
                 serde_json::from_str(golden).expect("response golden");
             let response = serde_json::from_value(expected.clone()).expect("response shape");
-            write_response(&mut server, response)
+            write_response(&mut server, response, "test-daemon")
                 .await
                 .expect("send response");
             let actual = tokio::time::timeout(Duration::from_secs(1), client.next())
@@ -736,9 +768,12 @@ mod tests {
 
     #[tokio::test]
     async fn silent_client_handshake_has_deadline() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let services = test_services(temp.path()).await;
         let (server, _client) = UnixStream::pair().expect("socket pair");
         let mut framed = Framed::new(server, FleetCodec::<Outbound, Request>::new());
-        let result = negotiate_hello_with_timeout(&mut framed, Duration::from_millis(10)).await;
+        let result =
+            negotiate_hello_with_timeout(&mut framed, Duration::from_millis(10), &services).await;
         assert!(matches!(result, Err(DaemonError::Timeout(_))));
     }
 

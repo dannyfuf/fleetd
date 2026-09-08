@@ -1,5 +1,20 @@
 use super::*;
 
+/// A path interpreted either locally or by a named remote daemon.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub host: Option<HostId>,
+    pub path: String,
+}
+
+impl Location {
+    /// Returns a filesystem path only when this location belongs to the local machine.
+    #[must_use]
+    pub fn local_path(&self) -> Option<PathBuf> {
+        self.host.is_none().then(|| PathBuf::from(&self.path))
+    }
+}
+
 /// Everything one frame of the Workspace needs, read from [`AppState`] exactly once.
 pub(super) struct Model {
     pub(super) session: SessionId,

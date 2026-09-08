@@ -231,14 +231,18 @@ pub struct TerminalSpec {
 
 /// Resolves the configured terminal layout and substitutes the selected agent command.
 #[must_use]
-pub fn default_terminals(config: &Config, agent: Agent) -> Vec<TerminalSpec> {
+pub fn default_terminals(config: &Config, agent: Agent, proxied: bool) -> Vec<TerminalSpec> {
     let agent_command = config.agent_commands.command(agent);
     config
         .windows
         .iter()
         .map(|window| TerminalSpec {
             name: window.name.clone(),
-            command: window.command.replace("{agent}", agent_command),
+            command: if proxied && window.command == crate::config::NATIVE_LAZYGIT {
+                "lazygit".to_owned()
+            } else {
+                window.command.replace("{agent}", agent_command)
+            },
         })
         .collect()
 }
@@ -332,7 +336,7 @@ mod tests {
     #[test]
     fn resolves_default_layout() {
         let config = default_config("/tmp/.fleet");
-        let terminals = default_terminals(&config, Agent::Claude);
+        let terminals = default_terminals(&config, Agent::Claude, false);
         assert_eq!(
             terminals,
             vec![
@@ -350,6 +354,15 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn proxied_layout_degrades_only_native_lazygit() {
+        let config = default_config("/tmp/.fleet");
+        let terminals = default_terminals(&config, Agent::Claude, true);
+        assert_eq!(terminals[0].command, "nvim .");
+        assert_eq!(terminals[1].command, "claude");
+        assert_eq!(terminals[2].command, "lazygit");
     }
 
     #[test]

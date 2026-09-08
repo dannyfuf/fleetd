@@ -148,6 +148,13 @@ impl Services {
             update::runtime_checkout(),
         );
         let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
+        let daemon_id = load_or_create_daemon_id(&home);
+        let machines = Arc::new(Machines::from_config(&default_config(&home)));
+        let mirror = Arc::new(mirror::Mirror::new());
+        let router = Arc::new(router::Router::new(
+            Arc::clone(&machines),
+            Arc::clone(&mirror),
+        ));
         let watches = sessions.watches();
         let watch_discovery = watch_discovery::WatchDiscovery::new(
             Arc::clone(&config),
@@ -158,8 +165,13 @@ impl Services {
         Self {
             boards,
             hosts,
+            machines,
+            mirror,
+            router,
+            bootstrap: Arc::new(bootstrap::Bootstrap::new()),
             home,
             started_at: chrono::Utc::now().to_rfc3339(),
+            daemon_id,
             contexts: Contexts::new(Arc::clone(&state)),
             repos,
             worktrees,
@@ -208,5 +220,33 @@ mod tests {
         );
 
         assert_eq!(services.update.checkout(), update::runtime_checkout());
+    }
+
+    #[test]
+    fn daemon_id_is_stable_for_one_fleet_home() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        let build = || {
+            let files = Arc::new(RealFiles::new(
+                home.join("trash"),
+                [home.join("repos"), home.join("worktrees")],
+            ));
+            Services::new(
+                home,
+                Arc::new(ConfigStore::new(home, files.clone())),
+                Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+                Arc::new(JobManager::new(home)),
+                Adapters::system(files),
+            )
+        };
+        let first = build();
+        let second = build();
+        assert_eq!(first.daemon_id(), second.daemon_id());
+        assert_eq!(
+            std::fs::read_to_string(home.join("daemon-id"))
+                .expect("daemon id file")
+                .trim(),
+            first.daemon_id()
+        );
     }
 }

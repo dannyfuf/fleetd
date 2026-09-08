@@ -363,7 +363,21 @@ fn host_rows(config: &Config) -> Vec<SettingRow> {
         .map(|(id, host)| {
             fact(
                 id.as_str(),
-                format!("{} \u{2014} {}", host.ssh, host.swarm_command),
+                match host {
+                    fleet_core::model::HostConfigEntry::Tailscale { node, user, .. } => format!(
+                        "tailscale \u{2014} {}{node}",
+                        user.as_ref()
+                            .map(|user| format!("{user}@"))
+                            .unwrap_or_default()
+                    ),
+                    fleet_core::model::HostConfigEntry::Command { display, .. } => format!(
+                        "command \u{2014} {}",
+                        display.as_deref().unwrap_or(id.as_str())
+                    ),
+                    fleet_core::model::HostConfigEntry::Legacy { ssh, swarm_command } => {
+                        format!("legacy \u{2014} {ssh} \u{2014} {swarm_command}")
+                    }
+                },
             )
         })
         .collect()

@@ -714,7 +714,11 @@ fn synchronization_reconciles_identities_once_per_snapshot_revision(cx: &mut gpu
 #[test]
 fn copy_path_always_resolves_visible_state() {
     assert_eq!(
-        actions::copy_path_outcome(Ok(ResponseBody::Path("/tmp/wt".to_owned()))).expect("path"),
+        actions::copy_path_outcome(Ok(ResponseBody::Path {
+            path: "/tmp/wt".to_owned(),
+            host: None,
+        }))
+        .expect("path"),
         "/tmp/wt"
     );
     assert!(actions::copy_path_outcome(Ok(ResponseBody::Ack)).is_err());

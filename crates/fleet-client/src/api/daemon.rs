@@ -16,7 +16,7 @@ impl Client {
         match self
             .request(RequestBody::Hello {
                 protocol: PROTOCOL_VERSION,
-                client: client.into(),
+                client: fleet_proto::request::HelloClient::from(client.into()),
             })
             .await?
         {
@@ -76,7 +76,7 @@ impl Client {
     /// Replaces quarantined state with a validated default and returns the archived path.
     pub async fn reset_state(&self) -> Result<String> {
         match self.request(RequestBody::ResetState).await? {
-            ResponseBody::Path(path) => Ok(path),
+            ResponseBody::Path { path, .. } => Ok(path),
             response => Err(unexpected("reset_state", response)),
         }
     }

@@ -2,6 +2,9 @@
 
 pub mod fakes;
 mod files;
+mod machines;
+
+pub use machines::{FakeMachine, FakeRemote};
 
 /// Locks a fake's mutex, recovering the guard after a previous holder panicked.
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {

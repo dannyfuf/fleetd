@@ -102,7 +102,7 @@ impl Doctor {
                         detail: status.error.unwrap_or_else(|| {
                             format!(
                                 "{} · {}",
-                                entry.ssh,
+                                host_display(entry),
                                 version.as_deref().unwrap_or("swarm (version unknown)")
                             )
                         }),
@@ -112,6 +112,16 @@ impl Doctor {
             .await,
         );
         Ok(checks)
+    }
+}
+
+fn host_display(entry: &fleet_core::model::HostConfigEntry) -> &str {
+    match entry {
+        fleet_core::model::HostConfigEntry::Tailscale { node, .. } => node,
+        fleet_core::model::HostConfigEntry::Command { display, .. } => {
+            display.as_deref().unwrap_or("command")
+        }
+        fleet_core::model::HostConfigEntry::Legacy { ssh, .. } => ssh,
     }
 }
 

@@ -604,6 +604,11 @@ mod tests {
         let mut offline_snapshot = snapshot(vec![remote]);
         offline_snapshot.hosts.push(HostStatus {
             id: host,
+            provider: "tailscale".to_owned(),
+            version: None,
+            link: fleet_proto::snapshot::LinkState::Down,
+            address: None,
+            agent_binaries: None,
             reachable: false,
             checked_at: "2026-09-04T11:59:00Z".to_owned(),
             error: Some("ssh timed out".to_owned()),

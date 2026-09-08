@@ -53,6 +53,9 @@ pub enum DaemonError {
     /// Protocol framing or transport failed.
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// A remote machine or daemon could not be reached.
+    #[error("remote operation failed: {0}")]
+    Remote(String),
     /// A service contract exists but its domain algorithm is not implemented yet.
     #[error("unimplemented service operation: {0}")]
     Unimplemented(&'static str),
@@ -94,6 +97,7 @@ impl From<DaemonError> for ProtoError {
             DaemonError::Github(_) => ErrorKind::Github,
             DaemonError::Cancelled => ErrorKind::Cancelled,
             DaemonError::Unimplemented(_) | DaemonError::Unsupported(_) => ErrorKind::Unsupported,
+            DaemonError::Remote(_) => ErrorKind::Remote,
             DaemonError::Shell(_)
             | DaemonError::Process(_)
             | DaemonError::Timeout(_)

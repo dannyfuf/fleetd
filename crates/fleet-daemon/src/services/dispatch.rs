@@ -1,15 +1,55 @@
 use super::*;
 
+/// Per-connection metadata recorded during the Hello handshake.
+#[derive(Debug, Clone, Default)]
+pub struct RequestContext {
+    pub client: fleet_proto::request::HelloClient,
+}
+
 impl Services {
     /// Dispatches one post-handshake protocol operation to its owning service.
     pub async fn dispatch(&self, body: RequestBody) -> DaemonResult<ResponseBody> {
-        self.dispatch_owned(body, 0).await
+        self.dispatch_with_context(body, RequestContext::default())
+            .await
+    }
+
+    /// Dispatches one request with its connection metadata.
+    pub async fn dispatch_with_context(
+        &self,
+        body: RequestBody,
+        _context: RequestContext,
+    ) -> DaemonResult<ResponseBody> {
+        match self.router.route(&body) {
+            router::Target::Local => self.dispatch_owned(body, 0).await,
+            router::Target::Host(host) => {
+                self.reject_remote_request(&body).await?;
+                self.router.forward(&host, body).await
+            }
+            router::Target::Fanout(parts) => {
+                self.reject_remote_request(&body).await?;
+                let results = self.router.fanout(parts).await;
+                router::translate::merge_fanout(&body, results)
+            }
+            router::Target::Unsupported(operation) => Err(DaemonError::Unsupported(format!(
+                "{operation}: not implemented"
+            ))),
+        }
     }
 
     pub(crate) async fn dispatch_owned(
         &self,
         body: RequestBody,
         owner: u64,
+    ) -> DaemonResult<ResponseBody> {
+        self.dispatch_owned_with_context(body, owner, RequestContext::default())
+            .await
+    }
+
+    pub(crate) async fn dispatch_owned_with_context(
+        &self,
+        body: RequestBody,
+        owner: u64,
+        _context: RequestContext,
     ) -> DaemonResult<ResponseBody> {
         self.reject_remote_request(&body).await?;
         match body {
@@ -267,9 +307,10 @@ impl Services {
                 self.worktrees.touch_opened(id).await?;
                 Ok(ResponseBody::Ack)
             }
-            RequestBody::WorktreePath { id } => {
-                Ok(ResponseBody::Path(self.worktrees.path(id).await?))
-            }
+            RequestBody::WorktreePath { id } => Ok(ResponseBody::Path {
+                path: self.worktrees.path(id).await?,
+                host: None,
+            }),
             RequestBody::RestoreTrash { entry } => {
                 self.worktrees.restore_trash(entry).await?;
                 Ok(ResponseBody::Ack)
@@ -303,7 +344,11 @@ impl Services {
                     .list_pull_requests(repo, context, tab, force)
                     .await?,
             )),
-            RequestBody::CreateWorktreeFromPr { repo, number } => {
+            RequestBody::CreateWorktreeFromPr {
+                repo,
+                number,
+                host: None,
+            } => {
                 let (created, worktree, post_create_job) =
                     self.worktrees.create_from_pr(repo, number).await?;
                 Ok(ResponseBody::Worktree {
@@ -311,6 +356,15 @@ impl Services {
                     worktree,
                     post_create_job: post_create_job.map(Box::new),
                 })
+            }
+            RequestBody::CreateWorktreeFromPr { host: Some(_), .. } => Err(remote_unsupported()),
+            RequestBody::BootstrapHost { host, git_ref } => {
+                let job = self.bootstrap.start(host, git_ref).await?;
+                let record = self
+                    .jobs
+                    .record(&job)
+                    .ok_or_else(|| DaemonError::NotFound(format!("job {job}")))?;
+                Ok(ResponseBody::Job(record))
             }
             RequestBody::EnsureSession {
                 worktree,
@@ -435,9 +489,10 @@ impl Services {
             )),
             RequestBody::ImportFromSwarm => Ok(ResponseBody::Job(self.import.start().await?)),
             RequestBody::Doctor => Ok(ResponseBody::Doctor(self.doctor.check().await?)),
-            RequestBody::ResetState => Ok(ResponseBody::Path(
-                self.state.reset_quarantined().await?.display().to_string(),
-            )),
+            RequestBody::ResetState => Ok(ResponseBody::Path {
+                path: self.state.reset_quarantined().await?.display().to_string(),
+                host: None,
+            }),
             RequestBody::Update => Ok(ResponseBody::Job(self.update.start().await?)),
             RequestBody::DaemonPing => Ok(ResponseBody::Pong),
             RequestBody::DaemonVersion => Ok(ResponseBody::Version {

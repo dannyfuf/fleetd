@@ -174,7 +174,10 @@ async fn doctor_reset_state_uses_typed_request_and_protocol_envelope() {
         send_result(
             &mut transport,
             request.id,
-            Ok(ResponseBody::Path(archived.display().to_string())),
+            Ok(ResponseBody::Path {
+                path: archived.display().to_string(),
+                host: None,
+            }),
         )
         .await;
     });

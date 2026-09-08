@@ -680,7 +680,7 @@ async fn establish(home: &Path, state: &mut ConnectionState) -> Result<Establish
             id: 0,
             body: RequestBody::Hello {
                 protocol: PROTOCOL_VERSION,
-                client: format!("fleet-client/{}", env!("CARGO_PKG_VERSION")),
+                client: fleet_proto::request::HelloClient::default(),
             },
         },
         negotiated_capabilities,

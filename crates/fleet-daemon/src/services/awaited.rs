@@ -114,6 +114,7 @@ pub(crate) fn copy_error(error: &DaemonError) -> DaemonError {
         DaemonError::Timeout(value) => DaemonError::Timeout(value.clone()),
         DaemonError::Cancelled => DaemonError::Cancelled,
         DaemonError::Protocol(value) => DaemonError::Protocol(value.clone()),
+        DaemonError::Remote(value) => DaemonError::Remote(value.clone()),
         DaemonError::Unimplemented(value) => DaemonError::Unimplemented(value),
         DaemonError::Unsupported(value) => DaemonError::Unsupported(value.clone()),
         DaemonError::Join(value) => DaemonError::Join(value.clone()),

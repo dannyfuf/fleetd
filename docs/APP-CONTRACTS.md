@@ -8,6 +8,13 @@ each other**: what the shell owns, what a screen owns, and what crosses between 
 These seams are stable on purpose: changing a signature here changes every screen, so change it
 deliberately and update this document in the same pass.
 
+The daemon wire protocol is version 7. Hello includes a defaultable `HelloClient` (`app`, `cli`,
+or `proxy`, plus an optional forwarding host id); its response envelope includes a stable daemon
+id, optional build commit, and capabilities including `remote-machines`. Host snapshots include
+provider, remote version, link state, resolved address, and optional agent-binary availability.
+Remote link and terminal-reattach changes arrive as additive events. Worktree paths carry an
+optional owning host, and PR worktree creation carries optional placement.
+
 ---
 
 ## 1. Module map

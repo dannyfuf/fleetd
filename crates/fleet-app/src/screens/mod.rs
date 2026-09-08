@@ -5,4 +5,4 @@ pub mod agent_thread;
 pub(crate) mod board;
 pub(crate) mod hub;
 pub(crate) mod jobs;
-pub(crate) mod workspace;
+pub mod workspace;

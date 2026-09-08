@@ -114,7 +114,7 @@ impl Client {
     /// Resolves a local worktree's absolute path.
     pub async fn worktree_path(&self, id: WorktreeId) -> Result<String> {
         match self.request(RequestBody::WorktreePath { id }).await? {
-            ResponseBody::Path(path) => Ok(path),
+            ResponseBody::Path { path, .. } => Ok(path),
             response => Err(unexpected("worktree_path", response)),
         }
     }

@@ -250,6 +250,7 @@ impl AppState {
             }
             Event::TerminalExited { terminal, code } => self.apply_terminal_exit(terminal, code),
             Event::TerminalTitle { terminal, title } => self.apply_terminal_title(terminal, title),
+            Event::HostLinkChanged { .. } | Event::TerminalReattach { .. } => {}
             Event::Toast { level, message } => self.apply_toast_event(level, message, now),
             Event::DaemonShuttingDown => {
                 self.daemon = DaemonLink::Lost {
