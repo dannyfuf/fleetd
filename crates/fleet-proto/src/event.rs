@@ -1,7 +1,7 @@
 //! Asynchronous daemon events broadcast to subscribed clients.
 
 use fleet_core::{
-    agents::{AgentThreadSummary, SeqEvent, ThreadId},
+    agents::{AgentThreadSummary, AttentionKind, SeqEvent, ThreadId},
     ids::{BoardId, SessionId, TerminalId},
     sessions::{AgentActivity, Session},
     watches::{Watch, WatchChunk, WatchId},
@@ -109,6 +109,9 @@ pub enum Event {
         agent: Option<String>,
         /// New activity state.
         activity: AgentActivity,
+        /// Authoritative hook-supplied reason this terminal needs the user.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attention: Option<AttentionKind>,
         /// ISO-8601 transition time.
         changed_at: String,
     },
@@ -175,6 +178,7 @@ mod tests {
             terminal_id: TerminalId(3),
             agent: Some("claude".to_owned()),
             activity: AgentActivity::Idle,
+            attention: Some(AttentionKind::Finished),
             changed_at: "2026-09-05T12:00:00Z".to_owned(),
         });
         assert_round_trip(EventKind::Toast);

@@ -73,6 +73,14 @@ impl SessionRuntime {
             let Some(session) = registry.terminal_sessions.get(&terminal).cloned() else {
                 continue;
             };
+            if let Some(entry) = registry.sessions.get_mut(&session).and_then(|session| {
+                session
+                    .terminals
+                    .iter_mut()
+                    .find(|entry| entry.id == terminal)
+            }) {
+                entry.agent_attention = next.attention;
+            }
             registry
                 .activity_changed_at
                 .insert(terminal, changed_at.clone());
@@ -80,7 +88,8 @@ impl SessionRuntime {
                 session,
                 terminal,
                 agent,
-                activity: next,
+                activity: next.activity,
+                attention: next.attention,
                 changed_at: changed_at.clone(),
             });
         }
@@ -92,6 +101,7 @@ impl SessionRuntime {
         session: &SessionId,
         terminal: TerminalId,
         activity: AgentActivity,
+        attention: Option<AttentionKind>,
         now: Instant,
     ) -> DaemonResult<Option<AgentActivityTransition>> {
         let changed_at = chrono::Utc::now().to_rfc3339();
@@ -108,18 +118,23 @@ impl SessionRuntime {
                 "terminal `{terminal}` in session `{session}`"
             )));
         }
-        let output_bytes_total = registry
-            .hosts
-            .get(&terminal)
-            .map(|host| host.activity().output_bytes_total);
+        let terminal_activity = registry.hosts.get(&terminal).map(|host| host.activity());
         let changed = registry
             .activity_trackers
             .entry(terminal)
             .or_default()
-            .set_explicit(activity, now, output_bytes_total);
-        let Some(activity) = changed else {
+            .set_explicit(activity, attention, now, terminal_activity);
+        let Some(state) = changed else {
             return Ok(None);
         };
+        if let Some(entry) = registry.sessions.get_mut(session).and_then(|session| {
+            session
+                .terminals
+                .iter_mut()
+                .find(|entry| entry.id == terminal)
+        }) {
+            entry.agent_attention = state.attention;
+        }
         registry
             .activity_changed_at
             .insert(terminal, changed_at.clone());
@@ -127,7 +142,8 @@ impl SessionRuntime {
             session: session.clone(),
             terminal,
             agent: registry.observed_agents.get(&terminal).cloned().flatten(),
-            activity,
+            activity: state.activity,
+            attention: state.attention,
             changed_at,
         }))
     }
@@ -212,6 +228,7 @@ impl Sessions {
                             .activity_trackers
                             .get(&terminal.id)
                             .map_or(AgentActivity::Unknown, AgentActivityTracker::activity),
+                        agent_attention: terminal.agent_attention,
                         agent_activity_changed_at: registry
                             .activity_changed_at
                             .get(&terminal.id)
@@ -256,9 +273,10 @@ impl Sessions {
         session: &SessionId,
         terminal: TerminalId,
         activity: AgentActivity,
+        attention: Option<AttentionKind>,
         now: Instant,
     ) -> DaemonResult<Option<AgentActivityTransition>> {
         self.runtime
-            .set_agent_activity(session, terminal, activity, now)
+            .set_agent_activity(session, terminal, activity, attention, now)
     }
 }

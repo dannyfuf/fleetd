@@ -282,11 +282,13 @@ impl Services {
                 session,
                 terminal_id,
                 activity,
+                attention,
             } => {
                 let transition = self.sessions.set_agent_activity(
                     &session,
                     terminal_id,
                     activity,
+                    attention,
                     std::time::Instant::now(),
                 )?;
                 self.apply_agent_activity_transitions(transition.into_iter().collect())

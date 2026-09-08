@@ -405,6 +405,12 @@ pub enum AgentStatusChoice {
     Working,
     /// The agent finished its turn and is waiting for the user.
     Finished,
+    /// The agent is waiting for tool permission.
+    Permission,
+    /// The agent asked the user a question.
+    Question,
+    /// The agent proposed a plan for approval.
+    Plan,
 }
 
 /// Arguments accepted by `fleet agent-status`.
@@ -544,6 +550,9 @@ mod tests {
             vec!["fleet", "agent", "terminal"],
             vec!["fleet", "agent", "terminal", "opencode"],
             vec!["fleet", "agent-status", "finished", "--json"],
+            vec!["fleet", "agent-status", "permission"],
+            vec!["fleet", "agent-status", "question"],
+            vec!["fleet", "agent-status", "plan"],
             vec!["fleet", "doctor"],
             vec!["fleet", "doctor", "--reset-state", "--json"],
             vec!["fleet", "import", "--from-swarm"],

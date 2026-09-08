@@ -236,8 +236,16 @@ impl AppState {
                 terminal_id,
                 agent,
                 activity,
+                attention,
                 changed_at,
-            } => self.apply_agent_activity(session, terminal_id, agent, activity, changed_at, now),
+            } => self.apply_agent_activity(
+                session,
+                terminal_id,
+                agent,
+                (activity, attention),
+                changed_at,
+                now,
+            ),
             Event::Agent { thread, event } => {
                 if let Some(stale) = self.apply_agent_event(thread, &event) {
                     self.agents.mark_resync(stale);

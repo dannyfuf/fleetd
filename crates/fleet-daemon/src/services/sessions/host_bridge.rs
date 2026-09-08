@@ -251,6 +251,7 @@ pub(super) async fn spawn_terminal(
                 title: None,
                 keep_alive: Vec::new(),
                 has_unseen_output: false,
+                agent_attention: None,
                 kind: TerminalKind::Pty,
             },
             host,

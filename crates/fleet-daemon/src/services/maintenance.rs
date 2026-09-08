@@ -140,6 +140,7 @@ impl Services {
                 terminal_id: transition.terminal,
                 agent: transition.agent,
                 activity: transition.activity,
+                attention: transition.attention,
                 changed_at: transition.changed_at,
             });
         }

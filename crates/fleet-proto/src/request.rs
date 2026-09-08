@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use fleet_core::{
     agents::{
-        AgentKind, GateAnswer, GateId, ModelSelection, PermissionMode, Seq, ThreadId, UserInput,
+        AgentKind, AttentionKind, GateAnswer, GateId, ModelSelection, PermissionMode, Seq,
+        ThreadId, UserInput,
     },
     board::{BackendRef, BoardPatch, CardDraft, CardPatch, ConflictResolution},
     config::Agent,
@@ -453,8 +454,11 @@ pub enum RequestBody {
         session: SessionId,
         /// Target terminal within the session.
         terminal_id: TerminalId,
-        /// Explicit working or idle activity.
+        /// Explicit activity paired with optional semantic attention.
         activity: AgentActivity,
+        /// Why the terminal needs the user; absent for working and legacy status-only signals.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attention: Option<AttentionKind>,
     },
 
     /// List pull requests scoped to a repository or context.
@@ -776,6 +780,7 @@ mod tests {
                 session: SessionId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
                 terminal_id: TerminalId(8),
                 activity: AgentActivity::Idle,
+                attention: Some(AttentionKind::Finished),
             },
             RequestBody::RestartTerminal {
                 terminal: TerminalId(8),

@@ -259,6 +259,16 @@ cx.spawn(async move |_, cx| {
 `jobs.warnBeforeQuit`, and the PR-cache TTL on every connection/reconnection and config response.
 Consumers use those effective values rather than reconstructing persisted defaults.
 
+PTY agent activity and attention are separate contracts. Output-byte heuristics update only
+`AgentActivity::{Working, Idle}` and its glyph; heuristic idle never creates a toast or sound.
+`fleet agent-status` supplies the optional shared `AttentionKind` on
+`SetAgentActivity`, `AgentActivityChanged`, `Terminal.agent_attention`, and
+`WorktreeWindowStatus.agent_attention`. The app
+patches or snapshots that same field, shows the terminal tab's existing amber `attention` mark,
+and notifies once per session edge into a new `Some(kind)`. Connection seeding establishes a
+baseline without replaying historical attention. Explicit `working`, terminal input, terminal
+close, or real non-echo output clears terminal attention.
+
 Terminals attach with plain requests (`AttachTerminal`, `ResizeTerminal`, `TerminalKey`,
 `ScrollTerminal`, `DetachTerminal`); frames arrive as ordinary events and the shell has already
 applied them to `AppState::grids` before your screen renders. `fleet-client` re-attaches every
@@ -348,6 +358,7 @@ is the single source of truth on the client. The parts a screen touches:
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
 | `agents: AgentThreads` | the native-agent mirror: daemon summaries, opened `ThreadProjection`s, the per-worktree selected tab, seen cursors and pending resyncs |
+| `last_agent_activity` / `last_agent_attention` | PTY status-only glyph baseline and semantic hook-attention edge baseline; reconnect seeding is silent |
 | `watches: Watches` | the read-only subagent mirror and its per-session pane state |
 | `daemon: DaemonLink` | §3.12; `refuses_mutations()` and `drops_terminal_keys()` are the two questions a screen asks |
 

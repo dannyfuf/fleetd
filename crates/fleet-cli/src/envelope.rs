@@ -1,6 +1,7 @@
 //! Stable protocol-versioned JSON output envelopes.
 
 use fleet_core::{
+    agents::AttentionKind,
     board::{BackendDescriptor, BackendSchema, Board, BoardSummary, Card},
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
@@ -96,6 +97,8 @@ pub struct AgentStatusEnvelope<'a> {
     pub session: &'a fleet_core::ids::SessionId,
     pub terminal_id: fleet_core::ids::TerminalId,
     pub activity: AgentActivity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention: Option<AttentionKind>,
 }
 
 /// A sleep result compatible with swarm protocol one.

@@ -66,7 +66,7 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet agent stop <THREAD>` | Stop the provider and retain the transcript. | — |
 | `fleet agent tail <THREAD> [--replay]` | Print one JSON `SeqEvent` per line until the provider exits; `--replay` starts from sequence 1. | One `SeqEvent` object per line |
 | `fleet agent terminal [claude\|opencode]` | Ensure a repository-level PTY agent session exists (the terminal fallback); defaults to `config.agent`. | — |
-| `fleet agent-status <working\|finished> [--session <SESSION>] [--terminal-id <ID>] [--json]` | Report agent lifecycle activity; target flags default to `FLEET_SESSION` and `FLEET_TERMINAL_ID`. Silent on non-JSON success. | `protocol`, `ok`, `session`, `terminalId`, `activity` |
+| `fleet agent-status <working\|finished\|permission\|question\|plan> [--session <SESSION>] [--terminal-id <ID>] [--json]` | Report agent lifecycle or attention; target flags default to `FLEET_SESSION` and `FLEET_TERMINAL_ID`. Silent on non-JSON success. | `protocol`, `ok`, `session`, `terminalId`, `activity`, optional `attention` |
 | `fleet doctor` | Run environment diagnostics; exits unsuccessfully when any check fails. | — |
 | `fleet import --from-swarm` | Start an import of compatible `~/.swarm/config.json` and `state.json`. | — |
 | `fleet update` | Run self-update, wait for completion, then exit with restart code 75. | — |
@@ -136,20 +136,28 @@ card's remote issue in the browser, and `F` runs a full sync.
 
 ### Agent hooks
 
-Fleet detects Claude Code, OpenCode, and Codex activity from terminal output by default. Explicit
-agent hooks are faster and avoid ambiguity during quiet work. Fleet injects `FLEET_SESSION` and
-`FLEET_TERMINAL_ID` into every managed PTY, so Claude Code can report transitions with:
+Fleet detects Claude Code, OpenCode, and Codex working/idle status from terminal output by default.
+Only explicit agent hooks create attention notifications. Fleet injects `FLEET_SESSION` and
+`FLEET_TERMINAL_ID` into every managed PTY, so the recommended Claude Code configuration is:
 
 ```json
 { "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "fleet agent-status working" }] }],
-    "Stop":             [{ "hooks": [{ "type": "command", "command": "fleet agent-status finished" }] }]
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "fleet agent-status finished" }] }],
+    "Notification": [
+      { "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "fleet agent-status permission" }] },
+      { "matcher": "idle_prompt",       "hooks": [{ "type": "command", "command": "fleet agent-status question" }] }
+    ],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "fleet agent-status permission" }] }]
 } }
 ```
 
-Without hooks, Fleet falls back to daemon-side output-activity detection.
+`PermissionRequest` is a current Claude Code hook event and runs when a permission dialog is about
+to be shown. Without hooks, Fleet still shows heuristic working/idle glyphs, but it does not show
+agent attention toasts or play an agent attention sound.
 
-Agent-finished notifications use an in-app toast and the macOS Glass sound by default. Either
+Explicit permission, question, plan, and finished notifications use an in-app toast and the macOS
+Glass sound by default. Either
 channel can be disabled independently in `~/.fleet/config.json` (or `$FLEET_HOME/config.json`):
 
 ```json

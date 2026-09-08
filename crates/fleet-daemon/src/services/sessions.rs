@@ -9,6 +9,7 @@ use std::{
 };
 
 use fleet_core::{
+    agents::AttentionKind,
     config::{Agent, is_native_command},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
     sessions::{
@@ -64,6 +65,7 @@ pub(crate) struct AgentActivityTransition {
     pub(crate) terminal: TerminalId,
     pub(crate) agent: Option<String>,
     pub(crate) activity: AgentActivity,
+    pub(crate) attention: Option<AttentionKind>,
     pub(crate) changed_at: String,
 }
 

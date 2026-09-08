@@ -1,5 +1,6 @@
 use bytes::BytesMut;
 use fleet_core::{
+    agents::AttentionKind,
     board::{BoardSummary, BoardView, CardDraft},
     ids::{TerminalId, WorktreeId},
     model::RepoHooks,
@@ -154,6 +155,18 @@ fn request_wire_goldens() {
             },
         },
         r#"{"id":10,"body":{"type":"sync_board","board_id":"work","full":true}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 11,
+            body: RequestBody::SetAgentActivity {
+                session: "api/feature".parse().unwrap(),
+                terminal_id: TerminalId(7),
+                activity: AgentActivity::Idle,
+                attention: Some(AttentionKind::Permission),
+            },
+        },
+        r#"{"id":11,"body":{"type":"set_agent_activity","session":"api/feature","terminal_id":7,"activity":"idle","attention":"permission"}}"#,
     );
 }
 
@@ -312,9 +325,10 @@ fn event_wire_goldens() {
             terminal_id: TerminalId(7),
             agent: Some("claude".to_owned()),
             activity: AgentActivity::Idle,
+            attention: Some(AttentionKind::Finished),
             changed_at: "2026-09-06T12:00:00Z".to_owned(),
         },
-        r#"{"type":"agent_activity_changed","data":{"session":"api/feature","terminal_id":7,"agent":"claude","activity":"idle","changed_at":"2026-09-06T12:00:00Z"}}"#,
+        r#"{"type":"agent_activity_changed","data":{"session":"api/feature","terminal_id":7,"agent":"claude","activity":"idle","attention":"finished","changed_at":"2026-09-06T12:00:00Z"}}"#,
     );
     assert_frame(
         Event::WatchOutput {
@@ -345,4 +359,27 @@ fn event_wire_goldens() {
         Event::DaemonShuttingDown,
         r#"{"type":"daemon_shutting_down"}"#,
     );
+}
+
+#[test]
+fn terminal_attention_fields_default_for_legacy_peers() {
+    let request = r#"{"type":"set_agent_activity","session":"api/feature","terminal_id":7,"activity":"idle"}"#;
+    let request: RequestBody = serde_json::from_str(request).expect("legacy activity request");
+    assert!(matches!(
+        request,
+        RequestBody::SetAgentActivity {
+            attention: None,
+            ..
+        }
+    ));
+
+    let event = r#"{"type":"agent_activity_changed","data":{"session":"api/feature","terminal_id":7,"agent":"claude","activity":"idle","changed_at":"2026-09-06T12:00:00Z"}}"#;
+    let event: Event = serde_json::from_str(event).expect("legacy activity event");
+    assert!(matches!(
+        event,
+        Event::AgentActivityChanged {
+            attention: None,
+            ..
+        }
+    ));
 }

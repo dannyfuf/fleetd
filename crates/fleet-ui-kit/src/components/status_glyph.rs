@@ -33,7 +33,7 @@ pub enum StatusKind {
     Unknown,
     /// A recognized coding agent is actively working. `loader-circle`, amber, spinning.
     AgentWorking,
-    /// A recognized coding agent finished and is waiting. `circle-check`, green.
+    /// A recognized coding agent is heuristically idle. `circle-check`, green.
     AgentFinished,
     /// Post-create hooks failed but the worktree exists. `triangle-alert`, amber.
     Degraded,

@@ -59,7 +59,7 @@ const EVENT_CAPACITY: usize = 1_024;
 pub struct EffectiveConfig {
     /// Effective terminal settings.
     pub terminal: fleet_core::config::TerminalConfig,
-    /// Effective agent-finished notification settings.
+    /// Effective agent-attention notification settings.
     pub notifications: fleet_core::config::NotificationsConfig,
     /// Whether active daemon jobs require quit confirmation.
     pub warn_before_quit: bool,

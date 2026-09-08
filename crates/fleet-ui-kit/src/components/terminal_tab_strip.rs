@@ -38,7 +38,7 @@ pub enum TerminalTabKind {
 pub enum TerminalAgentState {
     /// The recognized agent is actively working.
     Working,
-    /// The recognized agent has finished and is waiting for the user.
+    /// The recognized agent is heuristically idle.
     Finished,
 }
 

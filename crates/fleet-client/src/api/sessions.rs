@@ -1,6 +1,7 @@
 use super::{Result, expect_ack, unexpected};
 use crate::Client;
 use fleet_core::{
+    agents::AttentionKind,
     config::Agent,
     ids::{SessionId, TerminalId, WorktreeId},
     sessions::{AgentActivity, Session},
@@ -17,6 +18,7 @@ impl Client {
         session: SessionId,
         terminal_id: TerminalId,
         activity: AgentActivity,
+        attention: Option<AttentionKind>,
     ) -> Result<()> {
         expect_ack(
             "set_agent_activity",
@@ -24,6 +26,7 @@ impl Client {
                 session,
                 terminal_id,
                 activity,
+                attention,
             })
             .await?,
         )
