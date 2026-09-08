@@ -251,11 +251,22 @@ impl Connection {
                             }
                         }
                         Ok(_) => {}
+                        // §6: "a gap in `seq` triggers a resync from the last applied `seq`.
+                        // This mirrors the terminal frame recovery rule rather than inventing a
+                        // new one" — so a slow reader is resynced, exactly like the frame branch
+                        // below, never disconnected. A streaming agent turn publishes an event
+                        // per 16 ms delta tick into the shared bus, and dropping the connection
+                        // for a few hundred milliseconds of client stall is the one failure the
+                        // client's own `AgentThreadSnapshot { from_seq }` recovery was designed
+                        // to make unnecessary: the next agent event it does see carries a
+                        // sequence gap, which `AgentMirror::apply_or_resync` closes.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                skipped,
+                                "event stream lagged; resyncing the client instead of dropping it"
+                            );
                             request_full_frames(&self.services, &attached).await;
-                            break Err(DaemonError::Protocol(format!(
-                                "event stream lagged by {skipped} messages; reconnect required"
-                            )));
+                            self.events.request_snapshot(Arc::clone(&self.services));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
                     }
@@ -508,6 +519,8 @@ fn event_visible(
 
 fn event_kind(event: &Event) -> EventKind {
     match event {
+        Event::Agent { .. } => EventKind::Agent,
+        Event::AgentSummary(_) => EventKind::AgentSummary,
         Event::WatchStarted(_) => EventKind::WatchStarted,
         Event::WatchOutput { .. } => EventKind::WatchOutput,
         Event::WatchExited(_) => EventKind::WatchExited,
@@ -1078,17 +1091,6 @@ mod tests {
             .expect("decode attach response")
             .result
             .expect("attach succeeds");
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), client.next())
-                .await
-                .expect("connection closes after lag")
-                .is_none(),
-            "event gap must be exposed as a reconnect"
-        );
-        let result = actor.await.expect("connection task");
-        assert!(
-            matches!(result, Err(DaemonError::Protocol(message)) if message.contains("reconnect required"))
-        );
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let frame = frames.recv().await.expect("frame channel");
@@ -1099,6 +1101,23 @@ mod tests {
         })
         .await
         .expect("lag requests a replacement full frame");
+
+        // §6 recovers a gap with a resync, not a disconnect: the stream stays open and the next
+        // event still reaches the client, where the sequence gap it carries is what triggers
+        // the client-side resync.
+        events.publish(Event::Toast {
+            level: fleet_proto::event::ToastLevel::Info,
+            message: "after the lag".to_owned(),
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), client.next())
+                .await
+                .expect("the connection survives the lag")
+                .is_some(),
+            "a lagged client is resynced, never disconnected"
+        );
+        assert!(!actor.is_finished(), "the lag must not end the connection");
+        actor.abort();
 
         services
             .sessions

@@ -68,6 +68,12 @@ impl Services {
             &adapters,
             sessions.clone(),
         );
+        let agents = agents::AgentSessionManager::new(
+            agents::AgentStore::new(home.join("agents")),
+            events.clone(),
+            worktrees.clone(),
+            Arc::clone(&config),
+        );
         let pool = Pool::new(
             Arc::clone(&config),
             Arc::clone(&state),
@@ -144,6 +150,7 @@ impl Services {
             contexts: Contexts::new(Arc::clone(&state)),
             repos,
             worktrees,
+            agents,
             pool,
             github,
             watches,

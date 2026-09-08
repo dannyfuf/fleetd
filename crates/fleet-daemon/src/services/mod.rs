@@ -27,6 +27,7 @@ use crate::{
 };
 
 mod agent_activity;
+pub mod agents;
 pub mod contexts;
 pub mod doctor;
 pub mod github;
@@ -43,6 +44,7 @@ mod watch_discovery;
 pub mod watches;
 pub mod worktrees;
 
+use agents::AgentService;
 use contexts::Contexts;
 use doctor::Doctor;
 use github::Github;
@@ -81,6 +83,8 @@ pub struct Services {
     pub github: Github,
     pub hosts: Hosts,
     pub sessions: Sessions,
+    /// Native structured coding-agent threads.
+    pub agents: AgentService,
     /// Cooperative and discovered child output and lifecycle registry.
     pub watches: watches::Watches,
     watch_discovery: watch_discovery::WatchDiscovery,

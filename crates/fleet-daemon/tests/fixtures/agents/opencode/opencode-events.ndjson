@@ -1,0 +1,18 @@
+data: {"id":"evt_07bc981a10017JvStX0Lzm4unR","type":"server.connected","properties":{}}
+
+data: {"id":"evt_07bc986d7001nXZv5ucX0Ke8H6","type":"session.updated","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY","info":{"id":"ses_f84367efaffepzjRB2cvputgcY","slug":"mighty-cabin","projectID":"global","directory":"/tmp/fixture","path":"private/tmp/claude-501/-Users-me--swarm-worktrees-me-fleetd-feat-nativa-agents/909d66e0-6398-4391-b728-523ad3ba62cc/scratchpad","title":"protocol fixture","agent":"build","model":{"id":"gpt-5.6-sol","providerID":"openai","variant":"default"},"version":"1.17.18","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1788783198469,"updated":1788783199958}}}}
+
+data: {"id":"evt_07bc986de0015Jp6DW961kg1Yj","type":"message.updated","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY","info":{"id":"msg_07bc986d60014SWFoMORKXRzuj","role":"user","sessionID":"ses_f84367efaffepzjRB2cvputgcY","time":{"created":1788783199958},"agent":"build","model":{"providerID":"openai","modelID":"gpt-5.6-sol"}}}}
+
+data: {"id":"evt_07bc986e100113QPMJiBo6hMWy","type":"message.part.updated","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY","part":{"type":"text","text":"Reply with exactly the word: pong","messageID":"msg_07bc986d60014SWFoMORKXRzuj","sessionID":"ses_f84367efaffepzjRB2cvputgcY","id":"prt_07bc986dd0010Dx6Pdzs4XzPuH"},"time":1788783199969}}
+
+data: {"id":"evt_07bc986e400145U8x60RHFAnqN","type":"session.updated","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY","info":{"id":"ses_f84367efaffepzjRB2cvputgcY","slug":"mighty-cabin","projectID":"global","directory":"/tmp/fixture","path":"private/tmp/claude-501/-Users-me--swarm-worktrees-me-fleetd-feat-nativa-agents/909d66e0-6398-4391-b728-523ad3ba62cc/scratchpad","title":"protocol fixture","agent":"build","model":{"id":"gpt-5.6-sol","providerID":"openai","variant":"default"},"version":"1.17.18","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1788783198469,"updated":1788783199972}}}}
+
+data: {"id":"evt_07bc9870e001W6YxiX5U14gik6","type":"session.status","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY","status":{"type":"busy"}}}
+
+data: {"id":"evt_07bc98711001fVpVaBvq5PPzg1","type":"session.error","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY","error":{"name":"UnknownError","data":{"message":"Model not found: openai/gpt-5.6-sol. Did you mean: gpt-5.6-sol, gpt-5.6-sol-pro, gpt-5.6-sol-fast?"}}}}
+
+data: {"id":"evt_07bc98712001D7sNr26BTm4ZsE","type":"session.status","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY","status":{"type":"idle"}}}
+
+data: {"id":"evt_07bc98712002TSK2EvnnD066tf","type":"session.idle","properties":{"sessionID":"ses_f84367efaffepzjRB2cvputgcY"}}
+
