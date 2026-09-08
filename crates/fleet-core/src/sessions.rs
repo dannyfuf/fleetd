@@ -245,11 +245,27 @@ pub fn default_terminals(config: &Config, agent: Agent) -> Vec<TerminalSpec> {
 
 /// Returns the runtime-only repository-level session name for an agent.
 pub fn agent_session_id(agent: Agent) -> Result<SessionId, IdError> {
-    let name = match agent {
+    SessionId::try_from(match agent {
         Agent::Claude => "swarm-agent-claude",
         Agent::Opencode => "swarm-agent-opencode",
+    })
+}
+
+/// Returns the agent-popup session name scoped to one worktree.
+///
+/// `NATIVE-AGENTS.md` §1/§2 make `^s F` the *same-worktree* terminal fallback for the thread
+/// on screen, so it cannot land in the one repository-level session
+/// [`agent_session_id`] names: that one lives in `repos_dir` and would open `claude` beside the
+/// repositories rather than inside the worktree the thread is editing.
+pub fn worktree_agent_session_id(
+    worktree_session: &str,
+    agent: Agent,
+) -> Result<SessionId, IdError> {
+    let name = match agent {
+        Agent::Claude => "claude",
+        Agent::Opencode => "opencode",
     };
-    SessionId::try_from(name)
+    SessionId::try_from(format!("{worktree_session}/agent-{name}"))
 }
 
 #[cfg(test)]
@@ -341,6 +357,24 @@ mod tests {
         assert_eq!(
             agent_session_id(Agent::Opencode).map(|id| id.to_string()),
             Ok("swarm-agent-opencode".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_worktree_fallback_session_is_named_after_its_worktree() {
+        // §1/§2: `^s F` is the same-worktree fallback, so its session is per worktree *and*
+        // per agent — never the one repository-level session in `repos_dir`.
+        assert_eq!(
+            worktree_agent_session_id("smoke/repo/work", Agent::Claude).map(|id| id.to_string()),
+            Ok("smoke/repo/work/agent-claude".to_owned())
+        );
+        assert_ne!(
+            worktree_agent_session_id("smoke/repo/work", Agent::Claude),
+            worktree_agent_session_id("smoke/repo/other", Agent::Claude)
+        );
+        assert_ne!(
+            worktree_agent_session_id("smoke/repo/work", Agent::Claude),
+            agent_session_id(Agent::Claude)
         );
     }
 }
