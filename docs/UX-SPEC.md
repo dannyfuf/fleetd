@@ -146,6 +146,9 @@ persists until `!` or `Esc`, replaces the ticker when present).
 | Sleeping | `moon` | `fg.muted` | count of `detached` sessions (awake or slept) | idem |
 | Unknown / offline | `circle-help` | **amber** | count of `unknown` sessions **and** unreachable hosts | §1.3 — the count a stale or offline daemon must surface |
 | Review | `flag` | `fg.muted` | count of PRs in the `review` tab | §5 header "review count" |
+| Agent needs you | `bot` | amber | `<n> needs you` — threads blocked on a permission, a question, a plan, or a finished turn nobody has read | `AgentThreadSummary.attention` |
+| Agent working | `loader-circle` (spin) | `fg.muted` | `<n> working` | idem |
+| Agent failed | `circle-x` | red | `<n> failed` | idem |
 | Update | `arrow-up-circle` | `fg.faint` | `↑<version>` when an update is available | §5 `U` |
 
 **[D-1]** The `unknown/offline` chip is mandatory: collapsing attached + detached into one chip
@@ -243,7 +246,8 @@ stacked; oldest evicted first.
 | Mode | Word | gpui key context |
 | --- | --- | --- |
 | Normal | `NORMAL` | `Hub`, `Hub > Repos`, `Hub > Worktrees`, `Hub > Prs` |
-| Terminal | `TERMINAL` | `Workspace > Terminal` |
+| Terminal | `TERMINAL` | `Workspace > Terminal`, `Workspace > Native` |
+| Agent | `AGENT` | `Agent > AgentIdle` / `AgentWorking` / `AgentDecision > …` |
 | Prefix (one-shot) | `^S` (amber) | `Workspace > Prefix` |
 | Scroll | `SCROLL` | `Workspace > Scroll` |
 | Filter | `FILTER` | `Filter` |
@@ -714,13 +718,125 @@ tab, every key except `ctrl-s` → the pane; `ctrl-s` then
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
-`a`/`A` floating agent popup · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
+`a`/`A` new native Claude/OpenCode agent thread · `F` the agent PTY popup (the terminal fallback) · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
 · `z` zoom · `!` sticky error slot (prefixed: `^s !`, KEYMAP A18) · `J` jobs · `?` help · `Esc` cancel
 prefix.
 
 ---
 
-### 3.6.1 Agent popup
+### 3.6.0 Native agent tab
+
+**Purpose:** *Show me what the agent is doing, and let me answer it, without reading a terminal.*
+
+A Claude Code or OpenCode session is a numbered tab in the **same strip** as the terminals —
+`[2] claude — rounding fix`, `[6] opencode — tz shifts` — drawn by Fleet rather than by a PTY.
+`^s a` starts Claude, `^s A` starts OpenCode, `^s x` closes the tab and keeps the transcript, and
+`^s F` opens the PTY popup below as the explicit fallback. There is no thread-list sidebar, no
+inspector and no detached diff pane. `docs/NATIVE-AGENTS.md` is the authority for the event
+model and the state machine, `docs/KEYMAP.md` for exactly which `^s` keys an agent tab binds;
+this section is what the screen shows.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ⑂ feat/payroll-fix  buk/payroll  #412 CI fail      needs you          ⟳1    │  30  header
+├─────────────────────────────────────────────────────────────────────────────┤
+│  1 nvim ✎ │ 2 claude — rounding fix ● │ 3 lg │ +                            │  30  tab strip
+├─────────────────────────────────────────────────────────────────────────────┤
+│        ┌─────────────────────────── 760 ───────────────────────────┐        │
+│        │ ┌───────────────────────────────────────────────────────┐ │        │
+│        │ │ fix the rounding in the payroll totals                │ │        │  user block
+│        │ └───────────────────────────────────────────────────────┘ │        │
+│        │ thinking · 6s  [⏎] show                                   │        │  thinking line
+│        │ I'll start from the totals helper.                        │        │  assistant prose
+│        │ ⏺ read    src/payroll/rounding.rb          120 lines      │        │  30  tool row
+│        │ ⏺ edit    src/payroll/rounding.rb       +14 −3 [⏎] diff   │        │  30  tool row
+│        │ worked 12s · 3 tool calls  [⏎] show                       │        │  fold
+│        │              48s · 12.4k tokens · 2 files changed +36 −3  │        │  turn footer
+│        │              [⏎] diff · [u] revert turn                   │        │
+│        │ ┃ Bash · rm -rf tmp/cache                                 │        │  decision card
+│        │ ┃ [y] allow once · [a] allow for this session · [n] deny  │        │
+│        │ ┃ [e] edit the command · [esc] deny and stop              │        │
+│        │ ┌───────────────────────────────────────────────────────┐ │        │
+│        │ │ ❯ Message claude… (@ file · / command)                │ │        │  36  composer
+│        │ └───────────────────────────────────────────────────────┘ │        │
+│        │ agent mode · claude-sonnet-5 · high    context 34% · $0.42│        │  22  metadata
+│        │ asks before edits                                · 48m    │        │
+│        └───────────────────────────────────────────────────────────┘        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ payroll/feat-payroll-fix   AGENT   y allow once · a allow for this session  │  26  status bar
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+The content measure is **760 px** with a 16 px inset, centered; a wide window leaves the right
+side empty on purpose. The transcript is bottom-anchored and the composer is docked under it.
+
+| Element | Content | Position | Why here | Why needed |
+| --- | --- | --- | --- | --- |
+| Tab | `<index> <provider> — <title>`, title from the first message or OpenCode's `Session.title`; bare `claude` until there is one | the terminal strip | one strip, one numbering: an index addresses exactly one surface | `AgentThreadSummary.title` |
+| Tab mark | spinner · amber dot · neutral dot · `exited <code>` — **at most one** | inside the tab | §3.3 of `NATIVE-AGENTS.md`; amber wins over neutral because amber means *waiting on you* | `AgentThreadSummary.attention` |
+| Session header word | `working` · `needs you` · `failed` · `idle` | header, right | the same vocabulary as the tab and the chips, so three surfaces cannot disagree | idem |
+| Context-bar chips | `3 needs you · 2 working · 1 failed`, including the current tab | §2.3 | a blocked thread on another worktree is invisible otherwise | `AgentCounts` |
+| User turn | the message on `bg.panel`, radius 6, attachments as pills below | transcript | the **only** block with a background: it is the one thing the user wrote | `ItemKind::UserMessage` |
+| Assistant prose | Markdown on the ground — no bubble, no avatar, no header | transcript | the answer is the content; chrome around it is noise | `AssistantText` |
+| Thinking | one collapsed muted line, `thinking · 6s` + `[⏎] show` | transcript | reasoning is available, never dominant | `Thinking` |
+| Tool row | 30 px: state glyph · 60 px kind column · one-line summary · right-aligned result | transcript | one shape for every tool means the eye scans a column, not sentences | `ItemKind::Tool` |
+| Nested rows | children indented 16 px behind a 1 px divider | under an `Agent` row | a subagent's work belongs to the row that started it | `Item.children` |
+| Inline diff | `DiffView` under an `edit` / `write` row, red/green 14 % washes | expanded row | the review happens where the edit is announced | `ToolDiff` |
+| `worked …` fold | `worked 12s · 3 tool calls` + `[⏎] show` | end of a settled turn | finished successful work is history; a **failed** row stays exposed | `TurnRecord.ended` |
+| Turn footer | `48s · 12.4k tokens · 2 files changed +36 −3` + `[⏎] diff · [u] revert turn`, right-aligned | after the fold | one line of accounting per turn, withheld until the turn completes so it never moves under the reader | `TurnEnd` |
+| Checkpoint line | `context compacted · 84k → 12k tokens` · `session resumed · 2h ago` | transcript | the two moments that silently change what the agent remembers | `Checkpoint` |
+| Error card | the failure, or `rate limited · retrying in 12s` with a spinner while a backoff counts down | transcript | a backoff is progress, a failure is not; they must not look alike | `RuntimeError`, `Retrying` |
+| Notice | one muted line with an amber glyph — a config warning, a deprecation, `Stop hook error occurred` | transcript | the provider is talking to the user, not failing; an unrecognised frame is a tracing diagnostic and never a notice | `Notice`, `ThreadProjection.notices` |
+| Decision card | 760 px, `bg.panel`, radius 6, **2 px amber bar** flush left, always the last row | transcript | a modal would hide the transcript that explains *why* it is being asked | `OpenGate` |
+| Queued message | the pending text at 60 % opacity with `queued` + `[esc] unqueue` | transcript | a message that has not been sent must not look sent | view-local queue |
+| Composer | 36 px box, `❯` prompt glyph, placeholder `Message claude… (@ file · / command)`; grows one line at a time to eight | docked, bottom | no send button: `⏎` sends, `⇧⏎` inserts a newline | `MultilineInput` |
+| Metadata row | 22 px: `agent mode · claude-sonnet-5 · high · asks before edits` left, `context 34% · $0.42 · 48m` right, both zero-suppressed | under the composer | the four facts that change what the next turn will do | `ThreadProjection` |
+| Empty state | `Message claude to start · @ file · / command` | centered in an empty transcript | a new thread must say what to type | — |
+| Mode word | `AGENT` | status bar, center | §2.8; keys reach Fleet's composer, not a PTY | `Mode::Agent` |
+| Status-bar hints | the live key set of the current state (see **Keyboard**) | status bar, right | the card's keys are bare letters, so the bar is where they are legible | §9 of `NATIVE-AGENTS.md` |
+
+**Copy is fixed.** `allow once` · `allow for this session` (Claude) · `allow for this directory`
+(OpenCode) — the effective scope is always spelled out and the word "always" is never used.
+The permission mode reads `asks before edits` · `accepts edits` · `plans before editing` ·
+`full access`; OpenCode names its agent (`build agent` / `plan agent`) where Claude says
+`agent mode`.
+
+**Color is semantic** (§1.4 unchanged): green = alive, amber = needs you or cannot verify, red =
+broken, gray = everything else *including progress*, blue = where you are and never a state.
+Only gray spinners and the text caret animate; attention is a static amber dot or bar.
+
+**States**
+
+| State | Rendering |
+| --- | --- |
+| Empty thread | the empty-state line only; the composer is focused |
+| Working | tab spinner, header `working`; the composer stays live and `⏎` **queues** behind the turn; `esc` interrupts |
+| Streaming | text grows in place with a caret after the last paragraph; tool rows keep their 30 px geometry so nothing jitters |
+| Decision open | the card is the last row, a 2 px amber bar on its left, the composer dims to 60 % and bare keys route to the card; the status bar mirrors the card's keys |
+| Turn settled | successful tool rows fold; a failed row stays; the footer appears once, complete |
+| Interrupted | footer reads `stopped · 12s · 3.1k tokens`; there is no error card — stopping is not failing |
+| Failed / exited | red `exited <code>` on the tab, header `failed`, an error card at the end of the transcript |
+| Scroll mode (`^s [`) | the tail is frozen so new output cannot pull the viewport away; leaving returns to the newest row |
+| Unread | a neutral dot on the tab only; the header stays `idle`, because nothing is waiting on the user |
+| Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op |
+
+**Intentionally omitted:** a thread sidebar, an inspector, a detached diff pane, a send button,
+per-message timestamps, an avatar or role header on assistant text, a token counter that moves
+during a turn, and any modal for a permission.
+
+**Icons:** `loader-circle` (running, retrying), `circle-check` (done), `circle-x` (error,
+denied, exited), `triangle-alert` (error card), `circle-arrow-down` (jump to latest), `bot` /
+`sparkles` on the tab and the `needs you` chip. The composer's `❯` is a glyph, not an icon.
+
+**Keyboard:** `docs/KEYMAP.md` § *Native agent thread* is authoritative. In short: `⏎` send ·
+`⇧⏎` newline · `⇧⇥` mode · `/` commands · `@` files · `↑` history · `^s m` model · `esc`
+interrupt while working · `^s [` scroll · `^s x` close · `^s a`/`^s A` new thread · `^s F` the
+PTY fallback. A decision card takes `y` / `a` / `n` / `e` / `esc` (permission), `1`–`4` /
+`space` / `⏎` (question), `y` / `n` / `⏎` (plan).
+
+---
+
+### 3.6.1 Agent popup (terminal fallback)
 
 The Claude/OpenCode agent is a window-wide `AppFrame.overlay` surface above the current Hub or
 Workspace, centered at **90 % of window width × 85 % of window height** with the dialog scrim.
@@ -1487,7 +1603,7 @@ Median for the four highest-frequency tasks (open, switch session, switch tab, c
 ## 6. Wire and state contracts used by this spec
 
 These are the implemented data seams behind the UI. Additive fields retain their serde defaults so
-version-1 config/state and version-4 IPC payloads remain readable.
+version-1 config/state and older IPC payloads remain readable.
 
 | # | Change | Why the UI needs it |
 | --- | --- | --- |
@@ -1499,7 +1615,8 @@ version-1 config/state and version-4 IPC payloads remain readable.
 | C6 | `Terminal { has_unseen_output: bool }`, cleared when the terminal becomes active | The tab activity dot (§3.6). |
 | C7 | `Snapshot { generated_at: Timestamp }` | The `stale · <age>` header stamp (§1.3, §3.12). |
 | C8 | `WorktreeStatus.session` must be set to `unknown` — **never `none`** — whenever the local status observation fails, matching the remote path | Directly retires the §9 defect. This is a daemon behavior requirement, not a type change. |
-| C9 | `PruneWorktrees { …, ids: Option<Vec<WorktreeId>> }`, defaulted and omitted when absent | `None` preserves legacy repo-scoped discovery; confirm commits `Some(exact displayed DELETE ids)`, and daemon reinspection may shrink but never expand that authority. IPC stays version 4. |
+| C9 | `PruneWorktrees { …, ids: Option<Vec<WorktreeId>> }`, defaulted and omitted when absent | `None` preserves legacy repo-scoped discovery; confirm commits `Some(exact displayed DELETE ids)`, and daemon reinspection may shrink but never expand that authority. |
+| C10 | `Snapshot { agent_threads: Vec<AgentThreadSummary> }` (`#[serde(default)]`), the eleven `Agent*` requests with their `AgentThreads` / `AgentThreadCreated` / `AgentThreadSnapshot` / `AgentAck` answers, and the `Agent` / `AgentSummary` events | §3.6.0's tab marks, §2.3's agent chips and the session-header word are all one derived `Attention` carried in the summary, so the strip, the header and the chips cannot disagree. `AgentMarkSeen` is what clears a finished turn's amber dot. IPC becomes version 5; the defaulted snapshot field keeps version-4 payloads readable. |
 
 ---
 
@@ -1634,6 +1751,17 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `DaemonSplash` | The full-window cold-start and will-not-start surfaces: title, spinner, socket path, `fleetd.log` tail, bare recovery keys | daemon states A and B (§3.12) |
 | `DaemonDot` | 8 px liveness dot that expands into a labelled pill when degraded | context bar |
 | `Veil` | 55 % scrim over terminal grids only, with key-dropping | daemon disconnect |
+
+### 9.6 Native agent transcript
+
+| Component | Responsibility | Used by |
+| --- | --- | --- |
+| `TranscriptList` | Bottom-anchored variable-height rows over gpui `list`, keyed and spliced, jump-to-latest, scroll mode | §3.6.0 |
+| `ToolRow` | The 30 px `glyph · 60 px kind · summary · result` row, with nested children and a bounded expanded body | §3.6.0 |
+| `DecisionCard` | Permission / question / plan card with the amber left bar; owns the key vocabulary, not the key event | §3.6.0 |
+| `MultilineInput` | The docked composer: wrapping, IME, paste, `↑` history, `⏎`/`⇧⏎`, `/` and `@` triggers | §3.6.0 |
+| `Markdown` | Assistant prose parsed from a stream, stable under growth | §3.6.0 |
+| `DiffView` (`fleet-lazygit`) | Inline unified diff under an edit row, ADR 0005 rows with the semantic diff washes | §3.6.0 |
 
 ## Subagent watch pane
 

@@ -21,7 +21,8 @@ deliberately and update this document in the same pass.
 | `presentation/` | shared projection and formatting used by more than one screen |
 | `screens/hub/` | §3.1–§3.5 |
 | `screens/workspace/` | §3.6 |
-| `screens/agent_popup/` | §3.6.1, the floating agent surface and its terminal attachment |
+| `screens/agent_thread/` | §3.6.0, one native agent thread: transcript rows, decisions, the docked composer, the completion pickers |
+| `screens/agent_popup/` | §3.6.1, the floating agent PTY surface and its terminal attachment |
 | `screens/jobs/` | §3.7 |
 | `dialogs/` | §3.8–§3.10, plus the `ActiveDialog` entity the shell mounts |
 | `terminal/` | the painted cell grid, its geometry, selection and prepared presentation |
@@ -30,7 +31,11 @@ deliberately and update this document in the same pass.
 
 Each of those roots holds the type and its composition only. Preparation, lifecycle, actions and
 tests live in sibling modules — `screens/hub/{projection,cache,navigation,actions,composition}`,
-`screens/workspace/{model,lifecycle,terminal,native,chrome,actions}` and so on.
+`screens/workspace/{model,lifecycle,terminal,native,agent,chrome,actions}` and so on.
+The agent thread follows the same split: `screens/agent_thread/{rows,decisions,presentation,picker}`
+prepare, `state/agents.rs` holds the per-worktree tab order and the client mirror, and the view
+itself issues no I/O — it emits `AgentThreadEvent`, which `screens/workspace/agent.rs` relays as
+`BridgeCommand`s.
 
 ---
 
@@ -143,6 +148,7 @@ is always `Fleet`.
 | Hub, PR screen focused | `Fleet > Hub > Prs` |
 | Workspace, PTY tab | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
+| Workspace, native agent tab | `Fleet > Agent > AgentIdle` \| `AgentWorking` \| `AgentNativeScroll`, or `Fleet > Agent > AgentDecision > AgentPermission` \| `AgentQuestion` \| `AgentPlan` while a gate is open |
 | Floating agent terminal | `Fleet > Agent > Terminal` \| `Prefix` \| `Scroll` |
 | Filter / Palette / Jobs | `Fleet > Filter` \| `Palette` \| `Jobs` |
 | Any dialog | `Fleet > Dialog > <name>` |
@@ -169,7 +175,25 @@ that mutually-exclusive enum. When it is topmost, `Agent` owns focus and the Hub
 mounted underneath. Help and `Quit` / `QuitDaemon` may occupy the one ordinary overlay slot above
 it; closing that dialog returns focus to `Agent`. Palette, Settings, Filter, and Jobs have no
 binding in `Agent`, so they cannot create a second competing topmost surface. `ctrl-q` resolves to
-`agent::Hide` in this context; `ctrl-shift-q` remains the global stop-confirm action.
+`agent::Hide` in this context; `ctrl-shift-q` remains the global stop-confirm action. The binding
+lives on the popup's own children (`Agent > Terminal`, `Agent > Prefix`), never on `Agent`
+itself: gpui matches `>` as a subsequence, so a binding on the root would also match a native
+agent tab's `Agent > AgentIdle` — where the popup is not mounted, nothing handles the action and
+the global quit would be shadowed by a dead key.
+
+The native agent tab reuses the same `Agent` root word but is **not** the popup: it is the
+Workspace's selected tab, so the Workspace stays mounted and only the chain's second word
+changes. `AppState::agent_context_chain()` derives it from daemon state, not from the view —
+the thread's newest open gate picks `AgentDecision > AgentPermission` \| `AgentQuestion` \|
+`AgentPlan`, and otherwise a running session, a running turn or live background work picks
+`AgentWorking` over `AgentIdle`; a frozen transcript tail (`ctrl-s [`) takes precedence over all
+of them and picks `AgentNativeScroll`, which is also what the status bar's `SCROLL` word is read
+from. Deriving it from the projection is what makes the card own the
+keyboard in the *same frame* the gate appears, instead of one frame later. `Agent > AgentRow`
+is bound, listed in Help and handled by the workspace (`ExpandRow`, `Revert`, `OpenInEditor`
+act on the newest expandable item), but nothing calls `TranscriptList::focus_row` yet, so no
+chain contains that word and those three keys cannot fire — row focus is the follow-up in
+`NATIVE-AGENTS.md` §10.
 
 Every focus-owner generation change also dirties the window. gpui synchronously draws a dirty
 window before dispatching keyboard input, so the new context/focus tree is normally already live
@@ -244,9 +268,37 @@ retained prefix only to the same live terminal.
 **Never block the foreground thread on the daemon.** Everything above is non-blocking by
 construction; there is no synchronous path and there must not be one.
 
+### Native agent threads
+
+Agent traffic does not go through `RequestBody` at the call site. `BridgeCommand` mirrors the
+eleven agent requests — `AgentThreadList`, `AgentThreadCreate { worktree, provider, model, mode,
+resume_cursor, title }`, `AgentThreadOpen { thread, from_seq }`, `AgentThreadClose`, `AgentSend
+{ thread, input }`, `AgentInterrupt`, `AgentRespond { thread, gate, answer }`, `AgentSetMode`,
+`AgentSetModel`, `AgentMarkSeen { thread, seq }`, `AgentStop` — and converts losslessly with
+`From<BridgeCommand> for RequestBody`, so a view can name an intent without depending on the
+wire enum:
+
+```rust
+bridge.send_agent(BridgeCommand::AgentSend { thread, input });          // fire and forget
+let reply = bridge.request_agent(BridgeCommand::AgentThreadOpen { thread, from_seq });
+```
+
+`AgentThreadView` sends nothing itself. Every mutation leaves it as an `AgentThreadEvent`
+(`Command(BridgeCommand)`, `OpenInEditor(String)`, `Notice(SharedString)`), and
+`screens/workspace/agent.rs` is the one place that relays those onto the bridge, opens an
+editor, or pushes a toast. The view therefore renders purely from state it already holds, which
+is the same render discipline §2 imposes on a screen.
+
+Two events arrive back: `BridgeEvent::Agent { thread, event }` carries one `SeqEvent` for a
+thread the window has opened, and `BridgeEvent::AgentSummary(summary)` carries the tab and
+counter state for every thread, opened or not. The shell has already applied both to
+`AppState::agents` before your screen renders.
+
 ### IPC and CLI compatibility
 
-Daemon IPC remains version 4. The bug-fix program added one request field:
+Daemon IPC is version **5**; the bump carries the native-agent requests, responses and events
+described above, and `Snapshot.agent_threads` is `#[serde(default)]` so version-4 snapshot JSON
+still decodes. The bug-fix program added one request field:
 `PruneWorktrees.ids: Option<Vec<WorktreeId>>`. It is defaulted and omitted when `None`, so an old
 request still decodes and the current legacy call path emits the byte-identical request shape.
 `None` retains repo/all-worktree discovery. The prune dialog sends `Some(ids)` only when committing,
@@ -263,7 +315,7 @@ Pong response envelopes likewise have an optional `daemon` object containing `pi
 `bootId` is stable for one fleetd process and changes across starts, including PID reuse. New
 clients retain it while delivering the existing unit `Pong` body to callers; older clients ignore
 the additive envelope member. App reconnect identity probes use this Pong metadata and never load
-a fallback snapshot. IPC v4 otherwise does not include daemon Git-mutation jobs, arbitrary
+a fallback snapshot. IPC v5 otherwise does not include daemon Git-mutation jobs, arbitrary
 terminal-history reads, terminal search/focus requests, cell hyperlinks, or frame effects. Those
 deferred surfaces require a separately negotiated additive contract before clients may send them.
 The public JSON CLI is a separate, unchanged protocol-1 envelope.
@@ -286,12 +338,33 @@ is the single source of truth on the client. The parts a screen touches:
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
+| `agents: AgentThreads` | the native-agent mirror: daemon summaries, opened `ThreadProjection`s, the per-worktree selected tab, seen cursors and pending resyncs |
 | `watches: Watches` | the read-only subagent mirror and its per-session pane state |
 | `daemon: DaemonLink` | §3.12; `refuses_mutations()` and `drops_terminal_keys()` are the two questions a screen asks |
 
 `agent_popup: Option<AgentPopupState>` is screen-independent. Its `Terminal` / `Prefix` / `Scroll`
 submodes reuse the existing `TERMINAL` / `^S` / `SCROLL` status words; it does not add a ninth mode
 word. An ordinary dialog above it temporarily shows `DIALOG`, then reveals the popup's prior word.
+
+`agents: AgentThreads` is the one place agent state is read from, and everything derived from it
+is a pure function so no two surfaces can disagree about a thread:
+
+| Question | Answer |
+| --- | --- |
+| Which tabs does this worktree have? | `agents.of_worktree(&worktree)`, in daemon snapshot order |
+| What mark does a tab carry? | `agents.attention(thread)` → `tab_badge`: spinner (`Working`) · amber dot (`NeedsYou`) · gray dot (`Unread`) · `exited <code>` (`Failed`) · nothing |
+| What does the session header say? | the same attention → `header_word`: `working` · `needs you` · `failed` · `idle` |
+| What do the context-bar chips count? | `agents.counts()` → `AgentCounts { needs_you, working, failed }`, including the thread on the current tab, each chip zero-suppressed |
+| When does a notification fire? | `agents.attention_edges()` — one toast per *edge* into `NeedsYou`/`Failed`, so a thread that stays blocked does not re-notify |
+| What has this window shown? | `agents.seen(thread)`; selecting a tab sends `AgentMarkSeen`, which is what clears a `NeedsYou(Finished)` |
+
+The **daemon's** `Attention` is authoritative — it is derived by the same `fleet-core` reducer
+every client replays, so a listed thread and an opened one cannot rank differently. The app
+applies exactly one local override: the two attentions defined against a seen cursor
+(`NeedsYou(Finished)` and `Unread`) drop to `Idle` as soon as this window's cursor reaches
+`last_seq`, so a tab the user is reading never keeps an amber dot while the daemon's echo is in
+flight. A `MirrorOutcome::Gap` from `apply_event` marks the thread for resync instead of
+applying a hole, and the workspace re-opens it from its last applied `seq`.
 
 Dialogs, the palette, and activation/destructive actions resolve their target from
 `displayed_hub`, not by repeating filters against the raw snapshot. Cursor movement may clamp an
