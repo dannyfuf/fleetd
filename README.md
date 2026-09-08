@@ -58,7 +58,14 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet watch list [--session <id>] [--json]` | List cooperative and daemon-discovered watches (defaults to `FLEET_SESSION`); human rows contain id, source, label, status, start time, and terminal id. | `protocol`, `watches` |
 | `fleet watch tail <id> [--follow]` | Print retained text on its original stdout/stderr channel; `--follow` polls every 250 ms until exit. | Raw retained stdout/stderr text |
 | `fleet exec [--watch] [--label TEXT] -- CMD [ARGS...]` | Run a child with byte-exact passthrough; optionally publish a read-only subagent watch using `FLEET_SESSION` and numeric `FLEET_TERMINAL_ID` (`FLEET_TERMINAL` remains the human name). | Raw child stdout/stderr; child exit status |
-| `fleet agent [claude\|opencode]` | Ensure a repository-level agent session exists; defaults to `config.agent`. | — |
+| `fleet agent list` | List native-agent threads: id, provider, session, attention, worktree, title. | — |
+| `fleet agent new <WORKTREE> --provider <claude\|opencode> [--model <MODEL>] [--mode <ask\|accept-edits\|plan\|full-access>]` | Start a native-agent thread in a published worktree and print its id. Reports the typed `Unsupported` error, naming the terminal fallback, when the provider executable is missing or too old. | — |
+| `fleet agent send <THREAD> <TEXT>` | Send or steer a message on a thread. | — |
+| `fleet agent respond <THREAD> <GATE> <ANSWER>` | Answer an open permission, question, or plan gate with provider-neutral words. | — |
+| `fleet agent interrupt <THREAD>` | Interrupt the active turn; the provider's terminal event stays authoritative. | — |
+| `fleet agent stop <THREAD>` | Stop the provider and retain the transcript. | — |
+| `fleet agent tail <THREAD> [--replay]` | Print one JSON `SeqEvent` per line until the provider exits; `--replay` starts from sequence 1. | One `SeqEvent` object per line |
+| `fleet agent terminal [claude\|opencode]` | Ensure a repository-level PTY agent session exists (the terminal fallback); defaults to `config.agent`. | — |
 | `fleet agent-status <working\|finished> [--session <SESSION>] [--terminal-id <ID>] [--json]` | Report agent lifecycle activity; target flags default to `FLEET_SESSION` and `FLEET_TERMINAL_ID`. Silent on non-JSON success. | `protocol`, `ok`, `session`, `terminalId`, `activity` |
 | `fleet doctor` | Run environment diagnostics; exits unsuccessfully when any check fails. | — |
 | `fleet import --from-swarm` | Start an import of compatible `~/.swarm/config.json` and `state.json`. | — |
@@ -67,8 +74,8 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 
 Commands that accept `--json` emit one compact line using swarm-compatible protocol 1 envelopes.
 Their errors use `{"protocol":1,"error":{"kind":"<kind>","message":"<message>"}}`; other
-commands use human-readable output. This public envelope is separate from daemon IPC version 4;
-the bug-fix program did not change CLI envelope version 1.
+commands use human-readable output. This public envelope is separate from daemon IPC version 5;
+neither the bug-fix program nor the native-agent work changed CLI envelope version 1.
 
 ### Board
 
@@ -165,6 +172,7 @@ until closed.
 | --- | --- | --- |
 | Normal | Navigate Hub repositories, worktrees, and pull requests. | Open a session |
 | Terminal | Send keys to the active PTY. | `ctrl-s` enters Prefix |
+| Agent | Type into a native agent thread's composer and answer its decision cards. | Select another tab, `ctrl-s x` |
 | Prefix | One-shot Workspace or Agent popup command after `ctrl-s`. | Next key or `Esc` |
 | Scroll | Navigate and select terminal scrollback. | `Esc`, `q`, or `i` |
 | Filter | Filter the current list. | `Enter` or `Esc` |
@@ -189,7 +197,7 @@ The 16 keys and key groups to learn first are:
 | `/` | Filter the current list. |
 | `:` | Open the command palette. |
 | `i` | Toggle the detail panel. |
-| `a` / `A` | Open the floating Claude / OpenCode agent popup. |
+| `a` / `A` | In the Hub, open the floating Claude / OpenCode agent popup; in a Workspace, `ctrl-s a` / `ctrl-s A` start a native agent thread instead. |
 | `r` | Refresh status, pull requests, and discovery as a job. |
 | `J` | Open the Jobs panel. |
 | `?` | Open help. |
@@ -201,11 +209,21 @@ path. Soft-wrapped visual rows copy as one logical line. `ctrl-c` and `ctrl-v` r
 keys. `ctrl-s` is the only Workspace prefix:
 `ctrl-s s` returns to Hub, `ctrl-s S` sleeps then returns, `ctrl-s 1`–`9` switches tabs,
 `ctrl-s h`/`l` changes tabs, `ctrl-s w` opens the last session, `ctrl-s c`/`x` creates/closes a
-tab, `ctrl-s a`/`A` opens the floating agent popup, `ctrl-s [` enters Scroll, `ctrl-s ]` pastes,
+tab, `ctrl-s a`/`A` starts a native Claude/OpenCode agent thread, `ctrl-s F` opens the floating
+agent popup (the terminal fallback), `ctrl-s [` enters Scroll, `ctrl-s ]` pastes,
 and `ctrl-s J`/`?` opens Jobs/help. Inside the popup, `ctrl-q` hides it without stopping the
 agent session. Use
 `ctrl-s ctrl-s` to send a literal `ctrl-s`. See [docs/KEYMAP.md](docs/KEYMAP.md) for the complete,
 authoritative map.
+
+A native agent thread is a tab drawn by Fleet, not a PTY: the status bar reads `AGENT`, `Enter`
+sends the composer and `Shift-Enter` inserts a newline, `Esc` interrupts a running turn, and a
+permission, question or plan appears as a card in the thread that answers to bare keys
+(`y`/`a`/`n`/`e`/`Esc`, `1`-`4`, `y`/`n`). The tab carries an amber dot when the agent is waiting
+on you. The daemon owns the thread, so it survives closing the app, and its transcript survives a
+daemon restart. `fleet agent` drives the same threads from the terminal, and the popup on
+`ctrl-s F` stays available whenever a provider is missing or too old. See
+[docs/NATIVE-AGENTS.md](docs/NATIVE-AGENTS.md).
 
 ## Architecture
 
@@ -256,6 +274,7 @@ cargo run -p fleet-ui-kit --example gallery_data
 cargo run -p fleet-ui-kit --example gallery_input
 cargo run -p fleet-ui-kit --example gallery_structure
 cargo run -p fleet-ui-kit --example gallery_terminal
+cargo run -p fleet-ui-kit --example gallery_agent
 ```
 
 For UI automation, set `FLEET_DRIVE` to an append-only script. The debug app polls it every 100 ms;
@@ -275,4 +294,6 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details, logs, and script
 Fleet v1 is local-only: `fleetd` probes configured remote hosts over SSH every minute and reports
 reachability in the Hub and `fleet doctor`, but remote worktree, session, and repository operations
 are not supported yet. Terminal sessions survive closing the
-app because `fleetd` owns them, but they do not survive a daemon restart.
+app because `fleetd` owns them, but they do not survive a daemon restart. Native agent threads
+do: their transcripts are persisted under `$FLEET_HOME/agents/` and a thread with a provider
+resume cursor is resumed the next time it is opened.

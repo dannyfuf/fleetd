@@ -192,6 +192,13 @@ impl AppState {
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
+            BridgeEvent::Agent { thread, event } => {
+                if let Some(stale) = self.apply_agent_event(thread, &event) {
+                    self.agents.mark_resync(stale);
+                }
+                self.notify_agent_attention(now);
+            }
+            BridgeEvent::AgentSummary(summary) => self.apply_agent_summary(summary, now),
             BridgeEvent::MutationFailed { message } => {
                 self.sticky_error = Some(StickyError {
                     text: message,
@@ -231,6 +238,13 @@ impl AppState {
                 activity,
                 changed_at,
             } => self.apply_agent_activity(session, terminal_id, agent, activity, changed_at, now),
+            Event::Agent { thread, event } => {
+                if let Some(stale) = self.apply_agent_event(thread, &event) {
+                    self.agents.mark_resync(stale);
+                }
+                self.notify_agent_attention(now);
+            }
+            Event::AgentSummary(summary) => self.apply_agent_summary(summary, now),
             Event::TerminalFrame(frame) => {
                 self.apply_frame(&frame);
             }

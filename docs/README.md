@@ -9,6 +9,9 @@
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) | The `fleet-ui-kit` tokens and component contracts |
 | [BOARD.md](BOARD.md) | The card model, the reconciliation engine, and the board surface |
 | [BOARD-JIRA.md](BOARD-JIRA.md) | The Jira backend, and what `acli` can and cannot do |
+| [NATIVE-AGENTS.md](NATIVE-AGENTS.md) | Native Claude Code / OpenCode sessions: adapters, event model, thread state, the agent tab |
+| [research/harness-protocols.md](research/harness-protocols.md) | Wire reference for the installed Claude Code and OpenCode versions |
+| [research/agents-contracts.md](research/agents-contracts.md) | The shipped native-agent public API: names, signatures, serialized shapes, module paths |
 | [SWARM-INVENTORY.md](SWARM-INVENTORY.md) | The swarm behavior Fleet must preserve, 1:1 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Building, running, testing, and driving the app |
 | [decisions/](decisions) | Why the load-bearing choices were made |
@@ -32,3 +35,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0007](decisions/0007-gui-smoke-procedure.md) | The reproducible GUI smoke procedure |
 | [0008](decisions/0008-board-model-and-sync.md) | A backend-agnostic board model with a pure reconciliation engine |
 | [0009](decisions/0009-jira-board-backend.md) | Jira through `acli`, not through the REST API |
+| [0010](decisions/0010-native-agents.md) | Native agent sessions: structured protocols, completion authority, the reducer in `fleet-core` |

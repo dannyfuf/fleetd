@@ -35,6 +35,7 @@ pub(crate) use host::{
     read_host, retain_task, with_host,
 };
 pub(crate) use input::{clear_all, field, type_into, typed_char};
+pub(crate) use settings::editor_command;
 
 /// §3.8 card width for a single-field prompt: new/edit context, rename, assign repo.
 const NARROW_W: Pixels = px(460.0);

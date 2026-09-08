@@ -86,6 +86,8 @@ exists only for the pointer and never expresses state.
 | `selection` | `rgba(88,166,255,.28)` | `rgba(9,105,218,.20)` | text selection, terminal + inputs |
 | `scroll_thumb` | `#2C313A` | `#D3D6DC` | 3 px pane-edge thumb |
 | `skeleton` | `#1E222A` | `#EEF0F3` | cold-load placeholder rows |
+| `diff_added` | `rgba(63,185,80,.14)` | `rgba(26,127,55,.14)` | added-line wash inside reusable diff views |
+| `diff_removed` | `rgba(248,81,73,.14)` | `rgba(207,34,46,.14)` | removed-line wash inside reusable diff views |
 
 Semantic tones are selected through `Tone`, never by reaching for the field:
 `Tone::{Default, Secondary, Muted, Accent, Success, Warning, Danger, Info, Inverse}`.
@@ -214,6 +216,14 @@ So do the Git UI's own dimensions: `status_pane_h 62` · `stash_pane_h 92` ·
 `overlay_help_w 640` · `editor_box_h 160` · `diff_caret_h 14`.
 The same token set owns the opacity ladder: `veil 0.55` · `dimmed 0.40` ·
 `refreshing 0.60` · `stale 0.55` · `skeleton 0.30` · `no_session 0.30`.
+
+The native-agent canvas has its own six constants, and they live in
+`components::agent::metrics` rather than in `Metrics`: `AGENT_CONTENT_W 760` ·
+`AGENT_TOOL_KIND_W 60` · `AGENT_CARET_H 17` · `AGENT_BODY_MAX_H 240` ·
+`AGENT_LIST_OVERDRAW 256` · `AGENT_SCROLLBAR_INSET 3`. `Metrics` is the density ladder a
+theme may restate; these are fixed product decisions from `NATIVE-AGENTS.md` §2 that no theme
+may move, which is exactly why they are constants and not tokens. They are still exported from
+`fleet_ui_kit`, so no app-side copy of `760` exists.
 
 ---
 
@@ -960,10 +970,10 @@ printing" bug reports are born. Zero-suppressed at `offset == 0` and in alt-scre
 #### `TerminalTabStrip`
 **Purpose.** Numbered tabs, 84–200 px, with activity, keep-alive, agent-status and exit marks.
 **API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").activity(bool).starting(bool)
-.keep_alive(Icon).agent_status(StatusKind).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
+.keep_alive(Icon).agent_status(StatusKind).unread(bool).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
 .on_select(Fn(position, ..)).on_new(Fn(..))`.
 **States.** active (accent underline + `ui_strong`) · inactive · activity (6 px amber dot) ·
-starting (per-tab `loader-circle`) · agent working (`loader-circle`) · agent finished
+unread (6 px neutral dot) · starting (per-tab `loader-circle`) · agent working (`loader-circle`) · agent finished
 (`circle-check`) · exited (faint label + `circle-x` + code, or `—` when the process was killed
 by a signal and has no code).
 **Usage rule (`starting`).** §3.6's "Waking a slept session" rebuilds the strip and spawns one
@@ -973,6 +983,10 @@ yet. **Usage rule (`exited`).** `.exited(1)` and `.exited(None)` both compile: e
 `SIGKILL` from `^s x` produces none.
 **Usage rule.** The index is the argument to `ctrl-s 1`–`9`, so the strip is the legend for that
 binding. Agent activity appears only on terminals with a recognized agent.
+**Usage rule (`unread` vs `activity`).** A tab draws **at most one** dot, and amber wins: amber
+means the tab is waiting on the user, neutral only that content arrived while they were
+elsewhere. A native agent tab uses both (`NATIVE-AGENTS.md` §3.3 maps `NeedsYou` to amber and
+`Unread` to neutral); the active tab and an exited tab draw neither.
 
 #### `ScrollPill`
 **Purpose.** `SCROLL <offset>/<len>` while in scroll mode.
@@ -999,10 +1013,12 @@ signal-killed process has no exit code and the strip must not invent `128 + sign
 #### `ModeWord`
 **Purpose.** The fixed 84 px word in the center of the status bar.
 **API.** `ModeWord::{new(Mode), word(text)}().tone(Tone)`;
-`Mode::{Normal, Terminal, Prefix, Scroll, Filter, Palette, Dialog, Jobs}` with
+`Mode::{Normal, Terminal, Agent, Prefix, Scroll, Filter, Palette, Dialog, Jobs}` with
 `.word() .tone() .keys_reach_pty()` and `Mode::ALL`.
 **Usage rule.** Present on **every** screen, including the Workspace and including zoom. Only
-`Prefix` is amber, because it is the one mode that expires on its own.
+`Prefix` is amber, because it is the one mode that expires on its own. `Agent` is a separate
+word from `Terminal` because keys reach Fleet's own composer rather than a PTY: `keys_reach_pty()`
+is false for it, so a view's hints keep their bare form.
 
 #### `Banner`
 **Purpose.** A 28 px full-width strip with a countdown and recovery keys.
@@ -1037,7 +1053,118 @@ from `Theme::metrics.veil_opacity`.
 surface is veiled. Keys typed into a veiled grid are **dropped, not buffered**; the component
 renders the scrim and `drops_keys()` states the contract the caller must honour.
 
-### 6.6 Board
+### 6.6 Native agent transcript
+
+Four of these are the exception to §6's "no component owns state": a transcript, a composer and
+their key routing cannot be `RenderOnce`, because the list caches measured row heights and the
+composer owns a caret, a selection and an IME session. They are gpui **entities** that emit
+events and never act on a thread; the screen that owns them decides what an event means.
+`components::agent::metrics` holds their six fixed dimensions (§2.8), and
+`components::agent::format` holds their copy — `format_duration`, `format_token_count`,
+`format_file_delta`, `format_files_changed`, `format_turn_footer`, `format_worked`,
+`format_thinking`, `format_retrying`, `format_compacted`, `format_resumed`, and `MINUS`, the
+U+2212 the design uses for a removed-line count. Keycaps are never inside those strings: they
+are `KeyHint`s drawn by the row that owns them.
+
+#### `TranscriptList`
+**Purpose.** The bottom-anchored, variable-height conversation.
+**API.** Entity. `TranscriptList::new(&mut Context<Self>)`, `set_rows(Vec<TranscriptRow>, cx)`,
+`set_tool_body(ToolBodyRenderer, cx)`, `scroll_to_bottom(cx)`, `scroll_mode(bool, cx)`,
+`set_streaming(bool, cx)`, `focus_row(Option<usize>, cx)`; the scroll-mode motions
+`scroll_rows(f32, cx)`, `scroll_viewports(f32, cx)`, `scroll_to_top(cx)` and `scroll_to_end(cx)`;
+readers `rows()`, `focused_row()`,
+`is_scroll_mode()`, `is_at_bottom()`, `open_decision()`, `focus_handle()`,
+`event_for_key(&str) -> Option<TranscriptEvent>`. Free helpers: `diff_rows` (the `RowSplice`
+`set_rows` applies), `scroll_fraction`, `user_block`, `user_block_with`, `attachment_pill`,
+`error_card`.
+**Rows.** `TranscriptRow::{UserBlock{attachments}, AssistantText, Thinking, ToolRow{children},
+WorkedFold, TurnFooter, DecisionCard, ErrorCard{retrying}, CheckpointLine, Notice,
+QueuedMessage, EmptyState}`. `Notice` is a provider's own user-facing message — a config warning,
+a deprecation — which is not an error and must not be drawn as one.
+**States.** following the tail · scroll mode (tail frozen) · streaming (caret after the last
+paragraph) · empty (`EmptyState`).
+**Usage rule.** GPUI `list`, **not** `uniform_list` — an assistant paragraph, a 30 px tool row
+and an inline diff are not one height. ADR 0005's uniform-row rule still governs the diff, which
+stays uniform *inside* its row. `set_rows` splices only what `diff_rows` says changed, so a
+streaming turn re-measures its last row and nothing else.
+**Usage rule (key routing).** `event_for_key` resolves the open decision card **before** the
+focused row, so a `y` can never toggle a row behind an unanswered permission.
+
+#### `ToolRow`
+**Purpose.** The 30 px row every tool call is drawn as.
+**Anatomy.** state glyph · 60 px kind column (`AGENT_TOOL_KIND_W`) · one-line summary ·
+right-aligned result. Children indent 16 px behind a 1 px left divider; an expanded body is
+capped at `AGENT_BODY_MAX_H` and scrolls inside the row.
+**API.** `ToolRow::new(id, kind, summary).state(ToolRowState).result(..).output(..).diff(..)
+.expanded(bool)`; `.has_body()`; `tool_row(&ToolRow, &App)` for the plain element, or
+`ToolRowElement::new(row).focused(bool).body(..).children(..).on_toggle(..)`; `expand_hint(bool)`.
+**States.** `ToolRowState::{Running, Done, Error, Denied}` → `.glyph()` gives the icon and tone.
+**Usage rule.** The geometry does not change while the row streams — a row that grows under the
+reader is how a transcript starts to jitter. Only successful rows fold into `WorkedFold`; a
+failed row stays exposed after the turn settles.
+
+#### `DecisionCard`
+**Purpose.** A permission, question or plan asked **inside** the thread.
+**Anatomy.** `AGENT_CONTENT_W` wide, panel background, radius 6, a 2 px amber bar flush left,
+always the last row.
+**API.** `DecisionCard::new(id, title, DecisionCardKind).actions(Vec<DecisionOption>)`;
+`.option_count(usize)`, `.action_for_key(&str) -> Option<DecisionAction>`;
+`DecisionCardElement::new(card).default_action(..).selected(..).expanded(bool).answer(..)
+.on_action(..)`; `permission_actions`, `question_actions`, `plan_actions`, `decision_key_hints`,
+and `SOMETHING_ELSE` (the `Something else…` free-text option).
+**Variants.** `Permission { tool, payload, rationale }` · `Question { questions }` ·
+`Plan { markdown, steps }`.
+**Usage rule.** The card owns the key *vocabulary*; the surface holding the focus handle owns
+the key *event* and routes it here. That split is what stops one thread from answering another
+thread's card. This type mirrors rather than imports `fleet_core::agents::GateKind`, so the kit
+keeps its "no domain dependencies" rule.
+**Usage rule (copy).** An action always spells out its effective scope — `allow once`, `allow
+for this session`, `allow for this directory` — never the word "always".
+
+#### `MultilineInput`
+**Purpose.** The docked composer: `TextInput`'s wrapping, multi-line sibling.
+**API.** Entity. `MultilineInput::new(&mut Context<Self>, placeholder)`, `text()`, `is_empty()`,
+`set_text(.., cx)`, `clear(cx)`, `set_placeholder(.., cx)`, `set_focus_visible(bool, cx)`,
+`submit(cx)`, `push_history(..)`, `focus_handle()`, readers `buffer()` and `history()`, and the
+three `-> bool` motions an owner falls through on — `recall_previous(cx)`, `caret_up(cx)`,
+`caret_down(cx)`, each answering whether it moved; emits
+`MultilineInputEvent::{Submit(String), Trigger(char), Escape}` under
+`MULTILINE_INPUT_KEY_CONTEXT`. `MultilineBuffer` is the pure editing model and `PromptHistory`
+the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` was opened from.
+**States.** empty (placeholder) · typing · multi-line (grows one line at a time, to eight) ·
+IME composition · dimmed while a decision card is open.
+**Keyboard.** printable · `⏎` submit · `⇧⏎` newline · `Backspace`/`Delete` · word-wise deletion ·
+line/word motion · shift-selection · select-all · paste · `↑` history · `/` and `@` emit
+`Trigger`.
+**Usage rule.** It never acts on a thread: a submit, a completion trigger and an escape are
+reported, and the owner decides what they mean. Like `TextField`, an entity installing the
+platform input handler calls `handle_edit_keystroke`, and bare-letter bindings above it must be
+shadowed in its key context.
+
+#### `Markdown`
+**Purpose.** Assistant prose, rendered from a stream.
+**API.** `parse_markdown_document(&str) -> MarkdownDocument`; `markdown(&MarkdownDocument, &App)`.
+`MarkdownBlock::{Paragraph, Code{lang,text}, List{ordered,items}, Heading{level,inlines},
+Quote, Rule}`, `MarkdownInline::{Text, Code, Strong, Emphasis, Link}`.
+**Usage rule.** Two invariants, both tested: `parse_markdown_document` never panics or loops on any
+input, and for any prefix `p` of `s`, every block of `parse_markdown_document(p)` except its last is a
+block of `parse_markdown_document(s)` at the same index — a transcript must not reflow behind the reader
+while the model keeps typing. Tables, images and indented code are out of scope and survive as
+their own source text.
+
+#### `DiffView` (`fleet_lazygit::diff_view`, not the kit)
+**Purpose.** The inline diff under an `Edit` / `Write` tool row.
+**API.** Entity. `DiffView::new(unified, cx)`, `DiffView::for_path(..)`, `unified()`,
+`set_unified(.., cx)`, `expanded()`, `set_actions(..)`.
+**Usage rule.** It takes unified-diff *text*, so an embedder needs no git plumbing and
+`fleet-ui-kit` gains no `fleet-git` dependency — which is the only reason this one lives outside
+the kit. Rows come from the ADR 0005 stack and `views::row_layout`, so an inline diff has the
+same geometry as a full-window one; only the wash differs (`diff_added` / `diff_removed`).
+Beyond `MAX_ROWS` (400) it folds with a "show all" affordance rather than flooding the thread.
+The action row (`[u] revert this edit · [o] open in nvim`) is the embedder's, handed in through
+`set_actions`.
+
+### 6.7 Board
 
 The kanban surface of `docs/BOARD.md` §7. It obeys the same two rules as the rest of the
 kit: no domain type crosses the boundary (a card arrives as `SharedString`s, scalars and
@@ -1120,8 +1247,8 @@ same components as a static overview in both themes.
    adding it to §5.1 here.
 3. A new component gets its own module under `src/components/`, a `pub use` in
    `components/mod.rs`, an entry in §6 here, and a panel in the matching per-group gallery
-   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_terminal`, or `gallery_board`) showing
-   **every** state. `kit_gallery` remains the combined overview. If a state is not in a gallery,
-   it is not implemented.
+   (`gallery_structure`, `gallery_data`, `gallery_input`, `gallery_terminal`, `gallery_agent`, or
+   `gallery_board`) showing **every** state. `kit_gallery` remains the combined overview. If a
+   state is not in a gallery, it is not implemented.
 4. `cargo check -p fleet-ui-kit --examples` and
    `cargo run -p fleet-ui-kit --example kit_gallery` are the acceptance gate.

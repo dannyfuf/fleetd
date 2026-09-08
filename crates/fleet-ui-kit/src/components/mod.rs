@@ -6,6 +6,7 @@
 //! [`crate::theme::Theme`].
 
 mod age_label;
+pub mod agent;
 mod app_frame;
 mod badge;
 mod banner;
@@ -37,8 +38,10 @@ mod key_hint;
 mod key_value_list;
 mod list_view;
 mod log_view;
+mod markdown;
 mod markdown_text;
 mod mode_word;
+mod multiline_input;
 mod navigation;
 mod number_field;
 mod overlay;
@@ -73,6 +76,7 @@ mod veil;
 pub use crate::focus::{FocusRing, FocusRingKind};
 
 pub use age_label::{AgeLabel, format_age};
+pub use agent::*;
 pub use app_frame::AppFrame;
 pub use badge::{Badge, BadgeStyle};
 pub use banner::Banner;
@@ -109,10 +113,18 @@ pub use list_view::{
 };
 pub use list_view::{ListCursor, ListView};
 pub use log_view::{LOG_TAIL_LINES, LogCommand, LogView};
+pub use markdown::{
+    MarkdownBlock, MarkdownDocument, MarkdownInline, markdown,
+    parse_markdown as parse_markdown_document,
+};
 pub use markdown_text::{
     LIST_MARKER_CH, MAX_HEADING_LEVEL, MarkdownText, MdBlock, MdSpan, parse_markdown,
 };
 pub use mode_word::{Mode, ModeWord};
+pub use multiline_input::{
+    HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineBuffer, MultilineInput,
+    MultilineInputEvent, PromptHistory,
+};
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};
 pub use palette::{Palette, PaletteRow, PaletteSection, PaletteSectionKind};

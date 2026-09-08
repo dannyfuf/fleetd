@@ -14,7 +14,7 @@ use fleet_core::{
     sessions::{
         AgentActivity, Session, SessionKind, SessionState, Terminal, TerminalKind, TerminalStatus,
         WorktreeStatus, WorktreeWindowStatus, agent_session_id, aggregate_agent_activity,
-        default_terminals,
+        default_terminals, worktree_agent_session_id,
     },
 };
 use fleet_proto::{

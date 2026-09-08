@@ -442,7 +442,7 @@ pub(super) fn choice(value: &str, options: &[&str], current: &str) -> RowKind {
 pub(super) fn duration_choice(value: u64) -> RowKind {
     let index = DURATIONS.iter().position(|step| *step == value);
     RowKind::Choice {
-        value: format_duration(value),
+        value: format_cycler_duration(value),
         has_prev: index.is_some_and(|index| index > 0),
         has_next: index.is_some_and(|index| index + 1 < DURATIONS.len()),
         off_grid: index.is_none(),
@@ -459,9 +459,13 @@ pub(super) fn pool_choice(value: u64) -> RowKind {
     }
 }
 
-/// A millisecond duration as the cycler words it (`10 min`).
+/// A millisecond duration as the settings cycler words it (`10 min`).
+///
+/// Deliberately not [`fleet_ui_kit::format_duration`], which words the same number the way an
+/// agent turn footer does (`48s`): one states a configured interval a user picks from a list,
+/// the other states elapsed work.
 #[must_use]
-pub fn format_duration(millis: u64) -> String {
+pub fn format_cycler_duration(millis: u64) -> String {
     let seconds = millis / 1_000;
     if seconds >= 3_600 && seconds.is_multiple_of(3_600) {
         format!("{} h", seconds / 3_600)

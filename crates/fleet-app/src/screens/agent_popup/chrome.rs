@@ -20,14 +20,22 @@ impl AgentPopup {
             .child(Text::ui_strong(label))
             .child(Text::data(model.session.to_string()).muted().ellipsize())
             .child(div().flex_1())
-            .child(
-                KeyHintRow::new()
-                    .key("^s q", "hide")
-                    .key("^s a/A", "switch")
-                    .key("^q", "hide"),
-            )
+            .child(key_hints())
             .into_any_element()
     }
+}
+
+/// The popup's own key set (§9), which its header shows and the status bar mirrors.
+///
+/// While the popup owns the keyboard the workspace's bindings are shadowed, so a status bar
+/// still advertising `⏎ send · ⇧⇥ plan mode · …` beside the word `TERMINAL` names six commands
+/// none of which fire (DESIGN-SYSTEM §4). One source, two surfaces.
+#[must_use]
+pub(crate) fn key_hints() -> KeyHintRow {
+    KeyHintRow::new()
+        .key("^s q", "hide")
+        .key("^s a/A", "switch")
+        .key("^q", "hide")
 }
 
 pub(super) fn header_status_tone(model: &Model) -> Tone {

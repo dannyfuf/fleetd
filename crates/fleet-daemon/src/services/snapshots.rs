@@ -58,6 +58,7 @@ impl Services {
             worktrees: state.worktrees.clone(),
             active_context: state.active_context_id.clone(),
             sessions,
+            agent_threads: self.agents.summaries(),
             statuses,
             pools,
             hosts,

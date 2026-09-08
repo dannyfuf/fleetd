@@ -29,7 +29,7 @@ JSON document store, and the `Boards` service that loads, applies, validates, sa
   pushed.
 
 The wire messages the board needs — the board, card, sync and backend families, `Snapshot.boards`
-and `Event::BoardChanged` — are a protocol addition, so `PROTOCOL_VERSION` is 5. The board request
+and `Event::BoardChanged` — are a protocol addition, so `PROTOCOL_VERSION` is 6. The board request
 families are exempt from the client's generic RPC deadline: a `describe` or a `sync` is several
 backend calls with their own retry budgets, and timing them out client-side would replace the
 backend's own sentence with a transport error (`fleet-client/src/connection.rs::request_timeout`).

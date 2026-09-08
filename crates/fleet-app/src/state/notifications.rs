@@ -191,6 +191,7 @@ impl AppState {
 
     /// Replaces agent-activity baselines without presenting historical completions.
     pub(super) fn seed_agent_activity(&mut self, snapshot: &Snapshot, now: Instant) {
+        self.agents.seed(&snapshot.agent_threads);
         self.last_agent_activity = snapshot_agent_activities(snapshot)
             .map(|(session, activity)| (session.clone(), (activity, now)))
             .collect();
@@ -228,6 +229,55 @@ impl AppState {
                 Toast::new(format!("{label}: agent finished"))
                     .icon(Icon::CircleCheck)
                     .tone(Tone::Success),
+                now,
+                dwell_for(ToastDuration::Normal),
+            );
+        }
+        if self.notifications.sound {
+            self.notification_sound.play();
+        }
+    }
+
+    /// Presents one native-agent attention edge through the same channels (§9, §3.3).
+    ///
+    /// A structured thread knows exactly why it wants the user, so the copy names it instead of
+    /// the terminal path's single "agent finished"; the channels themselves are unchanged.
+    pub(super) fn notify_agent_thread(
+        &mut self,
+        label: &str,
+        attention: fleet_core::agents::Attention,
+        now: Instant,
+    ) {
+        use fleet_core::agents::{Attention, AttentionKind};
+        let (text, icon, tone) = match attention {
+            Attention::NeedsYou(AttentionKind::Permission) => (
+                format!("{label}: needs permission"),
+                Icon::Lock,
+                Tone::Warning,
+            ),
+            Attention::NeedsYou(AttentionKind::Question) => (
+                format!("{label}: asks a question"),
+                Icon::CircleQuestionMark,
+                Tone::Warning,
+            ),
+            Attention::NeedsYou(AttentionKind::Plan) => (
+                format!("{label}: proposed a plan"),
+                Icon::ClipboardCheck,
+                Tone::Warning,
+            ),
+            // §2/§3.3: amber is "needs you", and the Signals board maps *agent finished* to
+            // exactly that; red is reserved for broken.
+            Attention::NeedsYou(AttentionKind::Finished) => (
+                format!("{label}: agent finished"),
+                Icon::CircleCheck,
+                Tone::Warning,
+            ),
+            Attention::Failed => (format!("{label}: failed"), Icon::CircleX, Tone::Danger),
+            Attention::Working | Attention::Unread | Attention::Idle => return,
+        };
+        if self.notifications.toast {
+            self.toast(
+                Toast::new(text).icon(icon).tone(tone),
                 now,
                 dwell_for(ToastDuration::Normal),
             );

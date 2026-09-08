@@ -235,7 +235,7 @@ pub(super) fn open_config_file(state: &Entity<AppState>, bridge: &Bridge, cx: &m
 }
 
 /// `$EDITOR`, or `vi` — the one editor POSIX guarantees.
-pub(super) fn editor_command() -> String {
+pub(crate) fn editor_command() -> String {
     std::env::var("EDITOR")
         .ok()
         .map(|editor| editor.trim().to_owned())

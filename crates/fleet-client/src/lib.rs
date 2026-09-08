@@ -6,7 +6,10 @@ mod spawn;
 mod terminal;
 mod watches;
 
-pub use api::{CreateWorktreeResult, DaemonVersion, HelloResult, Result};
+pub use api::{
+    AgentMirror, AgentSnapshot, CreateWorktreeResult, DaemonVersion, HelloResult, MirrorOutcome,
+    Result,
+};
 pub use connection::{Client, ConnectError};
 pub use spawn::{SpawnError, ensure_daemon, resolve_daemon_path, restart_daemon};
 pub use terminal::{TerminalHandle, TerminalUpdate};

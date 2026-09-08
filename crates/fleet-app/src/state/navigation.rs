@@ -73,10 +73,16 @@ pub enum AgentPopupMode {
 }
 
 /// The persistent, screen-independent floating-agent state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentPopupState {
-    /// Which fixed daemon-owned agent session is visible.
+    /// Which daemon-owned agent session is visible.
     pub agent: Agent,
+    /// The worktree the fallback belongs to, when it was opened from one.
+    ///
+    /// §1/§2 make `^s F` the *same-worktree* fallback for the thread on screen, so the popup
+    /// ensures that worktree's own agent session. `None` is the repository-level popup the Hub
+    /// opens with `^a`/`^o`, which lives in `repos_dir`.
+    pub worktree: Option<WorktreeId>,
     /// Which terminal input mode owns the popup keyboard.
     pub mode: AgentPopupMode,
     /// Returning from a prefix must preserve Scroll's selection and viewport ownership.
@@ -129,6 +135,8 @@ pub enum Mode {
     Terminal,
     /// Keys go to the Fleet-drawn pane in the active tab.
     Native,
+    /// Keys go to a native structured agent thread.
+    Agent,
     /// One key after `ctrl-s`.
     Prefix,
     /// Scrollback and copy mode.
@@ -149,8 +157,10 @@ impl Mode {
     pub const fn word(self) -> ModeWord {
         match self {
             Self::Normal => ModeWord::Normal,
-            // Native tabs retain the TERMINAL mode word; their glyph identifies the kind.
+            // A Fleet-drawn pane keeps the TERMINAL word: keys stay inside the tab, and its
+            // glyph on the strip already says the pane is not a PTY.
             Self::Terminal | Self::Native => ModeWord::Terminal,
+            Self::Agent => ModeWord::Agent,
             Self::Prefix => ModeWord::Prefix,
             Self::Scroll => ModeWord::Scroll,
             Self::Filter => ModeWord::Filter,
@@ -311,7 +321,7 @@ impl AppState {
         if self.board_filter_owns_keys() {
             return vec!["Filter", "BoardFilter"];
         }
-        let mut chain = match (self.agent_popup, &self.screen) {
+        let mut chain = match (&self.agent_popup, &self.screen) {
             (Some(popup), _) => vec![
                 "Agent",
                 match popup.mode {
@@ -329,15 +339,19 @@ impl AppState {
                     (HubPane::List, HubTab::Prs) => "Prs",
                 },
             ],
-            (None, Screen::Workspace { .. }) => vec![
-                "Workspace",
-                match self.terminal_mode {
-                    TerminalMode::Terminal => "Terminal",
-                    TerminalMode::Native => "Native",
-                    TerminalMode::Prefix => "Prefix",
-                    TerminalMode::Scroll => "Scroll",
-                },
-            ],
+            // An agent tab owns the whole `Agent > …` chain of §9; the terminal sub-modes
+            // belong to the tabs that really are terminals.
+            (None, Screen::Workspace { .. }) => self.agent_context_chain().unwrap_or_else(|| {
+                vec![
+                    "Workspace",
+                    match self.terminal_mode {
+                        TerminalMode::Terminal => "Terminal",
+                        TerminalMode::Native => "Native",
+                        TerminalMode::Prefix => "Prefix",
+                        TerminalMode::Scroll => "Scroll",
+                    },
+                ]
+            }),
         };
         if let DaemonLink::Lost {
             dismissed: false, ..
@@ -359,7 +373,7 @@ impl AppState {
                 Overlay::Dialog(_) => Mode::Dialog,
             };
         }
-        if let Some(popup) = self.agent_popup {
+        if let Some(popup) = &self.agent_popup {
             return match popup.mode {
                 AgentPopupMode::Terminal => Mode::Terminal,
                 AgentPopupMode::Prefix => Mode::Prefix,
@@ -371,6 +385,12 @@ impl AppState {
         }
         match self.screen {
             Screen::Hub { .. } => Mode::Normal,
+            // DESIGN-SYSTEM: the mode word is present on every screen and names the mode the
+            // keys are actually in — a frozen tail is not `AGENT`.
+            Screen::Workspace { .. } if self.active_agent_thread().is_some() => self
+                .active_agent_thread()
+                .filter(|thread| self.agents.is_scrolling(*thread))
+                .map_or(Mode::Agent, |_| Mode::Scroll),
             Screen::Workspace { .. } => match self.terminal_mode {
                 TerminalMode::Terminal => Mode::Terminal,
                 TerminalMode::Native => Mode::Native,
@@ -388,9 +408,18 @@ impl AppState {
     }
 
     /// Opens, switches, or hides the floating agent popup without changing the base screen.
-    pub fn toggle_agent_popup(&mut self, agent: Agent) -> AgentPopupTransition {
-        let transition = match self.agent_popup {
-            Some(current) if current.agent == agent => {
+    ///
+    /// `worktree` scopes the fallback session: `^s F` on an agent tab passes the thread's
+    /// worktree so the PTY starts *there*, while the Hub's `^a`/`^o` pass `None` for the
+    /// repository-level popup. Re-pressing the same agent for a different worktree switches
+    /// rather than hides — it is a different session, not the one already on screen.
+    pub fn toggle_agent_popup(
+        &mut self,
+        agent: Agent,
+        worktree: Option<WorktreeId>,
+    ) -> AgentPopupTransition {
+        let transition = match &self.agent_popup {
+            Some(current) if current.agent == agent && current.worktree == worktree => {
                 self.agent_popup = None;
                 return AgentPopupTransition::Hidden;
             }
@@ -399,10 +428,31 @@ impl AppState {
         };
         self.agent_popup = Some(AgentPopupState {
             agent,
+            worktree,
             mode: AgentPopupMode::Terminal,
             prefix_return: AgentPopupMode::Terminal,
         });
         transition
+    }
+
+    /// The daemon session id the popup's current selection names.
+    #[must_use]
+    pub fn agent_popup_session_id(&self) -> Option<SessionId> {
+        let popup = self.agent_popup.as_ref()?;
+        match &popup.worktree {
+            Some(worktree) => {
+                let session = self
+                    .snapshot
+                    .as_ref()?
+                    .worktrees
+                    .iter()
+                    .find(|entry| &entry.id == worktree)?
+                    .session
+                    .as_str();
+                fleet_core::sessions::worktree_agent_session_id(session, popup.agent).ok()
+            }
+            None => fleet_core::sessions::agent_session_id(popup.agent).ok(),
+        }
     }
 
     /// Hides the floating agent surface. The daemon session is intentionally untouched.
@@ -434,8 +484,7 @@ impl AppState {
     /// The daemon session currently selected by the floating agent popup.
     #[must_use]
     pub fn agent_popup_session(&self) -> Option<&Session> {
-        let agent = self.agent_popup?.agent;
-        let id = fleet_core::sessions::agent_session_id(agent).ok()?;
+        let id = self.agent_popup_session_id()?;
         self.snapshot
             .as_ref()?
             .sessions
@@ -448,18 +497,18 @@ impl AppState {
     /// The shell uses this as the pure half of its single-flight recovery gate after reconnects
     /// and authoritative snapshots that remove an agent session.
     #[must_use]
-    pub fn missing_agent_popup_session(&self) -> Option<Agent> {
-        let popup = self.agent_popup?;
+    pub fn missing_agent_popup_session(&self) -> Option<(Agent, Option<WorktreeId>)> {
+        let popup = self.agent_popup.as_ref()?;
         if !self.daemon.is_connected() {
             return None;
         }
-        let session = fleet_core::sessions::agent_session_id(popup.agent).ok()?;
+        let session = self.agent_popup_session_id()?;
         self.snapshot
             .as_ref()?
             .sessions
             .iter()
             .all(|candidate| candidate.id != session)
-            .then_some(popup.agent)
+            .then(|| (popup.agent, popup.worktree.clone()))
     }
 
     /// Leaves the prefix, whatever the key was. Called for **every** key seen in `Prefix`,
@@ -478,11 +527,24 @@ impl AppState {
     /// The mode a Workspace tab rests in: what owns the keyboard when no Fleet mode is active.
     #[must_use]
     pub fn resting_terminal_mode(&self) -> TerminalMode {
-        if self.active_terminal_is_native() {
+        if self.active_tab_is_fleet_drawn() {
             TerminalMode::Native
         } else {
             TerminalMode::Terminal
         }
+    }
+
+    /// Whether the active Workspace tab is drawn by Fleet rather than fed by a PTY.
+    ///
+    /// A `fleet://` pane and a native agent tab are both Fleet-drawn, but they reach the
+    /// snapshot differently: the pane is a `Terminal` record the daemon marks native, while an
+    /// agent tab is client state ([`AgentThreads::active`]) laid over the same strip and backed
+    /// by no terminal at all. `session.active_terminal` therefore still names the PTY the user
+    /// left behind, and every predicate that asks "is a PTY listening?" has to consult both —
+    /// otherwise the keys typed into the composer are forwarded to that PTY as well.
+    #[must_use]
+    pub fn active_tab_is_fleet_drawn(&self) -> bool {
+        self.active_agent_thread().is_some() || self.active_terminal_is_native()
     }
 
     /// Whether the active session's active tab is drawn by Fleet rather than by a PTY.

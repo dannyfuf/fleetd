@@ -2,10 +2,10 @@ use super::{Shell, first_run_import_allowed, focus::focus_owner};
 use crate::{
     keymap::ROOT_CONTEXT,
     shell::daemon,
-    state::{Overlay, Screen},
+    state::{AppState, Overlay, Screen},
 };
 use fleet_ui_kit::{ActiveTheme, AppFrame, ToastStack, Veil};
-use gpui::{AnyElement, Context, IntoElement, Render, Window, div, prelude::*};
+use gpui::{AnyElement, App, Context, IntoElement, Render, Window, div, prelude::*};
 use std::{rc::Rc, time::Instant};
 
 impl Render for Shell {
@@ -189,9 +189,10 @@ impl Shell {
                     .clone()
                     .cached(gpui::StyleRefinement::default().size_full()),
             )
-            .body_overlay(ToastStack::new(
-                state.toasts.iter().map(|live| live.toast.clone()),
-            ));
+            .body_overlay(
+                ToastStack::new(state.toasts.iter().map(|live| live.toast.clone()))
+                    .bottom_inset(toast_bottom_inset(state, cx)),
+            );
         if let Some(banner) = daemon::banner(
             &state.daemon,
             state.daemon_since,
@@ -211,5 +212,19 @@ impl Shell {
             };
         }
         frame.into_any_element()
+    }
+}
+
+/// How far above the body's bottom edge the toast stack starts.
+///
+/// §2 docks the native agent tab's composer and its 22 px metadata row at the bottom of the
+/// pane, and the toast layer covers the whole body: at the default 12 px a completion toast lands
+/// squarely on that metadata row and hides `$0.87 · 3m`. Everywhere else the default stands.
+fn toast_bottom_inset(state: &AppState, cx: &App) -> gpui::Pixels {
+    let theme = cx.theme();
+    if matches!(state.screen, Screen::Workspace { .. }) && state.active_agent_thread().is_some() {
+        theme.metrics.toast_inset + theme.metrics.text_field_h + theme.metrics.strip_h
+    } else {
+        theme.metrics.toast_inset
     }
 }

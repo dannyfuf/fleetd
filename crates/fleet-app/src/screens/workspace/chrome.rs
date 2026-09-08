@@ -1,7 +1,12 @@
 use super::*;
 
 impl WorkspaceScreen {
-    pub(super) fn header(&self, model: &Model, pr: Option<(u64, PrBadgeState)>) -> AnyElement {
+    pub(super) fn header(
+        &self,
+        model: &Model,
+        pr: Option<(u64, PrBadgeState)>,
+        agent: Option<SharedString>,
+    ) -> AnyElement {
         let mut header = WorkspaceHeader::new(model.title.clone())
             .status(model.status)
             .keep_alive(model.keep_alive.iter().cloned())
@@ -20,6 +25,10 @@ impl WorkspaceScreen {
         }
         if let Some((number, badge)) = pr {
             header = header.pr(number, badge);
+        }
+        // §3.3: an agent tab states its own attention beside the session's status glyph.
+        if let Some(word) = agent {
+            header = header.agent(word);
         }
 
         header.into_any_element()
@@ -45,16 +54,25 @@ impl WorkspaceScreen {
             }),
             SessionKind::Agent { .. } => None,
         };
-        let tabs = self.local.borrow_mut().state.tab_labels.tabs(
+        let agents = threads_of(app, session);
+        let mut tabs = self.local.borrow_mut().state.tab_labels.tabs(
             session,
             status,
             model.terminal,
             &app.renamed_terminals,
         );
-        let active = model
-            .terminal
-            .and_then(|terminal| workspace_tabs::position_of(session, terminal))
-            .unwrap_or(0);
+        let first_agent = tabs.len();
+        let selected = active_target(model);
+        for (offset, summary) in agents.iter().enumerate() {
+            let active = selected == Some(workspace_tabs::TabTarget::Agent(summary.thread));
+            tabs.push(workspace_tabs::agent_tab(
+                summary,
+                first_agent + offset + 1,
+                app.agents.attention(summary.thread),
+                active,
+            ));
+        }
+        let active = workspace_tabs::active_position(session, &agents, selected);
 
         let (new_request, new_bridge, new_state) =
             (shell_tab_request(session), bridge.clone(), state.clone());
@@ -66,20 +84,14 @@ impl WorkspaceScreen {
             // Mouse parity for `ctrl-s 1`-`9` (§3.6). It is also the only way a mouse-first
             // user reaches a Fleet-drawn tab, which is why the strip is finally wired.
             .on_select(move |position, _window, cx| {
-                let Some(terminal) = select_state
-                    .read(cx)
-                    .active_session()
-                    .and_then(|session| workspace_tabs::terminal_at(session, position))
-                else {
-                    return;
+                let target = {
+                    let app = select_state.read(cx);
+                    app.active_session().and_then(|session| {
+                        let agents = threads_of(app, session);
+                        workspace_tabs::target_at(session, &agents, position)
+                    })
                 };
-                select_terminal(
-                    &select_local,
-                    &select_bridge,
-                    &select_state,
-                    Some(terminal),
-                    cx,
-                );
+                select_target(&select_local, &select_bridge, &select_state, target, cx);
             })
             // Mouse parity for `ctrl-s c` (§3.6): the `+` is the same request.
             .on_new(move |_window, cx| {
@@ -117,5 +129,5 @@ pub(super) fn prefix_hints() -> KeyHintRow {
         .key("c", "new")
         .key("x", "close")
         .key("[", "scroll")
-        .key("a", "agent")
+        .key("a", "claude")
 }

@@ -13,6 +13,48 @@ impl Services {
     ) -> DaemonResult<ResponseBody> {
         self.reject_remote_request(&body).await?;
         match body {
+            RequestBody::AgentThreadList => self.agent_response(self.agents.list().await),
+            RequestBody::AgentThreadCreate {
+                worktree,
+                provider,
+                model,
+                mode,
+                resume_cursor,
+                title,
+            } => self.agent_response(
+                self.agents
+                    .create(worktree, provider, model, mode, resume_cursor, title)
+                    .await,
+            ),
+            RequestBody::AgentThreadOpen { thread, from_seq } => {
+                self.agent_response(self.agents.open(thread, from_seq).await)
+            }
+            RequestBody::AgentThreadClose { thread } => {
+                self.agent_response(self.agents.close(thread).await)
+            }
+            RequestBody::AgentSend { thread, input } => {
+                self.agent_response(self.agents.send(thread, input).await)
+            }
+            RequestBody::AgentInterrupt { thread } => {
+                self.agent_response(self.agents.interrupt(thread).await)
+            }
+            RequestBody::AgentRespond {
+                thread,
+                gate,
+                answer,
+            } => self.agent_response(self.agents.respond(thread, gate, answer).await),
+            RequestBody::AgentSetMode { thread, mode } => {
+                self.agent_response(self.agents.set_mode(thread, mode).await)
+            }
+            RequestBody::AgentSetModel { thread, model } => {
+                self.agent_response(self.agents.set_model(thread, model).await)
+            }
+            RequestBody::AgentMarkSeen { thread, seq } => {
+                self.agent_response(self.agents.mark_seen(thread, seq).await)
+            }
+            RequestBody::AgentStop { thread } => {
+                self.agent_response(self.agents.stop(thread).await)
+            }
             RequestBody::ListBoards { context_id } => Ok(ResponseBody::Boards(
                 self.boards.list(context_id.as_ref()).await?,
             )),
@@ -404,6 +446,28 @@ impl Services {
             }),
             RequestBody::DaemonShutdown { .. } => Ok(ResponseBody::ShuttingDown),
         }
+    }
+
+    fn agent_response(
+        &self,
+        result: Result<ResponseBody, fleet_proto::error::ProtoError>,
+    ) -> DaemonResult<ResponseBody> {
+        result.map_err(|error| match error.kind {
+            fleet_proto::error::ErrorKind::NotFound => DaemonError::NotFound(error.message),
+            fleet_proto::error::ErrorKind::Conflict => DaemonError::Conflict(error.message),
+            fleet_proto::error::ErrorKind::Validation => DaemonError::Validation(error.message),
+            fleet_proto::error::ErrorKind::Cancelled => DaemonError::Cancelled,
+            fleet_proto::error::ErrorKind::Unsupported => DaemonError::Unsupported(error.message),
+            fleet_proto::error::ErrorKind::Git => DaemonError::Git(error.message),
+            fleet_proto::error::ErrorKind::Github => DaemonError::Github(error.message),
+            fleet_proto::error::ErrorKind::Fs => DaemonError::fs(
+                self.home.join("agents"),
+                std::io::Error::other(error.message),
+            ),
+            fleet_proto::error::ErrorKind::Tmux
+            | fleet_proto::error::ErrorKind::Remote
+            | fleet_proto::error::ErrorKind::Unknown => DaemonError::Protocol(error.message),
+        })
     }
 
     pub(super) async fn delete_repo_cascade(&self, repo: RepoId) -> DaemonResult<()> {

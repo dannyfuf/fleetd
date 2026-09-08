@@ -215,6 +215,7 @@ fn snapshot(count: usize) -> Snapshot {
             .collect(),
         active_context: None,
         sessions: vec![],
+        agent_threads: Vec::new(),
         statuses: vec![],
         pools: vec![],
         hosts: vec![],

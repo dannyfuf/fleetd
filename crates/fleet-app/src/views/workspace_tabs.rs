@@ -5,10 +5,114 @@ use gpui::SharedString;
 use std::collections::{HashMap, HashSet};
 
 use fleet_core::{
+    agents::{AgentThreadSummary, Attention, ThreadId},
     ids::TerminalId,
     sessions::{AgentActivity, Session, TerminalStatus, WorktreeStatus},
 };
 use fleet_ui_kit::{TerminalAgentState, TerminalTab, TerminalTabKind};
+
+use crate::screens::agent_thread::presentation::{TabBadge, tab_badge, tab_title};
+
+/// What one position of the strip selects.
+///
+/// §2 puts agent threads in the same numbered strip as terminals, so `ctrl-s 1`-`9`, `ctrl-s h`
+/// and `ctrl-s l` count one list: the session's terminals first, then its worktree's threads in
+/// daemon order. A terminal tab is daemon state; the selected agent tab is client state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabTarget {
+    /// A PTY or Fleet-drawn terminal tab.
+    Terminal(TerminalId),
+    /// A native structured agent thread.
+    Agent(ThreadId),
+}
+
+/// Every position of the combined strip, in strip order.
+#[must_use]
+pub(crate) fn targets(session: &Session, agents: &[&AgentThreadSummary]) -> Vec<TabTarget> {
+    session
+        .terminals
+        .iter()
+        .map(|terminal| TabTarget::Terminal(terminal.id))
+        .chain(
+            agents
+                .iter()
+                .map(|summary| TabTarget::Agent(summary.thread)),
+        )
+        .collect()
+}
+
+/// The target `ctrl-s <n>` selects, or `None` when the strip has fewer tabs.
+#[must_use]
+pub(crate) fn target_at(
+    session: &Session,
+    agents: &[&AgentThreadSummary],
+    position: usize,
+) -> Option<TabTarget> {
+    targets(session, agents).into_iter().nth(position)
+}
+
+/// The strip position of the tab currently shown.
+#[must_use]
+pub(crate) fn active_position(
+    session: &Session,
+    agents: &[&AgentThreadSummary],
+    active: Option<TabTarget>,
+) -> usize {
+    active
+        .and_then(|active| {
+            targets(session, agents)
+                .into_iter()
+                .position(|target| target == active)
+        })
+        .unwrap_or(0)
+}
+
+/// The target `ctrl-s h` / `ctrl-s l` moves to, wrapping across terminals and threads alike.
+#[must_use]
+pub(crate) fn neighbour_target(
+    session: &Session,
+    agents: &[&AgentThreadSummary],
+    active: Option<TabTarget>,
+    delta: isize,
+) -> Option<TabTarget> {
+    let targets = targets(session, agents);
+    if targets.is_empty() {
+        return None;
+    }
+    let current = active
+        .and_then(|active| targets.iter().position(|target| target == &active))
+        .unwrap_or(0);
+    let len = isize::try_from(targets.len()).unwrap_or(isize::MAX);
+    let next = (isize::try_from(current).unwrap_or(0) + delta).rem_euclid(len);
+    targets.into_iter().nth(usize::try_from(next).unwrap_or(0))
+}
+
+/// One agent thread's tab, badged with the §3.3 mark its attention maps to.
+#[must_use]
+pub(crate) fn agent_tab(
+    summary: &AgentThreadSummary,
+    index: usize,
+    attention: Attention,
+    active: bool,
+) -> TerminalTab {
+    let mut tab = TerminalTab::new(index, SharedString::from(tab_title(summary)))
+        .id(SharedString::from(format!("agent-tab-{}", summary.thread)));
+    match tab_badge(attention, summary.exit_code) {
+        TabBadge::Spinner => tab = tab.starting(true),
+        // §2 draws the amber dot for as long as the thread needs you, on the selected tab too:
+        // an open gate is not "news you have already read", it is work only you can unblock,
+        // and the strip is where the workspace says so. `activity` is the strip's *unseen
+        // output* mark and the kit suppresses it on the selected tab, which is exactly right
+        // for output and exactly wrong here — hence the separate `attention` mark.
+        TabBadge::NeedsYou => tab = tab.attention(true),
+        TabBadge::Exited(code) => tab = tab.exited(code),
+        // Neutral, and never on the tab you are already reading: §3.3 reserves amber for a
+        // thread that is blocked on you.
+        TabBadge::Unread => tab = tab.unread(!active),
+        TabBadge::None => {}
+    }
+    tab
+}
 
 #[derive(Default)]
 pub(crate) struct TabLabels(HashMap<TerminalId, SharedString>);
@@ -304,6 +408,44 @@ mod tests {
         let tabs = TabLabels::default().tabs(&session, Some(&status), None, &HashSet::new());
         assert_eq!(tabs[0].agent_status, Some(TerminalAgentState::Working));
         assert_eq!(tabs[1].agent_status, None);
+    }
+
+    fn agent_summary(attention: Attention) -> AgentThreadSummary {
+        let worktree: fleet_core::ids::WorktreeId = "buk/payroll#feat"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let projection = fleet_core::agents::ThreadProjection::new(
+            fleet_core::agents::ThreadId::new(),
+            worktree,
+            fleet_core::agents::AgentKind::Claude,
+        );
+        let mut summary = projection.summary(fleet_core::agents::Seq::default());
+        summary.attention = attention;
+        summary
+    }
+
+    #[test]
+    fn a_thread_that_needs_you_keeps_its_amber_dot_on_the_selected_tab() {
+        let blocked = agent_summary(Attention::NeedsYou(
+            fleet_core::agents::AttentionKind::Permission,
+        ));
+        for active in [false, true] {
+            let tab = agent_tab(&blocked, 4, blocked.attention, active);
+            assert!(
+                tab.attention,
+                "§2: the amber dot says the thread is blocked on you, which is still true on \
+                 the tab you are reading — the permission card is not news you have read"
+            );
+            // `activity` is the strip's unseen-output mark and the kit blanks it on the
+            // selected tab; asking for the dot through it is what made the first fix invisible
+            // in the running app while this test passed.
+            assert!(!tab.activity);
+        }
+
+        // Unread output is the opposite: it is news, and there is none on the tab you are on.
+        let unread = agent_summary(Attention::Unread);
+        assert!(agent_tab(&unread, 4, Attention::Unread, false).unread);
+        assert!(!agent_tab(&unread, 4, Attention::Unread, true).unread);
     }
 
     #[test]

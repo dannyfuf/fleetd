@@ -1,6 +1,7 @@
 //! Asynchronous daemon events broadcast to subscribed clients.
 
 use fleet_core::{
+    agents::{AgentThreadSummary, SeqEvent, ThreadId},
     ids::{BoardId, SessionId, TerminalId},
     sessions::{AgentActivity, Session},
     watches::{Watch, WatchChunk, WatchId},
@@ -13,6 +14,10 @@ use crate::{job::JobRecord, snapshot::Snapshot, terminal::FrameUpdate};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    /// Sequenced native-agent transcript and lifecycle events.
+    Agent,
+    /// Compact native-agent summary changes.
+    AgentSummary,
     /// Board or card mutations.
     BoardChanged,
     /// Watch registration.
@@ -56,9 +61,18 @@ pub enum ToastLevel {
 }
 
 /// Asynchronous notification emitted by the daemon.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    /// One normalized, persisted native-agent event.
+    Agent {
+        /// Owning thread.
+        thread: ThreadId,
+        /// Sequenced event payload.
+        event: SeqEvent,
+    },
+    /// A native-agent thread's compact state changed.
+    AgentSummary(AgentThreadSummary),
     /// A board or its cards changed.
     BoardChanged {
         /// Changed board identifier.
@@ -125,6 +139,8 @@ pub enum Event {
     DaemonShuttingDown,
 }
 
+/// Compatibility name for the asynchronous event payload enum.
+pub type EventBody = Event;
 /// Why a board changed; clients reload its authoritative view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -163,6 +179,26 @@ mod tests {
         });
         assert_round_trip(EventKind::Toast);
         assert_round_trip(ToastLevel::Warning);
+        let projection = fleet_core::agents::ThreadProjection::new(
+            ThreadId::new(),
+            fleet_core::ids::WorktreeId::try_from("acme/api#native-agents")
+                .unwrap_or_else(|error| panic!("{error}")),
+            fleet_core::agents::AgentKind::Claude,
+        );
+        assert_round_trip(Event::AgentSummary(projection.summary(Default::default())));
+        assert_round_trip(Event::Agent {
+            thread: projection.thread,
+            event: SeqEvent {
+                seq: fleet_core::agents::Seq(9),
+                at: "2026-09-07T12:00:00Z"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+                raw: Some("system.init".to_owned()),
+                event: fleet_core::agents::AgentEvent::Notice("provider ready".to_owned()),
+            },
+        });
+        assert_round_trip(EventKind::Agent);
+        assert_round_trip(EventKind::AgentSummary);
     }
 
     #[test]

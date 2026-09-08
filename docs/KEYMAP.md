@@ -21,7 +21,8 @@ this file; where the two disagree, this file wins.
 | Native | `Workspace > Native` | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`) | `ctrl-s` (prefix), or selecting a PTY tab |
 | Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal or Native | any key (consumed) or `Esc` |
 | Scroll | `Workspace > Scroll` | `ctrl-s [` | `Esc`, `q`, `i` |
-| Agent terminal | `Agent > Terminal` | `a`/`A` in Hub, `ctrl-s a`/`ctrl-s A` in Workspace | `ctrl-s` (agent prefix), `ctrl-q` (hide) |
+| Agent thread | `Agent > AgentIdle` / `Agent > AgentWorking` / `Agent > AgentDecision > *` (`Agent > AgentRow` is bound but not yet entered) | `ctrl-s a`/`ctrl-s A` in Workspace, selecting a native agent tab | selecting another tab, `ctrl-s x` |
+| Agent terminal | `Agent > Terminal` | `a`/`A` in Hub, `ctrl-s F` in Workspace | `ctrl-s` (agent prefix), `ctrl-q` (hide) |
 | Agent prefix | `Agent > Prefix` (one-shot) | `ctrl-s` inside the popup | any key (consumed) or `Esc` |
 | Agent scroll | `Agent > Scroll` | `ctrl-s [` inside the popup | `Esc`, `q`, `i` |
 | Filter | `Filter` | `/` in a list | `Esc` (first keeps filter, second clears), `Enter` |
@@ -31,8 +32,12 @@ this file; where the two disagree, this file wins.
 | Daemon | `Daemon > Down` / `Daemon > Banner` / `Daemon > Doctor` | fleetd will not start (§3.12 B), fleetd died while attached (§3.12 C), doctor runs | daemon comes back, `Esc` (banner/doctor), `ctrl-q` |
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
 
-The context stack is ordered: the Agent popup shadows `Hub` and `Workspace`; Help and the two
-quit confirms may shadow the Agent popup. Palette and Settings are unavailable while the popup
+The agent **thread** is not a shadowing surface: it is the Workspace's selected tab, so it
+*replaces* the `Workspace > …` context rather than covering it. That also means the Workspace
+prefix table below does not apply inside an agent tab — only the `ctrl-s` combinations listed
+under *Native agent thread* are bound there, and the rest (`^s s`, `^s 1`–`9`, `^s h`/`l`, …)
+are a follow-up. The context stack is ordered: the Agent popup shadows
+`Hub` and `Workspace`; Help and the two quit confirms may shadow the Agent popup. Palette and Settings are unavailable while the popup
 owns focus. `Daemon > Down` and `FirstRun` are full-window and shadow everything except `ctrl-q`.
 
 ## Global (Normal mode, all Hub screens)
@@ -161,7 +166,8 @@ alone preserves them.
 | `,` | rename current terminal |
 | `[` | Scroll mode |
 | `]` | paste clipboard (bracketed when the app requests it) |
-| `a` / `A` | open the floating Claude / OpenCode agent popup |
+| `a` / `A` | new native Claude / OpenCode agent thread in this worktree |
+| `F` | the terminal fallback: the floating agent PTY popup (§10) |
 | `z` | zoom: hide the session header and terminal tab strip; watch pane stays visible (toggle) |
 | `v` | hide/show the cooperative/discovered subagent watch pane; no watches → `no subagent watches` |
 | `V` | dismiss the selected exited watch; if running, hide pane and show `watch still running; pane hidden` |
@@ -217,6 +223,71 @@ After `ctrl-s`:
 
 Agent Scroll mode uses the same `j`/`k`, half/page, `gg`/`G`, `v`/`y`, search-reservation, and
 exit keys as Workspace Scroll mode.
+
+## Native agent thread
+
+A native agent tab is drawn by Fleet, so keys reach its composer rather than a PTY, and the
+status bar reads `AGENT`. The context is chosen by what the thread is doing: an open decision
+card shadows everything else, and the focused transcript row is last.
+
+| Context | Key | Action |
+| --- | --- | --- |
+| `Agent > AgentIdle` | `Enter` | send the composer |
+| `Agent > AgentIdle` | `Shift-Enter` | newline |
+| `Agent > AgentIdle` | `Shift-Tab` | cycle plan / permission mode |
+| `Agent > AgentIdle` | `/` · `@` | slash-command · worktree-file completion |
+| `Agent > AgentIdle` | `Up` / `ctrl-p`, `Down` / `ctrl-n` | move an open completion picker; with no picker, the composer's own caret motion (and prompt history at the top of the buffer) |
+| `Agent > AgentIdle` | `ctrl-s m` | model picker |
+| `Agent > AgentWorking` | `Esc` | interrupt the turn |
+| `Agent > AgentWorking` | `Enter` | queue the composer behind the active turn |
+| both | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close tab · new thread · terminal fallback |
+| both | `Esc` | close a picker, else abandon a note/correction draft, else leave scroll mode, else unqueue, else interrupt |
+| `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |
+| `Agent > AgentDecision > AgentQuestion` | `1`-`4` · `Space` · `Enter` | choose · toggle (multi-select) · answer |
+| `Agent > AgentDecision > AgentPlan` | `y` · `n` · `Enter` | approve · ask for changes · view the plan |
+| `Agent > AgentRow` | `Enter` · `u` · `o` | expand/collapse · revert the edit or turn · open in the editor |
+| `Agent > AgentNativeScroll` | `j`/`k` · `ctrl-d`/`ctrl-u` · `ctrl-f`/`ctrl-b` · `gg`/`G` · `q`/`i`/`Esc` · `ctrl-s [` | line · half page · page · oldest/newest · leave scroll mode |
+
+`ctrl-s [` freezes the transcript's tail and enters `Agent > AgentNativeScroll`, which owns the
+same `j`/`k`, half/page and `gg`/`G` vocabulary the terminal scroll mode has; the status bar's
+mode word reads `SCROLL` for as long as it is on. `G` jumps to the newest row without leaving
+the mode — the tail stays frozen until `q`, `i` or `Esc` leaves it, which is what re-arms the
+follow.
+
+The `Agent > AgentRow` bindings are declared and handled, but nothing gives a transcript row the
+focus yet, so that context never enters a chain and those three keys cannot fire today. Row
+focus is the follow-up in `NATIVE-AGENTS.md` §10; until it lands, **clicking** a tool row, a
+`thinking · 6s` line or a `worked …` fold expands and collapses it, which is what every `[⏎]
+show` hint in the transcript is currently offering.
+
+`e` is offered only by a provider whose gate carries an edit answer (Claude's Bash permission).
+`e` on a permission, `n` on a plan and choosing a question's "Something else…" option all *open*
+a composer field rather than answering at once: while the corrected command, the plan note or
+the free-text answer is being typed the composer keeps the bare letters and the card's keys
+stand down, so the text can start with a `y`, an `n` or contain a space. `Enter` sends it, `Esc`
+abandons it and leaves the card open.
+
+`Esc` is a keymap binding only in `Agent > AgentWorking` and `Agent > AgentNativeScroll`. In
+`Agent > AgentIdle` the composer owns the key and reports it as `MultilineInputEvent::Escape`,
+which runs the same cascade — binding it there as well would take `Esc` away from the buffer that
+has to cancel an IME preedit and a selection first.
+
+`1`-`4` are bound unconditionally but only the digits a question actually offers are honoured: a
+`3` on a two-option question is ignored rather than stored as an answer no label matches.
+
+`/` and `@` are not bound in `Agent > AgentIdle`: the composer inserts the character and reports
+it (`MultilineInputEvent::Trigger`), which is what opens the picker, so both characters stay
+typable inside a prompt and the picker can filter on what follows them.
+
+An open completion picker is a list under a text field, so DESIGN-SYSTEM §4's `ctrl-n`/`ctrl-p`
+and `↓`/`↑` move it, in that sense: `↑` moves the highlight up. All four keys are handed
+straight back to the composer when no picker is open, so a `Shift-Enter` draft still moves its
+caret and `↑` at the top of an untouched buffer still recalls the previous prompt.
+
+`u` also reports that turn checkpoints are not built yet: reverting restores files from a
+Fleet-owned checkpoint (`NATIVE-AGENTS.md` §5), and neither the checkpoint service nor an
+`AgentRevert` request exists. The key answers, rather than silently doing nothing or quietly
+running a different, destructive action.
 
 **Rationale [A25].** The agent surface is a detachable view of the fixed daemon session, not a
 navigation destination. Repeating the visible agent key therefore hides it, switching agent keys

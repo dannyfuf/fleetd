@@ -127,14 +127,23 @@ async fn stores(
     (temp, config, state, worktree)
 }
 
+/// How long a window command may take to say something.
+///
+/// These windows are launched through the developer's own login shell, and a real one can spend
+/// seconds on its startup files before the command inside it runs at all. The budget is a
+/// deadlock guard, not an assertion about speed: it only has to be longer than the slowest
+/// honest shell, or a normal machine reads a green suite as a regression.
+const WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 async fn wait_for_file_text(path: &std::path::Path, needle: &[u8]) -> Vec<u8> {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(WAIT_BUDGET, async {
         loop {
             let bytes = std::fs::read(path).unwrap_or_default();
             if bytes.windows(needle.len()).any(|window| window == needle) {
                 return bytes;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(WAIT_POLL).await;
         }
     })
     .await
@@ -142,9 +151,9 @@ async fn wait_for_file_text(path: &std::path::Path, needle: &[u8]) -> Vec<u8> {
 }
 
 async fn wait_for_file(path: &std::path::Path) {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(WAIT_BUDGET, async {
         while !path.exists() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(WAIT_POLL).await;
         }
     })
     .await
@@ -537,7 +546,7 @@ async fn new_output_prevents_sleep_close() {
         )
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(WAIT_BUDGET, async {
         loop {
             if frames.recv().await.unwrap().terminal == background {
                 break;

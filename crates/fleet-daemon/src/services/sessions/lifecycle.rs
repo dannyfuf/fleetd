@@ -39,6 +39,36 @@ impl Sessions {
                     specs,
                 )
             }
+            // §1/§2: `^s F` is the same-worktree terminal fallback for the thread on screen, so
+            // the popup session it ensures is the worktree's own — one per worktree and agent,
+            // running the configured agent command in the worktree path. Without the worktree
+            // the request is the repository-level popup below, which lives in `repos_dir`.
+            (Some(worktree_id), Some(agent)) => {
+                let state = self.state.load().await?;
+                let worktree = state
+                    .worktrees
+                    .iter()
+                    .find(|entry| entry.id == worktree_id)
+                    .ok_or_else(|| DaemonError::NotFound(worktree_id.to_string()))?;
+                if worktree.host.is_some() {
+                    return Err(remote_unsupported());
+                }
+                let session_id = worktree_agent_session_id(&worktree.session, agent)
+                    .map_err(|error| DaemonError::Validation(error.to_string()))?;
+                let name = match agent {
+                    Agent::Claude => "claude",
+                    Agent::Opencode => "opencode",
+                };
+                (
+                    session_id,
+                    SessionKind::Agent(agent),
+                    worktree.path.clone(),
+                    vec![fleet_core::sessions::TerminalSpec {
+                        name: name.to_owned(),
+                        command: config.agent_commands.command(agent).to_owned(),
+                    }],
+                )
+            }
             (None, Some(agent)) => {
                 let session_id = agent_session_id(agent)
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;
@@ -63,9 +93,9 @@ impl Sessions {
                     }],
                 )
             }
-            _ => {
+            (None, None) => {
                 return Err(DaemonError::Validation(
-                    "exactly one of worktree or agent is required".to_owned(),
+                    "a session requires a worktree, an agent, or both".to_owned(),
                 ));
             }
         };

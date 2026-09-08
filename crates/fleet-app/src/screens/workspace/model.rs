@@ -27,6 +27,8 @@ pub(super) struct Model {
     pub(super) modes: Vec<KitTerminalMode>,
     /// Whether the active tab is drawn by Fleet rather than by a PTY.
     pub(super) native: bool,
+    /// The native agent thread the strip has selected, when an agent tab is active.
+    pub(super) agent: Option<ThreadId>,
     /// The worktree the session belongs to, and its path on disk — what a pane is built from.
     pub(super) worktree: Option<(WorktreeId, PathBuf)>,
     /// Whether a Fleet overlay owns the keyboard, in which case no pane may hold it.
@@ -59,9 +61,13 @@ impl HostReachability {
 }
 
 impl Model {
-    /// The terminal this client attaches to, which is never a Fleet-drawn tab.
+    /// The terminal this client attaches to, which is never a Fleet-drawn or agent tab.
     pub(super) const fn attach_target(&self) -> Option<TerminalId> {
-        if self.native { None } else { self.terminal }
+        if self.native || self.agent.is_some() {
+            None
+        } else {
+            self.terminal
+        }
     }
 
     pub(super) fn build(app: &AppState, session: &Session) -> Self {
@@ -73,6 +79,12 @@ impl Model {
             .map(|terminal| terminal.id);
         let popup_owns_terminal = terminal.is_some() && popup_terminal == terminal;
         let worktree = worktree_of(app, session);
+        // An agent tab is client-side selection over daemon-listed threads, so a thread the
+        // snapshot no longer lists silently returns the strip to its terminals.
+        let agent = worktree.and_then(|worktree| {
+            let thread = app.agents.active(&worktree.id)?;
+            app.agents.summary(thread).map(|summary| summary.thread)
+        });
         let (title, branch_key, repo, host) = match worktree {
             Some(worktree) => (
                 SharedString::new(&worktree.branch),
@@ -163,10 +175,12 @@ impl Model {
             keep_alive,
             running_jobs,
             failed_jobs,
-            native: session
-                .terminals
-                .iter()
-                .any(|entry| Some(entry.id) == terminal && entry.is_native()),
+            native: agent.is_none()
+                && session
+                    .terminals
+                    .iter()
+                    .any(|entry| Some(entry.id) == terminal && entry.is_native()),
+            agent,
             worktree: worktree.map(|worktree| (worktree.id.clone(), PathBuf::from(&worktree.path))),
             overlay_open: app.overlay.is_some() || app.agent_popup.is_some(),
             popup_owns_terminal,

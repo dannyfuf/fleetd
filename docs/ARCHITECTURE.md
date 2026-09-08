@@ -35,8 +35,8 @@ so `fleet import --from-swarm` can copy `~/.swarm/{config,state}.json` verbatim.
 
 ```
 crates/
-  fleet-core      domain types, ids + validation, config/state schemas + defaults, pure helpers   (no I/O)
-  fleet-proto     client<->daemon wire protocol: Request/Response/Event, Snapshot, Job, terminal Frame/Cell, codec
+  fleet-core      domain types, ids + validation, config/state schemas + defaults, agents/ (event model + reducer), pure helpers   (no I/O)
+  fleet-proto     client<->daemon wire protocol: Request/Response/Event, Snapshot, Job, agent threads, terminal Frame/Cell, codec
   fleet-git       git plumbing over the real `git` binary: model, read, mutation, rebase, parse, watch
   fleet-term      pty (portable-pty) + VtEngine trait + GhosttyEngine (libghostty-vt) + terminal host thread (daemon side)
   fleet-daemon    bin `fleetd`: adapters (shell/git/gh/files/process/logs), stores (config/state+lock), services, jobs, socket server
@@ -51,7 +51,8 @@ Dependency direction: `core <- proto <- {term, client, cli} <- {daemon, app}`; `
 only on gpui; `lazygit` depends on `git` and `ui-kit`, never on `core` or `proto`.
 
 Inside the two GPUI crates the module layout follows responsibility, not screen count. `fleet-app`
-splits `shell/`, `state/`, `bridge/`, `presentation/`, `screens/{hub,workspace,agent_popup,jobs}/`,
+splits `shell/`, `state/`, `bridge/`, `presentation/`,
+`screens/{hub,workspace,agent_thread,agent_popup,jobs}/`,
 `dialogs/`, `views/`, `terminal/` and `watches/`; each of those roots holds the type and its
 composition, with preparation, actions, lifecycle and tests in siblings. `fleet-lazygit` splits
 `root/`, `state/`, `panels/`, `views/`, `bridge/` and `drive/` the same way.
@@ -76,7 +77,8 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   discovery cache), `Worktrees` (creation, publication, recovery, trash, hooks) with the
   prepared-copy `Pool`, `Inspect`, `Prune`,
   `Github` (PR tabs, caches, TTLs), `Sessions` (registry, lifecycle, host bridge, observations),
-  `Hosts`, `Sleep`, `Watches` and `WatchDiscovery`, `AgentActivity`, `Awaited`, `Doctor`,
+  `Hosts`, `Sleep`, `Watches` and `WatchDiscovery`, `AgentActivity`, `Agents` (the native agent
+  session manager, below), `Awaited`, `Doctor`,
   `Import`, `Update`. `services/composition.rs` wires them, `dispatch.rs` routes requests,
   `snapshots.rs` builds the broadcast snapshot, and `maintenance.rs` owns the periodic sweeps.
   Revision-keyed caches in `services/cache.rs` let unchanged inventories be reused instead of
@@ -121,6 +123,70 @@ preimage, stash drop carries the stash OID rather than only a mutable index, and
 distinguishes revert from merge/rebase. The backend revalidates those identities immediately
 before mutation; merged status comes from commit reachability.
 
+## Native agent sessions
+
+A Claude Code or OpenCode session is a **thread**, and a thread is daemon state exactly like a
+terminal: the app never owns one. `docs/NATIVE-AGENTS.md` is the specification and ADR 0010
+records why the load-bearing choices are what they are; this is the map.
+
+```
+fleet-core::agents        ids (ThreadId/TurnId/ItemId/GateId/Seq), AgentEvent, items, gates,
+                          state enums, ThreadProjection (the reducer) and AgentThreadSummary
+fleet-daemon services/agents/
+  manager.rs              AgentSessionManager: threads, lifecycle, sequencing, broadcast
+  thread.rs               one live thread: runtime handles, serialized operation gate, coalescing
+  store.rs                append-only event log per thread + the versioned thread index
+  providers/claude/       Claude Code over bidirectional stream-json on stdio
+  providers/opencode/     OpenCode over HTTP + SSE against one managed `opencode serve` per thread
+fleet-client api/agents/  typed commands plus AgentMirror, which replays the same reducer
+fleet-app  screens/agent_thread/   Entity<AgentThreadView> per open tab; state/agents.rs mirrors
+```
+
+**Ownership boundary.** Provider IO produces normalised `AgentEvent`s; a serialised reducer
+stamps each with a per-thread `seq`, persists it, applies it to the projection, and broadcasts
+it; views render projections. Provider wire types never leave `fleet-daemon`, and GPUI never
+owns lifecycle truth. Because the reducer is `fleet_core::agents::ThreadProjection::apply`, the
+daemon and every client run the *same* function over the same ordered events.
+
+**Event flow.** `AgentThreadCreate` resolves the published `WorktreeId` to a trusted canonical
+path through `Worktrees`, spawns the adapter named by `config.agentCommands`, and returns an
+`AgentThreadSummary`. The adapter's `mpsc` receiver is drained by one task per thread: each
+event is sequenced, appended to the log, reduced, and published as `Event::Agent { thread,
+event }`, with `Event::AgentSummary` whenever the summary changes. `ContentDelta`s are coalesced
+per item on a 16 ms tick before broadcast, so a fast model cannot schedule a render per token.
+Turn completion is the provider's authoritative primitive only (§4 of `NATIVE-AGENTS.md`);
+before a `TurnCompleted` is applied every open item of that turn is closed, so no finished turn
+shows a spinner. Gates are independent of turns and close only on `GateResolved`.
+
+**Attention** is derived by the reducer, not by any view: permission > question > plan >
+finished > failed > working > unread > idle, carried in `AgentThreadSummary` so the tab badge,
+the session header word and the context-bar counters cannot disagree. `Finished` is amber and
+clears when the client reports `AgentMarkSeen { thread, seq }`; seen state is per client and
+lives in the app.
+
+**Persistence** is `$FLEET_HOME/agents/`: one append-only `<thread_id>/events.ndjson` written
+before the event is broadcast, plus a versioned `index.json` (id, worktree, provider, title,
+created, last activity, resume cursor, model, mode, last outcome) written with the `StateStore`
+discipline — serialised mutation, atomic rename, quarantine to `index.json.broken-*` on
+corruption. It is not part of `PersistedState` version 1; it has its own file and version.
+
+**Restart.** On boot the manager loads the index and replays each thread's log. A thread the
+log leaves `Starting`/`Running` is an orphan and is settled explicitly: with a resume cursor it
+records `TurnAborted { ProviderExited }` and `SessionStateChanged(Stopped)` and is resumed
+lazily the next time it is opened; without one it records `SessionExited { expected: false }`.
+No PID is ever reattached, and every thread stays browsable read-only regardless. A log whose
+tail the reducer refuses on replay is trimmed back to the last event that reduces
+(`AgentStore::truncate_after`), so one bad record costs the tail rather than the thread.
+
+**Clients** get `Snapshot.agent_threads` for tabs and counters, then `AgentThreadOpen { thread,
+from_seq }` for one thread's `ThreadProjection` plus the events after that cursor, then the
+event stream. A `seq` gap makes the mirror return `MirrorOutcome::Gap` and the app re-opens from
+its last applied `seq`, mirroring terminal frame recovery rather than inventing a rule.
+`fleet agent list|new|send|respond|interrupt|stop|tail` drives the same requests from the CLI,
+which is how a thread is exercised without the app; `fleet agent terminal` is the unchanged PTY
+popup path, kept under its own verb. The read-only verbs open with an explicit `Seq(0)` cursor, so
+reading a thread never triggers the lazy resume a cursorless open means.
+
 ## Terminal pipeline
 
 ```
@@ -134,7 +200,7 @@ modes{alt_screen, mouse, bracketed_paste}, title }`.
 `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid. The wire protocol is version 5; `wrapped` preserves logical lines
+on the client's mirror grid. The wire protocol is version 6; `wrapped` preserves logical lines
 during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
 row is discarded, history shrinks, or a column change reflows it, without treating viewport
 movement as eviction. Off-screen
@@ -205,7 +271,16 @@ explicit return-to-bottom behavior.
 
 ## Protocol compatibility
 
-Daemon IPC is version 5, the bump that carries the board request, response, and event families.
+Daemon IPC is version **6**. Two families arrived since version 4. The board surface adds its
+request, response, and event families (`docs/BOARD.md`). The native-agent surface adds eleven
+`RequestBody` variants (`AgentThreadList`, `AgentThreadCreate`, `AgentThreadOpen`,
+`AgentThreadClose`, `AgentSend`, `AgentInterrupt`, `AgentRespond`, `AgentSetMode`,
+`AgentSetModel`, `AgentMarkSeen`, `AgentStop`), their `ResponseBody` answers (`AgentThreads`,
+`AgentThreadCreated`, `AgentThreadSnapshot`, `AgentAck`), and the `Agent` / `AgentSummary`
+events. `Snapshot`'s new `agent_threads` and `boards` are both `#[serde(default)]`, so an older
+snapshot payload still deserializes; the requests are new names, which an older daemon rejects
+rather than misreads, and `Hello` negotiates the version before any of them is sent.
+
 `PruneWorktrees.ids` is the shipped additive field: it defaults to
 absent and is omitted when `None`, preserving legacy request JSON; `Some(ids)` is the exact
 reviewed allowlist for a commit, which the daemon may shrink after locked reinspection but never
@@ -221,13 +296,18 @@ swarm-compatible CLI JSON envelope remains version 1.
   jobs, sessions, jobs) plus per-terminal mirror grids, all updated from the event stream on
   the gpui foreground executor. A tokio runtime on a background thread runs `fleet-client`;
   channels bridge into gpui.
-- **Modes**: `Normal` (lists), `Terminal` (keys go to the PTY), `Prefix` (one-shot after
-  `ctrl-s` inside a terminal), `Scroll` (copy/scrollback mode), `Filter`, `Palette`, `Dialog`.
-  Implemented as gpui key contexts + actions; see `docs/KEYMAP.md`.
+- **Modes**: `Normal` (lists), `Terminal` (keys go to the PTY), `Native` (keys go to a
+  Fleet-drawn tab), `Agent` (keys go to a native agent thread's composer), `Prefix` (one-shot
+  after `ctrl-s` inside a terminal), `Scroll` (copy/scrollback mode), `Filter`, `Palette`,
+  `Dialog`. Implemented as gpui key contexts + actions; see `docs/KEYMAP.md`.
 - **Screens**: `Hub` (contexts / repos / worktrees or PRs / detail / status bar), `Workspace`
   (session terminals with a tab strip, a compact session header and the subagent watch pane),
-  the floating agent popup, the `Jobs` panel, the dialogs, Palette and Filter.
-  See `docs/UX-SPEC.md` for the per-view content and placement decisions.
+  the native agent tab, the floating agent popup, the `Jobs` panel, the dialogs, Palette and
+  Filter. See `docs/UX-SPEC.md` for the per-view content and placement decisions.
+- **Agent threads**: `AppState::agents` mirrors the daemon's summaries, the projections of the
+  threads this window opened, and the local-only cursors (which tab is selected per worktree,
+  which `seq` has been shown). The tab strip, the session header word, the context-bar counters
+  and the attention notifications all read that one mirror; see `docs/APP-CONTRACTS.md`.
 - **Render discipline**: a screen prepares in `synchronize` — attachment, requests, focus and
   resource reconciliation — and `render_prepared` only composes what is already prepared. Render
   performs no filesystem access and starts no request. See `docs/APP-CONTRACTS.md`.
@@ -239,7 +319,10 @@ swarm-compatible CLI JSON envelope remains version 1.
 Ports/adapters with fakes as in swarm §8: adapter tests assert exact argv; service tests
 assert domain results and side-effect order; core helpers are pure-tested; proto has
 round-trip tests; `fleet-term` has an engine test (bytes in → cells out); `fleet-ui-kit`
-components are exercised by a `kit-gallery` example binary.
+components are exercised by a `kit-gallery` example binary. The agent adapters and the reducer
+are tested by replaying the recorded harness captures (`docs/research/fixtures/agents/`, with the
+subset the adapters replay under `crates/fleet-daemon/tests/fixtures/agents/`) into projections
+and asserting the resulting thread state and attention — no live provider, no window.
 
 ## Cooperative and discovered subagent watches
 

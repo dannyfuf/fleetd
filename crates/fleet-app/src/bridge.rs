@@ -16,7 +16,15 @@ use std::{
 
 use async_channel::{Receiver, Sender};
 use fleet_client::{Client, ensure_daemon};
-use fleet_core::{config::Config, paths::FleetHome};
+use fleet_core::{
+    agents::{
+        AgentKind, AgentThreadSummary, GateAnswer, GateId, ModelSelection, PermissionMode, Seq,
+        SeqEvent, ThreadId, UserInput,
+    },
+    config::Config,
+    ids::WorktreeId,
+    paths::FleetHome,
+};
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     event::Event,
@@ -78,6 +86,15 @@ impl EffectiveConfig {
 /// Everything the background thread tells the UI.
 #[derive(Debug, Clone)]
 pub enum BridgeEvent {
+    /// A sequenced native-agent event ready for the foreground mirror.
+    Agent {
+        /// Owning thread.
+        thread: ThreadId,
+        /// Ordered event payload.
+        event: SeqEvent,
+    },
+    /// A compact native-agent summary update.
+    AgentSummary(AgentThreadSummary),
     /// The daemon answered and sent its first snapshot (§3.12 A resolved).
     Connected(Box<Snapshot>),
     /// The daemon could not be started (§3.12 B).
@@ -127,6 +144,129 @@ pub enum BridgeEvent {
         /// How many events the buffer dropped.
         dropped: u64,
     },
+}
+
+/// Typed native-agent commands accepted by the app bridge.
+#[derive(Debug, Clone)]
+pub enum BridgeCommand {
+    /// List native-agent threads.
+    AgentThreadList,
+    /// Create and start a thread.
+    AgentThreadCreate {
+        /// Owning worktree.
+        worktree: WorktreeId,
+        /// Provider kind.
+        provider: AgentKind,
+        /// Optional model.
+        model: Option<ModelSelection>,
+        /// Initial permission mode.
+        mode: PermissionMode,
+        /// Optional provider cursor.
+        resume_cursor: Option<String>,
+        /// Optional display title.
+        title: Option<String>,
+    },
+    /// Open a projection and event tail.
+    AgentThreadOpen {
+        /// Target thread.
+        thread: ThreadId,
+        /// Optional last-applied cursor.
+        from_seq: Option<Seq>,
+    },
+    /// Close a client thread lease.
+    AgentThreadClose {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Send or steer input.
+    AgentSend {
+        /// Target thread.
+        thread: ThreadId,
+        /// Text and attachments.
+        input: UserInput,
+    },
+    /// Interrupt active work.
+    AgentInterrupt {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Answer a provider gate.
+    AgentRespond {
+        /// Target thread.
+        thread: ThreadId,
+        /// Target gate.
+        gate: GateId,
+        /// Normalized answer.
+        answer: GateAnswer,
+    },
+    /// Change permission mode.
+    AgentSetMode {
+        /// Target thread.
+        thread: ThreadId,
+        /// New mode.
+        mode: PermissionMode,
+    },
+    /// Change the model.
+    AgentSetModel {
+        /// Target thread.
+        thread: ThreadId,
+        /// New model selection.
+        model: ModelSelection,
+    },
+    /// Mark a sequence viewed.
+    AgentMarkSeen {
+        /// Target thread.
+        thread: ThreadId,
+        /// Viewed cursor.
+        seq: Seq,
+    },
+    /// Stop the provider while retaining its transcript.
+    AgentStop {
+        /// Target thread.
+        thread: ThreadId,
+    },
+}
+
+impl From<BridgeCommand> for RequestBody {
+    fn from(command: BridgeCommand) -> Self {
+        match command {
+            BridgeCommand::AgentThreadList => Self::AgentThreadList,
+            BridgeCommand::AgentThreadCreate {
+                worktree,
+                provider,
+                model,
+                mode,
+                resume_cursor,
+                title,
+            } => Self::AgentThreadCreate {
+                worktree,
+                provider,
+                model,
+                mode,
+                resume_cursor,
+                title,
+            },
+            BridgeCommand::AgentThreadOpen { thread, from_seq } => {
+                Self::AgentThreadOpen { thread, from_seq }
+            }
+            BridgeCommand::AgentThreadClose { thread } => Self::AgentThreadClose { thread },
+            BridgeCommand::AgentSend { thread, input } => Self::AgentSend { thread, input },
+            BridgeCommand::AgentInterrupt { thread } => Self::AgentInterrupt { thread },
+            BridgeCommand::AgentRespond {
+                thread,
+                gate,
+                answer,
+            } => Self::AgentRespond {
+                thread,
+                gate,
+                answer,
+            },
+            BridgeCommand::AgentSetMode { thread, mode } => Self::AgentSetMode { thread, mode },
+            BridgeCommand::AgentSetModel { thread, model } => Self::AgentSetModel { thread, model },
+            BridgeCommand::AgentMarkSeen { thread, seq } => Self::AgentMarkSeen { thread, seq },
+            BridgeCommand::AgentStop { thread } => Self::AgentStop { thread },
+        }
+    }
 }
 
 /// A command sent to the background thread.
@@ -235,6 +375,20 @@ impl Bridge {
                 self.report_mutation_failure("the Fleet daemon bridge is closed");
             }
         }
+    }
+
+    /// Sends a typed native-agent command and forgets its response.
+    pub fn send_agent(&self, command: BridgeCommand) {
+        self.send(command.into());
+    }
+
+    /// Sends a typed native-agent command and returns its correlated response channel.
+    #[must_use]
+    pub fn request_agent(
+        &self,
+        command: BridgeCommand,
+    ) -> Receiver<Result<ResponseBody, ProtoError>> {
+        self.request(command.into())
     }
 
     /// Sends a request and returns the channel its single answer arrives on.

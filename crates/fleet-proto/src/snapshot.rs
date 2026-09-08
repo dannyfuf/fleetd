@@ -1,6 +1,7 @@
 //! Complete daemon state snapshots used to initialize client mirrors.
 
 use fleet_core::{
+    agents::AgentThreadSummary,
     ids::{ContextId, HostId, RepoId},
     model::{CloneJob, Context, Repo, Worktree},
     sessions::{Session, WorktreeStatus},
@@ -74,6 +75,9 @@ pub struct Snapshot {
     pub active_context: Option<ContextId>,
     /// Daemon-owned terminal sessions.
     pub sessions: Vec<Session>,
+    /// Persisted and live native-agent thread summaries.
+    #[serde(default)]
+    pub agent_threads: Vec<AgentThreadSummary>,
     /// Runtime worktree status summaries.
     pub statuses: Vec<WorktreeStatus>,
     /// Prepared-copy availability by repository.
@@ -107,6 +111,32 @@ mod tests {
             checked_at: "2026-09-04T12:00:00Z".to_owned(),
             error: Some("ssh timed out".to_owned()),
         });
+    }
+
+    #[test]
+    fn missing_agent_threads_defaults_for_older_snapshots() {
+        let json = serde_json::json!({
+            "generatedAt": "2026-09-04T12:00:00Z",
+            "contexts": [],
+            "repos": [],
+            "clones": [],
+            "worktrees": [],
+            "activeContext": null,
+            "sessions": [],
+            "statuses": [],
+            "pools": [],
+            "hosts": [],
+            "jobs": [],
+            "daemon": {
+                "version": "0.1.0",
+                "pid": 7,
+                "startedAt": "2026-09-04T12:00:00Z",
+                "home": "/tmp/fleet"
+            }
+        });
+        let snapshot: Snapshot =
+            serde_json::from_value(json).unwrap_or_else(|error| panic!("{error}"));
+        assert!(snapshot.agent_threads.is_empty());
     }
 
     #[test]

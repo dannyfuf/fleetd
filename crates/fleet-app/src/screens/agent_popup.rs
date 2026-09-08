@@ -4,7 +4,7 @@
 use crate::terminal::surface::*;
 
 mod actions;
-mod chrome;
+pub(crate) mod chrome;
 mod lifecycle;
 mod model;
 mod terminal;
@@ -25,7 +25,7 @@ use std::{
 use fleet_core::{
     config::Agent,
     ids::{SessionId, TerminalId},
-    sessions::{AgentActivity, TerminalStatus, agent_session_id},
+    sessions::{AgentActivity, TerminalStatus},
 };
 use fleet_proto::{
     request::RequestBody,

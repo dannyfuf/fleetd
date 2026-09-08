@@ -99,6 +99,7 @@ fn app_with_session(session: Session) -> AppState {
         worktrees: Vec::new(),
         active_context: None,
         sessions: vec![session],
+        agent_threads: Vec::new(),
         statuses: Vec::new(),
         pools: Vec::new(),
         hosts: Vec::new(),
@@ -111,6 +112,113 @@ fn app_with_session(session: Session) -> AppState {
         },
     });
     app
+}
+
+/// A worktree session with one PTY tab plus one native agent thread whose tab is selected.
+///
+/// This is the shape S1 was reported in: an agent tab is client state laid over the same strip,
+/// so `session.active_terminal` still names the PTY the user came from.
+fn app_showing_an_agent_tab() -> (AppState, fleet_core::agents::ThreadId) {
+    let worktree: WorktreeId = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut record = session("payroll/feat", terminal(1, TerminalKind::Pty));
+    record.kind = SessionKind::Worktree(worktree.clone());
+    let mut app = app_with_session(record.clone());
+    let projection = fleet_core::agents::ThreadProjection::new(
+        fleet_core::agents::ThreadId::new(),
+        worktree.clone(),
+        fleet_core::agents::AgentKind::Claude,
+    );
+    let thread = projection.thread;
+    let mut snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("app_with_session installs a snapshot"));
+    snapshot.agent_threads = vec![projection.summary(fleet_core::agents::Seq::default())];
+    app.apply_snapshot(snapshot, Instant::now());
+    app.screen = Screen::Workspace {
+        session: record.id.clone(),
+    };
+    app.agents.activate(worktree, thread);
+    (app, thread)
+}
+
+/// S1: characters typed into an agent tab's composer were forwarded to a background PTY, where
+/// they edited whatever program was running in tab 1. The composer never saw them, because the
+/// Workspace's key-down listener stopped propagation before gpui reached the input handler.
+#[test]
+fn an_agent_tab_leaves_no_pty_listening_for_the_keys_typed_into_its_composer() {
+    let (app, _thread) = app_showing_an_agent_tab();
+
+    assert!(app.active_agent_thread().is_some());
+    assert!(
+        app.active_tab_is_fleet_drawn(),
+        "an agent tab is drawn by Fleet even though the session still names a PTY"
+    );
+    assert_eq!(
+        app.active_session()
+            .and_then(|session| session.active_terminal),
+        Some(TerminalId(1)),
+        "the reported bug: the daemon-side selection still points at the PTY"
+    );
+    assert_eq!(
+        terminal_input_target_of(&app),
+        None,
+        "nothing may be typed into that PTY while the composer is on screen"
+    );
+    assert!(!workspace_terminal_is_live_owner(&app, Some(TerminalId(1))));
+    assert_eq!(
+        app.resting_terminal_mode(),
+        TerminalMode::Native,
+        "a Fleet-drawn tab rests in Native, which is the second gate `forward_terminal_key` reads"
+    );
+}
+
+/// The same guard must not deafen a real terminal tab: leaving the agent tab hands the keys back.
+#[test]
+fn leaving_the_agent_tab_gives_the_pty_its_keys_back() {
+    let (mut app, _thread) = app_showing_an_agent_tab();
+    let worktree: WorktreeId = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(app.agents.deactivate(&worktree));
+    app.sync_terminal_mode();
+
+    assert_eq!(terminal_input_target_of(&app), Some((TerminalId(1), false)));
+    assert!(workspace_terminal_is_live_owner(&app, Some(TerminalId(1))));
+    assert_eq!(app.resting_terminal_mode(), TerminalMode::Terminal);
+}
+
+/// S2: `^s x` acknowledged, deselected the tab — and the very next summary broadcast drew it
+/// again, so the tab "survived" and the selection appeared to jump to terminal 1.
+#[test]
+fn a_closed_agent_tab_leaves_the_strip_and_stays_gone() {
+    let (mut app, thread) = app_showing_an_agent_tab();
+    let worktree: WorktreeId = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(app.agents.of_worktree(&worktree).len(), 1);
+
+    // What `close_agent_tab` does, minus the daemon round trip.
+    assert!(app.agents.deactivate(&worktree));
+    assert!(app.agents.close(thread));
+
+    assert!(app.agents.of_worktree(&worktree).is_empty());
+    assert!(app.active_agent_thread().is_none());
+
+    // §6 keeps the thread browsable, so the daemon goes on listing it; the strip must not.
+    let snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("app_with_session installs a snapshot"));
+    app.apply_snapshot(snapshot, Instant::now());
+    assert!(
+        app.agents.of_worktree(&worktree).is_empty(),
+        "a redrawn summary must not resurrect a tab the user closed"
+    );
+    assert!(app.agents.is_closed(thread));
 }
 
 fn encoded(key: &str, key_char: Option<&str>, mods: GpuiModifiers) -> KeyEvent {

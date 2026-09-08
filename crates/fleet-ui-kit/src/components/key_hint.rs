@@ -93,6 +93,19 @@ impl KeyHintRow {
         self.hints.extend(other.hints);
         self
     }
+
+    /// The `(keys, label)` pairs this row will draw, in order.
+    ///
+    /// Two surfaces advertise the same set — a status bar mirrors a card or a popup header
+    /// (`NATIVE-AGENTS.md` §9) — and the only way to hold them to it is to compare the rows
+    /// rather than the code that built them.
+    #[must_use]
+    pub fn pairs(&self) -> Vec<(SharedString, Option<SharedString>)> {
+        self.hints
+            .iter()
+            .map(|hint| (hint.keys.clone(), hint.label.clone()))
+            .collect()
+    }
 }
 
 impl Default for KeyHintRow {

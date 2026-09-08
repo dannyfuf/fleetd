@@ -47,7 +47,7 @@ fn request_wire_goldens() {
                 client: "fleet-test".to_owned(),
             },
         },
-        r#"{"id":1,"body":{"type":"hello","protocol":5,"client":"fleet-test"}}"#,
+        r#"{"id":1,"body":{"type":"hello","protocol":6,"client":"fleet-test"}}"#,
     );
     assert_frame(
         Request {
@@ -167,7 +167,7 @@ fn response_wire_goldens() {
                 server: "fleet-test".to_owned(),
             }),
         },
-        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":5,"server":"fleet-test"}}}}"#,
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":6,"server":"fleet-test"}}}}"#,
     );
     assert_frame(
         Response {
@@ -266,11 +266,11 @@ fn board_view() -> BoardView {
 #[test]
 fn hello_metadata_accepts_old_and_new_ipc_v4_envelopes() {
     let old =
-        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":5,"server":"fleet-test"}}}}"#;
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":6,"server":"fleet-test"}}}}"#;
     let old: HelloResponse = serde_json::from_str(old).expect("old Hello envelope");
     assert!(old.capabilities.is_empty());
 
-    let new_json = r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":5,"server":"fleet-test"}}},"capabilities":["prune.reviewed_ids"]}"#;
+    let new_json = r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":6,"server":"fleet-test"}}},"capabilities":["prune.reviewed_ids"]}"#;
     let new: HelloResponse = serde_json::from_str(new_json).expect("new Hello envelope");
     assert_eq!(new.capabilities, ["prune.reviewed_ids"]);
     let legacy: Response = serde_json::from_str(new_json).expect("legacy Hello decoder");

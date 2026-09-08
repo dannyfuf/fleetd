@@ -25,6 +25,8 @@ const RAIL_WIDTH: f32 = 180.0;
 
 mod draft;
 mod persistence;
+
+pub(crate) use persistence::editor_command;
 mod schema;
 #[cfg(test)]
 mod tests;

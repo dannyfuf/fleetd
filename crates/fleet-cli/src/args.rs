@@ -62,7 +62,7 @@ pub enum Command {
     Path(PathArgs),
     /// Apply sleep policy to a session.
     Sleep(SleepArgs),
-    /// Ensure a repository-level coding-agent session exists.
+    /// Create and control native coding-agent threads.
     Agent(AgentArgs),
     /// Report coding-agent lifecycle activity for the current Fleet terminal.
     AgentStatus(AgentStatusArgs),
@@ -297,9 +297,105 @@ pub enum AgentChoice {
 /// Arguments accepted by `fleet agent`.
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct AgentArgs {
-    /// Agent to launch; defaults to config.agent.
+    /// Native-agent thread operation.
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+/// Native-agent thread operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum AgentCommand {
+    /// List persisted and live native-agent threads.
+    List,
+    /// Create a native-agent thread in a published worktree.
+    New(AgentNewArgs),
+    /// Send or steer a message.
+    Send(AgentSendArgs),
+    /// Answer an open permission, question, or plan gate.
+    Respond(AgentRespondArgs),
+    /// Interrupt the active turn.
+    Interrupt(AgentThreadArgs),
+    /// Stop the provider while retaining its transcript.
+    Stop(AgentThreadArgs),
+    /// Print sequenced events until the provider exits.
+    Tail(AgentTailArgs),
+    /// Open the legacy PTY agent session for this repository (the §10 fallback).
+    Terminal(AgentTerminalArgs),
+}
+
+/// Provider selection for the legacy PTY agent session.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct AgentTerminalArgs {
+    /// Agent to launch; defaults to `config.agent`.
     #[arg(value_enum)]
     pub agent: Option<AgentChoice>,
+}
+
+/// Creation options for one native-agent thread.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct AgentNewArgs {
+    /// Exact published worktree identifier.
+    pub worktree: fleet_core::ids::WorktreeId,
+    /// Structured provider to launch.
+    #[arg(long, value_enum)]
+    pub provider: AgentChoice,
+    /// Provider-native model, optionally `provider/model` for OpenCode.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Initial permission or plan mode.
+    #[arg(long, value_enum, default_value_t = AgentModeChoice::Ask)]
+    pub mode: AgentModeChoice,
+}
+
+/// Permission modes accepted by `fleet agent new`.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum AgentModeChoice {
+    /// Ask before protected operations.
+    Ask,
+    /// Apply edits without asking.
+    AcceptEdits,
+    /// Request a plan before execution.
+    Plan,
+    /// Auto-allow supported operations.
+    FullAccess,
+}
+
+/// A native-agent thread and message.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct AgentSendArgs {
+    /// Thread UUID.
+    pub thread: fleet_core::agents::ThreadId,
+    /// Message text.
+    pub text: String,
+}
+
+/// A native-agent gate and provider-neutral answer words.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct AgentRespondArgs {
+    /// Thread UUID.
+    pub thread: fleet_core::agents::ThreadId,
+    /// Gate UUID.
+    pub gate: fleet_core::agents::GateId,
+    /// Answer words; permission/plan answers begin with their action.
+    #[arg(required = true, num_args = 1..)]
+    pub answer: Vec<String>,
+}
+
+/// A native-agent thread target.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct AgentThreadArgs {
+    /// Thread UUID.
+    pub thread: fleet_core::agents::ThreadId,
+}
+
+/// Event-tail options for one native-agent thread.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct AgentTailArgs {
+    /// Thread UUID.
+    pub thread: fleet_core::agents::ThreadId,
+    /// Print retained history before following live events.
+    #[arg(long)]
+    pub replay: bool,
 }
 
 /// Activity values accepted by `fleet agent-status`.
@@ -398,7 +494,55 @@ mod tests {
             vec!["fleet", "status", "--json"],
             vec!["fleet", "path", "acme/api#feature"],
             vec!["fleet", "sleep", "api/feature", "--json"],
-            vec!["fleet", "agent", "opencode"],
+            vec!["fleet", "agent", "list"],
+            vec![
+                "fleet",
+                "agent",
+                "new",
+                "acme/api#feature",
+                "--provider",
+                "opencode",
+                "--model",
+                "anthropic/claude-sonnet-4",
+                "--mode",
+                "plan",
+            ],
+            vec![
+                "fleet",
+                "agent",
+                "send",
+                "00000000-0000-4000-8000-000000000001",
+                "hello",
+            ],
+            vec![
+                "fleet",
+                "agent",
+                "respond",
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002",
+                "once",
+            ],
+            vec![
+                "fleet",
+                "agent",
+                "interrupt",
+                "00000000-0000-4000-8000-000000000001",
+            ],
+            vec![
+                "fleet",
+                "agent",
+                "stop",
+                "00000000-0000-4000-8000-000000000001",
+            ],
+            vec![
+                "fleet",
+                "agent",
+                "tail",
+                "00000000-0000-4000-8000-000000000001",
+                "--replay",
+            ],
+            vec!["fleet", "agent", "terminal"],
+            vec!["fleet", "agent", "terminal", "opencode"],
             vec!["fleet", "agent-status", "finished", "--json"],
             vec!["fleet", "doctor"],
             vec!["fleet", "doctor", "--reset-state", "--json"],

@@ -609,6 +609,7 @@ mod tests {
             worktrees,
             active_context: None,
             sessions: Vec::new(),
+            agent_threads: Vec::new(),
             statuses,
             pools: Vec::new(),
             hosts: Vec::new(),

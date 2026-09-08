@@ -1,18 +1,9 @@
-//! The diff renderer: file-header cards, hunk separators, tinted rows, syntax colours and
-//! word-level marks, virtualised over `gpui::uniform_list`.
+//! The diff renderer: file-header cards, hunk separators, notes and the split layout,
+//! virtualised over `gpui::uniform_list`.
 //!
-//! Three layers compose per payload row, in this order:
-//!
-//! 1. **Row tint** — a wash derived from the theme background and the ANSI hue that already
-//!    names this diff colour, so no new `ColorTokens` field is needed and both theme modes are
-//!    correct for free. The gutter step is lighter than the row, so the columns read as a rail.
-//! 2. **Syntax runs** from [`super::syntax`], as `HighlightStyle { color }`.
-//! 3. **Word marks** from [`super::intraline`], as `HighlightStyle { background_color }` — a
-//!    stronger wash on top of the already-tinted row.
-//!
-//! Layers 2 and 3 *must* go through [`gpui::combine_highlights`] before reaching
-//! `StyledText::with_default_highlights`, which walks a monotonic cursor and panics on an
-//! unsorted or overlapping range list. Syntax and word ranges overlap constantly.
+//! Payload rows themselves come from [`super::row_layout`], which the reusable inline
+//! [`crate::diff_view::DiffView`] draws from too; this module supplies lazygit's own
+//! [`RowPalette::ansi`] wash and everything around a line.
 //!
 //! Horizontal scroll is a real pixel offset on the payload container (a negative left margin),
 //! not a `chars().skip()`, so the gutters stay pinned and the clamp is `max_offset` on the
@@ -22,69 +13,21 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use fleet_git::DiffKind;
+use fleet_ui_kit::Theme;
 use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::theme::{CH, ch};
-use fleet_ui_kit::{Theme, ThemeMode};
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, Corners, Edges, ElementId, FontFeatures, FontWeight,
-    HighlightStyle, Hsla, Pixels, Point, SharedString, StyledText, TextRun, TextStyle,
-    UniformListDecoration, UniformListScrollHandle, WhiteSpace, Window, WindowTextSystem, canvas,
-    combine_highlights, div, fill, font, point, px, quad, size, transparent_black, uniform_list,
+    Hsla, Pixels, Point, TextRun, UniformListDecoration, UniformListScrollHandle, Window,
+    WindowTextSystem, canvas, div, fill, font, point, px, quad, size, transparent_black,
+    uniform_list,
 };
 
 use super::Ansi;
-use super::diff_model::{
-    DiffModel, DiffRow, DiffViewMode, FileMeta, RowKind, is_panned_payload, marker,
+use super::diff_model::{DiffModel, DiffRow, DiffViewMode, FileMeta, RowKind, is_panned_payload};
+use super::row_layout::{
+    Gutters, RowPalette, RowStyle, SIGN_CH, SIGN_GAP_CH, background, line_row,
 };
-use super::syntax::Bucket;
-
-/// The width of the `+` / `-` sign column, in characters.
-const SIGN_CH: f32 = 1.0;
-
-/// The gap between the sign column and the code, in characters.
-const SIGN_GAP_CH: f32 = 1.0;
-
-/// The three washes one diff colour contributes.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DiffTints {
-    /// Behind the whole row.
-    pub(crate) row: Hsla,
-    /// Behind the line-number gutters — one step lighter, so the columns read as a rail.
-    pub(crate) gutter: Hsla,
-    /// Behind the words that actually changed.
-    pub(crate) emphasis: Hsla,
-    /// The 2 px bar at the very left edge, and the `+` / `-` sign.
-    pub(crate) marker: Hsla,
-}
-
-/// Derives the washes for one diff colour from the theme, rather than adding tokens.
-///
-/// `Hsla::blend` composites its argument **over** the receiver and keeps the receiver's alpha,
-/// so `bg.blend(hue.opacity(a))` is an opaque tinted background — Zed's own
-/// `flattened_background_color` idiom.
-#[must_use]
-pub(crate) fn tints(theme: &Theme, ansi: Ansi) -> DiffTints {
-    let hue = ansi.color(theme);
-    let (row, emphasis, gutter) = match theme.mode {
-        ThemeMode::Dark => (0.12, 0.26, 0.08),
-        ThemeMode::Light => (0.16, 0.32, 0.10),
-    };
-    DiffTints {
-        row: theme.colors.bg.blend(hue.opacity(row)),
-        gutter: theme.colors.bg.blend(hue.opacity(gutter)),
-        emphasis: theme.colors.bg.blend(hue.opacity(emphasis)),
-        marker: hue,
-    }
-}
-
-/// The washes for one row kind, or `None` for a row that keeps the plain background.
-fn row_tints(theme: &Theme, kind: RowKind) -> Option<DiffTints> {
-    match kind {
-        RowKind::Added => Some(tints(theme, Ansi::Green)),
-        RowKind::Removed => Some(tints(theme, Ansi::Red)),
-        _ => None,
-    }
-}
 
 /// The colour a file's status glyph and counts use.
 #[must_use]
@@ -108,227 +51,6 @@ pub(crate) fn kind_icon(kind: DiffKind) -> Icon {
         DiffKind::Unmerged => Icon::TriangleAlert,
         _ => Icon::FilePen,
     }
-}
-
-/// The one `TextStyle` every payload line is shaped with.
-///
-/// Ligatures are off: a face that renders `!=` as a single glyph silently moves the column grid.
-/// `WhiteSpace::Nowrap` short-circuits `TextLayout`'s wrap machinery entirely.
-fn line_style(theme: &Theme, color: Hsla) -> TextStyle {
-    TextStyle {
-        color,
-        font_family: theme.font_mono.clone(),
-        font_features: FontFeatures::disable_ligatures(),
-        font_size: theme.text.data.size.into(),
-        line_height: gpui::DefiniteLength::Absolute(theme.text.data.line_height.into()),
-        font_weight: FontWeight::NORMAL,
-        white_space: WhiteSpace::Nowrap,
-        ..TextStyle::default()
-    }
-}
-
-/// Applies the mono type role to a container, so `StyledText`'s own layout agrees with the runs
-/// we hand it — it reads font size and line height from the *inherited* style.
-fn mono(element: gpui::Div, theme: &Theme) -> gpui::Div {
-    element
-        .font_family(theme.font_mono.clone())
-        .text_size(theme.text.data.size)
-        .line_height(theme.text.data.line_height)
-        .whitespace_nowrap()
-}
-
-/// One payload line, syntax-coloured with its changed words marked.
-fn payload(
-    text: &SharedString,
-    runs: &[(Range<usize>, Bucket)],
-    words: &[Range<usize>],
-    base: Hsla,
-    emphasis: Option<Hsla>,
-    theme: &Theme,
-) -> AnyElement {
-    if text.is_empty() {
-        return div().into_any_element();
-    }
-    let style = line_style(theme, base);
-    let syntax = runs.iter().map(|(range, bucket)| {
-        (
-            range.clone(),
-            HighlightStyle {
-                color: Some(bucket.color(theme)),
-                ..HighlightStyle::default()
-            },
-        )
-    });
-    let marks = words.iter().filter_map(|range| {
-        Some((
-            range.clone(),
-            HighlightStyle {
-                background_color: Some(emphasis?),
-                ..HighlightStyle::default()
-            },
-        ))
-    });
-    // `combine_highlights` sweeps the endpoints and emits disjoint, sorted ranges. Without it
-    // `with_default_highlights` panics on the first overlap between a syntax run and a word mark.
-    let highlights: Vec<(Range<usize>, HighlightStyle)> =
-        combine_highlights(syntax, marks).collect();
-    StyledText::new(text.clone())
-        .with_default_highlights(&style, highlights)
-        .into_any_element()
-}
-
-/// How a row is selected, and where the payload is scrolled to.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct RowStyle {
-    /// Whether the row is inside the current selection.
-    pub(crate) selected: bool,
-    /// Whether the row is the cursor itself, which also earns the 2 px left bar.
-    pub(crate) cursor: bool,
-    /// Whether the panel owning this list has the keyboard.
-    pub(crate) focused: bool,
-    /// Horizontal payload offset, in pixels.
-    pub(crate) h_scroll: f32,
-}
-
-/// The background of a row, with the selection composited over the diff tint rather than
-/// replacing it — a selected added line must still read as added.
-///
-/// The wash is the accent hue at a low alpha rather than `row_selected` at a high one: the
-/// latter is an opaque blue-grey and swallows the green or red the row is carrying, which is
-/// precisely the information a staging selection must not hide.
-fn background(theme: &Theme, tint: Option<Hsla>, style: RowStyle) -> Option<Hsla> {
-    if !style.selected {
-        return tint;
-    }
-    let base = tint.unwrap_or(theme.colors.bg);
-    let alpha = if style.focused { 0.26 } else { 0.10 };
-    Some(base.blend(theme.colors.accent.opacity(alpha)))
-}
-
-/// One line-number gutter cell.
-fn gutter(number: Option<u32>, digits: usize, tint: Option<Hsla>, theme: &Theme) -> AnyElement {
-    let text = number.map_or_else(String::new, |number| number.to_string());
-    let mut cell = mono(div(), theme)
-        .flex_none()
-        .w(ch(digits as f32 + 1.0))
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_end()
-        .pr(theme.space.xs)
-        .text_color(theme.colors.text_muted);
-    if let Some(tint) = tint {
-        cell = cell.bg(tint);
-    }
-    cell.child(text).into_any_element()
-}
-
-/// Which line-number gutters a payload row draws.
-///
-/// Unified shows both, so a reader can follow either side. Split shows one per column, because
-/// the column *is* the side and repeating the other number is noise.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Gutters {
-    /// Old and new, in that order.
-    Both,
-    /// The old side only — the left column of a split.
-    Old,
-    /// The new side only — the right column of a split.
-    New,
-}
-
-/// One payload row: marker bar, the gutters, the sign column and the scrolled payload.
-fn line_row(
-    model: &DiffModel,
-    index: usize,
-    style: RowStyle,
-    gutters: Gutters,
-    cx: &App,
-) -> AnyElement {
-    let theme = cx.theme();
-    let Some(row) = model.rows.get(index) else {
-        return div().h(theme.metrics.diff_row_h).into_any_element();
-    };
-    let tints = row_tints(theme, row.kind);
-    let base = match row.kind {
-        RowKind::Context => theme.colors.text_secondary,
-        RowKind::Other => theme.colors.text_muted,
-        _ => theme.colors.text,
-    };
-    let runs = model.runs_for(index);
-    let mut element = div()
-        .relative()
-        .flex()
-        .flex_row()
-        .items_center()
-        .w_full()
-        .h(theme.metrics.diff_row_h)
-        .overflow_hidden();
-    if let Some(background) = background(theme, tints.map(|tint| tint.row), style) {
-        element = element.bg(background);
-    }
-    // Zed's gutter strip: a thin bar flush at x = 0, so a change is legible even when the row
-    // tint is washed out by a selection on top of it. Every row of a *selection* carries the
-    // cursor colour, which is what makes a multi-row range read as one block.
-    let bar = if style.selected {
-        Some(theme.colors.cursor_bar)
-    } else {
-        tints.map(|tint| tint.marker)
-    };
-    if let Some(bar) = bar {
-        element = element.child(
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .w(theme.metrics.focus_ring_w)
-                .h(theme.metrics.diff_row_h)
-                .bg(bar),
-        );
-    }
-    let wash = tints.map(|tint| tint.gutter);
-    if matches!(gutters, Gutters::Both | Gutters::Old) {
-        element = element.child(gutter(row.old_no, model.digits, wash, theme));
-    }
-    if matches!(gutters, Gutters::Both | Gutters::New) {
-        element = element.child(gutter(row.new_no, model.digits, wash, theme));
-    }
-    element
-        // The sign gets its own fixed `SIGN_CH` cell and the code a fixed `SIGN_GAP_CH` of
-        // padding after it, so the code column starts at the same x on every row whatever its
-        // kind — a `+`/`-` glued to an unindented line and floating away from an indented one is
-        // how the columns drift by a character. GitHub, diffs.com and Zed all do this.
-        .child(
-            mono(div(), theme)
-                .flex_none()
-                .w(ch(SIGN_CH))
-                .text_color(tints.map_or(theme.colors.text_muted, |tint| tint.marker))
-                .child(marker(row.kind)),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .pl(ch(SIGN_GAP_CH))
-                .overflow_hidden()
-                .child(if let Some(line) = model.long_lines.get(&index) {
-                    line.element(style.h_scroll, theme.text.data.line_height)
-                } else {
-                    mono(div(), theme)
-                        .ml(px(-style.h_scroll))
-                        .flex_none()
-                        .child(payload(
-                            &row.text,
-                            &runs,
-                            &row.words,
-                            base,
-                            tints.map(|tint| tint.emphasis),
-                            theme,
-                        ))
-                        .into_any_element()
-                }),
-        )
-        .into_any_element()
 }
 
 /// The top half of a file-header card: status glyph, directory, file name, rename arrow.
@@ -511,7 +233,14 @@ pub(crate) fn unified_row(
         },
         RowKind::HunkHeader => hunk_row(row, index, style, cx),
         RowKind::Note => note_row(row, style, cx),
-        _ => line_row(model, index, style, Gutters::Both, cx),
+        _ => line_row(
+            model,
+            index,
+            style,
+            Gutters::Both,
+            RowPalette::ansi(cx.theme()),
+            cx,
+        ),
     }
 }
 
@@ -556,7 +285,14 @@ pub(crate) fn split_row(model: &DiffModel, index: usize, style: RowStyle, cx: &A
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .child(line_row(model, row, style, gutters, cx))
+            .child(line_row(
+                model,
+                row,
+                style,
+                gutters,
+                RowPalette::ansi(theme),
+                cx,
+            ))
             .into_any_element(),
         None => spacer(cx),
     };
@@ -823,28 +559,6 @@ mod tests {
         "+trois\n",
     )
     .as_bytes();
-
-    #[test]
-    fn markers_match_the_patch_sign_column() {
-        assert_eq!(marker(RowKind::Added), "+");
-        assert_eq!(marker(RowKind::Removed), "-");
-        assert_eq!(marker(RowKind::Context), " ");
-        assert_eq!(marker(RowKind::FileHeader), "");
-    }
-
-    #[test]
-    fn tints_stay_opaque_and_ordered() {
-        let theme = Theme::dark();
-        let added = tints(&theme, Ansi::Green);
-        assert_eq!(added.row.a, 1.0, "a row wash must be opaque");
-        assert_eq!(added.gutter.a, 1.0);
-        assert_eq!(added.emphasis.a, 1.0);
-        // The emphasis wash must be further from the background than the row wash, or a marked
-        // word is invisible on its own row.
-        let distance = |colour: Hsla| (colour.l - theme.colors.bg.l).abs() + (colour.s).abs();
-        assert!(distance(added.emphasis) > distance(added.row));
-        assert!(distance(added.row) > distance(added.gutter));
-    }
 
     #[test]
     fn horizontal_scroll_is_clamped_to_the_content() {

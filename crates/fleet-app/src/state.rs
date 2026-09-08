@@ -10,7 +10,7 @@ use fleet_core::{
     board::BackendDescriptor,
     config::{Agent, NotificationsConfig},
     github::PrTab,
-    ids::{ContextId, JobId, RepoId, SessionId, TerminalId},
+    ids::{ContextId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
     sessions::{AgentActivity, Session, SessionKind, aggregate_agent_activity},
 };
 use fleet_proto::{
@@ -29,6 +29,7 @@ use crate::{
     notify_sound::{NotificationSound, SystemSound},
 };
 
+mod agents;
 mod board;
 mod connection;
 mod navigation;
@@ -38,6 +39,7 @@ mod terminal;
 #[cfg(test)]
 mod test_support;
 
+pub use agents::{AgentCounts, AgentThreads};
 pub use board::{BoardFocus, BoardState, GroupBy};
 pub use connection::{DaemonLink, daemon_log_path, reconnect_backoff};
 use navigation::clamp_cursor;
@@ -135,6 +137,8 @@ pub struct AppState {
     pub terminal_mode: TerminalMode,
     /// The floating agent popup, independent of the base Hub or Workspace screen.
     pub agent_popup: Option<AgentPopupState>,
+    /// The native structured agent threads: daemon summaries, opened projections, seen cursors.
+    pub agents: AgentThreads,
     /// Effective history and wheel configuration.
     pub terminal_config: fleet_core::config::TerminalConfig,
     /// Enabled channels for agent-finished notifications.
@@ -218,6 +222,7 @@ impl AppState {
             displayed_hub: crate::presentation::DisplayedHub::default(),
             terminal_mode: TerminalMode::Terminal,
             agent_popup: None,
+            agents: AgentThreads::default(),
             terminal_config: fleet_core::config::TerminalConfig::default(),
             notifications: NotificationsConfig::default(),
             overlay: None,

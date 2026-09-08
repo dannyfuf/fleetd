@@ -143,7 +143,9 @@ impl ToastStack {
         self
     }
 
-    /// Distance from the edges of the layer the stack is placed in. 12 px by §2.2.
+    /// Distance from the *bottom* of the layer the stack is placed in; the other three edges
+    /// keep §2.2's 12 px. A surface that docks something along the bottom — the native agent
+    /// tab's composer and its metadata row — raises this so a toast never paints over it.
     pub fn bottom_inset(mut self, inset: gpui::Pixels) -> Self {
         self.bottom_inset = Some(inset);
         self
@@ -230,7 +232,8 @@ impl RenderOnce for ToastStack {
                 .flex_col()
                 .justify_end()
                 .items_end()
-                .p(self.bottom_inset.unwrap_or(theme.metrics.toast_inset))
+                .p(theme.metrics.toast_inset)
+                .pb(self.bottom_inset.unwrap_or(theme.metrics.toast_inset))
                 .gap(theme.space.sm)
                 .children(visible.into_iter().map(|toast| {
                     let tone = allowed_tone(toast.tone);

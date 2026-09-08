@@ -125,7 +125,7 @@ fn scroll_mode_cmd_c_never_reaches_pty() {
 fn model_with(state: AgentTerminalState, activity: AgentActivity) -> Model {
     Model {
         agent: Agent::Claude,
-        session: agent_session_id(Agent::Claude)
+        session: fleet_core::sessions::agent_session_id(Agent::Claude)
             .unwrap_or_else(|error| panic!("valid agent session: {error}")),
         mode: AgentPopupMode::Terminal,
         terminal: None,

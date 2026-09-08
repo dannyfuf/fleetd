@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::views::workspace_tabs::TabTarget;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PendingSelectionScroll {
     terminal: TerminalId,
@@ -496,11 +498,14 @@ impl WorkspaceScreen {
             ($root:expr, $action:ty, $position:expr) => {{
                 let (local, bridge, state) = self.handles(bridge, state);
                 $root.on_action(move |_: &$action, _window, cx| {
-                    let terminal = state
-                        .read(cx)
-                        .active_session()
-                        .and_then(|session| workspace_tabs::terminal_at(session, $position));
-                    select_terminal(&local, &bridge, &state, terminal, cx);
+                    let target = {
+                        let app = state.read(cx);
+                        app.active_session().and_then(|session| {
+                            let agents = threads_of(app, session);
+                            workspace_tabs::target_at(session, &agents, $position)
+                        })
+                    };
+                    select_target(&local, &bridge, &state, target, cx);
                 })
             }};
         }
@@ -517,15 +522,15 @@ impl WorkspaceScreen {
         let root = {
             let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::PrevTab, _window, cx| {
-                let terminal = neighbour_terminal(&state, -1, cx);
-                select_terminal(&local, &bridge, &state, terminal, cx);
+                let target = neighbour_tab(&state, -1, cx);
+                select_target(&local, &bridge, &state, target, cx);
             })
         };
         let root = {
             let (local, bridge, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::NextTab, _window, cx| {
-                let terminal = neighbour_terminal(&state, 1, cx);
-                select_terminal(&local, &bridge, &state, terminal, cx);
+                let target = neighbour_tab(&state, 1, cx);
+                select_target(&local, &bridge, &state, target, cx);
             })
         };
         let (local, bridge, state) = self.handles(bridge, state);
@@ -925,6 +930,22 @@ pub(super) fn visible_rows(state: &Entity<AppState>, cx: &App) -> u16 {
 /// Half a page of the current grid, never zero, as `ctrl-d` / `ctrl-u` move.
 pub(super) fn half_page(state: &Entity<AppState>, cx: &App) -> i32 {
     i32::from(visible_rows(state, cx) / 2).max(1)
+}
+
+/// The strip position `ctrl-s h` / `ctrl-s l` moves to, across terminals and agent threads.
+pub(super) fn neighbour_tab(state: &Entity<AppState>, delta: isize, cx: &App) -> Option<TabTarget> {
+    let app = state.read(cx);
+    let session = app.active_session()?;
+    let agents = threads_of(app, session);
+    let active = match &session.kind {
+        SessionKind::Worktree(worktree) => app
+            .agents
+            .active(worktree)
+            .map(TabTarget::Agent)
+            .or_else(|| session.active_terminal.map(TabTarget::Terminal)),
+        SessionKind::Agent { .. } => session.active_terminal.map(TabTarget::Terminal),
+    };
+    workspace_tabs::neighbour_target(session, &agents, active, delta)
 }
 
 /// The terminal `ctrl-s h` / `ctrl-s l` moves to.

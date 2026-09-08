@@ -41,8 +41,8 @@ use crate::actions::{
         FocusStickyError, OpenAgentClaude, OpenAgentOpencode, OpenHelp, OpenJobs, OpenPalette,
         OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
     },
-    help, hub, jobs, palette, prefix, prs, quit_daemon_dialog, quit_dialog, repos, scroll,
-    settings, workspace, worktrees,
+    help, hub, jobs, native_agent, palette, prefix, prs, quit_daemon_dialog, quit_dialog, repos,
+    scroll, settings, workspace, worktrees,
 };
 
 /// One row of the key table, in the order it is registered.
@@ -315,8 +315,11 @@ key_table! {
     ",",            "Workspace > Prefix" => prefix::RenameTerminal;
     "[",            "Workspace > Prefix" => prefix::EnterScroll;
     "]",            "Workspace > Prefix" => prefix::Paste;
-    "a",            "Workspace > Prefix" => OpenAgentClaude;
-    "A",            "Workspace > Prefix" => OpenAgentOpencode;
+    // §10 phase 6: `^s a` / `^s A` default to a native thread; the PTY popup stays reachable
+    // as an explicit fallback on `^s F`, and `a` / `A` on the Hub still open the popup.
+    "a",            "Workspace > Prefix" => native_agent::NewClaude;
+    "A",            "Workspace > Prefix" => native_agent::NewOpenCode;
+    "F",            "Workspace > Prefix" => native_agent::TerminalFallback;
     "z",            "Workspace > Prefix" => prefix::ToggleZoom;
     "v",            "Workspace > Prefix" => prefix::ToggleWatchPane;
     "V",            "Workspace > Prefix" => prefix::DismissWatch;
@@ -351,7 +354,13 @@ key_table! {
 
     // Agent is the persistent popup context; its Terminal / Prefix / Scroll children mirror
     // Workspace terminal mechanics without changing the Workspace underneath.
-    "ctrl-q",       "Agent" => agent::Hide;
+    //
+    // `agent::Hide` is bound on the popup's own children, never on `Agent` itself: gpui matches
+    // `>` as a subsequence, so an `Agent` binding also matches `Fleet > Agent > AgentIdle` — a
+    // native tab, where the popup is not mounted and no handler exists. It shadowed the global
+    // `ctrl-q → Quit` there and the key did nothing at all (APP-CONTRACTS §3 scopes the gesture
+    // to the popup).
+    "ctrl-q",       "Agent > Terminal" => agent::Hide;
 
     "ctrl-s",       "Agent > Terminal" => agent::EnterPrefix;
     "cmd-c",        "Agent > Terminal" => agent::CopySelection;
@@ -390,6 +399,91 @@ key_table! {
     "q",            "Agent > Scroll" => scroll::Exit;
     "i",            "Agent > Scroll" => scroll::Exit;
     "escape",       "Agent > Scroll" => scroll::Escape;
+
+    // Native structured agent contexts coexist with the legacy Terminal/Prefix/Scroll popup
+    // during migration. Deeper gate-shape contexts resolve the deliberately reused bare keys.
+    "enter",         "Agent > AgentIdle" => native_agent::Send;
+    "shift-tab",     "Agent > AgentIdle" => native_agent::PlanMode;
+    // `/`, `@` and `⇧⏎` are deliberately unbound: DESIGN-SYSTEM §6.6 has the composer *insert*
+    // the character and report it as `MultilineInputEvent::Trigger`, which is what opens the
+    // picker. Binding them here consumes the keystroke, so neither character could be typed
+    // into a prompt and the picker's query stayed empty forever. `⇧⏎` was bound to an action
+    // no listener entered (APP-CONTRACTS §6: "actions stop at the first listener … the failure
+    // is silent"), and only worked because gpui let the unhandled key fall through to the
+    // composer that already owns it.
+    // DESIGN-SYSTEM §4: "a list under a text field moves with `ctrl-n`/`ctrl-p` or `↓`/`↑`".
+    // With no picker open both keys are handed straight back to the composer's own caret
+    // motion, so binding them costs a draft nothing.
+    "up",            "Agent > AgentIdle" => native_agent::History;
+    "ctrl-p",        "Agent > AgentIdle" => native_agent::History;
+    "down",          "Agent > AgentIdle" => native_agent::HistoryNext;
+    "ctrl-n",        "Agent > AgentIdle" => native_agent::HistoryNext;
+    "ctrl-s m",      "Agent > AgentIdle" => native_agent::Model;
+    "ctrl-s [",      "Agent > AgentIdle" => native_agent::Scroll;
+    "ctrl-s a",      "Agent > AgentIdle" => native_agent::NewClaude;
+    "ctrl-s A",      "Agent > AgentIdle" => native_agent::NewOpenCode;
+    "ctrl-s x",      "Agent > AgentIdle" => native_agent::CloseTab;
+    "ctrl-s F",      "Agent > AgentIdle" => native_agent::TerminalFallback;
+
+    // §9's `^s [` is a mode, not just a frozen tail: the transcript takes the same vocabulary
+    // the terminal scroll mode has for as long as it is on.
+    "j",             "Agent > AgentNativeScroll" => native_agent::ScrollLineDown;
+    "k",             "Agent > AgentNativeScroll" => native_agent::ScrollLineUp;
+    "ctrl-d",        "Agent > AgentNativeScroll" => native_agent::ScrollHalfPageDown;
+    "ctrl-u",        "Agent > AgentNativeScroll" => native_agent::ScrollHalfPageUp;
+    "ctrl-f",        "Agent > AgentNativeScroll" => native_agent::ScrollPageDown;
+    "ctrl-b",        "Agent > AgentNativeScroll" => native_agent::ScrollPageUp;
+    "g g",           "Agent > AgentNativeScroll" => native_agent::ScrollTop;
+    "G",             "Agent > AgentNativeScroll" => native_agent::ScrollBottom;
+    "q",             "Agent > AgentNativeScroll" => native_agent::ScrollExit;
+    "i",             "Agent > AgentNativeScroll" => native_agent::ScrollExit;
+    "escape",        "Agent > AgentNativeScroll" => native_agent::Stop;
+    "ctrl-s [",      "Agent > AgentNativeScroll" => native_agent::Scroll;
+    "ctrl-s x",      "Agent > AgentNativeScroll" => native_agent::CloseTab;
+    "ctrl-s F",      "Agent > AgentNativeScroll" => native_agent::TerminalFallback;
+
+    "escape",        "Agent > AgentWorking" => native_agent::Stop;
+    "enter",         "Agent > AgentWorking" => native_agent::Queue;
+    "ctrl-s [",      "Agent > AgentWorking" => native_agent::Scroll;
+    "ctrl-s a",      "Agent > AgentWorking" => native_agent::NewClaude;
+    "ctrl-s A",      "Agent > AgentWorking" => native_agent::NewOpenCode;
+    "ctrl-s x",      "Agent > AgentWorking" => native_agent::CloseTab;
+    "ctrl-s F",      "Agent > AgentWorking" => native_agent::TerminalFallback;
+
+    // §1 keeps the terminal path "as an explicit fallback, now on `^s F`" and §3.3 rule 4 lets
+    // an unanswered gate outlive its turn: without these the escape hatches are dead keys for
+    // as long as a card is open. gpui matches `>` as a subsequence in the other direction, so
+    // the `AgentIdle` / `AgentWorking` bindings do not reach these contexts.
+    "ctrl-s [",      "Agent > AgentDecision > AgentPermission" => native_agent::Scroll;
+    "ctrl-s x",      "Agent > AgentDecision > AgentPermission" => native_agent::CloseTab;
+    "ctrl-s F",      "Agent > AgentDecision > AgentPermission" => native_agent::TerminalFallback;
+    "ctrl-s [",      "Agent > AgentDecision > AgentQuestion" => native_agent::Scroll;
+    "ctrl-s x",      "Agent > AgentDecision > AgentQuestion" => native_agent::CloseTab;
+    "ctrl-s F",      "Agent > AgentDecision > AgentQuestion" => native_agent::TerminalFallback;
+    "ctrl-s [",      "Agent > AgentDecision > AgentPlan" => native_agent::Scroll;
+    "ctrl-s x",      "Agent > AgentDecision > AgentPlan" => native_agent::CloseTab;
+    "ctrl-s F",      "Agent > AgentDecision > AgentPlan" => native_agent::TerminalFallback;
+
+    "y",             "Agent > AgentDecision > AgentPermission" => native_agent::AllowOnce;
+    "a",             "Agent > AgentDecision > AgentPermission" => native_agent::AllowSession;
+    "n",             "Agent > AgentDecision > AgentPermission" => native_agent::Deny;
+    "e",             "Agent > AgentDecision > AgentPermission" => native_agent::EditCommand;
+    "escape",        "Agent > AgentDecision > AgentPermission" => native_agent::DenyAndStop;
+
+    "1",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose1;
+    "2",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose2;
+    "3",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose3;
+    "4",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose4;
+    "space",         "Agent > AgentDecision > AgentQuestion" => native_agent::Toggle;
+    "enter",         "Agent > AgentDecision > AgentQuestion" => native_agent::Answer;
+
+    "y",             "Agent > AgentDecision > AgentPlan" => native_agent::ApprovePlan;
+    "n",             "Agent > AgentDecision > AgentPlan" => native_agent::AskChanges;
+    "enter",         "Agent > AgentDecision > AgentPlan" => native_agent::ViewPlan;
+
+    "enter",         "Agent > AgentRow" => native_agent::ExpandRow;
+    "u",             "Agent > AgentRow" => native_agent::Revert;
+    "o",             "Agent > AgentRow" => native_agent::OpenInEditor;
 
     "enter",        "Filter" => filter::Accept;
     "escape",       "Filter" => filter::Escape;
@@ -537,10 +631,19 @@ mod tests {
         "Workspace > Native",
         "Workspace > Prefix",
         "Workspace > Scroll",
-        "Agent",
+        // `Agent` itself binds nothing: gpui evaluates a bare identifier against every node of
+        // the dispatch path, so an `Agent` binding also fires inside a native agent tab, where
+        // the popup is not mounted. Every popup key lives on `Agent > Terminal` / `> Prefix`.
         "Agent > Terminal",
         "Agent > Prefix",
         "Agent > Scroll",
+        "Agent > AgentIdle",
+        "Agent > AgentWorking",
+        "Agent > AgentDecision > AgentPermission",
+        "Agent > AgentDecision > AgentQuestion",
+        "Agent > AgentDecision > AgentPlan",
+        "Agent > AgentRow",
+        "Agent > AgentNativeScroll",
         "Filter",
         "Palette",
         "Jobs",
@@ -855,11 +958,21 @@ mod tests {
     #[test]
     fn agent_popup_ctrl_q_hides_instead_of_quitting() {
         let stroke = Keystroke::parse("ctrl-q").unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            action_for_keystroke("Agent", &stroke)
-                .unwrap_or_else(|| panic!("Agent must override global ctrl-q"))
-                .name(),
-            "agent::Hide"
+        for context in ["Agent > Terminal", "Agent > Prefix"] {
+            assert_eq!(
+                action_for_keystroke(context, &stroke)
+                    .unwrap_or_else(|| panic!("{context} must override global ctrl-q"))
+                    .name(),
+                "agent::Hide"
+            );
+        }
+        // …and nowhere above them. gpui matches a bare identifier at every node of the dispatch
+        // path, so a binding on `Agent` also fires in a native agent tab — where the popup is
+        // not mounted, nothing handles `agent::Hide`, and the global quit would be shadowed by
+        // a key that does nothing at all.
+        assert!(
+            action_for_keystroke("Agent", &stroke).is_none(),
+            "ctrl-q on the Agent root shadows the global quit in a native agent tab"
         );
         assert!(table().iter().any(|spec| {
             spec.context == ROOT_CONTEXT

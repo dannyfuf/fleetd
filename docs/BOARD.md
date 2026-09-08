@@ -549,7 +549,7 @@ changed or this daemon rewrote it. Boards whose context no longer exists are ski
 per board: no board's clone, sync or hook run blocks another board's requests, and `ensure` reads
 an existing board without taking one.
 
-## 5. Protocol (`fleet-proto`, version 5)
+## 5. Protocol (`fleet-proto`, version 6)
 
 ```rust
 // RequestBody discriminants and fields use snake_case, like their siblings; domain payloads use camelCase.

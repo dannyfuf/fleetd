@@ -774,6 +774,7 @@ async fn create_waits_for_clone_snapshot_without_polling_and_preserves_the_envel
             worktrees: Vec::new(),
             active_context: None,
             sessions: Vec::new(),
+            agent_threads: Vec::new(),
             statuses: Vec::new(),
             pools: Vec::new(),
             hosts: Vec::new(),

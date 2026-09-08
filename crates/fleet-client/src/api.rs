@@ -1,5 +1,6 @@
 //! Typed high-level request and response operations.
 
+mod agents;
 mod boards;
 mod daemon;
 mod jobs;
@@ -51,6 +52,8 @@ pub struct DaemonVersion {
     /// Supported wire protocol version.
     pub protocol: u32,
 }
+
+pub use agents::{AgentMirror, AgentSnapshot, MirrorOutcome};
 
 pub(crate) fn expect_ack(operation: &str, response: ResponseBody) -> Result<()> {
     match response {

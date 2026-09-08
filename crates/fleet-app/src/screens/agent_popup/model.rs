@@ -29,8 +29,8 @@ pub(super) enum AgentTerminalState {
 
 impl Model {
     pub(super) fn build(app: &AppState) -> Option<Self> {
-        let popup = app.agent_popup?;
-        let session = agent_session_id(popup.agent).ok()?;
+        let popup = app.agent_popup.as_ref()?;
+        let session = app.agent_popup_session_id()?;
         let record = app
             .snapshot
             .as_ref()
