@@ -18,7 +18,7 @@ use gpui::{App, SharedString, Window, div, prelude::*};
 
 use crate::{text::Text, theme::ActiveTheme, tone::Tone};
 
-/// The eight modes of the app, and their words.
+/// The nine modes of the app, and their words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Mode {
     /// Lists. `NORMAL`.
@@ -26,6 +26,11 @@ pub enum Mode {
     Normal,
     /// Keys go to the PTY. `TERMINAL`.
     Terminal,
+    /// A native agent thread has the keyboard. `AGENT`.
+    ///
+    /// Distinct from [`Mode::Terminal`] because keys reach Fleet's own composer, not a PTY:
+    /// the transcript answers `j`/`k` and the decision keys, and `^s` still prefixes.
+    Agent,
     /// One-shot after `ctrl-s`. `^S`, amber.
     Prefix,
     /// Scrollback / copy mode. `SCROLL`.
@@ -45,6 +50,7 @@ impl Mode {
     pub const ALL: &'static [Mode] = &[
         Mode::Normal,
         Mode::Terminal,
+        Mode::Agent,
         Mode::Prefix,
         Mode::Scroll,
         Mode::Filter,
@@ -58,6 +64,7 @@ impl Mode {
         match self {
             Mode::Normal => "NORMAL",
             Mode::Terminal => "TERMINAL",
+            Mode::Agent => "AGENT",
             Mode::Prefix => "^S",
             Mode::Scroll => "SCROLL",
             Mode::Filter => "FILTER",

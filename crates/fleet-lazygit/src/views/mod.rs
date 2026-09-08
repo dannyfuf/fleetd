@@ -8,6 +8,7 @@ pub(crate) mod diff_model;
 pub(crate) mod file_tree;
 pub(crate) mod intraline;
 pub(crate) mod long_line;
+pub(crate) mod row_layout;
 pub(crate) mod rows;
 pub(crate) mod syntax;
 

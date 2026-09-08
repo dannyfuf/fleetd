@@ -76,6 +76,10 @@ pub struct ColorTokens {
     pub scroll_thumb: Hsla,
     /// Cold-load placeholder rows.
     pub skeleton: Hsla,
+    /// Low-alpha green wash behind added diff lines.
+    pub diff_added: Hsla,
+    /// Low-alpha red wash behind removed diff lines.
+    pub diff_removed: Hsla,
 }
 
 impl ColorTokens {
@@ -104,6 +108,8 @@ impl ColorTokens {
             selection: ca(0x58A6FF47),
             scroll_thumb: c(0x2C313A),
             skeleton: c(0x1E222A),
+            diff_added: ca(0x3FB95024),
+            diff_removed: ca(0xF8514924),
         }
     }
 
@@ -132,6 +138,8 @@ impl ColorTokens {
             selection: ca(0x0969DA33),
             scroll_thumb: c(0xD3D6DC),
             skeleton: c(0xEEF0F3),
+            diff_added: ca(0x1A7F3724),
+            diff_removed: ca(0xCF222E24),
         }
     }
 }

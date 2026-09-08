@@ -62,6 +62,19 @@ pub struct TerminalTab {
     pub name: SharedString,
     /// Output happened since this tab was last visited.
     pub activity: bool,
+    /// The tab is blocked on the user, so its amber dot survives being selected.
+    ///
+    /// `NATIVE-AGENTS.md` §2/§3.3: an open gate is not "news you have already read", it is work
+    /// only the reader can unblock, and the strip is where the workspace says so — including on
+    /// the tab that is currently open, which is the one place [`TerminalTab::activity`] is
+    /// deliberately silent.
+    pub attention: bool,
+    /// Content changed but nothing is waiting on the user: a neutral mark, not an amber one.
+    ///
+    /// A native agent tab distinguishes "the agent wrote while you were elsewhere" from "the
+    /// agent is blocked on you" (`NATIVE-AGENTS.md` §3.3). Amber is reserved for the second,
+    /// so unread draws the same dot in the secondary tone.
+    pub unread: bool,
     /// The PTY is still spawning: §3.6 "Waking a slept session" rebuilds the strip and each
     /// tab shows a `loader-circle` until its process is up.
     pub starting: bool,
@@ -84,6 +97,8 @@ impl TerminalTab {
             id: None,
             name: name.into(),
             activity: false,
+            attention: false,
+            unread: false,
             starting: false,
             keep_alive: None,
             agent_status: None,
@@ -104,9 +119,21 @@ impl TerminalTab {
         self
     }
 
-    /// Mark unread output.
+    /// Mark output that wants the user's attention, with the amber dot.
     pub fn activity(mut self, activity: bool) -> Self {
         self.activity = activity;
+        self
+    }
+
+    /// Mark the tab as blocked on the user; the amber dot then stays on while it is selected.
+    pub fn attention(mut self, attention: bool) -> Self {
+        self.attention = attention;
+        self
+    }
+
+    /// Mark unseen content that is not waiting on the user.
+    pub fn unread(mut self, unread: bool) -> Self {
+        self.unread = unread;
         self
     }
 
@@ -139,6 +166,31 @@ impl TerminalTab {
         self.id
             .clone()
             .unwrap_or_else(|| ("tab", self.index).into())
+    }
+
+    /// The single dot the tab draws, if any.
+    ///
+    /// Amber wins over neutral and an exited tab draws neither: the exit mark already says
+    /// everything a dot could, and two marks on one tab make the strip unreadable. Activity on
+    /// the tab you are already looking at is not news, so the active tab is bare — *unless* the
+    /// tab is blocked on the reader, which stays true no matter which tab is open (§3.3).
+    fn dot_tone(&self, is_active: bool) -> Option<Tone> {
+        if self.exited.is_some() {
+            return None;
+        }
+        if self.attention {
+            return Some(Tone::Warning);
+        }
+        if is_active {
+            return None;
+        }
+        if self.activity {
+            Some(Tone::Warning)
+        } else if self.unread {
+            Some(Tone::Secondary)
+        } else {
+            None
+        }
     }
 
     /// The exit code as it is written on the tab: the number, or `—` for a signal.
@@ -310,6 +362,7 @@ fn tab_element(
 /// The tab's single line: index, kind glyph, name, then the status marks.
 fn tab_body(tab: TerminalTab, is_active: bool, theme: &Theme) -> gpui::Div {
     let exited = tab.exited;
+    let dot = tab.dot_tone(is_active);
     div()
         .flex()
         .flex_1()
@@ -339,8 +392,14 @@ fn tab_body(tab: TerminalTab, is_active: bool, theme: &Theme) -> gpui::Div {
             .ellipsize(),
         )
         .children(
-            tab.starting
-                .then(|| Spinner::new("starting").size(IconSize::Small)),
+            // §2: "gray spinner (running), amber dot (needs you)". Colour is semantic, so
+            // progress is gray everywhere on the strip; amber belongs to the attention dot
+            // alone, and an amber spinner beside it collides with that one signal.
+            tab.starting.then(|| {
+                Spinner::new("starting")
+                    .size(IconSize::Small)
+                    .tone(Tone::Secondary)
+            }),
         )
         .children(tab.keep_alive.map(|icon| {
             icon.el()
@@ -366,11 +425,7 @@ fn tab_body(tab: TerminalTab, is_active: bool, theme: &Theme) -> gpui::Div {
                 )
                 .child(Text::hint(TerminalTab::exit_label(code)).faint())
         }))
-        .children(
-            // Activity on the tab you are already looking at is not news.
-            (tab.activity && !is_active && exited.is_none())
-                .then(|| StatusDot::small(Tone::Warning)),
-        )
+        .children(dot.map(StatusDot::small))
 }
 
 /// The trailing `+`: mouse parity for `ctrl-s c`.
@@ -426,6 +481,39 @@ impl TabStripState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_dot_at_most_and_amber_outranks_unread() {
+        let plain = TerminalTab::new(1, "sh");
+        assert_eq!(plain.dot_tone(false), None);
+        assert_eq!(
+            plain.clone().unread(true).dot_tone(false),
+            Some(Tone::Secondary)
+        );
+        assert_eq!(
+            plain.clone().activity(true).dot_tone(false),
+            Some(Tone::Warning)
+        );
+        assert_eq!(
+            plain.clone().activity(true).unread(true).dot_tone(false),
+            Some(Tone::Warning)
+        );
+        // The tab you are looking at, and an exited tab, draw no dot at all.
+        assert_eq!(plain.clone().unread(true).dot_tone(true), None);
+        assert_eq!(plain.clone().activity(true).dot_tone(true), None);
+        assert_eq!(plain.clone().unread(true).exited(0).dot_tone(false), None);
+        // …except a tab that is blocked on the reader: §3.3's amber dot survives selection,
+        // and only the exit mark still outranks it.
+        assert_eq!(
+            plain.clone().attention(true).dot_tone(true),
+            Some(Tone::Warning)
+        );
+        assert_eq!(
+            plain.clone().attention(true).unread(true).dot_tone(true),
+            Some(Tone::Warning)
+        );
+        assert_eq!(plain.attention(true).exited(0).dot_tone(true), None);
+    }
 
     struct TestStrip {
         tabs: usize,
