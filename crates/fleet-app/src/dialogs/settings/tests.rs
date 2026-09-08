@@ -233,6 +233,7 @@ fn about_reports_app_version_and_live_link() {
         worktrees: Vec::new(),
         active_context: None,
         sessions: Vec::new(),
+        agent_threads: Vec::new(),
         statuses: Vec::new(),
         pools: Vec::new(),
         hosts: Vec::new(),
@@ -292,9 +293,9 @@ fn a_number_row_refuses_every_non_digit() {
 
 #[test]
 fn durations_read_as_one_unit() {
-    assert_eq!(format_duration(600_000), "10 min");
-    assert_eq!(format_duration(3_600_000), "1 h");
-    assert_eq!(format_duration(30_000), "30 s");
+    assert_eq!(schema::format_cycler_duration(600_000), "10 min");
+    assert_eq!(schema::format_cycler_duration(3_600_000), "1 h");
+    assert_eq!(schema::format_cycler_duration(30_000), "30 s");
 }
 
 #[test]

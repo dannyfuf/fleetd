@@ -42,6 +42,7 @@ fn app_with_jobs(home: &str, jobs: Vec<JobRecord>) -> AppState {
         worktrees: vec![],
         active_context: None,
         sessions: vec![],
+        agent_threads: Vec::new(),
         statuses: vec![],
         pools: vec![],
         hosts: vec![],

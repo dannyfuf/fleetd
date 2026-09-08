@@ -1,6 +1,6 @@
 use super::Shell;
 use crate::{actions::fleet, state::AgentPopupTransition};
-use fleet_core::config::Agent;
+use fleet_core::{config::Agent, ids::WorktreeId};
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use gpui::{Context, Window};
 use std::{
@@ -8,20 +8,23 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AgentEnsureKey {
     agent: Agent,
+    /// The worktree the popup is scoped to, or `None` for the repository-level popup.
+    worktree: Option<WorktreeId>,
     generation: u64,
 }
 
 impl Hash for AgentEnsureKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         AgentEnsureFlights::agent_index(self.agent).hash(state);
+        self.worktree.as_ref().map(WorktreeId::as_str).hash(state);
         self.generation.hash(state);
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AgentEnsureClaim {
     key: AgentEnsureKey,
     nonce: u64,
@@ -48,16 +51,17 @@ impl AgentEnsureFlights {
         }
         self.next_nonce = self.next_nonce.wrapping_add(1);
         let claim = AgentEnsureClaim {
-            key,
+            key: key.clone(),
             nonce: self.next_nonce,
         };
+        let agent = Self::agent_index(key.agent);
         self.in_flight.insert(key, claim.nonce);
-        self.current[Self::agent_index(key.agent)] = Some(claim.nonce);
+        self.current[agent] = Some(claim.nonce);
         Some(claim)
     }
 
     /// Finishes an exact flight and reports whether its response still owns the agent claim.
-    fn finish(&mut self, claim: AgentEnsureClaim, current_generation: u64) -> bool {
+    fn finish(&mut self, claim: &AgentEnsureClaim, current_generation: u64) -> bool {
         if self.in_flight.get(&claim.key) != Some(&claim.nonce) {
             return false;
         }
@@ -93,7 +97,10 @@ impl Shell {
     /// Opens or switches the independent popup and ensures its fixed daemon session exists.
     fn toggle_agent(&mut self, agent: Agent, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
-        let hiding_current = state.agent_popup.is_some_and(|popup| popup.agent == agent);
+        let hiding_current = state
+            .agent_popup
+            .as_ref()
+            .is_some_and(|popup| popup.agent == agent && popup.worktree.is_none());
         let preserve = state
             .active_session()
             .and_then(|session| session.active_terminal);
@@ -101,7 +108,7 @@ impl Shell {
             return;
         }
         let transition = self.state.update(cx, |state, cx| {
-            let transition = state.toggle_agent_popup(agent);
+            let transition = state.toggle_agent_popup(agent, None);
             cx.notify();
             transition
         });
@@ -123,18 +130,21 @@ impl Shell {
             self.agent_popup.discard_pending();
             return;
         }
-        let Some(agent) = self.state.read(cx).missing_agent_popup_session() else {
+        let Some((agent, worktree)) = self.state.read(cx).missing_agent_popup_session() else {
             return;
         };
         let key = AgentEnsureKey {
             agent,
+            worktree: worktree.clone(),
             generation: self.state.read(cx).link_generation,
         };
         let Some(claim) = self.agent_ensures.claim(key) else {
             return;
         };
+        // §1/§2: `^s F` is the same-worktree fallback, so the ensured session is the worktree's
+        // own; the Hub's repository-level popup passes no worktree and keeps `repos_dir`.
         let reply = self.bridge.request(RequestBody::EnsureSession {
-            worktree: None,
+            worktree,
             agent: Some(agent),
             sleep_previous: false,
         });
@@ -142,7 +152,7 @@ impl Shell {
             let answer = reply.recv().await;
             let _ = shell.update(cx, |shell, cx| {
                 let generation = shell.state.read(cx).link_generation;
-                if !shell.agent_ensures.finish(claim, generation) {
+                if !shell.agent_ensures.finish(&claim, generation) {
                     return;
                 }
                 match answer {
@@ -152,9 +162,9 @@ impl Shell {
                             cx.notify();
                         });
                     }
-                    Ok(Err(error)) => shell.fail_agent_ensure(claim.key, error.message, cx),
+                    Ok(Err(error)) => shell.fail_agent_ensure(&claim.key, error.message, cx),
                     Ok(Ok(_)) => shell.fail_agent_ensure(
-                        claim.key,
+                        &claim.key,
                         "daemon returned an unexpected response; press a/A to retry".to_owned(),
                         cx,
                     ),
@@ -169,13 +179,20 @@ impl Shell {
 
     fn fail_agent_ensure(
         &mut self,
-        claim: AgentEnsureKey,
+        claim: &AgentEnsureKey,
         message: String,
         cx: &mut Context<Self>,
     ) {
-        let still_selected = self.state.read(cx).agent_popup.is_some_and(|popup| {
-            popup.agent == claim.agent && self.state.read(cx).link_generation == claim.generation
-        });
+        let still_selected = self
+            .state
+            .read(cx)
+            .agent_popup
+            .as_ref()
+            .is_some_and(|popup| {
+                popup.agent == claim.agent
+                    && popup.worktree == claim.worktree
+                    && self.state.read(cx).link_generation == claim.generation
+            });
         if !still_selected {
             return;
         }
@@ -206,16 +223,17 @@ mod tests {
         let mut flights = AgentEnsureFlights::default();
         let old_key = AgentEnsureKey {
             agent: Agent::Claude,
+            worktree: None,
             generation: 3,
         };
-        let old = flights.claim(old_key).expect("first claim");
+        let old = flights.claim(old_key.clone()).expect("first claim");
         assert!(
-            flights.claim(old_key).is_none(),
+            flights.claim(old_key.clone()).is_none(),
             "same key stays single-flight"
         );
 
         assert!(
-            !flights.finish(old, 4),
+            !flights.finish(&old, 4),
             "a reply from the previous link is stale even before a replacement claim exists"
         );
 
@@ -225,13 +243,41 @@ mod tests {
         let current = flights
             .claim(AgentEnsureKey {
                 agent: Agent::Claude,
+                worktree: None,
                 generation: 4,
             })
             .expect("new link generation gets a distinct flight");
         assert!(
-            !flights.finish(superseded, 4),
+            !flights.finish(&superseded, 4),
             "a newer flight supersedes the old nonce before its reply arrives"
         );
-        assert!(flights.finish(current, 4));
+        assert!(flights.finish(&current, 4));
+    }
+
+    #[test]
+    fn the_same_agent_in_two_worktrees_is_two_flights() {
+        let mut flights = AgentEnsureFlights::default();
+        let worktree: WorktreeId = "acme/api#feature"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let repos = AgentEnsureKey {
+            agent: Agent::Claude,
+            worktree: None,
+            generation: 1,
+        };
+        let scoped = AgentEnsureKey {
+            agent: Agent::Claude,
+            worktree: Some(worktree),
+            generation: 1,
+        };
+        let first = flights.claim(repos).expect("the repository-level popup");
+        // §1/§2: `^s F` ensures the worktree's own fallback session, which is a different
+        // session from the Hub's — one in flight must not block the other.
+        let second = flights.claim(scoped).expect("the worktree fallback");
+        assert!(
+            !flights.finish(&first, 1),
+            "the second claim owns the agent"
+        );
+        assert!(flights.finish(&second, 1));
     }
 }

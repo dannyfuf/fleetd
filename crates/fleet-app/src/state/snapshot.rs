@@ -83,6 +83,8 @@ impl AppState {
         self.cursors.worktrees = clamp_cursor(self.cursors.worktrees, snapshot.worktrees.len());
         self.cursors.jobs = clamp_cursor(self.cursors.jobs, snapshot.jobs.len());
         self.forget_vanished(&snapshot);
+        self.agents.sync_snapshot(snapshot.agent_threads.clone());
+        self.notify_agent_attention(now);
         self.snapshot = Some(snapshot);
         self.snapshot_at = Some(now);
         self.bump_snapshot_revision();

@@ -375,6 +375,8 @@ enum FocusTarget {
     Overlay,
     Agent,
     Native,
+    /// A native agent tab, whose composer takes the keyboard itself.
+    AgentThread,
 }
 
 fn focus_target(state: &AppState) -> FocusTarget {
@@ -387,6 +389,16 @@ fn focus_target(state: &AppState) -> FocusTarget {
         FocusTarget::Overlay
     } else if !splash && state.agent_popup.is_some() {
         FocusTarget::Agent
+    } else if !splash
+        && state.doctor.is_none()
+        && !state.is_first_run()
+        && matches!(state.screen, Screen::Workspace { .. })
+        && state.active_agent_thread().is_some()
+    {
+        // APP-CONTRACTS §3: an agent tab's keys reach Fleet's own composer, which the thread
+        // view focuses. Taking focus back for the shell body here would undo that on every
+        // delta the thread receives.
+        FocusTarget::AgentThread
     } else if !splash
         && state.doctor.is_none()
         && !state.is_first_run()
@@ -411,8 +423,8 @@ fn focus_surface(
         FocusTarget::Body => body,
         FocusTarget::Overlay => overlay,
         FocusTarget::Agent => agent,
-        // Native panes restore their own descendant focus on activation.
-        FocusTarget::Native => return,
+        // Native panes and agent tabs restore their own descendant focus on activation.
+        FocusTarget::Native | FocusTarget::AgentThread => return,
     };
     if !wanted.is_focused(window) {
         window.focus(wanted, cx);
@@ -516,7 +528,7 @@ mod tests {
                 assert!(view.overlay.is_focused(window));
                 view.state.update(cx, |state, cx| {
                     state.close_overlay();
-                    state.toggle_agent_popup(fleet_core::config::Agent::Claude);
+                    state.toggle_agent_popup(fleet_core::config::Agent::Claude, None);
                     cx.notify();
                 });
             })

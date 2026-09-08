@@ -306,7 +306,7 @@ pub(super) fn popup_input_target(app: &AppState) -> Option<PopupInputTarget> {
     if app.overlay.is_some() || app.drops_terminal_keys() {
         return None;
     }
-    let popup = app.agent_popup?;
+    let popup = app.agent_popup.as_ref()?;
     let terminal = app
         .agent_popup_session()
         .and_then(|session| session.terminals.first())
@@ -330,6 +330,7 @@ pub(super) fn agent_terminal_is_live_owner(
     app.overlay.is_none()
         && app
             .agent_popup
+            .as_ref()
             .is_some_and(|popup| popup.agent == owner.agent)
         && app.link_generation == owner.generation
         && terminal.is_some()
@@ -350,7 +351,7 @@ pub(super) fn forward_terminal_key(
 ) -> bool {
     let target = {
         let app = state.read(cx);
-        let Some(popup) = app.agent_popup else {
+        let Some(popup) = app.agent_popup.as_ref() else {
             return false;
         };
         if app.overlay.is_some() || popup.mode != AgentPopupMode::Terminal {
@@ -427,7 +428,7 @@ pub(super) fn copy_selection(
         return;
     }
     let app = state.read(cx);
-    if copy_reaches_pty(app.agent_popup.map(|popup| popup.mode))
+    if copy_reaches_pty(app.agent_popup.as_ref().map(|popup| popup.mode))
         && let Some(target) = popup_input_target(app)
     {
         let accepted = send_or_queue(local, bridge, target, PendingInput::Key(copy_keystroke()));

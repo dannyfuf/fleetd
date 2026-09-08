@@ -208,7 +208,7 @@ fn agent_popup_open_switch_hide_preserves_the_underlying_focus_state() {
     let base = state.screen.clone();
 
     assert_eq!(
-        state.toggle_agent_popup(Agent::Claude),
+        state.toggle_agent_popup(Agent::Claude, None),
         AgentPopupTransition::Opened
     );
     assert_eq!(state.screen, base);
@@ -225,17 +225,17 @@ fn agent_popup_open_switch_hide_preserves_the_underlying_focus_state() {
     assert_eq!(state.context_chain(), vec!["Agent", "Prefix"]);
     assert!(state.leave_agent_prefix());
     assert_eq!(
-        state.toggle_agent_popup(Agent::Opencode),
+        state.toggle_agent_popup(Agent::Opencode, None),
         AgentPopupTransition::Switched
     );
     assert_eq!(state.screen, base);
     assert_eq!(
-        state.agent_popup.map(|popup| popup.agent),
+        state.agent_popup.as_ref().map(|popup| popup.agent),
         Some(Agent::Opencode)
     );
 
     assert_eq!(
-        state.toggle_agent_popup(Agent::Opencode),
+        state.toggle_agent_popup(Agent::Opencode, None),
         AgentPopupTransition::Hidden
     );
     assert!(state.agent_popup.is_none());
@@ -255,7 +255,7 @@ fn agent_popup_does_not_change_workspace_terminal_mode() {
     };
     state.terminal_mode = TerminalMode::Scroll;
 
-    state.toggle_agent_popup(Agent::Claude);
+    state.toggle_agent_popup(Agent::Claude, None);
     state.enter_agent_prefix();
     assert_eq!(state.terminal_mode, TerminalMode::Scroll);
     assert!(state.hide_agent_popup());
@@ -266,7 +266,7 @@ fn agent_popup_does_not_change_workspace_terminal_mode() {
 #[test]
 fn agent_prefix_restores_scroll_instead_of_bypassing_its_cleanup() {
     let mut state = AppState::new("/tmp/fleet", Instant::now());
-    state.toggle_agent_popup(Agent::Claude);
+    state.toggle_agent_popup(Agent::Claude, None);
     state
         .agent_popup
         .as_mut()
@@ -275,12 +275,12 @@ fn agent_prefix_restores_scroll_instead_of_bypassing_its_cleanup() {
 
     state.enter_agent_prefix();
     assert_eq!(
-        state.agent_popup.map(|popup| popup.mode),
+        state.agent_popup.as_ref().map(|popup| popup.mode),
         Some(AgentPopupMode::Prefix)
     );
     assert!(state.leave_agent_prefix());
     assert_eq!(
-        state.agent_popup.map(|popup| popup.mode),
+        state.agent_popup.as_ref().map(|popup| popup.mode),
         Some(AgentPopupMode::Scroll)
     );
 }
@@ -289,12 +289,66 @@ fn agent_prefix_restores_scroll_instead_of_bypassing_its_cleanup() {
 fn missing_visible_agent_session_is_recoverable_only_while_connected() {
     let now = Instant::now();
     let mut state = AppState::new("/tmp/fleet", now);
-    state.toggle_agent_popup(Agent::Claude);
+    state.toggle_agent_popup(Agent::Claude, None);
     state.snapshot = Some(snapshot());
 
     assert_eq!(state.missing_agent_popup_session(), None);
     state.daemon = DaemonLink::Connected;
-    assert_eq!(state.missing_agent_popup_session(), Some(Agent::Claude));
+    assert_eq!(
+        state.missing_agent_popup_session(),
+        Some((Agent::Claude, None))
+    );
+}
+
+#[test]
+fn the_terminal_fallback_ensures_the_threads_own_worktree_session() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let worktree: fleet_core::ids::WorktreeId = "acme/api#feature"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut snapshot = snapshot();
+    snapshot.worktrees = vec![fleet_core::model::Worktree {
+        id: worktree.clone(),
+        repo_id: "acme/api".parse().unwrap_or_else(|error| panic!("{error}")),
+        slug: "feature".to_owned(),
+        branch: "feature".to_owned(),
+        base_ref: "main".to_owned(),
+        path: "/tmp/worktrees/acme/api/feature".to_owned(),
+        session: "acme/api/feature".to_owned(),
+        host: None,
+        created_at: "2026-09-04T09:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    }];
+    state.snapshot = Some(snapshot);
+    state.daemon = DaemonLink::Connected;
+
+    // `^a` from the Hub keeps the one repository-level popup, which lives in `repos_dir`.
+    state.toggle_agent_popup(Agent::Claude, None);
+    assert_eq!(
+        state.agent_popup_session_id().map(|id| id.to_string()),
+        Some("swarm-agent-claude".to_owned())
+    );
+
+    // §1/§2: `^s F` on a thread opens the fallback in *that thread's* worktree, so it ensures
+    // a different session — r2-06 showed `claude` starting in `<home>/repos` instead.
+    let transition = state.toggle_agent_popup(Agent::Claude, Some(worktree.clone()));
+    assert_eq!(transition, AgentPopupTransition::Switched);
+    assert_eq!(
+        state.agent_popup_session_id().map(|id| id.to_string()),
+        Some("acme/api/feature/agent-claude".to_owned())
+    );
+    assert_eq!(
+        state.missing_agent_popup_session(),
+        Some((Agent::Claude, Some(worktree.clone())))
+    );
+
+    // The same key on the same worktree still hides it.
+    assert_eq!(
+        state.toggle_agent_popup(Agent::Claude, Some(worktree)),
+        AgentPopupTransition::Hidden
+    );
 }
 
 #[test]

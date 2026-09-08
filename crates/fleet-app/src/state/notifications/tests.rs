@@ -107,7 +107,7 @@ fn popup_agent_activity_survives_snapshots_and_notifies_once() {
     let mut current = snapshot();
     current.sessions.push(fixed_agent);
     state.apply_bridge_event(BridgeEvent::Connected(Box::new(current.clone())), now);
-    state.toggle_agent_popup(Agent::Claude);
+    state.toggle_agent_popup(Agent::Claude, None);
 
     state.apply_daemon_event(
         agent_event(session.as_str(), 41, AgentActivity::Working),

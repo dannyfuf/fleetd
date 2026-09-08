@@ -156,7 +156,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
 #[test]
 fn agent_prefix_consumes_bound_and_unbound_keys_and_restores_scroll_with_daemon_banner() {
     let mut state = AppState::new("/tmp/fleet", Instant::now());
-    state.toggle_agent_popup(Agent::Claude);
+    state.toggle_agent_popup(Agent::Claude, None);
     state.agent_popup.as_mut().expect("popup open").mode = crate::state::AgentPopupMode::Scroll;
     state.daemon = DaemonLink::Lost {
         attempt: 1,
@@ -172,7 +172,7 @@ fn agent_prefix_consumes_bound_and_unbound_keys_and_restores_scroll_with_daemon_
         Some(Action::name(&prefix::Paste))
     );
     assert_eq!(
-        state.agent_popup.map(|popup| popup.mode),
+        state.agent_popup.as_ref().map(|popup| popup.mode),
         Some(crate::state::AgentPopupMode::Scroll)
     );
 
@@ -182,7 +182,7 @@ fn agent_prefix_consumes_bound_and_unbound_keys_and_restores_scroll_with_daemon_
     assert!(consumed);
     assert!(action.is_none());
     assert_eq!(
-        state.agent_popup.map(|popup| popup.mode),
+        state.agent_popup.as_ref().map(|popup| popup.mode),
         Some(crate::state::AgentPopupMode::Scroll)
     );
 }
@@ -232,7 +232,7 @@ fn pointer_gate_paints_after_every_overlay_layer() {
 #[test]
 fn popup_ctrl_q_guard_is_exact() {
     let mut state = AppState::new("/tmp/fleet", Instant::now());
-    state.toggle_agent_popup(Agent::Claude);
+    state.toggle_agent_popup(Agent::Claude, None);
     let quit = Keystroke::parse("ctrl-q").unwrap_or_else(|error| panic!("{error}"));
     assert!(popup_owns_ctrl_q(&state, &quit));
     let stop = Keystroke::parse("ctrl-shift-q").unwrap_or_else(|error| panic!("{error}"));

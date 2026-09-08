@@ -44,6 +44,12 @@ pub fn event_damage(event: &Event) -> EventDamage {
             terminal: Some(*terminal_id),
             ..EventDamage::default()
         },
+        Event::Agent { .. } | Event::AgentSummary(_) => EventDamage {
+            domain: true,
+            chrome: true,
+            notifications: true,
+            ..EventDamage::default()
+        },
         Event::TerminalFrame(frame) => EventDamage {
             terminal: Some(frame.terminal),
             sessions: frame.title.is_some(),

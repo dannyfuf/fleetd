@@ -230,6 +230,97 @@ pub mod agent {
     );
 }
 
+/// Actions owned by the native structured agent thread.
+pub mod native_agent {
+    use gpui::actions;
+
+    actions!(
+        native_agent,
+        [
+            /// `Enter` — send the composer text.
+            Send,
+            /// `Shift+Tab` — enter plan mode.
+            PlanMode,
+            /// `/` — open command completion.
+            Commands,
+            /// `@` — open file completion.
+            Files,
+            /// `Up` / `ctrl-p` — the previous completion row, else composer history.
+            History,
+            /// `Down` / `ctrl-n` — the next completion row, else one caret row down.
+            HistoryNext,
+            /// `ctrl-s m` — choose model and effort.
+            Model,
+            /// `ctrl-s [` — enter transcript scroll mode.
+            Scroll,
+            /// `j` in transcript scroll mode — move the viewport down one row.
+            ScrollLineDown,
+            /// `k` in transcript scroll mode — move the viewport up one row.
+            ScrollLineUp,
+            /// `ctrl-d` in transcript scroll mode — down half a viewport.
+            ScrollHalfPageDown,
+            /// `ctrl-u` in transcript scroll mode — up half a viewport.
+            ScrollHalfPageUp,
+            /// `ctrl-f` in transcript scroll mode — down a viewport.
+            ScrollPageDown,
+            /// `ctrl-b` in transcript scroll mode — up a viewport.
+            ScrollPageUp,
+            /// `gg` in transcript scroll mode — the oldest retained row.
+            ScrollTop,
+            /// `G` in transcript scroll mode — back to the live bottom.
+            ScrollBottom,
+            /// `q` / `i` in transcript scroll mode — leave it; the viewport snaps to the bottom.
+            ScrollExit,
+            /// `ctrl-s a` — create a Claude thread.
+            NewClaude,
+            /// `ctrl-s A` — create an OpenCode thread.
+            NewOpenCode,
+            /// `Esc` — interrupt active work.
+            Stop,
+            /// `Enter` while working — queue composer text.
+            Queue,
+            /// `y` — allow this invocation once.
+            AllowOnce,
+            /// `a` — allow matching calls for this session or directory.
+            AllowSession,
+            /// `n` — deny this invocation.
+            Deny,
+            /// `e` — edit the protected command.
+            EditCommand,
+            /// `Esc` on permission — deny and interrupt.
+            DenyAndStop,
+            /// `1` — choose question option one.
+            Choose1,
+            /// `2` — choose question option two.
+            Choose2,
+            /// `3` — choose question option three.
+            Choose3,
+            /// `4` — choose question option four.
+            Choose4,
+            /// `Space` — toggle a multi-select option.
+            Toggle,
+            /// `Enter` — submit question answers.
+            Answer,
+            /// `y` — approve the plan and build.
+            ApprovePlan,
+            /// `n` — ask the agent to change its plan.
+            AskChanges,
+            /// `Enter` — view the full plan.
+            ViewPlan,
+            /// `Enter` on a focused row — expand or collapse it.
+            ExpandRow,
+            /// `u` — revert the focused edit or turn.
+            Revert,
+            /// `o` — open the focused path in the editor.
+            OpenInEditor,
+            /// `ctrl-s x` — close the native agent tab.
+            CloseTab,
+            /// `ctrl-s F` — open the PTY agent session instead (migration fallback).
+            TerminalFallback,
+        ]
+    );
+}
+
 pub mod prefix {
     use gpui::actions;
 

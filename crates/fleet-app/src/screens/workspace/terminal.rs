@@ -131,6 +131,7 @@ impl WorkspaceScreen {
         let root = self.with_key_forwarding(root, bridge, state);
         let root = self.with_clipboard_actions(root, bridge, state);
         let root = self.with_prefix_actions(root, bridge, state);
+        let root = self.with_agent_actions(root, bridge, state);
         self.with_scroll_actions(root, bridge, state)
     }
 
@@ -308,8 +309,19 @@ pub(super) fn terminal_input_target(
     terminal_input_target_of(state.read(cx))
 }
 
+/// The PTY a Workspace keystroke belongs to, and whether it is primed.
+///
+/// `None` whenever nothing is listening: an overlay or the popup owns the keys, the link is
+/// down, or the tab on screen is drawn by Fleet. That last case covers the native agent tabs,
+/// which are client state over the same strip and leave `session.active_terminal` pointing at
+/// the PTY the user came from; without the guard every character typed into the composer is
+/// also written to that background PTY.
 pub(super) fn terminal_input_target_of(app: &AppState) -> Option<(TerminalId, bool)> {
-    if app.overlay.is_some() || app.agent_popup.is_some() || app.drops_terminal_keys() {
+    if app.overlay.is_some()
+        || app.agent_popup.is_some()
+        || app.drops_terminal_keys()
+        || app.active_tab_is_fleet_drawn()
+    {
         return None;
     }
     let terminal = active_pty_terminal_of(app.active_session()?)?;
@@ -331,7 +343,7 @@ pub(super) fn workspace_terminal_is_live_owner(
             .active_session()
             .and_then(|session| session.active_terminal)
             == terminal
-        && !app.active_terminal_is_native()
+        && !app.active_tab_is_fleet_drawn()
 }
 
 pub(super) fn forward_terminal_key(

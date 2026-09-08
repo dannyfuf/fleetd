@@ -184,6 +184,13 @@ const GROUPS: &[(&str, &[&str])] = &[
             "Agent > Terminal",
             "Agent > Prefix",
             "Agent > Scroll",
+            "Agent > AgentIdle",
+            "Agent > AgentWorking",
+            "Agent > AgentDecision > AgentPermission",
+            "Agent > AgentDecision > AgentQuestion",
+            "Agent > AgentDecision > AgentPlan",
+            "Agent > AgentRow",
+            "Agent > AgentNativeScroll",
         ],
     ),
     (

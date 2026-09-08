@@ -323,6 +323,7 @@ impl WorkspaceScreen {
         self.arm_prefix_hint(&model, state, cx);
         self.lookup_pr(&model, bridge, state, cx);
         self.sync_panes(&model, bridge, state, window, cx);
+        self.sync_agent_views(&model, bridge, state, window, cx);
 
         if let Some(grid) = state.read(cx).active_grid().filter(|grid| grid.primed) {
             self.local

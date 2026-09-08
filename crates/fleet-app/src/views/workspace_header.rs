@@ -34,6 +34,7 @@ pub(crate) struct WorkspaceHeader {
     failed_jobs: usize,
     waking: bool,
     modes: Vec<TerminalMode>,
+    agent: Option<SharedString>,
 }
 
 impl WorkspaceHeader {
@@ -52,7 +53,18 @@ impl WorkspaceHeader {
             failed_jobs: 0,
             waking: false,
             modes: Vec::new(),
+            agent: None,
         }
+    }
+
+    /// The active agent thread's attention word: `working`, `needs you`, `idle` or `failed`.
+    ///
+    /// It sits beside the session's own status because the two are orthogonal: the session can
+    /// be attached while its agent thread is the thing that needs the user (§3.3).
+    #[must_use]
+    pub(crate) fn agent(mut self, word: impl Into<SharedString>) -> Self {
+        self.agent = Some(word.into());
+        self
     }
 
     /// The `owner/name` the worktree belongs to.
@@ -181,6 +193,14 @@ impl RenderOnce for WorkspaceHeader {
                     .child(Text::hint(host).tone(host_tone))
             }))
             .children(self.pr.map(|(number, state)| PrBadge::new(number, state)))
+            .children(self.agent.map(|word| {
+                let tone = if word == "needs you" || word == "failed" {
+                    Tone::Warning
+                } else {
+                    Tone::Secondary
+                };
+                Text::ui(word).tone(tone)
+            }))
             // Everything after this spacer is right-aligned, in the §3.6 order:
             // VT modes · status glyph · keep-alive · jobs.
             .child(div().flex_1())

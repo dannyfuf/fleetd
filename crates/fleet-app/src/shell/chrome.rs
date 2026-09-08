@@ -67,6 +67,15 @@ fn context_bar(state: &AppState, cx: &App) -> AnyElement {
         .chip(Chip::counter(Icon::Moon, counts.sleeping))
         .chip(Chip::counter(Icon::CircleQuestionMark, counts.unknown).tone(Tone::Warning))
         .chip(Chip::counter(Icon::Flag, counts.review));
+    // §3.3: the agent counters are one vocabulary with the tab badge and the session header,
+    // and they include the thread on the current tab.
+    for (icon, label, tone) in agent_segments(state.agents.counts()) {
+        let mut chip = Chip::labeled(icon, label).tone(tone);
+        if icon == Icon::LoaderCircle {
+            chip = chip.id("context-bar-agents-working").spinning(true);
+        }
+        bar = bar.chip(chip);
+    }
     if let Some(version) = &state.update_version {
         bar = bar.chip(Chip::labeled(
             Icon::CircleArrowUp,
@@ -74,6 +83,60 @@ fn context_bar(state: &AppState, cx: &App) -> AnyElement {
         ));
     }
     bar.into_any_element()
+}
+
+/// The §3.3 agent segments of the context bar, in `needs you · working · failed` order.
+///
+/// A zero segment is omitted. §1.2's zero-suppression cannot reach these on its own: the count
+/// lives inside the chip's *word* (`3 needs you`), and [`Chip::zero_suppress`] only drops a bare
+/// `Some(0)` count — so the bar read `0 needs you` in amber next to `0 failed` in red while
+/// nothing needed anyone. Colour is semantic (§1.4); a count of nothing has no semantics to
+/// paint, so it does not get a segment at all.
+#[must_use]
+fn agent_segments(counts: crate::state::AgentCounts) -> Vec<(Icon, String, Tone)> {
+    [
+        (Icon::Bot, "needs you", Tone::Warning, counts.needs_you),
+        (
+            Icon::LoaderCircle,
+            "working",
+            Tone::Secondary,
+            counts.working,
+        ),
+        (Icon::CircleX, "failed", Tone::Danger, counts.failed),
+    ]
+    .into_iter()
+    .filter(|(_, _, _, count)| *count > 0)
+    .map(|(icon, word, tone, count)| (icon, format!("{count} {word}"), tone))
+    .collect()
+}
+
+/// The §9 key hints of the active agent tab, which the status bar mirrors.
+#[must_use]
+fn agent_key_hints(state: &AppState) -> Option<fleet_ui_kit::KeyHintRow> {
+    use crate::screens::agent_thread::presentation::{decision_hints, key_hints};
+    use fleet_core::agents::AgentKind;
+
+    // §9: the floating fallback shadows every workspace binding while it is up — the mode word
+    // already reads `TERMINAL` — so the bar mirrors the popup's keys, not the tab's.
+    if state.agent_popup.is_some() {
+        return Some(crate::screens::agent_popup::chrome::key_hints());
+    }
+    let thread = state.active_agent_thread()?;
+    let projection = state.agents.projection(thread);
+    let gate = projection.and_then(|projection| projection.gates.last());
+    // §9: while a correction or a plan note is being typed the card's keys stand down, so the
+    // status bar must not keep advertising `y allow once` at a composer that owns the letters.
+    if let Some(gate) = gate.filter(|_| !state.agents.is_composing(thread)) {
+        let provider = projection.map_or(AgentKind::Claude, |projection| projection.provider);
+        return Some(decision_hints(
+            gate,
+            provider,
+            state.agents.question_cursor(thread),
+        ));
+    }
+    // §9 and DESIGN-SYSTEM §4: the bar mirrors the keys that actually fire, so it reads the
+    // same working predicate `agent_context_chain` picks the key context from.
+    Some(key_hints(state.agents.is_working(thread)))
 }
 
 /// The status-bar breadcrumb `context › repo › row` (§2.2).
@@ -96,6 +159,10 @@ fn status_bar(state: &AppState) -> AnyElement {
     let mut bar = StatusBar::new()
         .breadcrumb(SharedString::from(breadcrumb_text(state)))
         .mode(state.mode().word());
+    // §9: an agent tab advertises its own key set, which changes with the open decision card.
+    if let Some(hints) = agent_key_hints(state) {
+        bar = bar.trailing(hints);
+    }
 
     let jobs = state
         .snapshot
@@ -176,6 +243,7 @@ mod tests {
             worktrees: Vec::new(),
             active_context: active.then_some(id),
             sessions: Vec::new(),
+            agent_threads: Vec::new(),
             statuses: Vec::new(),
             pools: Vec::new(),
             hosts: Vec::new(),
@@ -187,6 +255,49 @@ mod tests {
                 home: "/tmp/fleet".to_owned(),
             },
         }
+    }
+
+    #[test]
+    fn the_status_bar_mirrors_the_popups_keys_while_the_popup_is_up() {
+        let now = std::time::Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        assert!(agent_key_hints(&state).is_none());
+
+        state.toggle_agent_popup(fleet_core::config::Agent::Claude, None);
+        assert_eq!(state.mode().word().word(), "TERMINAL");
+        let hints = agent_key_hints(&state).expect("the popup advertises its own keys");
+        assert_eq!(
+            hints.pairs(),
+            crate::screens::agent_popup::chrome::key_hints().pairs(),
+            "§9: the bar names the keys that actually fire, and while the popup owns the \
+             keyboard those are the popup's — not `⏎ send · ⇧⇥ plan mode · …`"
+        );
+
+        state.hide_agent_popup();
+        assert!(agent_key_hints(&state).is_none());
+    }
+
+    #[test]
+    fn the_agent_segments_omit_every_count_of_nothing() {
+        use crate::state::AgentCounts;
+
+        assert!(agent_segments(AgentCounts::default()).is_empty());
+        let some = AgentCounts {
+            needs_you: 3,
+            working: 0,
+            failed: 1,
+        };
+        assert_eq!(
+            agent_segments(some)
+                .into_iter()
+                .map(|(_, label, tone)| (label, tone))
+                .collect::<Vec<_>>(),
+            vec![
+                ("3 needs you".to_owned(), Tone::Warning),
+                ("1 failed".to_owned(), Tone::Danger),
+            ],
+            "§2's example is `3 needs you · 2 working · 1 failed`; a zero segment is not in it"
+        );
     }
 
     #[test]

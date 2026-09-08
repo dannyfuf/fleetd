@@ -6,6 +6,7 @@
 use crate::terminal::surface::*;
 
 mod actions;
+mod agent;
 mod chrome;
 mod lifecycle;
 mod model;
@@ -15,6 +16,7 @@ mod terminal;
 mod tests;
 
 use actions::*;
+use agent::*;
 use chrome::*;
 use model::*;
 use native::*;
@@ -22,9 +24,16 @@ use terminal::*;
 
 pub(crate) use model::status_kind;
 
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Instant};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    rc::Rc,
+    time::Instant,
+};
 
 use fleet_core::{
+    agents::{ThreadId, ThreadProjection},
     github::{PrChecks, PrReviewDecision, PrTab, derive_pr_state},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
     model::Worktree,
@@ -77,6 +86,10 @@ pub(crate) struct WorkspaceScreen {
     /// with sleep and wake, and re-opening the same worktree should find the same git view.
     /// Evicted in [`WorkspaceScreen::sync_panes`] when the daemon stops listing the worktree.
     panes: HashMap<WorktreeId, Pane>,
+    /// One live view per opened agent thread, shared with the root's action listeners.
+    agent_views: Rc<RefCell<AgentViews>>,
+    /// Threads whose `@` completion listing has already been requested.
+    agent_files: Rc<RefCell<HashSet<ThreadId>>>,
 }
 
 impl WorkspaceScreen {
@@ -87,6 +100,8 @@ impl WorkspaceScreen {
             local: Rc::new(RefCell::new(Local::default())),
             model: None,
             panes: HashMap::new(),
+            agent_views: Rc::new(RefCell::new(AgentViews::new())),
+            agent_files: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
@@ -125,9 +140,14 @@ impl WorkspaceScreen {
                     .copied()
             })
         });
-        let header = (!model.zoomed).then(|| self.header(model, pr));
+        let agent_word = self.agent_header_word(state.read(cx), model);
+        let header = (!model.zoomed).then(|| self.header(model, pr, agent_word));
         let tabs = (!model.zoomed).then(|| self.tab_strip(model, bridge, state, cx));
-        let terminal = self.terminal_area(model, bridge, state, focus, focused, cx);
+        let terminal = if model.agent.is_some() {
+            self.agent_area(model, cx)
+        } else {
+            self.terminal_area(model, bridge, state, focus, focused, cx)
+        };
         let watch = crate::views::watch_pane::render(
             &model.session,
             state,
