@@ -370,8 +370,10 @@ async fn authenticate(
     if let Some(expected) = expected_subscription {
         assert_eq!(events, expected);
     } else {
-        assert_eq!(events.len(), 13);
+        assert_eq!(events.len(), 15);
         for kind in [
+            EventKind::Agent,
+            EventKind::AgentSummary,
             EventKind::WatchStarted,
             EventKind::WatchOutput,
             EventKind::WatchExited,
