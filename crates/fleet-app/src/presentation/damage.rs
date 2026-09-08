@@ -18,6 +18,9 @@ pub struct EventDamage {
 
 pub fn event_damage(event: &Event) -> EventDamage {
     match event {
+        // The board mirror is not part of the Hub's domain projection: `AppState` marks it
+        // stale and the board screen reloads it, so no cached row here is invalidated.
+        Event::BoardChanged { .. } => EventDamage::default(),
         Event::SnapshotChanged(_) => EventDamage {
             domain: true,
             jobs: true,

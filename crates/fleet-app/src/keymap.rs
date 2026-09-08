@@ -35,7 +35,8 @@ use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredic
 
 use crate::actions::fleet::Cancel;
 use crate::actions::{
-    agent, confirm, context_dialog, create_worktree, daemon, dialog, filter, first_run,
+    agent, board, card_detail, confirm, context_dialog, create_worktree, daemon, dialog, filter,
+    first_run,
     fleet::{
         FocusStickyError, OpenAgentClaude, OpenAgentOpencode, OpenHelp, OpenJobs, OpenPalette,
         OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
@@ -139,6 +140,56 @@ fn parse_binding(spec: BindingSpec, action: Box<dyn Action>) -> Result<KeyBindin
 pub const ROOT_CONTEXT: &str = "Fleet";
 
 key_table! {
+    "g b", "Hub" => board::GoBoard;
+    "h", "Hub > Board" => board::PrevColumn;
+    "left", "Hub > Board" => board::PrevColumn;
+    "l", "Hub > Board" => board::NextColumn;
+    "right", "Hub > Board" => board::NextColumn;
+    "j", "Hub > Board" => board::NextCard;
+    "down", "Hub > Board" => board::NextCard;
+    "k", "Hub > Board" => board::PrevCard;
+    "up", "Hub > Board" => board::PrevCard;
+    "enter", "Hub > Board" => board::OpenCard;
+    "c", "Hub > Board" => board::NewCard;
+    "s", "Hub > Board" => board::PickStatus;
+    "p", "Hub > Board" => board::PickPriority;
+    "a", "Hub > Board" => board::PickAssignee;
+    "t", "Hub > Board" => board::PickLabels;
+    "e", "Hub > Board" => board::PickEstimate;
+    "[", "Hub > Board" => board::MovePrevColumn;
+    "]", "Hub > Board" => board::MoveNextColumn;
+    "w", "Hub > Board" => board::CreateWorktree;
+    "o", "Hub > Board" => board::OpenWorktree;
+    "S", "Hub > Board" => board::Sync;
+    "F", "Hub > Board" => board::FullSync;
+    "x", "Hub > Board" => board::OpenRemote;
+    "d", "Hub > Board" => board::DeleteCard;
+    ",", "Hub > Board" => board::Settings;
+    "r", "Hub > Board" => board::Reload;
+    "/", "Hub > Board" => board::Filter;
+    "escape", "Dialog > CardDetail" => card_detail::Close;
+    "i", "Dialog > CardDetail" => card_detail::EditTitle;
+    "d", "Dialog > CardDetail" => card_detail::EditDescription;
+    "c", "Dialog > CardDetail" => card_detail::AddComment;
+    "j", "Dialog > CardDetail" => card_detail::NextProperty;
+    "k", "Dialog > CardDetail" => card_detail::PrevProperty;
+    "enter", "Dialog > CardDetail" => card_detail::EditProperty;
+    "w", "Dialog > CardDetail" => card_detail::CreateWorktree;
+    "x", "Dialog > CardDetail" => card_detail::OpenRemote;
+    "K", "Dialog > CardDetail" => card_detail::KeepLocal;
+    "R", "Dialog > CardDetail" => card_detail::TakeRemote;
+    "ctrl-s", "Dialog > CardDetail" => card_detail::Save;
+    // The palette replaces the dialog it is opened over and remembers which one it was, so the
+    // `Card detail:` rows can save or cancel an edit already typed instead of reseeding one over
+    // it. Without a way in from the detail those rows can never be listed and that path is dead.
+    ":",      "Dialog > CardDetail" => OpenPalette;
+    "ctrl-enter", "Dialog > CardCreate" => board::CreateAndOpen;
+    "space", "Dialog > CardPicker" => settings::Toggle;
+    "j", "Dialog > BoardSettings" => settings::MoveDown;
+    "k", "Dialog > BoardSettings" => settings::MoveUp;
+    "h", "Dialog > BoardSettings" => settings::CyclePrev;
+    "l", "Dialog > BoardSettings" => settings::CycleNext;
+    "space", "Dialog > BoardSettings" => settings::Toggle;
 
     "ctrl-q",       "Fleet" => Quit;
     "ctrl-shift-q", "Fleet" => QuitAndStopDaemon;
@@ -444,6 +495,11 @@ key_table! {
     "ctrl-w",       "Filter" => filter::DeleteWord;
     "ctrl-u",       "Filter" => filter::Clear;
 
+    "left", "Filter > BoardFilter" => board::PrevColumn;
+    "ctrl-b", "Filter > BoardFilter" => board::PrevColumn;
+    "right", "Filter > BoardFilter" => board::NextColumn;
+    "ctrl-f", "Filter > BoardFilter" => board::NextColumn;
+
     "enter",        "Palette" => palette::Run;
     "escape",       "Palette" => palette::Close;
     "ctrl-n",       "Palette" => palette::CursorDown;
@@ -566,6 +622,11 @@ mod tests {
         "Hub > Repos",
         "Hub > Worktrees",
         "Hub > Prs",
+        "Hub > Board",
+        "Dialog > CardDetail",
+        "Dialog > CardCreate",
+        "Dialog > CardPicker",
+        "Dialog > BoardSettings",
         "Workspace > Terminal",
         "Workspace > Native",
         "Workspace > Prefix",
@@ -601,6 +662,42 @@ mod tests {
     ];
 
     #[test]
+    fn board_documentation_and_bindings_match_in_both_directions() {
+        let docs = include_str!("../../../docs/KEYMAP.md");
+        let documented: HashSet<_> = docs
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split('`').collect();
+                if fields.len() < 7 {
+                    return None;
+                }
+                let (keys, context, action) = (fields[1], fields[3], fields[5]);
+                (action.starts_with("board::")
+                    || action.starts_with("card_detail::")
+                    || matches!(
+                        context,
+                        "Dialog > CardCreate" | "Dialog > CardPicker" | "Dialog > BoardSettings"
+                    ))
+                .then_some((keys, context, action))
+            })
+            .collect();
+        let registered: HashSet<_> = table()
+            .into_iter()
+            .filter(|spec| {
+                spec.action.starts_with("board::")
+                    || spec.action.starts_with("card_detail::")
+                    || matches!(
+                        spec.context,
+                        "Dialog > CardCreate" | "Dialog > CardPicker" | "Dialog > BoardSettings"
+                    )
+            })
+            .map(|spec| (spec.keys, spec.context, spec.action))
+            .collect();
+        assert!(!documented.is_empty());
+        assert_eq!(documented, registered);
+    }
+
+    #[test]
     fn key_table_is_well_formed() {
         let bindings = bindings();
         assert_eq!(bindings.len(), table().len());
@@ -622,6 +719,20 @@ mod tests {
         }
     }
 
+    /// The palette replaces the dialog it is opened over and keeps its draft, and the two
+    /// `Card detail:` rows act on exactly that. Without a way in from the detail they are rows
+    /// no state can ever list, and `behind_palette` is dead machinery.
+    #[test]
+    fn the_palette_can_be_opened_over_the_card_detail() {
+        assert!(
+            table()
+                .iter()
+                .any(|spec| spec.context == "Dialog > CardDetail"
+                    && spec.action.ends_with("OpenPalette")),
+            "nothing opens the palette from the card detail"
+        );
+    }
+
     #[test]
     fn no_context_binds_one_keystroke_twice() {
         let mut seen: HashMap<(&str, &str), &str> = HashMap::new();
@@ -638,7 +749,17 @@ mod tests {
     #[test]
     fn g_prefix_sequences_are_complete() {
         let table = table();
-        for keys in ["g g", "g t", "g shift-t", "g r", "g w", "g p", "g j", "g a"] {
+        for keys in [
+            "g b",
+            "g g",
+            "g t",
+            "g shift-t",
+            "g r",
+            "g w",
+            "g p",
+            "g j",
+            "g a",
+        ] {
             assert!(
                 table.iter().any(|spec| spec.keys == keys),
                 "missing the `{keys}` sequence"

@@ -8,7 +8,7 @@ end lists what moved so a reader holding the original freeze can find it. All do
 use Serde `snake_case` variant names; struct fields use `camelCase` unless a declaration says
 otherwise.
 
-`docs/NATIVE-AGENTS.md` is the specification, `docs/decisions/0008-native-agents.md` records why
+`docs/NATIVE-AGENTS.md` is the specification, `docs/decisions/0010-native-agents.md` records why
 the load-bearing choices are what they are, and `docs/research/harness-protocols.md` is the wire
 reference for the two harnesses.
 
@@ -190,7 +190,7 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
 
 ## `fleet-proto`
 
-`PROTOCOL_VERSION` is **5** in `crates/fleet-proto/src/lib.rs`.
+`PROTOCOL_VERSION` is **6** in `crates/fleet-proto/src/lib.rs`.
 
 ### Requests — `crates/fleet-proto/src/request.rs`
 
@@ -374,7 +374,7 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
   inlines: Vec<MarkdownInline> } | Quote(Vec<MarkdownBlock>) | Rule`;
   `MarkdownInline = Text(String) | Code(String) | Strong(Vec<MarkdownInline>) |
   Emphasis(Vec<MarkdownInline>) | Link { label: Vec<MarkdownInline>, url: String }`.
-  `parse_markdown(&str) -> MarkdownDocument` and
+  `parse_markdown_document(&str) -> MarkdownDocument` and
   `markdown(&MarkdownDocument, &App) -> impl IntoElement`.
 - `components/agent/metrics.rs`: `AGENT_CONTENT_W 760` · `AGENT_TOOL_KIND_W 60` ·
   `AGENT_CARET_H 17` · `AGENT_BODY_MAX_H 240` · `AGENT_LIST_OVERDRAW 256` ·

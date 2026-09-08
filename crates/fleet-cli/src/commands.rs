@@ -1,6 +1,7 @@
 //! Command dispatch and daemon client orchestration.
 
 mod agents;
+mod board;
 mod jobs;
 mod sessions;
 mod watches;
@@ -10,6 +11,7 @@ use crate::{
     args::{AgentCommand, Cli, Command, DaemonCommand, VERSION_DISPLAY, WatchArgs, WatchCommand},
     envelope::{error_json, single_line},
 };
+use board::board;
 use clap::{Parser, error::ErrorKind as ClapErrorKind};
 use fleet_client::{Client, SpawnError, ensure_daemon, restart_daemon};
 use fleet_proto::{
@@ -163,6 +165,7 @@ async fn run_command(mut command: Command) -> Result<CommandOutput, ProtoError> 
 
 async fn execute(client: &Client, command: Command) -> Result<CommandOutput, ProtoError> {
     match command {
+        Command::Board(arguments) => board(client, arguments).await,
         Command::Exec(_) | Command::WatchChild(_) => {
             Err(validation("exec must run before daemon autostart"))
         }
@@ -231,6 +234,7 @@ pub(crate) fn fleet_home() -> Result<PathBuf, ProtoError> {
 
 fn command_requests_json(command: &Command) -> bool {
     match command {
+        Command::Board(arguments) => arguments.json,
         Command::Watch(arguments) => {
             matches!(&arguments.command, WatchCommand::List(arguments) if arguments.json)
         }

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use gpui::{AnyElement, App, ElementId, SharedString, Window, div, prelude::*};
 
 use crate::{
-    components::{KeyHint, KeyHintRow, markdown, parse_markdown},
+    components::{KeyHint, KeyHintRow, markdown, parse_markdown_document},
     focus::FocusRing,
     text::Text,
     theme::ActiveTheme,
@@ -530,7 +530,7 @@ impl RenderOnce for DecisionCardElement {
                         .child(Text::ui(step.clone()))
                 }))
                 .when(expanded, |el| {
-                    el.child(markdown(&parse_markdown(source), cx))
+                    el.child(markdown(&parse_markdown_document(source), cx))
                 })
                 .into_any_element(),
         };

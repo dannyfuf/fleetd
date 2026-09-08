@@ -30,6 +30,14 @@ impl Client {
         }
     }
 
+    /// Selects the active context, or clears the selection.
+    pub async fn set_active_context(&self, id: Option<ContextId>) -> Result<()> {
+        expect_ack(
+            "set_active_context",
+            self.request(RequestBody::SetActiveContext { id }).await?,
+        )
+    }
+
     /// Deletes a context and its descendants.
     pub async fn delete_context(&self, id: ContextId) -> Result<()> {
         expect_ack(

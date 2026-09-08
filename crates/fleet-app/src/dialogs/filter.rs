@@ -148,7 +148,9 @@ fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
                         crate::state::move_cursor(app.cursors.prs_review, delta, shown)
                 }
             },
-            (HubPane::List, Screen::Workspace { .. }) => {}
+            // The board owns its own filter and its own cursor keys, and the Workspace has no
+            // Hub list at all: neither is reachable from the Hub's filter overlay.
+            (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => {}
         }
         cx.notify();
     });
@@ -167,7 +169,7 @@ fn reset_cursor(app: &mut AppState) {
             fleet_core::github::PrTab::Mine => app.cursors.prs_mine = 0,
             fleet_core::github::PrTab::Review => app.cursors.prs_review = 0,
         },
-        (HubPane::List, Screen::Workspace { .. }) => {}
+        (HubPane::List, Screen::Hub { tab: HubTab::Board } | Screen::Workspace { .. }) => {}
     }
 }
 

@@ -5,7 +5,7 @@ provider-neutral event model, the thread state machine, and the native agent tab
 `fleet-app`. This document is the design **and** what shipped; §10 is the status table that says
 which parts are done and which are follow-ups. `ARCHITECTURE.md` ("Native agent sessions"),
 `APP-CONTRACTS.md` (§3, §4, §5), `UX-SPEC.md` (§3.6.0), `KEYMAP.md` ("Native agent thread"),
-`DESIGN-SYSTEM.md` (§6.6) and ADR `decisions/0008-native-agents.md` carry the seams that touch
+`DESIGN-SYSTEM.md` (§6.6) and ADR `decisions/0010-native-agents.md` carry the seams that touch
 them; where one of those disagrees with this file about its own surface, that file wins.
 
 Sources this was distilled from:
@@ -113,7 +113,7 @@ fleet-ui-kit
   components/agent/       TranscriptList, ToolRow, DecisionCard, format, metrics
   components/{markdown,multiline_input}
 fleet-lazygit
-  diff_view.rs            the reusable inline DiffView (kept out of the kit; see ADR 0008)
+  diff_view.rs            the reusable inline DiffView (kept out of the kit; see ADR 0010)
 ```
 
 Ownership boundary, copied from t3code: **provider IO produces normalised events; a
@@ -457,7 +457,7 @@ silently doing nothing or running a different, destructive action (§10).
 
 ## 7. Protocol additions (`fleet-proto`)
 
-`PROTOCOL_VERSION` is **5**. The `RequestBody` variants beside the session requests are
+`PROTOCOL_VERSION` is **6**. The `RequestBody` variants beside the session requests are
 `AgentThreadList`, `AgentThreadCreate { worktree, provider, model, mode, resume_cursor, title }`,
 `AgentThreadOpen { thread, from_seq }`, `AgentThreadClose`, `AgentSend { thread, input }`,
 `AgentInterrupt`, `AgentRespond { thread, gate, answer }`, `AgentSetMode`, `AgentSetModel`,
@@ -526,7 +526,7 @@ surface — a follow-up is a surface that is not there yet and says so where the
 
 | # | Phase | Status |
 | --- | --- | --- |
-| 1 | **Domain, protocol, fixtures.** `fleet-core::agents` types and the reducer, `fleet-proto` variants at version 5, harness captures under `research/fixtures/agents/`, replay tests asserting thread state and attention for a plain turn, a tool turn, a permission, a question, a plan, an interrupt and process death | **done** |
+| 1 | **Domain, protocol, fixtures.** `fleet-core::agents` types and the reducer, `fleet-proto` variants at version 6, harness captures under `research/fixtures/agents/`, replay tests asserting thread state and attention for a plain turn, a tool turn, a permission, a question, a plan, an interrupt and process death | **done** |
 | 2 | **Daemon adapters and store.** Claude over stream-json, OpenCode over HTTP + SSE, `AgentSessionManager`, per-thread append-only log, versioned index, 16 ms delta coalescing, restart recovery, `fleet agent` CLI | **done** |
 | 3 | **Read-only transcript.** `AgentThreadView` with user blocks, assistant Markdown, thinking, tool rows, folds, footers, checkpoints and error cards; the tab badge, the session-header word, the context-bar counters and `NeedsYou` notifications | **done** |
 | 4 | **Composer and decisions.** `MultilineInput`, send, queue, steer, interrupt, the three decision cards with key routing, the `/` `@` and model pickers, mode switching, empty state | **done** |
@@ -557,7 +557,7 @@ Known follow-ups, each already named where it is visible:
 - **Cost of one OpenCode server per thread.** Acceptable for a handful of tabs; revisit with an
   external-server mode if users run many.
 - **Markdown scope.** A focused in-house renderer was chosen over Zed's `markdown` crate to
-  respect ADR 0003 and keep the dependency graph small (ADR 0008); tables and images come later.
+  respect ADR 0003 and keep the dependency graph small (ADR 0010); tables and images come later.
 - **Cancelled state.** The canvas defines no cancelled block; Fleet renders an interrupted turn
   with a footer `stopped · 12s · 3.1k tokens` and no error card.
 - **Human PR review** is not an agent state; it stays in Hub/Pull Requests.

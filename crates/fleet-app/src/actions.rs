@@ -706,3 +706,95 @@ pub mod first_run {
         ]
     );
 }
+
+/// Actions for the board surface (BOARD §8).
+pub mod board {
+    use gpui::actions;
+    actions!(
+        board,
+        [
+            /// Go to board.
+            GoBoard,
+            /// Previous column.
+            PrevColumn,
+            /// Next column.
+            NextColumn,
+            /// Next card.
+            NextCard,
+            /// Previous card.
+            PrevCard,
+            /// Open card.
+            OpenCard,
+            /// New card.
+            NewCard,
+            /// `ctrl-enter` in the New card dialog: create it and open its detail.
+            CreateAndOpen,
+            /// Status picker.
+            PickStatus,
+            /// Priority picker.
+            PickPriority,
+            /// Assignee picker.
+            PickAssignee,
+            /// Labels picker.
+            PickLabels,
+            /// Estimate picker.
+            PickEstimate,
+            /// Move card to previous column.
+            MovePrevColumn,
+            /// Move card to next column.
+            MoveNextColumn,
+            /// Create worktree from card.
+            CreateWorktree,
+            /// Open linked worktree.
+            OpenWorktree,
+            /// Sync.
+            Sync,
+            /// Full sync.
+            FullSync,
+            /// Open remote issue.
+            OpenRemote,
+            /// Delete card.
+            DeleteCard,
+            /// Settings.
+            Settings,
+            /// Reload.
+            Reload,
+            /// Filter cards.
+            Filter,
+        ]
+    );
+}
+
+/// Actions for the card detail surface (BOARD §8).
+pub mod card_detail {
+    use gpui::actions;
+    actions!(
+        card_detail,
+        [
+            /// Close.
+            Close,
+            /// Edit title.
+            EditTitle,
+            /// Edit description.
+            EditDescription,
+            /// Add comment.
+            AddComment,
+            /// Next property.
+            NextProperty,
+            /// Previous property.
+            PrevProperty,
+            /// Edit selected property.
+            EditProperty,
+            /// Create worktree.
+            CreateWorktree,
+            /// Open remote issue.
+            OpenRemote,
+            /// Resolve conflict: keep local.
+            KeepLocal,
+            /// Resolve conflict: take remote.
+            TakeRemote,
+            /// Save text edit.
+            Save,
+        ]
+    );
+}

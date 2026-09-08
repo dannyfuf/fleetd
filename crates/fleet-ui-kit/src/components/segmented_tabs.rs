@@ -8,7 +8,9 @@
 //! user reads the missing number as "not loaded yet". `loading(true)` is the state that means
 //! *that*, and it keeps the cached rows at full opacity while it shows `…`.
 
-use gpui::{App, SharedString, Window, div, prelude::*};
+use std::rc::Rc;
+
+use gpui::{App, MouseButton, SharedString, Window, div, prelude::*};
 
 use crate::{text::Text, theme::ActiveTheme, tone::Tone};
 
@@ -64,7 +66,11 @@ impl SegmentedTab {
 pub struct SegmentedTabs {
     tabs: Vec<SegmentedTab>,
     active: usize,
+    underlined: bool,
+    on_select: Option<Rc<TabSelect>>,
 }
+
+type TabSelect = dyn Fn(usize, &mut Window, &mut App);
 
 impl SegmentedTabs {
     /// A tab bar.
@@ -72,7 +78,21 @@ impl SegmentedTabs {
         Self {
             tabs: tabs.into_iter().collect(),
             active: 0,
+            underlined: true,
+            on_select: None,
         }
+    }
+
+    /// Use a selected background instead of an underline for a parent navigation level.
+    pub fn underlined(mut self, underlined: bool) -> Self {
+        self.underlined = underlined;
+        self
+    }
+
+    /// Handles mouse selection with the same intent as keyboard tab navigation.
+    pub fn on_select(mut self, on_select: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_select = Some(Rc::new(on_select));
+        self
     }
 
     /// Which tab is active.
@@ -125,7 +145,23 @@ impl RenderOnce for SegmentedTabs {
                 } else {
                     Tone::Muted
                 };
+                let on_select = self.on_select.clone();
                 div()
+                    .id(tab.label.clone())
+                    .when_some(on_select, |el, on_select| {
+                        el.cursor_pointer().on_mouse_down(
+                            MouseButton::Left,
+                            move |_, window, cx| {
+                                on_select(ix, window, cx);
+                                cx.stop_propagation();
+                            },
+                        )
+                    })
+                    .when(!self.underlined, |el| {
+                        el.px(theme.space.sm)
+                            .rounded(theme.radii.sm)
+                            .when(is_active, |el| el.bg(theme.colors.row_selected))
+                    })
                     .flex()
                     .flex_col()
                     .justify_between()
@@ -152,11 +188,16 @@ impl RenderOnce for SegmentedTabs {
                     )
                     // The underline slot exists on every tab so the active one does not
                     // shift the row by 2 px when it moves.
-                    .child(div().h(underline_h).w_full().bg(if is_active {
-                        accent
-                    } else {
-                        gpui::transparent_black()
-                    }))
+                    .child(
+                        div()
+                            .h(underline_h)
+                            .w_full()
+                            .bg(if is_active && self.underlined {
+                                accent
+                            } else {
+                                gpui::transparent_black()
+                            }),
+                    )
             }))
     }
 }

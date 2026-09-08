@@ -15,7 +15,7 @@ make restart     # restart fleetd from this build — run it after changing daem
 make daemon      # restart fleetd and follow its log
 make build       # build the workspace
 make check       # cargo check --workspace --all-targets
-make test        # cargo test --workspace
+make test        # build fleetd, then cargo test --workspace against it
 make fmt         # cargo fmt --all
 make lint        # fmt --check plus Clippy with warnings denied
 make doctor      # build Fleet and run its diagnostics
@@ -32,6 +32,14 @@ fleet daemon restart
 That command requests a graceful shutdown, falls back to `SIGTERM` when the daemon cannot answer,
 waits for its socket to disappear, and starts the newly built sibling `fleetd` binary. PTYs do not
 survive it.
+
+`make test` and `make ci` build `fleetd` before running workspace tests because app
+integration tests launch the ordinary daemon binary. These targets set `FLEET_DAEMON`
+to that freshly built workspace binary, overriding inherited paths to other checkouts.
+`cargo test` alone builds its test
+harness and can leave an older `target/debug/fleetd` in place. Before running app tests
+directly, run `cargo build -p fleet-daemon`, then
+`FLEET_DAEMON="$PWD/target/debug/fleetd" cargo test -p fleet-app`.
 
 Direct Cargo equivalents work as usual. Build artifacts use Cargo's default target directory,
 `target/` inside this repository. Sharing that repository-local directory between commands in

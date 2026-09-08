@@ -248,6 +248,53 @@ pub(super) fn commit(state: &Entity<AppState>, bridge: &Bridge, pressed: Confirm
         ConfirmRequest::KillSession { session, .. } => {
             bridge.send(RequestBody::KillSession { session });
         }
+        ConfirmRequest::DeleteCard { card, .. } => {
+            // A context switch, a reconnect or a `Disconnected` clears the board under an open
+            // confirm. `bridge.send` drops refusals, so a stale `Enter` would delete a card
+            // that is no longer on screen with nothing anywhere to say that it happened.
+            let live = state
+                .read(cx)
+                .board()
+                .is_some_and(|view| view.cards.iter().any(|item| item.id == card));
+            if !live {
+                state.update(cx, |app, _| {
+                    app.toast_short(
+                        "That board is no longer loaded",
+                        fleet_ui_kit::Icon::Boxes,
+                        std::time::Instant::now(),
+                    );
+                });
+                state.update(cx, |app, cx| {
+                    app.close_overlay();
+                    cx.notify();
+                });
+                return;
+            }
+            // `bridge.request`, not `send`: a background sync that linked the card between
+            // `d` and this `Enter` makes the daemon refuse the delete, and a dropped reply
+            // closed the confirm with the card still there and nothing anywhere saying so.
+            let reply = bridge.request(RequestBody::DeleteCard { card_id: card });
+            crate::dialogs::host::complete_request(state, cx, async move |state, cx| {
+                let failure = match reply.recv().await {
+                    Ok(Err(error)) => Some(error.message),
+                    Err(_) => Some("fleetd disconnected before deletion completed".to_owned()),
+                    Ok(Ok(_)) => None,
+                };
+                let Some(state) = state.upgrade() else { return };
+                cx.update(|cx| {
+                    if let Some(message) = failure {
+                        state.update(cx, |app, cx| {
+                            app.sticky_error = Some(crate::state::StickyError {
+                                text: message,
+                                job: None,
+                                retryable: false,
+                            });
+                            cx.notify();
+                        });
+                    }
+                });
+            });
+        }
         ConfirmRequest::CloseTerminal { terminal, .. } => {
             bridge.send(RequestBody::CloseTerminal { terminal });
         }

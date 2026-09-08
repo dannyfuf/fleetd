@@ -256,6 +256,7 @@ mod tests {
         let mut state = AppState::new("/tmp/fleet", now);
         state.apply_snapshot(
             Snapshot {
+                boards: Vec::new(),
                 generated_at: String::new(),
                 contexts: Vec::new(),
                 repos: Vec::new(),

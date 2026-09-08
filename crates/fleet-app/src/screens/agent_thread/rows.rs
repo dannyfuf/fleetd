@@ -14,7 +14,7 @@ use fleet_core::agents::{
 use fleet_ui_kit::{
     DecisionCard, ToolRow, ToolRowState, TranscriptRow, format_compacted, format_duration,
     format_resumed, format_retrying, format_token_count, format_turn_footer, format_worked,
-    parse_markdown,
+    parse_markdown_document,
 };
 use gpui::SharedString;
 
@@ -302,7 +302,7 @@ fn item_row(inputs: &RowInputs<'_>, items: &HashMap<ItemId, &Item>, item: &Item)
             attachments: attachments.iter().map(attachment_name).collect(),
         }],
         ItemKind::AssistantText => vec![TranscriptRow::AssistantText {
-            markdown: parse_markdown(item.text.as_deref().unwrap_or_default()),
+            markdown: parse_markdown_document(item.text.as_deref().unwrap_or_default()),
         }],
         ItemKind::Thinking => {
             anchors.items.insert(0, item.id);

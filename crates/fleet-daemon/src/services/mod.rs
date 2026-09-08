@@ -28,6 +28,7 @@ use crate::{
 
 mod agent_activity;
 pub mod agents;
+pub mod boards;
 pub mod contexts;
 pub mod doctor;
 pub mod github;
@@ -71,6 +72,8 @@ pub use maintenance::PeriodicTasks;
 /// Fully wired facade used by socket connection actors.
 #[derive(Clone)]
 pub struct Services {
+    /// Backend-independent board service.
+    pub boards: Arc<boards::Boards>,
     pub config: Arc<ConfigStore>,
     pub state: Arc<StateStore>,
     pub jobs: Arc<JobManager>,

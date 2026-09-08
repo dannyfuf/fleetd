@@ -1,7 +1,7 @@
 //! §3.9 Command palette (`:`) — *jump to anything by name, or do the thing whose key I do not
 
 use fleet_core::{
-    ids::{ContextId, JobId, RepoId, SessionId, WorktreeId},
+    ids::{CardId, ContextId, JobId, RepoId, SessionId, WorktreeId},
     sessions::{AgentActivity, SessionKind, SessionState},
 };
 use fleet_proto::{request::RequestBody, snapshot::Snapshot};
@@ -9,7 +9,7 @@ use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
-    actions::{fleet, palette as palette_actions},
+    actions::{board, card_detail, fleet, palette as palette_actions},
     bridge::Bridge,
     dialogs::{
         ConfirmRequest, DialogHost, Dialogs, SessionTransport, clear_all, notify,
@@ -88,6 +88,77 @@ pub struct Entry {
 /// The list is deliberately small: only the commands that are worth reaching without their key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    /// Go to board.
+    BoardGoBoard,
+    /// Previous column.
+    BoardPrevColumn,
+    /// Next column.
+    BoardNextColumn,
+    /// Next card.
+    BoardNextCard,
+    /// Previous card.
+    BoardPrevCard,
+    /// Open card.
+    BoardOpenCard,
+    /// New card.
+    BoardNewCard,
+    /// Status picker.
+    BoardPickStatus,
+    /// Priority picker.
+    BoardPickPriority,
+    /// Assignee picker.
+    BoardPickAssignee,
+    /// Labels picker.
+    BoardPickLabels,
+    /// Estimate picker.
+    BoardPickEstimate,
+    /// Move card to previous column.
+    BoardMovePrevColumn,
+    /// Move card to next column.
+    BoardMoveNextColumn,
+    /// Create worktree from card.
+    BoardCreateWorktree,
+    /// Open linked worktree.
+    BoardOpenWorktree,
+    /// Sync.
+    BoardSync,
+    /// Full sync.
+    BoardFullSync,
+    /// Open remote issue.
+    BoardOpenRemote,
+    /// Delete card.
+    BoardDeleteCard,
+    /// Settings.
+    BoardSettings,
+    /// Reload.
+    BoardReload,
+    /// Filter cards.
+    BoardFilter,
+    /// Close.
+    CardDetailClose,
+    /// Edit title.
+    CardDetailEditTitle,
+    /// Edit description.
+    CardDetailEditDescription,
+    /// Add comment.
+    CardDetailAddComment,
+    /// Next property.
+    CardDetailNextProperty,
+    /// Previous property.
+    CardDetailPrevProperty,
+    /// Edit selected property.
+    CardDetailEditProperty,
+    /// Create worktree.
+    CardDetailCreateWorktree,
+    /// Open remote issue.
+    CardDetailOpenRemote,
+    /// Resolve conflict: keep local.
+    CardDetailKeepLocal,
+    /// Resolve conflict: take remote.
+    CardDetailTakeRemote,
+    /// Save text edit.
+    CardDetailSave,
+
     /// Open §3.8.1.
     NewWorktree,
     /// Open §3.8.2.
@@ -137,6 +208,41 @@ pub enum Command {
 impl Command {
     /// Every command, in the order the `DO` section lists them.
     pub const ALL: &'static [Self] = &[
+        Self::BoardGoBoard,
+        Self::BoardPrevColumn,
+        Self::BoardNextColumn,
+        Self::BoardNextCard,
+        Self::BoardPrevCard,
+        Self::BoardOpenCard,
+        Self::BoardNewCard,
+        Self::BoardPickStatus,
+        Self::BoardPickPriority,
+        Self::BoardPickAssignee,
+        Self::BoardPickLabels,
+        Self::BoardPickEstimate,
+        Self::BoardMovePrevColumn,
+        Self::BoardMoveNextColumn,
+        Self::BoardCreateWorktree,
+        Self::BoardOpenWorktree,
+        Self::BoardSync,
+        Self::BoardFullSync,
+        Self::BoardOpenRemote,
+        Self::BoardDeleteCard,
+        Self::BoardSettings,
+        Self::BoardReload,
+        Self::BoardFilter,
+        Self::CardDetailClose,
+        Self::CardDetailEditTitle,
+        Self::CardDetailEditDescription,
+        Self::CardDetailAddComment,
+        Self::CardDetailNextProperty,
+        Self::CardDetailPrevProperty,
+        Self::CardDetailEditProperty,
+        Self::CardDetailCreateWorktree,
+        Self::CardDetailOpenRemote,
+        Self::CardDetailKeepLocal,
+        Self::CardDetailTakeRemote,
+        Self::CardDetailSave,
         Self::NewWorktree,
         Self::CloneRepo,
         Self::PruneWorktrees,
@@ -165,6 +271,42 @@ impl Command {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::BoardGoBoard => "Board: Go to board",
+            Self::BoardPrevColumn => "Board: Previous column",
+            Self::BoardNextColumn => "Board: Next column",
+            Self::BoardNextCard => "Board: Next card",
+            Self::BoardPrevCard => "Board: Previous card",
+            Self::BoardOpenCard => "Board: Open card",
+            Self::BoardNewCard => "Board: New card",
+            Self::BoardPickStatus => "Board: Status picker",
+            Self::BoardPickPriority => "Board: Priority picker",
+            Self::BoardPickAssignee => "Board: Assignee picker",
+            Self::BoardPickLabels => "Board: Labels picker",
+            Self::BoardPickEstimate => "Board: Estimate picker",
+            Self::BoardMovePrevColumn => "Board: Move card to previous column",
+            Self::BoardMoveNextColumn => "Board: Move card to next column",
+            Self::BoardCreateWorktree => "Board: Create worktree from card",
+            Self::BoardOpenWorktree => "Board: Open linked worktree",
+            Self::BoardSync => "Board: Sync",
+            Self::BoardFullSync => "Board: Full sync",
+            Self::BoardOpenRemote => "Board: Open remote issue",
+            Self::BoardDeleteCard => "Board: Delete card",
+            Self::BoardSettings => "Board: Settings",
+            Self::BoardReload => "Board: Reload",
+            Self::BoardFilter => "Board: Filter cards",
+            Self::CardDetailClose => "Card detail: Close",
+            Self::CardDetailEditTitle => "Card detail: Edit title",
+            Self::CardDetailEditDescription => "Card detail: Edit description",
+            Self::CardDetailAddComment => "Card detail: Add comment",
+            Self::CardDetailNextProperty => "Card detail: Next property",
+            Self::CardDetailPrevProperty => "Card detail: Previous property",
+            Self::CardDetailEditProperty => "Card detail: Edit selected property",
+            Self::CardDetailCreateWorktree => "Card detail: Create worktree",
+            Self::CardDetailOpenRemote => "Card detail: Open remote issue",
+            Self::CardDetailKeepLocal => "Card detail: Resolve conflict: keep local",
+            Self::CardDetailTakeRemote => "Card detail: Resolve conflict: take remote",
+            Self::CardDetailSave => "Card detail: Save text edit",
+
             Self::NewWorktree => "New worktree",
             Self::CloneRepo => "Clone repo",
             Self::DeleteWorktree => "Delete worktree",
@@ -194,6 +336,42 @@ impl Command {
     #[must_use]
     pub const fn icon(self) -> Icon {
         match self {
+            Self::BoardGoBoard => Icon::Boxes,
+            Self::BoardPrevColumn => Icon::ChevronLeft,
+            Self::BoardNextColumn => Icon::ChevronRight,
+            Self::BoardNextCard => Icon::CircleArrowDown,
+            Self::BoardPrevCard => Icon::CircleArrowUp,
+            Self::BoardOpenCard => Icon::Eye,
+            Self::BoardNewCard => Icon::Plus,
+            Self::BoardPickStatus => Icon::CircleDot,
+            Self::BoardPickPriority => Icon::Flag,
+            Self::BoardPickAssignee => Icon::Bot,
+            Self::BoardPickLabels => Icon::FilePen,
+            Self::BoardPickEstimate => Icon::Hourglass,
+            Self::BoardMovePrevColumn => Icon::ChevronLeft,
+            Self::BoardMoveNextColumn => Icon::ChevronRight,
+            Self::BoardCreateWorktree => Icon::GitBranchPlus,
+            Self::BoardOpenWorktree => Icon::GitBranch,
+            Self::BoardSync => Icon::CloudDownload,
+            Self::BoardFullSync => Icon::CloudDownload,
+            Self::BoardOpenRemote => Icon::Globe,
+            Self::BoardDeleteCard => Icon::Trash,
+            Self::BoardSettings => Icon::Settings2,
+            Self::BoardReload => Icon::RefreshCw,
+            Self::BoardFilter => Icon::Search,
+            Self::CardDetailClose => Icon::X,
+            Self::CardDetailEditTitle => Icon::FilePen,
+            Self::CardDetailEditDescription => Icon::FilePen,
+            Self::CardDetailAddComment => Icon::Plus,
+            Self::CardDetailNextProperty => Icon::CircleArrowDown,
+            Self::CardDetailPrevProperty => Icon::CircleArrowUp,
+            Self::CardDetailEditProperty => Icon::FilePen,
+            Self::CardDetailCreateWorktree => Icon::GitBranchPlus,
+            Self::CardDetailOpenRemote => Icon::Globe,
+            Self::CardDetailKeepLocal => Icon::CloudUpload,
+            Self::CardDetailTakeRemote => Icon::CloudDownload,
+            Self::CardDetailSave => Icon::Check,
+
             Self::NewWorktree => Icon::GitBranchPlus,
             Self::CloneRepo => Icon::CloudDownload,
             Self::DeleteWorktree | Self::DeleteContext => Icon::Trash,
@@ -220,7 +398,8 @@ impl Command {
     pub const fn destructive(self) -> bool {
         matches!(
             self,
-            Self::DeleteWorktree
+            Self::BoardDeleteCard
+                | Self::DeleteWorktree
                 | Self::DeleteContext
                 | Self::PruneWorktrees
                 | Self::KillSession
@@ -232,6 +411,42 @@ impl Command {
     #[must_use]
     pub const fn action(self) -> &'static str {
         match self {
+            Self::BoardGoBoard => "board::GoBoard",
+            Self::BoardPrevColumn => "board::PrevColumn",
+            Self::BoardNextColumn => "board::NextColumn",
+            Self::BoardNextCard => "board::NextCard",
+            Self::BoardPrevCard => "board::PrevCard",
+            Self::BoardOpenCard => "board::OpenCard",
+            Self::BoardNewCard => "board::NewCard",
+            Self::BoardPickStatus => "board::PickStatus",
+            Self::BoardPickPriority => "board::PickPriority",
+            Self::BoardPickAssignee => "board::PickAssignee",
+            Self::BoardPickLabels => "board::PickLabels",
+            Self::BoardPickEstimate => "board::PickEstimate",
+            Self::BoardMovePrevColumn => "board::MovePrevColumn",
+            Self::BoardMoveNextColumn => "board::MoveNextColumn",
+            Self::BoardCreateWorktree => "board::CreateWorktree",
+            Self::BoardOpenWorktree => "board::OpenWorktree",
+            Self::BoardSync => "board::Sync",
+            Self::BoardFullSync => "board::FullSync",
+            Self::BoardOpenRemote => "board::OpenRemote",
+            Self::BoardDeleteCard => "board::DeleteCard",
+            Self::BoardSettings => "board::Settings",
+            Self::BoardReload => "board::Reload",
+            Self::BoardFilter => "board::Filter",
+            Self::CardDetailClose => "card_detail::Close",
+            Self::CardDetailEditTitle => "card_detail::EditTitle",
+            Self::CardDetailEditDescription => "card_detail::EditDescription",
+            Self::CardDetailAddComment => "card_detail::AddComment",
+            Self::CardDetailNextProperty => "card_detail::NextProperty",
+            Self::CardDetailPrevProperty => "card_detail::PrevProperty",
+            Self::CardDetailEditProperty => "card_detail::EditProperty",
+            Self::CardDetailCreateWorktree => "card_detail::CreateWorktree",
+            Self::CardDetailOpenRemote => "card_detail::OpenRemote",
+            Self::CardDetailKeepLocal => "card_detail::KeepLocal",
+            Self::CardDetailTakeRemote => "card_detail::TakeRemote",
+            Self::CardDetailSave => "card_detail::Save",
+
             Self::NewWorktree => "worktrees::Create",
             Self::CloneRepo => "repos::Clone",
             Self::DeleteWorktree => "worktrees::Delete",
@@ -258,13 +473,71 @@ impl Command {
     }
 
     /// Whether the command can run right now. Invalid commands are not listed (§3.9).
+    ///
+    /// Listing goes through [`Self::valid_with`], which resolves the board's card once for the
+    /// whole of `ALL`; this is the same question asked about one command in isolation.
+    #[cfg(test)]
     #[must_use]
     pub fn valid(self, state: &AppState) -> bool {
+        self.valid_with(state, card_context(state, None, None))
+    }
+
+    /// `valid` with the board lookup hoisted out.
+    ///
+    /// [`card_context`] sorts a column and lowercases every card field a filter touches. Doing
+    /// that once per command, for all of `ALL`, on every palette keystroke is the whole cost of
+    /// listing the palette on a board of any size.
+    fn valid_with(self, state: &AppState, card: CardContext) -> bool {
+        let has_card = card.present;
         let snapshot = state.snapshot.as_ref();
         let has_repo = snapshot.is_some_and(|snapshot| !snapshot.repos.is_empty());
         let connected = state.daemon.is_connected();
         let on_prs = matches!(state.screen, Screen::Hub { tab: HubTab::Prs });
+        let on_board = matches!(state.screen, Screen::Hub { tab: HubTab::Board });
         match self {
+            Self::BoardGoBoard => state.active_context().is_some(),
+            Self::BoardPrevColumn
+            | Self::BoardNextColumn
+            | Self::BoardNextCard
+            | Self::BoardPrevCard
+            | Self::BoardNewCard
+            | Self::BoardSync
+            | Self::BoardFullSync
+            | Self::BoardSettings
+            | Self::BoardReload
+            | Self::BoardFilter => on_board,
+            Self::BoardOpenCard | Self::BoardCreateWorktree => has_card,
+            // `d` refuses every mirrored card — the sync would file the issue again as a new
+            // card — so on a linked board this row could only ever fail (§3.9).
+            Self::BoardDeleteCard => has_card && !card.mirrored,
+            // A field the board's backend owns can only answer the read-only refusal, so the
+            // row is not listed at all — the same rule `BoardOpenRemote` follows (§3.9).
+            Self::BoardPickStatus | Self::BoardMovePrevColumn | Self::BoardMoveNextColumn => {
+                has_card && !state.is_readonly_field("status_id")
+            }
+            Self::BoardPickPriority => has_card && !state.is_readonly_field("priority"),
+            Self::BoardPickAssignee => has_card && !state.is_readonly_field("assignee"),
+            Self::BoardPickLabels => has_card && !state.is_readonly_field("labels"),
+            Self::BoardPickEstimate => has_card && !state.is_readonly_field("estimate"),
+            // A card the backend has not linked, or linked without publishing an address, has
+            // no remote issue: the row would open a browser tab at nothing.
+            Self::BoardOpenRemote | Self::CardDetailOpenRemote => has_card && card.remote,
+            // Opening the worktree of a card that has none is a row with nothing behind it.
+            Self::BoardOpenWorktree => has_card && card.worktree,
+            // Closing and saving only mean anything on a detail that is already open behind
+            // the palette: from the board they seed a fresh one, act on nothing, and leave a
+            // dialog the user never asked for (§3.9 lists no row that cannot run).
+            Self::CardDetailClose | Self::CardDetailSave => has_card && card.detail,
+            Self::CardDetailEditTitle => has_card,
+            Self::CardDetailEditDescription => has_card,
+            Self::CardDetailAddComment => has_card,
+            Self::CardDetailNextProperty => has_card,
+            Self::CardDetailPrevProperty => has_card,
+            Self::CardDetailEditProperty => has_card,
+            Self::CardDetailCreateWorktree => has_card,
+            // A resolution needs something to resolve; on a clean card both rows open the
+            // detail and then return without doing anything.
+            Self::CardDetailKeepLocal | Self::CardDetailTakeRemote => has_card && card.conflicted,
             Self::NewWorktree | Self::PruneWorktrees => {
                 connected && crate::dialogs::focused_repo(state).is_some()
             }
@@ -278,7 +551,7 @@ impl Command {
                 connected && state.active_context().is_some()
             }
             Self::PullRequests => !on_prs && has_repo,
-            Self::Worktrees => on_prs,
+            Self::Worktrees => on_prs || on_board,
             Self::UpdateFleet => connected && state.update_version.is_some(),
             Self::NewContext
             | Self::Settings
@@ -288,6 +561,64 @@ impl Command {
             | Self::QuitDaemon => connected,
             Self::JobsPanel | Self::Help | Self::Quit => true,
         }
+    }
+}
+
+/// Whether the board tab has a focused card for the `Board:` and `Card detail:` rows.
+/// What the board's selection and the palette's backdrop offer the card rows.
+///
+/// Resolved once per palette render and handed to every command, because finding the selected
+/// card sorts a column and lowercases every field the filter touches.
+#[derive(Debug, Clone, Copy, Default)]
+struct CardContext {
+    /// A card is selected on the board tab.
+    present: bool,
+    /// That card carries an unresolved conflict.
+    conflicted: bool,
+    /// That card owns a worktree.
+    worktree: bool,
+    /// That card is linked to a remote issue with a browsable address.
+    remote: bool,
+    /// That card is linked to a remote issue at all, address or not.
+    ///
+    /// `remote` answers "can `x` open something"; this answers "does the backend own this
+    /// card", which is what `d` refuses on — a linked card with no site setting is neither
+    /// openable nor deletable, and one flag cannot say both.
+    mirrored: bool,
+    /// The card detail is the dialog the palette was opened over.
+    detail: bool,
+}
+
+fn card_context(
+    state: &AppState,
+    behind: Option<Dialogs>,
+    detail_card: Option<&CardId>,
+) -> CardContext {
+    let detail = behind == Some(Dialogs::CardDetail);
+    let selected = matches!(state.screen, Screen::Hub { tab: HubTab::Board })
+        .then(|| crate::screens::board::selected_card(state))
+        .flatten();
+    // The `Card detail:` rows act on the card the open dialog is holding, and that card
+    // deliberately survives a refresh that moves the board's selection. Asking the board
+    // instead hides "Open remote issue" for a card that has one, and offers "Keep local" for a
+    // card with no conflict.
+    let card = detail
+        .then(|| {
+            detail_card.and_then(|id| {
+                state
+                    .board()
+                    .and_then(|view| view.cards.iter().find(|card| card.id == *id))
+            })
+        })
+        .flatten()
+        .or(selected);
+    CardContext {
+        present: card.is_some(),
+        conflicted: card.is_some_and(|card| card.conflict.is_some()),
+        worktree: card.is_some_and(|card| card.worktree_id.is_some()),
+        remote: card.is_some_and(|card| crate::screens::board::remote_url(card).is_some()),
+        mirrored: card.is_some_and(|card| card.remote.is_some()),
+        detail,
     }
 }
 
@@ -331,7 +662,12 @@ pub fn session_detail(session: SessionState, slept: bool) -> &'static str {
 /// Filtering runs on the borrowed snapshot strings, so a row is only built once it has
 /// survived the query and the section's idle cap — this runs on every keystroke.
 #[must_use]
-pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
+pub fn candidates(
+    state: &AppState,
+    query: &str,
+    behind: Option<Dialogs>,
+    detail_card: Option<&CardId>,
+) -> Vec<Entry> {
     let sessions_only = is_session_switcher(query);
     let effective_query = if sessions_only { "" } else { query };
     let idle = effective_query.trim().is_empty();
@@ -351,7 +687,8 @@ pub fn candidates(state: &AppState, query: &str) -> Vec<Entry> {
 
     let mut rows = go_rows(state, snapshot, &index, &matcher, sessions_only, limit);
     if !sessions_only {
-        rows.extend(do_rows(state, snapshot, &matcher, limit));
+        let card = card_context(state, behind, detail_card);
+        rows.extend(do_rows(state, snapshot, &matcher, card, limit));
         rows.extend(context_rows(snapshot, &matcher));
     }
     rows
@@ -491,6 +828,7 @@ fn do_rows(
     state: &AppState,
     snapshot: &Snapshot,
     matcher: &FuzzyQuery,
+    card: CardContext,
     limit: usize,
 ) -> Vec<Entry> {
     let mut rows: Vec<Entry> = Vec::new();
@@ -498,7 +836,7 @@ fn do_rows(
         if rows.len() == limit {
             return rows;
         }
-        if !command.valid(state) || !matcher.matches(command.label()) {
+        if !command.valid_with(state, card) || !matcher.matches(command.label()) {
             continue;
         }
         rows.push(Entry {
@@ -728,8 +1066,16 @@ pub(super) fn seed(state: &Entity<AppState>, cx: &mut App) {
 }
 
 pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
-    let query = with_host(state, cx, |host| host.palette.query.text().to_owned());
-    let rows = candidates(state.read(cx), &query);
+    // The backdrop and the card the detail is holding decide which `Board:` and `Card detail:`
+    // rows exist at all, so they are read with the query the rows are prepared from.
+    let (query, behind, detail_card) = with_host(state, cx, |host| {
+        (
+            host.palette.query.text().to_owned(),
+            host.behind_palette.clone(),
+            host.card_detail.card_id.clone(),
+        )
+    });
+    let rows = candidates(state.read(cx), &query, behind, detail_card.as_ref());
     let total = rows.len();
     let cap = if is_session_switcher(&query) {
         usize::MAX
@@ -773,6 +1119,9 @@ fn run_selected<T: SessionTransport>(
     }) else {
         return;
     };
+    // Read before closing: the palette replaced whatever dialog was open, and closing it is
+    // what makes the host forget which one that was.
+    let behind = super::with_host(state, cx, |host| host.behind_palette.clone());
     state.update(cx, |app, cx| {
         app.close_overlay();
         cx.notify();
@@ -791,25 +1140,108 @@ fn run_selected<T: SessionTransport>(
             transport.send(RequestBody::SetActiveContext { id: Some(context) });
         }
         Run::CancelJob(job) => transport.send(RequestBody::CancelJob { job }),
-        Run::Command(command) => run_command(command, state, transport, window, cx),
+        Run::Command(command) => run_command(command, behind, state, transport, window, cx),
     }
 }
 
 /// Runs one command. Destructive rows open their confirm rather than acting (§3.9).
 fn run_command<T: SessionTransport>(
     command: Command,
+    behind: Option<Dialogs>,
     state: &Entity<AppState>,
     transport: &T,
     window: &mut Window,
     cx: &mut App,
 ) {
     let open = |dialog: Dialogs, cx: &mut App| {
+        if dialog == Dialogs::CardDetail {
+            // Re-seeding a detail the palette was opened over throws away the edit the command
+            // is about to act on, which is every text row's `ctrl-s`.
+            if behind.as_ref() != Some(&Dialogs::CardDetail) {
+                super::card_detail::seed(state, cx);
+            }
+            super::with_host(state, cx, |host| host.open = Some(Dialogs::CardDetail));
+        }
         state.update(cx, |app, cx| {
             app.open_overlay(Overlay::Dialog(dialog));
             cx.notify();
         });
     };
     match command {
+        Command::BoardGoBoard => window.dispatch_action(Box::new(board::GoBoard), cx),
+        Command::BoardPrevColumn => window.dispatch_action(Box::new(board::PrevColumn), cx),
+        Command::BoardNextColumn => window.dispatch_action(Box::new(board::NextColumn), cx),
+        Command::BoardNextCard => window.dispatch_action(Box::new(board::NextCard), cx),
+        Command::BoardPrevCard => window.dispatch_action(Box::new(board::PrevCard), cx),
+        Command::BoardOpenCard => window.dispatch_action(Box::new(board::OpenCard), cx),
+        Command::BoardNewCard => window.dispatch_action(Box::new(board::NewCard), cx),
+        Command::BoardPickStatus => window.dispatch_action(Box::new(board::PickStatus), cx),
+        Command::BoardPickPriority => window.dispatch_action(Box::new(board::PickPriority), cx),
+        Command::BoardPickAssignee => window.dispatch_action(Box::new(board::PickAssignee), cx),
+        Command::BoardPickLabels => window.dispatch_action(Box::new(board::PickLabels), cx),
+        Command::BoardPickEstimate => window.dispatch_action(Box::new(board::PickEstimate), cx),
+        Command::BoardMovePrevColumn => window.dispatch_action(Box::new(board::MovePrevColumn), cx),
+        Command::BoardMoveNextColumn => window.dispatch_action(Box::new(board::MoveNextColumn), cx),
+        Command::BoardCreateWorktree => window.dispatch_action(Box::new(board::CreateWorktree), cx),
+        Command::BoardOpenWorktree => window.dispatch_action(Box::new(board::OpenWorktree), cx),
+        Command::BoardSync => window.dispatch_action(Box::new(board::Sync), cx),
+        Command::BoardFullSync => window.dispatch_action(Box::new(board::FullSync), cx),
+        Command::BoardOpenRemote => window.dispatch_action(Box::new(board::OpenRemote), cx),
+        Command::BoardDeleteCard => window.dispatch_action(Box::new(board::DeleteCard), cx),
+        Command::BoardSettings => window.dispatch_action(Box::new(board::Settings), cx),
+        Command::BoardReload => window.dispatch_action(Box::new(board::Reload), cx),
+        Command::BoardFilter => window.dispatch_action(Box::new(board::Filter), cx),
+        Command::CardDetailClose => {
+            // Like every other row here: the dialog comes back, and `Close` then does to it
+            // exactly what `Esc` would — cancel the open edit, or close the dialog.
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::Close), cx);
+        }
+        Command::CardDetailEditTitle => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::EditTitle), cx);
+        }
+        Command::CardDetailEditDescription => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::EditDescription), cx);
+        }
+        Command::CardDetailAddComment => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::AddComment), cx);
+        }
+        Command::CardDetailNextProperty => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::NextProperty), cx);
+        }
+        Command::CardDetailPrevProperty => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::PrevProperty), cx);
+        }
+        Command::CardDetailEditProperty => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::EditProperty), cx);
+        }
+        Command::CardDetailCreateWorktree => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::CreateWorktree), cx);
+        }
+        Command::CardDetailOpenRemote => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::OpenRemote), cx);
+        }
+        Command::CardDetailKeepLocal => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::KeepLocal), cx);
+        }
+        Command::CardDetailTakeRemote => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::TakeRemote), cx);
+        }
+        Command::CardDetailSave => {
+            open(Dialogs::CardDetail, cx);
+            window.dispatch_action(Box::new(card_detail::Save), cx);
+        }
+
         Command::NewWorktree => open(Dialogs::CreateWorktree, cx),
         Command::CloneRepo => open(Dialogs::CloneRepo, cx),
         Command::MoveRepo => open(Dialogs::AssignRepo, cx),
@@ -1050,7 +1482,7 @@ mod tests {
     #[test]
     fn an_empty_snapshot_still_offers_the_always_valid_commands() {
         let state = AppState::new("/tmp/fleet", Instant::now());
-        let rows = candidates(&state, "");
+        let rows = candidates(&state, "", None, None);
         assert!(
             rows.is_empty(),
             "without a snapshot the palette has nothing to point at"
@@ -1063,6 +1495,7 @@ mod tests {
             .parse()
             .unwrap_or_else(|error| panic!("{error}"));
         let mut snapshot = fleet_proto::snapshot::Snapshot {
+            boards: Vec::new(),
             generated_at: "2026-09-04T12:00:00Z".to_owned(),
             contexts: Vec::new(),
             repos: Vec::new(),
@@ -1236,7 +1669,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{error}")),
         );
 
-        let rows = candidates(&app, "sessions");
+        let rows = candidates(&app, "sessions", None, None);
         assert_eq!(rows.len(), ROW_CAP + 4);
         assert_eq!(rows[0].label, "acme/widgets#feature-6");
         assert_eq!(rows[1].label, "acme/widgets#feature-2");
@@ -1253,7 +1686,7 @@ mod tests {
         let now = Instant::now();
         let mut app = AppState::new("/tmp/fleet", now);
         app.apply_snapshot(go_snapshot(SessionState::Detached, false), now);
-        let rows = candidates(&app, "");
+        let rows = candidates(&app, "", None, None);
         let go: Vec<_> = rows
             .iter()
             .filter(|entry| entry.section == PaletteSectionKind::Go)
@@ -1269,13 +1702,153 @@ mod tests {
         // The same worktree, actually attached, and slept.
         let mut app = AppState::new("/tmp/fleet", now);
         app.apply_snapshot(go_snapshot(SessionState::Attached, false), now);
-        let rows = candidates(&app, "");
+        let rows = candidates(&app, "", None, None);
         assert_eq!(rows[0].status, Some(StatusKind::Attached));
         let mut app = AppState::new("/tmp/fleet", now);
         app.apply_snapshot(go_snapshot(SessionState::Detached, true), now);
-        let rows = candidates(&app, "");
+        let rows = candidates(&app, "", None, None);
         assert_eq!(rows[0].status, Some(StatusKind::Sleeping));
         assert_eq!(rows[0].detail.as_deref(), Some("sleeping"));
+    }
+
+    fn board_with_one_card() -> AppState {
+        let mut state = AppState::new("/tmp/fleet-palette-board", Instant::now());
+        state.screen = Screen::Hub { tab: HubTab::Board };
+        let context = fleet_core::model::Context {
+            id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+            name: "Work".into(),
+            owners: Vec::new(),
+            created_at: "2026-09-06T12:00:00Z".into(),
+        };
+        let mut board = fleet_core::board::new_board(&context, &context.created_at);
+        let card = fleet_core::board::create_card(
+            &mut board,
+            &[],
+            "card-1".parse().unwrap_or_else(|error| panic!("{error}")),
+            fleet_core::board::CardDraft {
+                title: "Fix login".into(),
+                ..Default::default()
+            },
+            &context.created_at,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let column = board
+            .statuses
+            .iter()
+            .position(|status| status.id == card.status_id)
+            .unwrap_or_else(|| panic!("no column"));
+        state.board.view = Some(fleet_core::board::BoardView {
+            board,
+            cards: vec![card],
+        });
+        state.board.focus = crate::state::BoardFocus { column, row: 0 };
+        state
+    }
+
+    #[test]
+    fn card_rows_that_could_only_do_nothing_are_not_listed() {
+        let mut state = board_with_one_card();
+        assert!(Command::CardDetailEditTitle.valid(&state));
+        // §3.9: a row that opens a dialog and then returns is not a valid row.
+        assert!(!Command::CardDetailClose.valid(&state));
+        assert!(!Command::CardDetailSave.valid(&state));
+        assert!(!Command::CardDetailKeepLocal.valid(&state));
+        assert!(!Command::CardDetailTakeRemote.valid(&state));
+        assert!(!Command::BoardOpenWorktree.valid(&state));
+
+        // Over an open detail, closing and saving are exactly what the palette is for.
+        let behind = card_context(&state, Some(Dialogs::CardDetail), None);
+        assert!(Command::CardDetailClose.valid_with(&state, behind));
+        assert!(Command::CardDetailSave.valid_with(&state, behind));
+        assert!(!Command::CardDetailKeepLocal.valid_with(&state, behind));
+
+        let card = &mut state
+            .board
+            .view
+            .as_mut()
+            .unwrap_or_else(|| panic!("no board"))
+            .cards[0];
+        card.worktree_id = Some(
+            "acme/api#wor-1"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        );
+        card.conflict = Some(fleet_core::board::Conflict {
+            detected_at: "2026-09-06T12:00:00Z".into(),
+            remote: fleet_core::board::RemoteCard::default(),
+            fields: vec!["title".into()],
+        });
+        assert!(Command::BoardOpenWorktree.valid(&state));
+        assert!(Command::CardDetailKeepLocal.valid(&state));
+        assert!(Command::CardDetailTakeRemote.valid(&state));
+    }
+
+    /// The card detail deliberately keeps the card it opened on when a refresh moves the
+    /// board's selection, so the `Card detail:` rows have to be judged against *that* card.
+    #[test]
+    fn the_card_detail_rows_follow_the_open_dialog_and_not_the_board_selection() {
+        let mut state = board_with_one_card();
+        let view = state
+            .board
+            .view
+            .as_mut()
+            .unwrap_or_else(|| panic!("no board"));
+        let mut second = view.cards[0].clone();
+        second.id = "card-two".parse().unwrap_or_else(|error| panic!("{error}"));
+        second.number = 2;
+        second.conflict = Some(fleet_core::board::Conflict {
+            detected_at: "2026-09-06T12:00:00Z".into(),
+            remote: fleet_core::board::RemoteCard::default(),
+            fields: vec!["title".into()],
+        });
+        let held = second.id.clone();
+        view.cards.push(second);
+        // The board is focused on the first card, which has no conflict; the dialog holds the
+        // second, which does.
+        let selection = card_context(&state, Some(Dialogs::CardDetail), None);
+        assert!(!Command::CardDetailKeepLocal.valid_with(&state, selection));
+        let held = card_context(&state, Some(Dialogs::CardDetail), Some(&held));
+        assert!(Command::CardDetailKeepLocal.valid_with(&state, held));
+        assert!(Command::CardDetailTakeRemote.valid_with(&state, held));
+    }
+
+    #[test]
+    fn opening_a_remote_issue_needs_a_link_that_carries_an_address() {
+        let mut state = board_with_one_card();
+        assert!(
+            !Command::BoardOpenRemote.valid(&state),
+            "an unlinked card has no issue to open"
+        );
+        let card = &mut state
+            .board
+            .view
+            .as_mut()
+            .unwrap_or_else(|| panic!("no board"))
+            .cards[0];
+        card.remote = Some(fleet_core::board::RemoteLink {
+            parent_key: None,
+            backend: "jira".into(),
+            key: "SP-1".into(),
+            url: None,
+            version: None,
+            synced_at: "2026-09-06T12:00:00Z".into(),
+            remote_updated_at: None,
+        });
+        assert!(
+            !Command::BoardOpenRemote.valid(&state),
+            "a backend that publishes no URL leaves nothing to open"
+        );
+        let card = &mut state
+            .board
+            .view
+            .as_mut()
+            .unwrap_or_else(|| panic!("no board"))
+            .cards[0];
+        if let Some(remote) = card.remote.as_mut() {
+            remote.url = Some("https://example.test/browse/SP-1".into());
+        }
+        assert!(Command::BoardOpenRemote.valid(&state));
+        assert!(Command::CardDetailOpenRemote.valid(&state));
     }
 
     #[gpui::test]
@@ -1291,7 +1864,7 @@ mod tests {
             app
         });
         cx.update(|cx| {
-            let rows = candidates(state.read(cx), "sessions").into();
+            let rows = candidates(state.read(cx), "sessions", None, None).into();
             with_host(&state, cx, |host| {
                 host.palette.rows = rows;
                 host.palette.cursor = 0;
@@ -1357,7 +1930,7 @@ mod tests {
             app
         });
         cx.update(|cx| {
-            let rows = candidates(state.read(cx), "sessions").into();
+            let rows = candidates(state.read(cx), "sessions", None, None).into();
             with_host(&state, cx, |host| {
                 host.palette.rows = rows;
                 host.palette.cursor = 0;
@@ -1405,7 +1978,7 @@ mod tests {
             app
         });
         cx.update(|cx| {
-            let rows = candidates(state.read(cx), "sessions").into();
+            let rows = candidates(state.read(cx), "sessions", None, None).into();
             with_host(&state, cx, |host| host.palette.rows = rows);
         });
         let transport = FakeTransport::default();

@@ -20,6 +20,7 @@ deliberately and update this document in the same pass.
 | `actions.rs` / `keymap.rs` | one action per `KEYMAP.md` row, and the binding table as data |
 | `presentation/` | shared projection and formatting used by more than one screen |
 | `screens/hub/` | §3.1–§3.5 |
+| `screens/board.rs` | BOARD §8: the board tab, its loading states and action extension points |
 | `screens/workspace/` | §3.6 |
 | `screens/agent_thread/` | §3.6.0, one native agent thread: transcript rows, decisions, the docked composer, the completion pickers |
 | `screens/agent_popup/` | §3.6.1, the floating agent PTY surface and its terminal attachment |
@@ -58,6 +59,9 @@ impl HubScreen {
     ) -> AnyElement;
 }
 
+// screens/board.rs — same frozen constructor/render signature as HubScreen
+impl BoardScreen { pub fn new(cx: &mut App) -> Self; pub fn render(/* … */) -> AnyElement; }
+
 // screens/jobs.rs — same shape, rendered into the overlay layer
 impl JobsPanel { pub fn new(cx: &mut App) -> Self; pub fn render(/* … */) -> AnyElement; }
 
@@ -79,7 +83,8 @@ impl ActiveDialog {
 
 // dialogs/mod.rs
 pub enum Dialogs { CreateWorktree, CloneRepo, Confirm, NewContext, EditContext, AssignRepo,
-                   EditHooks, Settings, RenameTerminal, Help, Quit, QuitDaemon }
+                   EditHooks, Settings, RenameTerminal, Help, Quit, QuitDaemon,
+                   CardDetail, CardCreate, CardPicker, BoardSettings }
 impl Dialogs {
     pub const fn context_name(&self) -> &'static str;   // the `Dialog > <name>` word
     fn render(/* state, bridge, focus, window, cx */) -> AnyElement;   // called by ActiveDialog
@@ -146,6 +151,7 @@ is always `Fleet`.
 | Hub, repos rail focused | `Fleet > Hub > Repos` |
 | Hub, worktrees list focused | `Fleet > Hub > Worktrees` |
 | Hub, PR screen focused | `Fleet > Hub > Prs` |
+| Hub, board tab (independent of repo pane selection) | `Fleet > Hub > Board` |
 | Workspace, PTY tab | `Fleet > Workspace > Terminal` \| `Prefix` \| `Scroll` |
 | Workspace, `fleet://` tab | `Fleet > Workspace > Native`, then the embedded view's own chain (`> Lazygit > Panels > Files`, …) |
 | Workspace, native agent tab | `Fleet > Agent > AgentIdle` \| `AgentWorking` \| `AgentNativeScroll`, or `Fleet > Agent > AgentDecision > AgentPermission` \| `AgentQuestion` \| `AgentPlan` while a gate is open |
@@ -296,9 +302,9 @@ counter state for every thread, opened or not. The shell has already applied bot
 
 ### IPC and CLI compatibility
 
-Daemon IPC is version **5**; the bump carries the native-agent requests, responses and events
-described above, and `Snapshot.agent_threads` is `#[serde(default)]` so version-4 snapshot JSON
-still decodes. The bug-fix program added one request field:
+Daemon IPC is version **6**; the bumps carry the board families of `docs/BOARD.md` and the
+native-agent requests, responses and events described above, and both `Snapshot.boards` and
+`Snapshot.agent_threads` are `#[serde(default)]` so version-4 snapshot JSON still decodes. The bug-fix program added one request field:
 `PruneWorktrees.ids: Option<Vec<WorktreeId>>`. It is defaulted and omitted when `None`, so an old
 request still decodes and the current legacy call path emits the byte-identical request shape.
 `None` retains repo/all-worktree discovery. The prune dialog sends `Some(ids)` only when committing,
@@ -315,7 +321,7 @@ Pong response envelopes likewise have an optional `daemon` object containing `pi
 `bootId` is stable for one fleetd process and changes across starts, including PID reuse. New
 clients retain it while delivering the existing unit `Pong` body to callers; older clients ignore
 the additive envelope member. App reconnect identity probes use this Pong metadata and never load
-a fallback snapshot. IPC v5 otherwise does not include daemon Git-mutation jobs, arbitrary
+a fallback snapshot. IPC v6 otherwise does not include daemon Git-mutation jobs, arbitrary
 terminal-history reads, terminal search/focus requests, cell hyperlinks, or frame effects. Those
 deferred surfaces require a separately negotiated additive contract before clients may send them.
 The public JSON CLI is a separate, unchanged protocol-1 envelope.
@@ -333,6 +339,9 @@ is the single source of truth on the client. The parts a screen touches:
 | `snapshot_at` / `snapshot_age(now)` | what the `stale · <age>` stamp ages (§1.3) |
 | `grids: HashMap<TerminalId, MirrorGrid>` | one mirror grid per terminal, diffs already applied |
 | `displayed_hub: DisplayedHub` | stable IDs and rows from the Hub's current scoped/sorted/filtered projection |
+| `board: BoardState` | active context’s `BoardView`, loading/error, `BoardFocus { column, row }`, filter and optional `GroupBy` |
+| `board_stale: bool` | authoritative refresh pending; lives outside the frozen `BoardState` fields |
+| `board_backends: Vec<BackendDescriptor>` | the daemon's backend registry, fetched once per connection; the header label and the settings dialog's rows are drawn from it |
 | `screen`, `hub_pane`, `pr_tab`, `scope`, `cursors` | where the cursor is, per list |
 | `terminal_mode`, `agent_popup`, `overlay`, `mode()` | the base Workspace mode, floating-agent mode, top overlay, and resulting mode word/key context |
 | `filter` | query + whether the input still owns the keyboard |
@@ -592,3 +601,153 @@ active terminal drag; idle or already-completed selections must let sibling watc
 clicks reach bubble. The handler-path unit test covers this ownership decision,
 including retaining completed selections for copying. There is no GPUI test-app
 harness in this crate; actual pointer delivery still needs a host GUI smoke test.
+
+## Board app extension points (BOARD §8)
+
+`HubTab::Board` is selected by `board::GoBoard` (`g b`). `HubScreen` owns
+`screens::board::BoardScreen` and renders it with the frozen signature. The Hub's
+screen strip includes `Board`, the active context's summary `open_count`, and a
+conflict dot when `conflict_count > 0`. `BoardScreen` owns one horizontal
+`ScrollHandle` for the columns and one per column for its cards, and reveals the
+focused column and card when their selection changes. Only the inner Board root tracks the
+Hub focus handle on that tab. `views::board_screen` holds the pure model
+(filter predicate, visible slice of a column, priority and category mappings, header
+facts) and the rendering; `views::board_card_detail` holds the property-row model and
+the detail panes. Placement and content decisions are in `UX-SPEC.md` § Board.
+
+`BoardState` has `view: Option<BoardView>`, `loading: bool`,
+`error: Option<String>`, `focus: BoardFocus`, `filter: String`,
+`filter_editing: bool` and `group_secondary: Option<GroupBy>`.
+`filter_editing` records whether the board filter owns text input. It is what
+`AppState::board_filter_owns_keys` reads, and while it is set `context_chain()`
+returns `["Filter", "BoardFilter"]` (and `mode()` returns `Mode::Filter`) instead of
+`["Hub", "Board"]`, so the board's bare letters type instead of firing.
+`AppState::board_filter_escape()` is the §3.10 two-stage `Esc` for it; base Cancel
+calls its second stage. `Filter > BoardFilter` adds left/right and ctrl-b/ctrl-f
+column navigation to the inherited Filter editing bindings.
+`clamp_board_focus` is `pub(crate)` and clamps against the **filtered** column, so the
+selection can never point at a hidden card. `BoardFocus` has `column: usize` and `row: usize`;
+`GroupBy` is `Priority | Assignee | Labels`. `AppState::board() -> Option<&BoardView>`
+returns the current view. Reducers are `apply_board_view(BoardView)`,
+`apply_card(Card)`, and `clear_board()`. Card upserts reject another board, sort by status and position, and clamp
+focus. Unknown-status responses request a full refresh instead of inserting an invisible card; board views reject another active context. Clear resets the draft and
+invalidates pending responses. `apply_daemon_event(Event, Instant)` handles
+`Event::BoardChanged` by setting `board_stale` only for the displayed board.
+
+There are **no new `BridgeEvent` variants**: like PR/worktree response consumers,
+`screens::board::ensure_current` awaits the receiver returned by
+`Bridge::request(RequestBody::EnsureBoard { context_id })`. It applies
+`ResponseBody::Board` via `finish_board_load` and `apply_board_view`. Card
+request consumers apply `ResponseBody::Card` through `apply_card`.
+The board loader runs on tab entry, active-context change, reconnect, or a stale
+board's next render. Only one request is in flight per generation. Context switches
+(including A → B → A) and link changes reject old responses. Errors remain visible
+in state until reload; an event arriving during a refresh schedules one more load.
+
+The payload-free `Dialogs` variants and `context_name()` values are `CardDetail`,
+`CardCreate`, `CardPicker`, and `BoardSettings`. Their titles are `Card detail`,
+`New card`, `Card property`, and `Board settings`. Each module exposes `render`
+with the ordinary dialog signature; each returned root tracks focus and closes on
+Escape. `DialogHost` owns these public fields:
+
+| Field | Type | Initial draft |
+| --- | --- | --- |
+| `card_detail` | `card_detail::CardDetailState` | `card_id`, `property_row`, `area: TextAreaState`, `edit: Option<CardEdit>`, `revision`, `saving: Option<u64>` and `error` |
+| `card_create` | `card_create::CardCreateState` | `board_id`, `draft: CardDraft`, plus `field`, `title_caret` (chars), `description_area: TextAreaState` and `error` |
+| `card_picker` | `card_picker::CardPickerState` | `kind`, `card_id`, `query`, `cursor`, plus `caret`, `selected: Vec<String>`, `then_worktree`, `then_detail` and `error` |
+| `board_settings` | `board_settings::BoardSettingsState` | `board_id`, `name`, `prefix`, `default_repo_id`, `start_on_worktree`, `push_new_cards`, `conflict_policy`, `backend_kind`, `original_kind`, `original_settings`, `rows: Vec<BackendRow>`, plus `row`, `caret` and `error` |
+
+`DialogHost.behind_palette` names the dialog the open palette replaced — the palette does not
+stack on a dialog, and a `Card detail:` palette row reopens that dialog instead of reseeding it
+over the text the user already typed. `:` is therefore bound in `Dialog > CardDetail` as well as
+in `Hub`: without a way in from the detail, `Card detail: Close` and `Card detail: Save text edit`
+are rows no state could ever list and the whole `behind_palette` path is unreachable. The added fields are all local editing state; the BOARD §8
+fields keep their names and meanings. `CardDetailState` holds **one** buffer for the three text surfaces
+(title, description, comment), because at most one of them is ever open.
+`Dialogs::CardDetail.width()` is 880 px — it is a two-pane surface, not a form — and
+the other three board dialogs are 560 px.
+
+`card_picker::PickerKind` is `Status | Priority | Assignee | Labels | Estimate |
+DueDate | Repo | Property(String)`. Set `host.card_picker.kind` before opening
+`CardPicker`; seeding preserves it and resets the selection/query for the target card.
+Opening a picker from detail carries its card ID, independently of the board cursor.
+Applying or cancelling returns to the existing detail draft without reseeding it.
+Other dialog openings seed fresh drafts.
+
+Every BOARD §8 command has a palette `Command` variant, label and action dispatch.
+The exact action names are listed in `KEYMAP.md`; the namespaces are `board` and
+`card_detail`. `Shell::with_actions` registers every action. Board handlers call
+the corresponding snake_case free function in `screens::board`; detail handlers
+call the matching free function in `dialogs::card_detail`. Every one of them is
+implemented; a dialog's own `on_action` handler shadows the shell's, because gpui
+stops action propagation by default in the bubble phase.
+
+Three additions outside the skeleton's list:
+
+* `actions::board::CreateAndOpen` (`ctrl-enter` in `Dialog > CardCreate`) creates the
+  card and opens its detail. It has no palette command: it only means anything inside
+  that dialog.
+* `Dialog > CardPicker` binds `space` to `settings::Toggle` (multi-select) and
+  `Dialog > BoardSettings` binds `j`/`k`/`h`/`l`/`space` to the `settings::*` actions,
+  reusing §3.8.6's row model — including its rule that a bare letter types when a text
+  row owns the keyboard. Everything else these dialogs answer is inherited from the
+  generic `Dialog` context.
+* `ConfirmRequest::DeleteCard { card, key, title }` routes `d` on the board through
+  §3.8.3, like every other destructive key. A card with a `remote` link never reaches the
+  dialog: the daemon refuses that deletion (the sync would file the issue again as a new
+  card), so `d` answers "Mirrored card — delete it in the backend" instead of confirming a
+  consequence the system does not deliver.
+
+Property mutations go through `screens::board::send_card`, which applies the returned
+`Card` with `apply_card`, moves the focus onto it, and puts a refusal in the sticky
+error slot. Nothing on the board is optimistic.
+
+### The backend registry, generically (BOARD-JIRA §6)
+
+`fleet-app` names no backend. `AppState` caches the daemon's registry in
+`board_backends: Vec<BackendDescriptor>`, fetched **once per connection** by
+`screens::board::ensure_backends` — `begin_backends_load()` marks the request as issued when
+it goes out, not when it answers, because the board re-renders every frame and a flag cleared
+by a failure would ask sixty times a second. `clear_board()` clears the flag (a reconnect may
+land on a different fleetd) but keeps the descriptors, so the header's label never flickers.
+`backend_label(kind)` falls back to the raw kind, which is what an older daemon leaves behind.
+
+* **Header** — `views::board_screen::HeaderFacts::of(view, backend_label, now)` puts the label
+  in the backend chip; `BoardProps.backend_label` carries it in.
+* **Settings dialog** — the `Backend` row cycles `backend_kinds(state, current)` (the registry,
+  plus the board's own kind when the registry does not know it), and every row below it is one
+  `settings_schema` entry of the selected descriptor. The row model is pure and unit tested:
+  `backend_rows(schema, settings)` → `Vec<BackendRow>`, `rows_to_settings(base, rows)` →
+  settings JSON (keeping keys the schema never names, removing the ones a row emptied, writing
+  numbers as numbers), and `rows_error(rows)` for the required and numeric rules.
+  `PropertyKind` picks the control: `Bool` → `Toggle`, `Select` → `Cycler` over the schema's
+  options, `Number` → `NumberField` that takes digits only (so `h`/`l` keep stepping it),
+  everything else → `TextField`; `MultiSelect` is typed comma-separated. `PropertySchema` has
+  no `required` flag, so a name ending in `fleet_core::board::REQUIRED_MARKER` (`(required)`,
+  re-exported as `board_settings::REQUIRED_MARKER`) is the signal; the marker is stripped from
+  the label and shown as `∗`. It lives in the core because the daemon reads it the same way: a
+  required row names the remote itself, and `BoardService::update` refuses to change one on a
+  board whose cards are already linked, exactly as it refuses a kind change.
+  `h` on an empty `Number` row is a no-op — stepping down from unset would write `0`, a value the
+  daemon is not using and that `backend_element` refuses to draw. Save sends
+  `BoardPatch { backend: Some(BackendRef { kind, settings }), … }`; changing kind starts from
+  empty settings and returning to the board's own kind restores them, mirroring the daemon's
+  rule. A refusal keeps the dialog open with the daemon's message verbatim.
+* **Read-only fields** — `AppState::readonly_fields()` / `is_readonly_field(field)` read
+  `board.sync.readonly_fields`, and are empty on a local board exactly as
+  `fleet_core::board::ops` reads them. `PickerKind::card_field()` maps a picker to the field
+  name that list uses. `screens::board::readonly_message(state, kind)` builds
+  `"<field> is read-only on <backend label> boards"`; the board's pickers and `[` / `]` show it
+  as a toast (`Icon::Lock`), and the card detail writes it to its own error line, because the
+  dialog's scrim covers the toast stack. `views::board_card_detail::PropertyRow.locked` draws
+  the row in `Tone::Secondary` with a trailing lock glyph while keeping its picker target — a
+  row that silently did nothing would look like a broken key.
+* **`x`** — `board::OpenRemote` and `card_detail::OpenRemote` open `card.remote.url` with
+  `cx.open_url`. `screens::board::remote_url(card)` is the single source of "is there an
+  address here"; it also gates the two palette rows through `CardContext.remote`.
+
+Detail text saves keep the editor until a matching successful reply. Revision guards prevent
+older replies from clearing newer drafts; failures retain text and display the daemon error.
+Both detail and CardCreate description editors retain `TextAreaState` across keystrokes.
+In CardCreate, Enter in the description inserts a newline, Tab indents, Shift-Tab returns
+to the title, and Ctrl-Enter creates and opens the card.

@@ -16,7 +16,7 @@ this file; where the two disagree, this file wins.
 
 | Mode | gpui key context | Entered by | Left by |
 | --- | --- | --- | --- |
-| Normal | `Hub` / `Hub > Repos` / `Hub > Worktrees` / `Hub > Prs` | app start, `ctrl-s s` from a terminal, `Esc` from dialogs | opening a session |
+| Normal | `Hub` / `Hub > Repos` / `Hub > Worktrees` / `Hub > Prs` / `Hub > Board` | app start, `ctrl-s s` from a terminal, `Esc` from dialogs | opening a session |
 | Terminal | `Workspace > Terminal` | opening a worktree session, `Enter` on a session tab | `ctrl-s` (prefix) |
 | Native | `Workspace > Native` | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`) | `ctrl-s` (prefix), or selecting a PTY tab |
 | Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal or Native | any key (consumed) or `Esc` |
@@ -448,3 +448,82 @@ and "cancel job" in the Jobs panel. `f` cycles the Jobs filter in the list and t
 inside an expanded log. `y` copies a path, a URL or a log path depending on the pane. All are
 mode- or pane-disjoint; the Help dialog groups by mode precisely so they can be read side by
 side.
+
+## Board and card detail (BOARD §8)
+
+Board shortcuts override the inherited Hub shortcuts. `j` moves down (next),
+and `k` moves up (previous), following the global nvim convention.
+
+`/` does **not** open the Hub's filter overlay: the board owns `BoardState.filter`,
+and while its input has the keyboard the screen publishes the `Filter` key context
+instead of `Hub > Board`. Every row below is therefore shadowed while you are typing
+a filter, and the `Filter` rows above apply instead — including their two-stage `Esc`.
+
+The board dialog rows below are **in addition to** everything the generic Dialog
+context binds: enter, tab, ctrl-n / ctrl-p, backspace, ctrl-w, ctrl-u, ctrl-a,
+ctrl-e, left and right. A bare letter bound in the board settings dialog types
+itself when a text row owns the keyboard, exactly as in §3.8.6.
+
+| Key | Context | Action |
+| --- | --- | --- |
+| `g b` | `Hub` | `board::GoBoard` — Go to board |
+| `h` | `Hub > Board` | `board::PrevColumn` — Previous column |
+| `left` | `Hub > Board` | `board::PrevColumn` — Previous column |
+| `l` | `Hub > Board` | `board::NextColumn` — Next column |
+| `right` | `Hub > Board` | `board::NextColumn` — Next column |
+| `j` | `Hub > Board` | `board::NextCard` — Next card |
+| `down` | `Hub > Board` | `board::NextCard` — Next card |
+| `k` | `Hub > Board` | `board::PrevCard` — Previous card |
+| `up` | `Hub > Board` | `board::PrevCard` — Previous card |
+| `enter` | `Hub > Board` | `board::OpenCard` — Open card |
+| `c` | `Hub > Board` | `board::NewCard` — New card |
+| `s` | `Hub > Board` | `board::PickStatus` — Status picker |
+| `p` | `Hub > Board` | `board::PickPriority` — Priority picker |
+| `a` | `Hub > Board` | `board::PickAssignee` — Assignee picker |
+| `t` | `Hub > Board` | `board::PickLabels` — Labels picker |
+| `e` | `Hub > Board` | `board::PickEstimate` — Estimate picker |
+| `[` | `Hub > Board` | `board::MovePrevColumn` — Move card to previous column |
+| `]` | `Hub > Board` | `board::MoveNextColumn` — Move card to next column |
+| `w` | `Hub > Board` | `board::CreateWorktree` — Create worktree from card |
+| `o` | `Hub > Board` | `board::OpenWorktree` — Open linked worktree |
+| `S` | `Hub > Board` | `board::Sync` — Sync |
+| `F` | `Hub > Board` | `board::FullSync` — Full sync, ignoring the incremental cursor |
+| `x` | `Hub > Board` | `board::OpenRemote` — Open the focused card's remote issue |
+| `d` | `Hub > Board` | `board::DeleteCard` — Delete card (a mirrored card answers "Mirrored card — delete it in the backend") |
+| `,` | `Hub > Board` | `board::Settings` — Settings |
+| `r` | `Hub > Board` | `board::Reload` — Reload |
+| `/` | `Hub > Board` | `board::Filter` — Filter cards |
+| `escape` | `Dialog > CardDetail` | `card_detail::Close` — Close |
+| `i` | `Dialog > CardDetail` | `card_detail::EditTitle` — Edit title |
+| `d` | `Dialog > CardDetail` | `card_detail::EditDescription` — Edit description |
+| `c` | `Dialog > CardDetail` | `card_detail::AddComment` — Add comment |
+| `j` | `Dialog > CardDetail` | `card_detail::NextProperty` — Next property |
+| `k` | `Dialog > CardDetail` | `card_detail::PrevProperty` — Previous property |
+| `enter` | `Dialog > CardDetail` | `card_detail::EditProperty` — Edit selected property |
+| `w` | `Dialog > CardDetail` | `card_detail::CreateWorktree` — Create worktree |
+| `x` | `Dialog > CardDetail` | `card_detail::OpenRemote` — Open the remote issue |
+| `K` | `Dialog > CardDetail` | `card_detail::KeepLocal` — Resolve conflict: keep local |
+| `R` | `Dialog > CardDetail` | `card_detail::TakeRemote` — Resolve conflict: take remote |
+| `ctrl-s` | `Dialog > CardDetail` | `card_detail::Save` — Save text edit |
+| `:` | `Dialog > CardDetail` | `OpenPalette` — Command palette over the open card detail |
+| `ctrl-enter` | `Dialog > CardCreate` | `board::CreateAndOpen` — Create and open |
+| `space` | `Dialog > CardPicker` | `settings::Toggle` — Toggle the highlighted label |
+| `j` | `Dialog > BoardSettings` | `settings::MoveDown` — Next row |
+| `k` | `Dialog > BoardSettings` | `settings::MoveUp` — Previous row |
+| `h` | `Dialog > BoardSettings` | `settings::CyclePrev` — Previous choice |
+| `l` | `Dialog > BoardSettings` | `settings::CycleNext` — Next choice |
+| `space` | `Dialog > BoardSettings` | `settings::Toggle` — Toggle the row |
+
+Board filtering also keeps horizontal navigation:
+
+| Key | Context | Action |
+| --- | --- | --- |
+| `left` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
+| `ctrl-b` | `Filter > BoardFilter` | `board::PrevColumn` — Previous column |
+| `right` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
+| `ctrl-f` | `Filter > BoardFilter` | `board::NextColumn` — Next column |
+
+In card text editors, Tab indents by two spaces. In CardCreate, Tab from the title enters
+its description; Shift-Tab returns to the title, Enter in the description inserts a newline,
+and Ctrl-Enter creates and opens the card. Escape in the property picker returns to the
+card detail when opened there. Space toggles both labels and custom multi-select options.

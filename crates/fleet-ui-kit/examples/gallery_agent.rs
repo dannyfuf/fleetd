@@ -170,7 +170,7 @@ impl AgentGallery {
                 expanded,
             },
             TranscriptRow::AssistantText {
-                markdown: parse_markdown(
+                markdown: parse_markdown_document(
                     "Reading the reducer first, then the projection it feeds.",
                 ),
             },

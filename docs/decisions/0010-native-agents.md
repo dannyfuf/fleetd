@@ -1,4 +1,4 @@
-# 0008 — Native agent sessions
+# 0010 — Native agent sessions
 
 **Adopted** for `fleet-daemon`'s `services/agents/`, `fleet-core::agents`, and the
 `screens/agent_thread/` tab in `fleet-app`. Claude Code and OpenCode run as structured sessions

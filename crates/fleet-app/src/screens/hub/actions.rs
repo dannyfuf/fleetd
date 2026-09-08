@@ -474,6 +474,11 @@ impl HubCtx {
 
     /// `b` — the PR's URL on the PR screen, the inspected PR or the repo elsewhere.
     pub(super) fn open_in_browser(&self, cx: &mut App) {
+        // Nothing on the board is a worktree or a pull request; acting on the hidden selection
+        // would open a URL for a row the user cannot see.
+        if self.on_board(cx) {
+            return;
+        }
         let url = if matches!(self.state.read(cx).screen, Screen::Hub { tab: HubTab::Prs }) {
             self.selected_pr(cx).map(|row| row.url.to_string())
         } else if self.state.read(cx).hub_pane == HubPane::Repos {

@@ -191,6 +191,7 @@ fn an_inspection_slot_never_blanks_its_previous_values() {
 
 fn snapshot(count: usize) -> Snapshot {
     Snapshot {
+        boards: Vec::new(),
         generated_at: String::new(),
         contexts: vec![],
         repos: vec![],

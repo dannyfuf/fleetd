@@ -121,6 +121,7 @@ impl AppState {
                 self.daemon = DaemonLink::Connected;
                 self.daemon_since = now;
                 self.link_generation = self.link_generation.wrapping_add(1);
+                self.clear_board();
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
                 self.apply_snapshot(*snapshot, now);
@@ -154,6 +155,7 @@ impl AppState {
                 self.overlay = None;
             }
             BridgeEvent::Disconnected { attempt } => {
+                self.clear_board();
                 self.daemon_capabilities.clear();
                 let dismissed = matches!(
                     self.daemon,
@@ -184,6 +186,7 @@ impl AppState {
                 // The daemon-side connection is new and holds no attachments, whether or not
                 // fleetd itself restarted.
                 self.link_generation = self.link_generation.wrapping_add(1);
+                self.clear_board();
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
                 self.apply_snapshot(*snapshot, now);
@@ -205,6 +208,7 @@ impl AppState {
             }
             // Lag also affects quiet terminals. Shell requests full frames for these mirrors.
             BridgeEvent::EventsLagged { .. } => {
+                self.board_stale = true;
                 self.desync_grids();
                 self.watches.invalidate();
             }
@@ -214,6 +218,12 @@ impl AppState {
     /// Applies one ordinary daemon event to the mirror.
     pub fn apply_daemon_event(&mut self, event: Event, now: Instant) {
         match event {
+            Event::BoardChanged { board_id, .. } => {
+                if self.board().is_some_and(|view| view.board.id == board_id) || self.board.loading
+                {
+                    self.board_stale = true;
+                }
+            }
             Event::WatchStarted(watch) => self.watches.started(watch, now),
             Event::WatchOutput { watch, chunks } => self.watches.output(watch, chunks),
             Event::WatchExited(watch) => self.watches.exited(watch, now),

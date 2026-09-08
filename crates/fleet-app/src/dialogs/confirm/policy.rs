@@ -47,6 +47,15 @@ pub enum ConfirmRequest {
         /// Whether an editor in it has unsaved changes.
         unsaved: bool,
     },
+    /// `d` on a board card (BOARD §8).
+    DeleteCard {
+        /// The card to delete.
+        card: CardId,
+        /// Its display key, e.g. `FLT-12`.
+        key: String,
+        /// Its title, which is what the consequence sentence names.
+        title: String,
+    },
     /// `ctrl-s x` in the Workspace.
     CloseTerminal {
         /// The terminal to close.
@@ -74,6 +83,7 @@ impl ConfirmRequest {
             Self::DeleteWorktree { .. } => "Delete worktree".to_owned(),
             Self::DeleteRepo { repo, .. } => format!("Delete repository {}?", repo.as_str()),
             Self::DeleteContext { name, .. } => format!("Delete context \"{name}\"?"),
+            Self::DeleteCard { key, .. } => format!("Delete {key}?"),
             Self::Prune { repo } => format!("Prune {}", repo.as_str()),
             Self::KillSession { session, .. } => format!("Kill session {}?", session.as_str()),
             Self::CloseTerminal { index, name, .. } => {
@@ -107,6 +117,10 @@ impl ConfirmRequest {
             } => format!(
                 "Also deletes {repos} repositories, {worktrees} worktrees and every session in \
                  them ({sessions} running)."
+            ),
+            Self::DeleteCard { title, .. } => format!(
+                "Removes \"{title}\" with its comments and activity. A worktree created from it \
+                 is kept."
             ),
             Self::Prune { .. } => {
                 "Deletes the ones listed below. The skipped ones are kept, with the reason shown."
@@ -142,9 +156,10 @@ impl ConfirmRequest {
             return Icon::TriangleAlert;
         }
         match self {
-            Self::DeleteWorktree { .. } | Self::DeleteRepo { .. } | Self::DeleteContext { .. } => {
-                Icon::Trash
-            }
+            Self::DeleteWorktree { .. }
+            | Self::DeleteRepo { .. }
+            | Self::DeleteContext { .. }
+            | Self::DeleteCard { .. } => Icon::Trash,
             Self::Prune { .. } => Icon::Scissors,
             Self::KillSession { .. } => Icon::Power,
             Self::CloseTerminal { .. } => Icon::X,
@@ -155,9 +170,10 @@ impl ConfirmRequest {
     #[must_use]
     pub fn action_label(&self, prune_count: usize) -> String {
         match self {
-            Self::DeleteWorktree { .. } | Self::DeleteRepo { .. } | Self::DeleteContext { .. } => {
-                "Delete".to_owned()
-            }
+            Self::DeleteWorktree { .. }
+            | Self::DeleteRepo { .. }
+            | Self::DeleteContext { .. }
+            | Self::DeleteCard { .. } => "Delete".to_owned(),
             Self::Prune { .. } => format!("Prune {prune_count}"),
             Self::KillSession { .. } => "Kill".to_owned(),
             Self::CloseTerminal { .. } => "Close".to_owned(),
@@ -186,6 +202,7 @@ impl ConfirmRequest {
             Self::DeleteWorktree { id } => id.as_str().to_owned(),
             Self::DeleteRepo { repo, .. } | Self::Prune { repo } => repo.as_str().to_owned(),
             Self::DeleteContext { context, .. } => context.as_str().to_owned(),
+            Self::DeleteCard { key, .. } => key.clone(),
             Self::KillSession { session, .. } => session.as_str().to_owned(),
             Self::CloseTerminal { name, .. } => name.clone(),
         }

@@ -58,6 +58,9 @@ pub struct HostStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    /// Board summaries belonging to current contexts.
+    #[serde(default)]
+    pub boards: Vec<fleet_core::board::BoardSummary>,
     /// ISO-8601 time at which this snapshot was assembled.
     pub generated_at: String,
     /// Registered contexts.
@@ -134,5 +137,20 @@ mod tests {
         let snapshot: Snapshot =
             serde_json::from_value(json).unwrap_or_else(|error| panic!("{error}"));
         assert!(snapshot.agent_threads.is_empty());
+    }
+
+    #[test]
+    fn snapshots_without_boards_default_to_empty() {
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "generatedAt":"now", "contexts":[], "repos":[], "clones":[], "worktrees":[], "activeContext":null,
+            "sessions":[], "statuses":[], "jobs":[], "daemon":{"version":"test", "pid":1, "startedAt":"now", "home":"/tmp/fleet"}
+        }))
+        .expect("snapshot without a boards field");
+        assert!(snapshot.boards.is_empty());
+        assert_round_trip(snapshot.clone());
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap_or_else(|error| panic!("{error}"))["boards"],
+            serde_json::json!([])
+        );
     }
 }

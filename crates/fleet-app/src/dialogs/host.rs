@@ -18,6 +18,21 @@ use gpui::{
 pub(crate) struct DialogHost {
     /// The dialog the drafts below belong to, or `None` when no dialog is open.
     pub open: Option<Dialogs>,
+    /// The dialog the open palette replaced, so a palette command can act on its draft.
+    ///
+    /// The palette does not stack on the dialog it is opened over: it replaces it, and the
+    /// dialog's draft is all that is left of it. Every `Card detail:` palette row saves or
+    /// cancels an edit that is already typed, so it must reopen that dialog rather than seed a
+    /// fresh one over the user's text.
+    pub behind_palette: Option<Dialogs>,
+    /// Board settings draft (BOARD §8).
+    pub board_settings: board_settings::BoardSettingsState,
+    /// Card property draft (BOARD §8).
+    pub card_picker: card_picker::CardPickerState,
+    /// New card draft (BOARD §8).
+    pub card_create: card_create::CardCreateState,
+    /// Card detail draft (BOARD §8).
+    pub card_detail: card_detail::CardDetailState,
     /// Whether the palette's draft has been seeded for the currently open palette.
     pub palette_open: bool,
     pub create: create_worktree::CreateState,
@@ -297,6 +312,7 @@ fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
                 replacement || with_host(state, cx, |host| host.open.as_ref() != Some(&dialog));
             if changing {
                 close(state, cx);
+                with_host(state, cx, |host| host.behind_palette = None);
                 let pending = cx.default_global::<DialogRegistry>();
                 let confirm = pending.pending_confirm.take();
                 let hooks = pending.pending_hooks_repo.take();
@@ -309,11 +325,18 @@ fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         }
         Some(Overlay::Palette) => {
             if !with_host(state, cx, |host| host.palette_open) {
+                // Read before closing: `close` is what makes the host forget which dialog the
+                // palette replaced, and the `Card detail:` rows are judged against it.
+                let behind = with_host(state, cx, |host| host.open.clone());
                 close(state, cx);
+                with_host(state, cx, |host| host.behind_palette = behind);
                 palette::seed(state, cx);
             }
         }
-        _ => close(state, cx),
+        _ => {
+            close(state, cx);
+            with_host(state, cx, |host| host.behind_palette = None);
+        }
     }
 }
 

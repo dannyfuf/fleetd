@@ -73,8 +73,9 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
 - **Adapters** (traits + real impls + fakes for tests): `Shell`, `Git`, `Github`, `Files`
   (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`, `Logs`.
   Exact git/gh command lines are those in the inventory §7.
-- **Services**: `Contexts`, `Repos` (clone jobs, discovery cache), `Worktrees` (creation,
-  publication, recovery, trash, hooks) with the prepared-copy `Pool`, `Inspect`, `Prune`,
+- **Services**: `Contexts`, `Boards` (documents, cards, remote sync), `Repos` (clone jobs,
+  discovery cache), `Worktrees` (creation, publication, recovery, trash, hooks) with the
+  prepared-copy `Pool`, `Inspect`, `Prune`,
   `Github` (PR tabs, caches, TTLs), `Sessions` (registry, lifecycle, host bridge, observations),
   `Hosts`, `Sleep`, `Watches` and `WatchDiscovery`, `AgentActivity`, `Agents` (the native agent
   session manager, below), `Awaited`, `Doctor`,
@@ -125,7 +126,7 @@ before mutation; merged status comes from commit reachability.
 ## Native agent sessions
 
 A Claude Code or OpenCode session is a **thread**, and a thread is daemon state exactly like a
-terminal: the app never owns one. `docs/NATIVE-AGENTS.md` is the specification and ADR 0008
+terminal: the app never owns one. `docs/NATIVE-AGENTS.md` is the specification and ADR 0010
 records why the load-bearing choices are what they are; this is the map.
 
 ```
@@ -199,7 +200,7 @@ modes{alt_screen, mouse, bracketed_paste}, title }`.
 `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid. The wire protocol is version 5; `wrapped` preserves logical lines
+on the client's mirror grid. The wire protocol is version 6; `wrapped` preserves logical lines
 during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
 row is discarded, history shrinks, or a column change reflows it, without treating viewport
 movement as eviction. Off-screen
@@ -270,14 +271,15 @@ explicit return-to-bottom behavior.
 
 ## Protocol compatibility
 
-Daemon IPC is version **5**. The bump is the native-agent surface: eleven `RequestBody` variants
-(`AgentThreadList`, `AgentThreadCreate`, `AgentThreadOpen`, `AgentThreadClose`, `AgentSend`,
-`AgentInterrupt`, `AgentRespond`, `AgentSetMode`, `AgentSetModel`, `AgentMarkSeen`,
-`AgentStop`), their `ResponseBody` answers (`AgentThreads`, `AgentThreadCreated`,
-`AgentThreadSnapshot`, `AgentAck`), and the `Agent` / `AgentSummary` events. `Snapshot`'s new
-`agent_threads` is `#[serde(default)]`, so a version-4 snapshot payload still deserializes; the
-requests are new names, which an older daemon rejects rather than misreads, and `Hello`
-negotiates the version before any of them is sent.
+Daemon IPC is version **6**. Two families arrived since version 4. The board surface adds its
+request, response, and event families (`docs/BOARD.md`). The native-agent surface adds eleven
+`RequestBody` variants (`AgentThreadList`, `AgentThreadCreate`, `AgentThreadOpen`,
+`AgentThreadClose`, `AgentSend`, `AgentInterrupt`, `AgentRespond`, `AgentSetMode`,
+`AgentSetModel`, `AgentMarkSeen`, `AgentStop`), their `ResponseBody` answers (`AgentThreads`,
+`AgentThreadCreated`, `AgentThreadSnapshot`, `AgentAck`), and the `Agent` / `AgentSummary`
+events. `Snapshot`'s new `agent_threads` and `boards` are both `#[serde(default)]`, so an older
+snapshot payload still deserializes; the requests are new names, which an older daemon rejects
+rather than misreads, and `Hello` negotiates the version before any of them is sent.
 
 `PruneWorktrees.ids` is the shipped additive field: it defaults to
 absent and is omitted when `None`, preserving legacy request JSON; `Some(ids)` is the exact
@@ -371,3 +373,68 @@ tailed into stdout chunks, beginning with its last 64 KiB after discovery or dae
 restart. Generic discoveries carry an informational line because their output is not
 captured. Liveness and companion terminal states only change watch metadata; discovery
 never obtains a process-control handle.
+
+## Boards
+
+The daemon `Boards` service owns one versioned board document per context. It applies
+`fleet-core::board` operations, validates the resulting cards, atomically saves the
+whole document, updates its card-to-board index, and publishes `BoardChanged` plus a
+snapshot refresh request. The index is rebuilt lazily from disk after restart. A
+shared mutation gate serializes edits, worktree linking, and sync jobs so remote I/O
+cannot overwrite an intervening local edit. Snapshot reads skip damaged documents
+and boards whose contexts have disappeared; full views clear missing worktree links
+in memory without changing their stored history.
+
+`BoardBackends` resolves the `BoardBackend` adapter by `BackendRef.kind`. Each adapter
+validates its own settings, describes statuses and properties, and maps pull/push
+traffic into the core schema. Each also reports a human `label` and a `settings_schema`,
+which `ListBoardBackends` publishes as `BackendDescriptor`s so the CLI and app render
+backend settings generically. The production registry contains `LocalBackend`, whose
+capabilities are all disabled, and `JiraBackend`. Local sync returns Unsupported
+without scheduling work. Remote sync is a detached, retryable `board.sync` job with
+progress logs: describe, adopt schema, pull, reconcile, push, apply acknowledgements,
+save. These jobs are not cancellable because a backend push may already have remote
+side effects. Schema and reconciled cards are checkpointed together before push; failures
+preserve those checkpoints, record `sync.last_error`, and emit `SyncFailed`.
+Successful jobs store sync timestamps/cursors and emit `Synced`. The daemon assigns
+UUIDs to newly imported cards, maps old local statuses after initial schema adoption,
+and resolves remote parent keys and missing labels when accepting conflicts.
+
+`JiraBackend` (`adapters/board/jira/`) mirrors one Jira project through the Atlassian
+CLI only — every call is an `acli` invocation through the `Shell` adapter, with no HTTP
+client and no API token (`docs/BOARD-JIRA.md`). What that CLI can do shapes the backend:
+`search` returns seven fields, so a pull searches for keys and then issues one
+`workitem view` per key under a concurrency semaphore; `edit` writes only summary,
+description, labels and assignee, so priority, estimate, due date and parent are
+declared read-only in the `BackendSchema` and `fleet-core` refuses local edits to them;
+transitions move by status *name*, so statuses are keyed by name and a Jira status the
+board has never seen becomes a new column mid-sync. There is no cursor pagination, so
+incremental pulls are JQL `updated >= "-Nm"` over a watermark plus an overlap, and every
+Nth pull is full to catch deletions and filter exits. Descriptions and comment bodies are
+Atlassian Document Format, converted both ways by a pure `adf` module. `acli`
+invocations carry a 90 s timeout and retry rate-limited or transient failures with
+backoff; a display name is resolved to an account id through an in-memory `UserCache`
+refilled by every pull. Backend-only fields ride in `Card.properties` under `jira.*`.
+
+Card worktrees use `Worktrees::create`, including repository hooks and the existing
+prepared-copy pipeline. Repository selection is explicit argument, card repository,
+then board default. Slug and branch come from `ops::worktree_slug`; an existing
+repository/slug pair is reused. Linking records activity and, when configured, moves
+Backlog/Unstarted cards to the first Started status. The entire create-and-link transaction
+runs independently of the requesting connection; archived cards are rejected before creating worktrees.
+Mutation responses normalize pruned worktree links in the same way as full board views.
+
+Incremental pulls missing dirty-card baselines trigger a cursor-free pull before push planning.
+Rejected imports retain the previous cursor. Removed backend properties and values incompatible
+with a changed backend schema are removed atomically with schema adoption and reconciliation;
+local property schemas and values survive remote updates. Changing a linked board's backend **kind**
+is rejected; changing the settings of the same kind is allowed and clears only the sync cursor, so the
+status map and the backend's read-only list keep describing the remote the board still points at. Versionless push acknowledgements require an authoritative post-push
+pull under the mutation gate. If that fails, the persisted acknowledgement remains recoverable,
+and further edits wait for sync to restore its baseline.
+
+On disk, `$FLEET_HOME/boards/<board-id>.json` contains a `BoardDocument` with version 1,
+board metadata, and cards. `BoardStore` validates complete documents and writes via
+`Files::atomic_write_text`. Malformed documents are renamed beside the original as
+`<board-id>.json.broken-<uuid>`; deletion moves the document to
+`$FLEET_HOME/trash/board-<board-id>-<uuid>.json` for recovery.

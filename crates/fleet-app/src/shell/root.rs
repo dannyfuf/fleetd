@@ -13,6 +13,7 @@ use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Instant};
 
 mod actions;
 mod agent;
+mod board;
 mod bootstrap;
 mod daemon_lifecycle;
 mod events;

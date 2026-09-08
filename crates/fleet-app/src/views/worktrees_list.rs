@@ -601,6 +601,7 @@ mod tests {
         jobs: Vec<JobRecord>,
     ) -> Snapshot {
         Snapshot {
+            boards: Vec::new(),
             generated_at: String::new(),
             contexts: Vec::new(),
             repos: Vec::new(),

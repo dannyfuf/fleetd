@@ -1,6 +1,7 @@
 //! Typed high-level request and response operations.
 
 mod agents;
+mod boards;
 mod daemon;
 mod jobs;
 mod repositories;

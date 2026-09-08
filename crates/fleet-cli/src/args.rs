@@ -33,6 +33,8 @@ pub struct Cli {
 /// A daemon-backed Fleet operation.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
+    /// Manage context boards and their cards.
+    Board(BoardArgs),
     /// Run a command, optionally teeing piped output to a read-only watch.
     Exec(ExecArgs),
     /// Inspect subagent watches and their retained output.
@@ -671,5 +673,305 @@ mod tests {
         assert!(Cli::try_parse_from(["fleet", "exec", "--", "true"]).is_ok());
         assert!(Cli::try_parse_from(["fleet", "exec", "--watch"]).is_err());
         assert!(Cli::try_parse_from(["fleet", "exec", "sh"]).is_err());
+    }
+}
+
+/// Board selection and nested operations.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct BoardArgs {
+    /// Explicit board ID; mutually exclusive with --context.
+    #[arg(long, global = true, conflicts_with = "context")]
+    pub board: Option<fleet_core::ids::BoardId>,
+    /// Context ID; defaults to the daemon's active context.
+    #[arg(long, global = true, conflicts_with = "board")]
+    pub context: Option<fleet_core::ids::ContextId>,
+    /// Emit a protocol-one JSON envelope.
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Board operation.
+    #[command(subcommand)]
+    pub command: BoardCommand,
+}
+
+/// Operations accepted by `fleet board`.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum BoardCommand {
+    /// Show columns and their cards.
+    Show,
+    /// List board summaries across contexts.
+    List,
+    /// List registered backend kinds, their capabilities, and their setting keys.
+    Backends,
+    /// Print what the board's backend reports: statuses, labels, properties, read-only fields.
+    Describe,
+    /// Create a board for a context.
+    Create(BoardCreateArgs),
+    /// Update board properties and settings.
+    Set(BoardSetArgs),
+    /// Synchronize the board with its backend.
+    Sync {
+        /// Wait for completion and print the summary or last error.
+        #[arg(long)]
+        wait: bool,
+        /// Ignore the incremental cursor and pull the backend's complete set.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Create, inspect, and update cards.
+    Card(BoardCardArgs),
+}
+
+/// Splits one `--setting key=value` pair, leaving the value untouched for
+/// [`fleet_core::board::merge_settings`] to parse as JSON or keep as a string.
+fn parse_setting(value: &str) -> Result<(String, String), String> {
+    let (key, value) = value
+        .split_once('=')
+        .ok_or_else(|| "a setting must be written key=value".to_owned())?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("a setting key must not be empty".to_owned());
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
+/// New board properties.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct BoardCreateArgs {
+    /// Board name; defaults to the context name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Uppercase identifier prefix.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Registered backend kind; defaults to local.
+    #[arg(long)]
+    pub backend: Option<String>,
+    /// Backend setting as `key=value`; repeat for more. Values parse as JSON when they are
+    /// valid JSON, else as strings. Requires `--backend`.
+    #[arg(long = "setting", value_name = "KEY=VALUE", value_parser = parse_setting, requires = "backend")]
+    pub settings: Vec<(String, String)>,
+}
+
+/// Editable board properties.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct BoardSetArgs {
+    /// New board name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New uppercase identifier prefix.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Default repository in owner/name form.
+    #[arg(long)]
+    pub default_repo: Option<fleet_core::ids::RepoId>,
+    /// Clear the default repository.
+    #[arg(long, conflicts_with = "default_repo")]
+    pub clear_default_repo: bool,
+    /// Move unstarted cards into progress when creating a worktree
+    /// (`--start-on-worktree`, `--start-on-worktree false`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub start_on_worktree: Option<bool>,
+    /// Policy for conflicting local and remote changes.
+    #[arg(long, value_enum)]
+    pub conflict_policy: Option<BoardConflictPolicy>,
+    /// Whether cards created here are pushed to the backend as new remote issues
+    /// (`--push-new-cards`, `--push-new-cards false`).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub push_new_cards: Option<bool>,
+    /// Branch name template for worktrees started from a card, e.g. `{key}-{slug}`.
+    #[arg(long)]
+    pub branch_template: Option<String>,
+    /// Label to add to the board; repeat for multiple labels.
+    #[arg(long = "add-label")]
+    pub add_labels: Vec<String>,
+    /// Label ID or name to remove from the board; repeat for multiple labels.
+    #[arg(long = "remove-label")]
+    pub remove_labels: Vec<String>,
+    /// Registered backend kind. Changing it starts the backend settings from empty, so every
+    /// setting the new kind needs must be given in the same command.
+    #[arg(long)]
+    pub backend: Option<String>,
+    /// Backend setting as `key=value`; repeat for more. Values parse as JSON when they are
+    /// valid JSON, else as strings. Without `--backend` they merge into the current settings.
+    #[arg(long = "setting", value_name = "KEY=VALUE", value_parser = parse_setting)]
+    pub settings: Vec<(String, String)>,
+}
+
+/// Conflict policies with the contract's snake_case CLI spelling.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum BoardConflictPolicy {
+    /// Require an explicit resolution.
+    Manual,
+    /// Prefer remote changes.
+    RemoteWins,
+    /// Prefer local changes.
+    LocalWins,
+}
+
+/// Card priority choices, from highest to lowest.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BoardPriority {
+    /// Urgent work.
+    Urgent,
+    /// High priority.
+    High,
+    /// Medium priority.
+    Medium,
+    /// Low priority.
+    Low,
+    /// No priority assigned.
+    None,
+}
+
+/// Explicit resolution of a card conflict.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BoardResolution {
+    /// Keep the local version.
+    KeepLocal,
+    /// Accept the remote version.
+    TakeRemote,
+}
+
+/// Nested card operations.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct BoardCardArgs {
+    /// Card operation.
+    #[command(subcommand)]
+    pub command: BoardCardCommand,
+}
+
+/// Operations accepted by `fleet board card`.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum BoardCardCommand {
+    /// Create a card.
+    New {
+        /// Card title.
+        title: String,
+        /// Initial card properties.
+        #[command(flatten)]
+        fields: BoardCardFields,
+    },
+    /// Show card properties, description, and comments.
+    Show {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+    },
+    /// Edit selected properties of a card.
+    Edit {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+        /// Replacement title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Properties to replace; omitted properties remain unchanged.
+        #[command(flatten)]
+        fields: BoardCardFields,
+        /// Archive (`--archive`, `--archive true`) or restore (`--archive false`) the card.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        archive: Option<bool>,
+    },
+    /// Move a card into a status column.
+    Move {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+        /// Status ID or name.
+        status: String,
+        /// Position in the target column; defaults to the end.
+        #[arg(long)]
+        index: Option<usize>,
+    },
+    /// Add a comment.
+    Comment {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+        /// Comment text.
+        body: String,
+    },
+    /// Delete a card.
+    Delete {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+    },
+    /// Create a worktree linked to a card.
+    Worktree {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+        /// Repository in owner/name form; overrides the card and board defaults.
+        #[arg(long)]
+        repo: Option<fleet_core::ids::RepoId>,
+        /// Base Git ref.
+        #[arg(long)]
+        base: Option<String>,
+        /// Host ID; local uses the local host.
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Resolve a synchronization conflict.
+    Resolve {
+        /// Display key, local key, or card ID (case-insensitive).
+        key: String,
+        /// Which version to keep.
+        #[arg(value_enum)]
+        resolution: BoardResolution,
+    },
+}
+
+/// Common fields for card creation and editing.
+#[derive(Debug, Default, Args, PartialEq, Eq)]
+pub struct BoardCardFields {
+    /// Markdown description.
+    #[arg(long)]
+    pub desc: Option<String>,
+    /// Status ID or name.
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Card priority.
+    #[arg(long, value_enum)]
+    pub priority: Option<BoardPriority>,
+    /// Label ID or name; repeat for multiple labels.
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Clear labels.
+    #[arg(long, conflicts_with = "labels")]
+    pub clear_labels: bool,
+    /// Assignee name.
+    #[arg(long)]
+    pub assignee: Option<String>,
+    /// Clear assignee.
+    #[arg(long, conflicts_with = "assignee")]
+    pub clear_assignee: bool,
+    /// Estimate in points.
+    #[arg(long)]
+    pub estimate: Option<u32>,
+    /// Clear estimate.
+    #[arg(long, conflicts_with = "estimate")]
+    pub clear_estimate: bool,
+    /// Due date in YYYY-MM-DD form.
+    #[arg(long)]
+    pub due: Option<String>,
+    /// Clear due.
+    #[arg(long, conflicts_with = "due")]
+    pub clear_due: bool,
+    /// Repository in owner/name form.
+    #[arg(long)]
+    pub repo: Option<fleet_core::ids::RepoId>,
+    /// Clear repo.
+    #[arg(long, conflicts_with = "repo")]
+    pub clear_repo: bool,
+}
+
+impl BoardCardFields {
+    /// The first `--clear-*` flag that was supplied, if any.
+    #[must_use]
+    pub const fn clear_flag(&self) -> Option<&'static str> {
+        match () {
+            () if self.clear_labels => Some("--clear-labels"),
+            () if self.clear_assignee => Some("--clear-assignee"),
+            () if self.clear_estimate => Some("--clear-estimate"),
+            () if self.clear_due => Some("--clear-due"),
+            () if self.clear_repo => Some("--clear-repo"),
+            () => None,
+        }
     }
 }

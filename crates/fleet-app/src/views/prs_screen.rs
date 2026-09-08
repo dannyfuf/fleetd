@@ -485,6 +485,7 @@ mod tests {
     /// A snapshot carrying only what a PR row build reads through the index.
     fn snapshot(worktrees: Vec<Worktree>) -> Snapshot {
         Snapshot {
+            boards: Vec::new(),
             generated_at: String::new(),
             contexts: Vec::new(),
             repos: Vec::new(),

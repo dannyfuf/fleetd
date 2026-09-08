@@ -10,6 +10,7 @@ pub mod agent;
 mod app_frame;
 mod badge;
 mod banner;
+mod card_tile;
 mod chip;
 mod column_ladder;
 mod confirm_dialog;
@@ -31,12 +32,14 @@ mod freshness_stamp;
 mod fuzzy_list;
 mod job_row;
 mod job_ticker;
+mod kanban_column;
 mod keep_alive_chips;
 mod key_hint;
 mod key_value_list;
 mod list_view;
 mod log_view;
 mod markdown;
+mod markdown_text;
 mod mode_word;
 mod multiline_input;
 mod navigation;
@@ -47,6 +50,7 @@ mod pane;
 mod pane_header;
 mod pr_badge;
 mod prefix_hint;
+mod priority_glyph;
 mod row;
 mod scroll_pill;
 mod section_header;
@@ -63,6 +67,7 @@ mod sticky_error_slot;
 mod terminal_grid;
 mod terminal_modes;
 mod terminal_tab_strip;
+mod text_area;
 mod text_field;
 mod toast_stack;
 mod toggle;
@@ -75,6 +80,7 @@ pub use agent::*;
 pub use app_frame::AppFrame;
 pub use badge::{Badge, BadgeStyle};
 pub use banner::Banner;
+pub use card_tile::{ASSIGNEE_INITIALS, CARD_TITLE_LINES, CardTile, initials, label_tone};
 pub use chip::Chip;
 pub use column_ladder::{ColumnLadder, ColumnSpec, ColumnWidth, ResolvedColumn};
 pub use confirm_dialog::ConfirmDialog;
@@ -96,6 +102,7 @@ pub use freshness_stamp::{Freshness, FreshnessStamp};
 pub use fuzzy_list::{FuzzyItem, FuzzyList};
 pub use job_row::{JobRow, JobStatus};
 pub use job_ticker::JobTicker;
+pub use kanban_column::{COLUMN_WIDTH_CH, KanbanBoard, KanbanColumn};
 pub use keep_alive_chips::MAX_VISIBLE;
 pub use keep_alive_chips::{KeepAliveChips, KeepAliveLabel};
 pub use key_hint::{KeyHint, KeyHintRow};
@@ -106,7 +113,13 @@ pub use list_view::{
 };
 pub use list_view::{ListCursor, ListView};
 pub use log_view::{LOG_TAIL_LINES, LogCommand, LogView};
-pub use markdown::{MarkdownBlock, MarkdownDocument, MarkdownInline, markdown, parse_markdown};
+pub use markdown::{
+    MarkdownBlock, MarkdownDocument, MarkdownInline, markdown,
+    parse_markdown as parse_markdown_document,
+};
+pub use markdown_text::{
+    LIST_MARKER_CH, MAX_HEADING_LEVEL, MarkdownText, MdBlock, MdSpan, parse_markdown,
+};
 pub use mode_word::{Mode, ModeWord};
 pub use multiline_input::{
     HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineBuffer, MultilineInput,
@@ -119,6 +132,7 @@ pub use pane::{Pane, PaneBorder};
 pub use pane_header::PaneHeader;
 pub use pr_badge::{PrBadge, PrBadgeState};
 pub use prefix_hint::PrefixHint;
+pub use priority_glyph::{PRIORITY_BARS, PriorityGlyph, PriorityLevel};
 pub use row::GLYPH_COLUMN_CH;
 pub use row::{ColumnAlign, Row, RowColumn};
 pub use scroll_pill::{ScrollPill, ScrollbackBadge};
@@ -139,6 +153,7 @@ pub use terminal_grid::{
 };
 pub use terminal_modes::{TerminalMode, TerminalModes};
 pub use terminal_tab_strip::{TerminalAgentState, TerminalTab, TerminalTabKind, TerminalTabStrip};
+pub use text_area::{TAB_WIDTH, TEXT_AREA_ROWS, TextArea, TextAreaState};
 pub use text_field::{
     EditEffect, TEXT_FIELD_KEY_CONTEXT, TextField, TextFieldState, TextInput, TextInputEvent,
 };

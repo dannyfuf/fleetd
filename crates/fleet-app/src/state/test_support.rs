@@ -38,6 +38,7 @@ pub(super) fn frame(seq: u64, full: bool, rows: Vec<RowUpdate>) -> FrameUpdate {
 
 pub(super) fn snapshot() -> Snapshot {
     Snapshot {
+        boards: Vec::new(),
         generated_at: "2026-09-04T12:00:00Z".to_owned(),
         contexts: Vec::new(),
         repos: Vec::new(),

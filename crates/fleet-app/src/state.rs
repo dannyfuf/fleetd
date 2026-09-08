@@ -7,6 +7,7 @@ use std::{
 };
 
 use fleet_core::{
+    board::BackendDescriptor,
     config::{Agent, NotificationsConfig},
     github::PrTab,
     ids::{ContextId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
@@ -29,6 +30,7 @@ use crate::{
 };
 
 mod agents;
+mod board;
 mod connection;
 mod navigation;
 mod notifications;
@@ -38,6 +40,7 @@ mod terminal;
 mod test_support;
 
 pub use agents::{AgentCounts, AgentThreads};
+pub use board::{BoardFocus, BoardState, GroupBy};
 pub use connection::{DaemonLink, daemon_log_path, reconnect_backoff};
 use navigation::clamp_cursor;
 pub use navigation::{
@@ -61,6 +64,12 @@ pub const SPLASH_DETAIL_DELAY: Duration = Duration::from_secs(3);
 pub const RESTART_BANNER_DWELL: Duration = Duration::from_secs(6);
 /// How long a plain "reconnected" banner stays up (§3.12).
 pub const RECONNECT_BANNER_DWELL: Duration = Duration::from_millis(800);
+/// What the board says when no context is active, i.e. when there is no board to ask for.
+///
+/// The sentence names the keys that fix it: the board is `EnsureBoard(active_context)`, so
+/// picking a context is the whole remedy (BOARD §8, §2.1).
+pub const NO_ACTIVE_CONTEXT: &str =
+    "No active context \u{2014} pick one with 1\u{2013}9 or gt / gT";
 /// How many entries an MRU list keeps.
 const MRU_CAPACITY: usize = 32;
 /// Minimum observed working time before an idle transition is treated as a completed turn.
@@ -97,6 +106,23 @@ pub struct AppState {
     pub watches: crate::watches::Watches,
     /// The screen being shown.
     pub screen: Screen,
+    /// Board view and presentation state for the active context.
+    pub board: BoardState,
+    /// Whether the board needs an authoritative refresh.
+    pub board_stale: bool,
+    /// Invalidates asynchronous responses when the context or connection changes.
+    board_generation: u64,
+    /// The backend kinds this daemon registers, from `ListBoardBackends`.
+    ///
+    /// The app knows no backend by name: the header's label, the settings dialog's kind cycler
+    /// and every settings row it draws come from these descriptors, so a backend the daemon
+    /// adds needs no change here at all.
+    pub board_backends: Vec<BackendDescriptor>,
+    /// Whether a `ListBoardBackends` request has already been issued for this connection.
+    ///
+    /// Set when the request goes out, not when it answers: the board re-renders on every
+    /// frame, and a flag cleared by a failure would ask the daemon again sixty times a second.
+    board_backends_asked: bool,
     /// Which Hub pane owns the cursor.
     pub hub_pane: HubPane,
     /// Which PR tab is selected.
@@ -184,6 +210,11 @@ impl AppState {
             grids: HashMap::new(),
             watches: crate::watches::Watches::default(),
             screen: Screen::hub(),
+            board: BoardState::default(),
+            board_stale: true,
+            board_generation: 0,
+            board_backends: Vec::new(),
+            board_backends_asked: false,
             hub_pane: HubPane::List,
             pr_tab: PrTab::Mine,
             scope: RepoScope::All,

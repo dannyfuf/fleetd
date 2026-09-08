@@ -276,7 +276,7 @@ impl AgentThreadView {
         };
         match row {
             TranscriptRow::AssistantText { markdown } => {
-                *markdown = fleet_ui_kit::parse_markdown(&text);
+                *markdown = fleet_ui_kit::parse_markdown_document(&text);
             }
             TranscriptRow::Thinking { text: current, .. } => {
                 *current = gpui::SharedString::from(text);

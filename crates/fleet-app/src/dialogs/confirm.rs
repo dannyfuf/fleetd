@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use fleet_core::{
     github::InspectionPrState,
-    ids::{ContextId, RepoId, SessionId, TerminalId, WorktreeId},
+    ids::{CardId, ContextId, RepoId, SessionId, TerminalId, WorktreeId},
     inspection::WorktreeInspection,
     sessions::SessionState,
 };

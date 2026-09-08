@@ -1,5 +1,6 @@
 use bytes::BytesMut;
 use fleet_core::{
+    board::{BoardSummary, BoardView, CardDraft},
     ids::{TerminalId, WorktreeId},
     model::RepoHooks,
     sessions::AgentActivity,
@@ -9,7 +10,7 @@ use fleet_proto::{
     PROTOCOL_VERSION,
     codec::FleetCodec,
     error::{ErrorKind, ProtoError},
-    event::Event,
+    event::{BoardChangeReason, Event},
     request::{Request, RequestBody},
     response::{
         DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, WorktreeDeleteResult,
@@ -46,7 +47,7 @@ fn request_wire_goldens() {
                 client: "fleet-test".to_owned(),
             },
         },
-        r#"{"id":1,"body":{"type":"hello","protocol":5,"client":"fleet-test"}}"#,
+        r#"{"id":1,"body":{"type":"hello","protocol":6,"client":"fleet-test"}}"#,
     );
     assert_frame(
         Request {
@@ -111,6 +112,49 @@ fn request_wire_goldens() {
         },
         r#"{"id":6,"body":{"type":"prune_worktrees","dry_run":false,"fetch":false,"kill_sessions":false,"repo":"acme/api","ids":["acme/api#reviewed"]}}"#,
     );
+    assert_frame(
+        Request {
+            id: 7,
+            body: RequestBody::EnsureBoard {
+                context_id: "work".parse().unwrap(),
+            },
+        },
+        r#"{"id":7,"body":{"type":"ensure_board","context_id":"work"}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 8,
+            body: RequestBody::CreateCard {
+                board_id: "work".parse().unwrap(),
+                draft: CardDraft {
+                    title: "Fix login".to_owned(),
+                    ..CardDraft::default()
+                },
+            },
+        },
+        r#"{"id":8,"body":{"type":"create_card","board_id":"work","draft":{"title":"Fix login","description":"","statusId":null,"priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"properties":{}}}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 9,
+            body: RequestBody::MoveCard {
+                card_id: "card-12".parse().unwrap(),
+                status_id: "doing".parse().unwrap(),
+                index: Some(2),
+            },
+        },
+        r#"{"id":9,"body":{"type":"move_card","card_id":"card-12","status_id":"doing","index":2}}"#,
+    );
+    assert_frame(
+        Request {
+            id: 10,
+            body: RequestBody::SyncBoard {
+                board_id: "work".parse().unwrap(),
+                full: true,
+            },
+        },
+        r#"{"id":10,"body":{"type":"sync_board","board_id":"work","full":true}}"#,
+    );
 }
 
 #[test]
@@ -123,7 +167,7 @@ fn response_wire_goldens() {
                 server: "fleet-test".to_owned(),
             }),
         },
-        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":5,"server":"fleet-test"}}}}"#,
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":6,"server":"fleet-test"}}}}"#,
     );
     assert_frame(
         Response {
@@ -154,16 +198,79 @@ fn response_wire_goldens() {
         },
         r#"{"id":4,"result":{"Ok":{"type":"ack"}}}"#,
     );
+    assert_frame(
+        Response {
+            id: 5,
+            result: Ok(ResponseBody::Boards(vec![BoardSummary {
+                id: "work".parse().unwrap(),
+                context_id: "work".parse().unwrap(),
+                name: "Fleet".to_owned(),
+                prefix: "FLT".to_owned(),
+                backend_kind: "jira".to_owned(),
+                card_count: 1,
+                open_count: 1,
+                dirty_count: 0,
+                conflict_count: 0,
+                last_synced_at: None,
+                last_error: None,
+            }])),
+        },
+        r#"{"id":5,"result":{"Ok":{"type":"boards","data":[{"id":"work","contextId":"work","name":"Fleet","prefix":"FLT","backendKind":"jira","cardCount":1,"openCount":1,"dirtyCount":0,"conflictCount":0,"lastSyncedAt":null,"lastError":null}]}}}"#,
+    );
+    assert_frame(
+        Response {
+            id: 6,
+            result: Ok(ResponseBody::Board(board_view())),
+        },
+        r#"{"id":6,"result":{"Ok":{"type":"board","data":{"board":{"id":"work","contextId":"work","name":"Fleet","prefix":"FLT","nextNumber":13,"backend":{"kind":"jira","settings":{"jql":"project = SP","project":"SP"}},"statuses":[{"id":"todo","name":"To do","category":"unstarted","color":null}],"labels":[],"properties":[],"defaultRepoId":null,"settings":{"startOnWorktree":true,"branchTemplate":"{key}-{slug}","conflictPolicy":"manual","pushNewCards":false},"sync":{"lastSyncedAt":null,"cursor":null,"lastError":null,"statusMap":{"remoteToLocal":{},"localToRemote":{}},"readonlyFields":[]},"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"},"cards":[{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}]}}}}"#,
+    );
+    assert_frame(
+        Response {
+            id: 7,
+            result: Ok(ResponseBody::Card(
+                board_view().cards.pop().expect("fixture card"),
+            )),
+        },
+        r#"{"id":7,"result":{"Ok":{"type":"card","data":{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}}}}"#,
+    );
+}
+
+/// A remote-backed board and the one card the `board` and `card` response goldens pin.
+fn board_view() -> BoardView {
+    serde_json::from_value(serde_json::json!({
+        "board": {
+            "id": "work",
+            "contextId": "work",
+            "name": "Fleet",
+            "prefix": "FLT",
+            "nextNumber": 13,
+            // Sorted keys keep this byte fixture stable with or without preserve_order.
+            "backend": {"kind": "jira", "settings": {"jql": "project = SP", "project": "SP"}},
+            "statuses": [{"id": "todo", "name": "To do", "category": "unstarted"}],
+            "createdAt": "2026-09-06T12:00:00Z",
+            "updatedAt": "2026-09-06T12:00:00Z"
+        },
+        "cards": [{
+            "id": "card-12",
+            "boardId": "work",
+            "number": 12,
+            "title": "Fix login",
+            "statusId": "todo",
+            "createdAt": "2026-09-06T12:00:00Z",
+            "updatedAt": "2026-09-06T12:00:00Z"
+        }]
+    }))
+    .expect("board view fixture")
 }
 
 #[test]
 fn hello_metadata_accepts_old_and_new_ipc_v4_envelopes() {
     let old =
-        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":4,"server":"fleet-test"}}}}"#;
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":6,"server":"fleet-test"}}}}"#;
     let old: HelloResponse = serde_json::from_str(old).expect("old Hello envelope");
     assert!(old.capabilities.is_empty());
 
-    let new_json = r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":4,"server":"fleet-test"}}},"capabilities":["prune.reviewed_ids"]}"#;
+    let new_json = r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":6,"server":"fleet-test"}}},"capabilities":["prune.reviewed_ids"]}"#;
     let new: HelloResponse = serde_json::from_str(new_json).expect("new Hello envelope");
     assert_eq!(new.capabilities, ["prune.reviewed_ids"]);
     let legacy: Response = serde_json::from_str(new_json).expect("legacy Hello decoder");
@@ -226,6 +333,13 @@ fn event_wire_goldens() {
             code: None,
         },
         r#"{"type":"terminal_exited","data":{"terminal":7,"code":null}}"#,
+    );
+    assert_frame(
+        Event::BoardChanged {
+            board_id: "work".parse().unwrap(),
+            reason: BoardChangeReason::CardChanged,
+        },
+        r#"{"type":"board_changed","data":{"board_id":"work","reason":"card_changed"}}"#,
     );
     assert_frame(
         Event::DaemonShuttingDown,

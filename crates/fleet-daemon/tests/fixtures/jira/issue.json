@@ -1,0 +1,123 @@
+{
+  "key": "SP-42",
+  "id": "10042",
+  "fields": {
+    "summary": "Rework the payroll export",
+    "description": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        {
+          "type": "heading",
+          "attrs": { "level": 2 },
+          "content": [{ "type": "text", "text": "Context" }]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            { "type": "text", "text": "The export drops " },
+            { "type": "text", "text": "empty", "marks": [{ "type": "strong" }] },
+            { "type": "text", "text": " rows. See " },
+            {
+              "type": "text",
+              "text": "the ticket",
+              "marks": [
+                { "type": "link", "attrs": { "href": "https://buk.atlassian.net/browse/SP-1" } }
+              ]
+            },
+            { "type": "text", "text": "." }
+          ]
+        },
+        {
+          "type": "bulletList",
+          "content": [
+            {
+              "type": "listItem",
+              "content": [
+                { "type": "paragraph", "content": [{ "type": "text", "text": "Reproduce it" }] }
+              ]
+            },
+            {
+              "type": "listItem",
+              "content": [
+                { "type": "paragraph", "content": [{ "type": "text", "text": "Fix the writer" }] }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "codeBlock",
+          "attrs": { "language": "ruby" },
+          "content": [{ "type": "text", "text": "Payroll::Export.new(period).call" }]
+        }
+      ]
+    },
+    "status": {
+      "id": "3",
+      "name": "In Progress",
+      "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+    },
+    "priority": { "id": "2", "name": "High" },
+    "labels": ["payroll", "sector-publico"],
+    "assignee": {
+      "accountId": "5b10a2844c",
+      "displayName": "Danny Fuentes",
+      "emailAddress": "danny@example.com",
+      "active": true
+    },
+    "duedate": "2026-09-30",
+    "parent": {
+      "id": "10001",
+      "key": "SP-1",
+      "fields": { "summary": "Payroll epic" }
+    },
+    "updated": "2026-09-05T14:32:11.000-0300",
+    "created": "2026-09-01T09:15:00.000-0300",
+    "issuetype": { "id": "10002", "name": "Task", "subtask": false },
+    "customfield_10102": 3,
+    "customfield_10001": { "id": "10300", "value": "Sector Público" },
+    "comment": {
+      "startAt": 0,
+      "maxResults": 2,
+      "total": 2,
+      "comments": [
+        {
+          "id": "10501",
+          "author": { "accountId": "5b10ac8d82", "displayName": "Ana Rojas" },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Blocked on the schema change." }]
+              }
+            ]
+          },
+          "created": "2026-09-04T11:00:00.000-0300",
+          "updated": "2026-09-04T11:00:00.000-0300"
+        },
+        {
+          "id": "10502",
+          "author": {
+            "accountId": "5b10a2844c",
+            "displayName": "Danny Fuentes",
+            "emailAddress": "danny@example.com"
+          },
+          "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [{ "type": "text", "text": "Schema landed; picking this up." }]
+              }
+            ]
+          },
+          "created": "2026-09-05T14:30:00.000-0300",
+          "updated": "2026-09-05T14:30:00.000-0300"
+        }
+      ]
+    }
+  }
+}

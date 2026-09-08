@@ -226,6 +226,7 @@ fn text_row_visual_focus_matches_key_ownership() {
 fn about_reports_app_version_and_live_link() {
     let mut app = AppState::new("/tmp/fleet", std::time::Instant::now());
     app.snapshot = Some(fleet_proto::snapshot::Snapshot {
+        boards: Vec::new(),
         generated_at: String::new(),
         contexts: Vec::new(),
         repos: Vec::new(),

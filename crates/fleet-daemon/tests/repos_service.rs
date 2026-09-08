@@ -18,7 +18,8 @@ use fleet_daemon::{
     DaemonError, DaemonResult,
     adapters::{
         Adapters,
-        clock::SystemClock,
+        board::BoardBackends,
+        clock::{Clock, SystemClock},
         files::{Files, RealFiles},
         git::{Git, ShellGit},
         github::Github,
@@ -341,12 +342,15 @@ async fn repos_clone_reconciles_then_moves_updates_hooks_and_deletes() {
     let jobs = Arc::new(JobManager::new(temp.path().join(".fleet")));
     let shell = Arc::new(FakeShell::new());
     let real_shell: Arc<dyn Shell> = Arc::new(RealShell);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let adapters = Adapters {
+        board_backends: BoardBackends::system(Arc::clone(&real_shell), Arc::clone(&clock)),
         git: Arc::new(ShellGit::new(Arc::clone(&real_shell))),
         github: Arc::new(FakeGithub::new(shell)),
         process: Arc::new(RealProcess::new(Arc::clone(&real_shell))),
         files,
         shell: real_shell,
+        clock,
     };
     let services = Services::new(
         temp.path().join(".fleet"),

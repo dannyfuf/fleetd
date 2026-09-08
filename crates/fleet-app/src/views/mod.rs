@@ -1,5 +1,7 @@
 //! Domain-specific view composition. Shared read-only projections live in `crate::presentation`.
 
+pub mod board_card_detail;
+pub mod board_screen;
 pub mod detail;
 pub mod doctor_view;
 pub mod first_run;
