@@ -1,5 +1,6 @@
 use super::{
-    CommandOutput, FAILURE, jobs::wait_for_job, parse_id, parse_ids, validation, wait_event,
+    CommandOutput, FAILURE, jobs::wait_for_job, parse_id, parse_ids, unknown, validation,
+    wait_event,
 };
 use crate::{
     args::{
@@ -21,6 +22,8 @@ use fleet_core::{
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     event::Event,
+    request::RequestBody,
+    response::ResponseBody,
     snapshot::Snapshot,
 };
 
@@ -36,14 +39,27 @@ pub(super) async fn create(
     if let Some(default_branch) = &arguments.default_branch {
         validate_branch(default_branch).map_err(|error| validation(error.to_string()))?;
     }
-    let host = parse_host(arguments.host.as_deref())?;
+    let default_host = if arguments.host.is_none() {
+        client.get_config().await?.default_host().cloned()
+    } else {
+        None
+    };
+    let host = parse_host_or_default(arguments.host.as_deref(), default_host.as_ref())?;
     let supplied_hooks = arguments.hooks.as_deref().map(parse_hooks).transpose()?;
-    let mut repo = ensure_repo(client, &repo_id, &arguments).await?;
+    let mut repo = if host.is_some() {
+        registered_repo(client, &repo_id).await?
+    } else {
+        ensure_repo(client, &repo_id, &arguments).await?
+    };
 
-    if let Some(hooks) = supplied_hooks {
+    let hooks = if host.is_some() {
+        supplied_hooks.unwrap_or_else(|| repo.hooks.clone())
+    } else if let Some(hooks) = supplied_hooks {
         repo = client.set_repo_hooks(repo.id, hooks).await?;
-    }
-    let hooks = repo.hooks;
+        repo.hooks
+    } else {
+        repo.hooks
+    };
     let base = arguments
         .base
         .or_else(|| Some(format!("origin/{}", repo.default_branch)));
@@ -65,6 +81,20 @@ pub(super) async fn create(
         format!("Existing {}", result.worktree.id)
     };
     Ok(CommandOutput::success(text))
+}
+
+async fn registered_repo(client: &Client, repo_id: &RepoId) -> Result<Repo, ProtoError> {
+    client
+        .get_snapshot()
+        .await?
+        .repos
+        .into_iter()
+        .find(|repo| &repo.id == repo_id)
+        .ok_or_else(|| {
+            validation(format!(
+                "repository `{repo_id}` is not registered locally; register it before creating a remote worktree"
+            ))
+        })
 }
 
 async fn ensure_repo(
@@ -173,7 +203,7 @@ pub(super) async fn list(
             worktrees: &snapshot.worktrees,
         })?
     } else {
-        human::list(snapshot.repos.len(), snapshot.worktrees.len())
+        human::list(&snapshot.repos, &snapshot.worktrees)
     };
     Ok(CommandOutput::success(text))
 }
@@ -290,7 +320,26 @@ pub(super) async fn path(
     arguments: PathArgs,
 ) -> Result<CommandOutput, ProtoError> {
     let id = parse_id::<WorktreeId>(&arguments.id)?;
-    Ok(CommandOutput::success(client.worktree_path(id).await?))
+    match client.request(RequestBody::WorktreePath { id }).await? {
+        ResponseBody::Path { path, host } => {
+            let text = if arguments.json {
+                to_json(&serde_json::json!({
+                    "protocol": PROTOCOL,
+                    "path": path,
+                    "host": host,
+                }))?
+            } else {
+                match host {
+                    Some(host) => format!("{host}:{path}"),
+                    None => path,
+                }
+            };
+            Ok(CommandOutput::success(text))
+        }
+        response => Err(unknown(format!(
+            "worktree_path returned unexpected response: {response:?}"
+        ))),
+    }
 }
 
 fn resolve_open_target(worktrees: Vec<Worktree>, target: &str) -> Result<Worktree, ProtoError> {
@@ -328,8 +377,16 @@ pub(super) fn parse_hooks(source: &str) -> Result<RepoHooks, ProtoError> {
 }
 
 pub(super) fn parse_host(host: Option<&str>) -> Result<Option<HostId>, ProtoError> {
+    parse_host_or_default(host, None)
+}
+
+pub(super) fn parse_host_or_default(
+    host: Option<&str>,
+    default_host: Option<&HostId>,
+) -> Result<Option<HostId>, ProtoError> {
     match host {
-        None | Some("local") => Ok(None),
+        None => Ok(default_host.cloned()),
+        Some("local") => Ok(None),
         Some(host) => parse_id(host).map(Some),
     }
 }

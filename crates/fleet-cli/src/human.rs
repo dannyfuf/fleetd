@@ -2,6 +2,7 @@
 
 use fleet_core::{
     inspection::WorktreeInspection,
+    model::{Repo, Worktree},
     sessions::{SessionState, WorktreeStatus},
 };
 use fleet_proto::response::{
@@ -10,8 +11,24 @@ use fleet_proto::response::{
 
 /// Formats the compact list summary.
 #[must_use]
-pub fn list(repo_count: usize, worktree_count: usize) -> String {
-    format!("{repo_count} repos, {worktree_count} worktrees")
+pub fn list(repos: &[Repo], worktrees: &[Worktree]) -> String {
+    let mut lines = vec![format!(
+        "{} repos, {} worktrees",
+        repos.len(),
+        worktrees.len()
+    )];
+    if !worktrees.is_empty() {
+        lines.push("WORKTREE\tHOST\tSESSION".to_owned());
+        lines.extend(worktrees.iter().map(|worktree| {
+            format!(
+                "{}\t{}\t{}",
+                worktree.id,
+                worktree.host.as_ref().map_or("local", |host| host.as_str()),
+                worktree.session
+            )
+        }));
+    }
+    lines.join("\n")
 }
 
 /// Formats one row per watch: ID, source, label, status, start time, and terminal ID.
@@ -77,7 +94,10 @@ pub fn inspect(inspections: &[WorktreeInspection]) -> String {
             } else {
                 "active"
             };
-            let mut line = format!("{} {} {}", inspection.worktree_id, inspection.branch, state);
+            let mut line = format!(
+                "{} {} {} {}",
+                inspection.worktree_id, inspection.host, inspection.branch, state
+            );
             if let Some(error) = &inspection.error {
                 line.push_str(": ");
                 line.push_str(error);
@@ -214,7 +234,7 @@ const GUTTER: &str = "  ";
 /// print are already single-lined, and the alternative is a display-width dependency. Each row's
 /// own last cell is left unpadded, so a table never ends in trailing blanks and a row that grows
 /// an extra trailing cell still finds it at the column the padded row above put it.
-fn columns(rows: &[Vec<String>]) -> Vec<String> {
+pub(crate) fn columns(rows: &[Vec<String>]) -> Vec<String> {
     let mut widths: Vec<usize> = Vec::new();
     for row in rows {
         for (index, cell) in row.iter().enumerate() {

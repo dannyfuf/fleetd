@@ -307,6 +307,9 @@ pub struct KillArgs {
 pub struct PathArgs {
     /// Exact local worktree identifier.
     pub id: String,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments accepted by `fleet sleep`.

@@ -245,6 +245,7 @@ fn command_requests_json(command: &Command) -> bool {
             matches!(&arguments.command, WatchCommand::List(arguments) if arguments.json)
         }
         Command::Create(arguments) => arguments.json,
+        Command::Path(arguments) => arguments.json,
         Command::List(arguments) | Command::Status(arguments) => arguments.json,
         Command::Inspect(arguments) => arguments.json,
         Command::Delete(arguments) => arguments.json,
@@ -256,7 +257,6 @@ fn command_requests_json(command: &Command) -> bool {
         Command::Exec(_)
         | Command::WatchChild(_)
         | Command::Open(_)
-        | Command::Path(_)
         | Command::Agent(_)
         | Command::Import(_)
         | Command::Update
