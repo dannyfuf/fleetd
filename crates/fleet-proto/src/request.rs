@@ -17,7 +17,7 @@ use fleet_core::{
     sessions::AgentActivity,
     watches::{WatchId, WatchStream},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     event::EventKind,
@@ -38,7 +38,7 @@ pub enum ClientKind {
 }
 
 /// Metadata about the peer opening a daemon protocol connection.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelloClient {
     /// Peer category.
@@ -47,6 +47,37 @@ pub struct HelloClient {
     /// Identity of the forwarding daemon when `kind` is proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<HostId>,
+}
+
+impl<'de> Deserialize<'de> for HelloClient {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Metadata {
+            #[serde(default)]
+            kind: ClientKind,
+            #[serde(default)]
+            host_id: Option<HostId>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireClient {
+            Legacy(String),
+            Metadata(Metadata),
+        }
+
+        Ok(match WireClient::deserialize(deserializer)? {
+            WireClient::Legacy(_name) => Self::default(),
+            WireClient::Metadata(metadata) => Self {
+                kind: metadata.kind,
+                host_id: metadata.host_id,
+            },
+        })
+    }
 }
 
 impl From<&str> for HelloClient {
@@ -708,6 +739,11 @@ pub enum RequestBody {
     ImportFromSwarm,
     /// Run dependency and environment diagnostics.
     Doctor,
+    /// Run diagnostics for one configured remote host.
+    DoctorHost {
+        /// Configured host to diagnose.
+        host: HostId,
+    },
     /// Replace quarantined state with a validated empty state, retaining the archived file.
     ResetState,
     /// Start a Fleet self-update job.
@@ -752,6 +788,9 @@ mod tests {
             RequestBody::BootstrapHost {
                 host: HostId::try_from("dev-box").expect("host"),
                 git_ref: Some("fix/remote-agents".to_owned()),
+            },
+            RequestBody::DoctorHost {
+                host: HostId::try_from("dev-box").expect("host"),
             },
             RequestBody::AgentThreadList,
             RequestBody::AgentThreadCreate {
@@ -890,5 +929,23 @@ mod tests {
             assert!(!fields.keys().any(|key| key.contains(char::is_uppercase)));
             assert_round_trip(request);
         }
+    }
+
+    #[test]
+    fn hello_accepts_the_protocol_v6_string_client_wire_shape() {
+        let request: Request = serde_json::from_str(
+            r#"{"id":1,"body":{"type":"hello","protocol":6,"client":"fleet"}}"#,
+        )
+        .expect("legacy Hello request");
+        assert!(matches!(
+            request.body,
+            RequestBody::Hello {
+                protocol: 6,
+                client: HelloClient {
+                    kind: ClientKind::App,
+                    host_id: None,
+                },
+            }
+        ));
     }
 }
