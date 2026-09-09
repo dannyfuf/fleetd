@@ -17,43 +17,78 @@ impl Services {
     pub async fn dispatch_with_context(
         &self,
         body: RequestBody,
-        _context: RequestContext,
+        context: RequestContext,
     ) -> DaemonResult<ResponseBody> {
+        self.dispatch_routed_with_owner(body, 0, context).await
+    }
+
+    pub(crate) async fn dispatch_routed_with_owner(
+        &self,
+        body: RequestBody,
+        owner: u64,
+        context: RequestContext,
+    ) -> DaemonResult<ResponseBody> {
+        let config = self.config.load().await?;
+        self.machines.rebuild(&config);
         self.router.start_event_pumps(self.events.clone());
+        let body = if context.client.kind == fleet_proto::request::ClientKind::Proxy {
+            body
+        } else {
+            self.router.place_create_on_default(body, &config)
+        };
+        let hosted_create = match &body {
+            RequestBody::CreateWorktree {
+                host: Some(host),
+                repo,
+                ..
+            }
+            | RequestBody::CreateWorktreeFromPr {
+                host: Some(host),
+                repo,
+                ..
+            } => Some((host.clone(), repo.clone())),
+            _ => None,
+        };
+        if let Some((host, repo)) = hosted_create {
+            let state = self.state.load().await?;
+            let repository = state
+                .repos
+                .iter()
+                .find(|candidate| candidate.id == repo)
+                .ok_or_else(|| DaemonError::NotFound(format!("repo {repo}")))?
+                .clone();
+            return self
+                .router
+                .ensure_repo_then_create(&host, &repository, &state.worktrees, body)
+                .await;
+        }
         match self.router.route(&body) {
-            router::Target::Local => self.dispatch_owned(body, 0).await,
+            router::Target::Local => self.dispatch_owned_with_context(body, owner, context).await,
             router::Target::Host(host) => self.router.forward(&host, body).await,
             router::Target::Fanout(parts) => {
                 let local = router::classify::local_fanout_part(&body, self.router.as_ref());
                 let results = self.router.fanout(parts).await;
                 let remote = router::translate::merge_fanout(&body, results);
                 if let Some(local) = local {
-                    let local = self.dispatch_owned(local, 0).await;
+                    let local = self
+                        .dispatch_owned_with_context(local, owner, context)
+                        .await;
                     router::translate::merge_local_and_remote(&body, local, remote)
                 } else {
                     remote
                 }
             }
             router::Target::Unsupported(operation) => Err(DaemonError::Unsupported(format!(
-                "{operation}: not implemented"
+                "unsupported routed operation: {operation}"
             ))),
         }
-    }
-
-    pub(crate) async fn dispatch_owned(
-        &self,
-        body: RequestBody,
-        owner: u64,
-    ) -> DaemonResult<ResponseBody> {
-        self.dispatch_owned_with_context(body, owner, RequestContext::default())
-            .await
     }
 
     pub(crate) async fn dispatch_owned_with_context(
         &self,
         body: RequestBody,
         owner: u64,
-        _context: RequestContext,
+        context: RequestContext,
     ) -> DaemonResult<ResponseBody> {
         match body {
             RequestBody::AgentThreadList => self.agent_response(self.agents.list().await),
@@ -150,10 +185,53 @@ impl Services {
                 base,
                 host,
             } => {
-                let (card, worktree, created) = self
-                    .boards
-                    .create_worktree_from_card(&card_id, repo_id, base, host)
-                    .await?;
+                let (card, worktree, created) = if let Some(host) = host {
+                    let router = Arc::clone(&self.router);
+                    let local_worktrees = self.state.load().await?.worktrees;
+                    self.boards
+                        .create_worktree_from_card_routed(
+                            &card_id,
+                            repo_id,
+                            base,
+                            Some(host),
+                            move |repo, slug, branch, base, host| async move {
+                                let host = host.ok_or_else(|| {
+                                    DaemonError::Protocol(
+                                        "hosted card create lost its placement".to_owned(),
+                                    )
+                                })?;
+                                let request = RequestBody::CreateWorktree {
+                                    repo: repo.id.clone(),
+                                    slug,
+                                    branch,
+                                    base,
+                                    host: Some(host.clone()),
+                                    hooks: repo.hooks.clone(),
+                                };
+                                match router
+                                    .ensure_repo_then_create(
+                                        &host,
+                                        &repo,
+                                        &local_worktrees,
+                                        request,
+                                    )
+                                    .await?
+                                {
+                                    ResponseBody::Worktree {
+                                        created, worktree, ..
+                                    } => Ok((created, worktree)),
+                                    other => Err(DaemonError::Protocol(format!(
+                                        "remote card create returned {other:?}"
+                                    ))),
+                                }
+                            },
+                        )
+                        .await?
+                } else {
+                    self.boards
+                        .create_worktree_from_card(&card_id, repo_id, base, None)
+                        .await?
+                };
                 Ok(ResponseBody::CardWorktree {
                     card,
                     worktree,
@@ -377,11 +455,18 @@ impl Services {
                 worktree,
                 agent,
                 sleep_previous,
-            } => Ok(ResponseBody::Session(
-                self.sessions
-                    .ensure(worktree, agent, sleep_previous)
-                    .await?,
-            )),
+            } => {
+                let session = if context.client.kind == fleet_proto::request::ClientKind::Proxy {
+                    self.sessions
+                        .ensure_proxied(worktree, agent, sleep_previous)
+                        .await?
+                } else {
+                    self.sessions
+                        .ensure(worktree, agent, sleep_previous)
+                        .await?
+                };
+                Ok(ResponseBody::Session(session))
+            }
             RequestBody::ListSessions => Ok(ResponseBody::Sessions(self.sessions.snapshot())),
             RequestBody::CurrentSession => {
                 Ok(ResponseBody::CurrentSession(self.sessions.current()))
@@ -495,7 +580,10 @@ impl Services {
                 self.sleep.match_keep_alive_rules().await?,
             )),
             RequestBody::ImportFromSwarm => Ok(ResponseBody::Job(self.import.start().await?)),
-            RequestBody::Doctor => Ok(ResponseBody::Doctor(self.doctor.check().await?)),
+            RequestBody::Doctor => Ok(ResponseBody::Doctor(self.doctor_results(None).await?)),
+            RequestBody::DoctorHost { host } => Ok(ResponseBody::Doctor(
+                self.doctor_results(Some(&host)).await?,
+            )),
             RequestBody::ResetState => Ok(ResponseBody::Path {
                 path: self.state.reset_quarantined().await?.display().to_string(),
                 host: None,
@@ -532,16 +620,63 @@ impl Services {
         })
     }
 
+    async fn doctor_results(
+        &self,
+        only_host: Option<&fleet_core::ids::HostId>,
+    ) -> DaemonResult<Vec<fleet_proto::response::DoctorCheck>> {
+        let mut checks = if let Some(host) = only_host {
+            self.doctor.check_host(host, &self.machines).await?
+        } else {
+            self.doctor.check_with_machines(&self.machines).await?
+        };
+        let archived = self.worktrees.legacy_remote_records().await?;
+        checks.extend(archived.worktrees.into_iter().filter_map(|worktree| {
+            let host = worktree.host?;
+            if only_host.is_some_and(|only| only != &host) {
+                return None;
+            }
+            let present = self.mirror.fragment(&host).is_some_and(|fragment| {
+                fragment
+                    .snapshot
+                    .worktrees
+                    .iter()
+                    .any(|remote| remote.id == worktree.id)
+            });
+            (!present).then(|| fleet_proto::response::DoctorCheck {
+                check: format!("host {host} archived worktree {}", worktree.id),
+                status: fleet_proto::response::DoctorStatus::Warn,
+                detail: "legacy remote record is absent from the host mirror".to_owned(),
+            })
+        }));
+        Ok(checks)
+    }
+
     pub(super) async fn delete_repo_cascade(&self, repo: RepoId) -> DaemonResult<()> {
         let _deleting = self.jobs.begin_repo_deletion(&repo)?;
         self.jobs.quiesce_repo(&repo).await?;
+        let remote = self
+            .router
+            .delete_remote_worktrees(self.router.remote_worktrees_for_repo(&repo))
+            .await?;
+        let remote_failures = remote
+            .into_iter()
+            .filter(|result| !result.ok)
+            .map(|result| {
+                result
+                    .reason
+                    .unwrap_or_else(|| format!("could not delete {}", result.worktree_id))
+            })
+            .collect::<Vec<_>>();
+        if !remote_failures.is_empty() {
+            return Err(DaemonError::Conflict(remote_failures.join("; ")));
+        }
         let ids = self
             .state
             .load()
             .await?
             .worktrees
             .into_iter()
-            .filter(|worktree| worktree.repo_id == repo)
+            .filter(|worktree| worktree.repo_id == repo && worktree.host.is_none())
             .map(|worktree| worktree.id)
             .collect::<Vec<_>>();
         let failures = self

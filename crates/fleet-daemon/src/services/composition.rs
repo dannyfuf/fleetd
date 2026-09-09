@@ -149,11 +149,31 @@ impl Services {
         );
         let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
         let daemon_id = load_or_create_daemon_id(&home);
-        let machines = Arc::new(Machines::from_config(&default_config(&home)));
+        let local_daemon_id = HostId::try_from(daemon_id.as_str())
+            .expect("persisted daemon identity must be a valid host id");
+        let machines = Arc::new(
+            Machines::from_config_with_runtime(
+                &default_config(&home),
+                home.clone(),
+                Arc::clone(&adapters.shell),
+            )
+            .with_local_daemon_id(local_daemon_id),
+        );
         let mirror = Arc::new(mirror::Mirror::new());
-        let router = Arc::new(router::Router::new(
+        let router = Arc::new(router::Router::with_ids(
             Arc::clone(&machines),
             Arc::clone(&mirror),
+            router::RemoteIds::new(sessions.terminal_id_counter()),
+        ));
+        agents.set_remote_host_resolver(Arc::new({
+            let router = Arc::clone(&router);
+            move |id| router::Resolver::host_of_worktree(router.as_ref(), id)
+        }));
+        let bootstrap = Arc::new(bootstrap::Bootstrap::with_registry(
+            Arc::clone(&jobs),
+            Arc::clone(&machines),
+            bootstrap_origin_url(),
+            option_env!("FLEET_BUILD_COMMIT").map(str::to_owned),
         ));
         let watches = sessions.watches();
         let watch_discovery = watch_discovery::WatchDiscovery::new(
@@ -168,7 +188,7 @@ impl Services {
             machines,
             mirror,
             router,
-            bootstrap: Arc::new(bootstrap::Bootstrap::new()),
+            bootstrap,
             home,
             started_at: chrono::Utc::now().to_rfc3339(),
             daemon_id,
@@ -196,6 +216,21 @@ impl Services {
             events,
         }
     }
+}
+
+fn bootstrap_origin_url() -> String {
+    let checkout = update::runtime_checkout();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::{
 
 use fleet_core::{
     config::{Config, default_config},
-    ids::RepoId,
+    ids::{HostId, RepoId},
     paths::slot_path,
 };
 use fleet_proto::{

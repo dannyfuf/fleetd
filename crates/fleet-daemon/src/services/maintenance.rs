@@ -100,7 +100,6 @@ impl Services {
                 Arc::clone(self),
                 events.clone(),
                 shutdown.clone(),
-                Duration::from_secs(60),
             )),
             tokio::spawn(run_pool_refresh(Arc::clone(self), events, shutdown.clone())),
             tokio::spawn(run_pr_cache_expiry(Arc::clone(self), shutdown)),
@@ -221,7 +220,6 @@ async fn run_host_refresh(
     services: Arc<Services>,
     events: BroadcastBus,
     shutdown: CancellationToken,
-    every: Duration,
 ) {
     let mut policy = runtime_config_receiver(&services.config);
     let mut config = match initial_runtime_config(&services.config, &policy).await {
@@ -246,20 +244,37 @@ async fn run_host_refresh(
             }
             _ = tokio::time::sleep_until(next) => {}
         }
-        next = tokio::time::Instant::now() + every;
+        next = tokio::time::Instant::now() + host_refresh_interval(&config);
         let refresh = async {
-            if config.hosts.is_empty() {
-                return Ok::<(), DaemonError>(());
+            let results = services
+                .hosts
+                .refresh_all(config.as_ref(), &services.machines)
+                .await;
+            let changed = results
+                .iter()
+                .filter(|(id, status)| host_status_changed(previous.get(*id), status))
+                .map(|(id, status)| (id.clone(), status.clone()))
+                .collect::<Vec<_>>();
+            for (id, status) in &changed {
+                events.publish(Event::HostLinkChanged {
+                    host: id.clone(),
+                    link: status.link,
+                    version: status.version.clone(),
+                    error: status.error.clone(),
+                });
             }
-            let results = services.hosts.probe_all(config.as_ref()).await;
-            let current = results
-                .into_iter()
-                .map(|(id, status)| (id, (status.reachable, status.error)))
-                .collect::<BTreeMap<_, _>>();
-            if current != previous {
-                previous = current;
+            for id in previous.keys().filter(|id| !results.contains_key(*id)) {
+                events.publish(Event::HostLinkChanged {
+                    host: id.clone(),
+                    link: fleet_proto::snapshot::LinkState::Down,
+                    version: None,
+                    error: Some("host removed from configuration".to_owned()),
+                });
+            }
+            if !changed.is_empty() || previous.keys().any(|id| !results.contains_key(id)) {
                 events.request_snapshot(Arc::clone(&services));
             }
+            previous = results;
             Ok::<(), DaemonError>(())
         };
         tokio::select! {
@@ -271,6 +286,25 @@ async fn run_host_refresh(
             }
         }
     }
+}
+
+fn host_refresh_interval(config: &Config) -> Duration {
+    duration_from_millis(config.ui.remote_status_refresh_ms, 500)
+}
+
+fn host_status_changed(
+    previous: Option<&fleet_proto::snapshot::HostStatus>,
+    current: &fleet_proto::snapshot::HostStatus,
+) -> bool {
+    previous.is_none_or(|previous| {
+        previous.provider != current.provider
+            || previous.version != current.version
+            || previous.link != current.link
+            || previous.address != current.address
+            || previous.agent_binaries != current.agent_binaries
+            || previous.reachable != current.reachable
+            || previous.error != current.error
+    })
 }
 
 async fn run_pool_refresh(
@@ -480,7 +514,8 @@ mod host_refresh_tests {
         let config = Arc::new(ConfigStore::new(home, files.clone()));
         config
             .update(serde_json::json!({
-                "hosts": {"dev-box": {"ssh": "arch-dev", "swarmCommand": "swarm"}}
+                "hosts": {"dev-box": {"ssh": "arch-dev", "swarmCommand": "swarm"}},
+                "ui": {"remoteStatusRefreshMs": 500}
             }))
             .await
             .unwrap_or_else(|error| panic!("{error}"));
@@ -521,12 +556,16 @@ mod host_refresh_tests {
         let events = BroadcastBus::default();
         let mut receiver = events.subscribe();
         let shutdown = CancellationToken::new();
-        let task = tokio::spawn(run_host_refresh(
-            services,
-            events,
-            shutdown.clone(),
-            Duration::from_millis(10),
-        ));
+        let task = tokio::spawn(run_host_refresh(services, events, shutdown.clone()));
+        let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let Event::HostLinkChanged { host, link, .. } = event else {
+            panic!("expected host link change");
+        };
+        assert_eq!(host.as_str(), "dev-box");
+        assert_eq!(link, fleet_proto::snapshot::LinkState::Legacy);
         let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
             .await
             .unwrap_or_else(|error| panic!("{error}"))
@@ -536,15 +575,24 @@ mod host_refresh_tests {
         };
         assert!(snapshot.hosts[0].reachable);
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+            tokio::time::timeout(Duration::from_millis(150), receiver.recv())
                 .await
                 .is_err()
         );
+        tokio::time::sleep(Duration::from_millis(450)).await;
         assert!(
             shell.calls().len() > 1,
             "must have refreshed unchanged results"
         );
         online.store(false, Ordering::SeqCst);
+        let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let Event::HostLinkChanged { error, .. } = event else {
+            panic!("expected host link change");
+        };
+        assert_eq!(error.as_deref(), Some("Connection refused"));
         let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
             .await
             .unwrap_or_else(|error| panic!("{error}"))
@@ -562,6 +610,15 @@ mod host_refresh_tests {
             .await
             .unwrap_or_else(|error| panic!("{error}"))
             .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[test]
+    fn host_refresh_interval_clamps_to_five_hundred_milliseconds() {
+        let mut config = fleet_core::config::default_config("/tmp/fleet");
+        config.ui.remote_status_refresh_ms = 1;
+        assert_eq!(host_refresh_interval(&config), Duration::from_millis(500));
+        config.ui.remote_status_refresh_ms = 4_321;
+        assert_eq!(host_refresh_interval(&config), Duration::from_millis(4_321));
     }
 
     #[tokio::test]
