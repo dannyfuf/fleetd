@@ -56,7 +56,7 @@ pub enum DaemonError {
     /// A remote machine or daemon could not be reached.
     #[error("remote operation failed: {0}")]
     Remote(String),
-    /// A service contract exists but its domain algorithm is not implemented yet.
+    /// A recognized operation is unavailable in this daemon build.
     #[error("unimplemented service operation: {0}")]
     Unimplemented(&'static str),
     /// A requested protocol or operation is not supported by this daemon.
@@ -67,10 +67,10 @@ pub enum DaemonError {
     Join(String),
 }
 
-/// The single wording every remote-host refusal reports to clients.
-pub(crate) const REMOTE_UNSUPPORTED: &str = "remote hosts are not supported yet";
+/// The single wording used when a remote operation reaches a local-only service.
+pub(crate) const REMOTE_UNSUPPORTED: &str = "remote operation requires host routing";
 
-/// Builds the refusal returned wherever a request names a host Fleet cannot drive yet.
+/// Builds the refusal returned when a request bypasses remote-host routing.
 pub(crate) fn remote_unsupported() -> DaemonError {
     DaemonError::Unsupported(REMOTE_UNSUPPORTED.to_owned())
 }

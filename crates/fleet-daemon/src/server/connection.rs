@@ -177,7 +177,13 @@ impl Connection {
                             Some(Ok(ResponseBody::Ack))
                         }
                         body if terminal_request_is_serialized(&body) => {
-                            let result = run_terminal_request(&self.services, owner_id, body, &mut attached).await;
+                            let result = run_terminal_request(
+                                &self.services,
+                                owner_id,
+                                crate::services::RequestContext { client: client.clone() },
+                                body,
+                                &mut attached,
+                            ).await;
                             if result.is_ok() && snapshot_changed {
                                 self.events.request_snapshot(Arc::clone(&self.services));
                             }
@@ -201,7 +207,7 @@ impl Connection {
                                     gate.cancelled().await;
                                 }
                                 let result = services
-                                    .dispatch_owned_with_context(body, owner_id, context)
+                                    .dispatch_routed_with_owner(body, owner_id, context)
                                     .await;
                                 CompletedRequest { id, result, snapshot_changed, shutdown_request }
                             }));
@@ -272,7 +278,12 @@ impl Connection {
                                 skipped,
                                 "event stream lagged; resyncing the client instead of dropping it"
                             );
-                            request_full_frames(&self.services, &attached).await;
+                            request_full_frames(
+                                &self.services,
+                                owner_id,
+                                &client,
+                                &attached,
+                            ).await;
                             self.events.request_snapshot(Arc::clone(&self.services));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
@@ -290,7 +301,12 @@ impl Connection {
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            request_full_frames(&self.services, &attached).await;
+                            request_full_frames(
+                                &self.services,
+                                owner_id,
+                                &client,
+                                &attached,
+                            ).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
                     }
@@ -325,7 +341,16 @@ impl Connection {
         drop(watch_owner);
         let detached_any = !attached.is_empty();
         for terminal in attached {
-            if let Err(error) = self.services.sessions.detach(terminal).await
+            if let Err(error) = self
+                .services
+                .dispatch_routed_with_owner(
+                    RequestBody::DetachTerminal { terminal },
+                    owner_id,
+                    crate::services::RequestContext {
+                        client: client.clone(),
+                    },
+                )
+                .await
                 && !matches!(error, DaemonError::NotFound(_))
             {
                 tracing::warn!(%error, %terminal, "failed to detach disconnected client");
@@ -403,6 +428,7 @@ async fn negotiate_hello_with_timeout(
 async fn run_terminal_request(
     services: &Services,
     owner_id: u64,
+    context: crate::services::RequestContext,
     body: RequestBody,
     attached: &mut HashSet<fleet_core::ids::TerminalId>,
 ) -> DaemonResult<ResponseBody> {
@@ -416,15 +442,27 @@ async fn run_terminal_request(
             terminal,
             cols,
             rows,
-        } if attached.contains(&terminal) => services
-            .sessions
-            .resize(terminal, cols, rows)
-            .await
-            .map(|()| ResponseBody::Ack),
+        } if attached.contains(&terminal) => {
+            services
+                .dispatch_routed_with_owner(
+                    RequestBody::ResizeTerminal {
+                        terminal,
+                        cols,
+                        rows,
+                    },
+                    owner_id,
+                    context,
+                )
+                .await
+        }
         RequestBody::DetachTerminal { terminal } if !attached.contains(&terminal) => {
             Ok(ResponseBody::Ack)
         }
-        body => services.dispatch_owned(body, owner_id).await,
+        body => {
+            services
+                .dispatch_routed_with_owner(body, owner_id, context)
+                .await
+        }
     };
     if result.is_ok()
         && let Some((attach, terminal)) = membership
@@ -467,10 +505,25 @@ fn terminal_request_is_serialized(body: &RequestBody) -> bool {
         )
 }
 
-async fn request_full_frames(services: &Services, attached: &HashSet<fleet_core::ids::TerminalId>) {
+async fn request_full_frames(
+    services: &Services,
+    owner_id: u64,
+    client: &HelloClient,
+    attached: &HashSet<fleet_core::ids::TerminalId>,
+) {
     // A broadcast gap does not identify which terminal lost rows.
     for terminal in attached {
-        let _ignored = services.sessions.request_full_frame(*terminal).await;
+        let _ignored = services
+            .dispatch_routed_with_owner(
+                RequestBody::RequestFullFrame {
+                    terminal: *terminal,
+                },
+                owner_id,
+                crate::services::RequestContext {
+                    client: client.clone(),
+                },
+            )
+            .await;
     }
 }
 
