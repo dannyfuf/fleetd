@@ -51,6 +51,10 @@ pub trait MachineProvider: Send + Sync {
     async fn open_stream(&self) -> Result<Box<dyn AsyncDuplex>, MachineError>;
     fn fleetd_binary(&self) -> &str;
     fn fleet_home(&self) -> Option<&str>;
+    /// Non-fatal provider warning from the most recent resolution attempt.
+    fn warning(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Optional provisioning lifecycle implemented by future machine providers.
@@ -92,8 +96,4 @@ impl From<MachineError> for DaemonError {
             MachineError::Timeout(message) => Self::Timeout(message),
         }
     }
-}
-
-pub(crate) fn not_implemented(name: &str) -> MachineError {
-    MachineError::Unsupported(format!("{name}: not implemented"))
 }

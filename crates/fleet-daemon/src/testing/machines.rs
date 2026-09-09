@@ -5,7 +5,10 @@ use std::{collections::VecDeque, sync::Mutex, time::Duration};
 use async_trait::async_trait;
 use fleet_core::ids::HostId;
 use fleet_proto::{
-    event::Event, request::RequestBody, response::ResponseBody, snapshot::LinkState,
+    event::Event,
+    request::RequestBody,
+    response::ResponseBody,
+    snapshot::{LinkState, Snapshot},
 };
 use tokio::{
     io::DuplexStream,
@@ -119,6 +122,7 @@ pub struct FakeRemote {
     events_tx: broadcast::Sender<Event>,
     state_tx: watch::Sender<LinkState>,
     hello: Mutex<Option<RemoteHello>>,
+    last_snapshot: Mutex<Option<Snapshot>>,
 }
 
 impl FakeRemote {
@@ -133,6 +137,7 @@ impl FakeRemote {
             events_tx,
             state_tx,
             hello: Mutex::new(None),
+            last_snapshot: Mutex::new(None),
         }
     }
 
@@ -152,6 +157,9 @@ impl FakeRemote {
     pub fn set_hello(&self, hello: RemoteHello) {
         *lock(&self.hello) = Some(hello);
     }
+    pub fn set_last_snapshot(&self, snapshot: Snapshot) {
+        *lock(&self.last_snapshot) = Some(snapshot);
+    }
 }
 
 #[async_trait]
@@ -164,6 +172,9 @@ impl RemoteEndpoint for FakeRemote {
     }
     fn hello(&self) -> Option<RemoteHello> {
         lock(&self.hello).clone()
+    }
+    fn last_snapshot_seen(&self) -> Option<Snapshot> {
+        lock(&self.last_snapshot).clone()
     }
     async fn request(&self, body: RequestBody) -> DaemonResult<ResponseBody> {
         lock(&self.requests).push(body);
