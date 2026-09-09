@@ -45,6 +45,7 @@ use fleet_proto::{
     job::{JobRecord, JobStatus},
     request::RequestBody,
     response::ResponseBody,
+    snapshot::{HostStatus, LinkState},
     terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
 };
 use fleet_ui_kit::{

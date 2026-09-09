@@ -1,6 +1,8 @@
 use super::*;
 
+use fleet_core::ids::HostId;
 use fleet_core::slug::slugify;
+use fleet_proto::snapshot::LinkState;
 
 /// What `Enter` on a PR with no local worktree is about to create (§3.5 [D-6]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +39,10 @@ pub struct PrProps<'a> {
     pub pr: &'a PullRequest,
     /// The local worktree matching it, when one exists.
     pub local: Option<&'a Worktree>,
+    /// Machine owning the matching worktree, when remote.
+    pub host: Option<&'a HostId>,
+    /// Current link state of that machine.
+    pub host_link: Option<LinkState>,
     /// That worktree's runtime status.
     pub status: Option<&'a WorktreeStatus>,
     /// `$HOME`, for tilde collapsing.
@@ -61,6 +67,8 @@ pub fn pull_request_with_status(
     let PrProps {
         pr,
         local,
+        host,
+        host_link,
         status,
         home,
         now,
@@ -102,23 +110,35 @@ pub fn pull_request_with_status(
             let running = status
                 .map(|status| status.running.join(", "))
                 .filter(|labels| !labels.is_empty());
-            block(
-                vec![
-                    SectionHeader::new("Worktree").into_any_element(),
-                    FactRow::new("path", path_value(&worktree.path, home, cx))
-                        .mono(true)
-                        .into_any_element(),
-                    FactRow::new(
-                        "session",
-                        FactValue::known(match running {
-                            Some(labels) => format!("{} · {labels}", glyph.detail_word()),
-                            None => glyph.detail_word().to_owned(),
-                        }),
-                    )
+            let path = qualified_path(host, &worktree.path);
+            let mut rows = vec![
+                SectionHeader::new("Worktree").into_any_element(),
+                FactRow::new("path", path_value(&path, home, cx))
+                    .mono(true)
                     .into_any_element(),
-                ],
-                cx,
-            )
+                FactRow::new(
+                    "session",
+                    FactValue::known(match running {
+                        Some(labels) => format!("{} · {labels}", glyph.detail_word()),
+                        None => glyph.detail_word().to_owned(),
+                    }),
+                )
+                .into_any_element(),
+            ];
+            if let Some(host) = host {
+                let link = host_link.map_or("unknown", |link| match link {
+                    LinkState::Connecting => "connecting",
+                    LinkState::Ready => "ready",
+                    LinkState::Down => "down",
+                    LinkState::Legacy => "legacy",
+                });
+                rows.insert(
+                    1,
+                    FactRow::new("host", FactValue::known(format!("{host} · {link}")))
+                        .into_any_element(),
+                );
+            }
+            block(rows, cx)
         }
         None => {
             let plan = will_create(pr);
@@ -152,6 +172,10 @@ pub fn pull_request_with_status(
     ])
 }
 
+fn qualified_path(host: Option<&HostId>, path: &str) -> String {
+    host.map_or_else(|| path.to_owned(), |host| format!("{host}:{path}"))
+}
+
 fn checks_word(checks: PrChecks) -> &'static str {
     match checks {
         PrChecks::Pass => "pass",
@@ -175,6 +199,16 @@ mod tests {
     use fleet_core::ids::RepoId;
 
     use super::*;
+
+    #[test]
+    fn remote_worktree_paths_are_qualified_with_their_host() {
+        let host = HostId::try_from("dev-box").expect("host");
+        assert_eq!(
+            qualified_path(Some(&host), "/srv/fleet/worktree"),
+            "dev-box:/srv/fleet/worktree"
+        );
+        assert_eq!(qualified_path(None, "/tmp/local"), "/tmp/local");
+    }
 
     fn pull_request(cross: bool) -> PullRequest {
         PullRequest {

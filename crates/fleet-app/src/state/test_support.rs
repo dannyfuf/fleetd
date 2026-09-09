@@ -168,6 +168,7 @@ pub(super) fn session_with(id: &str, terminals: &[u64]) -> fleet_core::sessions:
     use fleet_core::sessions::{SessionKind, Terminal, TerminalStatus};
     fleet_core::sessions::Session {
         id: id.parse().unwrap_or_else(|error| panic!("{error}")),
+        host: None,
         kind: SessionKind::Worktree(
             "buk/payroll#feat"
                 .parse()

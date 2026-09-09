@@ -136,3 +136,133 @@ fn restart_clears_daemon_local_identity() {
     assert!(state.renamed_terminals.is_empty());
     assert!(state.terminal_mru.is_empty());
 }
+
+/// A remote host's status entry, as the daemon reports it before any link event.
+fn host_status(link: LinkState) -> fleet_proto::snapshot::HostStatus {
+    fleet_proto::snapshot::HostStatus {
+        id: "dev-box".parse().unwrap_or_else(|error| panic!("{error}")),
+        provider: "tailscale".to_owned(),
+        version: None,
+        link,
+        address: Some("100.64.0.2".to_owned()),
+        agent_binaries: None,
+        reachable: link == LinkState::Ready,
+        checked_at: "2026-09-04T12:00:00Z".to_owned(),
+        error: Some("connect refused".to_owned()),
+    }
+}
+
+fn link_event(link: LinkState, version: Option<&str>, error: Option<&str>) -> Event {
+    Event::HostLinkChanged {
+        host: "dev-box".parse().unwrap_or_else(|error| panic!("{error}")),
+        link,
+        version: version.map(str::to_owned),
+        error: error.map(str::to_owned),
+    }
+}
+
+fn mirrored_host(state: &AppState) -> fleet_proto::snapshot::HostStatus {
+    state
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.hosts.first().cloned())
+        .unwrap_or_else(|| panic!("the mirror holds the host the snapshot listed"))
+}
+
+/// §3: between two snapshots the event is the only news about a machine, so it is applied to
+/// the mirror the header, the thread badge and the status glyph all read.
+#[test]
+fn a_host_link_event_patches_the_mirrored_host_status() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let mut snapshot = snapshot();
+    snapshot.hosts = vec![host_status(LinkState::Down)];
+    state.apply_snapshot(snapshot, now);
+    let before = state.snapshot_revision;
+
+    state.apply_daemon_event(link_event(LinkState::Ready, Some("0.1.0"), None), now);
+
+    let host = mirrored_host(&state);
+    assert_eq!(host.link, LinkState::Ready);
+    assert!(host.reachable, "a ready link is a reached machine");
+    assert_eq!(host.version.as_deref(), Some("0.1.0"));
+    assert_eq!(host.error, None, "the failure that is over is cleared");
+    assert_ne!(
+        state.snapshot_revision, before,
+        "every projection keyed on the mirror has to be invalidated"
+    );
+
+    state.apply_daemon_event(
+        link_event(LinkState::Down, None, Some("tailscale is down")),
+        now,
+    );
+    let host = mirrored_host(&state);
+    assert_eq!(host.link, LinkState::Down);
+    assert!(!host.reachable);
+    assert_eq!(host.error.as_deref(), Some("tailscale is down"));
+    assert_eq!(
+        host.version.as_deref(),
+        Some("0.1.0"),
+        "a dropped link has not made the daemon it handshook with forget its version"
+    );
+
+    // A connect attempt in flight decides nothing, so it may not claim the machine is gone.
+    state.apply_daemon_event(link_event(LinkState::Connecting, None, None), now);
+    let host = mirrored_host(&state);
+    assert_eq!(host.link, LinkState::Connecting);
+    assert!(!host.reachable);
+}
+
+/// A host the snapshot has not introduced yet is left alone rather than half-invented.
+#[test]
+fn a_link_event_for_an_unknown_host_changes_nothing() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    state.apply_snapshot(snapshot(), now);
+    let before = state.snapshot_revision;
+
+    state.apply_daemon_event(link_event(LinkState::Ready, None, None), now);
+
+    assert!(
+        state
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.hosts.is_empty())
+    );
+    assert_eq!(state.snapshot_revision, before);
+}
+
+/// P2-T08: the reattach ask is recorded per terminal and dies with the terminal itself.
+#[test]
+fn a_reattach_event_is_recorded_until_a_snapshot_forgets_the_terminal() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let mut listed = snapshot();
+    listed.sessions = vec![session_with("payroll/feat", &[1])];
+    state.apply_snapshot(listed.clone(), now);
+
+    state.apply_daemon_event(
+        Event::TerminalReattach {
+            terminal: TerminalId(1),
+        },
+        now,
+    );
+    state.apply_daemon_event(
+        Event::TerminalReattach {
+            terminal: TerminalId(7),
+        },
+        now,
+    );
+    assert!(state.reattach_pending.contains(&TerminalId(1)));
+    assert!(state.reattach_pending.contains(&TerminalId(7)));
+
+    // The next authoritative snapshot lists neither terminal 7 nor, later, terminal 1.
+    state.apply_snapshot(listed, now);
+    assert_eq!(
+        state.reattach_pending.iter().copied().collect::<Vec<_>>(),
+        vec![TerminalId(1)],
+        "a request for a terminal the daemon no longer lists is not worth keeping"
+    );
+    state.apply_snapshot(snapshot(), now);
+    assert!(state.reattach_pending.is_empty());
+}

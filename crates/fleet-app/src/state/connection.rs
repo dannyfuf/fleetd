@@ -250,7 +250,18 @@ impl AppState {
             }
             Event::TerminalExited { terminal, code } => self.apply_terminal_exit(terminal, code),
             Event::TerminalTitle { terminal, title } => self.apply_terminal_title(terminal, title),
-            Event::HostLinkChanged { .. } | Event::TerminalReattach { .. } => {}
+            Event::HostLinkChanged {
+                host,
+                link,
+                version,
+                error,
+            } => self.apply_host_link(&host, link, version, error),
+            // §3: the daemon rebuilt this client's attachment set behind an id that did not
+            // change, so only an explicit re-attach brings the mirror back. The surface that
+            // owns the terminal consumes the request on its next frame.
+            Event::TerminalReattach { terminal } => {
+                self.reattach_pending.insert(terminal);
+            }
             Event::Toast { level, message } => self.apply_toast_event(level, message, now),
             Event::DaemonShuttingDown => {
                 self.daemon = DaemonLink::Lost {

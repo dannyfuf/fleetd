@@ -44,14 +44,20 @@ pub(super) struct Model {
     pub(super) native: bool,
     /// The native agent thread the strip has selected, when an agent tab is active.
     pub(super) agent: Option<ThreadId>,
-    /// The worktree the session belongs to, and its path on disk — what a pane is built from.
-    pub(super) worktree: Option<(WorktreeId, PathBuf)>,
+    /// The worktree the session belongs to, and where it lives — what a pane is built from.
+    ///
+    /// §12: the path is a [`Location`] rather than a `PathBuf` precisely because a remote one
+    /// means nothing to this machine's filesystem. Everything local — the embedded Git pane,
+    /// the `@` completion listing — goes through [`Location::local_path`].
+    pub(super) worktree: Option<(WorktreeId, Location)>,
     /// Whether a Fleet overlay owns the keyboard, in which case no pane may hold it.
     pub(super) overlay_open: bool,
     /// The popup is showing this exact terminal and temporarily owns its PTY dimensions.
     pub(super) popup_owns_terminal: bool,
     /// The popup terminal that must remain attached if this Workspace switches away from it.
     pub(super) popup_terminal: Option<TerminalId>,
+    /// The daemon asked for the active terminal to be attached again (§3 `TerminalReattach`).
+    pub(super) reattach: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +74,29 @@ impl HostReachability {
             Some(false) => Self::Unreachable,
             None => Self::Unknown,
         }
+    }
+
+    /// What a host's snapshot record says about reaching it right now (contract §3, §10).
+    ///
+    /// The daemon link is the authority wherever there is one: `Ready` is the state in which a
+    /// request actually crosses to the machine, and `Down` is the state P3-T04 disables the
+    /// composer in. `Connecting` has not decided yet, and a `Legacy` entry has no link at all,
+    /// so there its probe remains the only observation.
+    pub(super) const fn from_status(status: Option<&HostStatus>) -> Self {
+        let Some(status) = status else {
+            return Self::Unknown;
+        };
+        match status.link {
+            LinkState::Ready => Self::Reachable,
+            LinkState::Down => Self::Unreachable,
+            LinkState::Connecting => Self::Unknown,
+            LinkState::Legacy => Self::from_observation(Some(status.reachable)),
+        }
+    }
+
+    /// Whether the machine is known to be out of reach, which is not the same as unknown.
+    pub(super) const fn is_unreachable(self) -> bool {
+        matches!(self, Self::Unreachable)
     }
 
     pub(super) const fn is_reachable(self) -> bool {
@@ -106,16 +135,15 @@ impl Model {
                 Some(worktree.branch.clone()),
                 Some(worktree.repo_id.clone()),
                 worktree.host.as_ref().map(|host| {
-                    let reachable = app.snapshot.as_ref().and_then(|snapshot| {
+                    let status = app.snapshot.as_ref().and_then(|snapshot| {
                         snapshot
                             .hosts
                             .iter()
                             .find(|candidate| &candidate.id == host)
-                            .map(|candidate| candidate.reachable)
                     });
                     (
                         SharedString::from(host.to_string()),
-                        HostReachability::from_observation(reachable),
+                        HostReachability::from_status(status),
                     )
                 }),
             ),
@@ -196,10 +224,19 @@ impl Model {
                     .iter()
                     .any(|entry| Some(entry.id) == terminal && entry.is_native()),
             agent,
-            worktree: worktree.map(|worktree| (worktree.id.clone(), PathBuf::from(&worktree.path))),
+            worktree: worktree.map(|worktree| {
+                (
+                    worktree.id.clone(),
+                    Location {
+                        host: worktree.host.clone(),
+                        path: worktree.path.clone(),
+                    },
+                )
+            }),
             overlay_open: app.overlay.is_some() || app.agent_popup.is_some(),
             popup_owns_terminal,
             popup_terminal,
+            reattach: terminal.is_some_and(|id| app.reattach_pending.contains(&id)),
             waking: session.slept_at.is_some()
                 && session
                     .terminals

@@ -264,6 +264,7 @@ mod tests {
     fn session(names: &[&str]) -> Session {
         Session {
             id: SessionId::try_from("payroll/feat-x").unwrap_or_else(|error| panic!("{error}")),
+            host: None,
             kind: SessionKind::Agent(Agent::Claude),
             cwd: "/tmp".to_owned(),
             terminals: names

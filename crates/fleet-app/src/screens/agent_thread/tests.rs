@@ -1366,3 +1366,131 @@ fn leaving_plan_mode_restores_the_mode_it_was_entered_from(cx: &mut gpui::TestAp
         "leaving plan mode downgraded the thread instead of restoring it"
     );
 }
+
+/// P3-T04: a thread whose machine is unreachable refuses `⏎` *before* the send, keeps the
+/// draft the composer reported, and says which machine it is waiting for.
+#[gpui::test]
+fn an_unreachable_host_stands_the_composer_down_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::bridge::BridgeCommand;
+    use gpui::AppContext as _;
+
+    use super::{AgentThreadEvent, AgentThreadView, ThreadHost};
+
+    let view = cx.new(|cx| AgentThreadView::new(projection(), cx));
+    let sent: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let notices: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let (seen, heard) = (Rc::clone(&sent), Rc::clone(&notices));
+    cx.update(|cx| {
+        cx.subscribe(&view, move |_, event, _| match event {
+            AgentThreadEvent::Command(BridgeCommand::AgentSend { input, .. }) => {
+                seen.borrow_mut().push(input.text.clone());
+            }
+            AgentThreadEvent::Notice(text) => heard.borrow_mut().push(text.to_string()),
+            _ => {}
+        })
+        .detach();
+    });
+
+    view.update(cx, |view, cx| {
+        view.set_host(
+            Some(ThreadHost {
+                name: "dev-box".into(),
+                unreachable: true,
+            }),
+            cx,
+        );
+        let input = view.input().clone();
+        input.update(cx, |input, cx| {
+            input.set_text("ship it", cx);
+            input.submit(cx);
+        });
+    });
+    cx.run_until_parked();
+
+    view.read_with(cx, |view, cx| {
+        assert!(view.is_unreachable());
+        assert!(view.input().read(cx).is_read_only());
+        assert_eq!(
+            view.host().map(|host| host.name.to_string()),
+            Some("dev-box".to_owned()),
+            "the badge names the machine the thread runs on"
+        );
+        assert_eq!(
+            view.input().read(cx).text(),
+            "ship it",
+            "the draft the composer reported survives the refusal"
+        );
+    });
+    assert!(
+        sent.borrow().is_empty(),
+        "nothing may be dispatched to a machine the daemon has no link to"
+    );
+    assert!(
+        notices.borrow().is_empty(),
+        "a disabled composer must not process submit at all"
+    );
+
+    // The link comes back: the same key sends, with no further intervention.
+    view.update(cx, |view, cx| {
+        view.set_host(
+            Some(ThreadHost {
+                name: "dev-box".into(),
+                unreachable: false,
+            }),
+            cx,
+        );
+        view.send(cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(sent.borrow().as_slice(), ["ship it".to_owned()]);
+    view.read_with(cx, |view, _| assert!(!view.is_unreachable()));
+}
+
+/// A local thread carries no badge at all, and its composer keeps its ordinary invitation.
+#[gpui::test]
+fn a_local_thread_has_no_host_badge(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    use super::{AgentThreadView, ThreadHost};
+
+    let view = cx.new(|cx| AgentThreadView::new(projection(), cx));
+    view.update(cx, |view, cx| view.set_host(None, cx));
+    view.read_with(cx, |view, _| {
+        assert!(view.host().is_none());
+        assert!(!view.is_unreachable());
+    });
+
+    // A reachable remote thread is badged but never stood down.
+    view.update(cx, |view, cx| {
+        view.set_host(
+            Some(ThreadHost {
+                name: "dev-box".into(),
+                unreachable: false,
+            }),
+            cx,
+        );
+    });
+    view.read_with(cx, |view, _| {
+        assert!(view.host().is_some());
+        assert!(!view.is_unreachable());
+    });
+}
+
+/// The three unreachable sentences all name the host and never repeat one another.
+#[test]
+fn the_unreachable_copy_names_the_machine_in_every_place_it_appears() {
+    use super::presentation::{unreachable_hint, unreachable_notice, unreachable_placeholder};
+
+    let placeholder = unreachable_placeholder("dev-box");
+    let hint = unreachable_hint("dev-box");
+    let notice = unreachable_notice("dev-box");
+    for line in [&placeholder, &hint, &notice] {
+        assert!(line.contains("dev-box"), "{line}");
+        assert!(line.contains("unreachable"), "{line}");
+    }
+    assert_ne!(placeholder, hint);
+    assert_ne!(hint, notice);
+}

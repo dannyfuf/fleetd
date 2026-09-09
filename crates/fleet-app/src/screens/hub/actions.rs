@@ -1,10 +1,17 @@
 use super::*;
 
+/// The clipboard form of a worktree path.
+///
+/// A remote path is rendered `<host>:<path>` exactly as `fleet path` does (contract §11): a bare
+/// remote path pasted into a local shell is a lie, and contract §12 forbids treating it as local.
 pub(super) fn copy_path_outcome(
     result: Result<ResponseBody, ProtoError>,
 ) -> Result<String, ProtoError> {
     match result {
-        Ok(ResponseBody::Path { path, .. }) => Ok(path),
+        Ok(ResponseBody::Path { path, host }) => Ok(match host {
+            Some(host) => format!("{host}:{path}"),
+            None => path,
+        }),
         Ok(_) => Err(client_error("daemon returned an unexpected path response")),
         Err(error) => Err(error),
     }
@@ -20,6 +27,21 @@ pub(super) fn restore_acknowledged(
         )),
         Err(error) => Err(error),
     }
+}
+
+/// The toast text for an open that failed because the host is not there.
+///
+/// `ErrorKind::Remote` is the daemon's category for unreachable, auth and transport failures on
+/// a machine (contract §4), and it is the only failure the Hub demotes from the sticky banner.
+#[must_use]
+pub(super) fn unreachable_host_toast(error: &ProtoError, host: Option<&str>) -> Option<String> {
+    if error.kind != ErrorKind::Remote {
+        return None;
+    }
+    Some(match host {
+        Some(host) => format!("{host} is unreachable \u{2014} {}", error.message),
+        None => error.message.clone(),
+    })
 }
 
 impl HubCtx {
@@ -135,7 +157,11 @@ impl HubCtx {
     }
 
     /// Marks a worktree as opened and enters its session once the daemon confirms it exists.
+    ///
+    /// The placement is read before the request so the failure path can name the host without
+    /// touching the worktree's path: a remote location has no local one (contract §12).
     fn open_session(&self, id: WorktreeId, sleep_previous: bool, cx: &mut App) {
+        let host = self.worktree_host(&id, cx);
         self.bridge
             .send(RequestBody::TouchWorktreeOpened { id: id.clone() });
         self.ask(
@@ -145,14 +171,29 @@ impl HubCtx {
                 sleep_previous,
             },
             cx,
-            |result, ctx, cx| ctx.enter_session(result, cx),
+            move |result, ctx, cx| ctx.enter_session(result, host, cx),
         );
+    }
+
+    /// The host a worktree lives on, as the snapshot records it.
+    fn worktree_host(&self, id: &WorktreeId, cx: &App) -> Option<SharedString> {
+        self.state
+            .read(cx)
+            .snapshot
+            .as_ref()?
+            .worktrees
+            .iter()
+            .find(|worktree| &worktree.id == id)?
+            .host
+            .as_ref()
+            .map(|host| SharedString::from(host.to_string()))
     }
 
     /// Moves to the Workspace once the daemon confirms the session exists.
     pub(super) fn enter_session(
         &self,
         result: Result<ResponseBody, ProtoError>,
+        host: Option<SharedString>,
         cx: &mut gpui::AsyncApp,
     ) {
         match result {
@@ -163,7 +204,12 @@ impl HubCtx {
                 });
             }
             Ok(_) => {}
-            Err(error) => self.report(error, cx),
+            Err(error) => match unreachable_host_toast(&error, host.as_deref()) {
+                // §P2-T07: an offline host is a fact about the world, not a failed action the
+                // user must dismiss. The Hub keeps its banner for real refusals.
+                Some(text) => self.toast_async(text, Icon::CloudOff, cx),
+                None => self.report(error, cx),
+            },
         }
     }
 
@@ -413,7 +459,11 @@ impl HubCtx {
                             let sleep_previous = intent
                                 .map(|intent| intent.sleep_previous)
                                 .unwrap_or_default();
-                            ctx.ask_from_async(worktree.id, sleep_previous, cx);
+                            let host = worktree
+                                .host
+                                .as_ref()
+                                .map(|host| SharedString::from(host.to_string()));
+                            ctx.ask_from_async(worktree.id, host, sleep_previous, cx);
                         }
                     }
                     Ok(_) => ctx.report(
@@ -430,6 +480,7 @@ impl HubCtx {
     pub(super) fn ask_from_async(
         &self,
         id: WorktreeId,
+        host: Option<SharedString>,
         sleep_previous: bool,
         cx: &mut gpui::AsyncApp,
     ) {
@@ -444,7 +495,7 @@ impl HubCtx {
                 .recv()
                 .await
                 .unwrap_or_else(|_| Err(client_error("the Fleet daemon reply channel closed")));
-            ctx.enter_session(result, cx);
+            ctx.enter_session(result, host, cx);
         })
         .detach();
     }
