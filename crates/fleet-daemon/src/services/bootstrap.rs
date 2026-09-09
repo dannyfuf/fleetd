@@ -3,7 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use fleet_core::ids::{HostId, JobId};
-use fleet_proto::job::JobKind;
+use fleet_proto::{job::JobKind, request::RequestBody};
 
 use crate::{
     DaemonError, DaemonResult,
@@ -15,6 +15,7 @@ use fleet_proto::snapshot::LinkState;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const LINK_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_REMOTE_HOME: &str = "~/.fleet";
 
 type ProviderLookup = dyn Fn(&HostId) -> Option<Arc<dyn MachineProvider>> + Send + Sync;
@@ -256,14 +257,23 @@ async fn run_bootstrap(
     let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
     loop {
         check_cancelled(context)?;
-        if endpoint.state() == LinkState::Ready
-            && endpoint
+        if endpoint.state() == LinkState::Ready {
+            if endpoint
                 .hello()
                 .and_then(|hello| hello.build_commit)
                 .as_deref()
                 == Some(checkout_ref)
-        {
-            break;
+            {
+                break;
+            }
+            // A bridge from the replaced binary can keep its stdio pipes open after the old
+            // daemon exits. A ping makes that stale bridge observe the closed socket so the
+            // persistent endpoint reconnects and refreshes its Hello metadata.
+            let _ = tokio::time::timeout(
+                LINK_REFRESH_TIMEOUT,
+                endpoint.request(RequestBody::DaemonPing),
+            )
+            .await;
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(DaemonError::Remote(format!(

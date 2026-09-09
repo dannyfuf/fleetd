@@ -8,6 +8,7 @@ use fleet_daemon::{
     testing::{FakeMachine, FakeRemote},
 };
 use fleet_proto::job::{JobRecord, JobStatus};
+use fleet_proto::request::RequestBody;
 
 fn host() -> HostId {
     HostId::try_from("dev-box").unwrap_or_else(|error| panic!("{error}"))
@@ -51,13 +52,29 @@ async fn bootstrap_runs_the_exact_remote_build_install_restart_sequence() {
     remote.set_hello(RemoteHello {
         version: "fleetd test".to_owned(),
         daemon_id: "remote-daemon".to_owned(),
-        build_commit: Some("abc123".to_owned()),
+        build_commit: Some("previous".to_owned()),
         capabilities: vec![fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned()],
+    });
+    remote.push_response(Ok(fleet_proto::response::ResponseBody::Pong));
+    let refreshed = Arc::clone(&remote);
+    let refresh = tokio::spawn(async move {
+        loop {
+            if refreshed.requests().contains(&RequestBody::DaemonPing) {
+                refreshed.set_hello(RemoteHello {
+                    version: "fleetd test".to_owned(),
+                    daemon_id: "remote-daemon".to_owned(),
+                    build_commit: Some("abc123".to_owned()),
+                    capabilities: vec![fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned()],
+                });
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     });
     let service = Bootstrap::with_machine_and_endpoint(
         Arc::clone(&jobs),
         Arc::clone(&machine) as Arc<dyn MachineProvider>,
-        remote as Arc<dyn RemoteEndpoint>,
+        Arc::clone(&remote) as Arc<dyn RemoteEndpoint>,
         "https://github.com/acme/fleet.git",
         Some("abc123".to_owned()),
     );
@@ -67,6 +84,10 @@ async fn bootstrap_runs_the_exact_remote_build_install_restart_sequence() {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     let record = finished(&jobs, &id).await;
+    tokio::time::timeout(Duration::from_secs(1), refresh)
+        .await
+        .expect("refresh observation timed out")
+        .expect("refresh observer");
     assert_eq!(record.status, JobStatus::Succeeded);
     assert_eq!(record.target, "dev-box");
     assert_eq!(
@@ -109,6 +130,7 @@ async fn bootstrap_runs_the_exact_remote_build_install_restart_sequence() {
     assert!(log.contains("git version 2.51"));
     assert!(log.contains("cargo 1.97.1"));
     assert!(log.contains("host dev-box is ready"));
+    assert_eq!(remote.requests(), vec![RequestBody::DaemonPing]);
 }
 
 #[tokio::test]
