@@ -1,6 +1,7 @@
 use super::{DaemonVersion, HelloResult, Result, expect_ack, unexpected};
 use crate::Client;
 use fleet_core::config::Config;
+use fleet_core::ids::HostId;
 use fleet_proto::{
     PROTOCOL_VERSION,
     event::EventKind,
@@ -70,6 +71,14 @@ impl Client {
         match self.request(RequestBody::Doctor).await? {
             ResponseBody::Doctor(checks) => Ok(checks),
             response => Err(unexpected("doctor", response)),
+        }
+    }
+
+    /// Runs diagnostics for one configured remote host.
+    pub async fn doctor_host(&self, host: HostId) -> Result<Vec<DoctorCheck>> {
+        match self.request(RequestBody::DoctorHost { host }).await? {
+            ResponseBody::Doctor(checks) => Ok(checks),
+            response => Err(unexpected("doctor_host", response)),
         }
     }
 
