@@ -44,15 +44,11 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("{error}");
             std::process::exit(2);
         }
-        return Ok(());
+        // Tokio's stdin reader uses a blocking helper that can outlive a closed daemon socket.
+        // This bridge process has no state to flush once relay finishes, so exit immediately.
+        std::process::exit(0);
     }
-    let home = match args.home {
-        Some(home) => home,
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".fleet"))
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass --home or FLEET_HOME"))?,
-    };
+    let home = fleet_daemon::server::bridge::resolve_home(args.home)?;
     let layout = FleetHome::new(home.clone());
     let singleton = SingletonGuard::acquire(&home).await?;
     std::fs::create_dir_all(layout.logs_dir())?;
