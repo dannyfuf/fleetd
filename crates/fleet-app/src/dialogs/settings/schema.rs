@@ -1,5 +1,7 @@
 use super::*;
 
+use fleet_proto::snapshot::{HostStatus, LinkState};
+
 /// The sections of the rail, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -162,7 +164,7 @@ pub fn rows(state: &SettingsState, app: &AppState) -> Vec<SettingRow> {
         Section::Github => github_rows(config),
         Section::Status => status_rows(config),
         Section::Windows => window_rows(config),
-        Section::Hosts => host_rows(config),
+        Section::Hosts => host_rows(config, app),
         Section::About => about_rows(app),
     }
 }
@@ -353,34 +355,79 @@ fn window_rows(config: &Config) -> Vec<SettingRow> {
         .collect()
 }
 
-fn host_rows(config: &Config) -> Vec<SettingRow> {
+/// The Hosts section: `defaultHost`, then one read-only row per configured machine.
+///
+/// The row is the configured shape (provider, node, user) joined to what the daemon last saw
+/// of that machine, because a host entry that looks right and answers nothing is the whole
+/// reason this section exists. A legacy entry is named as such: it is probe-only and cannot
+/// carry worktrees, so it needs migrating rather than debugging.
+pub(super) fn host_rows(config: &Config, app: &AppState) -> Vec<SettingRow> {
+    let mut rows = vec![fact("default", config.default_host.clone())];
     if config.hosts.is_empty() {
-        return vec![fact("hosts", "none configured".to_owned())];
+        rows.push(fact("hosts", "none configured".to_owned()));
+        return rows;
     }
-    config
-        .hosts
-        .iter()
-        .map(|(id, host)| {
-            fact(
-                id.as_str(),
-                match host {
-                    fleet_core::model::HostConfigEntry::Tailscale { node, user, .. } => format!(
-                        "tailscale \u{2014} {}{node}",
-                        user.as_ref()
-                            .map(|user| format!("{user}@"))
-                            .unwrap_or_default()
-                    ),
-                    fleet_core::model::HostConfigEntry::Command { display, .. } => format!(
-                        "command \u{2014} {}",
-                        display.as_deref().unwrap_or(id.as_str())
-                    ),
-                    fleet_core::model::HostConfigEntry::Legacy { ssh, swarm_command } => {
-                        format!("legacy \u{2014} {ssh} \u{2014} {swarm_command}")
-                    }
-                },
-            )
-        })
-        .collect()
+    let statuses = app
+        .snapshot
+        .as_ref()
+        .map_or::<&[HostStatus], _>(&[], |snapshot| snapshot.hosts.as_slice());
+    rows.extend(config.hosts.iter().map(|(id, host)| {
+        let status = statuses.iter().find(|status| &status.id == id);
+        fact(
+            id.as_str(),
+            format!(
+                "{} \u{2014} {}",
+                host_shape(id, host),
+                host_link(host, status)
+            ),
+        )
+    }));
+    rows
+}
+
+/// The configured shape of one host, in the config's own vocabulary.
+fn host_shape(id: &fleet_core::ids::HostId, host: &fleet_core::model::HostConfigEntry) -> String {
+    match host {
+        fleet_core::model::HostConfigEntry::Tailscale { node, user, .. } => {
+            let mut line = format!("tailscale \u{00b7} node {node}");
+            if let Some(user) = user {
+                line.push_str(&format!(" \u{00b7} user {user}"));
+            }
+            line
+        }
+        fleet_core::model::HostConfigEntry::Command { display, .. } => format!(
+            "command \u{00b7} {}",
+            display.as_deref().unwrap_or(id.as_str())
+        ),
+        fleet_core::model::HostConfigEntry::Legacy { ssh, swarm_command } => {
+            format!("legacy \u{00b7} ssh {ssh} \u{00b7} {swarm_command}")
+        }
+    }
+}
+
+/// What the daemon last saw of one host.
+fn host_link(host: &fleet_core::model::HostConfigEntry, status: Option<&HostStatus>) -> String {
+    if matches!(host, fleet_core::model::HostConfigEntry::Legacy { .. }) {
+        return "legacy entry \u{2014} migrate it to a tailscale host".to_owned();
+    }
+    let Some(status) = status else {
+        return "no status yet".to_owned();
+    };
+    let detail = status
+        .error
+        .as_deref()
+        .filter(|error| !error.is_empty())
+        .map(|error| format!(" \u{00b7} {error}"))
+        .unwrap_or_default();
+    match status.link {
+        LinkState::Ready => match status.version.as_deref() {
+            Some(version) => format!("ready \u{00b7} fleetd {version}"),
+            None => "ready".to_owned(),
+        },
+        LinkState::Connecting => format!("connecting{detail}"),
+        LinkState::Down => format!("down{detail}"),
+        LinkState::Legacy => "legacy entry \u{2014} migrate it to a tailscale host".to_owned(),
+    }
 }
 
 /// The About section: versions, the daemon, and the two escape hatches.

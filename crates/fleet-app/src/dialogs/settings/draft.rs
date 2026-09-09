@@ -538,7 +538,7 @@ pub(super) fn focused_len(state: &Entity<AppState>, cx: &mut App) -> usize {
             Section::Pool => 4,
             Section::Status => 2,
             Section::Windows => config.windows.len(),
-            Section::Hosts => config.hosts.len().max(1),
+            Section::Hosts => host_rows(config, state.read(cx)).len(),
             Section::About => about_rows(state.read(cx)).len(),
         }
     })
