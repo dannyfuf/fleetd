@@ -1,6 +1,10 @@
 use super::*;
-use fleet_core::{config::Config, sessions::WorktreeStatus, state::State};
-use std::collections::HashMap;
+use fleet_core::{
+    config::Config,
+    sessions::{SessionKind, WorktreeStatus},
+    state::State,
+};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Default)]
 pub(super) struct InventoryCache {
@@ -45,9 +49,102 @@ impl Services {
     /// Assembles an authoritative snapshot from real persisted state and jobs with runtime sessions.
     pub async fn snapshot(&self) -> DaemonResult<Snapshot> {
         let (state, config, pools) = self.inventory().await?;
-        let (sessions, runtime_statuses) = self.sessions.snapshot_with_statuses(&state);
+        self.machines.rebuild(&config);
+        self.mirror.reconcile(
+            &config.hosts.keys().cloned().collect::<BTreeSet<_>>(),
+            &self.machines,
+            &self.events,
+        );
+        let local_worktrees = state
+            .worktrees
+            .iter()
+            .filter(|worktree| worktree.host.is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        let local_ids = local_worktrees
+            .iter()
+            .map(|worktree| worktree.id.clone())
+            .collect::<BTreeSet<_>>();
+        let (mut sessions, runtime_statuses) = self.sessions.snapshot_with_statuses(&state);
         let generated_at = chrono::Utc::now().to_rfc3339();
-        let statuses = merge_statuses(&state.worktrees, Some(&runtime_statuses));
+        let mut statuses = merge_statuses(&local_worktrees, Some(&runtime_statuses));
+        let mut remote_worktrees = self
+            .mirror
+            .worktrees()
+            .into_iter()
+            .filter(|worktree| !local_ids.contains(&worktree.id))
+            .collect::<Vec<_>>();
+        let visible_remote_ids = remote_worktrees
+            .iter()
+            .map(|worktree| worktree.id.clone())
+            .collect::<BTreeSet<_>>();
+        statuses.extend(
+            self.mirror
+                .statuses()
+                .into_iter()
+                .filter(|status| visible_remote_ids.contains(&status.worktree_id)),
+        );
+        let mut remote_sessions = self
+            .mirror
+            .sessions()
+            .into_iter()
+            .filter(|session| match &session.kind {
+                SessionKind::Worktree(id) => visible_remote_ids.contains(id),
+                SessionKind::Agent(_) => true,
+            })
+            .collect::<Vec<_>>();
+        for session in &mut remote_sessions {
+            let Some((host, remote)) = session.id.as_str().split_once('/') else {
+                continue;
+            };
+            let Ok(host) = fleet_core::ids::HostId::try_from(host) else {
+                continue;
+            };
+            let Ok(id) =
+                fleet_core::ids::SessionId::try_from(self.router.ids.local_session(&host, remote))
+            else {
+                continue;
+            };
+            session.id = id;
+            for terminal in &mut session.terminals {
+                terminal.id = self.router.ids.local_terminal(&host, terminal.id);
+            }
+            if let Some(active) = session.active_terminal {
+                session.active_terminal = Some(self.router.ids.local_terminal(&host, active));
+            }
+        }
+        sessions.extend(remote_sessions);
+        let local_threads = self.agents.summaries();
+        let local_thread_ids = local_threads
+            .iter()
+            .map(|summary| summary.thread)
+            .collect::<BTreeSet<_>>();
+        let mut agent_threads = local_threads;
+        agent_threads.extend(self.mirror.agent_threads().into_iter().filter(|summary| {
+            visible_remote_ids.contains(&summary.worktree)
+                && !local_thread_ids.contains(&summary.thread)
+        }));
+        for host in config.hosts.keys() {
+            if let Some(fragment) = self.mirror.fragment(host) {
+                let owned_worktrees = fragment
+                    .snapshot
+                    .worktrees
+                    .into_iter()
+                    .filter(|worktree| !local_ids.contains(&worktree.id))
+                    .collect::<Vec<_>>();
+                let owned_threads = fragment
+                    .snapshot
+                    .agent_threads
+                    .into_iter()
+                    .filter(|thread| !local_thread_ids.contains(&thread.thread))
+                    .collect::<Vec<_>>();
+                self.router
+                    .ids
+                    .replace_host_inventory(host, &owned_worktrees, &owned_threads);
+            }
+        }
+        let mut worktrees = local_worktrees;
+        worktrees.append(&mut remote_worktrees);
         let hosts = self.hosts.snapshot(&config, &generated_at).await;
         Ok(Snapshot {
             boards: self.boards.summaries().await,
@@ -55,10 +152,10 @@ impl Services {
             contexts: state.contexts.clone(),
             repos: state.repos.clone(),
             clones: state.clones.clone(),
-            worktrees: state.worktrees.clone(),
+            worktrees,
             active_context: state.active_context_id.clone(),
             sessions,
-            agent_threads: self.agents.summaries(),
+            agent_threads,
             statuses,
             pools,
             hosts,
