@@ -227,6 +227,154 @@ fn fanout_jobs(
     }
 }
 
+/// Returns the local partition omitted from [`Target::Fanout`]'s remote-host parts.
+#[must_use]
+pub(crate) fn local_fanout_part(
+    body: &RequestBody,
+    resolver: &dyn Resolver,
+) -> Option<RequestBody> {
+    match body {
+        RequestBody::DeleteWorktrees { ids } => {
+            nonempty_worktree_part(ids, resolver).map(|ids| RequestBody::DeleteWorktrees { ids })
+        }
+        RequestBody::InspectWorktrees { ids, repo, fetch } => nonempty_worktree_part(ids, resolver)
+            .map(|ids| RequestBody::InspectWorktrees {
+                ids,
+                repo: repo.clone(),
+                fetch: *fetch,
+            }),
+        RequestBody::PruneWorktrees {
+            dry_run,
+            fetch,
+            kill_sessions,
+            repo,
+            ids: Some(ids),
+        } => nonempty_worktree_part(ids, resolver).map(|ids| RequestBody::PruneWorktrees {
+            dry_run: *dry_run,
+            fetch: *fetch,
+            kill_sessions: *kill_sessions,
+            repo: repo.clone(),
+            ids: Some(ids),
+        }),
+        RequestBody::DismissJobs { jobs } => {
+            let jobs = jobs
+                .iter()
+                .filter(|job| resolver.host_of_job(job).is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            (!jobs.is_empty()).then_some(RequestBody::DismissJobs { jobs })
+        }
+        RequestBody::PruneWorktrees { ids: None, .. }
+        | RequestBody::AgentThreadList
+        | RequestBody::AgentThreadCreate { .. }
+        | RequestBody::AgentThreadOpen { .. }
+        | RequestBody::AgentThreadClose { .. }
+        | RequestBody::AgentSend { .. }
+        | RequestBody::AgentInterrupt { .. }
+        | RequestBody::AgentRespond { .. }
+        | RequestBody::AgentSetMode { .. }
+        | RequestBody::AgentSetModel { .. }
+        | RequestBody::AgentMarkSeen { .. }
+        | RequestBody::AgentStop { .. }
+        | RequestBody::ListBoards { .. }
+        | RequestBody::GetBoard { .. }
+        | RequestBody::EnsureBoard { .. }
+        | RequestBody::CreateBoard { .. }
+        | RequestBody::UpdateBoard { .. }
+        | RequestBody::DeleteBoard { .. }
+        | RequestBody::CreateCard { .. }
+        | RequestBody::UpdateCard { .. }
+        | RequestBody::MoveCard { .. }
+        | RequestBody::DeleteCard { .. }
+        | RequestBody::AddCardComment { .. }
+        | RequestBody::CreateWorktreeFromCard { .. }
+        | RequestBody::SyncBoard { .. }
+        | RequestBody::ResolveCardConflict { .. }
+        | RequestBody::DescribeBoardBackend { .. }
+        | RequestBody::ListBoardBackends {}
+        | RequestBody::StartWatch { .. }
+        | RequestBody::AppendWatchOutput { .. }
+        | RequestBody::FinishWatch { .. }
+        | RequestBody::ListWatches { .. }
+        | RequestBody::TailWatch { .. }
+        | RequestBody::DismissWatch { .. }
+        | RequestBody::Hello { .. }
+        | RequestBody::GetSnapshot
+        | RequestBody::Subscribe { .. }
+        | RequestBody::Unsubscribe
+        | RequestBody::CreateContext { .. }
+        | RequestBody::UpdateContext { .. }
+        | RequestBody::DeleteContext { .. }
+        | RequestBody::SetActiveContext { .. }
+        | RequestBody::CloneRepo { .. }
+        | RequestBody::DeleteRepo { .. }
+        | RequestBody::MoveRepoToContext { .. }
+        | RequestBody::SearchRemoteRepos { .. }
+        | RequestBody::ListRemoteRepos { .. }
+        | RequestBody::ListBaseRefs { .. }
+        | RequestBody::SetRepoHooks { .. }
+        | RequestBody::DismissClone { .. }
+        | RequestBody::CreateWorktree { .. }
+        | RequestBody::KillWorktree { .. }
+        | RequestBody::SleepWorktree { .. }
+        | RequestBody::TouchWorktreeOpened { .. }
+        | RequestBody::WorktreePath { .. }
+        | RequestBody::RestoreTrash { .. }
+        | RequestBody::RefreshStatuses { .. }
+        | RequestBody::SetAgentActivity { .. }
+        | RequestBody::ListPullRequests { .. }
+        | RequestBody::CreateWorktreeFromPr { .. }
+        | RequestBody::BootstrapHost { .. }
+        | RequestBody::EnsureSession { .. }
+        | RequestBody::ListSessions
+        | RequestBody::CurrentSession
+        | RequestBody::KillSession { .. }
+        | RequestBody::SleepSession { .. }
+        | RequestBody::NewTerminal { .. }
+        | RequestBody::CloseTerminal { .. }
+        | RequestBody::RestartTerminal { .. }
+        | RequestBody::RenameTerminal { .. }
+        | RequestBody::SelectTerminal { .. }
+        | RequestBody::AttachTerminal { .. }
+        | RequestBody::DetachTerminal { .. }
+        | RequestBody::TerminalInput { .. }
+        | RequestBody::TerminalKey { .. }
+        | RequestBody::TerminalMouse { .. }
+        | RequestBody::ResizeTerminal { .. }
+        | RequestBody::ScrollTerminal { .. }
+        | RequestBody::WheelTerminal { .. }
+        | RequestBody::ScrollOrKeyTerminal { .. }
+        | RequestBody::RequestFullFrame { .. }
+        | RequestBody::PasteTerminal { .. }
+        | RequestBody::ListJobs
+        | RequestBody::CancelJob { .. }
+        | RequestBody::RetryJob { .. }
+        | RequestBody::TailJob { .. }
+        | RequestBody::GetConfig
+        | RequestBody::SetConfig { .. }
+        | RequestBody::MatchKeepAliveRules
+        | RequestBody::ImportFromSwarm
+        | RequestBody::Doctor
+        | RequestBody::ResetState
+        | RequestBody::Update
+        | RequestBody::DaemonPing
+        | RequestBody::DaemonVersion
+        | RequestBody::DaemonShutdown { .. } => None,
+    }
+}
+
+fn nonempty_worktree_part(
+    ids: &[fleet_core::ids::WorktreeId],
+    resolver: &dyn Resolver,
+) -> Option<Vec<fleet_core::ids::WorktreeId>> {
+    let ids = ids
+        .iter()
+        .filter(|id| resolver.host_of_worktree(id).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    (!ids.is_empty()).then_some(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use fleet_core::{

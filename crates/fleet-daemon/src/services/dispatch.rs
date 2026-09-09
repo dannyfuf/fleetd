@@ -19,16 +19,20 @@ impl Services {
         body: RequestBody,
         _context: RequestContext,
     ) -> DaemonResult<ResponseBody> {
+        self.router.start_event_pumps(self.events.clone());
         match self.router.route(&body) {
             router::Target::Local => self.dispatch_owned(body, 0).await,
-            router::Target::Host(host) => {
-                self.reject_remote_request(&body).await?;
-                self.router.forward(&host, body).await
-            }
+            router::Target::Host(host) => self.router.forward(&host, body).await,
             router::Target::Fanout(parts) => {
-                self.reject_remote_request(&body).await?;
+                let local = router::classify::local_fanout_part(&body, self.router.as_ref());
                 let results = self.router.fanout(parts).await;
-                router::translate::merge_fanout(&body, results)
+                let remote = router::translate::merge_fanout(&body, results);
+                if let Some(local) = local {
+                    let local = self.dispatch_owned(local, 0).await;
+                    router::translate::merge_local_and_remote(&body, local, remote)
+                } else {
+                    remote
+                }
             }
             router::Target::Unsupported(operation) => Err(DaemonError::Unsupported(format!(
                 "{operation}: not implemented"
@@ -51,7 +55,6 @@ impl Services {
         owner: u64,
         _context: RequestContext,
     ) -> DaemonResult<ResponseBody> {
-        self.reject_remote_request(&body).await?;
         match body {
             RequestBody::AgentThreadList => self.agent_response(self.agents.list().await),
             RequestBody::AgentThreadCreate {
@@ -260,7 +263,9 @@ impl Services {
                 self.repos.dismiss_clone(repo).await?;
                 Ok(ResponseBody::Ack)
             }
-            RequestBody::CreateWorktree { host: Some(_), .. } => Err(remote_unsupported()),
+            RequestBody::CreateWorktree { host: Some(_), .. } => Err(DaemonError::Protocol(
+                "remote worktree creation reached the local dispatcher".to_owned(),
+            )),
             RequestBody::CreateWorktree {
                 repo,
                 slug,
@@ -357,7 +362,9 @@ impl Services {
                     post_create_job: post_create_job.map(Box::new),
                 })
             }
-            RequestBody::CreateWorktreeFromPr { host: Some(_), .. } => Err(remote_unsupported()),
+            RequestBody::CreateWorktreeFromPr { host: Some(_), .. } => Err(DaemonError::Protocol(
+                "remote pull-request worktree creation reached the local dispatcher".to_owned(),
+            )),
             RequestBody::BootstrapHost { host, git_ref } => {
                 let job = self.bootstrap.start(host, git_ref).await?;
                 let record = self
@@ -606,74 +613,6 @@ impl Services {
                     self.delete_repo_cascade(repository).await?;
                 }
             }
-        }
-    }
-
-    pub(super) async fn reject_remote_request(&self, body: &RequestBody) -> DaemonResult<()> {
-        let needs_state = matches!(
-            body,
-            RequestBody::DeleteContext { .. }
-                | RequestBody::DeleteRepo { .. }
-                | RequestBody::DeleteWorktrees { .. }
-                | RequestBody::InspectWorktrees { .. }
-                | RequestBody::PruneWorktrees { .. }
-                | RequestBody::KillWorktree { .. }
-                | RequestBody::SleepWorktree { .. }
-                | RequestBody::WorktreePath { .. }
-                | RequestBody::RefreshStatuses { .. }
-                | RequestBody::EnsureSession {
-                    worktree: Some(_),
-                    ..
-                }
-        );
-        if !needs_state {
-            return Ok(());
-        }
-        let state = self.state.load().await?;
-        let proxies_remote = match body {
-            RequestBody::DeleteContext { id } => state.worktrees.iter().any(|worktree| {
-                worktree.host.is_some()
-                    && state
-                        .repos
-                        .iter()
-                        .any(|repo| repo.id == worktree.repo_id && &repo.context_id == id)
-            }),
-            RequestBody::DeleteRepo { repo } => state
-                .worktrees
-                .iter()
-                .any(|worktree| worktree.host.is_some() && &worktree.repo_id == repo),
-            RequestBody::DeleteWorktrees { ids } => state
-                .worktrees
-                .iter()
-                .any(|worktree| worktree.host.is_some() && ids.contains(&worktree.id)),
-            RequestBody::InspectWorktrees { ids, repo, .. } => {
-                state.worktrees.iter().any(|worktree| {
-                    worktree.host.is_some()
-                        && (ids.is_empty() || ids.contains(&worktree.id))
-                        && repo.as_ref().is_none_or(|repo| &worktree.repo_id == repo)
-                })
-            }
-            RequestBody::PruneWorktrees { repo, .. } | RequestBody::RefreshStatuses { repo } => {
-                state.worktrees.iter().any(|worktree| {
-                    worktree.host.is_some()
-                        && repo.as_ref().is_none_or(|repo| &worktree.repo_id == repo)
-                })
-            }
-            RequestBody::KillWorktree { id }
-            | RequestBody::SleepWorktree { id }
-            | RequestBody::WorktreePath { id }
-            | RequestBody::EnsureSession {
-                worktree: Some(id), ..
-            } => state
-                .worktrees
-                .iter()
-                .any(|worktree| worktree.host.is_some() && &worktree.id == id),
-            _ => false,
-        };
-        if proxies_remote {
-            Err(remote_unsupported())
-        } else {
-            Ok(())
         }
     }
 }

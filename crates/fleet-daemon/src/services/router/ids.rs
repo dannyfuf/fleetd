@@ -19,6 +19,7 @@ pub struct ClearedIds {
     pub terminals: Vec<TerminalId>,
     pub sessions: Vec<String>,
     pub jobs: Vec<JobId>,
+    pub worktrees: Vec<WorktreeId>,
     pub threads: Vec<ThreadId>,
 }
 
@@ -36,12 +37,23 @@ struct Maps {
 /// Shared remote-id table used by request, response, event, and snapshot translation.
 pub struct RemoteIds {
     next: Arc<AtomicU64>,
-    maps: Mutex<Maps>,
+    maps: Arc<Mutex<Maps>>,
+}
+
+impl Clone for RemoteIds {
+    fn clone(&self) -> Self {
+        Self {
+            next: Arc::clone(&self.next),
+            maps: Arc::clone(&self.maps),
+        }
+    }
 }
 
 impl Default for RemoteIds {
     fn default() -> Self {
-        Self::new(Arc::new(AtomicU64::new(1)))
+        // Production composition replaces this with the session runtime's allocator. Keeping the
+        // standalone default in the upper half prevents collisions before that wiring is present.
+        Self::new(Arc::new(AtomicU64::new(1 << 63)))
     }
 }
 
@@ -50,7 +62,7 @@ impl RemoteIds {
     pub fn new(next: Arc<AtomicU64>) -> Self {
         Self {
             next,
-            maps: Mutex::new(Maps::default()),
+            maps: Arc::new(Mutex::new(Maps::default())),
         }
     }
 
@@ -63,6 +75,14 @@ impl RemoteIds {
         maps.terminal_local.insert((host.clone(), remote), local);
         maps.terminal_remote.insert(local, (host.clone(), remote));
         local
+    }
+
+    #[must_use]
+    pub fn existing_local_terminal(&self, host: &HostId, remote: TerminalId) -> Option<TerminalId> {
+        lock(&self.maps)
+            .terminal_local
+            .get(&(host.clone(), remote))
+            .copied()
     }
 
     #[must_use]
@@ -108,19 +128,33 @@ impl RemoteIds {
     pub fn register_worktree(&self, host: &HostId, worktree: WorktreeId) {
         lock(&self.maps).worktrees.insert(worktree, host.clone());
     }
+
     pub fn register_thread(&self, host: &HostId, thread: ThreadId) {
         lock(&self.maps).threads.insert(thread, host.clone());
     }
+
     pub fn forget_terminal(&self, local: TerminalId) {
-        if let Some(key) = lock(&self.maps).terminal_remote.remove(&local) {
-            lock(&self.maps).terminal_local.remove(&key);
+        let mut maps = lock(&self.maps);
+        if let Some(key) = maps.terminal_remote.remove(&local) {
+            maps.terminal_local.remove(&key);
         }
     }
+
     pub fn forget_job(&self, local: &JobId) {
-        if let Some(key) = lock(&self.maps).job_remote.remove(local) {
-            lock(&self.maps).job_local.remove(&key);
+        let mut maps = lock(&self.maps);
+        if let Some(key) = maps.job_remote.remove(local) {
+            maps.job_local.remove(&key);
         }
     }
+
+    pub fn forget_session(&self, local: &str) {
+        lock(&self.maps).sessions.remove(local);
+    }
+
+    pub fn forget_worktree(&self, worktree: &WorktreeId) {
+        lock(&self.maps).worktrees.remove(worktree);
+    }
+
     pub fn forget_thread(&self, thread: ThreadId) {
         lock(&self.maps).threads.remove(&thread);
     }
@@ -145,6 +179,12 @@ impl RemoteIds {
             .filter(|(_, item_host)| *item_host == host)
             .map(|(thread, _)| *thread)
             .collect::<Vec<_>>();
+        let worktrees = maps
+            .worktrees
+            .iter()
+            .filter(|(_, item_host)| *item_host == host)
+            .map(|(worktree, _)| worktree.clone())
+            .collect::<Vec<_>>();
         let sessions = maps
             .sessions
             .iter()
@@ -166,6 +206,7 @@ impl RemoteIds {
             terminals,
             sessions,
             jobs,
+            worktrees,
             threads,
         }
     }

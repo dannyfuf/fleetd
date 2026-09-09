@@ -24,7 +24,6 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     DaemonError, DaemonResult,
     adapters::{Adapters, files::Files},
-    error::remote_unsupported,
     jobs::{JobCtx, JobManager},
     machines::Machines,
     server::BroadcastBus,
