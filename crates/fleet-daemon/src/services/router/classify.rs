@@ -38,13 +38,10 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         }
         | CreateWorktreeFromPr {
             host: Some(host), ..
-        }
-        | CreateWorktreeFromCard {
-            host: Some(host), ..
         } => Target::Host(host.clone()),
         CreateWorktree { host: None, .. }
         | CreateWorktreeFromPr { host: None, .. }
-        | CreateWorktreeFromCard { host: None, .. } => Target::Local,
+        | CreateWorktreeFromCard { .. } => Target::Local,
 
         DeleteWorktrees { ids } | InspectWorktrees { ids, .. } => {
             fanout_worktrees(body, ids, resolver)
@@ -136,6 +133,7 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | MatchKeepAliveRules
         | ImportFromSwarm
         | Doctor
+        | DoctorHost { .. }
         | ResetState
         | Update
         | DaemonPing
@@ -237,12 +235,17 @@ pub(crate) fn local_fanout_part(
         RequestBody::DeleteWorktrees { ids } => {
             nonempty_worktree_part(ids, resolver).map(|ids| RequestBody::DeleteWorktrees { ids })
         }
-        RequestBody::InspectWorktrees { ids, repo, fetch } => nonempty_worktree_part(ids, resolver)
-            .map(|ids| RequestBody::InspectWorktrees {
-                ids,
-                repo: repo.clone(),
-                fetch: *fetch,
-            }),
+        RequestBody::InspectWorktrees { ids, repo, fetch } => {
+            if ids.is_empty() {
+                Some(body.clone())
+            } else {
+                nonempty_worktree_part(ids, resolver).map(|ids| RequestBody::InspectWorktrees {
+                    ids,
+                    repo: repo.clone(),
+                    fetch: *fetch,
+                })
+            }
+        }
         RequestBody::PruneWorktrees {
             dry_run,
             fetch,
@@ -264,9 +267,10 @@ pub(crate) fn local_fanout_part(
                 .collect::<Vec<_>>();
             (!jobs.is_empty()).then_some(RequestBody::DismissJobs { jobs })
         }
-        RequestBody::PruneWorktrees { ids: None, .. }
-        | RequestBody::AgentThreadList
-        | RequestBody::AgentThreadCreate { .. }
+        RequestBody::PruneWorktrees { ids: None, .. } | RequestBody::AgentThreadList => {
+            Some(body.clone())
+        }
+        RequestBody::AgentThreadCreate { .. }
         | RequestBody::AgentThreadOpen { .. }
         | RequestBody::AgentThreadClose { .. }
         | RequestBody::AgentSend { .. }
@@ -355,6 +359,7 @@ pub(crate) fn local_fanout_part(
         | RequestBody::MatchKeepAliveRules
         | RequestBody::ImportFromSwarm
         | RequestBody::Doctor
+        | RequestBody::DoctorHost { .. }
         | RequestBody::ResetState
         | RequestBody::Update
         | RequestBody::DaemonPing

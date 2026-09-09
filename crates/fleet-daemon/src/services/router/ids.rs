@@ -9,8 +9,9 @@ use std::{
 };
 
 use fleet_core::{
-    agents::ThreadId,
+    agents::{AgentThreadSummary, ThreadId},
     ids::{HostId, JobId, TerminalId, WorktreeId},
+    model::Worktree,
 };
 
 /// Identifiers removed when a host link goes down.
@@ -77,6 +78,22 @@ impl RemoteIds {
         local
     }
 
+    /// Restores a stable local terminal id after a remote daemon/link restart.
+    pub fn restore_terminal(&self, host: &HostId, remote: TerminalId, local: TerminalId) {
+        let mut maps = lock(&self.maps);
+        if let Some(replaced) = maps.terminal_local.insert((host.clone(), remote), local)
+            && replaced != local
+        {
+            maps.terminal_remote.remove(&replaced);
+        }
+        if let Some((old_host, old_remote)) =
+            maps.terminal_remote.insert(local, (host.clone(), remote))
+            && (old_host != *host || old_remote != remote)
+        {
+            maps.terminal_local.remove(&(old_host, old_remote));
+        }
+    }
+
     #[must_use]
     pub fn existing_local_terminal(&self, host: &HostId, remote: TerminalId) -> Option<TerminalId> {
         lock(&self.maps)
@@ -131,6 +148,25 @@ impl RemoteIds {
 
     pub fn register_thread(&self, host: &HostId, thread: ThreadId) {
         lock(&self.maps).threads.insert(thread, host.clone());
+    }
+
+    /// Atomically replaces the worktree and thread ownership inventory for one host.
+    pub fn replace_host_inventory(
+        &self,
+        host: &HostId,
+        worktrees: &[Worktree],
+        threads: &[AgentThreadSummary],
+    ) {
+        let mut maps = lock(&self.maps);
+        maps.worktrees.retain(|_, item_host| item_host != host);
+        maps.threads.retain(|_, item_host| item_host != host);
+        maps.worktrees.extend(
+            worktrees
+                .iter()
+                .map(|worktree| (worktree.id.clone(), host.clone())),
+        );
+        maps.threads
+            .extend(threads.iter().map(|summary| (summary.thread, host.clone())));
     }
 
     pub fn forget_terminal(&self, local: TerminalId) {

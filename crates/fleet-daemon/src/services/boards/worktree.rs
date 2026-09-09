@@ -1,4 +1,6 @@
 use super::*;
+use fleet_core::model::Repo;
+use std::future::Future;
 
 /// One wording for the archived-card refusal, which is raised again after the board guard is
 /// dropped for the worktree clone and the card is reloaded.
@@ -25,27 +27,69 @@ impl Boards {
         base: Option<String>,
         host: Option<HostId>,
     ) -> DaemonResult<(Card, Worktree, bool)> {
-        // The same refusal `CreateWorktree` gives: nothing below this line can reach a remote
-        // host, and silently creating the worktree locally would link the card to the wrong one.
         if host.is_some() {
-            return Err(DaemonError::Unsupported(
-                "remote hosts are not supported yet".to_owned(),
+            return Err(DaemonError::Protocol(
+                "hosted card worktree creation must pass through router orchestration".to_owned(),
             ));
         }
-        // Own the entire create-and-link transaction independently of the socket request.
-        let service = self.clone();
-        let card = card.clone();
-        tokio::spawn(async move { service.create_and_link_worktree(&card, repo, base).await })
-            .await
-            .map_err(|error| DaemonError::Join(error.to_string()))?
+        let worktrees = Arc::clone(&self.worktrees);
+        self.create_worktree_from_card_routed(
+            card,
+            repo,
+            base,
+            host,
+            move |repo, slug, branch, base, _host| async move {
+                let (created, worktree, _post_create_job) = worktrees
+                    .create(repo.id, slug, branch, base, repo.hooks)
+                    .await?;
+                Ok((created, worktree))
+            },
+        )
+        .await
     }
 
-    async fn create_and_link_worktree(
+    /// Creates and links a card worktree through a placement-aware creation callback.
+    ///
+    /// Local dispatch uses `create_worktree_from_card`; router dispatch supplies a callback that
+    /// performs repository ensure and worktree creation on the selected host.
+    pub async fn create_worktree_from_card_routed<Create, Created>(
         &self,
         card: &CardId,
         repo: Option<RepoId>,
         base: Option<String>,
-    ) -> DaemonResult<(Card, Worktree, bool)> {
+        host: Option<HostId>,
+        create: Create,
+    ) -> DaemonResult<(Card, Worktree, bool)>
+    where
+        Create: FnOnce(Repo, String, Option<String>, Option<String>, Option<HostId>) -> Created
+            + Send
+            + 'static,
+        Created: Future<Output = DaemonResult<(bool, Worktree)>> + Send + 'static,
+    {
+        // Own the entire create-and-link transaction independently of the socket request.
+        let service = self.clone();
+        let card = card.clone();
+        tokio::spawn(async move {
+            service
+                .create_and_link_worktree(&card, repo, base, host, create)
+                .await
+        })
+        .await
+        .map_err(|error| DaemonError::Join(error.to_string()))?
+    }
+
+    async fn create_and_link_worktree<Create, Created>(
+        &self,
+        card: &CardId,
+        repo: Option<RepoId>,
+        base: Option<String>,
+        host: Option<HostId>,
+        create: Create,
+    ) -> DaemonResult<(Card, Worktree, bool)>
+    where
+        Create: FnOnce(Repo, String, Option<String>, Option<String>, Option<HostId>) -> Created,
+        Created: Future<Output = DaemonResult<(bool, Worktree)>>,
+    {
         let (mut guard, mut doc, mut index) = self.card_document(card).await?;
         if doc.cards[index].archived {
             return Err(archived_card());
@@ -111,23 +155,15 @@ impl Boards {
                 // Creating a worktree clones a repository and runs its hooks: minutes of work
                 // that must not hold the board, or every other request for it times out.
                 drop(guard);
-                let made = match self
-                    .worktrees
-                    .create(
-                        repo_id.clone(),
-                        slug.clone(),
-                        Some(slug.clone()),
-                        base,
-                        repo.hooks.clone(),
-                    )
+                let made = match create(repo, slug.clone(), Some(slug.clone()), base, host.clone())
                     .await
                 {
-                    Ok(made) => made,
+                    Ok((created, worktree)) => (created, worktree),
                     // Two `w` presses on one card both pass the adoption check above and both
                     // reach here, because the guard is dropped for the clone. The loser must
                     // adopt what the winner just made — reporting `already exists` for the
                     // card's own worktree is a toast for work that succeeded.
-                    Err(error @ DaemonError::Conflict(_)) => {
+                    Err(error @ DaemonError::Conflict(_)) if host.is_none() => {
                         let adopted = self
                             .state_store
                             .load()
@@ -136,7 +172,7 @@ impl Boards {
                             .into_iter()
                             .find(|w| w.repo_id == repo_id && w.slug == slug);
                         match adopted {
-                            Some(worktree) => (false, worktree, None),
+                            Some(worktree) => (false, worktree),
                             None => return Err(error),
                         }
                     }
@@ -150,7 +186,7 @@ impl Boards {
                     Err(error) => {
                         return Err(DaemonError::Conflict(format!(
                             "worktree {} was created, but its card is gone: {error}",
-                            made.1.id
+                            made.1.id,
                         )));
                     }
                 };

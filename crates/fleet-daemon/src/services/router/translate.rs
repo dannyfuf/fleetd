@@ -158,6 +158,7 @@ pub fn to_remote(
         | MatchKeepAliveRules
         | ImportFromSwarm
         | Doctor
+        | DoctorHost { .. }
         | ResetState
         | Update
         | DaemonPing
@@ -217,6 +218,11 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
             }
         }
         JobCancelled(job) => *job = ids.local_job(host, job),
+        Inspections(inspections) => {
+            for inspection in inspections {
+                inspection.host = host.to_string();
+            }
+        }
         AgentAck
         | Boards(_)
         | Board(_)
@@ -231,7 +237,6 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         | RemoteRepos(_)
         | BaseRefs(_)
         | WorktreesDeleted(_)
-        | Inspections(_)
         | Pruned(_)
         | Slept(_)
         | PullRequests(_)
@@ -351,6 +356,24 @@ pub(crate) fn merge_local_and_remote(
 ) -> DaemonResult<ResponseBody> {
     let local = local?;
     let remote = remote?;
+    if matches!(
+        original,
+        RequestBody::DeleteWorktrees { .. }
+            | RequestBody::InspectWorktrees { .. }
+            | RequestBody::PruneWorktrees { .. }
+    ) {
+        let local_host = HostId::try_from("local-part").expect("static host id is valid");
+        let remote_host = HostId::try_from("remote-part").expect("static host id is valid");
+        return super::lifecycle::merge_lifecycle_fanout(
+            original,
+            vec![(local_host, Ok(local)), (remote_host, Ok(remote))],
+        )
+        .unwrap_or_else(|| {
+            Err(DaemonError::Protocol(
+                "lifecycle response was not mergeable".to_owned(),
+            ))
+        });
+    }
     match (local, remote) {
         (ResponseBody::WorktreesDeleted(mut local), ResponseBody::WorktreesDeleted(mut remote)) => {
             local.append(&mut remote);
@@ -633,6 +656,7 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::MatchKeepAliveRules
         | RequestBody::ImportFromSwarm
         | RequestBody::Doctor
+        | RequestBody::DoctorHost { .. }
         | RequestBody::ResetState
         | RequestBody::Update
         | RequestBody::DaemonPing
@@ -699,6 +723,7 @@ fn translate_terminal(terminal: &mut Terminal, host: &HostId, ids: &RemoteIds) {
 }
 
 fn translate_session(session: &mut Session, host: &HostId, ids: &RemoteIds) {
+    session.host = Some(host.clone());
     session.id = local_session(host, &session.id, ids);
     for terminal in &mut session.terminals {
         translate_terminal(terminal, host, ids);
@@ -726,6 +751,7 @@ fn translate_watch(watch: &mut Watch, host: &HostId, ids: &RemoteIds) {
 fn translate_summary(summary: &mut AgentThreadSummary, host: &HostId, ids: &RemoteIds) {
     ids.register_thread(host, summary.thread);
     ids.register_worktree(host, summary.worktree.clone());
+    summary.host = Some(host.clone());
 }
 
 fn translate_projection(projection: &mut ThreadProjection, host: &HostId, ids: &RemoteIds) {
@@ -733,7 +759,7 @@ fn translate_projection(projection: &mut ThreadProjection, host: &HostId, ids: &
     ids.register_worktree(host, projection.worktree.clone());
 }
 
-fn translate_snapshot(snapshot: &mut Snapshot, host: &HostId, ids: &RemoteIds) {
+pub(crate) fn translate_snapshot(snapshot: &mut Snapshot, host: &HostId, ids: &RemoteIds) {
     for worktree in &mut snapshot.worktrees {
         translate_worktree(worktree, host, ids);
     }

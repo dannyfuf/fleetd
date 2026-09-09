@@ -10,7 +10,7 @@ use fleet_core::{
     agents::ThreadId,
     config::default_config,
     ids::{HostId, JobId, TerminalId, WorktreeId},
-    sessions::{Terminal, TerminalKind, TerminalStatus},
+    sessions::{Session, SessionKind, Terminal, TerminalKind, TerminalStatus},
 };
 use fleet_daemon::{
     machines::{Machines, RemoteEndpoint},
@@ -286,6 +286,151 @@ async fn down_transition_clears_ids_and_emits_terminal_end_and_link_events() {
     assert!(router.ids.remote_terminal(local).is_none());
 }
 
+#[tokio::test]
+async fn ready_reensures_attached_session_and_restores_its_local_terminal_id() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    router.start_event_pumps(events);
+    let worktree = worktree("attached");
+    let ensure = RequestBody::EnsureSession {
+        worktree: Some(worktree.clone()),
+        agent: None,
+        sleep_previous: false,
+    };
+    remote.push_response(Ok(ResponseBody::Session(session(
+        worktree.clone(),
+        TerminalId(7),
+    ))));
+    let ResponseBody::Session(first) = router
+        .forward(&host, ensure.clone())
+        .await
+        .expect("initial ensure")
+    else {
+        panic!("expected session");
+    };
+    let stable = first.terminals[0].id;
+    remote.push_response(Ok(ResponseBody::Ack));
+    router
+        .forward(
+            &host,
+            RequestBody::AttachTerminal {
+                terminal: stable,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .await
+        .expect("attach");
+
+    remote.set_state(fleet_proto::snapshot::LinkState::Down);
+    wait_until(|| router.ids.remote_terminal(stable).is_none()).await;
+    remote.push_response(Ok(ResponseBody::Session(session(worktree, TerminalId(99)))));
+    remote.set_state(fleet_proto::snapshot::LinkState::Ready);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                receiver.recv().await.expect("router event"),
+                Event::TerminalReattach { terminal } if terminal == stable
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("reattach event");
+    assert_eq!(
+        router.ids.remote_terminal(stable),
+        Some((host, TerminalId(99)))
+    );
+    assert_eq!(
+        remote
+            .requests()
+            .iter()
+            .filter(|request| **request == ensure)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn remote_snapshot_fragments_are_not_published_as_global_snapshots() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    router.start_event_pumps(events);
+    remote.emit(Event::SnapshotChanged(
+        serde_json::from_value(serde_json::json!({
+            "boards": [],
+            "generatedAt": "2026-09-08T12:00:00Z",
+            "contexts": [],
+            "repos": [],
+            "clones": [],
+            "worktrees": [],
+            "activeContext": null,
+            "sessions": [],
+            "agentThreads": [],
+            "statuses": [],
+            "pools": [],
+            "hosts": [],
+            "jobs": [],
+            "daemon": {"version":"remote","pid":1,"startedAt":"now","home":"/remote"}
+        }))
+        .expect("snapshot"),
+    ));
+
+    let leaked = tokio::time::timeout(Duration::from_millis(100), async {
+        loop {
+            if matches!(receiver.recv().await, Ok(Event::SnapshotChanged(_))) {
+                return true;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(!leaked, "a remote fragment must not replace local state");
+    assert!(router.mirror.fragment(&host).is_some());
+}
+
+#[tokio::test]
+async fn replacing_an_endpoint_replaces_its_event_pump() {
+    let host = host("alpha");
+    let machines = Arc::new(Machines::from_config(&default_config("/tmp/fleet-router")));
+    let old = Arc::new(FakeRemote::new(host.clone()));
+    machines.install_endpoint(host.clone(), old.clone());
+    let router = Router::new(Arc::clone(&machines), Arc::new(Mirror::new()));
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    router.start_event_pumps(events.clone());
+
+    let replacement = Arc::new(FakeRemote::new(host.clone()));
+    machines.install_endpoint(host, replacement.clone());
+    router.start_event_pumps(events);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    old.emit(Event::Toast {
+        level: fleet_proto::event::ToastLevel::Info,
+        message: "stale".to_owned(),
+    });
+    replacement.emit(Event::Toast {
+        level: fleet_proto::event::ToastLevel::Info,
+        message: "current".to_owned(),
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Event::Toast { message, .. } = receiver.recv().await.expect("event") {
+                assert_eq!(message, "current");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("replacement event");
+}
+
 fn router_with_remote(host: HostId) -> (Router, Arc<FakeRemote>) {
     let machines = Arc::new(Machines::from_config(&default_config("/tmp/fleet-router")));
     let remote = Arc::new(FakeRemote::new(host.clone()));
@@ -315,4 +460,27 @@ fn terminal(id: TerminalId) -> Terminal {
         has_unseen_output: false,
         kind: TerminalKind::Pty,
     }
+}
+
+fn session(worktree: WorktreeId, terminal_id: TerminalId) -> Session {
+    Session {
+        id: "acme/api/attached".parse().expect("session"),
+        host: None,
+        kind: SessionKind::Worktree(worktree),
+        cwd: "/tmp".to_owned(),
+        terminals: vec![terminal(terminal_id)],
+        active_terminal: Some(terminal_id),
+        slept_at: None,
+        kept_terminals: Vec::new(),
+    }
+}
+
+async fn wait_until(predicate: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !predicate() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("condition timeout");
 }

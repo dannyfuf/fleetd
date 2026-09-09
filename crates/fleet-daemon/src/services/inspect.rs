@@ -116,25 +116,48 @@ impl Inspect {
         context: &JobCtx,
     ) -> DaemonResult<Vec<WorktreeInspection>> {
         let state = self.state.load().await?;
+        let mut prefabricated = Vec::new();
         let selected = if ids.is_empty() {
-            state.worktrees
+            state
+                .worktrees
+                .into_iter()
+                .enumerate()
+                .filter(|(_, worktree)| worktree.host.is_none())
+                .collect::<Vec<_>>()
         } else {
             let by_id = state
                 .worktrees
                 .iter()
                 .map(|worktree| (&worktree.id, worktree))
                 .collect::<HashMap<_, _>>();
-            ids.iter()
-                .map(|id| {
-                    by_id
-                        .get(id)
-                        .map(|worktree| (*worktree).clone())
-                        .ok_or_else(|| DaemonError::NotFound(format!("worktree {id}")))
-                })
-                .collect::<DaemonResult<Vec<_>>>()?
+            let mut selected = Vec::new();
+            for (index, id) in ids.iter().enumerate() {
+                if repo_filter
+                    .as_ref()
+                    .is_some_and(|repo| id.repo() != repo.as_str())
+                {
+                    continue;
+                }
+                match by_id.get(id) {
+                    Some(worktree) if worktree.host.is_none() => {
+                        selected.push((index, (*worktree).clone()));
+                    }
+                    Some(worktree) => prefabricated.push((
+                        index,
+                        failed_inspection(
+                            worktree,
+                            Self::unknown_status(worktree),
+                            chrono::Utc::now().to_rfc3339(),
+                            REMOTE_UNSUPPORTED.to_owned(),
+                        ),
+                    )),
+                    None => prefabricated.push((index, missing_inspection(id)?)),
+                }
+            }
+            selected
         }
         .into_iter()
-        .filter(|worktree| {
+        .filter(|(_, worktree)| {
             repo_filter
                 .as_ref()
                 .is_none_or(|repo| &worktree.repo_id == repo)
@@ -148,7 +171,15 @@ impl Inspect {
             .collect::<HashMap<_, _>>();
         let fetch_failures = if fetch {
             context.progress("fetching repository remotes")?;
-            self.fetch_repositories(&selected, &repos, context).await?
+            self.fetch_repositories(
+                &selected
+                    .iter()
+                    .map(|(_, worktree)| worktree.clone())
+                    .collect::<Vec<_>>(),
+                &repos,
+                context,
+            )
+            .await?
         } else {
             HashMap::new()
         };
@@ -163,31 +194,30 @@ impl Inspect {
             .collect::<HashMap<_, _>>();
         context.progress(format!("inspecting {} worktrees", selected.len()))?;
 
-        let mut pending =
-            stream::iter(selected.into_iter().enumerate().map(|(index, worktree)| {
-                let repo = repos.get(&worktree.repo_id).cloned();
-                let status = status_by_id
-                    .get(&worktree.id)
-                    .cloned()
-                    .unwrap_or_else(|| Self::unknown_status(&worktree));
-                let fetch_failed = fetch_failures.contains_key(&worktree.repo_id);
-                let service = self.clone();
-                let cancel = context.cancel.clone();
-                async move {
-                    if cancel.is_cancelled() {
-                        return Err(DaemonError::Cancelled);
-                    }
-                    Ok((
-                        index,
-                        service
-                            .inspect_one(worktree, repo, status, fetch_failed)
-                            .await,
-                    ))
+        let mut pending = stream::iter(selected.into_iter().map(|(index, worktree)| {
+            let repo = repos.get(&worktree.repo_id).cloned();
+            let status = status_by_id
+                .get(&worktree.id)
+                .cloned()
+                .unwrap_or_else(|| Self::unknown_status(&worktree));
+            let fetch_failed = fetch_failures.contains_key(&worktree.repo_id);
+            let service = self.clone();
+            let cancel = context.cancel.clone();
+            async move {
+                if cancel.is_cancelled() {
+                    return Err(DaemonError::Cancelled);
                 }
-            }))
-            .buffer_unordered(INSPECTION_CONCURRENCY);
+                Ok((
+                    index,
+                    service
+                        .inspect_one(worktree, repo, status, fetch_failed)
+                        .await,
+                ))
+            }
+        }))
+        .buffer_unordered(INSPECTION_CONCURRENCY);
 
-        let mut inspections = Vec::new();
+        let mut inspections = prefabricated;
         while let Some(inspection) = pending.next().await {
             inspections.push(inspection?);
         }
@@ -564,6 +594,37 @@ fn failed_inspection(
         warnings: Vec::new(),
         error: Some(error),
     }
+}
+
+fn missing_inspection(worktree_id: &WorktreeId) -> DaemonResult<WorktreeInspection> {
+    let repo_id = RepoId::try_from(worktree_id.repo())
+        .map_err(|error| DaemonError::Validation(error.to_string()))?;
+    Ok(WorktreeInspection {
+        repo_id,
+        worktree_id: worktree_id.clone(),
+        host: "local".to_owned(),
+        path: String::new(),
+        branch: String::new(),
+        base_ref: String::new(),
+        head: None,
+        target_branch: String::new(),
+        upstream: None,
+        ahead: None,
+        behind: None,
+        upstream_gone: false,
+        dirty: false,
+        dirty_files: None,
+        merged_into_target: false,
+        unique_commits: None,
+        published: false,
+        merged: false,
+        pr: None,
+        session: SessionState::Unknown,
+        running: Vec::new(),
+        inspected_at: chrono::Utc::now().to_rfc3339(),
+        warnings: Vec::new(),
+        error: Some(format!("worktree {worktree_id} was not found")),
+    })
 }
 
 #[cfg(test)]
