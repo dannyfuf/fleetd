@@ -230,8 +230,9 @@ async fn run_bootstrap(
 
     let restart = format!(
         "if [ -s {fleet_home_shell}/fleetd.pid ]; then \
-         kill -TERM \"$(cat {fleet_home_shell}/fleetd.pid)\" 2>/dev/null || true; \
-         i=0; while [ $i -lt 50 ] && kill -0 \"$(cat {fleet_home_shell}/fleetd.pid)\" 2>/dev/null; \
+         fleetd_pid=\"$(cat {fleet_home_shell}/fleetd.pid)\"; \
+         kill -TERM \"$fleetd_pid\" 2>/dev/null || true; \
+         i=0; while [ $i -lt 50 ] && kill -0 \"$fleetd_pid\" 2>/dev/null; \
          do i=$((i + 1)); sleep 0.1; done; fi; \
          mkdir -p {fleet_home_shell}/logs; \
          nohup {fleetd_command} --home {fleet_home_shell} \

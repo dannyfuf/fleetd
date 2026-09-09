@@ -97,7 +97,7 @@ async fn bootstrap_runs_the_exact_remote_build_install_restart_sequence() {
             vec![
                 "sh".to_owned(),
                 "-lc".to_owned(),
-                "if [ -s \"$HOME\"/.fleet/fleetd.pid ]; then kill -TERM \"$(cat \"$HOME\"/.fleet/fleetd.pid)\" 2>/dev/null || true; i=0; while [ $i -lt 50 ] && kill -0 \"$(cat \"$HOME\"/.fleet/fleetd.pid)\" 2>/dev/null; do i=$((i + 1)); sleep 0.1; done; fi; mkdir -p \"$HOME\"/.fleet/logs; nohup fleetd --home \"$HOME\"/.fleet >>\"$HOME\"/.fleet/logs/fleetd.out 2>&1 </dev/null &".to_owned(),
+                "if [ -s \"$HOME\"/.fleet/fleetd.pid ]; then fleetd_pid=\"$(cat \"$HOME\"/.fleet/fleetd.pid)\"; kill -TERM \"$fleetd_pid\" 2>/dev/null || true; i=0; while [ $i -lt 50 ] && kill -0 \"$fleetd_pid\" 2>/dev/null; do i=$((i + 1)); sleep 0.1; done; fi; mkdir -p \"$HOME\"/.fleet/logs; nohup fleetd --home \"$HOME\"/.fleet >>\"$HOME\"/.fleet/logs/fleetd.out 2>&1 </dev/null &".to_owned(),
             ],
         ]
     );
