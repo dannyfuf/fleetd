@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{Agent, Config},
-    ids::{IdError, SessionId, TerminalId, WorktreeId},
+    ids::{HostId, IdError, SessionId, TerminalId, WorktreeId},
 };
 
 /// The workload represented by a daemon-owned terminal session.
@@ -33,6 +33,9 @@ pub struct KeptTerminal {
 pub struct Session {
     /// Stable session name.
     pub id: SessionId,
+    /// Owning remote host, or `None` for daemon-local sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostId>,
     /// Session workload.
     pub kind: SessionKind,
     /// Default working directory.
@@ -358,11 +361,16 @@ mod tests {
 
     #[test]
     fn proxied_layout_degrades_only_native_lazygit() {
-        let config = default_config("/tmp/.fleet");
+        let mut config = default_config("/tmp/.fleet");
+        config.windows.push(crate::config::WindowConfig {
+            name: "structured-agent".to_owned(),
+            command: "fleet://agent/claude".to_owned(),
+        });
         let terminals = default_terminals(&config, Agent::Claude, true);
         assert_eq!(terminals[0].command, "nvim .");
         assert_eq!(terminals[1].command, "claude");
         assert_eq!(terminals[2].command, "lazygit");
+        assert_eq!(terminals[3].command, "fleet://agent/claude");
     }
 
     #[test]
