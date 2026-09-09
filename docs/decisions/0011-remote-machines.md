@@ -14,6 +14,11 @@ a `MachineProvider`, and the app and CLI continue to use only the local daemon s
 - **Keep the app and CLI transport-blind.** The local daemon routes requests, remaps daemon-local
   terminal/job/session identifiers, mirrors remote snapshot fragments, and rebroadcasts translated
   events. Remote daemons receive an ordinary protocol request with host placement cleared.
+- **Route native agents by ownership, not by provider transport.** Thread creation follows the
+  worktree owner; the returned thread UUID registers that host, and later prompts, gates,
+  interrupts, resumes, and stops follow the thread owner. Provider processes, resume cursors, and
+  transcripts remain in the owning daemon's `$FLEET_HOME/agents/`; the local daemon mirrors only
+  summaries and protocol events.
 - **Run OpenCode entirely on the owning machine.** Its localhost server and SSE consumer remain
   inside the remote daemon. No OpenCode port is exposed on the tailnet.
 - **Require protocol lockstep.** A remote link opens Hello as `ClientKind::Proxy`; incompatible

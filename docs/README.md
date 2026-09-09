@@ -10,9 +10,10 @@
 | [BOARD.md](BOARD.md) | The card model, the reconciliation engine, and the board surface |
 | [BOARD-JIRA.md](BOARD-JIRA.md) | The Jira backend, and what `acli` can and cannot do |
 | [NATIVE-AGENTS.md](NATIVE-AGENTS.md) | Native Claude Code / OpenCode sessions: adapters, event model, thread state, the agent tab |
+| [REMOTE-MACHINES.md](REMOTE-MACHINES.md) | Authoritative remote-machine config, protocol, provider, routing, mirror, and recovery contract |
 | [research/harness-protocols.md](research/harness-protocols.md) | Wire reference for the installed Claude Code and OpenCode versions |
 | [research/agents-contracts.md](research/agents-contracts.md) | The shipped native-agent public API: names, signatures, serialized shapes, module paths |
-| [SWARM-INVENTORY.md](SWARM-INVENTORY.md) | The swarm behavior Fleet must preserve, 1:1 |
+| [SWARM-INVENTORY.md](SWARM-INVENTORY.md) | The swarm compatibility baseline; its Fleet deviations explicitly replace selected legacy behavior |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Building, running, testing, and driving the app |
 | [decisions/](decisions) | Why the load-bearing choices were made |
 

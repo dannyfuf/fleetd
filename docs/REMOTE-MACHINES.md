@@ -2,16 +2,15 @@
 
 **AUTHORITATIVE — implementers code against this; changes require a DEVIATIONS entry.**
 
-## 1. Purpose and skeleton state
+## 1. Purpose and implementation state
 
 Fleet runs one `fleetd` per machine. The local daemon federates remote daemons; clients continue
 to connect only to the local socket. This contracts the config, protocol, transport, link, router,
 mirror, CLI, app, bootstrap, and testing seams used by the parallel implementation stages.
 
-In the contracts-stage skeleton, real config/protocol shapes, `ChildStream`, `CommandMachine`,
-registry construction, mirror storage, classification, and test doubles work. A skeleton body
-returns `Err(DaemonError::Unsupported(format!("{}: not implemented", name)))` (or the equivalent
-`MachineError`); it never panics, calls `todo!`, or calls `unimplemented!`.
+The config/protocol shapes, transports, reconnecting links, router, mirror, clients, and test
+doubles are implemented. Unsupported operations return a typed error; production paths never use
+`todo!` or `unimplemented!`.
 
 ## 2. Config schema
 
@@ -47,7 +46,7 @@ federation support.
 `HostStatus` keeps `id`, `reachable`, `error`, and `checked_at`, and defaultably adds `provider`,
 `version`, `link: Connecting | Ready | Down | Legacy`, `address`, and `agent_binaries: Option<
 AgentBinaries { claude, opencode }>`. Requests add `BootstrapHost { host, git_ref }`; PR creation
-adds defaultable `host`. `ResponseBody::Path { path, host }` carries optional ownership.
+adds defaultable `host`; `DoctorHost { host }` provides scoped diagnostics. `ResponseBody::Path { path, host }` carries optional ownership.
 `DeleteWorktrees -> WorktreesDeleted`, `InspectWorktrees -> Inspections`, and `PruneWorktrees ->
 Pruned` preserve per-item outcomes. Mixed-host dismiss/sleep/kill extensions must likewise return
 one outcome per requested item rather than failing the whole request.
@@ -71,6 +70,7 @@ pub trait AsyncDuplex: AsyncRead + AsyncWrite + Send + Unpin {}
     async fn open_stream(&self) -> Result<Box<dyn AsyncDuplex>, MachineError>;
     fn fleetd_binary(&self) -> &str;
     fn fleet_home(&self) -> Option<&str>;
+    fn warning(&self) -> Option<String>;
 }
 #[async_trait] pub trait MachineLifecycle: Send + Sync {
     async fn ensure_up(&self) -> Result<(), MachineError>;
@@ -97,6 +97,7 @@ lazily creates one non-legacy `RemoteLink` per host.
     fn host(&self) -> &HostId;
     fn state(&self) -> LinkState;
     fn hello(&self) -> Option<RemoteHello>;
+    fn last_snapshot_seen(&self) -> Option<Snapshot>;
     async fn request(&self, body: RequestBody) -> DaemonResult<ResponseBody>;
     fn events(&self) -> broadcast::Receiver<Event>;
     fn state_changes(&self) -> watch::Receiver<LinkState>;
@@ -104,7 +105,9 @@ lazily creates one non-legacy `RemoteLink` per host.
 }
 ```
 
-`RemoteHello` contains version, daemon id, build commit, and capabilities. `RemoteLink::new(
+`RemoteHello` contains version, daemon id, build commit, and capabilities. A successful link
+handshake orders `Hello -> Subscribe -> GetSnapshot -> Ready -> HostLinkChanged`; the endpoint
+retains that snapshot across `Down` transitions. `RemoteLink::new(
 provider, LinkOptions { backoff_min, backoff_max, hello_timeout }) -> Arc<Self>` creates the link;
 `connect()` starts it. It sends Hello as Proxy with the local daemon id in `host_id`, correlates
 responses by request id, publishes remote events untranslated, and reconnects with exponential
@@ -166,8 +169,8 @@ SSH/auth, fleetd presence/version, protocol mismatch, and agent-binary checks. L
 
 `fleet host list [--json]`, `fleet host doctor <id>`, and `fleet host bootstrap <id> [--ref <git
 ref>]` are stable. Worktree creation accepts `--host`; omitted placement may use `defaultHost`.
-Remote `fleet path` renders `<host>:<path>`. Skeleton host commands print `not implemented` and
-return nonzero.
+Remote `fleet path` renders `<host>:<path>` and supports the protocol-one JSON envelope. Host
+commands return nonzero on typed daemon failures.
 
 ## 12. App Location rule
 
