@@ -20,6 +20,7 @@ use fleet_core::agents::{
     ModelSelection, PermissionChoice, PermissionMode, PlanAnswer, SessionState, StartRequest,
     TurnId, UserInput,
 };
+use fleet_core::ids::HostId;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -54,6 +55,7 @@ struct ResumeCursor {
 #[derive(Debug)]
 pub struct OpenCodeProvider {
     command: String,
+    host: Option<HostId>,
     events_tx: ProviderSink,
     events_rx: Option<ProviderEvents>,
     http: Option<HttpClient>,
@@ -76,9 +78,16 @@ impl OpenCodeProvider {
     /// Creates a provider that launches `opencode serve` from the configured command line.
     #[must_use]
     pub fn new(command: impl Into<String>) -> Self {
+        Self::new_on_host(command, None)
+    }
+
+    /// Creates a provider whose launch errors identify the machine running OpenCode.
+    #[must_use]
+    pub fn new_on_host(command: impl Into<String>, host: Option<HostId>) -> Self {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         Self {
             command: command.into(),
+            host,
             events_tx,
             events_rx: Some(events_rx),
             http: None,
@@ -143,8 +152,14 @@ impl AgentProvider for OpenCodeProvider {
             })?;
         let port = free_port()?;
         let base_url = format!("http://127.0.0.1:{}", port.port());
-        let server =
-            ManagedServer::spawn(&self.command, &directory, port, self.events_tx.clone()).await?;
+        let server = ManagedServer::spawn(
+            &self.command,
+            self.host.as_ref(),
+            &directory,
+            port,
+            self.events_tx.clone(),
+        )
+        .await?;
         let http = HttpClient::new(
             &base_url,
             &directory,
