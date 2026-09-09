@@ -109,16 +109,29 @@ async fn import_validates_and_preserves_legacy_clone_directories() {
                 "hooks": {"prepare": [], "postCreate": []}
             }],
             "clones": [],
-            "worktrees": [{
-                "id": "acme/api#feature",
-                "repoId": "acme/api",
-                "slug": "feature",
-                "branch": "feature",
-                "baseRef": "origin/main",
-                "path": legacy_worktrees.join("acme/api/feature"),
-                "session": "api/feature",
-                "createdAt": "2026-09-04T00:00:00Z"
-            }],
+            "worktrees": [
+                {
+                    "id": "acme/api#feature",
+                    "repoId": "acme/api",
+                    "slug": "feature",
+                    "branch": "feature",
+                    "baseRef": "origin/main",
+                    "path": legacy_worktrees.join("acme/api/feature"),
+                    "session": "api/feature",
+                    "createdAt": "2026-09-04T00:00:00Z"
+                },
+                {
+                    "id": "acme/api#remote",
+                    "repoId": "acme/api",
+                    "slug": "remote",
+                    "branch": "remote",
+                    "baseRef": "origin/main",
+                    "path": "/remote/acme/api/remote",
+                    "session": "api/remote",
+                    "host": "dev-box",
+                    "createdAt": "2026-09-04T00:00:00Z"
+                }
+            ],
             "activeContextId": "acme"
         })
         .to_string(),
@@ -179,6 +192,7 @@ async fn import_validates_and_preserves_legacy_clone_directories() {
     assert_eq!(imported_state.contexts.len(), 1);
     assert_eq!(imported_state.repos.len(), 1);
     assert_eq!(imported_state.worktrees.len(), 1);
+    assert!(imported_state.worktrees[0].host.is_none());
     assert_eq!(notifier.0.load(Ordering::SeqCst), 1);
 }
 
