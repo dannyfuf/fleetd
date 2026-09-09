@@ -97,6 +97,7 @@ fn failed_list_synchronization_retries(cx: &mut TestAppContext) {
             active_context: None,
             sessions: vec![fleet_core::sessions::Session {
                 id: session,
+                host: None,
                 kind: fleet_core::sessions::SessionKind::Worktree(
                     "acme/api#fix"
                         .parse()

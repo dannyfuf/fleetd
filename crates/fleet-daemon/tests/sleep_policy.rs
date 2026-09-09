@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use fleet_core::{
     config::{NATIVE_LAZYGIT, WindowConfig},
     ids::{ContextId, RepoId, SessionId, WorktreeId},
-    model::{Context, Repo, RepoHooks, Worktree},
+    model::{Context, HostConfigEntry, Repo, RepoHooks, Worktree},
     state::default_state,
 };
 use fleet_daemon::{
-    DaemonResult,
+    DaemonError, DaemonResult,
     adapters::{
         clock::SystemClock,
         files::RealFiles,
@@ -265,6 +265,32 @@ async fn listening_port_keeps_terminal_and_missing_session_is_empty() {
         .kill(SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")))
         .await
         .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[tokio::test]
+async fn remote_session_is_rejected_before_local_process_inspection() {
+    let (_temp, config, state, _) = stores(Vec::new()).await;
+    let host = "dev-box".parse().expect("host");
+    let mut effective = config.load().await.expect("config");
+    effective.hosts.insert(
+        host,
+        HostConfigEntry::Command {
+            run: vec!["ssh".to_owned(), "dev-box".to_owned()],
+            fleetd: "fleetd".to_owned(),
+            fleet_home: None,
+            display: None,
+        },
+    );
+    config.save(effective).await.expect("save config");
+    let sessions = Sessions::new(Arc::clone(&config), Arc::clone(&state));
+    let sleep = Sleep::new(config, state, Arc::new(PanicProcess), &sessions);
+
+    let error = sleep
+        .session(SessionId::try_from("dev-box/acme/api#feature").expect("session"))
+        .await
+        .expect_err("remote session must be routed before local sleep policy");
+
+    assert!(matches!(error, DaemonError::Unsupported(_)));
 }
 
 #[tokio::test]
@@ -567,4 +593,25 @@ async fn new_output_prevents_sleep_close() {
             .any(|terminal| terminal.id == background)
     );
     sessions.kill(session.id).await.unwrap();
+}
+
+struct PanicProcess;
+
+#[async_trait]
+impl Process for PanicProcess {
+    async fn snapshot(&self) -> DaemonResult<Vec<ProcessInfo>> {
+        panic!("local sleep policy inspected processes for a remote session")
+    }
+
+    async fn listening_ports(&self, _pids: &[u32]) -> DaemonResult<Vec<ListeningPort>> {
+        panic!("local sleep policy inspected ports for a remote session")
+    }
+
+    async fn environment(&self, _pid: u32) -> DaemonResult<Vec<(String, String)>> {
+        panic!("local sleep policy inspected a remote process environment")
+    }
+
+    fn is_alive(&self, _pid: u32) -> bool {
+        panic!("local sleep policy inspected a remote pid")
+    }
 }

@@ -33,6 +33,8 @@ pub struct Cli {
 /// A daemon-backed Fleet operation.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum Command {
+    /// Manage configured remote machines.
+    Host(HostArgs),
     /// Manage context boards and their cards.
     Board(BoardArgs),
     /// Run a command, optionally teeing piped output to a read-only watch.
@@ -76,6 +78,38 @@ pub enum Command {
     Daemon(DaemonArgs),
     /// Print Fleet's build version.
     Version,
+}
+
+/// Arguments accepted by `fleet host`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct HostArgs {
+    /// Host operation.
+    #[command(subcommand)]
+    pub command: HostCommand,
+}
+
+/// Configured-host operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum HostCommand {
+    /// List configured hosts and cached status.
+    List {
+        /// Emit a protocol-versioned JSON envelope.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run diagnostics for one configured host.
+    Doctor {
+        /// Configured host id.
+        id: fleet_core::ids::HostId,
+    },
+    /// Build and install Fleet on one configured host.
+    Bootstrap {
+        /// Configured host id.
+        id: fleet_core::ids::HostId,
+        /// Source Git ref to install.
+        #[arg(long = "ref")]
+        git_ref: Option<String>,
+    },
 }
 
 /// Arguments accepted by `fleet watch`.
@@ -273,6 +307,9 @@ pub struct KillArgs {
 pub struct PathArgs {
     /// Exact local worktree identifier.
     pub id: String,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments accepted by `fleet sleep`.

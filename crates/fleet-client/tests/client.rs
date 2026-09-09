@@ -687,7 +687,7 @@ async fn authenticate(
     if let Some(expected) = expected_subscription {
         assert_eq!(events, expected);
     } else {
-        assert_eq!(events.len(), 16);
+        assert_eq!(events.len(), 18);
         for kind in [
             EventKind::Agent,
             EventKind::AgentSummary,
@@ -697,6 +697,8 @@ async fn authenticate(
             EventKind::WatchDismissed,
             EventKind::AgentActivityChanged,
             EventKind::BoardChanged,
+            EventKind::HostLinkChanged,
+            EventKind::TerminalReattach,
         ] {
             assert!(events.contains(&kind));
         }

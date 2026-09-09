@@ -1,17 +1,27 @@
 use std::sync::Arc;
 
 use fleet_core::{
-    config::{NATIVE_LAZYGIT, WindowConfig},
-    ids::{ContextId, RepoId, SessionId, WorktreeId},
+    config::{NATIVE_LAZYGIT, WindowConfig, default_config},
+    ids::{ContextId, HostId, RepoId, SessionId, TerminalId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
-    sessions::{SessionState, TerminalKind, TerminalStatus},
+    sessions::{Session, SessionKind, SessionState, Terminal, TerminalKind, TerminalStatus},
     state::default_state,
 };
 use fleet_daemon::{
     DaemonError,
     adapters::{clock::SystemClock, files::RealFiles},
-    services::sessions::Sessions,
+    machines::Machines,
+    services::{
+        mirror::Mirror,
+        router::{Router, Target},
+        sessions::Sessions,
+    },
     stores::{config::ConfigStore, state::StateStore},
+    testing::FakeRemote,
+};
+use fleet_proto::{
+    request::RequestBody,
+    response::{ResponseBody, SleepResult},
 };
 
 struct Fixture {
@@ -328,30 +338,147 @@ async fn concurrent_agent_ensures_create_one_named_terminal() {
 }
 
 #[tokio::test]
-async fn remote_worktrees_are_rejected_with_stable_message() {
-    if isolated_test("remote_worktrees_are_rejected_with_stable_message") {
+async fn remote_worktree_session_is_forwarded_and_ids_are_localized() {
+    if isolated_test("remote_worktree_session_is_forwarded_and_ids_are_localized") {
         return;
     }
     let fixture = fixture().await;
-    let mut state = fixture
-        .state
-        .load()
+    let host = HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}"));
+    let machines = Arc::new(Machines::from_config(&default_config("/tmp/fleet-router")));
+    let remote = Arc::new(FakeRemote::new(host.clone()));
+    machines.install_endpoint(host.clone(), remote.clone());
+    let router = Router::new(machines, Arc::new(Mirror::new()));
+    router
+        .ids
+        .register_worktree(&host, fixture.worktree.clone());
+    let body = RequestBody::EnsureSession {
+        worktree: Some(fixture.worktree.clone()),
+        agent: None,
+        sleep_previous: false,
+    };
+    remote.push_response(Ok(ResponseBody::Session(Session {
+        id: SessionId::try_from("repo/feature").unwrap_or_else(|error| panic!("{error}")),
+        host: None,
+        kind: SessionKind::Worktree(fixture.worktree),
+        cwd: "/remote/worktrees/repo/feature".to_owned(),
+        terminals: vec![Terminal {
+            id: TerminalId(1),
+            name: "shell".to_owned(),
+            command: "zsh".to_owned(),
+            cwd: "/remote/worktrees/repo/feature".to_owned(),
+            shell_pid: Some(42),
+            foreground_command: None,
+            status: TerminalStatus::Running,
+            title: None,
+            keep_alive: Vec::new(),
+            has_unseen_output: false,
+            kind: TerminalKind::Pty,
+        }],
+        active_terminal: Some(TerminalId(1)),
+        slept_at: None,
+        kept_terminals: Vec::new(),
+    })));
+
+    assert_eq!(router.route(&body), Target::Host(host.clone()));
+    let response = router
+        .forward(&host, body.clone())
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-    state.worktrees[0].host =
-        Some(fleet_core::ids::HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}")));
-    fixture
-        .state
-        .save(state)
+    let ResponseBody::Session(session) = response else {
+        panic!("expected session response");
+    };
+    assert_eq!(session.id.as_str(), "devbox/repo/feature");
+    assert_ne!(session.terminals[0].id, TerminalId(1));
+    let local_session = session.id.clone();
+    let local_terminal = session.terminals[0].id;
+
+    remote.push_response(Ok(ResponseBody::Terminal(Terminal {
+        id: TerminalId(2),
+        name: "extra".to_owned(),
+        command: "sh".to_owned(),
+        cwd: "/only/on/remote".to_owned(),
+        shell_pid: Some(43),
+        foreground_command: None,
+        status: TerminalStatus::Running,
+        title: None,
+        keep_alive: Vec::new(),
+        has_unseen_output: false,
+        kind: TerminalKind::Pty,
+    })));
+    router
+        .forward(
+            &host,
+            RequestBody::NewTerminal {
+                session: local_session.clone(),
+                name: "extra".to_owned(),
+                command: "sh".to_owned(),
+                cwd: "/only/on/remote".to_owned(),
+            },
+        )
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-    let sessions = Sessions::new(fixture.config, fixture.state);
-    let error = sessions
-        .ensure(Some(fixture.worktree), None, false)
+    remote.push_response(Ok(ResponseBody::Slept(SleepResult {
+        kept: Vec::new(),
+        closed: Vec::new(),
+        session_killed: false,
+    })));
+    router
+        .forward(
+            &host,
+            RequestBody::SleepSession {
+                session: local_session.clone(),
+            },
+        )
         .await
-        .expect_err("remote ensure must fail");
-    assert!(
-        matches!(error, DaemonError::Unsupported(message) if message == "remote hosts are not supported yet")
+        .unwrap_or_else(|error| panic!("{error}"));
+    remote.push_response(Ok(ResponseBody::Ack));
+    router
+        .forward(
+            &host,
+            RequestBody::AttachTerminal {
+                terminal: local_terminal,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    remote.push_response(Ok(ResponseBody::Ack));
+    router
+        .forward(
+            &host,
+            RequestBody::KillSession {
+                session: local_session,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(
+        remote.requests(),
+        vec![
+            body,
+            RequestBody::NewTerminal {
+                session: SessionId::try_from("repo/feature")
+                    .unwrap_or_else(|error| panic!("{error}")),
+                name: "extra".to_owned(),
+                command: "sh".to_owned(),
+                cwd: "/only/on/remote".to_owned(),
+            },
+            RequestBody::SleepSession {
+                session: SessionId::try_from("repo/feature")
+                    .unwrap_or_else(|error| panic!("{error}")),
+            },
+            RequestBody::AttachTerminal {
+                terminal: TerminalId(1),
+                cols: 80,
+                rows: 24,
+            },
+            RequestBody::KillSession {
+                session: SessionId::try_from("repo/feature")
+                    .unwrap_or_else(|error| panic!("{error}")),
+            },
+        ]
     );
 }
 

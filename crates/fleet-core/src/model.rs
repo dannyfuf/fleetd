@@ -152,18 +152,169 @@ pub struct Worktree {
 }
 
 /// Remote-host connection settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HostConfigEntry {
-    /// SSH destination accepted by the `ssh` command.
-    pub ssh: String,
-    /// Remote command prefix.
-    #[serde(default = "default_swarm_command")]
-    pub swarm_command: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostConfigEntry {
+    /// A Tailscale peer reached through OpenSSH.
+    Tailscale {
+        /// Tailnet hostname or MagicDNS name.
+        node: String,
+        /// Optional remote user.
+        user: Option<String>,
+        /// Additional OpenSSH options.
+        ssh_options: Vec<String>,
+        /// Remote Fleet daemon executable.
+        fleetd: String,
+        /// Remote Fleet home, defaulting to `~/.fleet`.
+        fleet_home: Option<String>,
+    },
+    /// An advanced local argv prefix used to execute remote commands.
+    Command {
+        /// Prefix prepended to every remote argv.
+        run: Vec<String>,
+        /// Remote Fleet daemon executable.
+        fleetd: String,
+        /// Remote Fleet home.
+        fleet_home: Option<String>,
+        /// Optional display label.
+        display: Option<String>,
+    },
+    /// The former swarm-over-SSH probe-only configuration.
+    Legacy {
+        /// SSH destination accepted by the `ssh` command.
+        ssh: String,
+        /// Remote command prefix.
+        swarm_command: String,
+    },
 }
 
 fn default_swarm_command() -> String {
     "swarm".to_owned()
+}
+
+fn default_fleetd() -> String {
+    "fleetd".to_owned()
+}
+
+fn default_fleet_home() -> Option<String> {
+    Some("~/.fleet".to_owned())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "lowercase")]
+enum TaggedHostConfigEntry {
+    Tailscale {
+        node: String,
+        #[serde(default)]
+        user: Option<String>,
+        #[serde(default, rename = "sshOptions")]
+        ssh_options: Vec<String>,
+        #[serde(default = "default_fleetd")]
+        fleetd: String,
+        #[serde(default = "default_fleet_home", rename = "fleetHome")]
+        fleet_home: Option<String>,
+    },
+    Command {
+        run: Vec<String>,
+        #[serde(default = "default_fleetd")]
+        fleetd: String,
+        #[serde(default, rename = "fleetHome")]
+        fleet_home: Option<String>,
+        #[serde(default)]
+        display: Option<String>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyHostConfigEntry {
+    ssh: String,
+    #[serde(default = "default_swarm_command")]
+    swarm_command: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HostConfigWire {
+    Tagged(TaggedHostConfigEntry),
+    Legacy(LegacyHostConfigEntry),
+}
+
+impl Serialize for HostConfigEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Tailscale {
+                node,
+                user,
+                ssh_options,
+                fleetd,
+                fleet_home,
+            } => TaggedHostConfigEntry::Tailscale {
+                node: node.clone(),
+                user: user.clone(),
+                ssh_options: ssh_options.clone(),
+                fleetd: fleetd.clone(),
+                fleet_home: fleet_home.clone(),
+            }
+            .serialize(serializer),
+            Self::Command {
+                run,
+                fleetd,
+                fleet_home,
+                display,
+            } => TaggedHostConfigEntry::Command {
+                run: run.clone(),
+                fleetd: fleetd.clone(),
+                fleet_home: fleet_home.clone(),
+                display: display.clone(),
+            }
+            .serialize(serializer),
+            Self::Legacy { ssh, swarm_command } => LegacyHostConfigEntry {
+                ssh: ssh.clone(),
+                swarm_command: swarm_command.clone(),
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HostConfigEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match HostConfigWire::deserialize(deserializer)? {
+            HostConfigWire::Tagged(TaggedHostConfigEntry::Tailscale {
+                node,
+                user,
+                ssh_options,
+                fleetd,
+                fleet_home,
+            }) => Self::Tailscale {
+                node,
+                user,
+                ssh_options,
+                fleetd,
+                fleet_home,
+            },
+            HostConfigWire::Tagged(TaggedHostConfigEntry::Command {
+                run,
+                fleetd,
+                fleet_home,
+                display,
+            }) => Self::Command {
+                run,
+                fleetd,
+                fleet_home,
+                display,
+            },
+            HostConfigWire::Legacy(LegacyHostConfigEntry { ssh, swarm_command }) => {
+                Self::Legacy { ssh, swarm_command }
+            }
+        })
+    }
 }
 
 /// The ordered remote host map stored in configuration.

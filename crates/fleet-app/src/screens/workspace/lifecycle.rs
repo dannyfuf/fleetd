@@ -74,6 +74,14 @@ impl WorkspaceScreen {
         // A Fleet-drawn tab has no PTY on the daemon side: attaching to it would answer
         // `NotFound`, and detaching from the previous tab still has to happen.
         let target = model.attach_target();
+        // §3 `TerminalReattach`: a remote link that came back rebuilt the daemon's attachment
+        // set behind an unchanged terminal id, so nothing in the model moved and the mirror
+        // would sit dead. Forgetting the attachment here is what makes the next lines claim it
+        // again — and it drops the retained input and row caches the dropped link invalidated.
+        let reattaching = model.reattach && target.is_some();
+        if reattaching {
+            local.attached = None;
+        }
         let terminal_changed = local.attached != target;
         if terminal_changed || relinked {
             local.pending.clear();
@@ -102,6 +110,11 @@ impl WorkspaceScreen {
                 state,
                 cx,
             );
+            // The request is out, so the ask is answered; leaving it set would re-attach on
+            // every frame for as long as the terminal stays selected.
+            if reattaching && let Some(terminal) = target {
+                state.update(cx, |app, _| app.reattach_pending.remove(&terminal));
+            }
             local = self.local.borrow_mut();
         }
 

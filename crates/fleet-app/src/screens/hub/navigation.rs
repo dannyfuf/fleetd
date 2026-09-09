@@ -85,6 +85,21 @@ impl HubCtx {
         });
     }
 
+    /// The same toast from an async continuation, where `&mut App` is out of reach.
+    pub(super) fn toast_async(
+        &self,
+        text: impl Into<SharedString>,
+        icon: Icon,
+        cx: &mut gpui::AsyncApp,
+    ) {
+        let now = Instant::now();
+        let toast = Toast::new(text).icon(icon);
+        self.state.update(cx, |state, cx| {
+            state.toast(toast, now, dwell_for(ToastDuration::Normal));
+            cx.notify();
+        });
+    }
+
     /// Refuses a mutation while the daemon is gone, flashing the banner instead (§3.12 C).
     pub(super) fn refuses(&self, cx: &mut App) -> bool {
         let refuses = self.state.read(cx).refuses_mutations();

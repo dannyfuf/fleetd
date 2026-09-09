@@ -381,6 +381,42 @@ impl Harness {
     }
 }
 
+#[tokio::test]
+async fn remote_worktree_guard_precedes_path_provider_and_store_access() {
+    let harness = Harness::start(Capabilities::default()).await;
+    let host = HostId::try_from("dev-box").expect("host");
+    let guarded_worktree = harness.worktree.clone();
+    harness
+        .manager
+        .set_remote_host_resolver(Arc::new(move |worktree| {
+            (worktree == &guarded_worktree).then(|| host.clone())
+        }));
+
+    let error = harness
+        .manager
+        .create(
+            harness.worktree.clone(),
+            AgentKind::Claude,
+            None,
+            PermissionMode::Ask,
+            None,
+            None,
+        )
+        .await
+        .expect_err("remote worktree must not reach the local manager");
+
+    assert_eq!(error.kind, ErrorKind::Remote);
+    assert!(error.message.contains("dev-box"));
+    assert!(
+        harness.script.calls().is_empty(),
+        "provider was not started"
+    );
+    assert!(
+        !harness.home.join("agents").exists(),
+        "local agent transcript store was not created"
+    );
+}
+
 fn drain(receiver: &mut broadcast::Receiver<Event>) -> Vec<Event> {
     let mut events = Vec::new();
     while let Ok(event) = receiver.try_recv() {

@@ -18,8 +18,8 @@ use fleet_core::agents::{
 };
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
-    AGENT_CONTENT_W, ActiveTheme, DecisionCard, KeyHint, MultilineInput, MultilineInputEvent, Text,
-    Tone, TranscriptEvent, TranscriptList, TranscriptRow,
+    AGENT_CONTENT_W, ActiveTheme, DecisionCard, Icon, IconSize, KeyHint, MultilineInput,
+    MultilineInputEvent, Text, Tone, TranscriptEvent, TranscriptList, TranscriptRow,
 };
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Window,
@@ -37,7 +37,7 @@ mod tests;
 
 use decisions::{DecisionKey, QuestionSelection};
 use picker::{Picker, PickerKind};
-use presentation::{composer_placeholder, metadata_left, metadata_right};
+use presentation::{composer_placeholder, metadata_left, metadata_right, unreachable_placeholder};
 use rows::{RowAnchors, RowInputs};
 
 /// What the thread asks the workspace to do on its behalf.
@@ -49,6 +49,19 @@ pub(crate) enum AgentThreadEvent {
     OpenInEditor(String),
     /// Say something short to the user, as a transient toast.
     Notice(SharedString),
+}
+
+/// The machine one thread's worktree lives on, as the thread view has to state it (§12).
+///
+/// A local thread has none of this: `host` is `None` on the model side and the badge, like the
+/// header's, is simply absent. P3-T04 puts the badge in the composer's metadata row and stands
+/// the composer down while the link is `Down`, rather than letting a send fail on submit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThreadHost {
+    /// Configured host id, which is what the badge reads.
+    pub(crate) name: SharedString,
+    /// Whether the daemon reports the link to that machine as down.
+    pub(crate) unreachable: bool,
 }
 
 /// Entity owning one thread projection, transcript list, and docked composer.
@@ -95,6 +108,8 @@ pub struct AgentThreadView {
     /// that visits plan mode has to come back to `full access`, not be quietly reduced to
     /// `asks before edits` while §2's mode word claims the policy is in force.
     mode_before_plan: Option<PermissionMode>,
+    /// The remote machine the thread runs on, when it is not this one (§12, P3-T04).
+    host: Option<ThreadHost>,
     /// What each row toggles, so a click can reach the item or turn behind it.
     anchors: RowAnchors,
     _subscriptions: Vec<Subscription>,
@@ -149,6 +164,7 @@ impl AgentThreadView {
             files: Vec::new(),
             scrolling: false,
             mode_before_plan: None,
+            host: None,
             anchors: RowAnchors::default(),
             _subscriptions: subscriptions,
         };
@@ -186,6 +202,39 @@ impl AgentThreadView {
     #[must_use]
     pub fn input(&self) -> &Entity<MultilineInput> {
         &self.input
+    }
+
+    /// Names the machine this thread runs on, or clears the badge for a local one (§12).
+    ///
+    /// The composer's placeholder is part of the state: while the link is down it says so, so a
+    /// composer that refuses `⏎` never looks like one that simply lost the key.
+    pub(crate) fn set_host(&mut self, host: Option<ThreadHost>, cx: &mut Context<Self>) {
+        if self.host == host {
+            return;
+        }
+        let unreachable = host.as_ref().is_some_and(|host| host.unreachable);
+        self.host = host;
+        let placeholder = match self.host.as_ref().filter(|_| unreachable) {
+            Some(host) => unreachable_placeholder(&host.name),
+            None => composer_placeholder(self.projection.provider),
+        };
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, cx);
+            input.set_read_only(unreachable, cx);
+        });
+        cx.notify();
+    }
+
+    /// The machine this thread runs on, when it is a remote one.
+    #[must_use]
+    pub(crate) const fn host(&self) -> Option<&ThreadHost> {
+        self.host.as_ref()
+    }
+
+    /// Whether the thread's machine is out of reach, which stands the composer down (P3-T04).
+    #[must_use]
+    pub(crate) fn is_unreachable(&self) -> bool {
+        self.host.as_ref().is_some_and(|host| host.unreachable)
     }
 
     /// Offers the worktree paths `@` completes, replacing any earlier listing.
@@ -380,6 +429,16 @@ impl AgentThreadView {
     pub(crate) fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
         let text = text.trim().to_owned();
         if text.is_empty() {
+            return;
+        }
+        // P3-T04: the daemon cannot carry this to a machine it has no link to. The draft is put
+        // back — `MultilineInput::submit` has already emptied the buffer by the time a composer
+        // submit arrives here — so the message survives until the link does come back.
+        if let Some(host) = self.host.as_ref().filter(|host| host.unreachable) {
+            let notice = presentation::unreachable_notice(&host.name);
+            self.input.update(cx, |input, cx| input.set_text(text, cx));
+            cx.emit(AgentThreadEvent::Notice(SharedString::from(notice)));
+            cx.notify();
             return;
         }
         if let Some(gate) = self.editing.take() {
@@ -881,6 +940,9 @@ impl AgentThreadView {
 
     /// Takes the keyboard for the composer, which is what an agent tab focuses.
     pub(crate) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_unreachable() {
+            return;
+        }
         let handle = self.input.read(cx).focus_handle().clone();
         if !handle.is_focused(window) {
             handle.focus(window, cx);
@@ -1092,25 +1154,43 @@ impl Render for AgentThreadView {
         // the composer is where you are, so it is drawn at full strength — the same predicate
         // that restores its focus ring below.
         let composing = self.is_composing(cx);
-        let composer_opacity = if deciding && !composing {
+        // P3-T04: a composer that cannot reach its machine is dimmed like one that has stood
+        // its keys down, because that is exactly what it has done.
+        let unreachable = self.is_unreachable();
+        let composer_opacity = if unreachable || (deciding && !composing) {
             1.0 - theme.metrics.dimmed_opacity
         } else {
             1.0
         };
 
+        // The badge sits with the metadata rather than over the transcript: §2 keeps the
+        // transcript for the thread's own content, and the row already carries what the thread
+        // is running as. The right half states the refusal while the link is down.
         let metadata = div()
             .flex()
             .items_center()
             .justify_between()
             .h(theme.metrics.strip_h)
             .w_full()
-            .child(Text::hint(metadata_left(&self.projection)).muted())
-            .child(Text::hint(metadata_right(&self.projection)).muted());
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme.space.sm)
+                    .children(self.host_badge(&theme))
+                    .child(Text::hint(metadata_left(&self.projection)).muted()),
+            )
+            .child(match self.host.as_ref().filter(|_| unreachable) {
+                Some(host) => {
+                    Text::hint(presentation::unreachable_hint(&host.name)).tone(Tone::Warning)
+                }
+                None => Text::hint(metadata_right(&self.projection)).muted(),
+            });
 
         // §2: blue is where you are. While the card owns the bare keys the composer is not
         // where you are, so it drops its focus ring even though it still holds the handle.
         self.input.update(cx, |input, cx| {
-            input.set_focus_visible(!deciding || composing, cx);
+            input.set_focus_visible((!deciding || composing) && !unreachable, cx);
         });
 
         let composer = div()
@@ -1165,6 +1245,27 @@ impl Render for AgentThreadView {
 }
 
 impl AgentThreadView {
+    /// The `⛅ dev-box` badge of a remote thread, in the composer's metadata row (P3-T04).
+    ///
+    /// It uses the workspace header's own pair of icons and tones, so one thread never reads as
+    /// reachable in the header and unreachable here.
+    fn host_badge(&self, theme: &fleet_ui_kit::Theme) -> Option<gpui::Div> {
+        let host = self.host()?;
+        let (icon, tone) = if host.unreachable {
+            (Icon::CloudOff, Tone::Warning)
+        } else {
+            (Icon::Cloud, Tone::Secondary)
+        };
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(theme.space.xxs)
+                .child(icon.el().size(IconSize::Small).color(tone.color(theme)))
+                .child(Text::hint(host.name.clone()).tone(tone)),
+        )
+    }
+
     /// The completion surface, drawn over the composer while one is open.
     fn picker_element(&self, theme: &fleet_ui_kit::Theme) -> Option<gpui::Div> {
         let picker = self.picker.as_ref()?;

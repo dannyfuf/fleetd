@@ -119,11 +119,53 @@ impl AppState {
             .retain(|session| live_sessions.contains(session));
         self.renamed_terminals
             .retain(|terminal| live_terminals.contains(terminal));
+        self.reattach_pending
+            .retain(|terminal| live_terminals.contains(terminal));
         self.terminal_mru
             .retain(|session, _| live_sessions.contains(session));
         for mru in self.terminal_mru.values_mut() {
             mru.retain(|terminal| live_terminals.contains(terminal));
         }
+    }
+
+    /// Patches one host's daemon link into the snapshot mirror (§3 `HostLinkChanged`).
+    ///
+    /// Between two snapshots the event is the only news there is about a machine, and the
+    /// workspace header, the agent thread's badge and the worktree's status glyph all read the
+    /// link from the mirrored [`fleet_proto::snapshot::HostStatus`]. A host the snapshot does
+    /// not list yet is left alone: the snapshot that introduces it carries its own link.
+    pub fn apply_host_link(
+        &mut self,
+        host: &HostId,
+        link: LinkState,
+        version: Option<String>,
+        error: Option<String>,
+    ) {
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return;
+        };
+        let Some(status) = snapshot
+            .hosts
+            .iter_mut()
+            .find(|candidate| &candidate.id == host)
+        else {
+            return;
+        };
+        status.link = link;
+        match link {
+            LinkState::Ready => status.reachable = true,
+            LinkState::Down => status.reachable = false,
+            // A connection attempt in flight says nothing yet, and a legacy entry has no link
+            // at all: its probe stays the only reachability observation it has.
+            LinkState::Connecting | LinkState::Legacy => {}
+        }
+        // A link that reports no version has not learned one; it has not forgotten the one the
+        // last handshake established either.
+        if version.is_some() {
+            status.version = version;
+        }
+        status.error = error;
+        self.bump_snapshot_revision();
     }
 
     /// The active context, when the snapshot names one.

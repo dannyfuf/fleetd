@@ -22,6 +22,7 @@ use model::*;
 use native::*;
 use terminal::*;
 
+pub use model::Location;
 pub(crate) use model::status_kind;
 
 use std::{
@@ -35,7 +36,7 @@ use std::{
 use fleet_core::{
     agents::{ThreadId, ThreadProjection},
     github::{PrChecks, PrReviewDecision, PrTab, derive_pr_state},
-    ids::{RepoId, SessionId, TerminalId, WorktreeId},
+    ids::{HostId, RepoId, SessionId, TerminalId, WorktreeId},
     model::Worktree,
     sessions::{AgentActivity, Session, SessionKind, SessionState, Terminal, TerminalStatus},
 };
@@ -44,6 +45,7 @@ use fleet_proto::{
     job::{JobRecord, JobStatus},
     request::RequestBody,
     response::ResponseBody,
+    snapshot::{HostStatus, LinkState},
     terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
 };
 use fleet_ui_kit::{

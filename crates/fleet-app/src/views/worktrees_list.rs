@@ -7,6 +7,7 @@ use fleet_core::{
     model::Worktree,
 };
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
+use fleet_proto::snapshot::LinkState;
 use fleet_ui_kit::{
     ActiveTheme, AgeLabel, ColumnLadder, DegradedChip, EmptyState, Freshness, Icon, IconSize,
     KeepAliveChips, KeepAliveLabel, ListView, Pane, PaneBorder, PaneHeader, PrBadge, PrBadgeState,
@@ -42,6 +43,10 @@ pub struct WorktreeRow {
     pub host: Option<SharedString>,
     /// Whether that host's last probe failed.
     pub host_unreachable: bool,
+    /// The machine provider backing that host (`tailscale`, `command`, `legacy`).
+    pub host_provider: Option<SharedString>,
+    /// The daemon-link state of that host, absent while no status has arrived.
+    pub host_link: Option<LinkState>,
     /// `owner/name`, shown in `All` scope or in a wide pane.
     pub repo_label: SharedString,
     /// Keep-alive labels of the running terminals (§4 sleep policy).
@@ -132,10 +137,13 @@ pub fn build_rows(
         .iter()
         .map(|worktree| {
             let status = index.status(&worktree.id);
-            let unreachable = worktree
-                .host
-                .as_ref()
-                .is_some_and(|host| index.host(host).is_some_and(|host| !host.reachable));
+            let host_status = worktree.host.as_ref().and_then(|host| index.host(host));
+            let host_link = host_status.map(|host| host.link);
+            // A probe failure and a dropped daemon link are the same thing to a row: the
+            // remote's state is not knowable, so the glyph must fall back to `unknown`.
+            // A legacy entry has no link by design and is never called offline for it.
+            let unreachable = host_status.is_some_and(|host| !host.reachable)
+                || host_link == Some(LinkState::Down);
             let job = index
                 .jobs_for_target(worktree.id.as_str())
                 .iter()
@@ -173,6 +181,11 @@ pub fn build_rows(
                     .as_ref()
                     .map(|host| SharedString::from(host.to_string())),
                 host_unreachable: unreachable,
+                host_provider: host_status
+                    .map(|host| host.provider.clone())
+                    .filter(|provider| !provider.is_empty())
+                    .map(SharedString::from),
+                host_link,
                 repo_label: SharedString::from(worktree.repo_id.to_string()),
                 keep_alive: status
                     .map(|status| {
@@ -457,10 +470,15 @@ fn branch_cell(row: &WorktreeRow, age_offset: i64, cx: &mut App) -> AnyElement {
             )
         })
         .children(row.host.clone().map(|host| {
-            let (icon, color) = if row.host_unreachable {
-                (Icon::CloudOff, warning)
-            } else {
-                (Icon::Cloud, secondary)
+            let (icon, tone) = host_badge(
+                row.host_provider.as_deref(),
+                row.host_link,
+                row.host_unreachable,
+            );
+            let color = match tone {
+                Tone::Warning => warning,
+                Tone::Secondary => secondary,
+                other => other.color(theme),
             };
             div()
                 .flex()
@@ -470,6 +488,36 @@ fn branch_cell(row: &WorktreeRow, age_offset: i64, cx: &mut App) -> AnyElement {
                 .child(Text::data_small(host).muted())
         }))
         .into_any_element()
+}
+
+/// The host chip's icon and tone: provider-aware, and link-aware on top of it.
+///
+/// `cloud-off` amber is the UX-SPEC §Host chip rule for an unreachable host, and a dropped
+/// daemon link reads the same way to the user. A `command` machine is not a cloud, and a
+/// legacy probe-only entry has no daemon link at all, so both get their own glyph.
+#[must_use]
+pub fn host_badge(
+    provider: Option<&str>,
+    link: Option<LinkState>,
+    unreachable: bool,
+) -> (Icon, Tone) {
+    if unreachable || link == Some(LinkState::Down) {
+        return (Icon::CloudOff, Tone::Warning);
+    }
+    if link == Some(LinkState::Legacy) || provider == Some("legacy") {
+        return (Icon::Unplug, Tone::Warning);
+    }
+    let icon = if provider == Some("command") {
+        Icon::Server
+    } else {
+        Icon::Cloud
+    };
+    let tone = if link == Some(LinkState::Connecting) {
+        Tone::Muted
+    } else {
+        Tone::Secondary
+    };
+    (icon, tone)
 }
 
 /// Column 4: the job phase, else the degraded chip, else the keep-alive chips (§2.9).
@@ -528,14 +576,14 @@ mod tests {
     use fleet_core::inspection::WorktreeInspection;
     use fleet_core::{
         github::{InspectionPrState, InspectionPullRequest},
-        ids::WorktreeId,
+        ids::{HostId, WorktreeId},
         model::Degraded,
         sessions::{AgentActivity, SessionState, WorktreeStatus},
     };
 
     use super::*;
 
-    use fleet_proto::snapshot::Snapshot;
+    use fleet_proto::snapshot::{HostStatus, Snapshot};
 
     // `session_glyph` and `inspection_badge` live in `crate::presentation`; the row builder is
     // their only consumer with a full case table, so the table is asserted here.
@@ -808,6 +856,100 @@ mod tests {
             inspection_badge(InspectionPrState::Merged),
             Some(PrBadgeState::Merged)
         );
+    }
+
+    fn host_status(id: &str, provider: &str, link: LinkState, reachable: bool) -> HostStatus {
+        HostStatus {
+            id: HostId::try_from(id).unwrap_or_else(|error| panic!("{error}")),
+            provider: provider.to_owned(),
+            version: None,
+            link,
+            address: None,
+            agent_binaries: None,
+            reachable,
+            checked_at: "2026-09-04T12:00:00Z".to_owned(),
+            error: (!reachable).then(|| "ssh timed out".to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_host_badge_is_provider_and_link_aware() {
+        assert_eq!(
+            host_badge(Some("tailscale"), Some(LinkState::Ready), false),
+            (Icon::Cloud, Tone::Secondary)
+        );
+        assert_eq!(
+            host_badge(Some("tailscale"), Some(LinkState::Connecting), false),
+            (Icon::Cloud, Tone::Muted)
+        );
+        assert_eq!(
+            host_badge(Some("tailscale"), Some(LinkState::Down), false),
+            (Icon::CloudOff, Tone::Warning)
+        );
+        assert_eq!(
+            host_badge(Some("tailscale"), Some(LinkState::Ready), true),
+            (Icon::CloudOff, Tone::Warning)
+        );
+        assert_eq!(
+            host_badge(Some("command"), Some(LinkState::Ready), false),
+            (Icon::Server, Tone::Secondary)
+        );
+        assert_eq!(
+            host_badge(Some("legacy"), Some(LinkState::Legacy), false),
+            (Icon::Unplug, Tone::Warning)
+        );
+        // No status has arrived yet: the chip stays neutral rather than crying offline.
+        assert_eq!(
+            host_badge(None, None, false),
+            (Icon::Cloud, Tone::Secondary)
+        );
+    }
+
+    #[test]
+    fn a_remote_row_carries_its_provider_and_link_state() {
+        let mut remote = worktree("a", None, "2026-09-01T10:00:00Z");
+        remote.host = Some(HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}")));
+        let mut snapshot = snapshot(vec![remote], Vec::new(), Vec::new());
+        snapshot.hosts = vec![host_status("devbox", "tailscale", LinkState::Ready, true)];
+        let cache = HashMap::new();
+        let rows = rows(&snapshot, &cache);
+        assert_eq!(rows[0].host.as_deref(), Some("devbox"));
+        assert_eq!(rows[0].host_provider.as_deref(), Some("tailscale"));
+        assert_eq!(rows[0].host_link, Some(LinkState::Ready));
+        assert!(!rows[0].host_unreachable);
+        assert_eq!(rows[0].glyph, StatusKind::Unknown);
+    }
+
+    #[test]
+    fn a_reachable_host_with_a_dropped_link_still_reads_offline() {
+        let mut remote = worktree("a", None, "2026-09-01T10:00:00Z");
+        remote.host = Some(HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}")));
+        let mut snapshot = snapshot(vec![remote], Vec::new(), Vec::new());
+        snapshot.hosts = vec![host_status("devbox", "tailscale", LinkState::Down, true)];
+        let cache = HashMap::new();
+        let rows = rows(&snapshot, &cache);
+        assert!(rows[0].host_unreachable);
+        assert_eq!(rows[0].glyph, StatusKind::HostUnreachable);
+        assert_eq!(
+            host_badge(
+                rows[0].host_provider.as_deref(),
+                rows[0].host_link,
+                rows[0].host_unreachable
+            ),
+            (Icon::CloudOff, Tone::Warning)
+        );
+    }
+
+    #[test]
+    fn a_legacy_host_is_not_offline_merely_for_having_no_link() {
+        let mut remote = worktree("a", None, "2026-09-01T10:00:00Z");
+        remote.host = Some(HostId::try_from("archdev").unwrap_or_else(|error| panic!("{error}")));
+        let mut snapshot = snapshot(vec![remote], Vec::new(), Vec::new());
+        snapshot.hosts = vec![host_status("archdev", "legacy", LinkState::Legacy, true)];
+        let cache = HashMap::new();
+        let rows = rows(&snapshot, &cache);
+        assert!(!rows[0].host_unreachable);
+        assert_eq!(rows[0].host_link, Some(LinkState::Legacy));
     }
 
     #[test]

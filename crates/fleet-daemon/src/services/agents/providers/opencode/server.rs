@@ -12,6 +12,7 @@ use std::{
 };
 
 use fleet_core::agents::{AgentEvent, SessionState};
+use fleet_core::ids::HostId;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -56,12 +57,13 @@ impl PortReservation {
 impl ManagedServer {
     pub(super) async fn spawn(
         command_line: &str,
+        host: Option<&HostId>,
         worktree: &Path,
         port: PortReservation,
         events: ProviderSink,
     ) -> ProviderResult<Self> {
         let (program, base_args) = command_parts(command_line)?;
-        check_version(&program, &base_args).await?;
+        check_version(&program, &base_args, host).await?;
 
         let port = {
             let number = port.port();
@@ -70,6 +72,8 @@ impl ManagedServer {
             number
         };
         let mut command = Command::new(&program);
+        // Each daemon owns and consumes its OpenCode HTTP/SSE server on its own machine.
+        // Loopback binding keeps the port off both the LAN and the tailnet.
         command
             .args(&base_args)
             .args([
@@ -86,9 +90,7 @@ impl ManagedServer {
             .stderr(Stdio::piped());
         let mut child = command
             .spawn()
-            .map_err(|error| ProviderError::Unavailable {
-                reason: format!("launch `opencode serve`: {error}"),
-            })?;
+            .map_err(|error| binary_io_error(&program, host, "launch `opencode serve`", error))?;
         let pid = child.id().ok_or_else(|| ProviderError::Unavailable {
             reason: "launched OpenCode server has no process id".to_owned(),
         })?;
@@ -205,7 +207,11 @@ fn command_parts(command_line: &str) -> ProviderResult<(OsString, Vec<OsString>)
     Ok((OsString::from(program), parts.map(OsString::from).collect()))
 }
 
-async fn check_version(program: &OsString, base_args: &[OsString]) -> ProviderResult<()> {
+async fn check_version(
+    program: &OsString,
+    base_args: &[OsString],
+    host: Option<&HostId>,
+) -> ProviderResult<()> {
     let output = tokio::time::timeout(
         VERSION_TIMEOUT,
         Command::new(program)
@@ -217,9 +223,7 @@ async fn check_version(program: &OsString, base_args: &[OsString]) -> ProviderRe
     .map_err(|_| ProviderError::Timeout {
         what: "`opencode --version`".to_owned(),
     })?
-    .map_err(|error| ProviderError::Unavailable {
-        reason: format!("run `opencode --version`: {error}"),
-    })?;
+    .map_err(|error| binary_io_error(program, host, "run `opencode --version`", error))?;
     if !output.status.success() {
         return Err(ProviderError::Unavailable {
             reason: format!(
@@ -253,6 +257,29 @@ async fn check_version(program: &OsString, base_args: &[OsString]) -> ProviderRe
         });
     }
     Ok(())
+}
+
+fn machine_label(host: Option<&HostId>) -> String {
+    host.map_or_else(|| "this machine".to_owned(), |host| format!("host {host}"))
+}
+
+fn binary_io_error(
+    program: &OsString,
+    host: Option<&HostId>,
+    operation: &str,
+    error: std::io::Error,
+) -> ProviderError {
+    ProviderError::Unavailable {
+        reason: if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "OpenCode binary `{}` was not found on {}",
+                program.to_string_lossy(),
+                machine_label(host)
+            )
+        } else {
+            format!("{operation} on {}: {error}", machine_label(host))
+        },
+    }
 }
 
 fn signal_group(pid: u32, signal: i32) -> ProviderResult<()> {
@@ -308,5 +335,33 @@ async fn trace_lines<R>(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn missing_program() -> OsString {
+        OsString::from("/fleet-tests/no-such-opencode-binary")
+    }
+
+    #[tokio::test]
+    async fn missing_binary_names_remote_host() {
+        let host = HostId::try_from("dev-box").unwrap_or_else(|error| panic!("{error}"));
+        let error = check_version(&missing_program(), &[], Some(&host))
+            .await
+            .expect_err("missing binary should fail");
+
+        assert!(error.to_string().contains("not found on host dev-box"));
+    }
+
+    #[tokio::test]
+    async fn missing_binary_names_this_machine_for_local_provider() {
+        let error = check_version(&missing_program(), &[], None)
+            .await
+            .expect_err("missing binary should fail");
+
+        assert!(error.to_string().contains("not found on this machine"));
     }
 }

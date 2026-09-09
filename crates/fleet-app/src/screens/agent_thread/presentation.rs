@@ -150,6 +150,31 @@ pub(crate) fn composer_placeholder(provider: AgentKind) -> String {
     )
 }
 
+/// The placeholder of a composer whose machine is out of reach (P3-T04).
+///
+/// It replaces the `Message claude…` invitation rather than sitting beside it: the composer is
+/// not accepting anything, and an invitation it will refuse is the thing the plan calls
+/// "failing on submit", one step earlier.
+#[must_use]
+pub(crate) fn unreachable_placeholder(host: &str) -> String {
+    format!("{host} is unreachable \u{2014} nothing can be sent yet")
+}
+
+/// The metadata row's right half while the thread's machine is out of reach (P3-T04).
+///
+/// It says what happens next, because nothing the user can do here fixes a network: the thread
+/// keeps running on its own machine and the composer opens again when the link does.
+#[must_use]
+pub(crate) fn unreachable_hint(host: &str) -> String {
+    format!("{host} unreachable \u{b7} the thread resumes when the link is back")
+}
+
+/// The toast a `⏎` earns while the machine is out of reach, naming the draft's fate.
+#[must_use]
+pub(crate) fn unreachable_notice(host: &str) -> String {
+    format!("{host} is unreachable \u{b7} your message is kept in the composer")
+}
+
 /// The status-bar hints for the composer's key set (§9), as data.
 ///
 /// The table is returned rather than rendered so the status bar and the tests agree on which

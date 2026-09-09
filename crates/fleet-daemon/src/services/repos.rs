@@ -33,7 +33,6 @@ use crate::{
         github::Github,
         process::{Process, pid_is_alive},
     },
-    error::remote_unsupported,
     jobs::{JobCtx, JobManager, JobPolicy},
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -278,13 +277,6 @@ impl Repos {
     /// whole cascade lives in `Services::delete_repo_cascade`.
     pub(crate) async fn delete_guarded(&self, repo: RepoId) -> DaemonResult<()> {
         let snapshot = self.state.load().await?;
-        if snapshot
-            .worktrees
-            .iter()
-            .any(|worktree| worktree.repo_id == repo && worktree.host.is_some())
-        {
-            return Err(remote_unsupported());
-        }
         let registered = snapshot.repos.iter().find(|item| item.id == repo).cloned();
         let clone = snapshot.clones.iter().find(|item| item.id == repo).cloned();
         if registered.is_none() && clone.is_none() {
@@ -318,11 +310,6 @@ impl Repos {
         let result = self
             .state
             .transaction(move |state| {
-                if state.worktrees.iter().any(|worktree| {
-                    worktree.repo_id == repo_in_transaction && worktree.host.is_some()
-                }) {
-                    return Err(remote_unsupported());
-                }
                 for path in &paths {
                     if files.exists(path) {
                         let destination = files.trash(path)?;

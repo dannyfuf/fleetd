@@ -141,7 +141,15 @@ impl Import {
                 let source_state = swarm_home.join("state.json");
                 let config_patch: serde_json::Value =
                     serde_json::from_str(&files.read_text(&source_config)?)?;
-                let imported_state: State = serde_json::from_str(&files.read_text(&source_state)?)?;
+                let mut imported_state: State =
+                    serde_json::from_str(&files.read_text(&source_state)?)?;
+                let skipped_remote = imported_state.take_remote_worktrees();
+                if !skipped_remote.is_empty() {
+                    tracing::info!(
+                        count = skipped_remote.len(),
+                        "skipped legacy remote worktrees during swarm import"
+                    );
+                }
                 imported_state
                     .validate()
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;

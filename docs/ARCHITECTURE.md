@@ -2,9 +2,10 @@
 
 Fleet is the native successor of `swarm` (a tmux-based TUI that manages copy-on-write
 development worktrees, GitHub PRs, and per-worktree tmux sessions with a fixed 3-window
-layout). Fleet keeps every swarm behavior (see `docs/SWARM-INVENTORY.md`, the authoritative
-1:1 feature inventory) but replaces tmux and the terminal TUI with a **daemon + native GPUI app**
-that owns everything: worktrees, GitHub state, background jobs, terminal sessions and rendering.
+layout). Fleet keeps the swarm compatibility baseline (see `docs/SWARM-INVENTORY.md`, including
+its explicit Fleet deviations) but replaces tmux and the terminal TUI with a **daemon + native
+GPUI app** that owns everything: worktrees, GitHub state, background jobs, terminal sessions and
+rendering.
 
 Guiding rules:
 
@@ -28,8 +29,9 @@ Guiding rules:
 
 `FLEET_HOME` (default `~/.fleet`) mirrors `~/.swarm`: `config.json`, `state.json` (+ lock),
 `repos/`, `worktrees/`, `cache/`, `logs/` (+ `logs/jobs/<job-id>.log`), `trash/`, plus
-`fleetd.sock` and `fleetd.pid`. Config and state schemas are the swarm schemas (version 1),
-so `fleet import --from-swarm` can copy `~/.swarm/{config,state}.json` verbatim.
+`fleetd.sock`, `fleetd.pid`, and the stable `daemon-id`. Config and state remain version 1 and
+`fleet import --from-swarm` can copy compatible data. Fleet extends host configuration with tagged
+machine providers while retaining the old `{ssh, swarmCommand}` entry as probe-only input.
 
 ## Crate map (Cargo workspace, Rust 1.97.1, edition 2024)
 
@@ -73,14 +75,19 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
 - **Adapters** (traits + real impls + fakes for tests): `Shell`, `Git`, `Github`, `Files`
   (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`, `Logs`.
   Exact git/gh command lines are those in the inventory §7.
+- **Machines**: `machines/` owns `MachineProvider`, provider construction, the Tailscale/OpenSSH
+  transport, the advanced command transport, legacy probing, and one lazy `RemoteLink` endpoint
+  per federated host. `fleetd connect` bridges stdin/stdout to the remote daemon's Unix socket;
+  neither daemon listens on a tailnet TCP port.
 - **Services**: `Contexts`, `Boards` (documents, cards, remote sync), `Repos` (clone jobs,
   discovery cache), `Worktrees` (creation, publication, recovery, trash, hooks) with the
   prepared-copy `Pool`, `Inspect`, `Prune`,
   `Github` (PR tabs, caches, TTLs), `Sessions` (registry, lifecycle, host bridge, observations),
   `Hosts`, `Sleep`, `Watches` and `WatchDiscovery`, `AgentActivity`, `Agents` (the native agent
-  session manager, below), `Awaited`, `Doctor`,
-  `Import`, `Update`. `services/composition.rs` wires them, `dispatch.rs` routes requests,
-  `snapshots.rs` builds the broadcast snapshot, and `maintenance.rs` owns the periodic sweeps.
+  session manager, below), `Router`, `Mirror`, `Bootstrap`, `Awaited`, `Doctor`, `Import`,
+  `Update`. `services/composition.rs` wires them, `dispatch.rs` enters the router,
+  `snapshots.rs` merges local state with mirrored host fragments, and `maintenance.rs` owns the
+  periodic sweeps.
   Revision-keyed caches in `services/cache.rs` let unchanged inventories be reused instead of
   rebuilt per request. Cache expiry inspects entry types and removes only the file identity it
   observed, so a concurrent refresh or temporary/non-directory entry is never unlinked as stale.
@@ -112,9 +119,11 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   `Conflict` rather than reaching one. The **client** draws the tab. Keeping it in the session
   list is what keeps `ctrl-s <n>` numbering stable. Sleep sees a tab with no process, so it is
   always idle: it closes with the other idle tabs and `EnsureSession` puts it back on wake. A
-  worktree on a remote host degrades the command back to the program it stands for
-  (`fleet://lazygit` → `lazygit`), because the client-side implementation runs `git` locally.
-  The only reserved command today is `fleet://lazygit`, drawn by `crates/fleet-lazygit`
+  proxied session degrades a process-backed native command to the program it stands for
+  (`fleet://lazygit` → `lazygit`), because the embedded implementation would run `git` on the
+  client machine. Structured native-agent tabs are explicitly exempt: clients draw them from
+  routed protocol events, so their provider still runs on the worktree's owning daemon. The only
+  reserved process-backed command today is `fleet://lazygit`, drawn by `crates/fleet-lazygit`
   embedded in `fleet-app` (see that crate's README, "Embedding").
 
 The native Git pane still executes mutations locally rather than as daemon jobs. Safety-sensitive
@@ -122,6 +131,47 @@ operations carry the identity the user reviewed: partial staging carries the dis
 preimage, stash drop carries the stash OID rather than only a mutable index, and continuation
 distinguishes revert from merge/rebase. The backend revalidates those identities immediately
 before mutation; merged status comes from commit reachability.
+
+## Remote machines and daemon federation
+
+Every machine runs its own `fleetd` and owns the files, Git operations, PTYs, process observation,
+agent processes, and persistence located there. The app and CLI connect only to the local Unix
+socket. For each tagged host in config, `Machines` builds a provider; the Tailscale provider
+resolves the node through `tailscale status --json`, then uses non-interactive OpenSSH to run
+`fleetd connect --home <fleetHome>`. A `RemoteLink` performs Hello as `ClientKind::Proxy`,
+correlates forwarded requests and responses, and rebroadcasts remote events. Legacy
+`{ssh, swarmCommand}` hosts have `Legacy` link state and can only be probed.
+
+`Router` classifies every `RequestBody` as local orchestration, one owning host, a host-partitioned
+fanout, or explicitly unsupported. Worktree operations resolve ownership from local state and the
+in-memory `Mirror`; session, terminal, job, and agent-thread requests resolve through id ownership
+tables. Before forwarding, the router converts local ids to that daemon's ids and clears explicit
+placement such as `host`, so the remote daemon executes its ordinary local service path. On the
+way back it reverses the translation. Worktree ids and thread UUIDs pass through but register an
+owner; session ids become `<host>/<remote-session>`; terminal and job ids use bijective mappings
+allocated from shared local counters.
+
+A remote `EnsureSession` therefore follows this complete path:
+
+1. The app sends `EnsureSession` to its local `fleetd`, exactly as for a local worktree.
+2. `dispatch` asks `Router` to resolve the `WorktreeId`; `Mirror` identifies the owning host.
+3. The router rewrites ids and placement and calls that host's ready `RemoteEndpoint`.
+4. The remote daemon dispatches the request locally, creates or repairs the session and terminals,
+   and applies proxied degradation (`fleet://lazygit` becomes a remote `lazygit` PTY).
+5. The response, terminal frames, session changes, and agent events return over `RemoteLink`.
+   The local router prefixes/remaps their ids and broadcasts them to the original client.
+
+Bulk requests are partitioned by owning host and executed concurrently. Their merged response
+keeps one outcome per requested item, including an `Unreachable` reason for items on a down host;
+one host failure never erases successful results from another host.
+
+`Mirror` retains one authoritative in-memory snapshot fragment per remote daemon and never
+persists those records as local worktrees. Local records win for local state; each remote fragment
+is the only source of truth for its host. When a link becomes `Down`, the fragment stays visible
+but stale/offline, new routed requests fail fast with `Unreachable`, terminal mappings are cleared,
+and clients receive terminal-ended behavior. When it becomes `Ready`, Fleet refreshes the remote
+snapshot, rebuilds mappings, resubscribes to events, and emits `TerminalReattach` for attachments
+that should recover.
 
 ## Native agent sessions
 
@@ -158,6 +208,13 @@ Turn completion is the provider's authoritative primitive only (§4 of `NATIVE-A
 before a `TurnCompleted` is applied every open item of that turn is closed, so no finished turn
 shows a spinner. Gates are independent of turns and close only on `GateResolved`.
 
+For a remote worktree, the local router sends `AgentThreadCreate` to the owning daemon before the
+local agent manager can resolve a path. The returned thread UUID is registered to that host;
+open/send/respond/interrupt/mode/model/seen/stop requests use that registration, while list fans
+out and merges summaries. Agent and summary events cross the link unchanged except for any
+embedded session or terminal ids. Claude stdio and the OpenCode localhost HTTP/SSE server remain
+entirely on the remote daemon; no provider stream or OpenCode port is tunneled over the tailnet.
+
 **Attention** is derived by the reducer, not by any view: permission > question > plan >
 finished > failed > working > unread > idle, carried in `AgentThreadSummary` so the tab badge,
 the session header word and the context-bar counters cannot disagree. `Finished` is amber and
@@ -169,6 +226,8 @@ before the event is broadcast, plus a versioned `index.json` (id, worktree, prov
 created, last activity, resume cursor, model, mode, last outcome) written with the `StateStore`
 discipline — serialised mutation, atomic rename, quarantine to `index.json.broken-*` on
 corruption. It is not part of `PersistedState` version 1; it has its own file and version.
+For a remote thread, this directory is under the remote daemon's Fleet home; the local daemon
+mirrors summaries and events but writes no transcript copy.
 
 **Restart.** On boot the manager loads the index and replays each thread's log. A thread the
 log leaves `Starting`/`Running` is an orphan and is settled explicitly: with a resume cursor it
@@ -200,7 +259,7 @@ modes{alt_screen, mouse, bracketed_paste}, title }`.
 `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid. The wire protocol is version 6; `wrapped` preserves logical lines
+on the client's mirror grid. The wire protocol is version 7; `wrapped` preserves logical lines
 during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
 row is discarded, history shrinks, or a column change reflows it, without treating viewport
 movement as eviction. Off-screen
@@ -271,24 +330,26 @@ explicit return-to-bottom behavior.
 
 ## Protocol compatibility
 
-Daemon IPC is version **6**. Two families arrived since version 4. The board surface adds its
-request, response, and event families (`docs/BOARD.md`). The native-agent surface adds eleven
-`RequestBody` variants (`AgentThreadList`, `AgentThreadCreate`, `AgentThreadOpen`,
-`AgentThreadClose`, `AgentSend`, `AgentInterrupt`, `AgentRespond`, `AgentSetMode`,
-`AgentSetModel`, `AgentMarkSeen`, `AgentStop`), their `ResponseBody` answers (`AgentThreads`,
-`AgentThreadCreated`, `AgentThreadSnapshot`, `AgentAck`), and the `Agent` / `AgentSummary`
-events. `Snapshot`'s new `agent_threads` and `boards` are both `#[serde(default)]`, so an older
-snapshot payload still deserializes; the requests are new names, which an older daemon rejects
-rather than misreads, and `Hello` negotiates the version before any of them is sent.
+Daemon IPC is version **7**. `Hello { protocol, client }` identifies app, CLI, or proxy peers;
+the flattened Hello response adds the stable daemon id, optional build commit, and capabilities.
+Federation adds `HostStatus` provider/version/link/address/agent-binary fields,
+`HostLinkChanged` and `TerminalReattach` events, optional host placement on PR creation, host
+ownership on `WorktreePath`, and `BootstrapHost`. These fields and events are additive, but remote
+daemon links require the same protocol version so routing never crosses incompatible builds.
 
-`PruneWorktrees.ids` is the shipped additive field: it defaults to
-absent and is omitted when `None`, preserving legacy request JSON; `Some(ids)` is the exact
-reviewed allowlist for a commit, which the daemon may shrink after locked reinspection but never
-expand. This is old-client/new-daemon compatible; `Hello` has no capability list, so exact-set
-commits cannot safely target an older daemon that ignores the field. Daemon Git-mutation jobs,
-terminal search/history/focus, cell hyperlinks/frame effects, and persisted `ui.presentation`
-configuration remain outside the current protocol and config schemas. The separate
-swarm-compatible CLI JSON envelope remains version 1.
+The board and native-agent families introduced by version 6 remain unchanged. `Snapshot`'s
+`agent_threads` and `boards` are both `#[serde(default)]`, so an older snapshot payload still
+deserializes; new request names are rejected rather than misread. `PruneWorktrees.ids` also remains
+defaulted and omitted when `None`; `Some(ids)` is the exact reviewed allowlist, which locked
+reinspection may shrink but never expand. Exact-set support is advertised as
+`prune.reviewed_ids` in Hello capabilities.
+
+Delete, inspect, and prune responses preserve per-worktree results across host fanout:
+`WorktreesDeleted(Vec<WorktreeDeleteResult>)`, `Inspections(Vec<WorktreeInspection>)`, and
+`Pruned(PruneResult)`. Mixed-host dismiss, sleep, and kill operations follow the same per-item
+rule. Daemon Git-mutation jobs, terminal search/history/focus, cell hyperlinks/frame effects, and
+persisted `ui.presentation` configuration remain outside the current protocol and config schemas.
+The separate swarm-compatible CLI JSON envelope remains version 1.
 
 ## Client (`fleet` app)
 

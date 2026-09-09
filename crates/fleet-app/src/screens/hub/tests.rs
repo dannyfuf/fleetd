@@ -5,11 +5,16 @@ use fleet_core::{
     model::{Context, Repo, RepoHooks},
     sessions::SessionState,
 };
-use fleet_proto::{response::PrSlice, snapshot::Snapshot};
+use fleet_proto::{
+    response::PrSlice,
+    snapshot::{HostStatus, Snapshot},
+};
 use fleet_ui_kit::PrBadgeState;
 use std::collections::VecDeque;
 
 use super::*;
+
+use super::actions::unreachable_host_toast;
 
 struct PendingHubRequest {
     body: RequestBody,
@@ -714,8 +719,21 @@ fn synchronization_reconciles_identities_once_per_snapshot_revision(cx: &mut gpu
 #[test]
 fn copy_path_always_resolves_visible_state() {
     assert_eq!(
-        actions::copy_path_outcome(Ok(ResponseBody::Path("/tmp/wt".to_owned()))).expect("path"),
+        actions::copy_path_outcome(Ok(ResponseBody::Path {
+            path: "/tmp/wt".to_owned(),
+            host: None,
+        }))
+        .expect("path"),
         "/tmp/wt"
+    );
+    assert_eq!(
+        actions::copy_path_outcome(Ok(ResponseBody::Path {
+            path: "/home/df/.fleet/worktrees/a".to_owned(),
+            host: Some("devbox".parse().unwrap_or_else(|error| panic!("{error}"))),
+        }))
+        .expect("path"),
+        "devbox:/home/df/.fleet/worktrees/a",
+        "a remote path is never handed over as if it were local"
     );
     assert!(actions::copy_path_outcome(Ok(ResponseBody::Ack)).is_err());
     assert!(actions::copy_path_outcome(Err(client_error("offline"))).is_err());
@@ -926,5 +944,90 @@ fn failed_restore_retains_undo_token(cx: &mut gpui::TestAppContext) {
     cx.read(|cx| {
         assert!(ctx.state.read(cx).last_trash_entry.is_none());
         assert!(ctx.hub.read(cx).restoring_trash.is_none());
+    });
+}
+
+fn remote_host_status(id: &str, link: fleet_proto::snapshot::LinkState) -> HostStatus {
+    HostStatus {
+        id: id.parse().unwrap_or_else(|error| panic!("{error}")),
+        provider: "tailscale".to_owned(),
+        version: None,
+        link,
+        address: None,
+        agent_binaries: None,
+        reachable: link == fleet_proto::snapshot::LinkState::Ready,
+        checked_at: "2026-09-04T12:00:00Z".to_owned(),
+        error: (link != fleet_proto::snapshot::LinkState::Ready)
+            .then(|| "ssh: connect timed out after 5s".to_owned()),
+    }
+}
+
+#[test]
+fn only_a_remote_failure_is_demoted_from_the_sticky_banner() {
+    let remote = ProtoError {
+        kind: ErrorKind::Remote,
+        message: "ssh: connect timed out after 5s".to_owned(),
+    };
+    assert_eq!(
+        unreachable_host_toast(&remote, Some("devbox")).as_deref(),
+        Some("devbox is unreachable \u{2014} ssh: connect timed out after 5s")
+    );
+    assert_eq!(
+        unreachable_host_toast(&remote, None).as_deref(),
+        Some("ssh: connect timed out after 5s"),
+        "a remote failure with no known host still says what happened"
+    );
+    let conflict = ProtoError {
+        kind: ErrorKind::Conflict,
+        message: "worktree already exists".to_owned(),
+    };
+    assert_eq!(
+        unreachable_host_toast(&conflict, Some("devbox")),
+        None,
+        "a real refusal keeps the sticky banner (§1.8)"
+    );
+}
+
+#[gpui::test]
+fn opening_an_offline_remote_worktree_toasts_rather_than_sticking(cx: &mut gpui::TestAppContext) {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet-hub-remote", now);
+    let mut source = snapshot(0);
+    let mut remote = worktree("acme/api#remote", "acme/api", "2026-09-04T10:00:00Z");
+    remote.host = Some("devbox".parse().unwrap_or_else(|error| panic!("{error}")));
+    source.worktrees = vec![remote];
+    source.hosts = vec![remote_host_status(
+        "devbox",
+        fleet_proto::snapshot::LinkState::Down,
+    )];
+    state.apply_snapshot(source, now);
+    state.cursors.worktrees = 0;
+    let (ctx, harness) = test_hub_ctx(state, cx);
+
+    cx.update(|cx| ctx.open_worktree(true, cx));
+    // `TouchWorktreeOpened` is fire-and-forget; the `EnsureSession` behind it is the one that
+    // reports the offline host.
+    assert!(matches!(
+        harness.close_next(),
+        RequestBody::TouchWorktreeOpened { .. }
+    ));
+    let ensured = harness.respond_next(Err(ProtoError {
+        kind: ErrorKind::Remote,
+        message: "ssh: connect timed out after 5s".to_owned(),
+    }));
+    assert!(matches!(ensured, RequestBody::EnsureSession { .. }));
+    cx.run_until_parked();
+
+    cx.read(|cx| {
+        let state = ctx.state.read(cx);
+        assert!(
+            state.sticky_error.is_none(),
+            "an offline host must not leave a banner the user has to dismiss"
+        );
+        assert_eq!(state.toasts.len(), 1);
+        assert!(
+            state.toasts[0].toast.text.contains("devbox is unreachable"),
+            "the toast names the host"
+        );
     });
 }

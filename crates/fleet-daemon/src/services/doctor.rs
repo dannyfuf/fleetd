@@ -2,7 +2,12 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use fleet_proto::response::{DoctorCheck, DoctorStatus};
+use fleet_core::{config::Config, ids::HostId, model::HostConfigEntry};
+use fleet_proto::{
+    PROTOCOL_VERSION,
+    response::{DoctorCheck, DoctorStatus},
+    snapshot::LinkState,
+};
 
 use crate::{
     DaemonError, DaemonResult,
@@ -11,7 +16,11 @@ use crate::{
         github::Github,
         shell::{Shell, ShellCommand},
     },
-    services::hosts::Hosts,
+    machines::{MachineProvider, Machines, RemoteEndpoint},
+    services::{
+        Services,
+        hosts::{HostDiagnostics, Hosts},
+    },
     stores::config::ConfigStore,
 };
 
@@ -46,6 +55,45 @@ impl Doctor {
     /// Checks Fleet's external dependencies and local runtime environment in parallel.
     pub async fn check(&self) -> DaemonResult<Vec<DoctorCheck>> {
         let config = self.config.load().await?;
+        let machines = Machines::from_config(&config);
+        self.check_config(config, &machines).await
+    }
+
+    /// Runs diagnostics against the daemon's live machine and endpoint registry.
+    pub async fn check_with_machines(&self, machines: &Machines) -> DaemonResult<Vec<DoctorCheck>> {
+        let config = self.config.load().await?;
+        self.check_config(config, machines).await
+    }
+
+    /// Runs only the checks belonging to one configured host.
+    pub async fn check_host(
+        &self,
+        host: &HostId,
+        machines: &Machines,
+    ) -> DaemonResult<Vec<DoctorCheck>> {
+        let config = self.config.load().await?;
+        let entry = config
+            .hosts
+            .get(host)
+            .ok_or_else(|| DaemonError::NotFound(format!("configured host `{host}`")))?;
+        let home = self
+            .config
+            .path()
+            .parent()
+            .map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let hosts = Hosts::new(home, Arc::clone(&self.shell));
+        let diagnostics = hosts.diagnose_configured(host, entry, machines).await;
+        Ok(host_checks(
+            diagnostics,
+            matches!(entry, HostConfigEntry::Legacy { .. }),
+        ))
+    }
+
+    async fn check_config(
+        &self,
+        config: Config,
+        machines: &Machines,
+    ) -> DaemonResult<Vec<DoctorCheck>> {
         let home = self
             .config
             .path()
@@ -91,27 +139,183 @@ impl Doctor {
             futures_util::future::join_all(config.hosts.iter().map(|(id, entry)| {
                 let hosts = &hosts;
                 async move {
-                    let (status, version) = hosts.probe_with_version(id, entry).await;
-                    DoctorCheck {
-                        check: format!("host {id}"),
-                        status: if status.reachable {
-                            DoctorStatus::Ok
-                        } else {
-                            DoctorStatus::Fail
-                        },
-                        detail: status.error.unwrap_or_else(|| {
-                            format!(
-                                "{} · {}",
-                                entry.ssh,
-                                version.as_deref().unwrap_or("swarm (version unknown)")
-                            )
-                        }),
-                    }
+                    let diagnostics = hosts.diagnose_configured(id, entry, machines).await;
+                    host_checks(diagnostics, matches!(entry, HostConfigEntry::Legacy { .. }))
                 }
             }))
-            .await,
+            .await
+            .into_iter()
+            .flatten(),
         );
         Ok(checks)
+    }
+
+    /// Renders Doctor lines for an injected machine and endpoint.
+    pub async fn check_machine(
+        &self,
+        provider: Arc<dyn MachineProvider>,
+        endpoint: Option<Arc<dyn RemoteEndpoint>>,
+    ) -> Vec<DoctorCheck> {
+        let home = self
+            .config
+            .path()
+            .parent()
+            .map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let hosts = Hosts::new(home, Arc::clone(&self.shell));
+        host_checks(hosts.diagnose_machine(provider, endpoint).await, false)
+    }
+}
+
+fn host_checks(diagnostics: HostDiagnostics, legacy: bool) -> Vec<DoctorCheck> {
+    let HostDiagnostics {
+        status,
+        resolve_error,
+        stderr,
+        hello,
+    } = diagnostics;
+    let prefix = format!("host {}", status.id);
+    let local_version = Services::version();
+    let summary_detail = if legacy {
+        status.error.clone().unwrap_or_else(|| {
+            format!(
+                "{} · {}",
+                status.address.as_deref().unwrap_or("address unknown"),
+                status
+                    .version
+                    .as_deref()
+                    .unwrap_or("swarm (version unknown)")
+            )
+        })
+    } else {
+        format!(
+            "provider {} · address {} · version {} · link {}",
+            status.provider,
+            status.address.as_deref().unwrap_or("unknown"),
+            status.version.as_deref().unwrap_or("unknown"),
+            link_name(status.link)
+        )
+    };
+    let mut checks = vec![
+        DoctorCheck {
+            check: prefix.clone(),
+            status: if status.reachable {
+                DoctorStatus::Ok
+            } else {
+                DoctorStatus::Fail
+            },
+            detail: summary_detail,
+        },
+        DoctorCheck {
+            check: format!("{prefix} provider"),
+            status: DoctorStatus::Ok,
+            detail: status.provider.clone(),
+        },
+        DoctorCheck {
+            check: format!("{prefix} address"),
+            status: if status.address.is_some() {
+                DoctorStatus::Ok
+            } else {
+                DoctorStatus::Fail
+            },
+            detail: status
+                .address
+                .clone()
+                .or(resolve_error)
+                .unwrap_or_else(|| "unresolved".to_owned()),
+        },
+        DoctorCheck {
+            check: format!("{prefix} ssh/probe"),
+            status: if status.reachable {
+                DoctorStatus::Ok
+            } else {
+                DoctorStatus::Fail
+            },
+            detail: if status.reachable {
+                "reachable".to_owned()
+            } else {
+                stderr
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| status.error.clone())
+                    .unwrap_or_else(|| "unreachable".to_owned())
+            },
+        },
+        DoctorCheck {
+            check: format!("{prefix} fleetd version"),
+            status: match status.version.as_deref() {
+                Some(version) if version == local_version => DoctorStatus::Ok,
+                Some(_) => DoctorStatus::Warn,
+                None => DoctorStatus::Fail,
+            },
+            detail: status.version.as_ref().map_or_else(
+                || format!("remote unknown · local {local_version}"),
+                |version| format!("remote {version} · local {local_version}"),
+            ),
+        },
+        DoctorCheck {
+            check: format!("{prefix} link"),
+            status: match status.link {
+                LinkState::Ready => DoctorStatus::Ok,
+                LinkState::Connecting | LinkState::Legacy => DoctorStatus::Warn,
+                LinkState::Down => DoctorStatus::Fail,
+            },
+            detail: link_name(status.link).to_owned(),
+        },
+        DoctorCheck {
+            check: format!("{prefix} protocol"),
+            status: if status.link == LinkState::Ready && hello.is_some() {
+                DoctorStatus::Ok
+            } else {
+                DoctorStatus::Warn
+            },
+            detail: if status.link == LinkState::Ready && hello.is_some() {
+                format!("remote protocol {PROTOCOL_VERSION} matches local {PROTOCOL_VERSION}")
+            } else if legacy {
+                "legacy swarm protocol 1; Fleet protocol not negotiated".to_owned()
+            } else {
+                format!("Fleet protocol {PROTOCOL_VERSION} not negotiated")
+            },
+        },
+    ];
+    if !legacy {
+        let binaries = status.agent_binaries.as_ref();
+        checks.extend([
+            agent_binary_check(&prefix, "claude", binaries.map(|value| value.claude)),
+            agent_binary_check(&prefix, "opencode", binaries.map(|value| value.opencode)),
+        ]);
+    }
+    if legacy {
+        checks.push(DoctorCheck {
+            check: format!("{prefix} migration"),
+            status: DoctorStatus::Warn,
+            detail: concat!(
+                "migrate this legacy {ssh, swarmCommand} entry to the new schema: ",
+                r#"{"provider":"tailscale","node":"<node>","fleetd":"fleetd","fleetHome":"~/.fleet"}"#
+            )
+            .to_owned(),
+        });
+    }
+    checks
+}
+
+fn agent_binary_check(prefix: &str, binary: &str, available: Option<bool>) -> DoctorCheck {
+    let (status, detail) = match available {
+        Some(true) => (DoctorStatus::Ok, "available through login shell"),
+        Some(false) => (DoctorStatus::Fail, "not found through login shell"),
+        None => (DoctorStatus::Warn, "login-shell availability check failed"),
+    };
+    DoctorCheck {
+        check: format!("{prefix} {binary}"),
+        status,
+        detail: detail.to_owned(),
+    }
+}
+
+const fn link_name(link: LinkState) -> &'static str {
+    match link {
+        LinkState::Connecting => "connecting",
+        LinkState::Ready => "ready",
+        LinkState::Down => "down",
+        LinkState::Legacy => "legacy",
     }
 }
 

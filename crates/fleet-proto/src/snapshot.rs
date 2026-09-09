@@ -45,6 +45,21 @@ pub struct PoolStatus {
 pub struct HostStatus {
     /// Configured remote host identifier.
     pub id: HostId,
+    /// Machine provider name.
+    #[serde(default)]
+    pub provider: String,
+    /// Remote Fleet daemon version when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Current daemon-link state.
+    #[serde(default)]
+    pub link: LinkState,
+    /// Resolved machine address when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Remote native-agent binary availability when checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_binaries: Option<AgentBinaries>,
     /// Whether the most recent probe succeeded.
     pub reachable: bool,
     /// ISO-8601 time of the most recent probe.
@@ -52,6 +67,31 @@ pub struct HostStatus {
     /// Probe failure detail when unreachable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Connection state of a configured machine's remote daemon link.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    /// A connection attempt is in progress.
+    Connecting,
+    /// The remote daemon handshake completed.
+    Ready,
+    /// The link is unavailable.
+    #[default]
+    Down,
+    /// A legacy probe-only entry has no daemon link.
+    Legacy,
+}
+
+/// Availability of supported native-agent executables on a machine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBinaries {
+    /// Whether Claude Code is resolvable.
+    pub claude: bool,
+    /// Whether OpenCode is resolvable.
+    pub opencode: bool,
 }
 
 /// Complete initial state sent to a newly connected client.
@@ -107,6 +147,11 @@ mod tests {
         });
         assert_round_trip(HostStatus {
             id: HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}")),
+            provider: "tailscale".to_owned(),
+            version: None,
+            link: LinkState::Down,
+            address: None,
+            agent_binaries: None,
             reachable: false,
             checked_at: "2026-09-04T12:00:00Z".to_owned(),
             error: Some("ssh timed out".to_owned()),

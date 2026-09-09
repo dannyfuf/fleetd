@@ -8,6 +8,13 @@ each other**: what the shell owns, what a screen owns, and what crosses between 
 These seams are stable on purpose: changing a signature here changes every screen, so change it
 deliberately and update this document in the same pass.
 
+The daemon wire protocol is version 7. Hello includes a defaultable `HelloClient` (`app`, `cli`,
+or `proxy`, plus an optional forwarding host id); its response envelope includes a stable daemon
+id, optional build commit, and capabilities including `remote-machines`. Host snapshots include
+provider, remote version, link state, resolved address, and optional agent-binary availability.
+Remote link and terminal-reattach changes arrive as additive events. Worktree paths carry an
+optional owning host, and PR worktree creation carries optional placement.
+
 ---
 
 ## 1. Module map
@@ -248,7 +255,7 @@ doctor table, a PR slice):
 ```rust
 let reply = bridge.request(RequestBody::WorktreePath { id });
 cx.spawn(async move |_, cx| {
-    if let Ok(Ok(ResponseBody::Path(path))) = reply.recv().await {
+    if let Ok(Ok(ResponseBody::Path { path, host })) = reply.recv().await {
         state.update(cx, |state, cx| { /* … */ cx.notify(); });
     }
 })
@@ -302,26 +309,52 @@ counter state for every thread, opened or not. The shell has already applied bot
 
 ### IPC and CLI compatibility
 
-Daemon IPC is version **6**; the bumps carry the board families of `docs/BOARD.md` and the
-native-agent requests, responses and events described above, and both `Snapshot.boards` and
-`Snapshot.agent_threads` are `#[serde(default)]` so version-4 snapshot JSON still decodes. The bug-fix program added one request field:
-`PruneWorktrees.ids: Option<Vec<WorktreeId>>`. It is defaulted and omitted when `None`, so an old
-request still decodes and the current legacy call path emits the byte-identical request shape.
-`None` retains repo/all-worktree discovery. The prune dialog sends `Some(ids)` only when committing,
-with exactly the DELETE rows the user reviewed; the daemon locks and re-inspects those IDs and may
-keep newly ineligible entries, but it never expands the set. An empty explicit list deletes nothing.
+Daemon IPC is version **7**. Rust field names are shown below; serde renders them as camelCase on
+the wire. The mandatory first request is `Hello { protocol, client: HelloClient }`, where
+`client.kind` is `app`, `cli`, or `proxy` and `client.host_id` optionally identifies the forwarding
+daemon. The entire `client` value defaults to
+an app client. `HelloResponse` flattens the ordinary correlated `Response` and adds
+`capabilities: Vec<String>`, `daemon_id: String`, and optional `build_commit`; a federating daemon
+advertises `remote-machines`. Proxy links require protocol lockstep before any request is routed.
 
-This guarantees old-client/new-daemon compatibility. The mandatory Hello response envelope has a
-defaulted, omitted-when-empty `capabilities` array. A daemon that honors exact IDs advertises
-`prune.reviewed_ids`; the client retains the latest negotiated set, and the app refuses a reviewed
-prune with update/restart guidance when that capability is absent. The metadata is outside the
-existing Hello body so older IPC-v4 decoders ignore it without changing the version.
+`Snapshot.hosts` contains `HostStatus { id, provider, version, link, address, agent_binaries,
+reachable, checked_at, error }`. `link` is `connecting`, `ready`, `down`, or `legacy`, and
+`agent_binaries` is the optional `{ claude, opencode }` result of host diagnostics. Two additive
+events keep the app's remote state live: `HostLinkChanged { host, link, version, error }` changes
+availability, and `TerminalReattach { terminal }` tells an attached terminal surface to attach
+again after remote-link recovery.
+
+Remote placement is additive to existing requests and responses. `CreateWorktreeFromPr` carries an
+optional `host`; `BootstrapHost { host, git_ref }` starts remote installation; and
+`ResponseBody::Path { path, host }` returns the owning host for a remote `WorktreePath`. The app
+must treat that path as display data: only a path whose host is absent may become a local
+`PathBuf` or enter an embedded native-Git operation.
+
+Bulk worktree operations have explicit per-item outcomes so a down host cannot erase successful
+local or other-host results:
+
+| Request | Response | Per-item contract |
+| --- | --- | --- |
+| `DeleteWorktrees { ids }` | `WorktreesDeleted(Vec<WorktreeDeleteResult>)` | `{ worktree_id, ok, reason?, trash_entry? }` for every requested worktree |
+| `InspectWorktrees { ids, repo, fetch }` | `Inspections(Vec<WorktreeInspection>)` | one inspection per selected worktree, with its own warnings/error |
+| `PruneWorktrees { dry_run, fetch, kill_sessions, repo, ids }` | `Pruned(PruneResult)` | `deleted`/would-delete ids plus `skipped` entries carrying each reason and safety facts |
+
+Mixed-host dismiss, sleep, and kill routing follows the same rule: the router partitions by owner,
+runs host parts independently, and preserves an outcome for each requested item instead of failing
+the whole request on the first unreachable host.
+
+The version-6 board and native-agent families remain valid in v7, and both `Snapshot.boards` and
+`Snapshot.agent_threads` stay `#[serde(default)]`. `PruneWorktrees.ids` also remains defaulted and
+omitted when `None`, preserving its legacy request shape; `None` retains repo/all-worktree
+discovery, `Some(ids)` is the reviewed allowlist, and an empty explicit list deletes nothing. A
+daemon that honors exact IDs advertises `prune.reviewed_ids`; the client refuses a reviewed prune
+with update/restart guidance when that capability is absent.
 
 Pong response envelopes likewise have an optional `daemon` object containing `pid` and `bootId`.
 `bootId` is stable for one fleetd process and changes across starts, including PID reuse. New
 clients retain it while delivering the existing unit `Pong` body to callers; older clients ignore
 the additive envelope member. App reconnect identity probes use this Pong metadata and never load
-a fallback snapshot. IPC v6 otherwise does not include daemon Git-mutation jobs, arbitrary
+a fallback snapshot. IPC v7 otherwise does not include daemon Git-mutation jobs, arbitrary
 terminal-history reads, terminal search/focus requests, cell hyperlinks, or frame effects. Those
 deferred surfaces require a separately negotiated additive contract before clients may send them.
 The public JSON CLI is a separate, unchanged protocol-1 envelope.

@@ -306,3 +306,21 @@ fn reviewed_prune_requires_the_negotiated_capability() {
         }
     );
 }
+
+#[test]
+fn confirmed_prune_stays_open_when_any_reviewed_item_was_skipped() {
+    let result = PruneResult {
+        dry_run: false,
+        deleted: Vec::new(),
+        skipped: vec![fleet_proto::response::PruneSkipped {
+            worktree_id: WorktreeId::try_from("buk/payroll#offline").expect("worktree"),
+            reason: "host dev-box is unreachable".to_owned(),
+            merged: false,
+            dirty: false,
+            unique_commits: None,
+            running: Vec::new(),
+        }],
+    };
+
+    assert!(prune_requires_review(&result));
+}

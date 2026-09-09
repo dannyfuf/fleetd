@@ -39,6 +39,40 @@ To start copying compatible swarm v1 config and state without modifying `~/.swar
 ./target/release/fleet import --from-swarm
 ```
 
+## Configuration
+
+Fleet reads `$FLEET_HOME/config.json` (normally `~/.fleet/config.json`). To place worktrees on a
+Tailscale peer, configure the peer under `hosts` and optionally make it the default placement:
+
+```json
+{
+  "hosts": {
+    "dev-box": {
+      "provider": "tailscale",
+      "node": "dev-box",
+      "user": "df",
+      "sshOptions": [],
+      "fleetd": "fleetd",
+      "fleetHome": "~/.fleet"
+    }
+  },
+  "defaultHost": "dev-box"
+}
+```
+
+`node` is a Tailscale hostname or MagicDNS name. `user` is optional, `sshOptions` defaults to an
+empty list, `fleetd` defaults to `fleetd`, and `fleetHome` defaults to `~/.fleet`. Fleet resolves
+the node with the local Tailscale CLI and uses non-interactive OpenSSH to run a compatible remote
+`fleetd`; it does not expose a daemon port on the tailnet. Set `defaultHost` to `local` to keep
+implicit creation local, or pass `--host` for one creation. A non-local `defaultHost` must name a
+configured host.
+
+The advanced/testing transport is a tagged command entry such as
+`{"provider":"command","run":["sh","-c","exec \"$@\"","--"],"fleetd":"/tmp/fleetd","fleetHome":"/tmp/remote","display":"loopback"}`.
+It executes `run` followed by each remote command. Existing entries shaped as
+`{"ssh":"arch-dev","swarmCommand":"swarm"}` still load, but are **legacy probe-only**: they
+report reachability and cannot host Fleet worktrees until migrated to a federated provider.
+
 ## CLI reference
 
 Run `fleet --help` or `fleet <command> --help` for generated help.
@@ -53,12 +87,12 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet prune [--dry-run] [--no-fetch] [--kill-sessions] [--repo <REPO>] [--json]` | Safely prune merged worktrees; fetching is on unless `--no-fetch` is used. | `protocol`, `dryRun`, `deleted`, `skipped` |
 | `fleet kill <ID> [--json]` | Hard-kill the session for an exact worktree id. | `protocol`, `ok` |
 | `fleet status [--json]` | Refresh local worktree runtime status. | `protocol`, `statuses` |
-| `fleet path <ID>` | Print an exact local worktree's absolute path. | — |
+| `fleet path <ID> [--json]` | Print a local absolute path or `<host>:<path>` for a remote worktree. | `protocol`, `path`, `host` |
 | `fleet sleep [SESSION] [--json]` | Apply sleep policy to a session or worktree; a sole running session is inferred. | `protocol`, `kept`, `closed`, `sessionKilled` |
 | `fleet watch list [--session <id>] [--json]` | List cooperative and daemon-discovered watches (defaults to `FLEET_SESSION`); human rows contain id, source, label, status, start time, and terminal id. | `protocol`, `watches` |
 | `fleet watch tail <id> [--follow]` | Print retained text on its original stdout/stderr channel; `--follow` polls every 250 ms until exit. | Raw retained stdout/stderr text |
 | `fleet exec [--watch] [--label TEXT] -- CMD [ARGS...]` | Run a child with byte-exact passthrough; optionally publish a read-only subagent watch using `FLEET_SESSION` and numeric `FLEET_TERMINAL_ID` (`FLEET_TERMINAL` remains the human name). | Raw child stdout/stderr; child exit status |
-| `fleet agent list` | List native-agent threads: id, provider, session, attention, worktree, title. | — |
+| `fleet agent list` | List native-agent threads: id, provider, host, session, attention, worktree, title. | — |
 | `fleet agent new <WORKTREE> --provider <claude\|opencode> [--model <MODEL>] [--mode <ask\|accept-edits\|plan\|full-access>]` | Start a native-agent thread in a published worktree and print its id. Reports the typed `Unsupported` error, naming the terminal fallback, when the provider executable is missing or too old. | — |
 | `fleet agent send <THREAD> <TEXT>` | Send or steer a message on a thread. | — |
 | `fleet agent respond <THREAD> <GATE> <ANSWER>` | Answer an open permission, question, or plan gate with provider-neutral words. | — |
@@ -67,6 +101,9 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet agent tail <THREAD> [--replay]` | Print one JSON `SeqEvent` per line until the provider exits; `--replay` starts from sequence 1. | One `SeqEvent` object per line |
 | `fleet agent terminal [claude\|opencode]` | Ensure a repository-level PTY agent session exists (the terminal fallback); defaults to `config.agent`. | — |
 | `fleet agent-status <working\|finished> [--session <SESSION>] [--terminal-id <ID>] [--json]` | Report agent lifecycle activity; target flags default to `FLEET_SESSION` and `FLEET_TERMINAL_ID`. Silent on non-JSON success. | `protocol`, `ok`, `session`, `terminalId`, `activity` |
+| `fleet host list [--json]` | List configured hosts with provider, reachability, daemon link state, version, address, and known agent binaries. | `protocol`, `hosts` |
+| `fleet host doctor <ID>` | Diagnose resolution, SSH/authentication, remote `fleetd`, protocol compatibility, and agent binaries for one host. | — |
+| `fleet host bootstrap <ID> [--ref <GIT_REF>]` | Build and install a matching `fleetd` on the host, restart it, and wait for the federated link. | — |
 | `fleet doctor` | Run environment diagnostics; exits unsuccessfully when any check fails. | — |
 | `fleet import --from-swarm` | Start an import of compatible `~/.swarm/config.json` and `state.json`. | — |
 | `fleet update` | Run self-update, wait for completion, then exit with restart code 75. | — |
@@ -74,7 +111,7 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 
 Commands that accept `--json` emit one compact line using swarm-compatible protocol 1 envelopes.
 Their errors use `{"protocol":1,"error":{"kind":"<kind>","message":"<message>"}}`; other
-commands use human-readable output. This public envelope is separate from daemon IPC version 5;
+commands use human-readable output. This public envelope is separate from daemon IPC version 7;
 neither the bug-fix program nor the native-agent work changed CLI envelope version 1.
 
 ### Board
@@ -291,9 +328,10 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details, logs, and script
 
 ## Status
 
-Fleet v1 is local-only: `fleetd` probes configured remote hosts over SSH every minute and reports
-reachability in the Hub and `fleet doctor`, but remote worktree, session, and repository operations
-are not supported yet. Terminal sessions survive closing the
-app because `fleetd` owns them, but they do not survive a daemon restart. Native agent threads
-do: their transcripts are persisted under `$FLEET_HOME/agents/` and a thread with a provider
-resume cursor is resumed the next time it is opened.
+Fleet supports worktrees, terminal sessions, lifecycle operations, and native Claude/OpenCode
+threads on configured Tailscale hosts through daemon federation. The app and CLI connect only to
+the local `fleetd`; it routes work to the owning host, keeps cached remote inventory visible while
+a host is offline, and resumes routing after the link recovers. Terminal sessions survive closing
+the app because their owning `fleetd` retains them, but they do not survive that daemon restarting.
+Native agent threads do: transcripts live under the owning daemon's `$FLEET_HOME/agents/`, and a
+thread with a provider resume cursor is resumed the next time it is opened.

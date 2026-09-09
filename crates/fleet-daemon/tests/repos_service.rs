@@ -310,6 +310,7 @@ fn init_repository(path: &Path) {
         vec!["commit", "-m", "fixture"],
     ] {
         let status = Command::new("git")
+            .args(["-c", "commit.gpgsign=false"])
             .arg("-C")
             .arg(path)
             .args(args)

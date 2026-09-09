@@ -8,6 +8,28 @@ impl Sessions {
         agent: Option<Agent>,
         sleep_previous: bool,
     ) -> DaemonResult<Session> {
+        self.ensure_with_proxy(worktree, agent, sleep_previous, false)
+            .await
+    }
+
+    /// Ensures a session for a client connected through another Fleet daemon.
+    pub async fn ensure_proxied(
+        &self,
+        worktree: Option<WorktreeId>,
+        agent: Option<Agent>,
+        sleep_previous: bool,
+    ) -> DaemonResult<Session> {
+        self.ensure_with_proxy(worktree, agent, sleep_previous, true)
+            .await
+    }
+
+    async fn ensure_with_proxy(
+        &self,
+        worktree: Option<WorktreeId>,
+        agent: Option<Agent>,
+        sleep_previous: bool,
+        proxied: bool,
+    ) -> DaemonResult<Session> {
         let _worktree_lifecycle = if let Some(worktree) = worktree.as_ref() {
             Some(
                 self.runtime
@@ -26,12 +48,9 @@ impl Sessions {
                     .iter()
                     .find(|entry| entry.id == worktree_id)
                     .ok_or_else(|| DaemonError::NotFound(worktree_id.to_string()))?;
-                if worktree.host.is_some() {
-                    return Err(remote_unsupported());
-                }
                 let session_id = SessionId::try_from(worktree.session.as_str())
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;
-                let specs = default_terminals(&config, config.agent);
+                let specs = default_terminals(&config, config.agent, proxied);
                 (
                     session_id,
                     SessionKind::Worktree(worktree_id),
@@ -50,9 +69,6 @@ impl Sessions {
                     .iter()
                     .find(|entry| entry.id == worktree_id)
                     .ok_or_else(|| DaemonError::NotFound(worktree_id.to_string()))?;
-                if worktree.host.is_some() {
-                    return Err(remote_unsupported());
-                }
                 let session_id = worktree_agent_session_id(&worktree.session, agent)
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;
                 let name = match agent {
@@ -132,6 +148,7 @@ impl Sessions {
                     session_id.clone(),
                     Session {
                         id: session_id.clone(),
+                        host: None,
                         kind: kind.clone(),
                         cwd: cwd.clone(),
                         terminals: Vec::new(),
@@ -260,9 +277,11 @@ impl Sessions {
                     "terminal name `{name}` already exists in session `{session}`"
                 )));
             }
-            let id = TerminalId(registry.next_terminal);
-            registry.next_terminal = registry.next_terminal.saturating_add(1);
-            id
+            let id = self
+                .terminal_id_counter()
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            registry.next_terminal = id.saturating_add(1);
+            TerminalId(id)
         };
 
         let (terminal, host) = spawn_terminal(
@@ -331,8 +350,11 @@ impl Sessions {
                     "terminal name `{name}` already exists in session `{session}`"
                 )));
             }
-            let id = TerminalId(registry.next_terminal);
-            registry.next_terminal = registry.next_terminal.saturating_add(1);
+            let id = self
+                .terminal_id_counter()
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            registry.next_terminal = id.saturating_add(1);
+            let id = TerminalId(id);
             let terminal = Terminal {
                 id,
                 name,

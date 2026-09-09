@@ -368,6 +368,8 @@ impl HubScreen {
             PrProps {
                 pr,
                 local,
+                host: row.host.as_ref(),
+                host_link: row.host_link,
                 status: local.and_then(|worktree| {
                     snapshot
                         .statuses

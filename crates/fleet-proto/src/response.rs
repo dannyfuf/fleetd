@@ -6,7 +6,7 @@ use fleet_core::{
     cache::RepoCache,
     config::Config,
     github::{PrTab, PullRequest},
-    ids::{JobId, WorktreeId},
+    ids::{HostId, JobId, WorktreeId},
     inspection::WorktreeInspection,
     model::{Context, Repo, Worktree},
     sessions::{Session, Terminal, WorktreeStatus},
@@ -41,6 +41,12 @@ pub struct HelloResponse {
     /// Optional behaviors implemented by this daemon build.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Stable identity persisted by the daemon under its Fleet home.
+    #[serde(default)]
+    pub daemon_id: String,
+    /// Source revision baked into the daemon build, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_commit: Option<String>,
 }
 
 /// Stable identity of one running daemon process.
@@ -279,15 +285,21 @@ pub enum ResponseBody {
         post_create_job: Option<Box<JobRecord>>,
     },
     /// Multi-worktree deletion results.
-    WorktreesDeleted(Vec<WorktreeDeleteResult>),
+    WorktreesDeleted(#[serde(default)] Vec<WorktreeDeleteResult>),
     /// Worktree inspection results.
-    Inspections(Vec<WorktreeInspection>),
+    Inspections(#[serde(default)] Vec<WorktreeInspection>),
     /// Safe-prune outcome.
     Pruned(PruneResult),
     /// Session sleep outcome.
     Slept(SleepResult),
-    /// Resolved local worktree path.
-    Path(String),
+    /// Resolved local or remote worktree path.
+    Path {
+        /// Path as interpreted by the owning daemon.
+        path: String,
+        /// Owning host; absent means local.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<HostId>,
+    },
     /// Pull-request query results.
     PullRequests(Vec<PrSlice>),
     /// Refreshed runtime worktree statuses.
@@ -334,6 +346,18 @@ mod tests {
 
     #[test]
     fn successful_and_failed_results_round_trip() {
+        assert_round_trip(HelloResponse {
+            response: Response {
+                id: 8,
+                result: Ok(ResponseBody::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    server: "fleetd test".to_owned(),
+                }),
+            },
+            capabilities: vec![crate::REMOTE_MACHINES_CAPABILITY.to_owned()],
+            daemon_id: "daemon-test".to_owned(),
+            build_commit: Some("abc123".to_owned()),
+        });
         assert_round_trip(Response {
             id: 9,
             result: Ok(ResponseBody::Version {

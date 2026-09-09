@@ -435,3 +435,145 @@ fn editing_a_cached_number_preserves_units_and_other_rows(cx: &mut gpui::TestApp
         });
     });
 }
+
+fn app_with_host_status(status: fleet_proto::snapshot::HostStatus) -> AppState {
+    let mut app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    app.snapshot = Some(fleet_proto::snapshot::Snapshot {
+        boards: Vec::new(),
+        generated_at: String::new(),
+        contexts: Vec::new(),
+        repos: Vec::new(),
+        clones: Vec::new(),
+        worktrees: Vec::new(),
+        active_context: None,
+        sessions: Vec::new(),
+        agent_threads: Vec::new(),
+        statuses: Vec::new(),
+        pools: Vec::new(),
+        hosts: vec![status],
+        jobs: Vec::new(),
+        daemon: fleet_proto::snapshot::DaemonInfo {
+            version: String::new(),
+            pid: 1,
+            started_at: String::new(),
+            home: "/tmp/fleet".to_owned(),
+        },
+    });
+    app
+}
+
+fn host_id(id: &str) -> fleet_core::ids::HostId {
+    fleet_core::ids::HostId::try_from(id).unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn fact_value(row: &SettingRow) -> &str {
+    match &row.kind {
+        RowKind::Fact(value) => value.as_str(),
+        other => panic!("expected a read-only fact, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_hosts_section_renders_the_configured_shape_and_the_live_link() {
+    let mut config = default_config("/tmp/fleet");
+    config.hosts.insert(
+        host_id("devbox"),
+        fleet_core::model::HostConfigEntry::Tailscale {
+            node: "dev-box".to_owned(),
+            user: Some("df".to_owned()),
+            ssh_options: Vec::new(),
+            fleetd: "fleetd".to_owned(),
+            fleet_home: Some("~/.fleet".to_owned()),
+        },
+    );
+    config.default_host = "devbox".to_owned();
+    let app = app_with_host_status(fleet_proto::snapshot::HostStatus {
+        id: host_id("devbox"),
+        provider: "tailscale".to_owned(),
+        version: Some("0.4.0".to_owned()),
+        link: fleet_proto::snapshot::LinkState::Ready,
+        address: Some("100.64.0.2".to_owned()),
+        agent_binaries: None,
+        reachable: true,
+        checked_at: "2026-09-04T12:00:00Z".to_owned(),
+        error: None,
+    });
+
+    let rows = super::schema::host_rows(&config, &app);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].label, "default");
+    assert_eq!(fact_value(&rows[0]), "devbox");
+    assert_eq!(rows[1].label, "devbox");
+    assert_eq!(
+        fact_value(&rows[1]),
+        "tailscale \u{00b7} node dev-box \u{00b7} user df \u{2014} ready \u{00b7} fleetd 0.4.0"
+    );
+    assert!(
+        rows.iter().all(|row| row.id == RowId::ReadOnly),
+        "the hosts section stays read-only (§3.8.6)"
+    );
+}
+
+#[test]
+fn a_legacy_host_is_named_as_one_and_told_to_migrate() {
+    let mut config = default_config("/tmp/fleet");
+    config.hosts.insert(
+        host_id("archdev"),
+        fleet_core::model::HostConfigEntry::Legacy {
+            ssh: "arch-dev".to_owned(),
+            swarm_command: "swarm".to_owned(),
+        },
+    );
+    let app = AppState::new("/tmp/fleet", std::time::Instant::now());
+    let rows = super::schema::host_rows(&config, &app);
+    assert_eq!(fact_value(&rows[0]), "local");
+    assert_eq!(
+        fact_value(&rows[1]),
+        "legacy \u{00b7} ssh arch-dev \u{00b7} swarm \u{2014} legacy entry \u{2014} migrate it to a tailscale host"
+    );
+}
+
+#[test]
+fn an_unreachable_host_reports_the_probe_error_and_a_command_host_its_label() {
+    let mut config = default_config("/tmp/fleet");
+    config.hosts.insert(
+        host_id("devbox"),
+        fleet_core::model::HostConfigEntry::Tailscale {
+            node: "dev-box".to_owned(),
+            user: None,
+            ssh_options: Vec::new(),
+            fleetd: "fleetd".to_owned(),
+            fleet_home: None,
+        },
+    );
+    config.hosts.insert(
+        host_id("loopback"),
+        fleet_core::model::HostConfigEntry::Command {
+            run: vec!["sh".to_owned()],
+            fleetd: "/tmp/fleetd".to_owned(),
+            fleet_home: Some("/tmp/remote".to_owned()),
+            display: Some("loopback".to_owned()),
+        },
+    );
+    let app = app_with_host_status(fleet_proto::snapshot::HostStatus {
+        id: host_id("devbox"),
+        provider: "tailscale".to_owned(),
+        version: None,
+        link: fleet_proto::snapshot::LinkState::Down,
+        address: None,
+        agent_binaries: None,
+        reachable: false,
+        checked_at: "2026-09-04T12:00:00Z".to_owned(),
+        error: Some("ssh: connect timed out after 5s".to_owned()),
+    });
+    let rows = super::schema::host_rows(&config, &app);
+    assert_eq!(
+        fact_value(&rows[1]),
+        "tailscale \u{00b7} node dev-box \u{2014} down \u{00b7} ssh: connect timed out after 5s"
+    );
+    assert_eq!(
+        fact_value(&rows[2]),
+        "command \u{00b7} loopback \u{2014} no status yet",
+        "a configured host the daemon has not probed says so rather than claiming failure"
+    );
+}

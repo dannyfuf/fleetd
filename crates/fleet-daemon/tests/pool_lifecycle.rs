@@ -307,6 +307,7 @@ fn create_repository(root: &Path) -> std::path::PathBuf {
 
 fn run(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
+        .args(["-c", "commit.gpgsign=false"])
         .args(args)
         .current_dir(cwd)
         .output()

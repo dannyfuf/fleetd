@@ -110,6 +110,28 @@ async fn unpushed_head_is_not_false_unknown() {
 }
 
 #[tokio::test]
+async fn selected_missing_worktree_is_reported_as_an_item_error() {
+    let fixture = inspection_fixture().await;
+    let missing =
+        WorktreeId::try_from("acme/api#missing").unwrap_or_else(|error| panic!("{error}"));
+
+    let inspections = fixture
+        .inspect
+        .worktrees(vec![missing.clone()], None, false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(inspections.len(), 1);
+    assert_eq!(inspections[0].worktree_id, missing);
+    assert!(
+        inspections[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not found"))
+    );
+}
+
+#[tokio::test]
 async fn inspect_and_prune_preserve_typed_failures() {
     let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
     let (inspect, jobs, files, state, _) = failing_inspect(temp.path().join("inspect"));
@@ -315,6 +337,7 @@ fn revision(repo: &Path) -> String {
 
 fn run(cwd: &Path, args: &[&str]) {
     let output = Command::new("git")
+        .args(["-c", "commit.gpgsign=false"])
         .args(args)
         .current_dir(cwd)
         .output()
