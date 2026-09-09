@@ -55,6 +55,7 @@ pub struct MultilineInput {
     goal_x: Option<Pixels>,
     /// Whether the composer draws the focus affordance while it holds the focus handle.
     focus_visible: bool,
+    read_only: bool,
 }
 
 impl MultilineInput {
@@ -73,6 +74,7 @@ impl MultilineInput {
             scroll: Pixels::ZERO,
             goal_x: None,
             focus_visible: true,
+            read_only: false,
         }
     }
 
@@ -86,6 +88,20 @@ impl MultilineInput {
             self.focus_visible = visible;
             cx.notify();
         }
+    }
+
+    /// Prevents user edits and submit events while preserving the current draft.
+    pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        if self.read_only != read_only {
+            self.read_only = read_only;
+            cx.notify();
+        }
+    }
+
+    /// Whether user interaction can mutate this composer.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Returns the current composer text.
@@ -157,7 +173,7 @@ impl MultilineInput {
 
     /// `⏎`: emit the current text and clear, unless it is blank.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
-        if self.buffer.is_blank() {
+        if self.read_only || self.buffer.is_blank() {
             return;
         }
         let text = self.buffer.text().to_owned();
@@ -484,6 +500,10 @@ impl MultilineInput {
 
     /// gpui's key-down listener: consume only what the composer owns.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            cx.stop_propagation();
+            return;
+        }
         if self.handle_keystroke(&event.keystroke, cx) {
             cx.stop_propagation();
         }
@@ -496,6 +516,9 @@ impl MultilineInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         window.focus(&self.focus_handle, cx);
         if let Some(bounds) = self.last_bounds {
             let position = point(
@@ -550,7 +573,11 @@ impl Render for MultilineInput {
         div()
             .key_context(MULTILINE_INPUT_KEY_CONTEXT)
             .track_focus(&self.focus_handle)
-            .cursor(CursorStyle::IBeam)
+            .cursor(if self.read_only {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::IBeam
+            })
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .flex()
@@ -637,6 +664,9 @@ impl EntityInputHandler for MultilineInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = self.resolve_range(range_utf16);
         let trigger = self.buffer.trigger_for(range.start, text);
         self.buffer.replace_range(range, text);
@@ -656,6 +686,9 @@ impl EntityInputHandler for MultilineInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = self.resolve_range(range_utf16);
         self.buffer.replace_and_mark(range, new_text);
         if let Some(selected) = new_selected_range_utf16 {
