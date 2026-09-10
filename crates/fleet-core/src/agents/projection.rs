@@ -842,7 +842,16 @@ impl ThreadProjection {
         let Ok(blocked) = u64::try_from(blocked) else {
             return;
         };
-        if let Some(record) = self.turns.iter_mut().find(|record| record.id == owner) {
+        // §5: "turn metadata is withheld until the turn completes, so the footer never moves
+        // under the reader" — and [`TurnRecord::footer`] re-derives the duration from
+        // `blocked_ms` on every read. OpenCode opens the plan gate *inside* turn settlement,
+        // so charging a wait that outlived the turn would shrink a footer the user has already
+        // read, to zero whenever the card sat open longer than the turn ran.
+        if let Some(record) = self
+            .turns
+            .iter_mut()
+            .find(|record| record.id == owner && record.ended.is_none())
+        {
             record.blocked_ms = record.blocked_ms.saturating_add(blocked);
         }
     }
@@ -1336,6 +1345,58 @@ mod tests {
         assert_eq!(
             footer.duration_ms, 42_000,
             "48s wall clock minus the 6s parked"
+        );
+    }
+
+    /// OpenCode opens the plan gate *inside* turn settlement, so the card is still open when
+    /// the turn's footer freezes. Charging the reading time to that turn would move a number
+    /// the user has already read — to zero whenever the plan is read for longer than the turn
+    /// ran — which is the §5 rule the late-`TokenUsage` arm is written to keep.
+    #[test]
+    fn a_gate_opened_at_settlement_does_not_move_a_settled_turn_footer() {
+        let mut projection = projection();
+        let mut events = EventBuilder::new();
+        let turn = turn_id(2);
+        let gate = gate_id(3);
+        start_turn(&mut projection, &mut events, turn, item_id(4), "plan it");
+
+        apply(
+            &mut projection,
+            &mut events,
+            AgentEvent::GateOpened {
+                gate,
+                turn: Some(turn),
+                kind: plan_gate(),
+            },
+        );
+        complete_turn(&mut projection, &mut events, turn);
+        let settled = projection.turns[0]
+            .footer()
+            .unwrap_or_else(|| panic!("a settled turn has a footer"));
+        assert_eq!(settled.duration_ms, 48_000);
+
+        // The user reads the plan for five ticks and then approves it.
+        for _ in 0..5 {
+            apply(
+                &mut projection,
+                &mut events,
+                AgentEvent::Notice("reading".to_owned()),
+            );
+        }
+        apply(
+            &mut projection,
+            &mut events,
+            AgentEvent::GateResolved {
+                gate,
+                answer: GateAnswer::Plan(PlanAnswer::Approve),
+                by: GateResolver::User,
+            },
+        );
+        assert_eq!(projection.turns[0].blocked_ms, 0);
+        assert_eq!(
+            projection.turns[0].footer(),
+            Some(settled),
+            "answering a gate after the turn settled must not rewrite its footer"
         );
     }
 
