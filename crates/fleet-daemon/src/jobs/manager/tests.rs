@@ -549,3 +549,72 @@ async fn extreme_retention_does_not_overflow_date_arithmetic() {
     manager.wait(&id).await.expect("finished");
     assert_eq!(manager.list().len(), 1);
 }
+
+#[tokio::test]
+async fn quiescing_reports_a_job_it_cannot_stop() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    manager.set_quiesce_timeout(StdDuration::from_millis(50));
+    let repo = RepoId::try_from("acme/api").expect("repo id");
+    let _id = manager
+        .submit_for_repo(
+            repo.clone(),
+            JobKind::PostCreateHooks,
+            "acme/api#feature",
+            "Post-create hooks",
+            JobPolicy::new(false, false),
+            |_| async { std::future::pending::<DaemonResult<()>>().await },
+        )
+        .expect("submission");
+
+    let error = tokio::time::timeout(StdDuration::from_secs(4), manager.quiesce_repo(&repo))
+        .await
+        .expect("quiesce must not wait for a job it cannot cancel")
+        .expect_err("a non-cancellable job must be reported");
+
+    assert!(
+        matches!(&error, DaemonError::Conflict(message) if message.contains("acme/api#feature")),
+        "{error}"
+    );
+    // The tombstone taken by the caller is released by its own guard, so the repository stays
+    // usable once the conflict is reported.
+    assert!(manager.ensure_repo_available(&repo).is_ok());
+}
+
+#[tokio::test]
+async fn a_blocked_log_write_does_not_stall_the_job_registry() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    let id = manager.submit(JobKind::Inspect, "all", "Inspect", true, false, |_| async {
+        std::future::pending::<DaemonResult<()>>().await
+    });
+    // A FIFO nobody reads parks the next log write inside `open(2)`, standing in for the slow
+    // or networked filesystem this daemon's home may live on.
+    let fifo = temp.path().join("blocking.log");
+    let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(fifo.as_os_str()))
+        .expect("fifo path");
+    // SAFETY: the NUL-terminated path stays valid for the duration of the call.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    {
+        let mut state = lock(&manager.inner.state);
+        let job = state.job_mut(&id).expect("submitted job");
+        job.record.log_path = fifo.to_string_lossy().into_owned();
+        *lock(&job.log) = None;
+    }
+
+    let writer = manager.clone();
+    let logged = id.clone();
+    let _blocked =
+        std::thread::spawn(move || writer.record_progress(&logged, "blocked".to_owned()));
+    tokio::time::sleep(StdDuration::from_millis(50)).await;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let probe = manager.clone();
+    let _prober = std::thread::spawn(move || {
+        let _ignored = sender.send(probe.list().len());
+    });
+    let listed = receiver
+        .recv_timeout(StdDuration::from_secs(2))
+        .expect("listing jobs must not block behind a job log write");
+    assert_eq!(listed, 1);
+}

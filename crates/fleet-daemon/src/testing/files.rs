@@ -10,7 +10,7 @@ use std::{
 use super::lock;
 use crate::{
     DaemonError, DaemonResult,
-    adapters::files::{FileKind, FileMetadata, Files},
+    adapters::files::{FileKind, FileMetadata, FileRevision, Files},
 };
 
 /// A captured fake filesystem operation.
@@ -87,6 +87,16 @@ impl Tree {
         } else {
             Err(failure(path, io::ErrorKind::NotFound))
         }
+    }
+
+    /// Every insertion takes a new identity, so it doubles as the file's revision.
+    fn revision(&self, path: &Path) -> DaemonResult<FileRevision> {
+        let identity = self
+            .file_identities
+            .get(path)
+            .ok_or_else(|| failure(path, io::ErrorKind::NotFound))?;
+        let len = self.files.get(path).map_or(0, |text| text.len() as u64);
+        Ok(FileRevision::fake(*identity, len))
     }
 
     fn insert_file(&mut self, path: PathBuf, text: String) {
@@ -342,6 +352,10 @@ impl Files for FakeFiles {
         tree.files.remove(path);
         tree.file_identities.remove(path);
         Ok(())
+    }
+
+    fn revision(&self, path: &Path) -> DaemonResult<FileRevision> {
+        lock(&self.tree).revision(path)
     }
 
     fn metadata(&self, path: &Path) -> DaemonResult<FileMetadata> {

@@ -10,7 +10,7 @@ use std::{
     future::Future,
     io::{BufWriter, Write},
     panic::AssertUnwindSafe,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     time::Duration as StdDuration,
@@ -38,10 +38,14 @@ struct ManagedJob {
     cancel: CancellationToken,
     cancellable: bool,
     retry: Option<RetryOperation>,
-    log: Option<BufWriter<File>>,
+    log: JobLog,
     repos: Vec<RepoId>,
     all_repos: bool,
 }
+
+/// A job's buffered log writer, held outside the registry lock so its IO never blocks the
+/// registry: writers take this mutex, everything else takes `JobManagerInner::state`.
+type JobLog = Arc<Mutex<Option<BufWriter<File>>>>;
 
 type JobFuture = Pin<Box<dyn Future<Output = DaemonResult<()>> + Send>>;
 type RetryOperation = Arc<dyn Fn(JobCtx) -> JobFuture + Send + Sync>;
@@ -120,7 +124,14 @@ struct JobManagerInner {
     retention: Mutex<RetentionPolicy>,
     cancellation_grace: Mutex<StdDuration>,
     cleanup_grace: Mutex<StdDuration>,
+    quiesce_timeout: Mutex<StdDuration>,
 }
+
+/// Longest `quiesce_repo` waits for one active job before reporting it.
+///
+/// Kept well under the client's ten-second request timeout so a repository deletion blocked by a
+/// non-cancellable job answers with a conflict instead of a transport timeout.
+const QUIESCE_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
 /// Detached background-job registry, scheduler resources, and progress log owner.
 #[derive(Clone)]
@@ -160,6 +171,7 @@ impl JobManager {
                 }),
                 cancellation_grace: Mutex::new(StdDuration::from_secs(3)),
                 cleanup_grace: Mutex::new(StdDuration::from_secs(3)),
+                quiesce_timeout: Mutex::new(QUIESCE_TIMEOUT),
             }),
         }
     }
@@ -368,7 +380,7 @@ impl JobManager {
                     cancel: cancel.clone(),
                     cancellable,
                     retry,
-                    log: None,
+                    log: JobLog::default(),
                     repos,
                     all_repos,
                 },
@@ -571,6 +583,11 @@ impl JobManager {
         *lock(&self.inner.cleanup_grace) = cleanup_grace;
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_quiesce_timeout(&self, quiesce_timeout: StdDuration) {
+        *lock(&self.inner.quiesce_timeout) = quiesce_timeout;
+    }
+
     /// Returns one retained job record.
     #[must_use]
     pub fn record(&self, id: &JobId) -> Option<JobRecord> {
@@ -672,8 +689,27 @@ impl JobManager {
                 let _ignored = self.cancel(&job.id);
             }
         }
+        let deadline = tokio::time::Instant::now() + *lock(&self.inner.quiesce_timeout);
         for job in active {
-            let _record = self.wait(&job.id).await?;
+            match tokio::time::timeout_at(deadline, self.wait(&job.id)).await {
+                Ok(record) => {
+                    let _record = record?;
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        job = %job.id,
+                        target = %job.target,
+                        %repo,
+                        "job did not quiesce before the deadline"
+                    );
+                    // Reporting instead of proceeding keeps the caller from deleting a tree a
+                    // non-cancellable job is still working in; its guard drops the tombstone.
+                    return Err(DaemonError::Conflict(format!(
+                        "{} for {} is still running",
+                        job.title, job.target
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -714,17 +750,12 @@ impl JobManager {
         if let Err(error) = self.append_log_line(id, Some(&outcome)) {
             tracing::warn!(%error, job = %id, "failed to append terminal job status");
         }
-        let changed = {
+        let (changed, log) = {
             let mut state = lock(&self.inner.state);
-            let (key, changed) = {
+            let (key, changed, log) = {
                 let Some(job) = state.jobs.get_mut(id) else {
                     return;
                 };
-                if let Some(mut log) = job.log.take()
-                    && let Err(error) = log.flush()
-                {
-                    tracing::warn!(%error, job = %id, "failed to flush job log");
-                }
                 job.record.status = status;
                 if matches!(job.record.status, JobStatus::Succeeded) {
                     job.retry = None;
@@ -734,13 +765,21 @@ impl JobManager {
                 (
                     (job.record.kind.clone(), job.record.target.clone()),
                     job.record.clone(),
+                    Arc::clone(&job.log),
                 )
             };
             if state.in_flight_targets.get(&key) == Some(id) {
                 state.in_flight_targets.remove(&key);
             }
-            changed
+            (changed, log)
         };
+        // The final flush happens without the registry lock, and before the terminal record is
+        // published, so a subscriber that reads the log still sees every line.
+        if let Some(mut log) = lock(&log).take()
+            && let Err(error) = log.flush()
+        {
+            tracing::warn!(%error, job = %id, "failed to flush job log");
+        }
         let _receivers = self.inner.updates.send(changed);
         self.prune(finished);
     }

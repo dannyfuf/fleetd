@@ -57,6 +57,29 @@ impl FileMetadata {
     }
 }
 
+/// Observable revision of a file: it changes when the bytes may have changed, whether the file
+/// was replaced by a rename or rewritten in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRevision {
+    identity: FileIdentity,
+    len: u64,
+    modified: (i64, i64),
+}
+
+impl FileRevision {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn fake(identity: u64, len: u64) -> Self {
+        Self {
+            identity: FileIdentity {
+                device: 0,
+                inode: identity,
+            },
+            len,
+            modified: (0, 0),
+        }
+    }
+}
+
 /// Filesystem operations used by stores and domain services.
 pub trait Files: Send + Sync {
     /// Reads an entire UTF-8 text file.
@@ -75,6 +98,16 @@ pub trait Files: Send + Sync {
     fn remove_detached(&self, path: &Path) -> DaemonResult<()>;
     /// Removes one file when it exists.
     fn remove_file(&self, path: &Path) -> DaemonResult<()>;
+    /// Returns a value that changes whenever a file's content may have changed.
+    ///
+    /// Callers cache a parse against it; an adapter that cannot observe revisions returns an
+    /// error and its callers simply reload every time.
+    fn revision(&self, path: &Path) -> DaemonResult<FileRevision> {
+        Err(DaemonError::Validation(format!(
+            "file revisions are unsupported for {}",
+            path.display()
+        )))
+    }
     /// Inspects one entry without following symlinks.
     fn metadata(&self, path: &Path) -> DaemonResult<FileMetadata> {
         Err(DaemonError::Validation(format!(
@@ -390,6 +423,18 @@ impl Files for RealFiles {
         }
     }
 
+    fn revision(&self, path: &Path) -> DaemonResult<FileRevision> {
+        let metadata = fs::metadata(path).map_err(|error| DaemonError::fs(path, error))?;
+        Ok(FileRevision {
+            identity: FileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
+            len: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+        })
+    }
+
     fn metadata(&self, path: &Path) -> DaemonResult<FileMetadata> {
         fs::symlink_metadata(path)
             .map(|metadata| file_metadata(&metadata))
@@ -534,6 +579,8 @@ fn metadata_at(parent: &File, name: &CStr) -> std::io::Result<FileMetadata> {
     Ok(FileMetadata {
         kind,
         identity: FileIdentity {
+            // `st_dev` is `u64` on Linux and `i32` on macOS; the cast is load-bearing there.
+            #[allow(clippy::unnecessary_cast)]
             device: stat.st_dev as u64,
             inode: stat.st_ino,
         },

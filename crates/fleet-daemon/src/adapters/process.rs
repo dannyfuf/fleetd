@@ -219,6 +219,7 @@ fn read_macos_environment(pid: u32) -> DaemonResult<Vec<(String, String)>> {
     parse_macos_procargs(&bytes)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_macos_procargs(bytes: &[u8]) -> DaemonResult<Vec<(String, String)>> {
     let argc_bytes: [u8; std::mem::size_of::<i32>()] = bytes
         .get(..std::mem::size_of::<i32>())
@@ -238,6 +239,7 @@ fn parse_macos_procargs(bytes: &[u8]) -> DaemonResult<Vec<(String, String)>> {
     Ok(parse_environment_entries(&bytes[cursor..]))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn skip_nul_terminated(bytes: &[u8], cursor: usize, field: &str) -> DaemonResult<usize> {
     let end = bytes[cursor..]
         .iter()
