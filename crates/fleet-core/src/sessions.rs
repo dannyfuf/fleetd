@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    agents::AttentionKind,
     config::{Agent, Config},
     ids::{HostId, IdError, SessionId, TerminalId, WorktreeId},
 };
@@ -111,6 +112,9 @@ pub struct Terminal {
     /// Whether output arrived since the owning client last selected this terminal.
     #[serde(default)]
     pub has_unseen_output: bool,
+    /// Authoritative hook-supplied reason this PTY needs the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_attention: Option<AttentionKind>,
     /// Whether a process or the client provides this terminal's content.
     ///
     /// Older snapshots without this field describe PTY terminals.
@@ -153,7 +157,7 @@ pub enum AgentActivity {
     Unknown,
     /// The agent is producing output or was explicitly marked as working.
     Working,
-    /// The live agent is quiet and waiting for the user.
+    /// The live agent is quiet; this heuristic does not itself imply user attention.
     Idle,
 }
 
@@ -173,7 +177,10 @@ pub struct WorktreeWindowStatus {
     pub agent: Option<String>,
     /// Current activity of the recognized agent.
     pub agent_activity: AgentActivity,
-    /// ISO-8601 time when `agent_activity` last changed.
+    /// Authoritative reason this terminal needs the user, when supplied by an agent hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_attention: Option<AttentionKind>,
+    /// ISO-8601 time when activity or attention last changed.
     pub agent_activity_changed_at: Option<String>,
 }
 
@@ -289,6 +296,7 @@ mod tests {
             keep_alive: Vec::new(),
             agent: Some("claude".to_owned()),
             agent_activity: activity,
+            agent_attention: None,
             agent_activity_changed_at: changed_at.map(str::to_owned),
         }
     }
@@ -333,6 +341,47 @@ mod tests {
         assert_eq!(value["agentActivityChangedAt"], "2026-09-05T14:00:00Z");
         assert_eq!(value["windows"][0]["agent"], "claude");
         assert_eq!(value["windows"][0]["agentActivity"], "idle");
+        assert!(value["windows"][0].get("agentAttention").is_none());
+    }
+
+    #[test]
+    fn terminal_attention_is_optional_and_legacy_snapshots_default_to_none() {
+        let mut value = serde_json::to_value(window(AgentActivity::Idle, None))
+            .unwrap_or_else(|error| panic!("{error}"));
+        value["agentAttention"] = serde_json::json!("permission");
+        let with_attention: WorktreeWindowStatus =
+            serde_json::from_value(value).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            with_attention.agent_attention,
+            Some(AttentionKind::Permission)
+        );
+
+        let legacy = serde_json::json!({
+            "index": 0,
+            "name": "agent",
+            "command": "claude",
+            "keepAlive": [],
+            "agent": "claude",
+            "agentActivity": "idle",
+            "agentActivityChangedAt": null
+        });
+        let legacy: WorktreeWindowStatus =
+            serde_json::from_value(legacy).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(legacy.agent_attention, None);
+
+        let legacy_terminal = serde_json::json!({
+            "id": 1,
+            "name": "agent",
+            "command": "claude",
+            "cwd": "/tmp",
+            "status": "running",
+            "keepAlive": [],
+            "hasUnseenOutput": false,
+            "kind": "pty"
+        });
+        let legacy_terminal: Terminal =
+            serde_json::from_value(legacy_terminal).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(legacy_terminal.agent_attention, None);
     }
 
     /// The names and their order are what `ctrl-s <n>` counts; they never move.

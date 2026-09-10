@@ -71,25 +71,48 @@ pub fn running_jobs(jobs: &[JobRecord]) -> Vec<&JobRecord> {
         .collect()
 }
 
-/// Aggregate activity keyed by the real session id represented in a snapshot.
-fn snapshot_agent_activities(
+fn aggregate_agent_attention(
+    windows: &[fleet_core::sessions::WorktreeWindowStatus],
+) -> Option<AttentionKind> {
+    highest_agent_attention(windows.iter().filter_map(|window| window.agent_attention))
+}
+
+fn aggregate_session_agent_attention(session: &Session) -> Option<AttentionKind> {
+    highest_agent_attention(
+        session
+            .terminals
+            .iter()
+            .filter_map(|terminal| terminal.agent_attention),
+    )
+}
+
+fn highest_agent_attention(
+    attention: impl Iterator<Item = AttentionKind>,
+) -> Option<AttentionKind> {
+    attention.max_by_key(|kind| fleet_core::agents::Attention::NeedsYou(*kind).rank())
+}
+
+/// Aggregate terminal-agent state keyed by the real session id represented in a snapshot.
+fn snapshot_agent_states(
     snapshot: &Snapshot,
-) -> impl Iterator<Item = (&SessionId, AgentActivity)> {
+) -> impl Iterator<Item = (&SessionId, AgentActivity, Option<AttentionKind>)> {
     let mut statuses = HashMap::with_capacity(snapshot.statuses.len());
     for status in &snapshot.statuses {
-        statuses
-            .entry(&status.worktree_id)
-            .or_insert(status.agent_activity);
+        statuses.entry(&status.worktree_id).or_insert((
+            status.agent_activity,
+            aggregate_agent_attention(&status.windows),
+        ));
     }
-    snapshot.sessions.iter().filter_map(move |session| {
-        let SessionKind::Worktree(worktree) = &session.kind else {
-            return None;
+    snapshot.sessions.iter().map(move |session| {
+        let (activity, status_attention) = match &session.kind {
+            SessionKind::Worktree(worktree) => statuses
+                .get(worktree)
+                .copied()
+                .unwrap_or((AgentActivity::Unknown, None)),
+            SessionKind::Agent(_) => (AgentActivity::Unknown, None),
         };
-        let activity = statuses
-            .get(worktree)
-            .copied()
-            .unwrap_or(AgentActivity::Unknown);
-        Some((&session.id, activity))
+        let attention = aggregate_session_agent_attention(session).or(status_attention);
+        (&session.id, activity, attention)
     })
 }
 
@@ -100,21 +123,28 @@ fn patch_snapshot_agent_activity(
     terminal_id: TerminalId,
     agent: Option<String>,
     activity: AgentActivity,
+    attention: Option<AttentionKind>,
     changed_at: String,
-) -> Option<AgentActivity> {
-    let (worktree, index) = {
+) -> Option<(AgentActivity, Option<AttentionKind>)> {
+    let (worktree, index, session_attention) = {
         let session = snapshot
             .sessions
-            .iter()
+            .iter_mut()
             .find(|candidate| &candidate.id == session)?;
-        let SessionKind::Worktree(worktree) = &session.kind else {
-            return None;
-        };
         let index = session
             .terminals
             .iter()
             .position(|terminal| terminal.id == terminal_id)?;
-        (worktree.clone(), u32::try_from(index).ok()?)
+        session.terminals[index].agent_attention = attention;
+        let session_attention = aggregate_session_agent_attention(session);
+        let SessionKind::Worktree(worktree) = &session.kind else {
+            return Some((activity, session_attention));
+        };
+        (
+            worktree.clone(),
+            u32::try_from(index).ok()?,
+            session_attention,
+        )
     };
     let status = snapshot
         .statuses
@@ -126,11 +156,15 @@ fn patch_snapshot_agent_activity(
         .find(|window| window.index == index)?;
     window.agent = agent;
     window.agent_activity = activity;
+    window.agent_attention = attention;
     window.agent_activity_changed_at = Some(changed_at);
     let (aggregate, changed_at) = aggregate_agent_activity(&status.windows);
     status.agent_activity = aggregate;
     status.agent_activity_changed_at = changed_at;
-    Some(aggregate)
+    Some((
+        aggregate,
+        aggregate_agent_attention(&status.windows).or(session_attention),
+    ))
 }
 
 /// The dwell of a kit toast duration, as milliseconds are a theme token the state cannot read.
@@ -149,7 +183,8 @@ impl AppState {
     pub fn session_agent_activity(&self, session: &SessionId) -> AgentActivity {
         self.last_agent_activity
             .get(session)
-            .map_or(AgentActivity::Unknown, |(activity, _)| *activity)
+            .copied()
+            .unwrap_or(AgentActivity::Unknown)
     }
 
     /// Records a toast under the §2.7 law.
@@ -190,58 +225,38 @@ impl AppState {
     }
 
     /// Replaces agent-activity baselines without presenting historical completions.
-    pub(super) fn seed_agent_activity(&mut self, snapshot: &Snapshot, now: Instant) {
+    pub(super) fn seed_agent_activity(&mut self, snapshot: &Snapshot, _now: Instant) {
         self.agents.seed(&snapshot.agent_threads);
-        self.last_agent_activity = snapshot_agent_activities(snapshot)
-            .map(|(session, activity)| (session.clone(), (activity, now)))
+        self.last_agent_activity = snapshot_agent_states(snapshot)
+            .map(|(session, activity, _)| (session.clone(), activity))
+            .collect();
+        self.last_agent_attention = snapshot_agent_states(snapshot)
+            .map(|(session, _, attention)| (session.clone(), attention))
             .collect();
     }
 
-    /// Records one aggregate activity observation and returns whether it completed real work.
-    fn observe_agent_activity(
-        &mut self,
-        session: SessionId,
-        activity: AgentActivity,
-        now: Instant,
-    ) -> bool {
-        let finished = self
-            .last_agent_activity
-            .get(&session)
-            .is_some_and(|(previous, seen_at)| {
-                *previous == AgentActivity::Working
-                    && activity == AgentActivity::Idle
-                    && now.saturating_duration_since(*seen_at) >= AGENT_FINISH_MIN_WORKING
-            });
-        match self.last_agent_activity.get_mut(&session) {
-            Some((previous, _)) if *previous == activity => {}
-            Some(entry) => *entry = (activity, now),
-            None => {
-                self.last_agent_activity.insert(session, (activity, now));
-            }
-        }
-        finished
+    /// Records status-only heuristic activity. It never creates user notifications.
+    fn observe_agent_activity(&mut self, session: SessionId, activity: AgentActivity) {
+        self.last_agent_activity.insert(session, activity);
     }
 
-    /// Presents an agent completion through each enabled notification channel.
-    fn notify_agent_finished(&mut self, label: &str, now: Instant) {
-        if self.notifications.toast {
-            self.toast(
-                Toast::new(format!("{label}: agent finished"))
-                    .icon(Icon::CircleCheck)
-                    .tone(Tone::Success),
-                now,
-                dwell_for(ToastDuration::Normal),
-            );
-        }
-        if self.notifications.sound {
-            self.notification_sound.play();
-        }
+    /// Records semantic attention and returns a new reason exactly once per session edge.
+    fn observe_agent_attention(
+        &mut self,
+        session: SessionId,
+        attention: Option<AttentionKind>,
+    ) -> Option<AttentionKind> {
+        let previous = self
+            .last_agent_attention
+            .insert(session, attention)
+            .flatten();
+        attention.filter(|attention| Some(*attention) != previous)
     }
 
     /// Presents one native-agent attention edge through the same channels (§9, §3.3).
     ///
-    /// A structured thread knows exactly why it wants the user, so the copy names it instead of
-    /// the terminal path's single "agent finished"; the channels themselves are unchanged.
+    /// Both structured threads and explicit terminal hooks know why they want the user, so the
+    /// copy names that shared reason and the notification channels remain unchanged.
     pub(super) fn notify_agent_thread(
         &mut self,
         label: &str,
@@ -287,37 +302,45 @@ impl AppState {
         }
     }
 
-    /// Compares all aggregate session activities in a full snapshot.
+    /// Compares all aggregate terminal-agent state in a full snapshot.
     pub(super) fn observe_snapshot_agent_activity(&mut self, snapshot: &Snapshot, now: Instant) {
         let live: HashSet<_> = snapshot
             .sessions
             .iter()
             .map(|session| &session.id)
             .collect();
-        let mut finished = Vec::new();
-        for (session, activity) in snapshot_agent_activities(snapshot) {
-            if self.observe_agent_activity(session.clone(), activity, now) {
-                finished.push(session);
+        let mut attention_edges = Vec::new();
+        for (session, activity, attention) in snapshot_agent_states(snapshot) {
+            self.observe_agent_activity(session.clone(), activity);
+            if let Some(attention) = self.observe_agent_attention(session.clone(), attention) {
+                attention_edges.push((session, attention));
             }
         }
         self.last_agent_activity
             .retain(|session, _| live.contains(session));
-        for session in finished {
-            self.notify_agent_finished(session.as_str(), now);
+        self.last_agent_attention
+            .retain(|session, _| live.contains(session));
+        for (session, attention) in attention_edges {
+            self.notify_agent_thread(
+                session.as_str(),
+                fleet_core::agents::Attention::NeedsYou(attention),
+                now,
+            );
         }
     }
 
-    /// Applies one terminal activity edge and presents a qualifying aggregate completion.
+    /// Applies one terminal status/attention edge and presents only semantic attention.
     pub fn apply_agent_activity(
         &mut self,
         session: SessionId,
         terminal_id: TerminalId,
         agent: Option<String>,
-        activity: AgentActivity,
+        state: (AgentActivity, Option<AttentionKind>),
         changed_at: String,
         now: Instant,
     ) {
-        let aggregate = self
+        let (activity, attention) = state;
+        let (aggregate, attention) = self
             .snapshot
             .as_mut()
             .and_then(|snapshot| {
@@ -327,12 +350,18 @@ impl AppState {
                     terminal_id,
                     agent,
                     activity,
+                    attention,
                     changed_at,
                 )
             })
-            .unwrap_or(activity);
-        if self.observe_agent_activity(session.clone(), aggregate, now) {
-            self.notify_agent_finished(session.as_str(), now);
+            .unwrap_or((activity, attention));
+        self.observe_agent_activity(session.clone(), aggregate);
+        if let Some(attention) = self.observe_agent_attention(session.clone(), attention) {
+            self.notify_agent_thread(
+                session.as_str(),
+                fleet_core::agents::Attention::NeedsYou(attention),
+                now,
+            );
         }
     }
 

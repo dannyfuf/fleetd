@@ -3,6 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use fleet_core::{
+    agents::AttentionKind,
     config::WindowConfig,
     ids::{ContextId, RepoId, SessionId, TerminalId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
@@ -84,6 +85,7 @@ async fn explicit_agent_activity_updates_status_and_emits_one_transition_and_sna
             session: session_id.clone(),
             terminal_id,
             activity: AgentActivity::Idle,
+            attention: Some(AttentionKind::Finished),
         })
         .await
         .unwrap_or_else(|error| panic!("{error}"));
@@ -99,6 +101,7 @@ async fn explicit_agent_activity_updates_status_and_emits_one_transition_and_sna
             session: ref event_session,
             terminal_id: event_terminal,
             activity: AgentActivity::Idle,
+            attention: Some(AttentionKind::Finished),
             ..
         } if event_session == &session_id && event_terminal == terminal_id
     ));
@@ -112,6 +115,14 @@ async fn explicit_agent_activity_updates_status_and_emits_one_transition_and_sna
     };
     assert_eq!(snapshot.statuses[0].agent_activity, AgentActivity::Idle);
     assert_eq!(
+        snapshot.sessions[0].terminals[0].agent_attention,
+        Some(AttentionKind::Finished)
+    );
+    assert_eq!(
+        snapshot.statuses[0].windows[0].agent_attention,
+        Some(AttentionKind::Finished)
+    );
+    assert_eq!(
         snapshot.statuses[0].windows[0].agent_activity,
         AgentActivity::Idle
     );
@@ -121,6 +132,7 @@ async fn explicit_agent_activity_updates_status_and_emits_one_transition_and_sna
             session: session_id.clone(),
             terminal_id,
             activity: AgentActivity::Idle,
+            attention: Some(AttentionKind::Finished),
         })
         .await
         .unwrap_or_else(|error| panic!("{error}"));
@@ -130,6 +142,7 @@ async fn explicit_agent_activity_updates_status_and_emits_one_transition_and_sna
             .is_err(),
         "unchanged explicit activity emitted another event"
     );
+
     services
         .sessions
         .kill(session_id)

@@ -77,13 +77,30 @@ pub(super) fn state_with_recording_sound(now: Instant) -> (AppState, Arc<AtomicU
 }
 
 pub(super) fn agent_snapshot(entries: &[(&str, &str, u64, AgentActivity)]) -> Snapshot {
+    let entries = entries
+        .iter()
+        .map(|(session, slug, terminal, activity)| (*session, *slug, *terminal, *activity, None))
+        .collect::<Vec<_>>();
+    agent_attention_snapshot(&entries)
+}
+
+pub(super) fn agent_attention_snapshot(
+    entries: &[(
+        &str,
+        &str,
+        u64,
+        AgentActivity,
+        Option<fleet_core::agents::AttentionKind>,
+    )],
+) -> Snapshot {
     let mut snapshot = snapshot();
-    for (session_id, slug, terminal_id, activity) in entries {
+    for (session_id, slug, terminal_id, activity, attention) in entries {
         let worktree_id: fleet_core::ids::WorktreeId = format!("buk/payroll#{slug}")
             .parse()
             .unwrap_or_else(|error| panic!("{error}"));
         let mut session = session_with(session_id, &[*terminal_id]);
         session.kind = SessionKind::Worktree(worktree_id.clone());
+        session.terminals[0].agent_attention = *attention;
         snapshot.sessions.push(session);
         snapshot.worktrees.push(Worktree {
             id: worktree_id.clone(),
@@ -110,6 +127,7 @@ pub(super) fn agent_snapshot(entries: &[(&str, &str, u64, AgentActivity)]) -> Sn
                 keep_alive: vec!["claude".to_owned()],
                 agent: Some("claude".to_owned()),
                 agent_activity: *activity,
+                agent_attention: *attention,
                 agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
             }],
             running: vec!["claude".to_owned()],
@@ -121,11 +139,21 @@ pub(super) fn agent_snapshot(entries: &[(&str, &str, u64, AgentActivity)]) -> Sn
 }
 
 pub(super) fn agent_event(session: &str, terminal_id: u64, activity: AgentActivity) -> Event {
+    agent_attention_event(session, terminal_id, activity, None)
+}
+
+pub(super) fn agent_attention_event(
+    session: &str,
+    terminal_id: u64,
+    activity: AgentActivity,
+    attention: Option<fleet_core::agents::AttentionKind>,
+) -> Event {
     Event::AgentActivityChanged {
         session: session.parse().unwrap_or_else(|error| panic!("{error}")),
         terminal_id: TerminalId(terminal_id),
         agent: Some("claude".to_owned()),
         activity,
+        attention,
         changed_at: "2026-09-05T12:00:00Z".to_owned(),
     }
 }
@@ -188,6 +216,7 @@ pub(super) fn session_with(id: &str, terminals: &[u64]) -> fleet_core::sessions:
                 title: None,
                 keep_alive: Vec::new(),
                 has_unseen_output: false,
+                agent_attention: None,
                 kind: fleet_core::sessions::TerminalKind::Pty,
             })
             .collect(),

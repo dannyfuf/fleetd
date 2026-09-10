@@ -186,7 +186,8 @@ Terminal `Palette(u8)` colors resolve through a theme palette table shipped with
 | `none` | **`dot` at 30 % opacity** | `fg.faint` | `no session` |
 | `unknown` | `circle-help` | **amber** | `unknown — <reason>` |
 | agent working | `loader-circle` (spin) | amber | `Agent working` |
-| agent finished | `circle-check` | green | `Agent finished — waiting for you` |
+| terminal agent idle | `circle-check` | green | `Agent idle` (status only; no notification) |
+| terminal agent needs you | existing amber tab dot plus the activity glyph | amber | hook-reported permission, question, plan, or finished attention |
 | degraded (hooks failed, §6) | `triangle-alert` | amber | `post-create hooks failed — J for log` |
 | job running on this row | `loader-circle` (spin) | amber | job kind + phase |
 | clone in flight (`CloneJob.status`) | `loader-circle` (spin) | amber | `cloning…` |
@@ -232,6 +233,7 @@ that would drift. Consequences today:
 | Action refused, with the reason | `Nothing to prune in payroll — 11 skipped · J for reasons` | 3.2 s | `info` |
 | Duplicate action suppressed | `Already running` | 1.6 s | `info` |
 | Mode no-op | `no scrollback in alt-screen` | 1.6 s | `chevrons-up` |
+| Terminal agent attention | `<session>: needs permission` / `asks a question` / `proposed a plan` / `agent finished` | 3.2 s | `lock` / `circle-question-mark` / `clipboard-check` / `circle-check` |
 
 **Never a toast:** job started, job succeeded when its row is on screen, worktree created,
 PR refreshed, context switched, session opened, settings saved, update available, **and any
@@ -714,7 +716,8 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Attaching | one dim centered line `attaching…`; key/paste input retains an ordered prefix capped at 1,024 events and 1 MiB, rejects newer overflow, and flushes only after the first valid frame. Attach has one absolute 5 s deadline; failure is sticky, already-expired work cannot resize, and no post-deadline result can claim the terminal. |
 | Attached | normal |
 | Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the header reads `waking…` for ≤ 1.5 s |
-| Recognized agent working / finished | the agent terminal shows an amber spinning `loader-circle` / green `circle-check`; the header uses the same aggregate state |
+| Recognized terminal agent working / idle | the agent terminal shows an amber spinning `loader-circle` / green `circle-check`; this heuristic status is glyph-only and never toasts or plays a sound |
+| Terminal agent hook attention | the PTY tab keeps the same static amber `NeedsYou` dot used by native tabs, including while selected; each session edge into permission, question, plan, or finished uses the configured toast/sound channels once |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
 | Native tab selected | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard" |
@@ -1637,6 +1640,7 @@ version-1 config/state and older IPC payloads remain readable.
 | C8 | `WorktreeStatus.session` must be set to `unknown` — **never `none`** — whenever the local status observation fails, matching the remote path | Directly retires the §9 defect. This is a daemon behavior requirement, not a type change. |
 | C9 | `PruneWorktrees { …, ids: Option<Vec<WorktreeId>> }`, defaulted and omitted when absent | `None` preserves legacy repo-scoped discovery; confirm commits `Some(exact displayed DELETE ids)`, and daemon reinspection may shrink but never expand that authority. |
 | C10 | `Snapshot { agent_threads: Vec<AgentThreadSummary> }` (`#[serde(default)]`), the eleven `Agent*` requests with their `AgentThreads` / `AgentThreadCreated` / `AgentThreadSnapshot` / `AgentAck` answers, and the `Agent` / `AgentSummary` events | §3.6.0's tab marks, §2.3's agent chips and the session-header word are all one derived `Attention` carried in the summary, so the strip, the header and the chips cannot disagree. `AgentMarkSeen` is what clears a finished turn's amber dot. IPC becomes version 6; the defaulted snapshot field keeps version-4 payloads readable. |
+| C11 | Optional/defaulted `AttentionKind` on terminal `SetAgentActivity`, `AgentActivityChanged`, `Terminal.agent_attention`, and `WorktreeWindowStatus.agent_attention` | PTY hooks and native threads share permission/question/plan/finished vocabulary. Silence-driven idle remains status-only; hook attention alone can notify. |
 
 ---
 

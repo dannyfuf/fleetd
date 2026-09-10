@@ -254,6 +254,13 @@ when the user views the tab (the app reports `last_seen_seq`). A thread the user
 opened is not unread. Broader worktree states win over agent states: offline > job phase >
 agent state > session state.
 
+The PTY fallback reuses only the `AttentionKind` vocabulary and the amber `NeedsYou` tab mark;
+it does not imitate this reducer. Terminal silence remains a best-effort working/idle glyph and
+never completes a turn or sends a notification. Only an explicit `fleet agent-status
+permission|question|plan|finished` hook creates PTY attention, and repeated snapshots/events with
+the same session attention do not re-notify. Native completion authority and seen-cursor behavior
+remain unchanged.
+
 Transition rules, all copied from t3code because each one closes a real race:
 
 1. `Running` is set only by `TurnStarted` from the adapter, which emits it at submission, not

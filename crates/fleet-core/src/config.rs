@@ -174,13 +174,13 @@ pub enum CloneProtocol {
     Https,
 }
 
-/// Agent-finished notification settings.
+/// Semantic agent-attention notification settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NotificationsConfig {
-    /// Whether an agent-finished toast is shown.
+    /// Whether an agent-attention toast is shown.
     pub toast: bool,
-    /// Whether an agent-finished sound is played.
+    /// Whether an agent-attention sound is played.
     pub sound: bool,
 }
 
@@ -201,7 +201,7 @@ pub struct UiConfig {
     pub status_refresh_ms: i64,
     /// Remote status refresh interval in milliseconds.
     pub remote_status_refresh_ms: i64,
-    /// Agent-finished notification channels.
+    /// Agent-attention notification channels.
     #[serde(default)]
     pub notifications: NotificationsConfig,
 }

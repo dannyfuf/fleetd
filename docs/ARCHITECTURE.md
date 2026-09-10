@@ -132,6 +132,18 @@ preimage, stash drop carries the stash OID rather than only a mutable index, and
 distinguishes revert from merge/rebase. The backend revalidates those identities immediately
 before mutation; merged status comes from commit reachability.
 
+## Terminal agent status and attention
+
+PTY output counters are sampled every 500 ms. `AgentActivityTracker` turns real non-echo output
+into `Working` and 2.5 seconds of silence into `Idle`; those heuristic states drive glyphs only.
+They never authorize a toast or sound. `fleet agent-status` is the authoritative terminal-attention
+path: `working` clears attention, while `permission`, `question`, `plan`, and `finished` set the
+shared `fleet_core::agents::AttentionKind` and report `Idle`. The optional attention travels on the
+request, transition event, and per-terminal snapshot status so event loss and snapshot recovery use
+one field. It persists through silence and echo, and clears on explicit working, user input, PTY
+close, or byte-advancing output beyond the echo window. The app renders the native `NeedsYou` amber
+tab mark and notifies once per session edge into semantic attention; reconnect seeding is silent.
+
 ## Remote machines and daemon federation
 
 Every machine runs its own `fleetd` and owns the files, Git operations, PTYs, process observation,

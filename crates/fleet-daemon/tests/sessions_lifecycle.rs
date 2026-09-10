@@ -372,6 +372,7 @@ async fn remote_worktree_session_is_forwarded_and_ids_are_localized() {
             title: None,
             keep_alive: Vec::new(),
             has_unseen_output: false,
+            agent_attention: None,
             kind: TerminalKind::Pty,
         }],
         active_terminal: Some(TerminalId(1)),
@@ -403,6 +404,7 @@ async fn remote_worktree_session_is_forwarded_and_ids_are_localized() {
         title: None,
         keep_alive: Vec::new(),
         has_unseen_output: false,
+        agent_attention: None,
         kind: TerminalKind::Pty,
     })));
     router

@@ -145,6 +145,7 @@ impl TabLabels {
                 }
                 let mut tab = TerminalTab::new(position + 1, shared.clone())
                     .activity(terminal.has_unseen_output && active != Some(terminal.id))
+                    .attention(terminal.agent_attention.is_some())
                     .starting(terminal.status == TerminalStatus::Starting)
                     .kind(if terminal.is_native() {
                         TerminalTabKind::Native
@@ -160,6 +161,9 @@ impl TabLabels {
                         .iter()
                         .find(|window| window.index == position as u32 && window.agent.is_some())
                 }) {
+                    tab = tab.attention(
+                        terminal.agent_attention.is_some() || window.agent_attention.is_some(),
+                    );
                     tab = match window.agent_activity {
                         AgentActivity::Working => tab.agent_status(TerminalAgentState::Working),
                         AgentActivity::Idle => tab.agent_status(TerminalAgentState::Finished),
@@ -257,6 +261,7 @@ mod tests {
             title: None,
             keep_alive: Vec::new(),
             has_unseen_output: false,
+            agent_attention: None,
             kind: fleet_core::sessions::TerminalKind::Pty,
         }
     }
@@ -399,6 +404,7 @@ mod tests {
                 keep_alive: vec!["claude".to_owned()],
                 agent: Some("claude".to_owned()),
                 agent_activity: AgentActivity::Working,
+                agent_attention: None,
                 agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
             }],
             running: vec!["claude".to_owned()],
@@ -409,6 +415,43 @@ mod tests {
         let tabs = TabLabels::default().tabs(&session, Some(&status), None, &HashSet::new());
         assert_eq!(tabs[0].agent_status, Some(TerminalAgentState::Working));
         assert_eq!(tabs[1].agent_status, None);
+    }
+
+    #[test]
+    fn terminal_attention_reuses_the_native_needs_you_mark() {
+        let mut session = session(&["cc"]);
+        session.terminals[0].agent_attention = Some(fleet_core::agents::AttentionKind::Permission);
+        let status = WorktreeStatus {
+            worktree_id: "buk/payroll#feat"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+            session: fleet_core::sessions::SessionState::Detached,
+            windows: vec![WorktreeWindowStatus {
+                index: 0,
+                name: "cc".to_owned(),
+                command: "claude".to_owned(),
+                keep_alive: vec!["claude".to_owned()],
+                agent: Some("claude".to_owned()),
+                agent_activity: AgentActivity::Idle,
+                agent_attention: None,
+                agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
+            }],
+            running: vec!["claude".to_owned()],
+            agent_activity: AgentActivity::Idle,
+            agent_activity_changed_at: Some("2026-09-05T12:00:00Z".to_owned()),
+        };
+
+        let tab = &TabLabels::default().tabs(
+            &session,
+            Some(&status),
+            Some(TerminalId(1)),
+            &HashSet::new(),
+        )[0];
+        assert!(
+            tab.attention,
+            "attention stays visible on the selected PTY tab"
+        );
+        assert_eq!(tab.agent_status, Some(TerminalAgentState::Finished));
     }
 
     fn agent_summary(attention: Attention) -> AgentThreadSummary {

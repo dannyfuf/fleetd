@@ -69,6 +69,7 @@ fn terminal(id: u64, kind: TerminalKind) -> Terminal {
         title: None,
         keep_alive: Vec::new(),
         has_unseen_output: false,
+        agent_attention: None,
         kind,
     }
 }

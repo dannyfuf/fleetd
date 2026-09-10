@@ -7,6 +7,7 @@ use std::{
 };
 
 use fleet_core::{
+    agents::AttentionKind,
     board::BackendDescriptor,
     config::{Agent, NotificationsConfig},
     github::PrTab,
@@ -72,9 +73,6 @@ pub const NO_ACTIVE_CONTEXT: &str =
     "No active context \u{2014} pick one with 1\u{2013}9 or gt / gT";
 /// How many entries an MRU list keeps.
 const MRU_CAPACITY: usize = 32;
-/// Minimum observed working time before an idle transition is treated as a completed turn.
-const AGENT_FINISH_MIN_WORKING: Duration = Duration::from_secs(2);
-
 /// The whole client-side state of the app.
 #[derive(Debug)]
 pub struct AppState {
@@ -141,7 +139,7 @@ pub struct AppState {
     pub agents: AgentThreads,
     /// Effective history and wheel configuration.
     pub terminal_config: fleet_core::config::TerminalConfig,
-    /// Enabled channels for agent-finished notifications.
+    /// Enabled channels for semantic agent-attention notifications.
     pub notifications: NotificationsConfig,
     /// The overlay that owns the keyboard, when any.
     pub overlay: Option<Overlay>,
@@ -159,8 +157,10 @@ pub struct AppState {
     pub terminal_mru: HashMap<SessionId, Mru<TerminalId>>,
     /// The live toasts, oldest first.
     pub toasts: Vec<LiveToast>,
-    /// Most recently observed aggregate activity and when that state was first seen, per session.
-    last_agent_activity: HashMap<SessionId, (AgentActivity, Instant)>,
+    /// Most recently observed aggregate heuristic activity, per session.
+    last_agent_activity: HashMap<SessionId, AgentActivity>,
+    /// Most recently observed authoritative terminal attention, per session.
+    last_agent_attention: HashMap<SessionId, Option<AttentionKind>>,
     /// Audible completion signal, replaceable by a recording implementation in tests.
     notification_sound: Box<dyn NotificationSound>,
     /// The sticky error slot.
@@ -240,6 +240,7 @@ impl AppState {
             terminal_mru: HashMap::new(),
             toasts: Vec::new(),
             last_agent_activity: HashMap::new(),
+            last_agent_attention: HashMap::new(),
             notification_sound: Box::new(SystemSound),
             sticky_error: None,
             seen_failed: HashSet::new(),

@@ -131,6 +131,7 @@ mod tests {
             title: Some("  vim README  ".into()),
             keep_alive: vec!["nvim".into()],
             has_unseen_output: true,
+            agent_attention: None,
             kind: TerminalKind::Pty,
         };
         assert_eq!(terminal_label(&terminal, false), "vim README");

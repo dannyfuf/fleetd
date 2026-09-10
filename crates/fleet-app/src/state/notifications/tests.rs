@@ -1,5 +1,6 @@
 use super::*;
 use crate::state::test_support::*;
+use fleet_core::agents::AttentionKind;
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -63,7 +64,7 @@ fn toasts_expire() {
 }
 
 #[test]
-fn working_to_idle_after_two_seconds_notifies_once() {
+fn heuristic_working_to_idle_never_notifies() {
     let now = Instant::now();
     let (mut state, plays) = state_with_recording_sound(now);
     state.apply_bridge_event(
@@ -86,64 +87,77 @@ fn working_to_idle_after_two_seconds_notifies_once() {
         now + Duration::from_secs(3),
     );
 
-    assert_eq!(state.toasts.len(), 1);
-    assert_eq!(
-        state.toasts[0].toast.text.as_ref(),
-        "payroll/feat: agent finished"
-    );
-    assert_eq!(state.toasts[0].toast.icon, Some(Icon::CircleCheck));
-    assert_eq!(state.toasts[0].toast.tone, Tone::Success);
-    assert_eq!(plays.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn popup_agent_activity_survives_snapshots_and_notifies_once() {
-    let now = Instant::now();
-    let (mut state, plays) = state_with_recording_sound(now);
-    let session = fleet_core::sessions::agent_session_id(Agent::Claude)
-        .unwrap_or_else(|error| panic!("{error}"));
-    let mut fixed_agent = session_with(session.as_str(), &[41]);
-    fixed_agent.kind = SessionKind::Agent(Agent::Claude);
-    let mut current = snapshot();
-    current.sessions.push(fixed_agent);
-    state.apply_bridge_event(BridgeEvent::Connected(Box::new(current.clone())), now);
-    state.toggle_agent_popup(Agent::Claude, None);
-
-    state.apply_daemon_event(
-        agent_event(session.as_str(), 41, AgentActivity::Working),
-        now,
-    );
-    assert_eq!(
-        state.session_agent_activity(&session),
-        AgentActivity::Working
-    );
-
-    state.apply_snapshot(current, now + Duration::from_secs(1));
-    assert_eq!(
-        state.session_agent_activity(&session),
-        AgentActivity::Working,
-        "an unrelated snapshot must not erase fixed-agent activity"
-    );
-
-    state.apply_daemon_event(
-        agent_event(session.as_str(), 41, AgentActivity::Idle),
-        now + Duration::from_secs(2),
-    );
-    assert_eq!(state.toasts.len(), 1);
-    assert_eq!(plays.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn short_working_flicker_does_not_notify() {
-    let now = Instant::now();
-    let (mut state, plays) = state_with_recording_sound(now);
-    state.apply_daemon_event(agent_event("payroll/feat", 1, AgentActivity::Working), now);
-    state.apply_daemon_event(
-        agent_event("payroll/feat", 1, AgentActivity::Idle),
-        now + Duration::from_millis(1_999),
-    );
     assert!(state.toasts.is_empty());
     assert_eq!(plays.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn explicit_attention_uses_native_copy_and_channels() {
+    let cases = [
+        (
+            AttentionKind::Permission,
+            "payroll/feat: needs permission",
+            Icon::Lock,
+        ),
+        (
+            AttentionKind::Question,
+            "payroll/feat: asks a question",
+            Icon::CircleQuestionMark,
+        ),
+        (
+            AttentionKind::Plan,
+            "payroll/feat: proposed a plan",
+            Icon::ClipboardCheck,
+        ),
+        (
+            AttentionKind::Finished,
+            "payroll/feat: agent finished",
+            Icon::CircleCheck,
+        ),
+    ];
+
+    for (attention, text, icon) in cases {
+        let now = Instant::now();
+        let (mut state, plays) = state_with_recording_sound(now);
+        state.apply_daemon_event(
+            agent_attention_event("payroll/feat", 1, AgentActivity::Idle, Some(attention)),
+            now,
+        );
+        assert_eq!(state.toasts.len(), 1);
+        assert_eq!(state.toasts[0].toast.text.as_ref(), text);
+        assert_eq!(state.toasts[0].toast.icon, Some(icon));
+        assert_eq!(state.toasts[0].toast.tone, Tone::Warning);
+        assert_eq!(plays.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn repeated_attention_notifies_once_until_cleared() {
+    let now = Instant::now();
+    let (mut state, plays) = state_with_recording_sound(now);
+    let permission = agent_attention_event(
+        "payroll/feat",
+        1,
+        AgentActivity::Idle,
+        Some(AttentionKind::Permission),
+    );
+    state.apply_daemon_event(permission.clone(), now);
+    state.apply_daemon_event(permission, now + Duration::from_secs(1));
+    state.apply_daemon_event(
+        agent_attention_event("payroll/feat", 1, AgentActivity::Working, None),
+        now + Duration::from_secs(2),
+    );
+    state.apply_daemon_event(
+        agent_attention_event(
+            "payroll/feat",
+            1,
+            AgentActivity::Idle,
+            Some(AttentionKind::Permission),
+        ),
+        now + Duration::from_secs(3),
+    );
+    assert_eq!(state.toasts.len(), 2);
+    assert_eq!(plays.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -159,18 +173,18 @@ fn unknown_to_idle_does_not_notify() {
 }
 
 #[test]
-fn reconnect_with_idle_sessions_seeds_silently() {
+fn reconnect_with_attention_seeds_silently() {
     let now = Instant::now();
     let (mut state, plays) = state_with_recording_sound(now);
-    state.apply_daemon_event(agent_event("payroll/feat", 1, AgentActivity::Working), now);
     state.apply_bridge_event(
         BridgeEvent::Reconnected {
             restarted: false,
-            snapshot: Box::new(agent_snapshot(&[(
+            snapshot: Box::new(agent_attention_snapshot(&[(
                 "payroll/feat",
                 "feat",
                 1,
                 AgentActivity::Idle,
+                Some(AttentionKind::Finished),
             )])),
         },
         now + Duration::from_secs(3),
@@ -180,39 +194,25 @@ fn reconnect_with_idle_sessions_seeds_silently() {
 }
 
 #[test]
-fn two_sessions_finishing_produce_two_notifications() {
-    let now = Instant::now();
-    let (mut state, plays) = state_with_recording_sound(now);
-    state.apply_daemon_event(agent_event("payroll/one", 1, AgentActivity::Working), now);
-    state.apply_daemon_event(agent_event("payroll/two", 2, AgentActivity::Working), now);
-    state.apply_daemon_event(
-        agent_event("payroll/one", 1, AgentActivity::Idle),
-        now + Duration::from_secs(2),
-    );
-    state.apply_daemon_event(
-        agent_event("payroll/two", 2, AgentActivity::Idle),
-        now + Duration::from_secs(2),
-    );
-    assert_eq!(state.toasts.len(), 2);
-    assert_eq!(plays.load(Ordering::SeqCst), 2);
-}
-
-#[test]
 fn sound_can_be_disabled_without_disabling_the_toast() {
     let now = Instant::now();
     let (mut state, plays) = state_with_recording_sound(now);
     state.notifications.sound = false;
-    state.apply_daemon_event(agent_event("payroll/feat", 1, AgentActivity::Working), now);
     state.apply_daemon_event(
-        agent_event("payroll/feat", 1, AgentActivity::Idle),
-        now + Duration::from_secs(2),
+        agent_attention_event(
+            "payroll/feat",
+            1,
+            AgentActivity::Idle,
+            Some(AttentionKind::Finished),
+        ),
+        now,
     );
     assert_eq!(state.toasts.len(), 1);
     assert_eq!(plays.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn a_full_snapshot_recovers_a_missed_finish_event() {
+fn a_full_snapshot_recovers_a_missed_attention_event() {
     let now = Instant::now();
     let (mut state, plays) = state_with_recording_sound(now);
     state.apply_bridge_event(
@@ -225,10 +225,20 @@ fn a_full_snapshot_recovers_a_missed_finish_event() {
         now,
     );
     state.apply_snapshot(
-        agent_snapshot(&[("payroll/feat", "feat", 1, AgentActivity::Idle)]),
+        agent_attention_snapshot(&[(
+            "payroll/feat",
+            "feat",
+            1,
+            AgentActivity::Idle,
+            Some(AttentionKind::Question),
+        )]),
         now + Duration::from_secs(2),
     );
     assert_eq!(state.toasts.len(), 1);
+    assert_eq!(
+        state.toasts[0].toast.text.as_ref(),
+        "payroll/feat: asks a question"
+    );
     assert_eq!(plays.load(Ordering::SeqCst), 1);
 }
 

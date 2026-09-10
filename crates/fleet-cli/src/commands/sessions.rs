@@ -6,6 +6,7 @@ use crate::{
 };
 use fleet_client::Client;
 use fleet_core::{
+    agents::AttentionKind,
     config::Agent,
     ids::{SessionId, WorktreeId},
     sessions::AgentActivity,
@@ -89,9 +90,12 @@ pub(super) async fn agent_status(
 ) -> Result<CommandOutput, ProtoError> {
     let (session, terminal_id) =
         resolve_agent_status_target(&arguments, |name| std::env::var_os(name))?;
-    let activity = match arguments.activity {
-        AgentStatusChoice::Working => AgentActivity::Working,
-        AgentStatusChoice::Finished => AgentActivity::Idle,
+    let (activity, attention) = match arguments.activity {
+        AgentStatusChoice::Working => (AgentActivity::Working, None),
+        AgentStatusChoice::Finished => (AgentActivity::Idle, Some(AttentionKind::Finished)),
+        AgentStatusChoice::Permission => (AgentActivity::Idle, Some(AttentionKind::Permission)),
+        AgentStatusChoice::Question => (AgentActivity::Idle, Some(AttentionKind::Question)),
+        AgentStatusChoice::Plan => (AgentActivity::Idle, Some(AttentionKind::Plan)),
     };
     let text = if arguments.json {
         to_json(&AgentStatusEnvelope {
@@ -100,12 +104,13 @@ pub(super) async fn agent_status(
             session: &session,
             terminal_id,
             activity,
+            attention,
         })?
     } else {
         String::new()
     };
     client
-        .set_agent_activity(session, terminal_id, activity)
+        .set_agent_activity(session, terminal_id, activity, attention)
         .await?;
     Ok(CommandOutput::success(text))
 }
