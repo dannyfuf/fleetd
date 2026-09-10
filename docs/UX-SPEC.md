@@ -891,8 +891,9 @@ Agent Scroll mode matches Workspace Scroll mode.
 **Purpose:** *What is the daemon doing for me, is it stuck, what failed, and what can I do about it?*
 
 Right-docked sheet, **440 px** wide (**640 px** when a log is expanded), full height between the
-context bar and the status bar, `bg.raised`, 1 px left border, 160 ms slide. The list behind stays
-fully visible and readable — a centered modal would hide exactly the rows the jobs are about.
+context bar and the status bar, `bg.raised`, 1 px left border. It appears and disappears in
+place — nothing slides (DESIGN-SYSTEM §2.7). The list behind stays fully visible and readable —
+a centered modal would hide exactly the rows the jobs are about.
 
 ```
                               ┌──────────────────────────────────────────────┐
@@ -1200,8 +1201,9 @@ button delay, a typed-name confirmation (typing trains people to type), diff pre
 worktree path.
 
 **States:** *facts loading* → values render as `…` and the dialog is confirmable with `Y` only;
-a background `inspect --no-fetch` swaps values in place with a 120 ms highlight. *facts errored* →
-amber line with the exact warning text and `Y`. *prune dry-run running* → the body shows
+a background `inspect --no-fetch` swaps values in place, with no highlight or flash
+(DESIGN-SYSTEM §2.7). *facts errored* → amber line with the exact warning text and `Y`.
+*prune dry-run running* → the body shows
 `⟳ checking 8 worktrees…` and `y` is inert (not styled disabled — it simply does nothing until
 facts exist). *nothing eligible to prune* → the dialog does **not** open; a 3.2 s toast says
 `Nothing to prune in payroll — 11 skipped · J for reasons`.
@@ -1475,8 +1477,9 @@ repo change or a screen change.
 ### 3.11 Toasts
 
 Rendering: bottom-right, above the status bar, **320 px** wide, 12 px insets, max **3** stacked,
-**3.2 s** (1.6 s for instant-action acknowledgements), slide + fade 140 ms. One line, one icon,
-no title, no close button. Contents and the governing law: **§2.7**.
+**3.2 s** (1.6 s for instant-action acknowledgements). A toast appears and vanishes in place —
+it does not slide or fade (DESIGN-SYSTEM §2.7). One line, one icon, no title, no close button.
+Contents and the governing law: **§2.7**.
 
 ---
 
@@ -1707,7 +1710,7 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `StatusBar` | Breadcrumb · `ModeWord` · job ticker · sticky error slot | all screens (§2.2) |
 | `Pane` | Bordered region with a header slot, a body slot and a scroll thumb | repos rail, lists, detail panel |
 | `PaneHeader` | Label · scope · `shown/total` · visible range · `stale` stamp; swaps in `FilterBar` in place | §2.10, every list |
-| `Sheet` | Right-docked panel, 440 / 640 px, 160 ms slide, non-blocking, focus-restoring on close | Jobs panel (§3.7) |
+| `Sheet` | Right-docked panel, 440 / 640 px, no slide, non-blocking, focus-restoring on close | Jobs panel (§3.7) |
 | `Dialog` | The shared frame: scrim + card + 44 px header + 44 px footer, `Esc` close, no button pair | all of §3.8 |
 | `Overlay` | Centered floating layer with optional scrim and explicit paint layer | Palette (§3.9), Agent popup (§3.6.1) |
 | `ToastStack` | Bottom-right stack, max 3, 3.2 / 1.6 s, 1 s identical-text coalescing into `×n` | §2.7 |

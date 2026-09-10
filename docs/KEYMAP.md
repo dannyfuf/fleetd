@@ -39,6 +39,10 @@ under *Native agent thread* are bound there, and the rest (`^s s`, `^s 1`–`9`,
 are a follow-up. The context stack is ordered: the Agent popup shadows
 `Hub` and `Workspace`; Help and the two quit confirms may shadow the Agent popup. Palette and Settings are unavailable while the popup
 owns focus. `Daemon > Down` and `FirstRun` are full-window and shadow everything except `ctrl-q`.
+`Daemon > Doctor` is full-window in the same sense — it replaces the whole context chain, so a key
+that has no Doctor binding is dead while the report is up — but only while no overlay is open: with
+a dialog, the palette or the Jobs panel up, that overlay keeps its own chain and the report waits
+behind it (`shell/root/focus.rs`, `focus_owner`).
 
 ## Global (Normal mode, all Hub screens)
 

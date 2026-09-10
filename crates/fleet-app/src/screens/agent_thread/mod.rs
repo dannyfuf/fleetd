@@ -1334,6 +1334,9 @@ impl AgentThreadView {
                 .border(theme.metrics.hairline)
                 .border_color(theme.colors.border_strong)
                 .rounded(theme.radii.md)
+                // §2.6 level 2: an `elevated` surface carries a shadow, and this one floats over
+                // the composer exactly as `Select`'s open option list floats over its field.
+                .shadow(theme.sheet_shadow())
                 .child(
                     div()
                         .flex()

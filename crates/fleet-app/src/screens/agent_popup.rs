@@ -156,7 +156,8 @@ impl AgentPopup {
         let exit = model
             .exit_code
             .map(|code| ExitStrip::new(code).hints(KeyHintRow::new().key("^s r", "restart")));
-        let theme = cx.theme().clone();
+        // DESIGN-SYSTEM §2.6: the elevated surface — background, hairline, radius and shadow —
+        // is `Overlay`'s to paint. The card only lays its own content out inside it.
         let card = div()
             .track_focus(focus)
             .flex()
@@ -164,7 +165,6 @@ impl AgentPopup {
             .w_full()
             .h(height)
             .min_h_0()
-            .bg(theme.colors.elevated)
             .child(header)
             .child(terminal)
             .children(exit);
