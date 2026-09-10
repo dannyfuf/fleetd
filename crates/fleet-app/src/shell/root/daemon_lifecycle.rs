@@ -27,7 +27,23 @@ impl Shell {
         self.retry_daemon(cx);
     }
 
+    /// `r` on the daemon-down surfaces (§3.12 B and C) and on the doctor report raised over them.
+    ///
+    /// The report replaces the surface it was raised from, so retrying has to dismiss it or the
+    /// diagnostics table would stay on screen with no `Starting fleetd…` feedback
+    /// (`shell/root/render.rs` gates the splash on `doctor.is_none()`). Settings can raise the
+    /// same report over a healthy daemon (§3.8.6), where there is nothing to retry.
     fn retry_daemon(&mut self, cx: &mut Context<Self>) {
+        let down = self.state.update(cx, |state, cx| {
+            let (dismissed, down) = retry_plan(state);
+            if dismissed {
+                cx.notify();
+            }
+            down
+        });
+        if !down {
+            return;
+        }
         self.bridge.reconnect();
         self.state.update(cx, |state, cx| {
             state.daemon = DaemonLink::Starting;
@@ -96,6 +112,16 @@ impl Shell {
         })
         .detach();
     }
+}
+
+/// Dismisses the doctor report and reports whether the link is down enough to reopen.
+fn retry_plan(state: &mut crate::state::AppState) -> (bool, bool) {
+    let dismissed = state.doctor.take().is_some();
+    let down = matches!(
+        state.daemon,
+        DaemonLink::Failed { .. } | DaemonLink::Lost { .. }
+    );
+    (dismissed, down)
 }
 
 struct DoctorAnswer {
@@ -179,6 +205,27 @@ mod tests {
             assert!(checks[0].detail.contains(expected));
             assert!(state.sticky_error.is_none());
         }
+    }
+
+    #[test]
+    fn retrying_from_the_doctor_report_dismisses_it_and_reopens_only_a_down_link() {
+        let mut state = crate::state::AppState::new("/tmp/fleet", Instant::now());
+        state.daemon = DaemonLink::Failed {
+            message: "fleetd could not start".to_owned(),
+            log_tail: Vec::new(),
+            stale_socket: false,
+            protocol_mismatch: false,
+        };
+        state.doctor = Some(doctor_failure("earlier result".to_owned()));
+        assert_eq!(retry_plan(&mut state), (true, true));
+        assert!(state.doctor.is_none(), "the splash needs the surface back");
+
+        // Settings raises the same report over a healthy daemon (§3.8.6); `r` only closes it.
+        let mut state = crate::state::AppState::new("/tmp/fleet", Instant::now());
+        state.daemon = DaemonLink::Connected;
+        state.doctor = Some(doctor_failure("earlier result".to_owned()));
+        assert_eq!(retry_plan(&mut state), (true, false));
+        assert!(state.doctor.is_none());
     }
 
     #[test]

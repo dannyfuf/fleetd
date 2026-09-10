@@ -281,8 +281,9 @@ Terminals attach with plain requests (`AttachTerminal`, `ResizeTerminal`, `Termi
 applied them to `AppState::grids` before your screen renders. `fleet-client` re-attaches every
 terminal after a reconnect on its own. Daemon and host share one absolute five-second attach
 deadline. App surfaces await the correlated acknowledgement with a bounded deadline; a refusal or
-timeout clears their optimistic attachment and generation, reports a sticky error, and schedules
-reconciliation again. A request already expired when the owner services it cannot resize the PTY,
+timeout clears their optimistic attachment and generation, reports a sticky error naming the
+terminal, and schedules reconciliation again; the next successful attach of that same terminal,
+by the attempt that still owns the surface, clears that error. A request already expired when the owner services it cannot resize the PTY,
 and no post-deadline result can publish an attachment frame or claim an attachment. Before the
 first valid frame, each app surface retains an ordered prefix of at most
 1,024 key/paste events and 1 MiB; it rejects the newest input after either bound and flushes the

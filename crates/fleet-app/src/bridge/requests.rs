@@ -18,7 +18,11 @@ struct Mutation {
 
 /// A single owner enqueues event-backed mutations in arrival order. Response waiters remain
 /// independent, preserving the existing request API while a slow daemon operation completes.
-pub(super) async fn run(requests: Receiver<Request>, events: Sender<BridgeEvent>) {
+pub(super) async fn run(
+    requests: Receiver<Request>,
+    events: Sender<BridgeEvent>,
+    resync_pending: Arc<AtomicBool>,
+) {
     let (mutations, mutation_rx) = async_channel::bounded(COMMAND_CAPACITY);
     let mutation_events = events.clone();
     let mutation_task = tokio::spawn(async move {
@@ -32,11 +36,24 @@ pub(super) async fn run(requests: Receiver<Request>, events: Sender<BridgeEvent>
                 reply,
             } => match reply {
                 Some(reply) => dispatch(client, *body, reply, events.clone()),
-                None => {
-                    if mutations.send(Mutation { client, body }).await.is_err() {
+                // Admission never waits on the mutation worker: parking here backs pressure up
+                // into the command loop, which also serves shutdown, reconnect and health. A
+                // full lane sheds with the same policy `Bridge::send` uses at the outermost
+                // hop — flag a resync so the dropped mutation is repaired from a snapshot, and
+                // tell the user the write did not land.
+                None => match mutations.try_send(Mutation { client, body }) {
+                    Ok(()) => {}
+                    Err(async_channel::TrySendError::Full(_)) => {
+                        resync_pending.store(true, Ordering::Release);
+                        publish_mutation_failure(
+                            &events,
+                            "the Fleet daemon bridge queue was saturated",
+                        );
+                    }
+                    Err(async_channel::TrySendError::Closed(_)) => {
                         publish_mutation_failure(&events, "the Fleet daemon bridge is closed");
                     }
-                }
+                },
             },
             Request::Resynchronize { client } => resynchronize(&client, &events).await,
         }
@@ -217,7 +234,7 @@ mod regression_tests {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
         drop(request_tx);
-        run(request_rx, event_tx).await;
+        run(request_rx, event_tx, Arc::new(AtomicBool::new(false))).await;
 
         let event = event_rx
             .recv()
@@ -249,7 +266,7 @@ mod regression_tests {
             .unwrap_or_else(|error| panic!("{error}"));
         drop(request_tx);
 
-        run(request_rx, event_tx).await;
+        run(request_rx, event_tx, Arc::new(AtomicBool::new(false))).await;
 
         let event = event_rx
             .recv()

@@ -713,7 +713,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 
 | State | Rendering |
 | --- | --- |
-| Attaching | one dim centered line `attaching…`; key/paste input retains an ordered prefix capped at 1,024 events and 1 MiB, rejects newer overflow, and flushes only after the first valid frame. Attach has one absolute 5 s deadline; failure is sticky, already-expired work cannot resize, and no post-deadline result can claim the terminal. |
+| Attaching | one dim centered line `attaching…`; key/paste input retains an ordered prefix capped at 1,024 events and 1 MiB, rejects newer overflow, and flushes only after the first valid frame. Attach has one absolute 5 s deadline; failure reports `could not attach terminal <id>: …` and stays sticky until that same terminal attaches, which retires it; already-expired work cannot resize, and no post-deadline result can claim the terminal. |
 | Attached | normal |
 | Waking a slept session | tabs rebuild with `loader-circle` per tab as each PTY spawns; the header reads `waking…` for ≤ 1.5 s |
 | Recognized terminal agent working / idle | the agent terminal shows an amber spinning `loader-circle` / green `circle-check`; this heuristic status is glyph-only and never toasts or plays a sound |

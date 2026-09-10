@@ -42,15 +42,21 @@ impl BatchDamage {
             _ => None,
         };
         let terminal = damage.and_then(|damage| damage.terminal);
-        let was_synced =
-            terminal.is_some_and(|id| state.grids.get(&id).is_some_and(|grid| !grid.desynced));
         let lagged = matches!(event, BridgeEvent::EventsLagged { .. });
         let terminal_only = damage.is_some_and(is_terminal_only);
         state.apply_bridge_event(event, now);
         self.state |= !terminal_only;
         if let Some(terminal) = terminal {
             self.terminals.insert(terminal);
-            if was_synced && state.grids.get(&terminal).is_some_and(|grid| grid.desynced) {
+            // A mirror that cannot accept a delta needs a full frame, whether it lost one or
+            // was born from one: a grid created by a diff is unprimed, never desynced, so an
+            // edge from synced to desynced would never fire for it. `recover` is a per-batch
+            // set, so this asks once per batch and asks again if the request is lost.
+            if state
+                .grids
+                .get(&terminal)
+                .is_some_and(|grid| !grid.primed || grid.desynced)
+            {
                 self.recover.insert(terminal);
             }
         }
@@ -236,6 +242,18 @@ mod tests {
             "terminal deltas leave chrome and list observers clean"
         );
         assert!(!batch.affects_visible_terminal(&state));
+    }
+
+    #[test]
+    fn a_delta_for_a_terminal_with_no_mirror_asks_for_a_full_frame() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        let mut batch = BatchDamage::default();
+        batch.apply(&mut state, frame(1, 7, false), now);
+        assert!(!state.grids[&TerminalId(1)].primed);
+        assert_eq!(batch.recover, HashSet::from([TerminalId(1)]));
+        batch.apply(&mut state, frame(1, 8, false), now);
+        assert_eq!(batch.recover.len(), 1, "one request, not one per delta");
     }
 
     #[test]

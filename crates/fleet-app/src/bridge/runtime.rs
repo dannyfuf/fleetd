@@ -53,7 +53,7 @@ pub(super) async fn run(
     home: &Path,
     commands: &Receiver<Command>,
     events: &Sender<BridgeEvent>,
-    resync_pending: &AtomicBool,
+    resync_pending: &Arc<AtomicBool>,
 ) {
     run_with_intervals(
         home,
@@ -70,12 +70,16 @@ pub(super) async fn run_with_intervals(
     home: &Path,
     commands: &Receiver<Command>,
     events: &Sender<BridgeEvent>,
-    resync_pending: &AtomicBool,
+    resync_pending: &Arc<AtomicBool>,
     health_interval: Duration,
     identity_interval: Duration,
 ) {
     let (requests, request_rx) = async_channel::bounded(COMMAND_CAPACITY);
-    let _request_task = tokio::spawn(requests::run(request_rx, events.clone()));
+    let _request_task = tokio::spawn(requests::run(
+        request_rx,
+        events.clone(),
+        Arc::clone(resync_pending),
+    ));
     let mut link: Option<Link> = None;
     let mut opening: Option<Opening<'_>> = Some(Box::pin(open(home, events)));
     let mut reason = OpeningReason::Initial;
@@ -107,7 +111,15 @@ pub(super) async fn run_with_intervals(
                     }
                 }
                 Ok(Command::Reconnect) => {
-                    if link.is_none() && opening.is_none() {
+                    // The app blanks the banner to `DaemonLink::Starting` the moment the user
+                    // asks, so an explicit reconnect must reopen even when a link is still
+                    // held: `Event::DaemonShuttingDown` retires it app-side before the health
+                    // probe notices. Drop the checks with it, or a probe left armed resolves
+                    // against the discarded pid and forces a second reopen.
+                    if opening.is_none() {
+                        link = None;
+                        health = None;
+                        identity = None;
                         reason = manual_opening_reason(backoff);
                         opening = Some(Box::pin(open(home, events)));
                     }

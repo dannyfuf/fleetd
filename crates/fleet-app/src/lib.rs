@@ -1,6 +1,7 @@
 //! Native GPUI Fleet application state and presentation layer, including its daemon bridge, keyboard modes and actions, screens, dialogs, and terminal renderer.
 
 pub(crate) mod actions;
+pub(crate) mod async_util;
 pub mod bridge;
 pub mod dialogs;
 pub(crate) mod drive;
