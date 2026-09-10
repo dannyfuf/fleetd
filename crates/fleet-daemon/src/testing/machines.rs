@@ -1,6 +1,13 @@
 //! Scriptable machine provider and remote endpoint test doubles.
 
-use std::{collections::VecDeque, sync::Mutex, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use fleet_core::ids::HostId;
@@ -123,6 +130,7 @@ pub struct FakeRemote {
     state_tx: watch::Sender<LinkState>,
     hello: Mutex<Option<RemoteHello>>,
     last_snapshot: Mutex<Option<Snapshot>>,
+    nudges: AtomicUsize,
 }
 
 impl FakeRemote {
@@ -138,6 +146,7 @@ impl FakeRemote {
             state_tx,
             hello: Mutex::new(None),
             last_snapshot: Mutex::new(None),
+            nudges: AtomicUsize::new(0),
         }
     }
 
@@ -151,8 +160,14 @@ impl FakeRemote {
     pub fn emit(&self, event: Event) {
         let _ = self.events_tx.send(event);
     }
+    /// Records the new link state even when no observer is subscribed to the watch channel.
     pub fn set_state(&self, state: LinkState) {
-        let _ = self.state_tx.send(state);
+        self.state_tx.send_replace(state);
+    }
+    /// Number of [`RemoteEndpoint::nudge_reconnect`] calls observed so far.
+    #[must_use]
+    pub fn nudges(&self) -> usize {
+        self.nudges.load(Ordering::Relaxed)
     }
     pub fn set_hello(&self, hello: RemoteHello) {
         *lock(&self.hello) = Some(hello);
@@ -183,6 +198,9 @@ impl RemoteEndpoint for FakeRemote {
                 "FakeRemote response queue is empty".to_owned(),
             ))
         })
+    }
+    fn nudge_reconnect(&self) {
+        self.nudges.fetch_add(1, Ordering::Relaxed);
     }
     fn events(&self) -> broadcast::Receiver<Event> {
         self.events_tx.subscribe()

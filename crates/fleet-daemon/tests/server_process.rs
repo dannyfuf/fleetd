@@ -1,7 +1,7 @@
 //! End-to-end daemon binary protocol and lifecycle coverage.
 
 use std::{
-    process::Command,
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -122,6 +122,49 @@ async fn singleton_precedes_all_recovery_mutation() {
     assert!(
         !home.join("logs").exists(),
         "rejected startup mutated daemon state before singleton acquisition"
+    );
+}
+
+/// A daemon the bridge starts can lose the singleton race against another starter. Its failure
+/// must reach `logs/fleetd.out`, the same startup log the remote restart script appends to.
+#[tokio::test]
+async fn bridge_records_a_losing_daemon_start() {
+    let temp = tempfile::tempdir().expect("create temp dir");
+    let home = temp.path().join("fleet-home");
+    let _owner = SingletonGuard::acquire(&home)
+        .await
+        .expect("acquire competing singleton");
+
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_fleetd"))
+        .arg("connect")
+        .arg("--home")
+        .arg(&home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the connect bridge");
+
+    let log = home.join("logs").join("fleetd.out");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let recorded = loop {
+        let contents = std::fs::read_to_string(&log).unwrap_or_default();
+        if contents.contains("already running") {
+            break contents;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bridge-started daemon left no trace in {}: {contents:?}",
+            log.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+
+    assert!(
+        recorded.contains(&home.join("fleetd.sock").display().to_string()),
+        "startup log does not name the contended socket: {recorded:?}"
     );
 }
 

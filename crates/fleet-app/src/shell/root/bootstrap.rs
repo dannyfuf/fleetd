@@ -10,13 +10,15 @@ const DEFAULT_SIZE: (f32, f32) = (1280.0, 800.0);
 const MIN_SIZE: (f32, f32) = (900.0, 560.0);
 
 /// `$FLEET_HOME`, or `~/.fleet`.
+///
+/// Resolved through `fleet_core` so a leading `~` expands exactly as `fleetd` and `fleet` expand
+/// it. Falls back to a relative `.fleet` when `$HOME` is unset, as an app has nowhere to report
+/// that failure before its window exists.
 #[must_use]
 fn fleet_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("FLEET_HOME") {
-        return PathBuf::from(home);
-    }
-    crate::presentation::home_dir()
-        .map_or_else(|| PathBuf::from(".fleet"), |home| home.join(".fleet"))
+    let selected = std::env::var_os("FLEET_HOME").map(PathBuf::from);
+    fleet_core::paths::resolve_home_with(selected, crate::presentation::home_dir())
+        .unwrap_or_else(|_| PathBuf::from(".fleet"))
 }
 
 /// Installs the process-wide `tracing` subscriber: `$RUST_LOG` (default `info`), to stderr.

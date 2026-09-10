@@ -55,6 +55,8 @@ survive it.
 `make test` and `make ci` build `fleetd` before running workspace tests because app
 integration tests launch the ordinary daemon binary. These targets set `FLEET_DAEMON`
 to that freshly built workspace binary, overriding inherited paths to other checkouts.
+`fleet-daemon`'s own tests ignore `FLEET_DAEMON` and always launch the binary Cargo built
+for them, so both halves of a loopback link are the same build.
 `cargo test` alone builds its test
 harness and can leave an older `target/debug/fleetd` in place. Before running app tests
 directly, run `cargo build -p fleet-daemon`, then
@@ -95,7 +97,7 @@ The idempotent bootstrap verifies the published SHA-256 checksum, installs the o
 `libghostty-vt-sys 0.2.1` build script invokes `zig` by name and does not honor a `ZIG` executable
 variable, so `~/.cargo/bin` must be on `PATH` (the bootstrap prints the required export).
 
-The repository config directs Zig's global cache to `~/.cache/zig`. On macOS 26 with the Xcode 26
+Zig's default global cache is `~/.cache/zig`; nothing in this repository overrides it. On macOS 26 with the Xcode 26
 SDK, the bootstrap also creates a private SDK overlay below the Zig installation that maps the
 SDK's `arm64e-macos` text-based stubs to the `arm64-macos` target expected by Zig 0.15.2. The real
 Xcode SDK is not modified.

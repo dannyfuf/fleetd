@@ -32,7 +32,7 @@ serde_json.workspace = true
 sha2.workspace = true
 shell-words.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
 tracing.workspace = true
 tracing-appender.workspace = true
@@ -42,3 +42,4 @@ uuid.workspace = true
 [dev-dependencies]
 fleet-daemon = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

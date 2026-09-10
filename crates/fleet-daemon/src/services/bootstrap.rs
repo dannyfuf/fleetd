@@ -3,7 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use fleet_core::ids::{HostId, JobId};
-use fleet_proto::job::JobKind;
+use fleet_proto::{job::JobKind, request::RequestBody};
 
 use crate::{
     DaemonError, DaemonResult,
@@ -11,10 +11,15 @@ use crate::{
     machines::{ExecOutput, MachineProvider, Machines, RemoteEndpoint},
 };
 use fleet_proto::snapshot::LinkState;
+use tokio_util::sync::CancellationToken;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+// Covers one worst-case reconnect envelope after the restart: the link Hello timeout (10 s), the
+// remote bridge start timeout (10 s), and one retry, with slack.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
+const PROBE_INTERVAL: Duration = Duration::from_millis(200);
+const LINK_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_REMOTE_HOME: &str = "~/.fleet";
 
 type ProviderLookup = dyn Fn(&HostId) -> Option<Arc<dyn MachineProvider>> + Send + Sync;
@@ -229,13 +234,31 @@ async fn run_bootstrap(
     .await?;
 
     let restart = format!(
-        "if [ -s {fleet_home_shell}/fleetd.pid ]; then \
-         kill -TERM \"$(cat {fleet_home_shell}/fleetd.pid)\" 2>/dev/null || true; \
-         i=0; while [ $i -lt 50 ] && kill -0 \"$(cat {fleet_home_shell}/fleetd.pid)\" 2>/dev/null; \
-         do i=$((i + 1)); sleep 0.1; done; fi; \
+        "fleetd_pid=''; kill_pid=''; \
+         if [ -s {fleet_home_shell}/fleetd.pid ]; then \
+         fleetd_pid=\"$(cat {fleet_home_shell}/fleetd.pid)\"; kill_pid=\"$fleetd_pid\"; \
+         case \"$(ps -p \"$kill_pid\" -o comm= 2>/dev/null)\" in \
+         *fleetd*) ;; *) kill_pid='' ;; esac; fi; \
+         if [ -n \"$kill_pid\" ]; then \
+         kill -TERM \"$kill_pid\" 2>/dev/null || true; \
+         i=0; while [ $i -lt 50 ] && kill -0 \"$kill_pid\" 2>/dev/null; \
+         do i=$((i + 1)); sleep 0.1; done; \
+         if kill -0 \"$kill_pid\" 2>/dev/null; then \
+         kill -KILL \"$kill_pid\" 2>/dev/null || true; \
+         i=0; while [ $i -lt 20 ] && kill -0 \"$kill_pid\" 2>/dev/null; \
+         do i=$((i + 1)); sleep 0.1; done; fi; fi; \
          mkdir -p {fleet_home_shell}/logs; \
          nohup {fleetd_command} --home {fleet_home_shell} \
-         >>{fleet_home_shell}/logs/fleetd.out 2>&1 </dev/null &"
+         >>{fleet_home_shell}/logs/fleetd.out 2>&1 </dev/null & \
+         i=0; while [ $i -lt 100 ]; do \
+         if [ -s {fleet_home_shell}/fleetd.pid ]; then \
+         started_pid=\"$(cat {fleet_home_shell}/fleetd.pid)\"; \
+         if [ -n \"$started_pid\" ] && [ \"$started_pid\" != \"$fleetd_pid\" ] \
+         && kill -0 \"$started_pid\" 2>/dev/null; then exit 0; fi; fi; \
+         i=$((i + 1)); sleep 0.1; done; \
+         echo 'fleetd failed to start' >&2; \
+         tail -n 40 {fleet_home_shell}/logs/fleetd.out >&2 || true; \
+         exit 1"
     );
     checked_exec(
         context,
@@ -251,28 +274,63 @@ async fn run_bootstrap(
             "host `{host}` bootstrap cannot verify the restarted daemon link"
         ))
     })?;
+    // The restart drops the link. Wake it out of any reconnect backoff so the probe observes the
+    // new daemon instead of waiting out a grown backoff; a Ready link is unaffected.
+    endpoint.nudge_reconnect();
     context.progress(format!("waiting for host {host} build {checkout_ref}"))?;
-    let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+    probe_for_build(
+        &endpoint,
+        &host,
+        checkout_ref,
+        &context.cancel,
+        PROBE_TIMEOUT,
+    )
+    .await?;
+    context.progress(format!("host {host} is ready ({checkout_ref})"))?;
+    Ok(())
+}
+
+/// Waits until the endpoint reports `checkout_ref`, refreshing a stale Hello on a Ready link.
+///
+/// Each iteration reads the Hello first, then checks the deadline, so a refresh that lands while
+/// the last ping is still in flight is honoured instead of discarded.
+async fn probe_for_build(
+    endpoint: &Arc<dyn RemoteEndpoint>,
+    host: &HostId,
+    checkout_ref: &str,
+    cancel: &CancellationToken,
+    budget: Duration,
+) -> DaemonResult<()> {
+    let deadline = tokio::time::Instant::now() + budget;
     loop {
-        check_cancelled(context)?;
-        if endpoint.state() == LinkState::Ready
-            && endpoint
-                .hello()
-                .and_then(|hello| hello.build_commit)
-                .as_deref()
-                == Some(checkout_ref)
+        if cancel.is_cancelled() {
+            return Err(DaemonError::Cancelled);
+        }
+        if endpoint
+            .hello()
+            .and_then(|hello| hello.build_commit)
+            .as_deref()
+            == Some(checkout_ref)
         {
-            break;
+            return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(DaemonError::Remote(format!(
                 "host `{host}` did not report build `{checkout_ref}` after restart"
             )));
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        if endpoint.state() == LinkState::Ready {
+            // A bridge from the replaced binary can keep its stdio pipes open after the old
+            // daemon exits. A ping makes that stale bridge observe the closed socket so the
+            // persistent endpoint reconnects and refreshes its Hello metadata.
+            let _ = tokio::time::timeout(
+                LINK_REFRESH_TIMEOUT,
+                endpoint.request(RequestBody::DaemonPing),
+            )
+            .await;
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
     }
-    context.progress(format!("host {host} is ready ({checkout_ref})"))?;
-    Ok(())
 }
 
 async fn checked_exec(
@@ -370,7 +428,84 @@ fn not_configured() -> DaemonError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use fleet_proto::{event::Event, response::ResponseBody};
+    use tokio::sync::{broadcast, watch};
+
     use super::*;
+    use crate::machines::RemoteHello;
+
+    /// Always-Ready endpoint whose ping never returns and whose Hello flips mid-ping.
+    struct StallingRemote {
+        host: HostId,
+        hello: Mutex<Option<RemoteHello>>,
+        events_tx: broadcast::Sender<Event>,
+        state_tx: watch::Sender<LinkState>,
+        pings: AtomicUsize,
+        refreshed_build: String,
+    }
+
+    impl StallingRemote {
+        fn new(refreshed_build: &str) -> Self {
+            let (events_tx, _) = broadcast::channel(8);
+            let (state_tx, _) = watch::channel(LinkState::Ready);
+            Self {
+                host: HostId::try_from("dev-box").unwrap_or_else(|error| panic!("{error}")),
+                hello: Mutex::new(None),
+                events_tx,
+                state_tx,
+                pings: AtomicUsize::new(0),
+                refreshed_build: refreshed_build.to_owned(),
+            }
+        }
+
+        fn pings(&self) -> usize {
+            self.pings.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl RemoteEndpoint for StallingRemote {
+        fn host(&self) -> &HostId {
+            &self.host
+        }
+        fn state(&self) -> LinkState {
+            *self.state_tx.borrow()
+        }
+        fn hello(&self) -> Option<RemoteHello> {
+            self.hello
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+        async fn request(&self, _body: RequestBody) -> DaemonResult<ResponseBody> {
+            self.pings.fetch_add(1, Ordering::Relaxed);
+            // The refresh lands while this ping is still in flight.
+            *self
+                .hello
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RemoteHello {
+                version: "fleetd test".to_owned(),
+                daemon_id: "remote-daemon".to_owned(),
+                build_commit: Some(self.refreshed_build.clone()),
+                capabilities: Vec::new(),
+            });
+            std::future::pending::<()>().await;
+            unreachable!("stalling endpoint never answers")
+        }
+        fn events(&self) -> broadcast::Receiver<Event> {
+            self.events_tx.subscribe()
+        }
+        fn state_changes(&self) -> watch::Receiver<LinkState> {
+            self.state_tx.subscribe()
+        }
+        async fn close(&self) {}
+    }
 
     #[test]
     fn install_target_honors_custom_and_default_binary_paths() {
@@ -379,5 +514,45 @@ mod tests {
             "\"$HOME\"/bin/custom-fleetd"
         );
         assert_eq!(install_path("fleetd"), "\"$HOME/.local/bin\"/fleetd");
+    }
+
+    #[tokio::test]
+    async fn probe_honours_a_hello_refresh_that_lands_during_the_last_ping() {
+        let endpoint = Arc::new(StallingRemote::new("abc123"));
+        let host = endpoint.host().clone();
+        // The budget expires while the first ping is still stalled, so the refresh it triggered
+        // is only observable if the loop re-reads the Hello before giving up.
+        let outcome = probe_for_build(
+            &(Arc::clone(&endpoint) as Arc<dyn RemoteEndpoint>),
+            &host,
+            "abc123",
+            &CancellationToken::new(),
+            Duration::from_millis(700),
+        )
+        .await;
+
+        assert!(outcome.is_ok(), "probe failed: {outcome:?}");
+        assert_eq!(endpoint.pings(), 1);
+    }
+
+    #[tokio::test]
+    async fn probe_never_pings_a_link_that_is_not_ready() {
+        let endpoint = Arc::new(crate::testing::FakeRemote::new(
+            HostId::try_from("dev-box").unwrap_or_else(|error| panic!("{error}")),
+        ));
+        endpoint.set_state(LinkState::Down);
+        let host = endpoint.host().clone();
+
+        let outcome = probe_for_build(
+            &(Arc::clone(&endpoint) as Arc<dyn RemoteEndpoint>),
+            &host,
+            "abc123",
+            &CancellationToken::new(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(outcome.is_err(), "expected a probe timeout");
+        assert!(endpoint.requests().is_empty());
     }
 }
