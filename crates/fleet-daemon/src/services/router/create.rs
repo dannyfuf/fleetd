@@ -5,7 +5,8 @@ use std::time::Duration;
 use fleet_core::{
     config::Config,
     ids::{HostId, WorktreeId},
-    model::{CloneStatus, Repo, Worktree},
+    model::{CloneStatus, Context, Repo, Worktree},
+    slug::normalize_context_id,
 };
 use fleet_proto::{request::RequestBody, response::ResponseBody, snapshot::Snapshot};
 
@@ -47,6 +48,7 @@ impl Router {
     pub async fn ensure_repo_then_create(
         &self,
         host: &HostId,
+        context: &Context,
         repo: &Repo,
         local_worktrees: &[Worktree],
         create: RequestBody,
@@ -56,6 +58,7 @@ impl Router {
             self.refuse_duplicate_on_another_host(host, &id, local_worktrees)?;
         }
 
+        self.ensure_remote_context(host, context).await?;
         self.ensure_remote_repo(host, repo).await?;
         let response = self
             .forward(
@@ -93,6 +96,74 @@ impl Router {
             return Err(DaemonError::Conflict(format!(
                 "worktree {id} already exists on another host"
             )));
+        }
+        Ok(())
+    }
+
+    /// Ensures the local context exists with matching display fields on `host`.
+    ///
+    /// `CreateContext` derives its id from `name` with [`normalize_context_id`]. Context ids are
+    /// required to be canonical, so creating with the id as the name produces that exact id;
+    /// `UpdateContext` then applies the display name. Do not simplify this to creating with
+    /// `context.name`, because a renamed context's display name may normalize to a different id.
+    async fn ensure_remote_context(&self, host: &HostId, context: &Context) -> DaemonResult<()> {
+        let normalized_id = normalize_context_id(context.id.as_str());
+        if normalized_id != context.id.as_str() {
+            return Err(DaemonError::Validation(format!(
+                "context id `{}` is not canonical; expected `{normalized_id}`",
+                context.id
+            )));
+        }
+
+        let snapshot = self.remote_snapshot(host).await?;
+        let remote = match snapshot
+            .contexts
+            .into_iter()
+            .find(|remote| remote.id == context.id)
+        {
+            Some(remote) => remote,
+            None => {
+                let create = self
+                    .forward(
+                        host,
+                        RequestBody::CreateContext {
+                            name: context.id.to_string(),
+                            owners: context.owners.clone(),
+                        },
+                    )
+                    .await;
+                match create {
+                    Ok(ResponseBody::Context(remote)) if remote.id == context.id => remote,
+                    Ok(other) => return Err(unexpected_response("context ensure", &other)),
+                    Err(error @ DaemonError::Conflict(_)) => {
+                        let snapshot = self.remote_snapshot(host).await?;
+                        snapshot
+                            .contexts
+                            .into_iter()
+                            .find(|remote| remote.id == context.id)
+                            .ok_or(error)?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+
+        if remote.name == context.name && remote.owners == context.owners {
+            return Ok(());
+        }
+
+        let response = self
+            .forward(
+                host,
+                RequestBody::UpdateContext {
+                    id: context.id.clone(),
+                    name: Some(context.name.clone()),
+                    owners: Some(context.owners.clone()),
+                },
+            )
+            .await?;
+        if !matches!(response, ResponseBody::Context(_)) {
+            return Err(unexpected_response("context ensure", &response));
         }
         Ok(())
     }
@@ -159,12 +230,13 @@ impl Router {
 pub(crate) async fn ensure_repo_then_create(
     router: &Router,
     host: &HostId,
+    context: &Context,
     repo: &Repo,
     local_worktrees: &[Worktree],
     create: RequestBody,
 ) -> DaemonResult<ResponseBody> {
     router
-        .ensure_repo_then_create(host, repo, local_worktrees, create)
+        .ensure_repo_then_create(host, context, repo, local_worktrees, create)
         .await
 }
 
@@ -227,10 +299,12 @@ mod tests {
     async fn ensures_repo_sets_hooks_then_creates_and_maps_progress() {
         let target = host("dev-box");
         let (router, remote) = router_with_remote(target.clone());
+        let context = context();
         let repo = repo();
         let remote_job = job("job-clone");
         let mut made = worktree("feature", Some(target.clone()));
         made.session = format!("{target}/{}", made.session);
+        remote.push_response(Ok(ResponseBody::Snapshot(snapshot(Vec::new(), Vec::new()))));
         remote.push_response(Ok(ResponseBody::CloneStarted(remote_job.clone())));
         remote.push_response(Ok(ResponseBody::Snapshot(snapshot(
             vec![repo.clone()],
@@ -249,6 +323,7 @@ mod tests {
         let response = router
             .ensure_repo_then_create(
                 &target,
+                &context,
                 &repo,
                 &[],
                 RequestBody::CreateWorktree {
@@ -272,9 +347,10 @@ mod tests {
             } if worktree == made
         ));
         let requests = remote.requests();
-        assert_eq!(requests.len(), 4, "{requests:#?}");
+        assert_eq!(requests.len(), 5, "{requests:#?}");
+        assert!(matches!(requests[0], RequestBody::GetSnapshot));
         assert_eq!(
-            requests[0],
+            requests[1],
             RequestBody::CloneRepo {
                 owner: "acme".to_owned(),
                 name: "api".to_owned(),
@@ -283,16 +359,16 @@ mod tests {
                 default_branch: Some("main".to_owned()),
             }
         );
-        assert!(matches!(requests[1], RequestBody::GetSnapshot));
+        assert!(matches!(requests[2], RequestBody::GetSnapshot));
         assert_eq!(
-            requests[2],
+            requests[3],
             RequestBody::SetRepoHooks {
                 repo: repo.id.clone(),
                 hooks: repo.hooks.clone(),
             }
         );
         assert!(matches!(
-            &requests[3],
+            &requests[4],
             RequestBody::CreateWorktree {
                 host: None,
                 hooks,
@@ -336,6 +412,7 @@ mod tests {
         let error = router
             .ensure_repo_then_create(
                 &target,
+                &context(),
                 &repo(),
                 &[],
                 RequestBody::CreateWorktree {
@@ -402,12 +479,7 @@ mod tests {
         Snapshot {
             boards: Vec::new(),
             generated_at: "2026-09-08T12:00:00Z".to_owned(),
-            contexts: vec![Context {
-                id: context_id(),
-                name: "Acme".to_owned(),
-                owners: vec!["acme".to_owned()],
-                created_at: "2026-09-08T12:00:00Z".to_owned(),
-            }],
+            contexts: vec![context()],
             repos,
             clones: Vec::new(),
             worktrees,
@@ -424,6 +496,15 @@ mod tests {
                 started_at: "2026-09-08T12:00:00Z".to_owned(),
                 home: "/tmp/remote".to_owned(),
             },
+        }
+    }
+
+    fn context() -> Context {
+        Context {
+            id: context_id(),
+            name: "Acme".to_owned(),
+            owners: vec!["acme".to_owned()],
+            created_at: "2026-09-08T12:00:00Z".to_owned(),
         }
     }
 

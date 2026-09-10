@@ -35,6 +35,7 @@ fn normalize(value: &str, allow_dot_and_underscore: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::ContextId;
 
     #[test]
     fn slugifies_inventory_cases() {
@@ -50,5 +51,18 @@ mod tests {
     fn normalizes_context_names() {
         assert_eq!(normalize_context_id(" Platform / API "), "platform-api");
         assert_eq!(normalize_context_id("One___Two..."), "one-two");
+    }
+
+    #[test]
+    fn every_accepted_context_id_case_is_normalization_idempotent() {
+        for value in ["personal", "platform-api-2"] {
+            assert!(ContextId::try_from(value).is_ok());
+            assert_eq!(normalize_context_id(value), value);
+        }
+
+        for value in ["personal-", "personal--"] {
+            assert!(ContextId::try_from(value).is_err());
+            assert_eq!(normalize_context_id(value), "personal");
+        }
     }
 }

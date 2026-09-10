@@ -29,7 +29,7 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-use crate::{DaemonError, DaemonResult};
+use crate::{DaemonError, DaemonResult, error::strip_proto_error_prefix};
 
 use super::{AsyncDuplex, MachineProvider};
 
@@ -714,18 +714,17 @@ fn codec_error(error: CodecError) -> DaemonError {
 }
 
 fn proto_error(error: ProtoError) -> DaemonError {
+    let message = strip_proto_error_prefix(error.kind, error.message);
     match error.kind {
-        ErrorKind::NotFound => DaemonError::NotFound(error.message),
-        ErrorKind::Conflict => DaemonError::Conflict(error.message),
-        ErrorKind::Validation => DaemonError::Validation(error.message),
+        ErrorKind::NotFound => DaemonError::NotFound(message),
+        ErrorKind::Conflict => DaemonError::Conflict(message),
+        ErrorKind::Validation => DaemonError::Validation(message),
         ErrorKind::Cancelled => DaemonError::Cancelled,
-        ErrorKind::Unsupported => DaemonError::Unsupported(error.message),
-        ErrorKind::Remote => DaemonError::Remote(error.message),
-        ErrorKind::Git => DaemonError::Git(error.message),
-        ErrorKind::Github => DaemonError::Github(error.message),
-        ErrorKind::Fs | ErrorKind::Tmux | ErrorKind::Unknown => {
-            DaemonError::Protocol(error.message)
-        }
+        ErrorKind::Unsupported => DaemonError::Unsupported(message),
+        ErrorKind::Remote => DaemonError::Remote(message),
+        ErrorKind::Git => DaemonError::Git(message),
+        ErrorKind::Github => DaemonError::Github(message),
+        ErrorKind::Fs | ErrorKind::Tmux | ErrorKind::Unknown => DaemonError::Protocol(message),
     }
 }
 
@@ -806,6 +805,62 @@ mod tests {
 
     use super::*;
     use crate::machines::{ExecOutput, MachineAddress, MachineError, ProbeReport};
+
+    fn assert_proto_error_round_trip(error: DaemonError, expected: &str) {
+        let decoded = proto_error(error.into());
+
+        assert_eq!(decoded.to_string(), expected);
+    }
+
+    #[test]
+    fn proto_errors_round_trip_without_duplicating_display_prefixes() {
+        assert_proto_error_round_trip(
+            DaemonError::NotFound("context personal".into()),
+            "not found: context personal",
+        );
+        assert_proto_error_round_trip(
+            DaemonError::Conflict("context personal".into()),
+            "conflict: context personal",
+        );
+        assert_proto_error_round_trip(
+            DaemonError::Validation("context personal".into()),
+            "validation failed: context personal",
+        );
+        assert_proto_error_round_trip(
+            DaemonError::Protocol("context personal".into()),
+            "protocol error: context personal",
+        );
+    }
+
+    #[test]
+    fn proto_error_preserves_an_unprefixed_message() {
+        let decoded = proto_error(ProtoError {
+            kind: ErrorKind::NotFound,
+            message: "context personal".into(),
+        });
+
+        assert!(matches!(
+            decoded,
+            DaemonError::NotFound(message) if message == "context personal"
+        ));
+    }
+
+    #[test]
+    fn proto_error_strips_exactly_one_matching_prefix() {
+        let decoded = proto_error(ProtoError {
+            kind: ErrorKind::NotFound,
+            message: "not found: not found: context personal".into(),
+        });
+
+        assert!(matches!(
+            &decoded,
+            DaemonError::NotFound(message) if message == "not found: context personal"
+        ));
+        assert_eq!(
+            decoded.to_string(),
+            "not found: not found: context personal"
+        );
+    }
 
     /// Provider whose stream never opens, so every reconnect attempt fails immediately.
     struct UnreachableProvider {
