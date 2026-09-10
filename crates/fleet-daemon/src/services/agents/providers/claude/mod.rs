@@ -181,7 +181,7 @@ impl AgentProvider for ClaudeProvider {
         self.emit(resolved)
     }
 
-    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<()> {
+    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<PermissionMode> {
         self.running()?
             .writer
             .write(json!({
@@ -192,7 +192,8 @@ impl AgentProvider for ClaudeProvider {
                     "mode": permission_mode_to_wire(mode),
                 },
             }))
-            .await
+            .await?;
+        Ok(mode)
     }
 
     async fn set_model(&mut self, model: ModelSelection) -> ProviderResult<()> {

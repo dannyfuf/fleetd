@@ -107,6 +107,8 @@ struct FakeScript {
     senders: StdMutex<Vec<ProviderSink>>,
     capabilities: Capabilities,
     unavailable: AtomicBool,
+    /// Makes every `stop` fail, as a child that exits from the stdin close does.
+    stop_fails: AtomicBool,
 }
 
 impl FakeScript {
@@ -116,6 +118,7 @@ impl FakeScript {
             senders: StdMutex::new(Vec::new()),
             capabilities,
             unavailable: AtomicBool::new(false),
+            stop_fails: AtomicBool::new(false),
         })
     }
 
@@ -191,9 +194,9 @@ impl AgentProvider for FakeProvider {
         Ok(())
     }
 
-    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<()> {
+    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<PermissionMode> {
         self.script.record(FakeCall::SetMode(mode));
-        Ok(())
+        Ok(mode)
     }
 
     async fn set_model(&mut self, model: ModelSelection) -> ProviderResult<()> {
@@ -203,6 +206,9 @@ impl AgentProvider for FakeProvider {
 
     async fn stop(&mut self) -> ProviderResult<()> {
         self.script.record(FakeCall::Stop);
+        if self.script.stop_fails.load(Ordering::SeqCst) {
+            return Err(ProviderError::Exited { code: None });
+        }
         Ok(())
     }
 
@@ -360,24 +366,40 @@ impl Harness {
         }
     }
 
-    /// Polls the projection until `predicate` holds, failing the test on timeout.
+    /// Waits until `predicate` holds of the projection, failing the test on timeout.
     async fn settle(
         &self,
         thread: ThreadId,
         what: &str,
         predicate: impl Fn(&ThreadProjection) -> bool,
     ) -> ThreadProjection {
+        // Subscribed before the first read: every applied event is broadcast, so the wait is on
+        // the manager's own signal rather than on a wall clock, and an event published while
+        // this is between a read and a `recv` is buffered rather than missed. `SETTLE` stays
+        // only as a backstop, so a manager that publishes nothing fails instead of hanging.
+        let mut updates = self.events.subscribe();
         tokio::time::timeout(SETTLE, async {
             loop {
                 let projection = self.projection(thread).await;
                 if predicate(&projection) {
                     return projection;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                next_update(&mut updates, what).await;
             }
         })
         .await
         .unwrap_or_else(|_| panic!("agent thread never reached {what}"))
+    }
+}
+
+/// Awaits the manager's next broadcast.
+async fn next_update(updates: &mut broadcast::Receiver<Event>, what: &str) {
+    match updates.recv().await {
+        // A lagged receiver missed frames the projection it re-reads already reflects.
+        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+        Err(broadcast::error::RecvError::Closed) => {
+            panic!("the event bus closed before the thread reached {what}")
+        }
     }
 }
 
@@ -1221,8 +1243,9 @@ async fn a_crashed_provider_is_dropped_so_the_next_send_resumes_the_thread() {
             expected: false,
         })
         .await;
-    // Polled through `summaries`, not `open`: opening the tab is itself one of the lazy resume
+    // Read through `summaries`, not `open`: opening the tab is itself one of the lazy resume
     // points, and it would hide the state this test is about.
+    let mut updates = harness.events.subscribe();
     tokio::time::timeout(SETTLE, async {
         loop {
             let summary = harness
@@ -1234,7 +1257,7 @@ async fn a_crashed_provider_is_dropped_so_the_next_send_resumes_the_thread() {
             if summary.session == SessionState::Error {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            next_update(&mut updates, "a dead session").await;
         }
     })
     .await
@@ -1257,6 +1280,135 @@ async fn a_crashed_provider_is_dropped_so_the_next_send_resumes_the_thread() {
         2,
         "the crashed adapter was replaced rather than reused"
     );
+}
+
+/// BH: `pending_claude_inputs` was drained only while the *front* entry matched the turn that
+/// had just started, so one prompt whose `TurnStarted` never arrived blocked the queue: every
+/// later prompt was written to Claude and never recorded, and §6's log stopped being the
+/// transcript — the model answering a question the tab does not show.
+#[tokio::test]
+async fn a_prompt_whose_turn_never_started_does_not_swallow_the_next_one() {
+    let harness = Harness::start(full()).await;
+    let thread = harness
+        .create(Some("cursor-strand".to_owned()))
+        .await
+        .thread;
+
+    // The fake provider echoes nothing, so this prompt's `TurnStarted` never lands.
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "one".to_owned(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("send the first prompt");
+    harness
+        .script
+        .emit(AgentEvent::SessionExited {
+            code: None,
+            expected: false,
+        })
+        .await;
+    // The session dying is the last chance to write that prompt down, so the transcript has it
+    // before anything else happens. Reading the thread is also what resumes it (§6).
+    harness
+        .settle(
+            thread,
+            "the stranded prompt in the transcript",
+            |projection| user_messages(projection) == ["one"],
+        )
+        .await;
+
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "two".to_owned(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect("send resumes the thread");
+    let resumed = harness
+        .script
+        .calls()
+        .into_iter()
+        .rev()
+        .find_map(|call| match call {
+            FakeCall::Send(turn, text) if text == "two" => Some(turn),
+            _ => None,
+        })
+        .expect("the second prompt reached a provider");
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn: resumed,
+            user_item: ItemId::new(),
+        })
+        .await;
+
+    let projection = harness
+        .settle(
+            thread,
+            "the second prompt in the transcript",
+            |projection| user_messages(projection).len() == 2,
+        )
+        .await;
+    assert_eq!(
+        user_messages(&projection),
+        ["one", "two"],
+        "the log is the transcript: every prompt Claude was given is in it, in order",
+    );
+}
+
+/// The user prompts the transcript holds, in order.
+fn user_messages(projection: &ThreadProjection) -> Vec<&str> {
+    projection
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::UserMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// BH: a stop that races the child's own exit answers `agent provider exited`, and `stop`
+/// returned on it before settling anything — the turn stayed `Running` on a dead process, so
+/// §2's tab spun forever and `attention()` never left `Working`.
+#[tokio::test]
+async fn stop_settles_the_turn_even_when_the_provider_will_not_stop() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    let turn = TurnId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn,
+            user_item: ItemId::new(),
+        })
+        .await;
+    harness
+        .settle(thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(turn)
+        })
+        .await;
+
+    harness.script.stop_fails.store(true, Ordering::SeqCst);
+    harness
+        .manager
+        .stop(thread)
+        .await
+        .expect("a provider that will not stop still settles the thread");
+
+    let projection = harness.projection(thread).await;
+    assert_eq!(projection.turn, TurnState::Interrupted(turn));
+    assert_eq!(projection.session, SessionState::Stopped);
 }
 
 #[tokio::test]

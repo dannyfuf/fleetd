@@ -383,13 +383,21 @@ impl AgentProvider for OpenCodeProvider {
         Ok(())
     }
 
-    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<()> {
+    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<PermissionMode> {
+        // The same downgrade `start` applies (BH9): permission is `opencode.json`'s to decide,
+        // so a switch to `ask` on a server that allows everything would otherwise move the row
+        // from a true `full access` to a false `asks before edits`. A server that has not
+        // started, or will not answer, keeps the requested mode exactly as `start` does.
+        let mode = match self.http() {
+            Ok(http) => effective_mode(http, mode).await,
+            Err(_) => mode,
+        };
         self.mode = mode;
         self.plan_approved = mode != PermissionMode::Plan;
         if let Some(mapper) = &self.mapper {
             mapper.lock().await.set_mode(mode);
         }
-        Ok(())
+        Ok(mode)
     }
 
     async fn set_model(&mut self, model: ModelSelection) -> ProviderResult<()> {
