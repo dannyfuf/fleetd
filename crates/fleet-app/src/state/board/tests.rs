@@ -173,6 +173,7 @@ fn a_load_never_goes_out_without_a_context_or_a_daemon_and_says_which() {
     lost.daemon = DaemonLink::Lost {
         attempt: 1,
         dismissed: false,
+        reason: DaemonLossReason::ConnectionLost,
     };
     assert!(lost.begin_board_load().is_none());
     assert_eq!(lost.board.error.as_deref(), Some("fleetd is not reachable"));

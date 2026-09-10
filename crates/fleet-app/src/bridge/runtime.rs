@@ -1,11 +1,11 @@
 use super::{
-    connection::{Failure, Link, daemon_identity, is_alive, open},
+    connection::{Failure, HealthCheckError, Link, check_health, daemon_identity, open},
     requests, *,
 };
 use std::{collections::VecDeque, future::Future, pin::Pin};
 
 type Opening<'a> = Pin<Box<dyn Future<Output = Result<(Link, Snapshot), Failure>> + Send + 'a>>;
-type HealthCheck = Pin<Box<dyn Future<Output = (u32, bool)> + Send>>;
+type HealthCheck = Pin<Box<dyn Future<Output = (u32, Result<(), HealthCheckError>)> + Send>>;
 type IdentityCheck =
     Pin<Box<dyn Future<Output = (u32, Option<String>, Option<(u32, String)>)> + Send>>;
 
@@ -23,6 +23,7 @@ pub(super) enum Backoff {
 pub(super) enum OpeningReason {
     Initial,
     Manual,
+    RecoveryProbe { previous_pid: u32 },
     Retry { previous_pid: u32, attempt: u32 },
 }
 
@@ -126,6 +127,10 @@ pub(super) async fn run_with_intervals(
                     Err(failure) => {
                         let event = match reason {
                         OpeningReason::Initial | OpeningReason::Manual => failure.into_event(),
+                        OpeningReason::RecoveryProbe { previous_pid } => {
+                            backoff = reconnecting(previous_pid, 0);
+                            BridgeEvent::Disconnected { attempt: 0 }
+                        }
                         OpeningReason::Retry { previous_pid, attempt } => {
                             let attempt = attempt.saturating_add(1);
                             backoff = reconnecting(previous_pid, attempt);
@@ -144,13 +149,14 @@ pub(super) async fn run_with_intervals(
                     return;
                 }
             },
-            (previous_pid, alive) = wait(&mut health) => {
+            (previous_pid, result) = wait(&mut health) => {
                 health = None;
-                if !alive {
+                if let Err(error) = result {
+                    tracing::warn!(%error, pid = previous_pid, "Fleet daemon health check failed");
                     link = None;
                     identity = None;
-                    backoff = reconnecting(previous_pid, 0);
-                    if events.send(BridgeEvent::Disconnected { attempt: 0 }).await.is_err() { return; }
+                    reason = OpeningReason::RecoveryProbe { previous_pid };
+                    opening = Some(Box::pin(open(home, events)));
                 }
             },
             (expected_pid, expected_boot_id, actual_identity) = wait(&mut identity) => {
@@ -180,7 +186,7 @@ pub(super) async fn run_with_intervals(
                 if health.is_none() && let Some(current) = link.as_ref() {
                     let client = current.client.clone();
                     let pid = current.pid;
-                    health = Some(Box::pin(async move { (pid, is_alive(&client).await) }));
+                    health = Some(Box::pin(async move { (pid, check_health(&client).await) }));
                 }
                 if !dispatch_resync(&link, &requests, resync_pending) {
                     return;
@@ -275,7 +281,8 @@ pub(super) fn opened_event(reason: OpeningReason, pid: u32, snapshot: Snapshot) 
         OpeningReason::Initial | OpeningReason::Manual => {
             BridgeEvent::Connected(Box::new(snapshot))
         }
-        OpeningReason::Retry { previous_pid, .. } => BridgeEvent::Reconnected {
+        OpeningReason::RecoveryProbe { previous_pid }
+        | OpeningReason::Retry { previous_pid, .. } => BridgeEvent::Reconnected {
             restarted: pid != previous_pid,
             snapshot: Box::new(snapshot),
         },

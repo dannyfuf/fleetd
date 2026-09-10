@@ -1,5 +1,14 @@
 use super::*;
 
+/// What FleetView knows about why its daemon link was lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonLossReason {
+    /// The existing socket and a fresh recovery connection both failed.
+    ConnectionLost,
+    /// The daemon explicitly announced that it was shutting down.
+    Stopped,
+}
+
 /// The three daemon situations of §3.12, plus the two transient banners that follow case C.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonLink {
@@ -18,12 +27,14 @@ pub enum DaemonLink {
     },
     /// Connected and answering pings.
     Connected,
-    /// C. The daemon died while attached; the client is backing off between reconnects.
+    /// C. The daemon link was lost while attached; the client is backing off between reconnects.
     Lost {
         /// How many reconnect attempts have failed.
         attempt: u32,
         /// Whether `Esc` dismissed the banner. The dot stays red either way.
         dismissed: bool,
+        /// Whether the daemon stopped or only the client connection was lost.
+        reason: DaemonLossReason,
     },
     /// The daemon came back. The wording depends on whether the PTYs died with it (§3.12 D-17).
     Reconnected {
@@ -157,14 +168,17 @@ impl AppState {
             BridgeEvent::Disconnected { attempt } => {
                 self.clear_board();
                 self.daemon_capabilities.clear();
-                let dismissed = matches!(
-                    self.daemon,
+                let (dismissed, reason) = match self.daemon {
                     DaemonLink::Lost {
-                        dismissed: true,
-                        ..
-                    }
-                );
-                self.daemon = DaemonLink::Lost { attempt, dismissed };
+                        dismissed, reason, ..
+                    } => (dismissed, reason),
+                    _ => (false, DaemonLossReason::ConnectionLost),
+                };
+                self.daemon = DaemonLink::Lost {
+                    attempt,
+                    dismissed,
+                    reason,
+                };
                 self.daemon_since = now;
             }
             BridgeEvent::Reconnected {
@@ -275,6 +289,7 @@ impl AppState {
                 self.daemon = DaemonLink::Lost {
                     attempt: 0,
                     dismissed: false,
+                    reason: DaemonLossReason::Stopped,
                 };
                 self.daemon_since = now;
             }

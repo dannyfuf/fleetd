@@ -63,10 +63,14 @@ impl Shell {
             return;
         }
         self.state.update(cx, |state, cx| {
-            if let DaemonLink::Lost { attempt, .. } = state.daemon {
+            if let DaemonLink::Lost {
+                attempt, reason, ..
+            } = state.daemon
+            {
                 state.daemon = DaemonLink::Lost {
                     attempt,
                     dismissed: true,
+                    reason,
                 };
                 cx.notify();
             }

@@ -179,6 +179,7 @@ fn context_chain_follows_the_screen_the_overlay_and_the_daemon() {
     state.daemon = DaemonLink::Lost {
         attempt: 1,
         dismissed: false,
+        reason: DaemonLossReason::ConnectionLost,
     };
     assert_eq!(
         state.context_chain(),
@@ -188,6 +189,7 @@ fn context_chain_follows_the_screen_the_overlay_and_the_daemon() {
     state.daemon = DaemonLink::Lost {
         attempt: 1,
         dismissed: true,
+        reason: DaemonLossReason::ConnectionLost,
     };
     assert_eq!(state.context_chain(), vec!["Workspace", "Scroll"]);
 
