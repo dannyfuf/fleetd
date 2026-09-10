@@ -4,6 +4,11 @@ use crate::state::BoardFocus;
 use fleet_core::board::{BoardView, CardDraft, create_card, new_board};
 
 fn view() -> BoardView {
+    titled(&["Fix login".to_owned(), "Ship the board".to_owned()])
+}
+
+/// A board holding one card per title, every card in the first column.
+fn titled(titles: &[String]) -> BoardView {
     let context = fleet_core::model::Context {
         id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
         name: "Fleet".into(),
@@ -12,7 +17,7 @@ fn view() -> BoardView {
     };
     let mut board = new_board(&context, "2026-09-06T12:00:00Z");
     let mut cards = Vec::new();
-    for (index, title) in ["Fix login", "Ship the board"].iter().enumerate() {
+    for (index, title) in titles.iter().enumerate() {
         let card = create_card(
             &mut board,
             &cards,
@@ -20,7 +25,7 @@ fn view() -> BoardView {
                 .parse()
                 .unwrap_or_else(|error| panic!("{error}")),
             CardDraft {
-                title: (*title).to_owned(),
+                title: title.clone(),
                 ..CardDraft::default()
             },
             "2026-09-06T12:00:00Z",
@@ -201,4 +206,92 @@ fn only_a_link_with_an_address_is_openable() {
         remote_url(&card).as_deref(),
         Some("https://example.test/browse/SP-1")
     );
+}
+
+/// The whole board model is derived once per revision, not once per frame.
+///
+/// `gpui-performance` rule 3 and `docs/APP-CONTRACTS.md` "render prepares nothing": the
+/// grouping, the filter, the per-column sort and every tile string are one derivation behind
+/// `BoardState::revision`. Neither the clock nor the cursor is an input to it — and the revision
+/// has to be the board's own, because a card the daemon answers with lands through
+/// [`AppState::apply_card`] and moves no snapshot.
+#[test]
+fn the_board_model_is_derived_once_per_revision() {
+    let titles: Vec<String> = (0..50).map(|index| format!("Card {index}")).collect();
+    let mut state = AppState::new("/tmp/fleet-board-projection", Instant::now());
+    state.board.view = Some(titled(&titles));
+    let cache = RefCell::default();
+
+    let initial = projection::prepare(&state, &cache, 1_788_523_200);
+    assert_eq!(initial.shown, 50);
+    assert_eq!(
+        initial
+            .columns
+            .iter()
+            .map(|column| column.rows.len())
+            .sum::<usize>(),
+        50
+    );
+
+    // Neither the clock nor the cursor is a projection input: 50 tiles are prepared once.
+    for tick in 0..5 {
+        state.board.focus.row = tick;
+        assert!(Rc::ptr_eq(
+            &initial,
+            &projection::prepare(&state, &cache, 1_788_523_201 + tick as i64)
+        ));
+    }
+
+    let mut card = state.board().unwrap_or_else(|| panic!("no board")).cards[0].clone();
+    card.title = "Renamed by the daemon".to_owned();
+    state.apply_card(card);
+    let updated = projection::prepare(&state, &cache, 1_788_523_210);
+    assert!(
+        !Rc::ptr_eq(&initial, &updated),
+        "an applied card is a new revision"
+    );
+    assert!(
+        updated
+            .columns
+            .iter()
+            .flat_map(|column| column.rows.iter())
+            .any(|row| row.title == "Renamed by the daemon")
+    );
+
+    state.board.filter = "renamed".to_owned();
+    assert_eq!(projection::prepare(&state, &cache, 1_788_523_211).shown, 1);
+}
+
+/// A column's list is told what changed rather than rebuilt.
+///
+/// `gpui-performance` rule 5: the `ListState` carries the measured height of every tile, so a
+/// filter that hides seven of eight cards splices the span that moved and leaves the rest alone.
+/// A list left at the old count draws rows the model no longer has.
+#[gpui::test]
+fn a_columns_list_follows_the_row_count_it_is_given(cx: &mut gpui::TestAppContext) {
+    let titles: Vec<String> = (0..8).map(|index| format!("Card {index}")).collect();
+    let mut state = AppState::new("/tmp/fleet-board-lists", Instant::now());
+    state.board.view = Some(titled(&titles));
+    let cache = RefCell::default();
+    let mut screen = cx.update(BoardScreen::new);
+
+    let model = projection::prepare(&state, &cache, 1_788_523_200);
+    screen.sync_lists(&model);
+    assert_eq!(screen.column_lists.len(), model.columns.len());
+    let rows: usize = screen
+        .column_lists
+        .iter()
+        .map(gpui::ListState::item_count)
+        .sum();
+    assert_eq!(rows, 8);
+
+    state.board.filter = "Card 1".to_owned();
+    let filtered = projection::prepare(&state, &cache, 1_788_523_201);
+    screen.sync_lists(&filtered);
+    let rows: usize = screen
+        .column_lists
+        .iter()
+        .map(gpui::ListState::item_count)
+        .sum();
+    assert_eq!(rows, 1, "the lists follow the filter, not the raw board");
 }

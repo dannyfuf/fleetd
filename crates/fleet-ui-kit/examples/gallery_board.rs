@@ -34,9 +34,11 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
     divided: false,
     compact: false,
 };
+use std::rc::Rc;
+
 use fleet_ui_kit::prelude::*;
 use gpui::{
-    AnyElement, App, Context, FocusHandle, Focusable, Hsla, KeyBinding, KeyDownEvent,
+    AnyElement, App, Context, FocusHandle, Focusable, Hsla, KeyBinding, KeyDownEvent, ListState,
     MouseDownEvent, Pixels, ScrollHandle, SharedString, Window, actions, div, px,
 };
 use support::layout::strip;
@@ -92,6 +94,7 @@ impl Category {
 }
 
 /// One card of the demo board.
+#[derive(Clone)]
 struct DemoCard {
     key: SharedString,
     title: SharedString,
@@ -163,21 +166,24 @@ impl DemoCard {
     }
 }
 
-/// One column of the demo board, with the scroll handle its body is tracked by.
+/// One column of the demo board, with the list state its virtualized body is drawn through.
 struct DemoColumn {
     title: SharedString,
     category: Category,
-    cards: Vec<DemoCard>,
-    scroll: ScrollHandle,
+    /// Shared with the row closure, so a frame hands the column a refcount and not a copy.
+    cards: Rc<Vec<DemoCard>>,
+    list: ListState,
 }
 
 impl DemoColumn {
     fn new(title: &str, category: Category, cards: Vec<DemoCard>) -> Self {
+        let list = KanbanColumn::list_state();
+        list.splice(0..0, cards.len());
         Self {
             title: title.to_string().into(),
             category,
-            cards,
-            scroll: ScrollHandle::new(),
+            cards: Rc::new(cards),
+            list,
         }
     }
 }
@@ -382,8 +388,15 @@ impl BoardGallery {
         if target == self.column || self.columns[self.column].cards.is_empty() {
             return;
         }
-        let card = self.columns[self.column].cards.remove(self.row);
-        self.columns[target].cards.push(card);
+        let card = Rc::make_mut(&mut self.columns[self.column].cards).remove(self.row);
+        // Only the row that left and the row that arrived are re-measured; every other tile
+        // keeps the height the list already has for it.
+        self.columns[self.column]
+            .list
+            .splice(self.row..self.row + 1, 0);
+        let appended = self.columns[target].cards.len();
+        Rc::make_mut(&mut self.columns[target].cards).push(card);
+        self.columns[target].list.splice(appended..appended, 1);
         self.column = target;
         self.row = self.columns[target].cards.len() - 1;
         self.clamp_row();
@@ -425,7 +438,7 @@ impl BoardGallery {
 
     fn cycle_priority(&mut self, _: &CyclePriority, _window: &mut Window, cx: &mut Context<Self>) {
         let (column, row) = (self.column, self.row);
-        if let Some(card) = self.columns[column].cards.get_mut(row) {
+        if let Some(card) = Rc::make_mut(&mut self.columns[column].cards).get_mut(row) {
             let next = PriorityLevel::ALL
                 .iter()
                 .position(|level| *level == card.priority)
@@ -488,26 +501,34 @@ fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>)
     let column_index = gallery.column;
     let row_index = gallery.row;
 
+    let weak = cx.weak_entity();
     let columns: Vec<AnyElement> = gallery
         .columns
         .iter()
         .enumerate()
         .map(|(index, column)| {
             let focused = index == column_index;
-            let tiles: Vec<AnyElement> = column
-                .cards
-                .iter()
-                .enumerate()
-                .map(|(row, card)| {
+            // The lazy row API, which is the one a real board has to use: the closure runs only
+            // for the tiles the column's viewport can show.
+            let cards = Rc::clone(&column.cards);
+            let weak = weak.clone();
+            KanbanColumn::new(
+                SharedString::from(format!("column-{index}")),
+                column.title.clone(),
+            )
+            .count(column.cards.len())
+            .accent(Some(column.category.accent(t)))
+            .focused(focused)
+            .empty_hint("No cards here.")
+            .rows(
+                column.list.clone(),
+                cards.len(),
+                move |row, _window, _cx| {
+                    let Some(card) = cards.get(row) else {
+                        return div().into_any_element();
+                    };
                     let selected = focused && row == row_index;
-                    let on_click =
-                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                            this.column = index;
-                            this.row = row;
-                            this.editing = false;
-                            this.load_editor();
-                            cx.notify();
-                        });
+                    let weak = weak.clone();
                     CardTile::new(
                         SharedString::from(format!("card-{}", card.key)),
                         card.key.clone(),
@@ -523,21 +544,19 @@ fn live_board(gallery: &BoardGallery, t: &Theme, cx: &mut Context<BoardGallery>)
                     .conflict(card.conflict)
                     .selected(selected)
                     .focused(selected)
-                    .on_click(on_click)
+                    .on_click(move |_event: &MouseDownEvent, _window, cx| {
+                        weak.update(cx, |this, cx| {
+                            this.column = index;
+                            this.row = row;
+                            this.editing = false;
+                            this.load_editor();
+                            cx.notify();
+                        })
+                        .ok();
+                    })
                     .into_any_element()
-                })
-                .collect();
-
-            KanbanColumn::new(
-                SharedString::from(format!("column-{index}")),
-                column.title.clone(),
+                },
             )
-            .count(column.cards.len())
-            .accent(Some(column.category.accent(t)))
-            .focused(focused)
-            .empty_hint("No cards here.")
-            .scroll_handle(column.scroll.clone())
-            .tiles(tiles)
             .into_any_element()
         })
         .collect();

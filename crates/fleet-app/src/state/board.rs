@@ -43,6 +43,12 @@ pub struct BoardState {
     pub filter_editing: bool,
     /// Optional secondary grouping.
     pub group_secondary: Option<GroupBy>,
+    /// Bumped by every mutation of [`Self::view`].
+    ///
+    /// The board screen memoises its whole derived model behind this counter, so it has to move
+    /// on every applied card and every applied view — `AppState::snapshot_revision` does not,
+    /// because a card edit lands through [`AppState::apply_card`] and never through a snapshot.
+    pub revision: u64,
 }
 
 impl BoardState {
@@ -50,6 +56,11 @@ impl BoardState {
     #[must_use]
     fn is_filtered(&self) -> bool {
         !self.filter.trim().is_empty()
+    }
+
+    /// Records that [`Self::view`] now holds something else than it did.
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 
@@ -69,6 +80,7 @@ impl AppState {
         self.board.view = Some(view);
         self.board.loading = false;
         self.board.error = None;
+        self.board.touch();
         self.clamp_board_focus();
     }
 
@@ -102,6 +114,7 @@ impl AppState {
                 b.number,
             ))
         });
+        self.board.touch();
         self.clamp_board_focus();
     }
 
@@ -118,7 +131,9 @@ impl AppState {
         ) {
             self.close_overlay();
         }
+        let revision = self.board.revision.wrapping_add(1);
         self.board = BoardState::default();
+        self.board.revision = revision;
         self.board_stale = true;
         self.board_generation = self.board_generation.wrapping_add(1);
         // A reconnect can land on a different fleetd with a different registry, and the

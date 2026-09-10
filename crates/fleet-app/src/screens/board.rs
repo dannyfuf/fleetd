@@ -11,14 +11,14 @@
 //! `Filter` key context instead of `Hub > Board`, so the bare letters type instead of firing
 //! (`crate::state::AppState::context_chain`).
 
-use std::time::Instant;
+use std::{cell::RefCell, rc::Rc, time::Instant};
 
 use crate::{
     actions::filter as filter_actions,
     bridge::Bridge,
     dialogs::{self, ConfirmRequest, Dialogs, card_picker::PickerKind, typed_char},
     state::{AppState, HubPane, HubTab, Overlay, Screen, StickyError},
-    views::board_screen::{self, BoardClick, BoardProps},
+    views::board_screen::{self, BoardClick, BoardModel, BoardProps},
 };
 use fleet_core::{
     board::Card,
@@ -30,12 +30,15 @@ use fleet_proto::{
     request::RequestBody,
     response::ResponseBody,
 };
-use fleet_ui_kit::Icon;
-use gpui::{AnyElement, App, Entity, FocusHandle, ScrollHandle, Subscription, Window, prelude::*};
+use fleet_ui_kit::{Icon, KanbanColumn};
+use gpui::{
+    AnyElement, App, Entity, FocusHandle, ListState, ScrollHandle, Subscription, Window, prelude::*,
+};
 
 mod actions;
 mod lifecycle;
 mod navigation;
+mod projection;
 #[cfg(test)]
 mod tests;
 
@@ -58,11 +61,17 @@ pub(crate) use navigation::{
 pub(crate) struct BoardScreen {
     /// Horizontal scroller of the columns; `h` / `l` reveal the focused one.
     board_scroll: ScrollHandle,
-    /// One vertical scroller per column; `j` / `k` reveal the focused card.
-    column_scrolls: Vec<ScrollHandle>,
-    /// Which board the column scrollers belong to; they are positional, not portable.
+    /// One virtualized list per column; `j` / `k` reveal the focused card through it.
+    column_lists: Vec<ListState>,
+    /// The model the lists were last spliced against, so a frame that changed nothing splices
+    /// nothing.
+    listed: Option<Rc<BoardModel>>,
+    /// Which board the column lists belong to; they are positional, not portable.
     scrolls_board: Option<BoardId>,
     revealed_focus: Option<(BoardId, usize, usize, Option<CardId>)>,
+    /// The derived model, kept behind its revision key so a frame that changed nothing pays
+    /// nothing (`gpui-performance` rule 3).
+    projection: RefCell<projection::ProjectionCache>,
     /// Keeps the load observation alive; dropping it stops the board refreshing itself.
     observation: Option<Subscription>,
 }
@@ -73,9 +82,11 @@ impl BoardScreen {
     pub(crate) fn new(_cx: &mut App) -> Self {
         Self {
             board_scroll: ScrollHandle::new(),
-            column_scrolls: Vec::new(),
+            column_lists: Vec::new(),
+            listed: None,
             scrolls_board: None,
             revealed_focus: None,
+            projection: RefCell::default(),
             observation: None,
         }
     }
@@ -108,42 +119,33 @@ impl BoardScreen {
         cx: &mut App,
     ) -> AnyElement {
         self.bind(state, bridge, cx);
-        let columns = state
-            .read(cx)
-            .board()
-            .map_or(0, |view| view.board.statuses.len());
+        let now = crate::presentation::now_unix();
+        let model = projection::prepare(state.read(cx), &self.projection, now);
         let shown = state.read(cx).board().map(|view| view.board.id.clone());
         if self.scrolls_board != shown {
-            // Handles are reused by position: another board's board would inherit its offsets.
-            self.column_scrolls.clear();
+            // Lists are reused by position: another board's columns would inherit their offsets
+            // and, worse, their measured tile heights.
+            self.column_lists.clear();
+            self.listed = None;
             self.scrolls_board = shown;
         }
-        self.column_scrolls.resize_with(columns, ScrollHandle::new);
+        self.sync_lists(&model);
 
         let click_state = state.clone();
         let click_bridge = bridge.clone();
-        let now = crate::presentation::now_unix();
         let app = state.read(cx);
-        // The chip states which system the board mirrors, so it reads the registry's label and
-        // not `jira` — the key a config file uses. Resolved before the borrow of `app.board`
-        // below, because the lookup needs the whole state.
-        let backend_label = app
-            .board()
-            .map(|view| app.backend_label(&view.board.backend.kind));
         let props = BoardProps {
-            view: app.board.view.as_ref(),
+            model: app.board().is_some().then_some(model.as_ref()),
             loading: app.board.loading,
             error: app.board.error.as_deref(),
             filter: &app.board.filter,
             filter_editing: app.board.filter_editing,
             focus: (app.board.focus.column, app.board.focus.row),
             syncing: syncing(app),
-            backend_label: backend_label.as_deref(),
-            now,
         };
         // The focused card, not only its coordinates: a refresh that inserts a card above it
         // moves the same selection to a place the scroller has not revealed yet.
-        let selection = props.view.map(|view| {
+        let selection = app.board().map(|view| {
             (
                 view.board.id.clone(),
                 props.focus.0,
@@ -158,7 +160,7 @@ impl BoardScreen {
         let body = board_screen::render(
             &props,
             &self.board_scroll,
-            &self.column_scrolls,
+            &self.column_lists,
             move |click, cx| on_click(click, &click_state, &click_bridge, cx),
             cx,
         );
@@ -250,11 +252,46 @@ impl BoardScreen {
             .into_any_element()
     }
 
+    /// Gives every column a list that knows the rows it now holds.
+    ///
+    /// A [`ListState`] carries the measured height of each tile, so it is told what changed
+    /// rather than rebuilt: only the columns whose rows actually moved are spliced, and every
+    /// other column keeps its measurements (`gpui-performance` rule 5). The comparison is on the
+    /// rows and not only on their count, because a tile's height follows its title and its meta
+    /// row — a card edited in place is a new height at the same index.
+    fn sync_lists(&mut self, model: &Rc<BoardModel>) {
+        if self
+            .listed
+            .as_ref()
+            .is_some_and(|listed| Rc::ptr_eq(listed, model))
+        {
+            return;
+        }
+        self.column_lists
+            .resize_with(model.columns.len(), KanbanColumn::list_state);
+        for (index, column) in model.columns.iter().enumerate() {
+            let previous = self
+                .listed
+                .as_ref()
+                .and_then(|listed| listed.columns.get(index));
+            if previous.is_some_and(|old| old.rows == column.rows) {
+                continue;
+            }
+            if let Some(list) = self.column_lists.get(index) {
+                list.splice(
+                    0..previous.map_or(0, |old| old.rows.len()),
+                    column.rows.len(),
+                );
+            }
+        }
+        self.listed = Some(Rc::clone(model));
+    }
+
     /// Keeps the focused column and card inside their scrollers.
     fn reveal_focus(&self, (column, row): (usize, usize)) {
         self.board_scroll.scroll_to_item(column);
-        if let Some(scroll) = self.column_scrolls.get(column) {
-            scroll.scroll_to_item(row);
+        if let Some(list) = self.column_lists.get(column) {
+            list.scroll_to_reveal_item(row);
         }
     }
 }

@@ -1,3 +1,4 @@
+use super::model::{card_extras, label_chips};
 use super::*;
 use fleet_core::{
     board::{CardDraft, Label, create_card, new_board},
@@ -162,4 +163,24 @@ fn label_chips_carry_the_token_name_not_a_color() {
     assert_eq!(chips.len(), 1);
     assert_eq!(chips[0].0.as_ref(), "Bug");
     assert_eq!(chips[0].1.as_deref(), Some("danger"));
+}
+
+/// The filter folds case without allocating a lowercased copy of every field of every card.
+///
+/// The fold is [`crate::presentation::contains_folded`], not an ASCII-only scan: a board is
+/// allowed to be in Spanish, and `AÑADIR` must still find `Añadir`. Case folding is also not
+/// accent stripping — `sesion` is a different word from `sesión` and finds nothing.
+#[test]
+fn the_filter_folds_case_beyond_ascii() {
+    let mut view = view();
+    let status = view.board.statuses[0].id.clone();
+    for card in &mut view.cards {
+        card.status_id = status.clone();
+    }
+    view.cards[0].title = "Añadir SESIÓN".to_owned();
+    let shown = |query: &str| visible_cards(&view, &status, query).len();
+    assert_eq!(shown("sesión"), 1);
+    assert_eq!(shown("AÑADIR"), 1);
+    assert_eq!(shown("añadir SESIÓN"), 1);
+    assert_eq!(shown("sesion"), 0, "folding case is not stripping accents");
 }

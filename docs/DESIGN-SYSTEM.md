@@ -1208,18 +1208,24 @@ is zero-suppressed, so a bare card costs exactly a key and a title.
 #### `KanbanColumn` / `KanbanBoard`
 **Purpose.** The column and the horizontal scroller that holds the columns.
 **Anatomy.** optional 2 px category accent bar · 30 px header (status name in the `Label` role,
-count `Badge`) · scrollable gapped body of tiles · `EmptyState` hint when the column is empty ·
-`Pane`'s 2 px focus ring.
+count `Badge`) · gapped body of tiles, virtualized through `gpui::list` when the caller supplies
+a `ListState` · `EmptyState` hint when the column is empty · `Pane`'s 2 px focus ring.
 **API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).focused(bool)
-.width(Pixels).empty_hint(..).tiles(..).scroll_handle(ScrollHandle)`; `COLUMN_WIDTH_CH` = 34.
+.width(Pixels).empty_hint(..)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
+.scroll_handle(ScrollHandle)` or `.rows(ListState, usize, impl FnMut(usize, &mut Window,
+&mut App) -> AnyElement)`; `KanbanColumn::list_state() -> ListState` builds the state with the
+column's own overdraw. `COLUMN_WIDTH_CH` = 34.
 `KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
 **States.** default · focused (the 2 px pane ring) · empty (the `empty_hint` `EmptyState`).
 **Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
 count reads as "unknown", not as "empty". `accent` takes a resolved `Hsla` because the status
 category → token mapping is domain knowledge that lives in the app; the call site passes a
-theme token and never a literal. Neither container binds a key: `h` / `l` / `j` / `k` move a
-cursor the screen owns, exactly as they do for `ListView`.
+theme token and never a literal. `tiles(..)` is for a fixed handful of rows; anything bounded by
+data uses `rows(..)`, because a column handed finished elements builds and measures every one of
+them every frame. `gpui::list` and not `uniform_list`: a `CardTile` is not uniform-height, since
+its title wraps to one line or two and its meta row is zero-suppressed. Neither container binds a
+key: `h` / `l` / `j` / `k` move a cursor the screen owns, exactly as they do for `ListView`.
 
 **Gallery.** The board group's bench is `examples/gallery_board.rs` (live cursor, live editor,
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the
