@@ -1,0 +1,95 @@
+[
+ {
+  "id": "app-shell-filter-accept-is-tested-through-a-copy",
+  "file": "crates/fleet-app/src/dialogs/filter.rs",
+  "line": 193,
+  "severity": "medium",
+  "category": "test-gap",
+  "rule": "gpui-app-shell audit brief \u2014 \"a test that cannot fail\"; CLAUDE.md \"duplicated logic that wants one helper\"",
+  "summary": "`filter::accept` (the `Enter` handler wired into the Filter overlay) is untested; the two `#[gpui::test]`s in the file exercise `accept_for_test`, a `#[cfg(test)]`-only reimplementation whose behaviour already differs from production, so a regression in the real path passes CI.",
+  "evidence": "Production path, crates/fleet-app/src/dialogs/filter.rs:177-190:\n```rust\nfn accept(state: &Entity<AppState>, hub: &HubCtx, cx: &mut App) {\n    let target = filter_target(state.read(cx));\n    ...\n    hub.activate_filter_target(target, cx);\n}\n```\nTest-only copy, :193-215:\n```rust\n#[cfg(test)]\nfn accept_for_test<T: SessionTransport>(state: &Entity<AppState>, bridge: &T, cx: &mut App) {\n    ...\n    DisplayedTarget::Worktree(id) => open_worktree(id, state, bridge, cx),\n    DisplayedTarget::PullRequest(_) => {}\n```\nThe real `HubCtx::activate_filter_target` (crates/fleet-app/src/screens/hub/actions.rs:62-84) gates both the worktree and PR arms behind `if !self.refuses(cx)` and opens the PR row via `open_pr_row(..)`; the copy has neither gate and drops `PullRequest` on the floor. The two tests at :315-368 (`filter_accepts_clone_failed_like_hub`, `filter_repo_activation_resets_worktree_cursor`) only ever call the copy.",
+  "failure_scenario": "Someone changes `accept` to stop clearing the filter, or `activate_filter_target`'s `CloneFailed` arm to stop setting `jobs_focus`. Both tests still pass, because they never touch either function \u2014 the copy still clears the filter and still sets `jobs_focus`. The bug ships: `/rut\u23ce` on a clone-failed row opens the Jobs panel focused on nothing, and the filter survives the screen change \u00a73.10 says it must not.",
+  "proposed_fix": "Delete `accept_for_test` and `select_repo` and drive the real `accept` in the tests by constructing a `HubCtx` over the fake transport (the Hub already does this in `crates/fleet-app/src/screens/hub/tests.rs`), or extract the state half of `accept` (`close_overlay` + `filter = FilterState::default()`) into a pure `fn leave_filter(state: &mut AppState)` that both `accept` and the tests call, and cover the routing half with the existing `activate_filter_target` tests.",
+  "test_plan": "Rewrite `filter_accepts_clone_failed_like_hub` to call `accept(&state, &hub_ctx, cx)` with a `HubCtx` built over the `FakeTransport`, then assert `overlay == Some(Overlay::Jobs)`, `jobs_focus == Some(\"clone-job\")` and `filter == FilterState::default()`. Add a third case for `DisplayedTarget::PullRequest` asserting the PR worktree request is recorded \u2014 that case fails immediately today because the tested copy has an empty arm.",
+  "area": "app-shell",
+  "verdict": "CONFIRMED",
+  "verify_reason": "`accept` (crates/fleet-app/src/dialogs/filter.rs:177-190) has no test; the two `#[gpui::test]`s at :315-368 call `accept_for_test` (:192-215), a `#[cfg(test)]` reimplementation that diverges from production \u2014 it lacks both `refuses(cx)` gates and has an empty `PullRequest` arm, where `HubCtx::activate_filter_target` (crates/fleet-app/src/screens/hub/actions.rs:62-84) gates and calls `open_pr_row`. Two corrections to the finding, though. First, the routing half is not untested: `filter_activation_uses_hub_selection_and_pr_creation_state` (crates/fleet-app/src/screens/hub/tests.rs:805-840) drives the real `activate_filter_target`, including the `PullRequest` arm, so \"the bug ships\" applies only to the `CloneFailed` arm (not covered anywhere) and to `accept`'s own half. Second, the real gap is narrow: `accept`'s state half (close_overlay + `filter = FilterState::default()`, the \u00a73.10 rule) is what nothing asserts.",
+  "effort": "small",
+  "blast_radius": "crates/fleet-app/src/dialogs/filter.rs (delete two cfg(test) fns, rewrite two tests, likely drop the local FakeTransport in favour of the hub harness) and crates/fleet-app/src/screens/hub/tests.rs (`test_hub_ctx` would need `pub(crate)` visibility to be reused from dialogs::filter).",
+  "corrected_fix": "Reuse the harness that already exists \u2014 `test_hub_ctx` in crates/fleet-app/src/screens/hub/tests.rs:805-812 \u2014 rather than \"constructing a HubCtx over the fake transport\" from scratch, and drive the real `accept(&state, &ctx, cx)`. Assert the \u00a73.10 half explicitly (`overlay` closed and `filter == FilterState::default()`), since that is the part no other test holds. Do not add a new `PullRequest` assertion to filter.rs: hub/tests.rs:826-839 already covers that arm; add the missing `CloneFailed` case to the hub test instead, next to the arm that implements it. Then delete `accept_for_test` and `select_repo`.",
+  "_files": [
+   "crates/fleet-app/src/dialogs/filter.rs",
+   "crates/fleet-app/src/screens/hub/tests.rs"
+  ]
+ },
+ {
+  "id": "app-async-pr-refresh-task-holds-strong-owner",
+  "file": "crates/fleet-app/src/screens/hub/cache.rs",
+  "line": 455,
+  "severity": "low",
+  "category": "consistency",
+  "rule": "rust-async-background-work \"fleetd-specific guidance \u2192 Generation guards vs WeakEntity\" (for new stateful sub-views prefer the WeakEntity form) and checklist 8 (\"If detached/stored, is unbounded lifetime actually correct?\")",
+  "summary": "`schedule_pr_refresh` stores a task holding a strong `Entity<HubState>` *on that same HubState*, a self-sustaining cycle for the whole PR TTL \u2014 while `schedule_inspection`, seventy lines below in the same file and doing the same job, downgrades both entities.",
+  "evidence": "crates/fleet-app/src/screens/hub/cache.rs:450-468:\n```rust\nself.hub.update(cx, |hub, _| hub.pr_refresh_task = None);\n\u2026\nlet ctx = self.clone();                       // HubCtx holds Entity<AppState> + Entity<HubState>\nlet task = cx.spawn(async move |cx| {\n    cx.background_executor().timer(delay).await;\n    cx.update(|cx| {\n        ctx.hub.update(cx, |hub, _| { hub.pr_refresh_task = None; hub.prs.invalidate_config(); });\n        ctx.tick_pull_requests(cx);\n    });\n});\nself.hub.update(cx, |hub, _| hub.pr_refresh_task = Some(task));\n```\n`HubCtx` holds strong handles \u2014 crates/fleet-app/src/screens/hub.rs:388-395:\n```rust\npub(crate) struct HubCtx {\n    state: Entity<AppState>,\n    hub: Entity<HubState>,\n    \u2026\n}\n```\nThe sibling debounce in the same file does it the documented way \u2014 cache.rs:536-541:\n```rust\nlet state = self.state.downgrade();\nlet hub = self.hub.downgrade();\n\u2026\nlet (Some(state), Some(hub)) = (state.upgrade(), hub.upgrade()) else { return };\nif hub.read(cx).inspect_generation != generation { return; }\n```\n`delay` is the PR TTL (`PR_TTL = 90 s` default, screens/hub.rs:77, or `github.prTtlSeconds`).",
+  "failure_scenario": "While the timer is pending, `HubState` is kept alive solely by the task it itself owns: releasing every other handle (window torn down between two shell synchronizes, or the Hub screen replaced without `synchronize`/`tick_pull_requests` running to clear `pr_refresh_task`) does not drop it. The entity, its `PrCache` slices and both PR badge vectors survive up to one full TTL past their owner, and a GPUI leak assertion in a test that drops the window mid-refresh would flag it. It self-resolves when the timer fires, so the cost is a bounded retention plus two contradictory conventions for the same concern in one file.",
+  "proposed_fix": "Downgrade before spawning, exactly as `schedule_inspection` does: capture `self.state.downgrade()`/`self.hub.downgrade()` (or add a `HubCtx::downgrade()` returning a weak twin), upgrade inside the task, and return early when either is gone.",
+  "test_plan": "Add a `#[gpui::test]` in the hub tests: build a `HubCtx`, call `schedule_pr_refresh`, take a `WeakEntity` of the `HubState`, drop every strong `HubCtx`/`Entity<HubState>` the test holds, `cx.run_until_parked()`, and assert `weak.upgrade().is_none()`. It fails today (the stored task keeps the entity alive until `advance_clock(PR_TTL)`) and passes once the task holds only weak handles.",
+  "area": "app-async",
+  "verdict": "CONFIRMED",
+  "verify_reason": "cache.rs:455-467 moves `self.clone()` \u2014 a HubCtx that holds `Entity<AppState>` and `Entity<HubState>` (hub.rs:388-395) \u2014 into a task that is then stored on that same HubState at :466-467, so HubState -> Task -> HubCtx -> Entity<HubState> is a genuine strong cycle for the length of `delay` (PR_TTL, hub.rs:77). schedule_inspection at cache.rs:536-541 does the same job with `downgrade()` + upgrade-or-return, so the file contains both conventions. Severity is genuinely low, as the finding says: the cycle is broken when the timer fires and the future's state is dropped, and synchronize() clears pr_refresh_task whenever the Hub is not visible (cache.rs:476), so the retention is bounded and self-resolving. Worth fixing for the convention, not for the leak.",
+  "effort": "trivial",
+  "blast_radius": "crates/fleet-app/src/screens/hub/cache.rs only (schedule_pr_refresh; the same pattern is worth checking at :424-433 where a HubCtx clone is also moved into a task). Optionally crates/fleet-app/src/screens/hub/tests.rs for a leak assertion. HubCtx is pub(crate) to the hub module, so a `downgrade()` helper stays local.",
+  "corrected_fix": "Mirror schedule_inspection rather than inventing a new shape: downgrade state and hub, clone bridge and the three scroll handles, upgrade inside the task and rebuild the HubCtx there, returning early if either entity is gone. Also add the generation guard schedule_inspection has \u2014 without it a stale timer that fires after a newer schedule_pr_refresh replaced the task can still invalidate the config and re-tick; today the cycle happens to mask that, so removing the strong handle without a guard changes behaviour rather than just lifetimes.",
+  "_files": [
+   "crates/fleet-app/src/screens/hub/cache.rs",
+   "crates/fleet-app/src/screens/hub/tests.rs"
+  ]
+ },
+ {
+  "id": "workspace-hygiene-no-layering-or-manifest-test",
+  "file": "docs/ARCHITECTURE.md",
+  "line": 52,
+  "severity": "medium",
+  "category": "test-gap",
+  "rule": "rust-workspace-architecture: \"Keep the crate graph acyclic and shallow, and prove it with a test \u2026 fleetd's graph is acyclic and `docs/ARCHITECTURE.md` states the direction, but nothing tests it \u2014 highest-leverage single change here\"",
+  "summary": "The dependency direction and the manifest conventions the whole workspace relies on are stated only in prose; no test enforces them, so the first violating edge or version literal lands green.",
+  "evidence": "docs/ARCHITECTURE.md:52-54 states the rule:\n```\nDependency direction: `core <- proto <- {term, client, cli} <- {daemon, app}`; `ui-kit` depends\nonly on gpui; `lazygit` depends on `git` and `ui-kit`, never on `core` or `proto`.\n```\n`cargo metadata --no-deps` confirms it holds today (fleet-ui-kit -> [], fleet-lazygit -> [fleet-git, fleet-ui-kit], fleet-core -> []), and all 10 manifests carry `[lints] workspace = true` with zero version literals. But `find crates/*/tests -name '*layering*'` and a grep for `cargo_metadata`/`workspace = true` across the test tree return nothing: the invariants are unenforced.",
+  "failure_scenario": "A future change needs a domain type inside `fleet-ui-kit` and adds `fleet-core.workspace = true` to `crates/fleet-ui-kit/Cargo.toml`, or adds `regex = \"1\"` (a literal) to a crate manifest, or omits `[lints] workspace = true` from a new crate. `make lint` and `make test` both pass; the boundary that ADR 0003 and docs/ARCHITECTURE.md:52 protect is gone, and review is the only thing that could have caught it.",
+  "proposed_fix": "Add `crates/fleet-app/tests/workspace_layering.rs` exactly as the skill specifies: parse `cargo metadata --no-deps`, assert none of the `FORBIDDEN` pairs (`fleet-lazygit -> fleet-core`, `fleet-lazygit -> fleet-proto`, `fleet-ui-kit -> fleet-core`, `fleet-core -> fleet-proto`, `fleet-daemon -> fleet-app`) is reachable through normal (non-dev) dependencies, and in the same file assert every `crates/*/Cargo.toml` contains `[lints]\\nworkspace = true` and no dependency line carrying a version literal.",
+  "test_plan": "The new `cargo test -p fleet-app --test workspace_layering` passes on today's tree. To prove it can fail, add `fleet-core.workspace = true` to `crates/fleet-ui-kit/Cargo.toml` (or `regex = \"1\"` to any crate manifest) and re-run: the test must report the offending path/manifest. Today no test changes state under either mutation.",
+  "area": "workspace-hygiene",
+  "verdict": "CONFIRMED",
+  "verify_reason": "The facts check out: docs/ARCHITECTURE.md:52-53 states the direction as quoted; no test anywhere parses the crate graph (no file under crates/*/tests or scripts/ mentions cargo metadata, and scripts/tests contains only bootstrap-zig-test.sh); all ten crate manifests do carry `[lints]` today (verified per file). So the invariant is documented and currently true but unenforced. This is a hardening gap rather than a live defect \u2014 nothing is broken today, and the failure scenario is by construction hypothetical.",
+  "effort": "small",
+  "blast_radius": "One new test file plus its crate's Cargo.toml (serde_json dev-dependency if not already present), and Makefile/CI only if it goes under scripts/tests. `cargo metadata` in a sandboxed CI must be offline-safe \u2014 use --no-deps and --offline so the test does not hit the network.",
+  "corrected_fix": "Add the layering test, but not the manifest-literal half as specified. (a) Location: a workspace-wide graph test does not belong in crates/fleet-app/tests \u2014 it would drag a GPUI-heavy crate's build into an assertion about Cargo metadata. Put it in crates/fleet-core/tests/workspace_layering.rs (leaf, cheapest to build) or in scripts/tests wired to `make test-scripts`, and shell out to `cargo metadata --no-deps --format-version 1` parsed with serde_json rather than adding a cargo_metadata dependency. (b) The 'no version literal' assertion as written would fail immediately: every crate manifest legitimately has `version = \"0.1.0\"` under [package] (verified in all ten). Scope that check to dependency tables only, or drop it \u2014 it adds little. (c) Assert the forbidden edges only over `kind: null` (normal) dependencies, so dev-dependencies used by test harnesses are not caught.",
+  "_files": [
+   "crates/fleet-app/tests/workspace_layering.rs",
+   "crates/fleet-core/tests/workspace_layering.rs",
+   "docs/ARCHITECTURE.md"
+  ]
+ },
+ {
+  "id": "workspace-hygiene-adr-0011-duplicate-number",
+  "file": "docs/decisions/0011-terminal-agent-attention.md",
+  "line": 1,
+  "severity": "low",
+  "category": "doc-drift",
+  "rule": "rust-workspace-architecture: \"One ADR per expensive-to-revisit decision, uniquely numbered and indexed \u2026 Renumber the second to `0012` and index it before adding a thirteenth\"",
+  "summary": "Two decision records claim number 0011 and one of them is absent from the index, so \"ADR 0011\" is ambiguous and the twelfth decision is invisible from docs/README.md.",
+  "evidence": "Both files open with the same number \u2014 `docs/decisions/0011-terminal-agent-attention.md:1`: `# 0011 \u2014 Terminal agent attention`, and `docs/decisions/0011-remote-machines.md:1`: `# 0011 \u2014 Remote machines through daemon federation`. The index in docs/README.md:29-40 ends at `| [0011](decisions/0011-remote-machines.md) | Remote machines \u2026 |` \u2014 twelve records, eleven rows.",
+  "failure_scenario": "A new ADR is written and the author takes \"the next free number\" from the index, which reads 0011 as the maximum, producing a third file numbered 0012 that collides with the renumbered attention record \u2014 or, more immediately, a code comment or commit message citing \"ADR 0011\" resolves to either of two unrelated decisions. `docs/decisions/0011-terminal-agent-attention.md` is also unreachable from the documentation entry point that docs/README.md is meant to be.",
+  "proposed_fix": "Rename `docs/decisions/0011-terminal-agent-attention.md` to `0012-terminal-agent-attention.md`, change its `# 0011 \u2014` heading to `# 0012 \u2014`, fix any inbound references, and add the `| [0012](decisions/0012-terminal-agent-attention.md) | \u2026 |` row to the table in docs/README.md.",
+  "test_plan": "Add a doc-conformity test (or a `scripts/tests/` check run by `make test-scripts`) that globs `docs/decisions/[0-9][0-9][0-9][0-9]-*.md`, asserts the numeric prefixes are unique, asserts each file's `# NNNN \u2014` heading matches its filename prefix, and asserts every file appears exactly once in the docs/README.md table. It fails today on both the duplicate `0011` and the missing index row.",
+  "area": "workspace-hygiene",
+  "verdict": "CONFIRMED",
+  "verify_reason": "`ls docs/decisions/` shows both 0011-remote-machines.md and 0011-terminal-agent-attention.md, and `head -1` on each confirms both headings claim `# 0011 \u2014`. The index at docs/README.md:29-40 ends at the remote-machines row: twelve files, eleven rows. A repo-wide grep for 'terminal-agent-attention' returns zero hits outside the file itself, so it is orphaned from the documentation entry point, while ADR 0011 is cited as 'remote machines' from docs/SWARM-INVENTORY.md:4, docs/REMOTE-MACHINES.md:197,207 and docs/decisions/0010-native-agents.md:9 \u2014 the ambiguity is already load-bearing in prose.",
+  "effort": "trivial",
+  "blast_radius": "docs/decisions/0011-terminal-agent-attention.md (renamed), docs/README.md table; no inbound references need updating.",
+  "corrected_fix": "Renumber the attention record to 0012, not the remote-machines one \u2014 the existing inbound citations (SWARM-INVENTORY.md:4, REMOTE-MACHINES.md:197 and 207, 0010-native-agents.md:9) all resolve 0011 to remote machines, and the orphan has no inbound links, so renaming it is the zero-churn side. Use `git mv` to keep history, fix the `# 0011 \u2014` heading to `# 0012 \u2014`, and add the docs/README.md row in the same commit (docs: prefix per the commit convention). The proposed conformity test is fine but optional; keep it in scripts/tests rather than a Rust test.",
+  "_files": [
+   "docs/README.md",
+   "docs/decisions/0011-terminal-agent-attention.md"
+  ]
+ }
+]

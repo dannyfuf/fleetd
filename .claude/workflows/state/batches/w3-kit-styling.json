@@ -1,0 +1,96 @@
+[
+ {
+  "id": "ui-kit-styling-metrics-doc-incomplete",
+  "file": "docs/DESIGN-SYSTEM.md",
+  "line": 206,
+  "severity": "low",
+  "category": "doc-drift",
+  "rule": "docs/DESIGN-SYSTEM.md:1-6 (\"This document and the crate are one contract\"), \u00a72.8:206 (\"`Metrics` holds every pixel constant the UX spec pins down\") and the checklist item \"A genuinely new token landed in `theme/tokens.rs` *and* \u00a72 of `docs/DESIGN-SYSTEM.md` in the same commit\"",
+  "summary": "\u00a72.8 presents itself as the full `Metrics` inventory and the full opacity ladder, but 19 of the 63 `Metrics` fields and 2 of the 11 named opacities appear nowhere in the design document.",
+  "evidence": "docs/DESIGN-SYSTEM.md:217-218 states the ladder as complete:\n```\nThe same token set owns the opacity ladder: `veil 0.55` \u00b7 `dimmed 0.40` \u00b7\n`refreshing 0.60` \u00b7 `stale 0.55` \u00b7 `skeleton 0.30` \u00b7 `no_session 0.30`.\n```\nyet crates/fleet-ui-kit/src/theme/tokens.rs:531-538 defines four more, two of which occur zero times in the whole document (`grep -c banner_border_opacity docs/DESIGN-SYSTEM.md` \u2192 0, same for `error_hover_opacity`):\n```rust\n/// Semantic banner border opacity.\npub banner_border_opacity: f32,\n/// Hover fill on sticky errors.\npub error_hover_opacity: f32,\n```\nThe same holds for pixel fields: `job_key_w`, `toast_inset`, `diff_scrollbar_w`, `diff_thumb_min_h`, `detail_overlay_w`, `scroll_pill_w`, `confirm_compact_w`, `new_terminal_tab_w`, `terminal_tab_min_w`/`max_w` and `diff_horizontal_step` all return 0 hits in docs/DESIGN-SYSTEM.md while \u00a72.8 claims to list them.",
+  "failure_scenario": "A contributor told by the skill and the checklist to \"use an existing `Metrics` opacity, or add a named one\" reads \u00a72.8's six-entry ladder, does not find a 22 % hover fill or a 35 % banner border, and adds a duplicate token or a bare `.opacity(0.22)` \u2014 which is exactly how `crates/fleet-lazygit/src/views/diff.rs:429-430` already ends up with `.opacity(0.55)` / `.opacity(0.5)` literals. Every review that uses \u00a72.8 as the authority also mis-passes a diff that hard-codes one of the 19 undocumented pixel values, because the doc gives no token name to point at.",
+  "proposed_fix": "Extend \u00a72.8 to list the remaining `Metrics` fields and complete the opacity ladder (`banner_border 0.35`, `error_hover 0.22`, `terminal_blink 0.70`, `neutral_fill 0.08`, `semantic_fill 0.14`), or narrow the sentence at :206 and :217 so it no longer claims completeness and points at `tokens.rs` as the inventory.",
+  "test_plan": "Add a doc-sync test in `crates/fleet-ui-kit` \u2014 `#[test] fn every_metrics_field_is_documented()` \u2014 that reads `include_str!(\"../../../docs/DESIGN-SYSTEM.md\")` and asserts each `Metrics` field name (or its documented short name) appears in it. It fails today naming `banner_border_opacity`, `error_hover_opacity`, `job_key_w`, `toast_inset`, \u2026 and passes once \u00a72.8 is completed.",
+  "area": "ui-kit-styling",
+  "verdict": "CONFIRMED",
+  "verify_reason": "docs/DESIGN-SYSTEM.md:206 claims '`Metrics` holds every pixel constant the UX spec pins down' and :217-218 states the opacity ladder as a closed six-entry list, but tokens.rs:414-543 defines 64 fields including `banner_border_opacity`, `error_hover_opacity`, `terminal_blink_opacity`, `neutral_fill_opacity`, `semantic_fill_opacity` and pixel fields `confirm_compact_w`, `terminal_tab_min_w/max_w`, `new_terminal_tab_w`, `scroll_pill_w`, `toast_inset`, `job_key_w`, `diff_scrollbar_w`, `diff_thumb_min_h`, `diff_horizontal_step`, `detail_overlay_w` \u2014 each of which greps to 0 hits in docs/DESIGN-SYSTEM.md. Verified field-by-field.",
+  "effort": "small",
+  "blast_radius": "docs/DESIGN-SYSTEM.md \u00a72.8. The proposed `every_metrics_field_is_documented()` test cannot enumerate struct fields \u2014 Rust has no reflection \u2014 so it would need a `metrics_fields!` declarative macro that generates the struct and the name list, i.e. a rewrite of tokens.rs:414-543 and every literal `Metrics { .. }` construction; that is a much larger change than the doc fix and should not ride along.",
+  "corrected_fix": "Prefer narrowing the claim over transcribing 64 names: rewrite :206 and :217 to say `Metrics` is the inventory and the doc lists the ladder entries a component author chooses between, pointing at crates/fleet-ui-kit/src/theme/tokens.rs as the authoritative list, and complete only the opacity ladder (banner_border 0.35, error_hover 0.22, terminal_blink, neutral_fill, semantic_fill) since that is the set the checklist actually sends contributors to. A hand-maintained mirror of every pixel field will drift again on the next token.",
+  "_files": [
+   "crates/fleet-ui-kit/src/theme/tokens.rs",
+   "docs/DESIGN-SYSTEM.md"
+  ]
+ },
+ {
+  "id": "ui-kit-styling-dead-motion-tokens",
+  "file": "crates/fleet-ui-kit/src/theme/tokens.rs",
+  "line": 382,
+  "severity": "low",
+  "category": "doc-drift",
+  "rule": "gpui-styling: \"Do not add a `motion.*` token without a consumer\"; checklist \"No new token without a consumer\" \u2014 and docs/DESIGN-SYSTEM.md:193 \"Fleet animates four things and nothing else\"",
+  "summary": "Three of the four animations \u00a72.7 declares \u2014 the toast slide, the sheet slide and the value-swap highlight \u2014 have no implementation: their duration tokens are read nowhere in the workspace, so the document asserts behaviour the app never performs.",
+  "evidence": "crates/fleet-ui-kit/src/theme/tokens.rs:381-387\n```rust\npub struct Motion {\n    /// 140 ms: toast slide + fade.\n    pub toast: u64,\n    /// 160 ms: sheet slide.\n    pub sheet: u64,\n    /// 120 ms: value-swap highlight.\n    pub highlight: u64,\n```\n`grep -rn \"motion\\.\" crates --include=*.rs | grep -v src/theme/` returns only `motion.toast_short`, `motion.toast_normal`, `motion.prefix_hint_delay` and `motion.spinner` (crates/fleet-ui-kit/src/components/toast_stack.rs:52-53, crates/fleet-app/src/terminal/surface.rs:790, crates/fleet-ui-kit/src/icons.rs:263). The only `with_animation` call in the workspace is the spinner at crates/fleet-ui-kit/src/icons.rs:264-269; `toast_stack.rs` renders its toasts with no transition and `sheet.rs` snaps open with no slide.",
+  "failure_scenario": "docs/DESIGN-SYSTEM.md:196-198 tells a reader the toast slides and fades over 140 ms and the sheet slides over 160 ms; in the running app both appear instantly. Any reviewer verifying \"motion comes from `theme.motion.*`\" against this table concludes the tokens are live and leaves them, so the dead half of the contract survives another release.",
+  "proposed_fix": "Either implement the three transitions with `with_animation` (which is also what makes `App::reduce_motion` work) in `toast_stack.rs`, `sheet.rs` and the fact-refresh path, adding a gallery panel for each; or delete `Motion::{toast, sheet, highlight}` and the corresponding rows from \u00a72.7 in the same commit.",
+  "test_plan": "Add `#[test] fn every_motion_token_has_a_consumer()` in `crates/fleet-ui-kit/src/theme/tokens.rs` that walks `crates/*/src/**/*.rs` (excluding `src/theme/`) and asserts each `Motion` field name appears at least once. It fails today naming `toast`, `sheet` and `highlight`, and passes once they are wired or removed.",
+  "area": "ui-kit-styling",
+  "verdict": "CONFIRMED",
+  "verify_reason": "tokens.rs:381-387 defines `Motion::{toast, sheet, highlight}`; `grep -rn 'motion\\.' crates --include=*.rs | grep -v src/theme/` returns only `toast_short`, `toast_normal`, `prefix_hint_delay`, `spinner` (plus two unrelated `motion.moves_down()` calls on a navigation enum in list_view.rs:238 and fleet-lazygit/src/root/navigation.rs:306). The workspace's only `with_animation` is the spinner at crates/fleet-ui-kit/src/icons.rs:264. docs/DESIGN-SYSTEM.md:193-203 asserts the toast slide, sheet slide and value-swap highlight as shipped behaviour.",
+  "effort": "small",
+  "blast_radius": "crates/fleet-ui-kit/src/theme/tokens.rs (struct + `Motion::default`), docs/DESIGN-SYSTEM.md \u00a72.7 table and its 'four things' sentence, plus any `Motion { .. }` literal (only the Default impl today) and the gallery's motion panel if it prints the table. The proposed 'every motion token has a consumer' test would have to walk the source tree at test time and would also have to special-case the `motion.moves_down()` false positives.",
+  "corrected_fix": "Delete `Motion::{toast, sheet, highlight}` and their \u00a72.7 rows in one commit \u2014 the checklist rule is 'no new token without a consumer', and implementing three transitions to justify three tokens inverts it. While editing \u00a72.7, also fix the surrounding prose: 'Fleet animates four things and nothing else' is already inaccurate, since `prefix_hint_delay` is a `Timer::after` visibility flip (prefix_hint.rs:9), not an animation, leaving the spinner as the only animated thing.",
+  "_files": [
+   "crates/fleet-ui-kit/src/theme/tokens.rs",
+   "docs/DESIGN-SYSTEM.md"
+  ]
+ },
+ {
+  "id": "ui-kit-styling-hover-paints-over-selection",
+  "file": "crates/fleet-app/src/views/watch_pane.rs",
+  "line": 123,
+  "severity": "medium",
+  "category": "consistency",
+  "rule": "gpui-styling: \"Hover is pointer feedback only \u2014 it never encodes state\"; checklist \"Hover ... never paints over `row_selected`; the gate is `hoverable && !disabled && !selected`\" and \"No `.hover(` / `.cursor_pointer()` added in `fleet-app`\" (docs/DESIGN-SYSTEM.md:9-12, 252)",
+  "summary": "The watch tab strip applies its hover background unconditionally, so pointing at the already-selected watch tab repaints `row_selected` with `row_hover` and erases the selection the keyboard set.",
+  "evidence": "crates/fleet-app/src/views/watch_pane.rs:113-124\n```rust\ndiv()\n    .id((\"watch-tab\", id.0))\n    .cursor_pointer()\n    ...\n    .when(id == selected, |el| el.bg(theme.colors.row_selected))\n    .hover(|s| s.bg(theme.colors.row_hover))\n```\nCompare the canonical gate in the kit, crates/fleet-ui-kit/src/components/row.rs:255-257:\n```rust\n// Hover is pointer feedback only (\u00a73): it never expresses state, and it never paints\n// over the selection background of the row the cursor is already on.\nlet hoverable = self.hoverable && !self.disabled && !selected;\n```",
+  "failure_scenario": "A session has two or more watches, so `tabs()` renders the strip. The user selects watch B with the keyboard (`app.watches.select`), then moves the pointer over B's tab without clicking. GPUI's hover refinement wins over the base style, so B paints `row_hover` (#191C22 dark) instead of `row_selected` (#1E2430) and no tab in the strip looks selected while the pointer rests there. The same interleaving over the *unselected* tab A paints A exactly as a selected tab would look on a lighter theme, i.e. hover and selection become indistinguishable.",
+  "proposed_fix": "Replace the hand-rolled strip with the kit's `SegmentedTabs` (crates/fleet-ui-kit/src/components/segmented_tabs.rs:158-166 already renders the non-underlined pill variant with `row_selected` and no hover at all), or, if a leading `StatusDot` slot must be added to it first, at minimum gate the hover the way `Row` does: `.when(id != selected, |el| el.hover(|s| s.bg(theme.colors.row_hover)))`. Either way the `.cursor_pointer()`/`.hover()` pair must move out of `fleet-app`, which docs/DESIGN-SYSTEM.md:9-12 forbids from carrying styling.",
+  "test_plan": "Add `crates/fleet-ui-kit/src/components/segmented_tabs.rs` (or `row.rs`) a unit test over the extracted predicate \u2014 e.g. `#[test] fn hover_is_suppressed_on_the_selected_tab() { assert!(!hoverable(/*selected*/ true, /*disabled*/ false)); assert!(hoverable(false, false)); }` \u2014 and port `watch_pane::tabs` onto that helper. Before the fix the watch strip has no such predicate and passes `row_hover` for every tab, so a test asserting the strip's built style for `id == selected` contains no hover refinement fails; after the fix it passes.",
+  "area": "ui-kit-styling",
+  "verdict": "CONFIRMED",
+  "verify_reason": "crates/fleet-app/src/views/watch_pane.rs:122-123 applies `.when(id == selected, |el| el.bg(theme.colors.row_selected))` and then an unconditional `.hover(|s| s.bg(theme.colors.row_hover))`; GPUI's hover StyleRefinement is applied on top of the base style, so the selected tab paints row_hover (dark #191C22 vs row_selected #1E2430, light #F3F4F6 vs #EDF2FB \u2014 tokens.rs:93-94, 123-124) while the pointer rests on it. The kit's own canonical gate is the opposite (crates/fleet-ui-kit/src/components/row.rs:255-257: `let hoverable = self.hoverable && !self.disabled && !selected;`), and the doc's state table (docs/DESIGN-SYSTEM.md:249-252) says hover is 'pointer only, never state'. The sibling hover at watch_pane.rs:82 is on the close button and is fine \u2014 only the tab strip conflates the two.",
+  "effort": "trivial",
+  "blast_radius": "crates/fleet-app/src/views/watch_pane.rs only. crates/fleet-app/src/views/watch_pane/tests.rs asserts state/controller behaviour, not built styles, so nothing breaks; the proposed 'assert the built style contains no hover refinement' test is not writable against GPUI's Div API and should be dropped. If the SegmentedTabs route were taken instead: segmented_tabs.rs, its gallery panel in examples/kit_gallery.rs, and every existing SegmentedTabs caller.",
+  "corrected_fix": "Gate the hover in place rather than swapping in SegmentedTabs: `.when(id != selected, |el| el.hover(|s| s.bg(theme.colors.row_hover)))`. The proposed SegmentedTabs replacement is not a drop-in \u2014 segmented_tabs.rs:130-166 has no leading slot for the StatusDot the watch tab needs, pins its height to `metrics.pane_header_h`, has no `overflow_x_scroll` for a strip of many watches, uses Text::label rather than Text::data_small, and fires on `on_mouse_down` instead of `on_click`. If the strip really must leave fleet-app, that is a separate component-design change (add a `leading` slot + scrollable variant to SegmentedTabs, with a gallery panel), not part of the hover fix.",
+  "_files": [
+   "crates/fleet-app/src/views/watch_pane.rs",
+   "crates/fleet-app/src/views/watch_pane/tests.rs",
+   "crates/fleet-ui-kit/src/components/segmented_tabs.rs",
+   "docs/DESIGN-SYSTEM.md"
+  ]
+ },
+ {
+  "id": "ui-kit-styling-inline-dialog-heights",
+  "file": "crates/fleet-app/src/dialogs/mod.rs",
+  "line": 47,
+  "severity": "low",
+  "category": "consistency",
+  "rule": "gpui-styling: \"No `px(<literal>)` in a component or a view\"; checklist \"New fixed geometry became a `Metrics` field with a doc comment naming its UX-spec clause \u2014 or ... a named `const` with the same doc comment (the accepted shape is `crates/fleet-app/src/dialogs/mod.rs:40-47`)\"; docs/DESIGN-SYSTEM.md:9-12",
+  "summary": "Three dialogs hard-code their height as an inline `px()` literal on the same builder call whose width correctly goes through the named-const `Dialogs::width(cx)` ladder, so half of each dialog's geometry is a token and half is an anonymous number.",
+  "evidence": "crates/fleet-app/src/dialogs/help.rs:500-503\n```rust\nDialog::new(\"Keymap\")\n    .icon(Icon::CircleQuestionMark)\n    .width(super::Dialogs::Help.width(cx))\n    .height(px(620.0))\n```\nand identically crates/fleet-app/src/dialogs/settings/view.rs:65-68 (`.width(crate::dialogs::Dialogs::Settings.width(cx))` / `.height(px(560.0))`) and crates/fleet-app/src/dialogs/clone_repo.rs:465-467 (`.height(px(420.0))`). The accepted shape sits a few lines away in crates/fleet-app/src/dialogs/mod.rs:41-47:\n```rust\nconst NARROW_W: Pixels = px(460.0);\nconst PROMPT_W: Pixels = px(520.0);\nconst WIDE_W: Pixels = px(720.0);\nconst HELP_W: Pixels = px(880.0);\n```",
+  "failure_scenario": "`px(560.0)` in `settings/view.rs` is numerically identical to `metrics.dialog_w` and `px(620.0)`/`px(420.0)` name nothing at all, so a density change to the dialog ladder (or a theme that restates `Metrics`) moves every dialog's width and leaves all three heights frozen \u2014 the dialogs end up at a width/height ratio no spec clause states, and the review grep `rg 'px\\([0-9]' crates/fleet-app/src` keeps returning noise that hides a genuinely new literal.",
+  "proposed_fix": "Give the heights the same treatment as the widths: add `HELP_H`/`SETTINGS_H`/`CLONE_H` consts next to `crates/fleet-app/src/dialogs/mod.rs:41-47` with a doc comment naming the UX-spec clause, exposed through a `Dialogs::height(cx)` sibling of `Dialogs::width(cx)` \u2014 or add three `Metrics` fields plus their \u00a72.8 rows.",
+  "test_plan": "Add `#[test] fn dialog_views_hold_no_pixel_literals()` in `crates/fleet-app/src/dialogs/mod.rs` that reads every `src/dialogs/**/*.rs` except `mod.rs` and asserts no line outside a `const` declaration matches `px([0-9]`. It fails today on help.rs:503, settings/view.rs:68 and clone_repo.rs:467, and passes once the heights become named consts.",
+  "area": "ui-kit-styling",
+  "verdict": "CONFIRMED",
+  "verify_reason": "Verified all three call sites: help.rs:502-503, settings/view.rs:67-68, clone_repo.rs:466-467 each pass `.width(Dialogs::X.width(cx))` immediately followed by an inline `.height(px(...))`. The named-const ladder sits at dialogs/mod.rs:41-47 with UX-spec doc comments for widths only, and `Dialog::height` (components/dialog.rs:80) takes plain `Pixels`. The sub-claim also checks out: `metrics.dialog_w` is `px(560.0)` (tokens.rs:416, 548), numerically identical to settings' inline height.",
+  "effort": "small",
+  "blast_radius": "crates/fleet-app/src/dialogs/mod.rs, dialogs/help.rs:503, dialogs/settings/view.rs:68, dialogs/clone_repo.rs:467; check `Dialogs::width` call sites and any dialogs/tests.rs that asserts dialog geometry. The proposed `dialog_views_hold_no_pixel_literals()` grep test must not be added as written \u2014 it would fail on crates/fleet-app/src/dialogs/confirm.rs:79 `gpui::px(0.0)`, a legitimate ListState alignment argument.",
+  "corrected_fix": "Add `HELP_H`/`SETTINGS_H`/`CLONE_H` consts beside dialogs/mod.rs:41-47, each with a doc comment naming its UX-spec clause, exposed through a `Dialogs::height(cx) -> Pixels` sibling of `Dialogs::width(cx)` (returning Option or a per-variant default for the dialogs that do not set a height). Do not add these as `Metrics` fields: heights that no theme may restate belong with the existing width consts in fleet-app, which is the shape the checklist already blesses.",
+  "_files": [
+   "crates/fleet-app/src/dialogs/confirm.rs",
+   "crates/fleet-app/src/dialogs/mod.rs"
+  ]
+ }
+]
