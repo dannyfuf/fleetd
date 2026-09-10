@@ -704,15 +704,18 @@ fn go_rows(
     limit: usize,
 ) -> Vec<Entry> {
     let mut rows: Vec<Entry> = Vec::new();
+    // The rank is read once per session, so it is resolved through a map built once rather
+    // than by rescanning the MRU inside the sort key — this list is rebuilt on every
+    // `AppState` notification while the palette is open.
+    let ranks: std::collections::HashMap<&SessionId, usize> = state
+        .session_mru
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(rank, id)| (id, rank))
+        .collect();
     let mut sessions: Vec<_> = snapshot.sessions.iter().collect();
-    sessions.sort_by_key(|session| {
-        state
-            .session_mru
-            .entries()
-            .iter()
-            .position(|id| id == &session.id)
-            .unwrap_or(usize::MAX)
-    });
+    sessions.sort_by_key(|session| ranks.get(&session.id).copied().unwrap_or(usize::MAX));
     for session in sessions {
         if rows.len() == limit {
             return rows;
@@ -1082,11 +1085,18 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
     } else {
         ROW_CAP
     };
-    let rows = rows.into_iter().take(cap).collect();
+    let rows: Vec<Entry> = rows.into_iter().take(cap).collect();
     with_host(state, cx, |host| {
-        host.palette.rows = rows;
+        // This runs on every `AppState` notification while the palette is open, so rows that
+        // came out the same keep the `Rc` the card already drew instead of a fresh one.
+        if host.palette.rows.as_ref() != rows.as_slice() {
+            host.palette.rows = rows.into();
+        }
         host.palette.total = total;
         host.palette.prepared_query = Some(query);
+        // A snapshot can lose rows under an open palette; an unclamped cursor would point past
+        // the end and make `Enter` a silent no-op (§3.9).
+        host.palette.cursor = step(host.palette.cursor, 0, host.palette.rows.len());
     });
 }
 
@@ -2016,6 +2026,74 @@ mod tests {
         assert!(PaletteSectionKind::Go < PaletteSectionKind::Do);
         assert!(PaletteSectionKind::Do < PaletteSectionKind::Context);
     }
+
+    #[gpui::test]
+    fn a_shrinking_refresh_clamps_the_palette_cursor(cx: &mut gpui::TestAppContext) {
+        // §3.9: `Enter` runs the highlighted row. A snapshot that loses sessions under an
+        // open palette must not leave the cursor past the last row, where `Enter` is inert.
+        let now = Instant::now();
+        let state = cx.new(|_| {
+            let mut app = AppState::new("/tmp/fleet", now);
+            app.apply_snapshot(multi_session_snapshot(6), now);
+            app.overlay = Some(Overlay::Palette);
+            app.palette_seed = Some("sessions".into());
+            app
+        });
+        cx.update(|cx| {
+            seed(&state, cx);
+            with_host(&state, cx, |host| {
+                assert_eq!(host.palette.rows.len(), 6);
+                host.palette.cursor = 5;
+            });
+        });
+
+        cx.update(|cx| {
+            state.update(cx, |app, _| {
+                app.apply_snapshot(multi_session_snapshot(2), now);
+            });
+            refresh(&state, cx);
+            with_host(&state, cx, |host| {
+                assert_eq!(host.palette.rows.len(), 2);
+                assert!(
+                    host.palette.rows.get(host.palette.cursor).is_some(),
+                    "the cursor still selects a row, cursor {} of {} rows",
+                    host.palette.cursor,
+                    host.palette.rows.len()
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_refresh_that_changes_nothing_keeps_the_prepared_rows(cx: &mut gpui::TestAppContext) {
+        // The open palette is refreshed from every `AppState` notification, so a rebuild that
+        // lands on the same rows must not swap the prepared list out from under the card.
+        let now = Instant::now();
+        let state = cx.new(|_| {
+            let mut app = AppState::new("/tmp/fleet", now);
+            app.apply_snapshot(multi_session_snapshot(3), now);
+            app.overlay = Some(Overlay::Palette);
+            app.palette_seed = Some("sessions".into());
+            app
+        });
+        let before = cx.update(|cx| {
+            seed(&state, cx);
+            with_host(&state, cx, |host| {
+                assert_eq!(host.palette.rows.len(), 3);
+                host.palette.rows.clone()
+            })
+        });
+
+        cx.update(|cx| {
+            refresh(&state, cx);
+            let after = with_host(&state, cx, |host| host.palette.rows.clone());
+            assert!(
+                std::rc::Rc::ptr_eq(&before, &after),
+                "unchanged rows are kept, not rebuilt into a fresh Rc"
+            );
+        });
+    }
+
     #[gpui::test]
     fn palette_seeding_and_cursor_motion_reuse_prepared_matches(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| {

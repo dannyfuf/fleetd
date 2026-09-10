@@ -166,9 +166,11 @@ pub(super) fn options(state: &AppState, kind: &PickerKind) -> Vec<PickerOption> 
 pub(super) fn candidates(state: &AppState, draft: &CardPickerState) -> Vec<PickerOption> {
     let schema = property_kind(state, &draft.kind);
     let query = draft.query.trim();
+    // Folded once, not once per offered value: this runs on every keystroke and every draw.
+    let needle = query.to_lowercase();
     let mut rows: Vec<PickerOption> = options(state, &draft.kind)
         .into_iter()
-        .filter(|option| crate::presentation::contains_folded(&option.label, &query.to_lowercase()))
+        .filter(|option| crate::presentation::contains_folded(&option.label, &needle))
         .collect();
     if accepts_free_text(&draft.kind, schema)
         && !query.is_empty()
