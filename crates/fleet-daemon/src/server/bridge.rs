@@ -1,6 +1,7 @@
 //! Standard-input/output bridge to a daemon socket.
 
 use std::{
+    fs::{File, OpenOptions},
     io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -12,6 +13,8 @@ use tokio::{net::UnixStream, time::Instant};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_INTERVAL: Duration = Duration::from_millis(50);
+/// Startup log the bootstrap restart script also appends to, relative to the logs directory.
+const DAEMON_OUTPUT_FILE: &str = "fleetd.out";
 
 /// Ensures the selected daemon is running, then relays raw bytes between it and stdio.
 pub async fn run_connect(home: Option<PathBuf>) -> anyhow::Result<()> {
@@ -34,8 +37,8 @@ async fn connect_or_start(home: &Path) -> anyhow::Result<UnixStream> {
         .arg("--home")
         .arg(home)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(daemon_output(&layout))
+        .stderr(daemon_output(&layout));
     configure_detached(&mut command);
     let mut child = command.spawn()?;
     let deadline = Instant::now() + START_TIMEOUT;
@@ -58,6 +61,21 @@ async fn connect_or_start(home: &Path) -> anyhow::Result<UnixStream> {
         }
         tokio::time::sleep(PROBE_INTERVAL).await;
     }
+}
+
+/// Appends a detached daemon's output to `<home>/logs/fleetd.out`, discarding it when that
+/// file cannot be opened: a missing startup log must never keep the bridge from connecting.
+fn daemon_output(layout: &FleetHome) -> Stdio {
+    open_daemon_output(layout).map_or_else(|_| Stdio::null(), Stdio::from)
+}
+
+fn open_daemon_output(layout: &FleetHome) -> io::Result<File> {
+    let logs_dir = layout.logs_dir();
+    std::fs::create_dir_all(&logs_dir)?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs_dir.join(DAEMON_OUTPUT_FILE))
 }
 
 async fn relay(socket: UnixStream) -> io::Result<()> {
