@@ -4,7 +4,7 @@ use std::future::Future;
 
 /// One wording for the archived-card refusal, which is raised again after the board guard is
 /// dropped for the worktree clone and the card is reloaded.
-const ARCHIVED_CARD: &str = "cannot create a worktree for an archived card";
+pub(super) const ARCHIVED_CARD: &str = "cannot create a worktree for an archived card";
 
 fn archived_card() -> DaemonError {
     DaemonError::Conflict(ARCHIVED_CARD.to_owned())
@@ -184,17 +184,34 @@ impl Boards {
                     // worktree is being made. Nothing on the board references the worktree now:
                     // the refusal names it, or `fleet list` is the only trace it ever existed.
                     Err(error) => {
-                        return Err(DaemonError::Conflict(format!(
-                            "worktree {} was created, but its card is gone: {error}",
-                            made.1.id,
-                        )));
+                        // `Worktrees::create` is idempotent, so an adopted worktree must not
+                        // be reported as one this call made.
+                        return Err(DaemonError::Conflict(if made.0 {
+                            format!(
+                                "worktree {} was created, but its card is gone: {error}",
+                                made.1.id,
+                            )
+                        } else {
+                            format!("worktree {} is linked to no card: {error}", made.1.id)
+                        }));
                     }
                 };
                 guard = reloaded.0;
                 doc = reloaded.1;
                 index = reloaded.2;
                 if doc.cards[index].archived {
-                    return Err(archived_card());
+                    // Archiving is the other way the card can move while the guard is dropped,
+                    // and it leaves the same orphan: a worktree this call made is referenced by
+                    // nothing on the board, so the refusal names it rather than reading as the
+                    // pre-clone refusal, which promises nothing was created.
+                    return Err(if made.0 {
+                        DaemonError::Conflict(format!(
+                            "worktree {} was created, but its card was archived",
+                            made.1.id,
+                        ))
+                    } else {
+                        archived_card()
+                    });
                 }
                 // The ownership check above ran under the guard this clone dropped. Two cards
                 // that render the same slug would otherwise both adopt one worktree here.

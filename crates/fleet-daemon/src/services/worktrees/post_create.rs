@@ -3,7 +3,10 @@
 
 use super::*;
 
-const RUNNER: &str = r#"status=0
+const RUNNER: &str = r#"pid_file="${FLEET_STATUS_PATH}.pid"
+printf '%s\n' "$$" > "${pid_file}.tmp"
+mv "${pid_file}.tmp" "$pid_file"
+status=0
 failed=0
 index=0
 for hook do
@@ -20,6 +23,22 @@ tmp="${FLEET_STATUS_PATH}.tmp.$$"
 printf '%s %s\n' "$failed" "$status" > "$tmp"
 mv "$tmp" "$FLEET_STATUS_PATH"
 exit "$status""#;
+
+/// Poll interval for a detached runner's liveness.
+const RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// A recovered runner's process identifier was recorded by an earlier boot and the operating
+/// system may since have handed it to somebody else, so a reconciliation wait is bounded and
+/// resolves the intent as unfinished on expiry. A runner this boot spawned is our own child
+/// and is watched until it exits.
+pub(super) const RECOVERED_RUNNER_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// Returns the path the runner publishes its own process identifier to before it runs a hook.
+pub(super) fn runner_pid_path(status_path: &Path) -> PathBuf {
+    let mut path = status_path.as_os_str().to_os_string();
+    path.push(".pid");
+    PathBuf::from(path)
+}
 
 impl Worktrees {
     /// Schedules the detached post-create runner, or nothing when a repository has no hooks.
@@ -100,18 +119,59 @@ impl Worktrees {
             .await?;
         intent.pid = Some(process.pid);
         self.write_post_create_intent(&intent)?;
+        self.await_detached_runner(&intent, None).await;
         self.finish_detached_post_create(intent).await
+    }
+
+    /// Waits for a detached runner to record its completion. The status file is the authority:
+    /// the process identifier only says the runner has not exited yet, so a recovered wait is
+    /// bounded by `limit` rather than trusting an identifier from an earlier boot forever.
+    async fn await_detached_runner(&self, intent: &PostCreateIntent, limit: Option<Duration>) {
+        let Some(pid) = self.detached_runner_pid(intent) else {
+            return;
+        };
+        let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
+        while pid_is_alive(pid) {
+            if self.files.exists(&intent.status_path) {
+                return;
+            }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                tracing::warn!(
+                    pid,
+                    intent = %intent.intent_path.display(),
+                    "stopped waiting for a recovered post-create runner"
+                );
+                return;
+            }
+            tokio::time::sleep(RUNNER_POLL_INTERVAL).await;
+        }
+    }
+
+    /// Reports whether the runner for an intent has already been launched. The runner publishes
+    /// its own identifier before it runs a hook, so a daemon killed between the spawn and the
+    /// intent write still sees the evidence and never runs the user's hooks a second time.
+    fn detached_runner_started(&self, intent: &PostCreateIntent) -> bool {
+        intent.pid.is_some()
+            || self.files.exists(&runner_pid_path(&intent.status_path))
+            || self.files.exists(&intent.status_path)
+    }
+
+    fn detached_runner_pid(&self, intent: &PostCreateIntent) -> Option<u32> {
+        if let Some(pid) = intent.pid {
+            return Some(pid);
+        }
+        self.files
+            .read_text(&runner_pid_path(&intent.status_path))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     pub(super) async fn finish_detached_post_create(
         &self,
         intent: PostCreateIntent,
     ) -> DaemonResult<()> {
-        if let Some(pid) = intent.pid {
-            while pid_is_alive(pid) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
         let status = match self.files.read_text(&intent.status_path) {
             Ok(status) => status,
             Err(error) => {
@@ -161,6 +221,10 @@ impl Worktrees {
     }
 
     fn cleanup_post_create_intent(&self, intent: &PostCreateIntent) {
+        let pid_path = runner_pid_path(&intent.status_path);
+        if let Err(error) = self.files.remove_file(&pid_path) {
+            tracing::warn!(%error, path = %pid_path.display(), "failed to remove completed hook pid");
+        }
         if let Err(error) = self.files.remove_file(&intent.status_path) {
             tracing::warn!(%error, path = %intent.status_path.display(), "failed to remove completed hook status");
         }
@@ -199,6 +263,9 @@ impl Worktrees {
             };
             intent.intent_path = path;
             if !registered.contains(&intent.worktree.id) {
+                let _ignored = self
+                    .files
+                    .remove_file(&runner_pid_path(&intent.status_path));
                 let _ignored = self.files.remove_file(&intent.status_path);
                 let _ignored = self.files.remove_file(&intent.intent_path);
                 continue;
@@ -213,7 +280,10 @@ impl Worktrees {
                 format!("Reconcile hooks for {}", intent.worktree.id),
                 JobPolicy::new(false, false),
                 move |context| async move {
-                    if intent.pid.is_some() || service.files.exists(&intent.status_path) {
+                    if service.detached_runner_started(&intent) {
+                        service
+                            .await_detached_runner(&intent, Some(RECOVERED_RUNNER_TIMEOUT))
+                            .await;
                         service.finish_detached_post_create(intent).await
                     } else {
                         service
