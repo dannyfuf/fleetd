@@ -369,7 +369,8 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
   `trigger_for`) and `PromptHistory` the bounded submitted-prompt ring.
 - `components/markdown/` (`parser.rs`, `render.rs`, `code.rs`):
   `MarkdownDocument { blocks: Vec<MarkdownBlock> }`;
-  `MarkdownBlock = Paragraph(Vec<MarkdownInline>) | Code { lang: Option<String>, text: String } |
+  `MarkdownBlock = Paragraph(Vec<MarkdownInline>) | Code { lang: Option<String>,
+  text: SharedString, highlights: CodeHighlights } (built by `MarkdownBlock::code(lang, text)`) |
   List { ordered: bool, items: Vec<Vec<MarkdownBlock>> } | Heading { level: u8,
   inlines: Vec<MarkdownInline> } | Quote(Vec<MarkdownBlock>) | Rule`;
   `MarkdownInline = Text(String) | Code(String) | Strong(Vec<MarkdownInline>) |

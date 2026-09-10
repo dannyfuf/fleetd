@@ -20,11 +20,13 @@
 //! geometry; `code` documents why fenced blocks are coloured locally rather than with the
 //! ADR 0005 `syntect` stack.
 
-use gpui::{App, prelude::*};
+use gpui::{App, SharedString, prelude::*};
 
 mod code;
 mod parser;
 mod render;
+
+pub use code::CodeHighlights;
 
 #[cfg(test)]
 mod tests;
@@ -41,12 +43,14 @@ pub struct MarkdownDocument {
 pub enum MarkdownBlock {
     /// A paragraph of inline nodes.
     Paragraph(Vec<MarkdownInline>),
-    /// A fenced code block.
+    /// A fenced code block. Build one with [`MarkdownBlock::code`], which colours it.
     Code {
         /// Optional fence language.
         lang: Option<String>,
         /// Literal code contents.
-        text: String,
+        text: SharedString,
+        /// The block's colour spans, resolved here so the renderer never lexes.
+        highlights: CodeHighlights,
     },
     /// An ordered or unordered list.
     List {
@@ -66,6 +70,20 @@ pub enum MarkdownBlock {
     Quote(Vec<MarkdownBlock>),
     /// A horizontal rule.
     Rule,
+}
+
+impl MarkdownBlock {
+    /// A fenced code block, lexed now rather than every time it is drawn.
+    #[must_use]
+    pub fn code(lang: Option<String>, text: impl Into<SharedString>) -> Self {
+        let text = text.into();
+        let highlights = CodeHighlights::new(lang.as_deref(), &text);
+        MarkdownBlock::Code {
+            lang,
+            text,
+            highlights,
+        }
+    }
 }
 
 /// Supported inline Markdown nodes.

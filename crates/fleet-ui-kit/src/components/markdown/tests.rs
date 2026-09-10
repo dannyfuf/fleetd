@@ -22,7 +22,7 @@ fn write_blocks(out: &mut String, blocks: &[MarkdownBlock], depth: usize) {
             MarkdownBlock::Heading { level, inlines } => {
                 out.push_str(&format!("{pad}heading{level} {}\n", inline_tree(inlines)));
             }
-            MarkdownBlock::Code { lang, text } => {
+            MarkdownBlock::Code { lang, text, .. } => {
                 let lang = lang.as_deref().unwrap_or("-");
                 out.push_str(&format!(
                     "{pad}code[{lang}] {:?}\n",
@@ -180,10 +180,7 @@ fn fenced_code_keeps_its_language_and_its_literal_body() {
     assert_eq!(
         document.blocks,
         vec![
-            MarkdownBlock::Code {
-                lang: Some("rust".to_owned()),
-                text: "let x = 1;\n\n  indented".to_owned(),
-            },
+            MarkdownBlock::code(Some("rust".to_owned()), "let x = 1;\n\n  indented"),
             MarkdownBlock::Paragraph(vec![text("after")]),
         ]
     );
@@ -193,10 +190,7 @@ fn fenced_code_keeps_its_language_and_its_literal_body() {
 fn a_tilde_fence_may_contain_backticks() {
     assert_eq!(
         parse_markdown("~~~\n```\n~~~").blocks,
-        vec![MarkdownBlock::Code {
-            lang: None,
-            text: "```".to_owned(),
-        }]
+        vec![MarkdownBlock::code(None, "```")]
     );
 }
 
@@ -398,10 +392,7 @@ fn a_lone_angle_bracket_is_text() {
 fn an_unterminated_fence_is_still_a_code_block() {
     assert_eq!(
         parse_markdown("```py\nprint(1)\n").blocks,
-        vec![MarkdownBlock::Code {
-            lang: Some("py".to_owned()),
-            text: "print(1)\n".to_owned(),
-        }]
+        vec![MarkdownBlock::code(Some("py".to_owned()), "print(1)\n")]
     );
 }
 
@@ -664,6 +655,33 @@ fn the_inline_code_fill_is_a_translucent_neutral() {
 fn flattening_drops_marks_and_keeps_text() {
     let nodes = inlines("a **b** [c](https://example.com) `d`");
     assert_eq!(render::flatten(&nodes), "a b c d");
+}
+
+/// A fence is lexed when its document is built, not when the document is drawn: the transcript
+/// redraws a streaming turn every frame, and re-scanning a 300-line block each time is the
+/// render-path work `gpui-performance` rule 1 forbids.
+#[gpui::test]
+fn a_code_block_is_highlighted_once_per_document(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    code::HIGHLIGHT_CALLS.with(|calls| calls.set(0));
+
+    let document = parse_markdown("```rust\nlet x = 1; // one\n```");
+    assert_eq!(
+        code::HIGHLIGHT_CALLS.with(std::cell::Cell::get),
+        1,
+        "the fence must be lexed once while the document is parsed"
+    );
+
+    cx.update(|cx| {
+        for _ in 0..3 {
+            let _ = render::render(&document, cx);
+        }
+    });
+    assert_eq!(
+        code::HIGHLIGHT_CALLS.with(std::cell::Cell::get),
+        1,
+        "drawing the document re-lexed the fence"
+    );
 }
 
 #[gpui::test]

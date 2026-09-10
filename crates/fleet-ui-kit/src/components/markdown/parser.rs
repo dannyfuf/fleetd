@@ -291,13 +291,7 @@ fn code_block(
         body.push(dedent(lines[index], indent));
         index += 1;
     }
-    (
-        MarkdownBlock::Code {
-            lang,
-            text: body.join("\n"),
-        },
-        index,
-    )
+    (MarkdownBlock::code(lang, body.join("\n")), index)
 }
 
 /// Collect a block quote, including CommonMark's lazy continuation lines.

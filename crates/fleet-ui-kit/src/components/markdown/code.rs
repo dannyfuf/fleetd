@@ -13,7 +13,7 @@
 //! `fleet-lazygit`'s `Bucket` resolves to, so a snippet in a transcript and the same snippet in
 //! a diff do not disagree.
 
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use gpui::Hsla;
 
@@ -80,11 +80,44 @@ fn family(lang: Option<&str>) -> Option<Family> {
     Some(family)
 }
 
+/// The colour spans of one fenced block, resolved when the document is built.
+///
+/// A block is lexed once, by [`CodeHighlights::new`], and the renderer only maps the buckets it
+/// already holds onto theme colours: `gpui-performance` rule 1 keeps the scan out of the draw
+/// path, where a streaming transcript would repeat it every frame.
+///
+/// The spans are shared rather than owned because a transcript row clones its document to draw
+/// it: a long fence has thousands of them, and copying that vector per frame would trade the
+/// scan for a memcpy of the same order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CodeHighlights(Arc<[(Range<usize>, CodeToken)]>);
+
+impl CodeHighlights {
+    /// Lex `text` as `lang`.
+    pub(super) fn new(lang: Option<&str>, text: &str) -> Self {
+        Self(highlight(lang, text).into())
+    }
+
+    /// The buckets, as sorted, disjoint byte ranges over the block's text.
+    pub(super) fn spans(&self) -> &[(Range<usize>, CodeToken)] {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`highlight`] has run on this thread, so a test can prove a block is
+    /// lexed once when its document is built rather than once per frame.
+    pub(super) static HIGHLIGHT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Colour one fenced block, as sorted, disjoint byte ranges over `text`.
 ///
 /// The ranges are what `StyledText::with_default_highlights` wants; producing them out of order
 /// or overlapping makes it panic, which is why the scanner only ever moves forward.
 pub(super) fn highlight(lang: Option<&str>, text: &str) -> Vec<(Range<usize>, CodeToken)> {
+    #[cfg(test)]
+    HIGHLIGHT_CALLS.with(|calls| calls.set(calls.get() + 1));
     let Some(family) = family(lang) else {
         return Vec::new();
     };
