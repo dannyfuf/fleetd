@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const RETENTION: Duration = Duration::from_secs(30 * 60);
+pub(crate) const RETENTION: Duration = Duration::from_secs(30 * 60);
 
 /// One watch plus the output retained for it and the connection that may write to it.
 struct Entry {
@@ -97,6 +97,11 @@ impl Watches {
             return None;
         }
         Some(registry.insert(None, watch, initial_output))
+    }
+
+    /// Ids of every watch the registry still holds, including finished ones awaiting expiry.
+    pub(crate) fn ids(&self) -> BTreeSet<WatchId> {
+        self.lock().entries.keys().copied().collect()
     }
 
     /// Returns the watch observing `pid`, if discovery already registered one.

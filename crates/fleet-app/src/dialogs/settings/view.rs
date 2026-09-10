@@ -65,7 +65,7 @@ pub(crate) fn render(
     let mut card = Dialog::new("Settings")
         .icon(Icon::Settings2)
         .width(crate::dialogs::Dialogs::Settings.width(cx))
-        .height(px(560.0))
+        .when_some(crate::dialogs::Dialogs::Settings.height(), Dialog::height)
         .body(body)
         .hint_row(if dirty {
             KeyHintRow::new()

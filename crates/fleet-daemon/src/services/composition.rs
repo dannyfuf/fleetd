@@ -148,9 +148,8 @@ impl Services {
             update::runtime_checkout(),
         );
         let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
-        let daemon_id = load_or_create_daemon_id(&home);
-        let local_daemon_id = HostId::try_from(daemon_id.as_str())
-            .expect("persisted daemon identity must be a valid host id");
+        let local_daemon_id = load_or_create_daemon_id(&home);
+        let daemon_id = local_daemon_id.to_string();
         let machines = Arc::new(
             Machines::from_config_with_runtime(
                 &default_config(&home),
@@ -238,6 +237,55 @@ mod tests {
     use super::*;
     use crate::{adapters::clock::SystemClock, adapters::files::RealFiles};
 
+    /// Collects formatted `tracing` output so a log-only failure path can be asserted.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `work` with every event it logs captured instead of printed.
+    fn capturing_logs<T>(work: impl FnOnce() -> T) -> (T, String) {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, work);
+        (value, logs.text())
+    }
+
     #[test]
     fn services_build_uses_runtime_update_checkout() {
         let temp = tempfile::tempdir().unwrap();
@@ -255,6 +303,98 @@ mod tests {
         );
 
         assert_eq!(services.update.checkout(), update::runtime_checkout());
+    }
+
+    #[test]
+    fn an_invalid_daemon_id_file_is_quarantined_instead_of_aborting_startup() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        // `local` is a reserved host id, so this file cannot become the daemon identity.
+        std::fs::write(home.join("daemon-id"), "local\n").expect("write daemon id");
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+
+        let services = Services::new(
+            home,
+            Arc::new(ConfigStore::new(home, files.clone())),
+            Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(home)),
+            Adapters::system(files),
+        );
+
+        assert_ne!(services.daemon_id(), "local");
+        assert!(HostId::try_from(services.daemon_id()).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(home.join("daemon-id.invalid"))
+                .expect("the rejected identity is kept for diagnosis")
+                .trim(),
+            "local"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("daemon-id"))
+                .expect("daemon id file")
+                .trim(),
+            services.daemon_id()
+        );
+    }
+
+    #[test]
+    fn a_daemon_id_that_cannot_be_read_or_written_still_starts_the_daemon() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        // A directory where the identity file belongs: neither the read nor the write can
+        // succeed, and startup must survive both rather than abort or hand out an invalid id.
+        std::fs::create_dir(home.join("daemon-id")).expect("occupy the identity path");
+        let build = || {
+            let files = Arc::new(RealFiles::new(
+                home.join("trash"),
+                [home.join("repos"), home.join("worktrees")],
+            ));
+            Services::new(
+                home,
+                Arc::new(ConfigStore::new(home, files.clone())),
+                Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+                Arc::new(JobManager::new(home)),
+                Adapters::system(files),
+            )
+        };
+        let ((first, second), logs) = capturing_logs(|| (build(), build()));
+        assert!(HostId::try_from(first.daemon_id()).is_ok());
+        assert_ne!(
+            first.daemon_id(),
+            second.daemon_id(),
+            "an identity that cannot be persisted cannot be stable, which is what the warning says"
+        );
+        // The failed write is the whole reason the identity is unstable, so it has to be
+        // reported rather than discarded: this is the only place that failure is observable.
+        assert!(
+            logs.contains("could not persist the daemon identity"),
+            "{logs}"
+        );
+
+        // Control: the same startup on a writable home says nothing, so the assertion above is
+        // reading the failed write and not a warning the daemon logs unconditionally.
+        let writable = tempfile::tempdir().expect("temp home");
+        let home = writable.path();
+        let (_services, logs) = capturing_logs(|| {
+            let files = Arc::new(RealFiles::new(
+                home.join("trash"),
+                [home.join("repos"), home.join("worktrees")],
+            ));
+            Services::new(
+                home,
+                Arc::new(ConfigStore::new(home, files.clone())),
+                Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+                Arc::new(JobManager::new(home)),
+                Adapters::system(files),
+            )
+        });
+        assert!(
+            !logs.contains("could not persist the daemon identity"),
+            "{logs}"
+        );
     }
 
     #[test]

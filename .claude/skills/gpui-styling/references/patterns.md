@@ -626,11 +626,12 @@ Consumers, verified: `spinner` (`icons.rs:263`), `prefix_hint_delay`
 (`components/prefix_hint.rs:9`, `crates/fleet-app/src/terminal/surface.rs:790`), `toast_short` /
 `toast_normal` (`components/toast_stack.rs:52-53`, `crates/fleet-app/src/state/notifications.rs:175-176`).
 
-**`motion.toast`, `motion.sheet` and `motion.highlight` have no consumer.** Only one
-`with_animation` exists in the whole workspace (the spinner). Either implement those three with
-`with_animation` — which buys `reduce_motion` for free — or delete the tokens. A token with no
-consumer contradicts `docs/DESIGN-SYSTEM.md:3-4` ("the crate is the machine-readable half of the
-contract").
+**Every `Motion` field has a consumer, and it must stay that way.** `motion.toast`,
+`motion.sheet` and `motion.highlight` used to sit here unread and were deleted rather than
+retro-fitted, because a token with no consumer contradicts `docs/DESIGN-SYSTEM.md:3-4` ("the
+crate is the machine-readable half of the contract"). Adding a duration back means implementing
+it with `with_animation` in the same change — which buys `reduce_motion` for free — not landing
+the token first and the animation later.
 
 ---
 

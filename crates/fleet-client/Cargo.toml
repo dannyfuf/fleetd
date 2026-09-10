@@ -21,6 +21,6 @@ tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "test-util"] }
 smol_str.workspace = true
 tempfile.workspace = true

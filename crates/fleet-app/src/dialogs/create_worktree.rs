@@ -2,10 +2,7 @@
 
 use std::{
     cell::Cell,
-    future::{Future, poll_fn},
-    pin::pin,
     rc::Rc,
-    task::Poll,
     time::{Duration, Instant},
 };
 
@@ -25,6 +22,7 @@ use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::{create_worktree as create_actions, dialog},
+    async_util::before_timeout,
     bridge::Bridge,
     dialogs::{DialogHost, field, notify, open_session, root, step, type_into, with_host},
     presentation::FuzzyQuery,
@@ -507,24 +505,6 @@ fn poll_base_refs<T: CreateTransport>(
         }
     });
     crate::dialogs::retain_task(state, cx, "create-refs", task);
-}
-
-async fn before_timeout<T>(
-    future: impl Future<Output = T>,
-    timeout: impl Future<Output = ()>,
-) -> Option<T> {
-    let mut future = pin!(future);
-    let mut timeout = pin!(timeout);
-    poll_fn(|cx| {
-        if let Poll::Ready(output) = future.as_mut().poll(cx) {
-            return Poll::Ready(Some(output));
-        }
-        if timeout.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(None);
-        }
-        Poll::Pending
-    })
-    .await
 }
 
 fn base_refs_from(

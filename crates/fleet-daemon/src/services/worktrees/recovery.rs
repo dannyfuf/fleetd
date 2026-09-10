@@ -21,10 +21,16 @@ impl Worktrees {
                 if name.starts_with(".hot") || name.starts_with(".discard-") {
                     continue;
                 }
-                if let Some((slug, _attempt)) = name.rsplit_once(".creating-") {
-                    self.recover_attempt(&config, &repo, slug, &child).await?;
+                // One unreadable or unobservable directory must not cost every later
+                // repository its scan, nor the post-create reconciliation below: an
+                // unrecovered worktree still occupies its canonical path and is invisible.
+                let recovered = if let Some((slug, _attempt)) = name.rsplit_once(".creating-") {
+                    self.recover_attempt(&config, &repo, slug, &child).await
                 } else {
-                    self.recover_published(&repo, name, &child).await?;
+                    self.recover_published(&repo, name, &child).await
+                };
+                if let Err(error) = recovered {
+                    tracing::warn!(%error, path = %child.display(), "skipped worktree during startup recovery");
                 }
             }
         }

@@ -792,6 +792,42 @@ fn help_uses_pre_overlay_context(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_event_drain_loop_yields_between_batches(cx: &mut TestAppContext) {
+    let (window, _requests, events) = test_window(cx);
+    // One event more than a batch: an always-ready receiver must not keep the foreground
+    // executor inside the loop until the backlog is gone.
+    for index in 0..=EVENT_BATCH_LIMIT {
+        events
+            .try_send(GitEvent::Opened {
+                root: PathBuf::from(format!("/repo/{index}")),
+            })
+            .unwrap();
+    }
+    cx.run_until_parked();
+    window
+        .update(cx, |pane, _, _| {
+            assert_eq!(
+                pane.state.root,
+                PathBuf::from(format!("/repo/{}", EVENT_BATCH_LIMIT - 1)),
+                "only the first batch is applied before the loop steps aside"
+            );
+        })
+        .unwrap();
+
+    cx.background_executor.advance_clock(EVENT_YIELD);
+    cx.run_until_parked();
+    window
+        .update(cx, |pane, _, _| {
+            assert_eq!(
+                pane.state.root,
+                PathBuf::from(format!("/repo/{EVENT_BATCH_LIMIT}")),
+                "the rest of the backlog lands on the next turn"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 fn hidden_panes_stop_timers_and_watcher_reads_and_refresh_on_activation(cx: &mut TestAppContext) {
     let (window, requests, events) = test_window(cx);
     window

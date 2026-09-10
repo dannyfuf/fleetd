@@ -657,15 +657,17 @@ impl CardTile {
     pub fn on_click(self, impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static) -> Self;
 }
 
-// kanban_column.rs — a column: header (name, count, category color), scrollable body of children, empty hint
+// kanban_column.rs — a column: header (name, count, category color), virtualized body of tiles, empty hint
 pub struct KanbanColumn { /* RenderOnce */ }
 impl KanbanColumn {
     pub fn new(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Self;
     pub fn count(self, usize) -> Self; pub fn accent(self, Option<Hsla>) -> Self /* tokens only at call site */;
     pub fn focused(self, bool) -> Self; pub fn width(self, Pixels) -> Self;
     pub fn empty_hint(self, impl Into<SharedString>) -> Self;
-    pub fn children(self, impl IntoIterator<Item = AnyElement>) -> Self;
-    pub fn scroll_handle(self, ScrollHandle) -> Self;
+    pub fn tiles(self, impl IntoIterator<Item = AnyElement>) -> Self;   // a fixed handful of rows
+    pub fn rows(self, ListState, usize, impl FnMut(usize, &mut Window, &mut App) -> AnyElement) -> Self;  // data-bounded, virtualized
+    pub fn list_state() -> ListState;                                   // the column's own overdraw
+    pub fn scroll_handle(self, ScrollHandle) -> Self;                   // only meaningful with tiles(..)
 }
 pub struct KanbanBoard { /* RenderOnce: horizontal scroller of columns with gutter */ }
 impl KanbanBoard { pub fn new(id: impl Into<ElementId>) -> Self; pub fn columns(self, impl IntoIterator<Item = AnyElement>) -> Self; pub fn scroll_handle(self, ScrollHandle) -> Self; }

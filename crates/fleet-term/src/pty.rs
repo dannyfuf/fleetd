@@ -460,6 +460,7 @@ impl Pty {
         thread::Builder::new()
             .name("fleet-pty-wait".to_owned())
             .spawn(move || {
+                // Fire-and-forget: the receiver is gone only once the terminal was dropped.
                 let _ = exit_sender.send_blocking(child.wait());
                 if let Some(notify) = notify {
                     notify();

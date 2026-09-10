@@ -23,13 +23,20 @@ pub(super) fn cursor_row(
         .child(FocusRing::cursor_row(focused).content(body))
 }
 
-/// Make `element` activatable by pointer, with the role and cursor that implies.
+/// Make `element` activatable by pointer, with the cursor that implies, announced to assistive
+/// technology as a button called `name`.
+///
+/// The name is not optional, which is the whole point: a `Role::Button` with nothing to announce
+/// is worse than no role at all, because it promises assistive technology a name the tree does
+/// not have. Role and label are set together or not at all.
 pub(super) fn on_activate<E: InteractiveElement + StatefulInteractiveElement + Styled>(
     element: E,
+    name: impl Into<gpui::SharedString>,
     activate: impl Fn(&mut Window, &mut App) + 'static,
 ) -> E {
     element
-        .role(gpui::Role::Button)
         .cursor_pointer()
         .on_click(move |_, window, cx| activate(window, cx))
+        .role(gpui::Role::Button)
+        .aria_label(name)
 }

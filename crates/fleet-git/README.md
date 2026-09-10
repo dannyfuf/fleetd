@@ -11,6 +11,10 @@ Git's exact bytes, and hands the UI owned, typed snapshots.
 - **One process per operation, explicit argv.** `tokio::process::Command` only.
   Every child gets `GIT_TERMINAL_PROMPT=0` and `LC_ALL=C`; path operations add
   `GIT_LITERAL_PATHSPECS=1` and background reads add `GIT_OPTIONAL_LOCKS=0`.
+- **Every child has a deadline.** A read or a local mutation is killed after
+  60 s; `CommandKind::Network` (fetch, pull, push) gets ten minutes, because it
+  waits on a remote and a link fleetd does not control. An overrun is SIGKILLed
+  and reported as `GitError::Timeout` carrying the deadline that was applied.
 - **Bytes in, bytes out.** Paths are `PathBuf` built from raw bytes and diff
   line content is `Vec<u8>`, so non-UTF-8 paths and content survive intact.
   Lossy decoding happens only where a type says `String`.

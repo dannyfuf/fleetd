@@ -148,6 +148,15 @@ pub struct DecisionCard {
 /// The free-text option every provider question that accepts one offers last.
 pub const SOMETHING_ELSE: &str = "Something else…";
 
+/// The most numbered options one question may draw, honour and advertise.
+///
+/// KEYMAP gives `Agent > AgentDecision > AgentQuestion` one binding per digit, so this is the
+/// last digit that dispatches: four provider options plus the [`SOMETHING_ELSE`] row every
+/// question that accepts free text appends. It bounds the rows the card draws as well as the
+/// keys it answers — a row numbered past the last bound digit is an affordance no key can
+/// reach, which DESIGN-SYSTEM §4 forbids in the same way as a listed key that does nothing.
+pub const MAX_QUESTION_OPTIONS: usize = 5;
+
 /// The §9 permission keys, with the session-or-directory label the provider chose.
 ///
 /// `session` is [`DecisionAction::AllowSession`] or [`DecisionAction::AllowDirectory`]
@@ -170,17 +179,22 @@ pub fn permission_actions(
 /// The §9 question keys for a question with `options` choices.
 #[must_use]
 pub fn question_actions(options: usize, multi_select: bool) -> Vec<DecisionOption> {
-    let last = options.clamp(1, 4);
-    let keys = if last == 1 {
-        SharedString::from("1")
-    } else {
-        SharedString::from(format!("1–{last}"))
-    };
-    let mut actions = vec![DecisionOption::new(
-        keys,
-        "choose",
-        DecisionAction::Choose(0),
-    )];
+    let last = options.min(MAX_QUESTION_OPTIONS);
+    let mut actions = Vec::new();
+    // DESIGN-SYSTEM §4: an invalid command is not listed. A question with no options at all
+    // has no digit to offer, and `action_for_key` refuses every one of them.
+    if last > 0 {
+        let keys = if last == 1 {
+            SharedString::from("1")
+        } else {
+            SharedString::from(format!("1–{last}"))
+        };
+        actions.push(DecisionOption::new(
+            keys,
+            "choose",
+            DecisionAction::Choose(0),
+        ));
+    }
     if multi_select {
         actions.push(DecisionOption::new(
             "space",
@@ -270,7 +284,8 @@ impl DecisionCard {
         match &self.kind {
             DecisionCardKind::Question { questions } => {
                 questions.get(index).map_or(0, |question| {
-                    question.options.len() + usize::from(question.allow_other)
+                    (question.options.len() + usize::from(question.allow_other))
+                        .min(MAX_QUESTION_OPTIONS)
                 })
             }
             _ => 0,
@@ -465,6 +480,9 @@ impl RenderOnce for DecisionCardElement {
                     if question.allow_other {
                         labels.push(SharedString::new_static(SOMETHING_ELSE));
                     }
+                    // The same ceiling `option_count` and `question_actions` use: a row past
+                    // the last bound digit would be numbered by nothing that can select it.
+                    labels.truncate(MAX_QUESTION_OPTIONS);
                     let card_id = card.id.clone();
                     let on_action = on_action.clone();
                     // DESIGN-SYSTEM §3: the cursor is a 2 px bar on the leading edge. §9 routes
@@ -789,6 +807,45 @@ mod tests {
         assert_eq!(normalize_key("space"), "space");
     }
 
+    /// The advertised digits, the honoured digits and the drawn rows are one set.
+    ///
+    /// A four-option question that also accepts free text draws five numbered rows, so `5` has
+    /// to be advertised and honoured; a question with no options at all advertises no digit.
+    #[test]
+    fn every_offered_option_is_advertised_and_no_absent_one_is() {
+        let card = DecisionCard::new(
+            "g5",
+            "claude asks",
+            DecisionCardKind::Question {
+                questions: vec![DecisionQuestion {
+                    header: "scope".into(),
+                    text: "which crate?".into(),
+                    options: vec![
+                        "core".into(),
+                        "app".into(),
+                        "ui-kit".into(),
+                        "daemon".into(),
+                    ],
+                    multi_select: false,
+                    allow_other: true,
+                }],
+            },
+        );
+        assert_eq!(card.option_count(0), 5);
+        assert_eq!(card.action_for_key("5"), Some(DecisionAction::Choose(4)));
+        assert_eq!(
+            question_actions(card.option_count(0), false)[0].key,
+            "1\u{2013}5",
+            "the row drawn as `5` has to be advertised as one of the keys"
+        );
+        assert!(
+            !question_actions(0, false)
+                .iter()
+                .any(|option| matches!(option.action, DecisionAction::Choose(_))),
+            "a question with no options must not list a digit `action_for_key` refuses"
+        );
+    }
+
     #[test]
     fn the_question_hint_row_states_the_range_that_exists() {
         let actions = question_actions(3, true);
@@ -796,6 +853,6 @@ mod tests {
         assert_eq!(actions[1].action, DecisionAction::Toggle);
         assert_eq!(actions[2].action, DecisionAction::Answer);
         assert_eq!(question_actions(1, false)[0].key, "1");
-        assert_eq!(question_actions(9, false)[0].key, "1–4");
+        assert_eq!(question_actions(9, false)[0].key, "1–5");
     }
 }

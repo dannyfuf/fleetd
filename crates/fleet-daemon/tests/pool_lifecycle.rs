@@ -236,6 +236,70 @@ async fn force_runs_forced_successor() {
     assert_eq!(shell.fetches.load(Ordering::SeqCst), 2);
 }
 
+#[tokio::test]
+async fn a_slot_is_reused_inside_its_freshness_window_and_rebuilt_past_it() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let home = temp.path().join("fleet");
+    let repo_path = create_repository(temp.path());
+    let files = Arc::new(RealFiles::new(
+        home.join("trash"),
+        [home.join("repos"), home.join("worktrees")],
+    ));
+    let config = Arc::new(ConfigStore::new(&home, files.clone()));
+    config
+        .update(json!({
+            "reposDir": home.join("repos"),
+            "worktreesDir": home.join("worktrees"),
+            "hotPoolSize": 1,
+            "hotRefreshIntervalMs": 0
+        }))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let state = Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock)));
+    let repo = fixture_repo(&repo_path);
+    let mut persisted = default_state();
+    persisted.contexts.push(fixture_context());
+    persisted.repos.push(repo.clone());
+    state
+        .save(persisted)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let jobs = Arc::new(JobManager::new(&home));
+    let shell = Arc::new(RealShell);
+    let git = Arc::new(ShellGit::new(Arc::clone(&shell)));
+    let pool = Pool::new(config.clone(), state, jobs, git, files, shell);
+
+    pool.prepare(repo.id.clone(), false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let marker = home.join("worktrees/acme/api/.hot/.git/swarm-hot.json");
+    let built = std::fs::read_to_string(&marker).unwrap_or_else(|error| panic!("{error}"));
+
+    // Inside the default sixty-second window an unforced prepare reuses the slot untouched.
+    pool.prepare(repo.id.clone(), false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap_or_else(|error| panic!("{error}")),
+        built,
+        "a slot inside its freshness window must not be rebuilt"
+    );
+
+    // Past the window the same unforced prepare rebuilds the slot and rewrites its marker.
+    config
+        .update(json!({"hotFreshnessMs": 0}))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    pool.prepare(repo.id.clone(), false)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_ne!(
+        std::fs::read_to_string(&marker).unwrap_or_else(|error| panic!("{error}")),
+        built,
+        "a slot past its freshness window must be rebuilt without force"
+    );
+}
+
 fn fixture_context() -> Context {
     Context {
         id: ContextId::try_from("acme").unwrap_or_else(|error| panic!("{error}")),

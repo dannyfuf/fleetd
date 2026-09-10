@@ -108,7 +108,7 @@ impl TerminalOwner {
                     }
                     Ok(WheelAction::Drop) => continue,
                     Err(error) => {
-                        warn!(%error, terminal = %self.terminal, "failed to encode terminal wheel event");
+                        tracing::warn!(%error, terminal = %self.terminal, "failed to encode terminal wheel event");
                         continue;
                     }
                 },
@@ -146,14 +146,14 @@ impl TerminalOwner {
                 match self.engine.try_encode_key(&event) {
                     Ok(bytes) => self.write_command_input(&bytes, reservation),
                     Err(error) => {
-                        warn!(%error, terminal = %self.terminal, "failed to encode terminal key")
+                        tracing::warn!(%error, terminal = %self.terminal, "failed to encode terminal key")
                     }
                 }
             }
             HostCommand::Mouse(event) => match self.engine.try_encode_mouse(&event) {
                 Ok(bytes) => self.write_command_input(&bytes, reservation),
                 Err(error) => {
-                    warn!(%error, terminal = %self.terminal, "failed to encode terminal mouse event")
+                    tracing::warn!(%error, terminal = %self.terminal, "failed to encode terminal mouse event")
                 }
             },
             HostCommand::Paste(text) => {
@@ -161,7 +161,7 @@ impl TerminalOwner {
                 match self.engine.try_encode_paste(&text) {
                     Ok(bytes) => self.write_command_input(&bytes, reservation),
                     Err(error) => {
-                        warn!(%error, terminal = %self.terminal, "failed to encode terminal paste")
+                        tracing::warn!(%error, terminal = %self.terminal, "failed to encode terminal paste")
                     }
                 }
             }
@@ -173,7 +173,7 @@ impl TerminalOwner {
                             .get_or_insert(Instant::now() + COMPRESSION_IDLE);
                     }
                     Err(error) => {
-                        warn!(%error, terminal = %self.terminal, "failed to resize terminal")
+                        tracing::warn!(%error, terminal = %self.terminal, "failed to resize terminal")
                     }
                 }
             }
@@ -195,8 +195,16 @@ impl TerminalOwner {
         match self.write(bytes, reservation) {
             Ok(()) => self.record_input(),
             Err(error) => {
-                warn!(%error, terminal = %self.terminal, "failed to write terminal PTY input")
+                tracing::warn!(%error, terminal = %self.terminal, "failed to write terminal PTY input")
             }
+        }
+    }
+
+    /// Reports why an attachment was refused; the requester is gone only when it already
+    /// gave up on its own deadline, so a failed send is an anomaly worth a line.
+    fn refuse_attach(&self, reply: &Sender<Result<FrameUpdate, String>>, error: String) {
+        if reply.try_send(Err(error)).is_err() {
+            tracing::warn!(terminal = %self.terminal, "attach requester stopped waiting");
         }
     }
 
@@ -208,11 +216,11 @@ impl TerminalOwner {
         reply: Sender<Result<FrameUpdate, String>>,
     ) {
         if deadline <= Instant::now() {
-            let _ = reply.try_send(Err("attachment deadline elapsed".to_owned()));
+            self.refuse_attach(&reply, "attachment deadline elapsed".to_owned());
             return;
         }
         if let Err(error) = resize(&self.pty, &mut self.engine, cols, rows) {
-            let _ = reply.try_send(Err(error));
+            self.refuse_attach(&reply, error);
             return;
         }
         self.compression_at
@@ -222,14 +230,14 @@ impl TerminalOwner {
             Err(error) => {
                 self.dirty = true;
                 self.force_full = true;
-                let _ = reply.try_send(Err(error.to_string()));
+                self.refuse_attach(&reply, error.to_string());
                 return;
             }
         };
         if deadline <= Instant::now() {
             self.dirty = true;
             self.force_full = true;
-            let _ = reply.try_send(Err("attachment deadline elapsed".to_owned()));
+            self.refuse_attach(&reply, "attachment deadline elapsed".to_owned());
             return;
         }
         if reply.try_send(Ok(frame.clone())).is_err() {
@@ -263,7 +271,7 @@ impl TerminalOwner {
                 command.push('\r');
                 self.record_input();
                 if let Err(error) = self.pty.write(command.as_bytes()) {
-                    warn!(%error, terminal = %self.terminal, "failed to type initial terminal command");
+                    tracing::warn!(%error, terminal = %self.terminal, "failed to type initial terminal command");
                 }
             }
             pending => self.pending_command = pending,

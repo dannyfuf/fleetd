@@ -81,6 +81,61 @@ fn failed_attachment_is_cleared_and_schedules_reconciliation(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn a_successful_retry_retires_the_attach_error(cx: &mut TestAppContext) {
+    let state = cx.new(|_| AppState::new("/tmp/fleet-attach-retry", Instant::now()));
+    let terminal = TerminalId(9);
+    let surface = Rc::new(RefCell::new(TerminalSurface::<()> {
+        attached: Some(terminal),
+        attached_generation: 5,
+        attachment_attempt: 11,
+        ..TerminalSurface::default()
+    }));
+    let (reply, answer) = async_channel::bounded(1);
+    cx.update(|cx| {
+        monitor_attachment(&surface, &state, terminal, 5, 11, answer, cx);
+    });
+    reply
+        .try_send(Err(ProtoError {
+            kind: ErrorKind::Unknown,
+            message: "attach refused".to_owned(),
+        }))
+        .expect("deliver refusal");
+    cx.run_until_parked();
+    state.read_with(cx, |app, _| {
+        assert!(
+            app.sticky_error
+                .as_ref()
+                .is_some_and(|error| error.text.starts_with("could not attach terminal 9: "))
+        );
+    });
+    cx.executor().advance_clock(ATTACH_RETRY_DELAY);
+    cx.run_until_parked();
+
+    // The retry reconciles the surface and this time the daemon acknowledges.
+    {
+        let mut local = surface.borrow_mut();
+        local.attached = Some(terminal);
+        local.attached_generation = 5;
+        local.attachment_attempt = 12;
+    }
+    let (reply, answer) = async_channel::bounded(1);
+    cx.update(|cx| {
+        monitor_attachment(&surface, &state, terminal, 5, 12, answer, cx);
+    });
+    reply
+        .try_send(Ok(fleet_proto::response::ResponseBody::Ack))
+        .expect("deliver acknowledgement");
+    cx.run_until_parked();
+
+    state.read_with(cx, |app, _| {
+        assert!(
+            app.sticky_error.is_none(),
+            "a live terminal keeps no `retrying` notice"
+        );
+    });
+}
+
+#[gpui::test]
 fn attachment_timeout_does_not_leave_the_surface_attached(cx: &mut TestAppContext) {
     let state = cx.new(|_| AppState::new("/tmp/fleet-attach-timeout", Instant::now()));
     let terminal = TerminalId(8);

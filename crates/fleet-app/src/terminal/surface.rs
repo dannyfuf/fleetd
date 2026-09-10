@@ -5,7 +5,7 @@
 //! target, so both surfaces answer the same gesture the same way.
 
 use super::*;
-use crate::{bridge::Bridge, state::AppState};
+use crate::{async_util::before_timeout, bridge::Bridge, state::AppState};
 use fleet_core::ids::TerminalId;
 use fleet_proto::{
     request::RequestBody,
@@ -16,10 +16,7 @@ use gpui::{App, Entity, Keystroke, ScrollWheelEvent, Task};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
-    future::{Future, poll_fn},
-    pin::pin,
     rc::Rc,
-    task::Poll,
     time::{Duration, Instant},
 };
 
@@ -32,6 +29,7 @@ const INPUT_REJECTION_NOTICE_INTERVAL: Duration = Duration::from_secs(1);
 const INPUT_REJECTION_NOTICE: &str = "input dropped while attaching";
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(6);
 const ATTACH_RETRY_DELAY: Duration = Duration::from_millis(250);
+const ATTACH_ERROR: &str = "could not attach terminal";
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MouseSelection {
@@ -588,6 +586,19 @@ fn monitor_attachment<S: 'static>(
             None => Some("request timed out".to_owned()),
         };
         let Some(failure) = failure else {
+            // Only the attempt that still owns the surface may retire its own failure notice;
+            // a late success from a superseded attempt must not erase the live one.
+            if !owns_attachment(&surface, terminal, generation, attempt) {
+                return;
+            }
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            state.update(cx, |app, cx| {
+                if clear_attach_error(app, terminal) {
+                    cx.notify();
+                }
+            });
             return;
         };
         let retry_at = Instant::now() + ATTACH_RETRY_DELAY;
@@ -607,7 +618,8 @@ fn monitor_attachment<S: 'static>(
             return;
         };
         let message = format!(
-            "could not attach terminal: {failure}; retrying. Reconnect Fleet if it persists"
+            "{}{failure}; retrying. Reconnect Fleet if it persists",
+            attach_error_prefix(terminal)
         );
         state.update(cx, |app, cx| {
             app.sticky_error = Some(crate::state::StickyError {
@@ -626,22 +638,38 @@ fn monitor_attachment<S: 'static>(
     .detach();
 }
 
-async fn before_timeout<T>(
-    future: impl Future<Output = T>,
-    timeout: impl Future<Output = ()>,
-) -> Option<T> {
-    let mut future = pin!(future);
-    let mut timeout = pin!(timeout);
-    poll_fn(|cx| {
-        if let Poll::Ready(output) = future.as_mut().poll(cx) {
-            return Poll::Ready(Some(output));
-        }
-        if timeout.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(None);
-        }
-        Poll::Pending
-    })
-    .await
+/// Whether this attempt still owns the surface it was started for.
+fn owns_attachment<S: 'static>(
+    surface: &Rc<RefCell<TerminalSurface<S>>>,
+    terminal: TerminalId,
+    generation: u64,
+    attempt: u64,
+) -> bool {
+    let local = surface.borrow();
+    local.attachment_attempt == attempt
+        && local.attached == Some(terminal)
+        && local.attached_generation == generation
+}
+
+/// The stable head of the attach failure notice, naming the terminal it belongs to.
+fn attach_error_prefix(terminal: TerminalId) -> String {
+    format!("{ATTACH_ERROR} {}: ", terminal.0)
+}
+
+/// Retires this terminal's own attach failure once it attaches, returning whether it cleared.
+///
+/// The notice says "retrying", so leaving it up over a live terminal misreports the app; the
+/// prefix keeps one surface's recovery from erasing another surface's live failure.
+fn clear_attach_error(app: &mut AppState, terminal: TerminalId) -> bool {
+    let prefix = attach_error_prefix(terminal);
+    let stale = app
+        .sticky_error
+        .as_ref()
+        .is_some_and(|error| error.job.is_none() && error.text.starts_with(prefix.as_str()));
+    if stale {
+        app.sticky_error = None;
+    }
+    stale
 }
 
 pub(crate) fn report_input_delivery(accepted: bool, state: &Entity<AppState>, cx: &mut App) {

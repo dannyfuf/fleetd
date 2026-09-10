@@ -37,16 +37,24 @@ impl KeyValueList {
         Self::new().title(title)
     }
 
+    /// A block under a section header carrying a right-aligned element on that header, normally
+    /// a [`super::FreshnessStamp`].
+    ///
+    /// The trailing element is a constructor argument and not a builder because the header is
+    /// the only place it can hang: an untitled block has nowhere to put it, and a header with a
+    /// blank label is not a shape the design system has.
+    pub fn titled_with_trailing(
+        title: impl Into<SharedString>,
+        trailing: impl IntoElement,
+    ) -> Self {
+        let mut list = Self::titled(title);
+        list.trailing = Some(trailing.into_any_element());
+        list
+    }
+
     /// Set the section title.
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
         self.title = Some(title.into());
-        self
-    }
-
-    /// A right-aligned element on the section header, normally a
-    /// [`super::FreshnessStamp`].
-    pub fn trailing(mut self, trailing: impl IntoElement) -> Self {
-        self.trailing = Some(trailing.into_any_element());
         self
     }
 
@@ -106,5 +114,54 @@ impl RenderOnce for KeyValueList {
                     .mono(mono)
                     .refreshing(refreshing)
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use super::*;
+
+    /// Records that it was actually laid out. Writing in `render` is only tolerable because
+    /// this element exists to prove a slot reached the tree at all.
+    #[derive(IntoElement)]
+    struct Probe(Rc<Cell<bool>>);
+
+    impl RenderOnce for Probe {
+        fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+            self.0.set(true);
+            div()
+        }
+    }
+
+    struct TestBlock {
+        rendered: Rc<Cell<bool>>,
+    }
+
+    impl Render for TestBlock {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            KeyValueList::titled_with_trailing("safety", Probe(self.rendered.clone()))
+                .row("path", FactValue::known("/x"))
+        }
+    }
+
+    #[gpui::test]
+    fn the_trailing_slot_reaches_the_header(cx: &mut gpui::TestAppContext) {
+        let rendered = Rc::new(Cell::new(false));
+        cx.update(|cx| cx.set_global(crate::Theme::dark()));
+        let block = rendered.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|_| TestBlock { rendered: block })
+            })
+            .expect("test window")
+        });
+        let cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(
+            rendered.get(),
+            "the trailing element never reached the tree"
+        );
     }
 }

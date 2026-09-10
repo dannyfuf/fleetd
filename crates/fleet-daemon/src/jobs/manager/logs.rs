@@ -21,9 +21,10 @@ impl JobManager {
     }
 
     pub(crate) fn record_progress(&self, id: &JobId, line: String) -> DaemonResult<()> {
+        let (log, path) = self.log_target(id)?;
+        self.write_log(&log, &path, Some(&line))?;
         let mut state = lock(&self.inner.state);
         let job = state.job_mut(id)?;
-        self.write_log(job, Some(&line))?;
         if job.record.progress.as_ref() != Some(&line) {
             job.record.progress = Some(line);
             let _receivers = self.inner.updates.send(job.record.clone());
@@ -31,9 +32,16 @@ impl JobManager {
         Ok(())
     }
 
-    fn write_log(&self, job: &mut ManagedJob, line: Option<&str>) -> DaemonResult<()> {
-        let path = std::path::Path::new(&job.record.log_path);
-        let file = match &mut job.log {
+    /// Returns a job's log writer and destination, holding the registry lock only to read them.
+    fn log_target(&self, id: &JobId) -> DaemonResult<(JobLog, PathBuf)> {
+        let state = lock(&self.inner.state);
+        let job = state.job(id)?;
+        Ok((Arc::clone(&job.log), PathBuf::from(&job.record.log_path)))
+    }
+
+    fn write_log(&self, log: &JobLog, path: &Path, line: Option<&str>) -> DaemonResult<()> {
+        let mut log = lock(log);
+        let file = match &mut *log {
             Some(file) => file,
             slot @ None => {
                 std::fs::create_dir_all(&self.inner.logs_dir)
@@ -53,17 +61,14 @@ impl JobManager {
     }
 
     pub(super) fn append_log_line(&self, id: &JobId, line: Option<&str>) -> DaemonResult<()> {
-        let mut state = lock(&self.inner.state);
-        let job = state.job_mut(id)?;
-        self.write_log(job, line)
+        let (log, path) = self.log_target(id)?;
+        self.write_log(&log, &path, line)
     }
 
     pub(crate) fn flush_log(&self, id: &JobId) -> DaemonResult<()> {
-        let mut state = lock(&self.inner.state);
-        let job = state.job_mut(id)?;
-        if let Some(log) = &mut job.log {
-            log.flush()
-                .map_err(|error| DaemonError::fs(&job.record.log_path, error))?;
+        let (log, path) = self.log_target(id)?;
+        if let Some(log) = &mut *lock(&log) {
+            log.flush().map_err(|error| DaemonError::fs(&path, error))?;
         }
         Ok(())
     }

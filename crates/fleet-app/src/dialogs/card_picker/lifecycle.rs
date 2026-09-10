@@ -93,10 +93,9 @@ pub(super) fn apply(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
         notify(state, cx);
         return;
     }
-    let chosen = candidates(state.read(cx), &draft)
-        .into_iter()
-        .nth(draft.cursor)
-        .map(|option| option.value);
+    let chosen = prepared(state, cx)
+        .get(draft.cursor)
+        .map(|option| option.value.clone());
     // A multi-select applies `draft.selected`, not the row under the cursor: filtering the list
     // down to nothing after toggling still leaves a perfectly good set to send, and a board with
     // no labels at all would otherwise make `t` a picker that can never apply anything.

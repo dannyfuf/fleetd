@@ -12,7 +12,7 @@ use fleet_daemon::{
     DaemonError,
     machines::{
         AsyncDuplex, ExecOutput, LinkOptions, MachineAddress, MachineError, MachineProvider,
-        ProbeReport, RemoteEndpoint, RemoteLink,
+        ProbeReport, RemoteEndpoint, RemoteLink, WRITE_BUDGET,
     },
     testing::FakeMachine,
 };
@@ -210,6 +210,161 @@ async fn link_recovers_when_connect_starts_before_the_remote_daemon() {
 
     link.close().await;
     drop(remote);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_remote_write_fails_its_request_instead_of_wedging_the_link() {
+    // `RemoteLink::new` identifies itself with the provider id, and the scripted handshake asserts
+    // that id in the proxy Hello.
+    let host = HostId::try_from("local-daemon").expect("scripted host id");
+    let machine = Arc::new(FakeMachine::new(host));
+    let provider: Arc<dyn MachineProvider> = machine.clone();
+    let link = RemoteLink::new(
+        provider,
+        LinkOptions {
+            backoff_min: Duration::from_millis(10),
+            backoff_max: Duration::from_millis(50),
+            hello_timeout: Duration::from_millis(50),
+        },
+    );
+    let connecting = {
+        let link = Arc::clone(&link);
+        tokio::spawn(async move { link.connect().await })
+    };
+    let peer = wait_for_fake_stream(&machine).await;
+    // The scripted peer answers the handshake and then stops reading, exactly as a remote daemon
+    // does once it reaches MAX_PENDING_REQUESTS. Keeping `remote` alive fills the pipe instead of
+    // closing it, so the link actor blocks inside its write.
+    let (remote, _snapshot) = complete_scripted_handshake(peer).await;
+    connecting
+        .await
+        .expect("connect task")
+        .expect("scripted handshake");
+
+    let mut wedged = Vec::new();
+    for terminal in 0..8_u64 {
+        let link = Arc::clone(&link);
+        wedged.push(tokio::spawn(async move {
+            link.request(RequestBody::TerminalInput {
+                terminal: fleet_core::ids::TerminalId(terminal),
+                bytes: vec![b'x'; 32 * 1024],
+            })
+            .await
+        }));
+    }
+
+    let request = wedged.pop().expect("a wedged request");
+    let failed = tokio::time::timeout(WRITE_BUDGET * 6, request)
+        .await
+        .expect("a stalled write must fail its pending request instead of wedging the actor")
+        .expect("request task");
+    assert!(matches!(failed, Err(DaemonError::Remote(_))), "{failed:?}");
+
+    tokio::time::timeout(WRITE_BUDGET * 6, link.close())
+        .await
+        .expect("close must not hang behind a stalled write");
+    drop(remote);
+}
+
+#[tokio::test]
+async fn nudge_on_a_connected_link_does_not_disturb_it() {
+    let host = HostId::try_from("local-daemon").expect("scripted host id");
+    let machine = Arc::new(FakeMachine::new(host));
+    let provider: Arc<dyn MachineProvider> = machine.clone();
+    let link = RemoteLink::new(provider, LinkOptions::default());
+    let connecting = {
+        let link = Arc::clone(&link);
+        tokio::spawn(async move { link.connect().await })
+    };
+    let peer = wait_for_fake_stream(&machine).await;
+    let (mut remote, _snapshot) = complete_scripted_handshake(peer).await;
+    connecting
+        .await
+        .expect("connect task")
+        .expect("scripted handshake");
+    assert_eq!(link.state(), LinkState::Ready);
+    let opened = machine.stream_opens();
+    let states = link.state_changes();
+
+    link.nudge_reconnect();
+
+    // The established transport must survive the nudge: the same scripted peer still answers.
+    // Both halves are bounded, so a nudge that tears the transport down fails here instead of
+    // leaving the test waiting on a frame that will never arrive.
+    let ping = {
+        let link = Arc::clone(&link);
+        tokio::spawn(async move { link.request(RequestBody::DaemonPing).await })
+    };
+    let request = tokio::time::timeout(Duration::from_secs(5), next_request(&mut remote))
+        .await
+        .expect("a nudge must leave the established transport carrying requests");
+    assert!(matches!(request.body, RequestBody::DaemonPing));
+    send_value(
+        &mut remote,
+        Response {
+            id: request.id,
+            result: Ok(ResponseBody::Pong),
+        },
+    )
+    .await;
+    let answered = tokio::time::timeout(Duration::from_secs(5), ping)
+        .await
+        .expect("the ping must be answered over the surviving transport")
+        .expect("ping task");
+    assert!(matches!(answered, Ok(ResponseBody::Pong)));
+    assert_eq!(
+        machine.stream_opens(),
+        opened,
+        "a nudge must not reopen the transport of a connected link"
+    );
+    assert_eq!(link.state(), LinkState::Ready);
+    assert!(
+        !states.has_changed().expect("link state sender"),
+        "a nudge must not move a Ready link through any other state"
+    );
+
+    link.close().await;
+    drop(remote);
+}
+
+#[tokio::test]
+async fn a_nudge_while_ready_is_retained_for_the_next_disconnect() {
+    let host = HostId::try_from("local-daemon").expect("scripted host id");
+    let machine = Arc::new(FakeMachine::new(host));
+    let provider: Arc<dyn MachineProvider> = machine.clone();
+    // A backoff floor far above the wait below, so only a retained permit can shorten it.
+    let link = RemoteLink::new(
+        provider,
+        LinkOptions {
+            backoff_min: Duration::from_secs(30),
+            backoff_max: Duration::from_secs(30),
+            hello_timeout: Duration::from_secs(5),
+        },
+    );
+    let connecting = {
+        let link = Arc::clone(&link);
+        tokio::spawn(async move { link.connect().await })
+    };
+    let peer = wait_for_fake_stream(&machine).await;
+    let (remote, _snapshot) = complete_scripted_handshake(peer).await;
+    connecting
+        .await
+        .expect("connect task")
+        .expect("scripted handshake");
+    assert_eq!(link.state(), LinkState::Ready);
+
+    // Bootstrap nudges between the remote restart and its probe, while the link still reads as
+    // Ready. Discarding the nudge there would make the probe wait out the whole backoff.
+    link.nudge_reconnect();
+    drop(remote);
+
+    // `wait_for_fake_stream` gives the retried attempt one second: thirty times less than the
+    // floor a link that dropped the nudge would sleep through first.
+    let retry = wait_for_fake_stream(&machine).await;
+    let (retried, _snapshot) = complete_scripted_handshake(retry).await;
+
+    link.close().await;
+    drop(retried);
 }
 
 type ScriptedRemote = Framed<DuplexStream, FleetCodec<Value, Request>>;

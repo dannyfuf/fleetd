@@ -9,6 +9,8 @@
 //! `model`, so the screen never derives the same thing twice and every rule is unit tested
 //! without gpui.
 
+use std::rc::Rc;
+
 use fleet_core::board::{
     Board, BoardView, Card, Priority, Status, StatusCategory, column_cards as ops_column_cards,
 };
@@ -18,15 +20,17 @@ use fleet_ui_kit::{
     KanbanColumn, Pane, PaneBorder, PaneHeader, PriorityLevel, SkeletonRows, SpinnerWithLabel,
     Text, Theme, Tone,
 };
-use gpui::{AnyElement, App, Hsla, MouseButton, ScrollHandle, SharedString, div, prelude::*};
+use gpui::{
+    AnyElement, App, Hsla, ListState, MouseButton, ScrollHandle, SharedString, div, prelude::*,
+};
 
 mod model;
 #[cfg(test)]
 mod tests;
 
+use model::category_accent;
 pub(crate) use model::priority_level;
-use model::{HeaderFacts, card_extras, category_accent, grouped_cards, label_chips, placed};
-pub use model::{counts, visible_cards};
+pub use model::{BoardModel, CardRow, ColumnRows, HeaderFacts, build, counts, visible_cards};
 
 /// How many skeleton columns a cold load shows.
 const SKELETON_COLUMNS: usize = 3;
@@ -34,9 +38,13 @@ const SKELETON_COLUMNS: usize = 3;
 const SKELETON_ROWS: usize = 4;
 
 /// Everything the screen needs to draw itself.
+///
+/// The board is a **prepared** model, not the raw view: the grouping, the filter, the sorts and
+/// every tile string are derived once per board revision by
+/// `crate::screens::board::projection`, and this body only composes them.
 pub(crate) struct BoardProps<'a> {
-    /// The loaded board, absent while the first `EnsureBoard` is in flight.
-    pub view: Option<&'a BoardView>,
+    /// The prepared board, absent while the first `EnsureBoard` is in flight.
+    pub model: Option<&'a BoardModel>,
     /// Whether a load is running.
     pub loading: bool,
     /// The last load failure, retained until an explicit reload.
@@ -49,10 +57,6 @@ pub(crate) struct BoardProps<'a> {
     pub focus: (usize, usize),
     /// Whether a `board.sync` job is running for this board.
     pub syncing: bool,
-    /// The registry's label for the board's backend kind, when it is known.
-    pub backend_label: Option<&'a str>,
-    /// The current epoch second, for the synced stamp.
-    pub now: i64,
 }
 
 /// What a mouse click on the board asks for.
@@ -72,11 +76,11 @@ pub(crate) enum BoardClick {
 pub(crate) fn render(
     props: &BoardProps<'_>,
     board_scroll: &ScrollHandle,
-    column_scrolls: &[ScrollHandle],
+    column_lists: &[ListState],
     on_click: impl Fn(BoardClick, &mut App) + Clone + 'static,
     cx: &App,
 ) -> AnyElement {
-    let Some(view) = props.view else {
+    let Some(model) = props.model else {
         return Pane::new()
             .border(PaneBorder::None)
             .focused(true)
@@ -85,33 +89,17 @@ pub(crate) fn render(
             .into_any_element();
     };
 
-    let grouped = grouped_cards(view, props.filter);
-    let shown = grouped.iter().map(Vec::len).sum();
-    let total = placed(view);
-    let orphans: Vec<_> = view
-        .cards
-        .iter()
-        .filter(|card| {
-            !card.archived
-                && !view
-                    .board
-                    .statuses
-                    .iter()
-                    .any(|status| status.id == card.status_id)
-        })
-        .collect();
-    let facts = HeaderFacts::of(view, props.backend_label, props.now);
-    let header = header(props, &facts, shown, total, cx);
+    let header = header(props, model, cx);
 
-    let body: AnyElement = if view.board.statuses.is_empty() {
+    let body: AnyElement = if model.no_columns {
         EmptyState::new("This board has no columns.")
             .action(",  board settings")
             .into_any_element()
-    } else if total == 0 {
+    } else if model.total == 0 {
         EmptyState::new("No cards yet.")
             .action("c  new card")
             .into_any_element()
-    } else if shown == 0 && !props.filter.trim().is_empty() {
+    } else if model.shown == 0 && !props.filter.trim().is_empty() {
         EmptyState::new(format!("Nothing matches \"{}\".", props.filter.trim()))
             // Escape is two-stage: while the filter input owns the keyboard the first one
             // only leaves the input, so promising one key here would read as a dead key.
@@ -122,15 +110,7 @@ pub(crate) fn render(
             })
             .into_any_element()
     } else {
-        columns(
-            props,
-            view,
-            &grouped,
-            board_scroll,
-            column_scrolls,
-            on_click,
-            cx,
-        )
+        columns(props, model, board_scroll, column_lists, on_click, cx)
     };
 
     Pane::new()
@@ -149,34 +129,19 @@ pub(crate) fn render(
                         .map(|message| error_row(message.to_owned(), Some("r  reload"), cx)),
                 )
                 .children(
-                    facts
+                    model
+                        .facts
                         .error
                         .clone()
                         .filter(|_| props.error.is_none())
                         .map(|message| error_row(format!("sync: {message}"), None, cx)),
                 )
-                .children((!orphans.is_empty()).then(|| {
-                    error_row(
-                        format!(
-                            // Reloading returns the same view: only a status this board still
-                            // has, or a sync that restores the missing one, can place them.
-                            "{} card(s) reference statuses this board no longer has \u{2014} \
-                             ,  board settings or S  sync: {}",
-                            orphans.len(),
-                            orphans
-                                .iter()
-                                .map(|card| format!(
-                                    "{} {}",
-                                    card.display_key(&view.board),
-                                    card.title
-                                ))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        None,
-                        cx,
-                    )
-                }))
+                .children(
+                    model
+                        .orphans
+                        .clone()
+                        .map(|message| error_row(message, None, cx)),
+                )
                 .child(div().flex_1().min_h_0().p(cx.theme().space.md).child(body)),
         )
         .into_any_element()
@@ -225,14 +190,10 @@ fn cold_body(props: &BoardProps<'_>, cx: &App) -> AnyElement {
 }
 
 /// The board header: `BOARD · <name>` on the left, the board's own facts on the right.
-fn header(
-    props: &BoardProps<'_>,
-    facts: &HeaderFacts,
-    shown: usize,
-    total: usize,
-    cx: &App,
-) -> AnyElement {
+fn header(props: &BoardProps<'_>, model: &BoardModel, cx: &App) -> AnyElement {
     let theme = cx.theme();
+    let facts = &model.facts;
+    let (shown, total) = (model.shown, model.total);
     let trailing = div()
         .flex()
         .flex_none()
@@ -291,85 +252,59 @@ fn header(
 }
 
 /// The columns and their tiles.
+///
+/// A column hands [`KanbanColumn::rows`] a closure over its prepared rows rather than a vector
+/// of finished tiles, so a 300-card column builds the dozen elements its viewport can show and
+/// not 300 (`gpui-performance` rule 4). Every string the closure reaches for was allocated once,
+/// when the model was prepared.
 fn columns(
     props: &BoardProps<'_>,
-    view: &BoardView,
-    grouped: &[Vec<&Card>],
+    model: &BoardModel,
     board_scroll: &ScrollHandle,
-    column_scrolls: &[ScrollHandle],
+    column_lists: &[ListState],
     on_click: impl Fn(BoardClick, &mut App) + Clone + 'static,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
     let (focus_column, focus_row) = props.focus;
-    let columns: Vec<AnyElement> = view
-        .board
-        .statuses
+    let empty_hint = if props.filter.is_empty() {
+        "No cards here."
+    } else {
+        "No match here."
+    };
+    let columns: Vec<AnyElement> = model
+        .columns
         .iter()
         .enumerate()
-        .map(|(index, status)| {
-            let cards = &grouped[index];
+        .map(|(index, column)| {
             let focused = index == focus_column;
-            let tiles: Vec<AnyElement> = cards
-                .iter()
-                .enumerate()
-                .map(|(row, card)| {
-                    let selected = focused && row == focus_row;
-                    let click = on_click.clone();
-                    CardTile::new(
-                        SharedString::from(format!("board-card-{}", card.id.as_str())),
-                        card.display_key(&view.board),
-                        card.title.clone(),
-                    )
-                    .priority(priority_level(card.priority))
-                    .labels(label_chips(&view.board, card))
-                    .assignee(card.assignee.clone().map(SharedString::from))
-                    .estimate(card.estimate)
-                    .due(card.due_date.clone().map(SharedString::from))
-                    .worktree(card.worktree_id.is_some())
-                    .dirty(card.dirty)
-                    .conflict(card.conflict.is_some())
-                    .selected(selected)
-                    .focused(selected)
-                    .extras(card_extras(&view.board, card))
-                    .on_click(move |event, _window, cx| {
-                        if event.click_count >= 2 {
-                            click(BoardClick::OpenCard(index, row), cx);
-                        } else {
-                            click(BoardClick::Card(index, row), cx);
-                        }
-                    })
-                    .into_any_element()
-                })
-                .collect();
-
-            let mut column = KanbanColumn::new(
-                SharedString::from(format!("board-column-{}", status.id.as_str())),
-                status.name.clone(),
-            )
-            .count(cards.len())
-            .accent(Some(category_accent(status, &theme)))
-            .focused(focused)
-            .empty_hint(if props.filter.is_empty() {
-                "No cards here."
-            } else {
-                "No match here."
-            })
-            .tiles(tiles);
-            if let Some(scroll) = column_scrolls.get(index) {
-                column = column.scroll_handle(scroll.clone());
+            let mut kanban =
+                KanbanColumn::new(column.element_id.clone(), column.status.name.clone())
+                    .count(column.rows.len())
+                    .accent(Some(category_accent(&column.status, &theme)))
+                    .focused(focused)
+                    .empty_hint(empty_hint);
+            if let Some(list) = column_lists.get(index) {
+                let rows = Rc::clone(&column.rows);
+                let click = on_click.clone();
+                kanban = kanban.rows(list.clone(), rows.len(), move |row, _window, _cx| {
+                    let Some(card) = rows.get(row) else {
+                        return div().into_any_element();
+                    };
+                    tile(card, focused && row == focus_row, index, row, click.clone())
+                });
             }
 
             let click = on_click.clone();
             div()
-                .id(SharedString::from(format!("board-column-hit-{index}")))
+                .id(column.hit_id.clone())
                 .flex()
                 .flex_none()
                 .h_full()
                 .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                     click(BoardClick::Column(index), cx);
                 })
-                .child(column)
+                .child(kanban)
                 .into_any_element()
         })
         .collect();
@@ -378,6 +313,40 @@ fn columns(
         .scroll_handle(board_scroll.clone())
         .columns(columns)
         .into_any_element()
+}
+
+/// One prepared card as its tile.
+fn tile(
+    card: &CardRow,
+    selected: bool,
+    column: usize,
+    row: usize,
+    on_click: impl Fn(BoardClick, &mut App) + 'static,
+) -> AnyElement {
+    CardTile::new(
+        card.element_id.clone(),
+        card.key.clone(),
+        card.title.clone(),
+    )
+    .priority(card.priority)
+    .labels(card.labels.clone())
+    .assignee(card.assignee.clone())
+    .estimate(card.estimate)
+    .due(card.due.clone())
+    .worktree(card.worktree)
+    .dirty(card.dirty)
+    .conflict(card.conflict)
+    .selected(selected)
+    .focused(selected)
+    .extras(card.extras.clone())
+    .on_click(move |event, _window, cx| {
+        if event.click_count >= 2 {
+            on_click(BoardClick::OpenCard(column, row), cx);
+        } else {
+            on_click(BoardClick::Card(column, row), cx);
+        }
+    })
+    .into_any_element()
 }
 
 /// The sticky error row: it never hides the columns underneath it.

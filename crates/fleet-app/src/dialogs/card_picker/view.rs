@@ -10,7 +10,9 @@ pub(crate) fn render(
     cx: &mut App,
 ) -> AnyElement {
     let draft = read_host(state, cx, |host, _| host.card_picker.clone());
-    let rows = candidates(state.read(cx), &draft);
+    // Composed from rows the draft already holds: `prepared` derives them again only when the
+    // query, the kind or the board behind them moved, never once per frame.
+    let rows = prepared(state, cx);
     let schema = property_kind(state.read(cx), &draft.kind);
     let invalid = free_text_error(&draft.kind, draft.query.trim(), schema);
     let multi = draft.kind.is_multi_select(schema);

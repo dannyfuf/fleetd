@@ -93,8 +93,12 @@ pub trait AgentProvider: Send {
     async fn interrupt(&mut self, turn: TurnId) -> ProviderResult<()>;
     /// Maps a normalized gate answer back to the provider protocol.
     async fn respond(&mut self, gate: GateId, answer: GateAnswer) -> ProviderResult<()>;
-    /// Changes permission or plan mode.
-    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<()>;
+    /// Changes permission or plan mode, answering the mode the session will actually honour.
+    ///
+    /// §2's mode word is a promise about behaviour, so the caller records what came back rather
+    /// than what it asked for: an OpenCode server whose `permission` config allows everything
+    /// downgrades `ask` to `full access` exactly as `start` does.
+    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<PermissionMode>;
     /// Changes the active model and optional effort/provider.
     async fn set_model(&mut self, model: ModelSelection) -> ProviderResult<()>;
     /// Stops the provider process or server.

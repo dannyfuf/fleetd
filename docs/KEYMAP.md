@@ -39,6 +39,10 @@ under *Native agent thread* are bound there, and the rest (`^s s`, `^s 1`–`9`,
 are a follow-up. The context stack is ordered: the Agent popup shadows
 `Hub` and `Workspace`; Help and the two quit confirms may shadow the Agent popup. Palette and Settings are unavailable while the popup
 owns focus. `Daemon > Down` and `FirstRun` are full-window and shadow everything except `ctrl-q`.
+`Daemon > Doctor` is full-window in the same sense — it replaces the whole context chain, so a key
+that has no Doctor binding is dead while the report is up — but only while no overlay is open: with
+a dialog, the palette or the Jobs panel up, that overlay keeps its own chain and the report waits
+behind it (`shell/root/focus.rs`, `focus_owner`).
 
 ## Global (Normal mode, all Hub screens)
 
@@ -243,7 +247,7 @@ card shadows everything else, and the focused transcript row is last.
 | both | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close tab · new thread · terminal fallback |
 | both | `Esc` | close a picker, else abandon a note/correction draft, else leave scroll mode, else unqueue, else interrupt |
 | `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |
-| `Agent > AgentDecision > AgentQuestion` | `1`-`4` · `Space` · `Enter` | choose · toggle (multi-select) · answer |
+| `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` | choose · toggle (multi-select) · answer |
 | `Agent > AgentDecision > AgentPlan` | `y` · `n` · `Enter` | approve · ask for changes · view the plan |
 | `Agent > AgentRow` | `Enter` · `u` · `o` | expand/collapse · revert the edit or turn · open in the editor |
 | `Agent > AgentNativeScroll` | `j`/`k` · `ctrl-d`/`ctrl-u` · `ctrl-f`/`ctrl-b` · `gg`/`G` · `q`/`i`/`Esc` · `ctrl-s [` | line · half page · page · oldest/newest · leave scroll mode |
@@ -272,8 +276,10 @@ abandons it and leaves the card open.
 which runs the same cascade — binding it there as well would take `Esc` away from the buffer that
 has to cancel an IME preedit and a selection first.
 
-`1`-`4` are bound unconditionally but only the digits a question actually offers are honoured: a
-`3` on a two-option question is ignored rather than stored as an answer no label matches.
+`1`-`5` are bound unconditionally but only the digits a question actually offers are honoured: a
+`3` on a two-option question is ignored rather than stored as an answer no label matches. The
+fifth digit exists because a question that accepts free text appends a "Something else…" row
+after its options, so a four-option question of that kind numbers its last row `5`.
 
 `/` and `@` are not bound in `Agent > AgentIdle`: the composer inserts the character and reports
 it (`MultilineInputEvent::Trigger`), which is what opens the picker, so both characters stay
@@ -411,6 +417,14 @@ opens `config.json` in a new terminal tab. The two never coexist in one key cont
 | **C. fleetd died while attached** (28 px banner) | `r` | reconnect now |
 | | `l` | open the log |
 | | `Esc` | dismiss the banner (the daemon dot stays red) |
+| **Doctor report** (`Daemon > Doctor`, full window) | `r` | dismiss the report, then retry or reconnect if the daemon is down |
+| | `L` | open the log |
+| | `D` | run doctor again |
+| | `Esc` | dismiss the report and return to the surface it was raised from |
+
+The doctor report replaces the whole context chain, so it repeats the recovery keys of the
+surface it was raised from — B, C, or Settings §3.8.6 About, where the daemon is healthy and
+`r` only closes the report.
 
 Case A (cold start) binds nothing: fleetd is auto-spawned. While disconnected, read-only keys
 (`j` / `k`, `y`, `b`, `/`, `i`, `:`) keep working; mutating keys flash the banner. Keys typed

@@ -38,6 +38,7 @@ pub struct FakeMachine {
     execs: Mutex<VecDeque<Result<ExecOutput, MachineError>>>,
     calls: Mutex<Vec<Vec<String>>>,
     peer: Mutex<Option<DuplexStream>>,
+    stream_opens: AtomicUsize,
 }
 
 impl FakeMachine {
@@ -50,6 +51,7 @@ impl FakeMachine {
             execs: Mutex::new(VecDeque::new()),
             calls: Mutex::new(Vec::new()),
             peer: Mutex::new(None),
+            stream_opens: AtomicUsize::new(0),
         }
     }
 
@@ -68,6 +70,11 @@ impl FakeMachine {
     }
     pub fn take_stream_peer(&self) -> Option<DuplexStream> {
         lock(&self.peer).take()
+    }
+    /// Number of [`MachineProvider::open_stream`] calls observed so far.
+    #[must_use]
+    pub fn stream_opens(&self) -> usize {
+        self.stream_opens.load(Ordering::Relaxed)
     }
 }
 
@@ -109,6 +116,7 @@ impl MachineProvider for FakeMachine {
         })
     }
     async fn open_stream(&self) -> Result<Box<dyn AsyncDuplex>, MachineError> {
+        self.stream_opens.fetch_add(1, Ordering::Relaxed);
         let (local, peer) = tokio::io::duplex(64 * 1024);
         *lock(&self.peer) = Some(peer);
         Ok(Box::new(local))

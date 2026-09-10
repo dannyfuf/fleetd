@@ -447,15 +447,40 @@ impl HubCtx {
 
     fn schedule_pr_refresh(&self, cx: &mut App) {
         let deadline = self.hub.read(cx).prs.refresh_deadline();
-        self.hub.update(cx, |hub, _| hub.pr_refresh_task = None);
+        let generation = self.hub.update(cx, |hub, _| {
+            hub.pr_refresh_task = None;
+            hub.pr_refresh_generation = hub.pr_refresh_generation.wrapping_add(1);
+            hub.pr_refresh_generation
+        });
         let Some(deadline) = deadline else {
             return;
         };
         let delay = deadline.saturating_duration_since(Instant::now());
-        let ctx = self.clone();
+        // The task is stored on the Hub, so it holds the entities weakly: a strong `HubCtx`
+        // here would keep the Hub alive through itself for the whole TTL.
+        let state = self.state.downgrade();
+        let hub = self.hub.downgrade();
+        let bridge = self.bridge.clone();
+        let rail_scroll = self.rail_scroll.clone();
+        let list_scroll = self.list_scroll.clone();
+        let pr_scroll = self.pr_scroll.clone();
         let task = cx.spawn(async move |cx| {
             cx.background_executor().timer(delay).await;
             cx.update(|cx| {
+                let (Some(state), Some(hub)) = (state.upgrade(), hub.upgrade()) else {
+                    return;
+                };
+                if hub.read(cx).pr_refresh_generation != generation {
+                    return;
+                }
+                let ctx = HubCtx {
+                    state,
+                    hub,
+                    bridge,
+                    rail_scroll,
+                    list_scroll,
+                    pr_scroll,
+                };
                 ctx.hub.update(cx, |hub, _| {
                     hub.pr_refresh_task = None;
                     hub.prs.invalidate_config();
@@ -606,6 +631,50 @@ mod regression_tests {
         assert_eq!(cache.refresh_deadline(), Some(now + Duration::from_secs(7)));
         assert!(!cache.needs_fetch(now + Duration::from_secs(6)));
         assert!(cache.needs_fetch(now + Duration::from_secs(7)));
+    }
+
+    /// The stored refresh task used to hold a strong `HubCtx`, so the Hub owned itself for a
+    /// whole TTL; it must hold the entities weakly, as `schedule_inspection` does.
+    #[gpui::test]
+    fn a_pending_pr_refresh_does_not_keep_the_hub_alive(cx: &mut gpui::TestAppContext) {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet-pr-refresh", now);
+        state.daemon = crate::state::DaemonLink::Connected;
+        state.screen = Screen::Hub { tab: HubTab::Prs };
+        let state = cx.new(|_| state);
+        let (ctx, _harness) = crate::screens::hub::tests::test_hub_ctx_for(state.clone(), cx);
+        ctx.hub.update(cx, |hub, _| {
+            let key = PrCacheKey {
+                repo: None,
+                context: None,
+                generation: 0,
+            };
+            let requests = hub.prs.begin_fetch(key.clone(), now);
+            assert!(
+                hub.prs
+                    .apply(&key, PrTab::Mine, requests[0].1, response(PrTab::Mine), now)
+            );
+            assert!(hub.prs.apply(
+                &key,
+                PrTab::Review,
+                requests[1].1,
+                response(PrTab::Review),
+                now
+            ));
+            assert!(hub.prs.refresh_deadline().is_some());
+        });
+
+        cx.update(|cx| ctx.schedule_pr_refresh(cx));
+
+        let hub = ctx.hub.downgrade();
+        drop(ctx);
+        drop(state);
+        cx.update(|_| {});
+
+        assert!(
+            hub.upgrade().is_none(),
+            "the pending PR refresh must not own the Hub it is stored on"
+        );
     }
 
     #[test]

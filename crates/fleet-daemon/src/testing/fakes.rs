@@ -126,7 +126,13 @@ impl Shell for FakeShell {
         for line in result.stdout.lines().chain(result.stderr.lines()) {
             on_line(line.to_owned());
         }
-        Ok(result)
+        // `RealShell` streams every line through `on_line` and keeps the captured buffers
+        // empty; a fake that returned them would let tests assert output production never has.
+        Ok(ShellResult {
+            status: result.status,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
     }
 }
 
@@ -401,5 +407,51 @@ impl crate::adapters::board::BoardBackend for FakeBackend {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front()
             .unwrap_or_else(|| Ok(Default::default()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::adapters::shell::RealShell;
+
+    async fn stream(shell: &dyn Shell, command: ShellCommand) -> (ShellResult, Vec<String>) {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&lines);
+        let result = shell
+            .run_streaming(
+                command,
+                CancellationToken::new(),
+                Arc::new(move |line| lock(&sink).push(line)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut lines = lock(&lines).clone();
+        // The real adapter drains stdout and stderr concurrently, so only the set is defined.
+        lines.sort();
+        (result, lines)
+    }
+
+    #[tokio::test]
+    async fn fake_and_real_shells_agree_on_streaming_results() {
+        let command = ShellCommand::new("sh").args(["-c", "echo out; echo err 1>&2; exit 3"]);
+        let fake = FakeShell::new();
+        fake.when(
+            |command| command.program == "sh",
+            ShellResult {
+                status: 3,
+                stdout: "out\n".to_owned(),
+                stderr: "err\n".to_owned(),
+            },
+        );
+
+        let (faked, faked_lines) = stream(&fake, command.clone()).await;
+        let (real, real_lines) = stream(&RealShell, command).await;
+
+        assert_eq!(faked_lines, vec!["err".to_owned(), "out".to_owned()]);
+        assert_eq!(faked_lines, real_lines);
+        assert_eq!(faked, real);
     }
 }

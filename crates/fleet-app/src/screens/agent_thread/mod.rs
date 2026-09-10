@@ -222,6 +222,7 @@ impl AgentThreadView {
             input.set_placeholder(placeholder, cx);
             input.set_read_only(unreachable, cx);
         });
+        self.sync_composer_ring(cx);
         cx.notify();
     }
 
@@ -240,6 +241,12 @@ impl AgentThreadView {
     /// Offers the worktree paths `@` completes, replacing any earlier listing.
     pub(crate) fn set_files(&mut self, files: Vec<String>) {
         self.files = files;
+    }
+
+    /// The paths `@` currently completes, so a test can tell a served listing from none.
+    #[cfg(test)]
+    pub(crate) fn files(&self) -> &[String] {
+        &self.files
     }
 
     /// The sequence the user has now seen, which is what clears `finished` and `unread`.
@@ -358,6 +365,7 @@ impl AgentThreadView {
             // paragraph the model is still writing.
             list.set_streaming(streaming, cx);
         });
+        self.sync_composer_ring(cx);
     }
 
     /// Builds, updates and drops the inline diff surface of every item that carries a patch.
@@ -443,10 +451,12 @@ impl AgentThreadView {
         }
         if let Some(gate) = self.editing.take() {
             self.answer_edited(gate, text, cx);
+            self.sync_composer_ring(cx);
             return;
         }
         if let Some(gate) = self.plan_note.take() {
             self.input.update(cx, MultilineInput::clear);
+            self.sync_composer_ring(cx);
             self.dispatch(
                 BridgeCommand::AgentRespond {
                     thread: self.thread,
@@ -529,6 +539,7 @@ impl AgentThreadView {
         // user was answering is still open behind it.
         if self.plan_note.take().is_some() || self.editing.take().is_some() {
             self.input.update(cx, MultilineInput::clear);
+            self.sync_composer_ring(cx);
             cx.notify();
             return;
         }
@@ -741,6 +752,7 @@ impl AgentThreadView {
             && self.plan_note.is_none()
         {
             self.plan_note = Some(gate.id);
+            self.sync_composer_ring(cx);
             cx.notify();
             return;
         }
@@ -758,6 +770,7 @@ impl AgentThreadView {
         self.selection = QuestionSelection::default();
         self.plan_note = None;
         self.input.update(cx, MultilineInput::clear);
+        self.sync_composer_ring(cx);
         self.dispatch(
             BridgeCommand::AgentRespond {
                 thread: self.thread,
@@ -812,6 +825,7 @@ impl AgentThreadView {
         self.editing = Some(id);
         self.input
             .update(cx, |input, cx| input.set_text(payload, cx));
+        self.sync_composer_ring(cx);
         cx.notify();
     }
 
@@ -938,9 +952,33 @@ impl AgentThreadView {
         self.transcript.update(cx, TranscriptList::scroll_to_end);
     }
 
+    /// Keeps the composer's focus ring in step with who owns the bare keys (§2).
+    ///
+    /// docs/APP-CONTRACTS.md:101 — render prepares nothing. The ring is a function of the open
+    /// gate, of whether the card has stood its keys down, and of whether the machine is in
+    /// reach, so it is written here, at every transition that moves one of the three, rather
+    /// than from the render body, where the composer's own `cx.notify()` scheduled a second
+    /// frame for a state the first one had already drawn.
+    fn sync_composer_ring(&self, cx: &mut Context<Self>) {
+        let visible =
+            (self.open_gate().is_none() || self.is_composing(cx)) && !self.is_unreachable();
+        self.input
+            .update(cx, |input, cx| input.set_focus_visible(visible, cx));
+    }
+
     /// Takes the keyboard for the composer, which is what an agent tab focuses.
+    ///
+    /// A stood-down composer must not take the handle, but something on this view has to: the
+    /// shell hands `FocusTarget::AgentThread` here and never touches focus again, so declining
+    /// outright left an agent tab whose overlay had just closed with no focus owner at all and
+    /// every `Agent > …` binding unresolved. The view's own tracked handle is the right
+    /// fallback rather than the shell body: gpui dispatches through ancestors, so focusing it
+    /// keeps both the thread's listeners and the workspace root's on the path.
     pub(crate) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_unreachable() {
+            if !self.focus.is_focused(window) {
+                self.focus.focus(window, cx);
+            }
             return;
         }
         let handle = self.input.read(cx).focus_handle().clone();
@@ -1188,11 +1226,8 @@ impl Render for AgentThreadView {
             });
 
         // §2: blue is where you are. While the card owns the bare keys the composer is not
-        // where you are, so it drops its focus ring even though it still holds the handle.
-        self.input.update(cx, |input, cx| {
-            input.set_focus_visible((!deciding || composing) && !unreachable, cx);
-        });
-
+        // where you are, so it drops its focus ring even though it still holds the handle —
+        // written by `sync_composer_ring` on every transition, because render prepares nothing.
         let composer = div()
             .flex()
             .flex_col()
@@ -1294,9 +1329,14 @@ impl AgentThreadView {
                 .flex_none()
                 .w_full()
                 .bg(theme.colors.elevated)
-                .border_1()
-                .border_color(theme.colors.border)
+                // DESIGN-SYSTEM §2.8: `border_strong` is the hairline that has to survive on
+                // top of `elevated`, and the width is the theme's, not a hard-coded pixel.
+                .border(theme.metrics.hairline)
+                .border_color(theme.colors.border_strong)
                 .rounded(theme.radii.md)
+                // §2.6 level 2: an `elevated` surface carries a shadow, and this one floats over
+                // the composer exactly as `Select`'s open option list floats over its field.
+                .shadow(theme.sheet_shadow())
                 .child(
                     div()
                         .flex()

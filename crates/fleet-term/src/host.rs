@@ -346,6 +346,13 @@ fn send_command(
     command: HostCommand,
     limit: usize,
 ) -> Result<(), HostError> {
+    // A kill is not user input: refusing it because queued writes filled the budget would
+    // strand the child process and the threads that own it.
+    let limit = if matches!(command, HostCommand::Kill) {
+        usize::MAX
+    } else {
+        limit
+    };
     let reserved = command_bytes(&command);
     let queued = reserve_command_bytes(queued_bytes, reserved, limit)?;
     let reservation = CommandReservation::new(Arc::clone(queued_bytes), reserved);
@@ -423,6 +430,7 @@ pub(super) fn host_event_bytes(event: &HostEvent) -> usize {
 impl Drop for TerminalHost {
     /// Releasing the handle stops the owner once every queued command has been applied.
     fn drop(&mut self) {
+        // Fire-and-forget: the owner thread receives this unless it has already exited.
         let _ = self.commands.send(OwnerEvent::CommandsClosed);
     }
 }

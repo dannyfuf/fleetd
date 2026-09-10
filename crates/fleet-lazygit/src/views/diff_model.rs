@@ -169,6 +169,12 @@ pub(crate) struct DiffModel {
     pub(crate) digits: usize,
     /// Syntax runs, filled in off the foreground thread.
     syntax: RefCell<Vec<Runs>>,
+    /// Whether a syntax pass ran to its end for this model.
+    ///
+    /// A model is shared — the inline view's content cache hands the same `Rc` to every view of
+    /// the same patch — so a pass that was cancelled before it landed would otherwise leave that
+    /// shared model flat for good. This is what lets the next view re-run it.
+    syntax_ready: Cell<bool>,
 }
 
 impl DiffModel {
@@ -185,6 +191,7 @@ impl DiffModel {
             payload_advances: Cell::new(None),
             digits: 1,
             syntax: RefCell::new(Vec::new()),
+            syntax_ready: Cell::new(false),
         }
     }
 
@@ -360,6 +367,7 @@ impl DiffModel {
             payload_advances: Cell::new(None),
             digits,
             syntax: RefCell::new(vec![Vec::new(); count]),
+            syntax_ready: Cell::new(false),
         })
     }
 
@@ -453,7 +461,16 @@ impl DiffModel {
         jobs
     }
 
-    /// Installs the result of a background pass.
+    /// Whether a syntax pass has already run to its end for this model.
+    ///
+    /// `false` after a cancelled pass, which is what makes such a model repairable rather than
+    /// permanently flat once it is shared.
+    #[must_use]
+    pub(crate) fn syntax_ready(&self) -> bool {
+        self.syntax_ready.get()
+    }
+
+    /// Installs the result of a background pass that ran to its end.
     pub(crate) fn apply_syntax(&self, runs: Vec<(usize, Runs)>) {
         let mut syntax = self.syntax.borrow_mut();
         for (row, line) in runs {
@@ -461,6 +478,7 @@ impl DiffModel {
                 *slot = line;
             }
         }
+        self.syntax_ready.set(true);
     }
 }
 

@@ -290,6 +290,8 @@ mod tests {
     use fleet_core::{ids::ContextId, model::Context, state::default_state};
     use fleet_proto::job::JobStatus;
 
+    use super::post_create::{RECOVERED_RUNNER_TIMEOUT, runner_pid_path};
+
     use crate::{
         adapters::{
             clock::SystemClock,
@@ -798,6 +800,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_post_create_launch_is_not_relaunched() {
+        let fixture = fixture().await;
+        let worktree = worktree(&fixture, "interrupted-hooks");
+        let mut state = fixture.state.load().await.expect("state");
+        state.worktrees.push(worktree.clone());
+        fixture.state.save(state).await.expect("state save");
+        let intent = PostCreateIntent {
+            worktree,
+            hooks: vec!["true".to_owned()],
+            pid: None,
+            status_path: fixture.home.join("jobs/interrupted.post-create.status"),
+            log_path: fixture.home.join("jobs/interrupted.log"),
+            intent_path: fixture.home.join("cache/post-create/interrupted.json"),
+        };
+        // The runner published its own identifier and the daemon died before the intent
+        // recorded one, so the user's hooks are already running. `u32::MAX` is outside the
+        // identifier range, so the reconciliation observes an exited runner rather than
+        // waiting on a live one.
+        let pid_path = runner_pid_path(&intent.status_path);
+        fixture
+            .files
+            .insert_text(&pid_path, format!("{}\n", u32::MAX));
+        fixture.files.insert_text(
+            &intent.intent_path,
+            serde_json::to_string(&intent).expect("intent"),
+        );
+        let mut updates = fixture.jobs.subscribe();
+
+        fixture
+            .service
+            .recover_post_create_intents()
+            .await
+            .expect("recover intents");
+        let job = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let record = updates.recv().await.expect("job update");
+                if matches!(record.kind, JobKind::PostCreateHooks) {
+                    break record.id;
+                }
+            }
+        })
+        .await
+        .expect("hook job deadline");
+        let _record = tokio::time::timeout(Duration::from_secs(2), fixture.jobs.wait(&job))
+            .await
+            .expect("hook completion deadline")
+            .expect("hook job completion");
+
+        assert!(
+            !fixture
+                .shell
+                .calls()
+                .iter()
+                .any(|call| matches!(call, FakeShellCall::Detached { .. })),
+            "a runner that already started must never have its hooks run a second time"
+        );
+        assert!(!fixture.files.exists(&pid_path));
+        assert!(!fixture.files.exists(&intent.intent_path));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovered_post_create_stops_waiting_on_a_foreign_pid() {
+        let fixture = fixture().await;
+        let worktree = worktree(&fixture, "foreign-pid-hooks");
+        let mut state = fixture.state.load().await.expect("state");
+        state.worktrees.push(worktree.clone());
+        fixture.state.save(state).await.expect("state save");
+        let intent = PostCreateIntent {
+            worktree: worktree.clone(),
+            // Process identifier 1 is always alive and is never ours: after a reboot the
+            // identifier a previous boot recorded can belong to any process at all.
+            pid: Some(1),
+            hooks: vec!["true".to_owned()],
+            status_path: fixture.home.join("jobs/foreign.post-create.status"),
+            log_path: fixture.home.join("jobs/foreign.log"),
+            intent_path: fixture.home.join("cache/post-create/foreign.json"),
+        };
+        fixture.files.insert_text(
+            &intent.intent_path,
+            serde_json::to_string(&intent).expect("intent"),
+        );
+        let mut updates = fixture.jobs.subscribe();
+
+        fixture
+            .service
+            .recover_post_create_intents()
+            .await
+            .expect("recover intents");
+        let job = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let record = updates.recv().await.expect("job update");
+                if matches!(record.kind, JobKind::PostCreateHooks) {
+                    break record.id;
+                }
+            }
+        })
+        .await
+        .expect("hook job deadline");
+        // The clock is paused, so this deadline outlasts the bound the wait must honour
+        // without the test spending it.
+        let _record = tokio::time::timeout(RECOVERED_RUNNER_TIMEOUT * 4, fixture.jobs.wait(&job))
+            .await
+            .expect("waiting on a recovered runner must be bounded")
+            .expect("hook job completion");
+
+        let recovered = fixture.state.load().await.expect("state");
+        assert_eq!(
+            recovered
+                .worktrees
+                .iter()
+                .find(|item| item.id == worktree.id)
+                .and_then(|item| item.degraded.as_ref())
+                .map(|degraded| degraded.step.as_str()),
+            Some("detached hook runner did not record completion")
+        );
+        assert!(!fixture.files.exists(&intent.intent_path));
+    }
+
+    #[tokio::test]
     async fn successful_retry_clears_degradation() {
         let fixture = fixture().await;
         let mut worktree = worktree(&fixture, "recovered-hooks");
@@ -933,5 +1054,60 @@ mod tests {
             .calls()
             .iter()
             .any(|call| matches!(call, FakeFilesCall::Remove(path) if path.ends_with("uncertain.creating-attempt"))));
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_survives_one_unobservable_worktree() {
+        let fixture = fixture().await;
+        let root = fixture.home.join("worktrees/acme/api");
+        for slug in ["broken", "good"] {
+            let marker = CreatingMarker {
+                id: format!("acme/api#{slug}"),
+                repo_id: fixture.repo.id.clone(),
+                branch: slug.to_owned(),
+                base_ref: "origin/main".to_owned(),
+                created_at: "2026-09-04T00:00:00Z".to_owned(),
+            };
+            fixture.files.insert_text(
+                creating_marker_path(root.join(slug)),
+                serde_json::to_string(&marker).expect("marker"),
+            );
+        }
+        // Only the second worktree answers `git branch --show-current`; the first leaves the
+        // fake unmatched, which is the transient observation failure a scan must survive.
+        let observable = root.join("good");
+        fixture.shell.when(
+            move |command| command.cwd.as_deref() == Some(observable.as_path()),
+            ShellResult {
+                status: 0,
+                stdout: "good\n".to_owned(),
+                stderr: String::new(),
+            },
+        );
+        let intent_path = fixture.home.join("cache/post-create/orphan.json");
+        let intent = PostCreateIntent {
+            worktree: worktree(&fixture, "orphan"),
+            hooks: vec!["true".to_owned()],
+            pid: None,
+            status_path: fixture.home.join("jobs/orphan.post-create.status"),
+            log_path: fixture.home.join("jobs/orphan.log"),
+            intent_path: intent_path.clone(),
+        };
+        fixture.files.insert_text(
+            &intent_path,
+            serde_json::to_string(&intent).expect("intent"),
+        );
+
+        fixture
+            .service
+            .recover_startup()
+            .await
+            .expect("an unobservable worktree never aborts the scan");
+
+        let state = fixture.state.load().await.expect("state");
+        assert!(state.worktrees.iter().any(|item| item.slug == "good"));
+        assert!(!state.worktrees.iter().any(|item| item.slug == "broken"));
+        // The scan reaches its last step, so a detached hook intent is still reconciled.
+        assert!(!fixture.files.exists(&intent_path));
     }
 }

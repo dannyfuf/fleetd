@@ -51,7 +51,7 @@ Theme::change(ThemeMode::Light, cx);       // explicit switch
 Theme::toggle(cx);                         // returns the new mode
 
 let theme = cx.theme();                    // ActiveTheme, on anything that derefs to App
-theme.colors.warning;  theme.space.md;  theme.metrics.row_h;  theme.motion.sheet;
+theme.colors.warning;  theme.space.md;  theme.metrics.row_h;  theme.motion.spinner;
 ```
 
 `ActiveTheme` is implemented for `App`; `Context<T>` derefs to `App`, so `cx.theme()` works in
@@ -170,7 +170,8 @@ is pane padding and dialog padding. `xxs` exists only inside a chip.
 `none 0` · `xs 3` · `sm 4` · `md 6` · `lg 12` · `full 9999`.
 
 Rows, panes and the terminal grid are square (`none`). Inputs, badges and in-dialog lists are
-`sm`. Toasts, sheets and the scroll pill are `md`. Dialogs and the palette are `lg`. Chips and
+`sm`. Toasts and the scroll pill are `md`; the docked `Sheet` is square, because it is flush to the
+window edge. Dialogs and the palette are `lg`. Chips and
 status dots are `full`.
 
 ### 2.6 Elevation
@@ -188,14 +189,12 @@ Four levels, and only two of them have a shadow.
 
 ### 2.7 Motion
 
-Fleet animates four things and nothing else. Nothing blinks, nothing re-announces itself,
-nothing decays on a timer the user did not set.
+Fleet animates one thing — the spinner — and nothing else. Nothing blinks, nothing
+re-announces itself, nothing decays on a timer the user did not set. The other entries below
+are dwell and delay durations, not animations: they time how long something waits or stays.
 
 | Token | ms | What |
 | --- | --- | --- |
-| `toast` | 140 | toast slide + fade |
-| `sheet` | 160 | Jobs sheet slide |
-| `highlight` | 120 | value-swap highlight when a fact refreshes in place |
 | `prefix_hint_delay` | 400 | how long `^S` waits before showing its keys |
 | `spinner` | 1000 | one turn of `loader-circle` |
 | `toast_short` | 1600 | dwell for instant acknowledgements |
@@ -203,7 +202,9 @@ nothing decays on a timer the user did not set.
 
 ### 2.8 Metrics
 
-`Metrics` holds every pixel constant the UX spec pins down, so no component hard-codes one:
+`Metrics` holds the pixel constants the UX spec pins down, so no component hard-codes one.
+`crates/fleet-ui-kit/src/theme/tokens.rs` is the authoritative inventory; the ones a component
+author reaches for most often are:
 `context_bar_h 36` · `status_bar_h 26` · `pane_header_h 30` · `row_h 30` · `palette_row_h 34` ·
 `job_row_h 44` · `section_header_h 20` · `dialog_header_h 44` · `dialog_footer_h 44` ·
 `banner_h 28` · `strip_h 22` · `chip_h 22` · `rail_w 240` · `detail_w 340` · `sheet_w 440` ·
@@ -214,8 +215,11 @@ The smaller component metrics live here too: `hairline 1` · `dot_size 8` ·
 `text_field_h 36` · `field_status_h 18` · `palette_input_h 44` · `number_field_w 96`.
 So do the Git UI's own dimensions: `status_pane_h 62` · `stash_pane_h 92` ·
 `overlay_help_w 640` · `editor_box_h 160` · `diff_caret_h 14`.
-The same token set owns the opacity ladder: `veil 0.55` · `dimmed 0.40` ·
-`refreshing 0.60` · `stale 0.55` · `skeleton 0.30` · `no_session 0.30`.
+The same token set owns the opacity ladder, and *that* list is complete — derive a variant
+with one of these rather than adding a near-duplicate token or a bare float:
+`veil 0.55` · `dimmed 0.40` · `refreshing 0.60` · `stale 0.55` · `terminal_blink 0.70` ·
+`banner_border 0.35` · `error_hover 0.22` · `neutral_fill 0.08` · `semantic_fill 0.14` ·
+`skeleton 0.30` · `no_session 0.30`.
 
 The native-agent canvas has its own six constants, and they live in
 `components::agent::metrics` rather than in `Metrics`: `AGENT_CONTENT_W 760` ·
@@ -636,7 +640,7 @@ without an age is not a fact.
 **API.** `FactRow::{new(label, FactValue), warning(message)}().label_width(Pixels).mono(bool)
 .refreshing(bool)`;
 `FactValue::{known, warning, from_option, Null}`;
-`KeyValueList::{new, titled(title)}().trailing(..).row(label, value).mono_row(label, value)
+`KeyValueList::{new, titled(title), titled_with_trailing(title, trailing)}().row(label, value).mono_row(label, value)
 .label_width(Pixels).refreshing(bool)`.
 **Usage rule.** Use `FactValue::from_option` for every nullable inspection fact. Warnings are
 rendered **verbatim** — swarm's soft-warning strings are greppable diagnostics and must never be
@@ -970,12 +974,15 @@ printing" bug reports are born. Zero-suppressed at `offset == 0` and in alt-scre
 #### `TerminalTabStrip`
 **Purpose.** Numbered tabs, 84–200 px, with activity, keep-alive, agent-status and exit marks.
 **API.** `TerminalTabStrip::new([TerminalTab::new(1, "nvim").activity(bool).starting(bool)
-.keep_alive(Icon).agent_status(StatusKind).unread(bool).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
+.keep_alive(Icon).agent_status(TerminalAgentState).attention(bool).kind(TerminalTabKind)
+.unread(bool).exited(impl Into<Option<i32>>)]).id(ElementId).active(usize).show_plus(bool)
 .on_select(Fn(position, ..)).on_new(Fn(..))`.
 **States.** active (accent underline + `ui_strong`) · inactive · activity (6 px amber dot) ·
-unread (6 px neutral dot) · starting (per-tab `loader-circle`) · agent working (`loader-circle`) · agent finished
-(`circle-check`) · exited (faint label + `circle-x` + code, or `—` when the process was killed
-by a signal and has no code).
+unread (6 px neutral dot) · attention (6 px amber dot that survives selection) · starting
+(per-tab `loader-circle`) · agent working (`loader-circle`) · agent finished
+(`circle-check`) · native (`git-branch` glyph before the name) · exited (faint label +
+`circle-x` + code, or `—` when the process was killed by a signal and has no code).
+`TerminalTabKind::{Pty, Native}`, `TerminalAgentState::{Working, Finished}`.
 **Usage rule (`starting`).** §3.6's "Waking a slept session" rebuilds the strip and spawns one
 PTY per tab; without a per-tab spinner the strip claims six live terminals that do not exist
 yet. **Usage rule (`exited`).** `.exited(1)` and `.exited(None)` both compile: exit codes are
@@ -986,7 +993,8 @@ binding. Agent activity appears only on terminals with a recognized agent.
 **Usage rule (`unread` vs `activity`).** A tab draws **at most one** dot, and amber wins: amber
 means the tab is waiting on the user, neutral only that content arrived while they were
 elsewhere. A native agent tab uses both (`NATIVE-AGENTS.md` §3.3 maps `NeedsYou` to amber and
-`Unread` to neutral); the active tab and an exited tab draw neither.
+`Unread` to neutral); an exited tab draws neither, and the active tab draws none *unless* it is
+blocked on the reader (`attention`) — the one mark that survives selection.
 
 #### `ScrollPill`
 **Purpose.** `SCROLL <offset>/<len>` while in scroll mode.
@@ -1144,8 +1152,9 @@ shadowed in its key context.
 #### `Markdown`
 **Purpose.** Assistant prose, rendered from a stream.
 **API.** `parse_markdown_document(&str) -> MarkdownDocument`; `markdown(&MarkdownDocument, &App)`.
-`MarkdownBlock::{Paragraph, Code{lang,text}, List{ordered,items}, Heading{level,inlines},
-Quote, Rule}`, `MarkdownInline::{Text, Code, Strong, Emphasis, Link}`.
+`MarkdownBlock::{Paragraph, Code{lang,text,highlights}, List{ordered,items},
+Heading{level,inlines}, Quote, Rule}` built through `MarkdownBlock::code(lang, text)`,
+`MarkdownInline::{Text, Code, Strong, Emphasis, Link}`.
 **Usage rule.** Two invariants, both tested: `parse_markdown_document` never panics or loops on any
 input, and for any prefix `p` of `s`, every block of `parse_markdown_document(p)` except its last is a
 block of `parse_markdown_document(s)` at the same index — a transcript must not reflow behind the reader
@@ -1208,18 +1217,24 @@ is zero-suppressed, so a bare card costs exactly a key and a title.
 #### `KanbanColumn` / `KanbanBoard`
 **Purpose.** The column and the horizontal scroller that holds the columns.
 **Anatomy.** optional 2 px category accent bar · 30 px header (status name in the `Label` role,
-count `Badge`) · scrollable gapped body of tiles · `EmptyState` hint when the column is empty ·
-`Pane`'s 2 px focus ring.
+count `Badge`) · gapped body of tiles, virtualized through `gpui::list` when the caller supplies
+a `ListState` · `EmptyState` hint when the column is empty · `Pane`'s 2 px focus ring.
 **API.** `KanbanColumn::new(id, title).count(usize).accent(Option<Hsla>).focused(bool)
-.width(Pixels).empty_hint(..).tiles(..).scroll_handle(ScrollHandle)`; `COLUMN_WIDTH_CH` = 34.
+.width(Pixels).empty_hint(..)` then either `.tiles(impl IntoIterator<Item = AnyElement>)
+.scroll_handle(ScrollHandle)` or `.rows(ListState, usize, impl FnMut(usize, &mut Window,
+&mut App) -> AnyElement)`; `KanbanColumn::list_state() -> ListState` builds the state with the
+column's own overdraw. `COLUMN_WIDTH_CH` = 34.
 `KanbanBoard::new(id).columns(..).scroll_handle(ScrollHandle)`.
 **States.** default · focused (the 2 px pane ring) · empty (the `empty_hint` `EmptyState`).
 **Variants.** column (vertical, `COLUMN_WIDTH_CH` wide) · board (the horizontal scroller).
 **Usage rule.** The count renders even at `0` — a column header is a ledger, and a missing
 count reads as "unknown", not as "empty". `accent` takes a resolved `Hsla` because the status
 category → token mapping is domain knowledge that lives in the app; the call site passes a
-theme token and never a literal. Neither container binds a key: `h` / `l` / `j` / `k` move a
-cursor the screen owns, exactly as they do for `ListView`.
+theme token and never a literal. `tiles(..)` is for a fixed handful of rows; anything bounded by
+data uses `rows(..)`, because a column handed finished elements builds and measures every one of
+them every frame. `gpui::list` and not `uniform_list`: a `CardTile` is not uniform-height, since
+its title wraps to one line or two and its meta row is zero-suppressed. Neither container binds a
+key: `h` / `l` / `j` / `k` move a cursor the screen owns, exactly as they do for `ListView`.
 
 **Gallery.** The board group's bench is `examples/gallery_board.rs` (live cursor, live editor,
 `[` / `]` moving a card, `p` cycling the priority); `kit_gallery`'s `board` section shows the

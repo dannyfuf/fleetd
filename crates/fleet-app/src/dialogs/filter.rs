@@ -12,14 +12,10 @@ use crate::{
 };
 
 #[cfg(test)]
-use super::host::{SessionTransport, open_worktree};
-#[cfg(test)]
 use crate::{
     presentation::{DisplayedPr, DisplayedTarget},
     state::RepoScope,
 };
-#[cfg(test)]
-use fleet_proto::{request::RequestBody, response::ResponseBody};
 
 /// How many rows the focused list shows, and how many it has in total (`2/12`).
 #[must_use]
@@ -190,70 +186,11 @@ fn accept(state: &Entity<AppState>, hub: &HubCtx, cx: &mut App) {
 }
 
 #[cfg(test)]
-fn accept_for_test<T: SessionTransport>(state: &Entity<AppState>, bridge: &T, cx: &mut App) {
-    let Some(target) = filter_target(state.read(cx)) else {
-        return;
-    };
-    state.update(cx, |app, cx| {
-        app.close_overlay();
-        app.filter = crate::state::FilterState::default();
-        cx.notify();
-    });
-    match target {
-        DisplayedTarget::AllRepos => select_repo(state, RepoScope::All, cx),
-        DisplayedTarget::Repo(repo) => select_repo(state, RepoScope::Repo(repo), cx),
-        DisplayedTarget::CloneFailed { job, .. } => {
-            state.update(cx, |app, cx| {
-                app.open_overlay(crate::state::Overlay::Jobs);
-                app.jobs_focus = job;
-                cx.notify();
-            });
-        }
-        DisplayedTarget::Worktree(id) => open_worktree(id, state, bridge, cx),
-        DisplayedTarget::PullRequest(_) => {}
-    }
-}
-
-#[cfg(test)]
-fn select_repo(state: &Entity<AppState>, scope: RepoScope, cx: &mut App) {
-    state.update(cx, |app, cx| {
-        app.scope = scope;
-        app.cursors.worktrees = 0;
-        app.hub_pane = HubPane::List;
-        cx.notify();
-    });
-}
-
-#[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
+    use std::time::Instant;
 
     use super::*;
-
-    type TestReplySender =
-        async_channel::Sender<Result<ResponseBody, fleet_proto::error::ProtoError>>;
-
-    #[derive(Clone, Default)]
-    struct FakeTransport {
-        requests: Rc<RefCell<Vec<RequestBody>>>,
-        replies: Rc<RefCell<VecDeque<TestReplySender>>>,
-    }
-
-    impl SessionTransport for FakeTransport {
-        fn send(&self, body: RequestBody) {
-            self.requests.borrow_mut().push(body);
-        }
-
-        fn request(
-            &self,
-            body: RequestBody,
-        ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>> {
-            let (sender, receiver) = async_channel::bounded(1);
-            self.requests.borrow_mut().push(body);
-            self.replies.borrow_mut().push_back(sender);
-            receiver
-        }
-    }
+    use crate::screens::hub::tests::test_hub_ctx_for;
 
     fn displayed_repo(
         kind: crate::presentation::DisplayedRepoKind,
@@ -318,6 +255,10 @@ mod tests {
             let mut state = AppState::new("/tmp/fleet", Instant::now());
             state.hub_pane = HubPane::Repos;
             state.overlay = Some(crate::state::Overlay::Filter);
+            state.filter = crate::state::FilterState {
+                query: "acme".to_owned(),
+                editing: true,
+            };
             state.displayed_hub.repos = vec![displayed_repo(
                 crate::presentation::DisplayedRepoKind::CloneFailed,
                 Some("acme/api"),
@@ -325,9 +266,9 @@ mod tests {
             )];
             state
         });
-        let transport = FakeTransport::default();
+        let (hub, _harness) = test_hub_ctx_for(state.clone(), cx);
 
-        cx.update(|cx| accept_for_test(&state, &transport, cx));
+        cx.update(|cx| accept(&state, &hub, cx));
 
         cx.read(|cx| {
             let app = state.read(cx);
@@ -336,7 +277,8 @@ mod tests {
                 app.jobs_focus.as_ref().map(|job| job.as_str()),
                 Some("clone-job")
             );
-            assert_eq!(app.cursors.worktrees, 0);
+            // §3.10: a filter does not survive a screen change, and opening is one.
+            assert_eq!(app.filter, crate::state::FilterState::default());
         });
     }
 
@@ -345,6 +287,11 @@ mod tests {
         let state = cx.new(|_| {
             let mut state = AppState::new("/tmp/fleet", Instant::now());
             state.hub_pane = HubPane::Repos;
+            state.overlay = Some(crate::state::Overlay::Filter);
+            state.filter = crate::state::FilterState {
+                query: "acme".to_owned(),
+                editing: true,
+            };
             state.cursors.worktrees = 7;
             state.displayed_hub.repos = vec![displayed_repo(
                 crate::presentation::DisplayedRepoKind::Repo,
@@ -353,9 +300,9 @@ mod tests {
             )];
             state
         });
-        let transport = FakeTransport::default();
+        let (hub, _harness) = test_hub_ctx_for(state.clone(), cx);
 
-        cx.update(|cx| accept_for_test(&state, &transport, cx));
+        cx.update(|cx| accept(&state, &hub, cx));
 
         cx.read(|cx| {
             let app = state.read(cx);
@@ -365,6 +312,8 @@ mod tests {
             );
             assert_eq!(app.cursors.worktrees, 0);
             assert_eq!(app.hub_pane, HubPane::List);
+            assert!(app.overlay.is_none());
+            assert_eq!(app.filter, crate::state::FilterState::default());
         });
     }
 }

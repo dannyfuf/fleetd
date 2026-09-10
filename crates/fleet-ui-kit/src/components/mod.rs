@@ -114,7 +114,7 @@ pub use list_view::{
 pub use list_view::{ListCursor, ListView};
 pub use log_view::{LOG_TAIL_LINES, LogCommand, LogView};
 pub use markdown::{
-    MarkdownBlock, MarkdownDocument, MarkdownInline, markdown,
+    CodeHighlights, MarkdownBlock, MarkdownDocument, MarkdownInline, markdown,
     parse_markdown as parse_markdown_document,
 };
 pub use markdown_text::{

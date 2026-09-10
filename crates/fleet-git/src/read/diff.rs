@@ -8,17 +8,44 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DIFF_ARGS: [&str; 4] = ["--no-color", "--no-ext-diff", "--patch", "--find-renames"];
+/// Flags every `diff` read shares.
+///
+/// The prefixes are pinned because [`crate::parse::path`] matches on `a/` and `b/`, and a user's
+/// `diff.mnemonicPrefix`, `diff.noprefix`, `diff.srcPrefix` or `diff.dstPrefix` would otherwise
+/// rename them out from under it — `diff.mnemonicPrefix` alone turns them into `c/` and `i/`.
+const DIFF_ARGS: [&str; 6] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--patch",
+    "--find-renames",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
 
 impl Repository {
     /// [`DIFF_ARGS`] plus the `-U<n>` the repository is currently configured for.
     ///
     /// Every `diff` read goes through this, so widening the context with
     /// [`Repository::set_diff_context`] moves the display and the patches built from it together.
-    fn diff_args(&self) -> [OsString; 5] {
-        let [no_color, no_ext_diff, patch, find_renames] = DIFF_ARGS.map(OsString::from);
+    fn diff_args(&self) -> [OsString; 7] {
+        let [
+            no_color,
+            no_ext_diff,
+            patch,
+            find_renames,
+            src_prefix,
+            dst_prefix,
+        ] = DIFF_ARGS.map(OsString::from);
         let context = OsString::from(format!("-U{}", self.diff_context()));
-        [no_color, no_ext_diff, patch, find_renames, context]
+        [
+            no_color,
+            no_ext_diff,
+            patch,
+            find_renames,
+            src_prefix,
+            dst_prefix,
+            context,
+        ]
     }
 
     /// `git diff [--cached]` with the shared flags for one side of the index.

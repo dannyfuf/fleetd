@@ -11,20 +11,21 @@
 
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fleet_git::DiffKind;
 use fleet_ui_kit::Theme;
 use fleet_ui_kit::prelude::*;
 use fleet_ui_kit::theme::{CH, ch};
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, Corners, Edges, ElementId, FontFeatures, FontWeight,
-    Hsla, Pixels, Point, TextRun, UniformListDecoration, UniformListScrollHandle, Window,
-    WindowTextSystem, canvas, div, fill, font, point, px, quad, size, transparent_black,
-    uniform_list,
+    AnyElement, App, BorderStyle, Bounds, Corners, Edges, ElementId, FontWeight, Hsla, Pixels,
+    Point, TextRun, UniformListDecoration, UniformListScrollHandle, Window, WindowTextSystem,
+    canvas, div, fill, point, px, quad, size, transparent_black, uniform_list,
 };
 
 use super::Ansi;
 use super::diff_model::{DiffModel, DiffRow, DiffViewMode, FileMeta, RowKind, is_panned_payload};
+use super::long_line;
 use super::row_layout::{
     Gutters, RowPalette, RowStyle, SIGN_CH, SIGN_GAP_CH, background, line_row,
 };
@@ -415,7 +416,6 @@ pub(crate) fn diff_list(
     state: ViewState,
     cx: &App,
 ) -> AnyElement {
-    measure_payload_advances(&model, cx);
     let count = model.len();
     if count == 0 {
         return div().into_any_element();
@@ -486,40 +486,48 @@ pub(crate) fn max_h_scroll(model: &DiffModel, viewport_w: f32) -> f32 {
         .fold(0.0, f32::max)
 }
 
-fn measure_payload_advances(model: &DiffModel, cx: &App) {
+/// Measures the widest payload advance in each code column and stores it on the model.
+///
+/// Shaping every payload row costs the whole diff, so this belongs to the background pass that
+/// builds the model — not to the frame that first draws it. Returns `false` when the pass was
+/// cancelled, leaving `payload_advances` unset so [`max_h_scroll`] falls back to scalar columns.
+pub(crate) fn measure_payload_advances(
+    model: &DiffModel,
+    style: &long_line::Style,
+    text_system: &WindowTextSystem,
+    cancelled: &AtomicBool,
+) -> bool {
     if model.payload_advances.get().is_some() {
-        return;
+        return true;
     }
-    let theme = cx.theme();
-    let mut mono_font = font(theme.font_mono.clone());
-    mono_font.features = FontFeatures::disable_ligatures();
-    let text_system = WindowTextSystem::new(cx.text_system().clone());
-    let advances: Vec<f32> = model
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            if !is_panned_payload(row.kind) {
-                return 0.0;
-            }
-            if let Some(line) = model.long_lines.get(&index) {
-                return f32::from(line.width());
-            }
-            let run = TextRun {
-                len: row.text.len(),
-                font: mono_font.clone(),
-                color: theme.colors.text,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            f32::from(
-                text_system
-                    .shape_line(row.text.clone(), theme.text.data.size, &[run], None)
-                    .width(),
-            )
-        })
-        .collect();
+    let mono_font = style.font().clone();
+    let mut advances: Vec<f32> = Vec::with_capacity(model.rows.len());
+    for (index, row) in model.rows.iter().enumerate() {
+        if cancelled.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !is_panned_payload(row.kind) {
+            advances.push(0.0);
+            continue;
+        }
+        if let Some(line) = model.long_lines.get(&index) {
+            advances.push(f32::from(line.width()));
+            continue;
+        }
+        let run = TextRun {
+            len: row.text.len(),
+            font: mono_font.clone(),
+            color: style.text(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        advances.push(f32::from(
+            text_system
+                .shape_line(row.text.clone(), style.size(), &[run], None)
+                .width(),
+        ));
+    }
     let width = |row: Option<usize>| row.map_or(0.0, |row| advances[row]);
     let measured = match model.mode {
         DiffViewMode::Unified => [advances.into_iter().fold(0.0, f32::max), 0.0],
@@ -533,6 +541,7 @@ fn measure_payload_advances(model: &DiffModel, cx: &App) {
         ),
     };
     model.payload_advances.set(Some(measured));
+    true
 }
 
 /// Everything left of the code on a unified payload row, in pixels: both line-number gutters,
@@ -593,7 +602,12 @@ mod tests {
                 &parse::diff::parse(patch.as_bytes()).expect("parses"),
                 DiffViewMode::Split,
             );
-            measure_payload_advances(&model, cx);
+            assert!(measure_payload_advances(
+                &model,
+                &long_line::Style::new(cx.theme()),
+                &WindowTextSystem::new(cx.text_system().clone()),
+                &AtomicBool::new(false),
+            ));
             let measured = model.payload_advances.get().expect("measured");
 
             assert!(measured[0] > measured[1]);

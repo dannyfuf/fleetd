@@ -40,7 +40,9 @@ returns `None` for local and the configured `HostId` otherwise.
 `PROTOCOL_VERSION` is 7. `Hello { protocol, client: HelloClient }` defaults the client to
 `ClientKind::App`; kinds are `App | Cli | Proxy`, with optional `host_id`. `HelloResponse` retains
 the correlated response and capabilities and adds `daemon_id: String` (persisted as
-`$FLEET_HOME/daemon-id`) plus `build_commit: Option<String>`. Capability `remote-machines` marks
+`$FLEET_HOME/daemon-id`; a file whose contents are not a valid `HostId` is moved aside to
+`daemon-id.invalid` and a fresh identity is minted, with both ids logged, rather than aborting
+startup) plus `build_commit: Option<String>`. Capability `remote-machines` marks
 federation support.
 
 `HostStatus` keeps `id`, `reachable`, `error`, and `checked_at`, and defaultably adds `provider`,
@@ -99,6 +101,7 @@ lazily creates one non-legacy `RemoteLink` per host.
     fn hello(&self) -> Option<RemoteHello>;
     fn last_snapshot_seen(&self) -> Option<Snapshot>;
     async fn request(&self, body: RequestBody) -> DaemonResult<ResponseBody>;
+    fn nudge_reconnect(&self) {}
     fn events(&self) -> broadcast::Receiver<Event>;
     fn state_changes(&self) -> watch::Receiver<LinkState>;
     async fn close(&self);
@@ -112,6 +115,19 @@ provider, LinkOptions { backoff_min, backoff_max, hello_timeout }) -> Arc<Self>`
 `connect()` starts it. It sends Hello as Proxy with the local daemon id in `host_id`, correlates
 responses by request id, publishes remote events untranslated, and reconnects with exponential
 backoff from 1s to 60s. State progresses Connecting -> Ready; transport/handshake loss becomes Down.
+
+Every write to the remote stream is bounded by `WRITE_BUDGET` (10s) and races link shutdown: a peer
+that stops reading — the remote server stops polling its reader at `MAX_PENDING_REQUESTS` — becomes
+an ordinary disconnect (pending requests fail, state Down, backoff reconnect) instead of wedging the
+link actor. `close()` bounds the join on that actor the same way and aborts it if the deadline
+passes, so a closed endpoint never keeps its stream or ssh child alive.
+
+`nudge_reconnect` wakes a link sleeping in reconnect backoff so its next attempt runs immediately
+and its backoff restarts at `backoff_min`. The trait's default body does nothing — correct only for
+an endpoint with no backoff to wake, and the reason any endpoint that does sleep in backoff has to
+override it. `RemoteLink` does: a nudge on a Ready link is not discarded, because the permit is
+retained when the actor is not sleeping, so a nudge that races a disconnect shortens the following
+attempt instead of being lost. It never tears down an established transport.
 
 ## 6. Router
 
@@ -155,7 +171,9 @@ are explicitly exempt because clients draw them from protocol events.
 `Bootstrap::start(host, git_ref)` submits a daemon job. Through `MachineProvider::exec`, it checks
 git/cargo, creates or fetches `<fleetHome>/src/fleet`, checks out the requested ref (default local
 build commit), runs `cargo build --release -p fleet-daemon`, installs the result as the configured
-fleetd binary, restarts the remote daemon, and probes until the link reports the matching build.
+fleetd binary, restarts the remote daemon, nudges the endpoint out of reconnect backoff
+(`RemoteEndpoint::nudge_reconnect`, § 5) so the probe observes the new daemon rather than waiting out
+a grown backoff, and probes until the link reports the matching build.
 Every step logs to the ordinary job log and cancellation stops before the next command.
 
 ## 10. Doctor and host status

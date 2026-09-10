@@ -268,25 +268,16 @@ still `impl Global for Theme` on the public type — wrapping it in a private ne
 
 **Gaps worth closing, incrementally, when you are already in the file:**
 
-- **Three inline `px()` heights in dialog views.** `dialogs/help.rs:503` (`px(620.0)`),
-  `dialogs/settings/view.rs:68` (`px(560.0)`), `dialogs/clone_repo.rs:467` (`px(420.0)`) each sit
-  next to a width that correctly goes through `Dialogs::width(cx)`. The width consts right
-  above them show the accepted shape — a named const with a doc comment citing the spec clause
-  (`dialogs/mod.rs:40-47`). Give the heights the same treatment, or a `Metrics` field.
 - **No elevation helper.** The bg + radius + hairline + shadow recipe is retyped at
   `components/dialog.rs:212-216`, `components/overlay.rs:136-140`,
   `components/toast_stack.rs:250-254` and `components/sheet.rs:98-101`. Zed collapses this into
   `StyledExt::elevation_2/3` (`zed/crates/ui/src/traits/styled_ext.rs:49-93`). A fleetd
   `sheet_surface(self, cx)` / `dialog_surface(self, cx)` extension trait would stop the four
   surfaces drifting. Add it when you next touch two of them, not as a standalone refactor.
-- **Ad-hoc hover in `fleet-app`.** `views/watch_pane.rs:82` and `:123` hand-roll
+- **Ad-hoc hover in `fleet-app`.** `views/watch_pane.rs:82` hand-rolls
   `.cursor_pointer().hover(|s| s.bg(theme.colors.row_hover))` — styling that
   `docs/DESIGN-SYSTEM.md:9-12` says must not exist in `fleet-app`. The affordance belongs in a
   kit component.
-- **Three dead motion tokens.** `motion.toast` (140 ms), `motion.sheet` (160 ms),
-  `motion.highlight` (120 ms) (`theme/tokens.rs:381-396`) have no consumer; only `spinner`,
-  `prefix_hint_delay`, `toast_short`, `toast_normal` are read. Implement them with
-  `with_animation` or delete them.
 - **No `h_flex()`/`v_flex()`.** 0 uses; `.flex().flex_col()` / `.flex().items_center()` is spelled
   out everywhere. Zed's helpers are three lines
   (`zed/crates/ui/src/traits/styled_ext.rs:33-42`), blanket-implemented over `Styled`. Worth

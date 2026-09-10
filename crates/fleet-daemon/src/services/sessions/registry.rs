@@ -2,6 +2,19 @@ use super::*;
 
 use std::sync::{OnceLock, atomic::AtomicU64};
 
+use fleet_term::HostError;
+
+/// Stops a terminal's PTY child and the threads that own it.
+///
+/// A closed owner is the ordinary case for a terminal whose child already exited; any other
+/// failure leaks the child, the owner thread and the event forwarder, so it must be visible.
+fn kill_host(terminal: TerminalId, host: &TerminalHost) {
+    match host.kill() {
+        Ok(()) | Err(HostError::Closed) => {}
+        Err(error) => tracing::warn!(%error, %terminal, "failed to kill terminal host"),
+    }
+}
+
 type TerminalIdCounters = BTreeMap<PathBuf, Arc<AtomicU64>>;
 
 fn terminal_id_counters() -> &'static Mutex<TerminalIdCounters> {
@@ -236,7 +249,7 @@ impl SessionRuntime {
             (name, host, removed_session.then_some(session_id))
         };
         if let Some(host) = host {
-            let _ = host.kill();
+            kill_host(terminal, &host);
         }
         if let Some(session) = removed_session.as_ref() {
             self.prune_ensure_lock(session);
@@ -275,11 +288,14 @@ impl SessionRuntime {
             removed
                 .terminals
                 .into_iter()
-                .filter_map(|terminal| self.forget_terminal(&mut registry, terminal.id))
+                .filter_map(|terminal| {
+                    self.forget_terminal(&mut registry, terminal.id)
+                        .map(|host| (terminal.id, host))
+                })
                 .collect::<Vec<_>>()
         };
-        for host in hosts {
-            let _ = host.kill();
+        for (terminal, host) in hosts {
+            kill_host(terminal, &host);
         }
         self.prune_ensure_lock(session);
         self.notify_snapshot();

@@ -107,7 +107,7 @@ impl RenderOnce for StickyErrorSlot {
                 .id(id)
                 .hover(move |s| s.bg(hover_bg))
                 .when_some(on_activate, |el, on_activate| {
-                    super::control::on_activate(el, on_activate)
+                    super::control::on_activate(el, "dismiss error", on_activate)
                 })
                 .into_any_element(),
             None => body.into_any_element(),

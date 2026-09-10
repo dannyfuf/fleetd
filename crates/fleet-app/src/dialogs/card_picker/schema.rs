@@ -161,14 +161,50 @@ pub(super) fn options(state: &AppState, kind: &PickerKind) -> Vec<PickerOption> 
     }
 }
 
+/// Every input the offered rows are derived from, as revisions and cheap values.
+///
+/// `options` walks the board's cards and `candidates` folds every label, so the rows are keyed
+/// the way the Hub and the board key their projections rather than rebuilt per draw
+/// (`docs/APP-CONTRACTS.md`, "render prepares nothing"). The snapshot is in the key because the
+/// repository picker offers `snapshot.repos`; the board revision because every other kind reads
+/// the board, and a card edit lands through `apply_card` and never through a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PreparedKey {
+    snapshot: u64,
+    board: u64,
+    kind: PickerKind,
+    query: String,
+}
+
+/// The offered rows for `draft`, derived only when one of the inputs above changed.
+pub(super) fn prepare(
+    state: &AppState,
+    draft: &mut CardPickerState,
+) -> std::rc::Rc<[PickerOption]> {
+    let key = PreparedKey {
+        snapshot: state.snapshot_revision,
+        board: state.board.revision,
+        kind: draft.kind.clone(),
+        query: draft.query.clone(),
+    };
+    if draft.prepared.as_ref() != Some(&key) {
+        let rows = candidates(state, draft);
+        draft.rows = rows.into();
+        draft.prepared = Some(key);
+    }
+    draft.rows.clone()
+}
+
 /// The offered values the query keeps, plus the typed value when the kind accepts one.
 #[must_use]
 pub(super) fn candidates(state: &AppState, draft: &CardPickerState) -> Vec<PickerOption> {
     let schema = property_kind(state, &draft.kind);
     let query = draft.query.trim();
+    // Folded once, not once per offered value: this runs on every keystroke and every draw.
+    let needle = query.to_lowercase();
     let mut rows: Vec<PickerOption> = options(state, &draft.kind)
         .into_iter()
-        .filter(|option| crate::presentation::contains_folded(&option.label, &query.to_lowercase()))
+        .filter(|option| crate::presentation::contains_folded(&option.label, &needle))
         .collect();
     if accepts_free_text(&draft.kind, schema)
         && !query.is_empty()

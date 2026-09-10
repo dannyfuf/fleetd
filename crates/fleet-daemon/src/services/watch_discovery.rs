@@ -337,6 +337,10 @@ impl WatchDiscovery {
             }
             self.lock().retained.insert(identity, tracked.watch);
         }
+        // A retained entry is garbage once `Watches` has expired the watch it names, and no
+        // candidate ever comes back to release it: prune once per scan, not per candidate.
+        let live = self.watches.ids();
+        self.lock().retained.retain(|_, watch| live.contains(watch));
     }
 
     fn release_reused_retained(&self, current: &ProcessIdentity) {
@@ -1104,6 +1108,38 @@ mod tests {
                 .contains("output is not captured")
         );
         assert_eq!(h.process.environment_calls(), vec![400]);
+    }
+
+    #[tokio::test]
+    async fn retained_entries_are_dropped_once_their_watch_expires() {
+        let h = harness().await;
+        h.process
+            .set_snapshot(vec![process(460, 1, "/usr/bin/codex exec retained")]);
+        h.process.set_environment(460, fleet_environment(Some(2)));
+        h.discovery
+            .discover(
+                &h.config,
+                std::slice::from_ref(&h.session),
+                &h.process.snapshot().await.unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(h.watches.watch_for_pid(460).is_some());
+
+        h.discovery.poll_snapshot(&[]);
+        assert_eq!(h.discovery.lock().retained.len(), 1);
+
+        h.watches
+            .tick(std::time::Instant::now() + crate::services::watches::RETENTION);
+        h.discovery
+            .discover(&h.config, std::slice::from_ref(&h.session), &[])
+            .await
+            .unwrap();
+
+        assert!(
+            h.discovery.lock().retained.is_empty(),
+            "a retained entry must not outlive the watch it names"
+        );
     }
 
     #[tokio::test]

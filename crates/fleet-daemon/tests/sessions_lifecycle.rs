@@ -776,6 +776,11 @@ fn isolated_test(name: &str) -> bool {
     if std::env::var("FLEET_SESSION_TEST").as_deref() == Ok(name) {
         return false;
     }
+    run_isolated_child(name).unwrap_or_else(|report| panic!("{report}"));
+    true
+}
+
+fn run_isolated_child(name: &str) -> Result<(), String> {
     let home = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
     let output = std::process::Command::new(
         std::env::current_exe().unwrap_or_else(|error| panic!("{error}")),
@@ -789,11 +794,27 @@ fn isolated_test(name: &str) -> bool {
     .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     .output()
     .unwrap_or_else(|error| panic!("{error}"));
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    true
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() {
+        return Err(format!("isolated child failed: {name}\n{stdout}\n{stderr}"));
+    }
+    // libtest exits 0 when its filter matches nothing, so a name that has drifted from its
+    // function would otherwise turn the caller into a silently passing no-op.
+    if !stdout.contains("1 passed") {
+        return Err(format!(
+            "isolated child ran no test: {name}\n{stdout}\n{stderr}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn the_isolation_harness_fails_when_the_child_runs_no_test() {
+    if std::env::var_os("FLEET_SESSION_TEST").is_some() {
+        return;
+    }
+    let report = run_isolated_child("no_such_session_test")
+        .expect_err("a filter matching no test must not report success");
+    assert!(report.contains("no_such_session_test"), "{report}");
 }

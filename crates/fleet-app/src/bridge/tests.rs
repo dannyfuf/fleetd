@@ -22,7 +22,11 @@ async fn diagnostic_tail_is_bounded_and_keeps_nonempty_lines() {
 async fn offline_requests_finish_without_waiting_for_connection_work() {
     let (requests, receiver) = async_channel::unbounded();
     let (events, _events_rx) = async_channel::unbounded();
-    let task = tokio::spawn(requests::run(receiver, events));
+    let task = tokio::spawn(requests::run(
+        receiver,
+        events,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    ));
     let (reply, response) = async_channel::bounded(1);
     requests
         .send(requests::Request::Command {
@@ -251,6 +255,104 @@ async fn stalled_health_check_does_not_delay_fifo_input_or_shutdown() {
     tokio::time::timeout(Duration::from_millis(250), task)
         .await
         .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_manual_reconnect_reopens_a_link_that_is_still_alive() {
+    let daemon = TestDaemon::start(|body| match body {
+        RequestBody::DaemonPing => Some(ResponseBody::Pong),
+        RequestBody::GetConfig => Some(ResponseBody::Config(fleet_core::config::default_config(
+            "/tmp/fleet-test",
+        ))),
+        RequestBody::GetSnapshot => Some(ResponseBody::Snapshot(empty_snapshot())),
+        _ => Some(ResponseBody::Ack),
+    });
+    let (commands, command_rx) = async_channel::unbounded();
+    let (events, event_rx) = async_channel::unbounded();
+    let resync_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let home = daemon.home.path().to_owned();
+    let runtime_resync = resync_pending.clone();
+    let task =
+        tokio::spawn(
+            async move { runtime::run(&home, &command_rx, &events, &runtime_resync).await },
+        );
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(event, BridgeEvent::Connected(_)) {
+            break;
+        }
+    }
+    daemon.connections.recv().await.unwrap();
+
+    // The app writes `DaemonLink::Starting` the moment `r` is pressed; the banner it replaces
+    // is gone, so a reconnect the runtime silently drops would leave no way back.
+    commands.send(Command::Reconnect).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), daemon.connections.recv())
+        .await
+        .expect("an explicit reconnect opens a fresh connection")
+        .unwrap();
+
+    commands.send(Command::Shutdown).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_stalled_mutation_does_not_delay_shutdown() {
+    let daemon = TestDaemon::start(|body| match body {
+        RequestBody::DaemonPing => Some(ResponseBody::Pong),
+        RequestBody::GetConfig => Some(ResponseBody::Config(fleet_core::config::default_config(
+            "/tmp/fleet-test",
+        ))),
+        RequestBody::GetSnapshot => Some(ResponseBody::Snapshot(empty_snapshot())),
+        // The daemon accepts the keystroke and never answers it.
+        RequestBody::TerminalInput { .. } => None,
+        _ => Some(ResponseBody::Ack),
+    });
+    let (commands, command_rx) = async_channel::unbounded();
+    let (events, event_rx) = async_channel::unbounded();
+    let resync_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let home = daemon.home.path().to_owned();
+    let runtime_resync = resync_pending.clone();
+    let task =
+        tokio::spawn(
+            async move { runtime::run(&home, &command_rx, &events, &runtime_resync).await },
+        );
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(event, BridgeEvent::Connected(_)) {
+            break;
+        }
+    }
+
+    // Enough to fill the admission lane, the mutation lane, and the hand of each worker
+    // parked between them, so the next send is what would park the control loop.
+    for index in 0..(4 * COMMAND_CAPACITY) {
+        commands
+            .send(Command::Request {
+                body: Box::new(RequestBody::TerminalInput {
+                    terminal: fleet_core::ids::TerminalId(1),
+                    bytes: vec![index as u8],
+                }),
+                reply: None,
+            })
+            .await
+            .unwrap();
+    }
+    commands.send(Command::Shutdown).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("a saturated mutation lane must not hold the control loop")
         .unwrap();
 }
 

@@ -6,6 +6,8 @@ use crate::{
 };
 use fleet_core::{model::Context, paths::FleetHome, state::default_state};
 
+use super::worktree::ARCHIVED_CARD;
+
 async fn fixture() -> (
     tempfile::TempDir,
     Services,
@@ -380,4 +382,93 @@ async fn damaged_board_does_not_break_snapshot() {
     )
     .unwrap();
     assert!(services.snapshot().await.unwrap().boards.is_empty());
+}
+
+#[tokio::test]
+async fn archiving_a_card_during_the_clone_names_the_created_worktree() {
+    let (_temp, services, _receiver) = fixture().await;
+    let view = services
+        .boards
+        .ensure(&"work".parse().unwrap())
+        .await
+        .unwrap();
+    let repo_id: RepoId = "acme/api".parse().unwrap();
+    let card = services
+        .boards
+        .create_card(
+            &view.board.id,
+            CardDraft {
+                title: "Archived mid-clone".into(),
+                ..CardDraft::default()
+            },
+        )
+        .await
+        .unwrap();
+    let slug = worktree_slug(&view.board, &card);
+    let worktree_id = format!("{repo_id}#{slug}");
+    services
+        .state
+        .transaction(|state| {
+            state.repos.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "acme/api", "owner": "acme", "name": "api",
+                    "url": "https://example.invalid/acme/api.git", "contextId": "work",
+                    "defaultBranch": "main", "path": "/tmp/acme-api", "clonedAt": "now"
+                }))
+                .unwrap(),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let made: Worktree = serde_json::from_value(serde_json::json!({
+        "id": worktree_id, "repoId": "acme/api", "slug": slug,
+        "branch": slug, "baseRef": "main", "path": "/tmp/acme-api-wt",
+        "session": "s", "createdAt": "now"
+    }))
+    .unwrap();
+    let boards = services.boards.clone();
+    let archived_card = card.id.clone();
+    // The board guard is dropped for the clone, so the card can be archived while its
+    // worktree is being made.
+    let error = services
+        .boards
+        .create_worktree_from_card_routed(
+            &card.id,
+            Some(repo_id),
+            None,
+            None,
+            move |_repo, _slug, _branch, _base, _host| async move {
+                boards
+                    .update_card(
+                        &archived_card,
+                        CardPatch {
+                            archived: Some(true),
+                            ..CardPatch::default()
+                        },
+                    )
+                    .await?;
+                Ok((true, made))
+            },
+        )
+        .await
+        .unwrap_err();
+
+    // The refusal must name the orphan, exactly as the card-gone branch beside it does:
+    // nothing on the board references the worktree, so `fleet list` is its only trace.
+    let DaemonError::Conflict(message) = error else {
+        panic!("archiving during the clone is a conflict: {error:?}");
+    };
+    assert!(
+        message.contains(&worktree_id),
+        "a refusal for a worktree that was created must name it: {message}"
+    );
+    // Refusing before anything is created keeps the plain wording.
+    assert!(matches!(
+        services
+            .boards
+            .create_worktree_from_card(&card.id, None, None, None)
+            .await,
+        Err(DaemonError::Conflict(message)) if message == ARCHIVED_CARD
+    ));
 }

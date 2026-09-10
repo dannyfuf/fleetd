@@ -36,6 +36,13 @@ use super::{AsyncDuplex, MachineProvider};
 const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 1_024;
 
+/// Deadline for one framed write to a remote daemon before its peer counts as stalled.
+///
+/// A remote daemon stops reading its socket once it holds `MAX_PENDING_REQUESTS` in flight, so an
+/// unbounded write can block the link actor forever. Bounding it turns a stalled peer into an
+/// ordinary disconnect: pending requests fail, the state becomes `Down`, and backoff reconnects.
+pub const WRITE_BUDGET: Duration = Duration::from_secs(10);
+
 type Transport = Framed<Box<dyn AsyncDuplex>, FleetCodec<Value, Value>>;
 
 /// Remote Hello metadata retained by an endpoint.
@@ -79,7 +86,10 @@ pub trait RemoteEndpoint: Send + Sync {
     /// Wakes a link that is sleeping in reconnect backoff so its next attempt runs immediately
     /// and its backoff restarts from the configured floor.
     ///
-    /// Implementations must treat this as a no-op for a link that is already connected.
+    /// Implementations that sleep in backoff must honour this: never disturb an established
+    /// transport, and never drop a nudge that arrives while the link is up, because callers use
+    /// it to shorten the attempt that follows a disconnect they just caused. The default body
+    /// does nothing, which is correct only for an endpoint that has no backoff to wake.
     fn nudge_reconnect(&self) {}
     fn events(&self) -> broadcast::Receiver<Event>;
     fn state_changes(&self) -> watch::Receiver<LinkState>;
@@ -304,12 +314,13 @@ impl RemoteEndpoint for RemoteLink {
         }
     }
 
+    /// A nudge is not discarded on a connected link: `Notify::notify_one` retains a permit when
+    /// the actor is not currently sleeping, so a nudge that races a disconnect shortens the
+    /// following backoff instead of being lost. A closed link has nothing left to wake.
     fn nudge_reconnect(&self) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        // A permit is retained when the actor is not currently sleeping, so a nudge that races a
-        // disconnect still shortens the following backoff instead of being lost.
         self.reconnect.notify_one();
     }
 
@@ -324,8 +335,16 @@ impl RemoteEndpoint for RemoteLink {
     async fn close(&self) {
         self.closed.store(true, Ordering::Release);
         let _ = self.shutdown_tx.send(true);
-        if let Some(task) = self.task.lock().await.take() {
-            let _ = task.await;
+        if let Some(mut task) = self.task.lock().await.take() {
+            // Every await the actor owns observes shutdown, but a close must never inherit a stall
+            // below them: give the join the same budget as a write and abort what outlives it.
+            if tokio::time::timeout(WRITE_BUDGET, &mut task).await.is_err() {
+                tracing::warn!(
+                    host = %self.provider.id(),
+                    "remote link actor outlived its close budget; aborting it"
+                );
+                task.abort();
+            }
         }
         self.set_down("remote link is closed".to_owned());
     }
@@ -473,11 +492,25 @@ async fn connected_loop(
                         continue;
                     }
                 };
-                if let Err(error) = transport.send(encoded).await {
-                    if let Some(response) = pending.remove(&id) {
-                        let _ = response.send(Err(DaemonError::Remote(error.to_string())));
+                // A peer that stops reading (the remote server stops polling its socket at
+                // MAX_PENDING_REQUESTS) must not wedge this actor: bound the write and keep
+                // observing shutdown. Either outcome discards the transport, so a half-written
+                // frame is irrelevant — the link reconnects with a fresh one.
+                let write = tokio::select! {
+                    result = transport.send(encoded) => {
+                        result.map_err(|error| format!("remote stream write failed: {error}"))
                     }
-                    return format!("remote stream write failed: {error}");
+                    () = sleep(WRITE_BUDGET) => Err("remote stream write timed out".to_owned()),
+                    changed = shutdown.changed() => {
+                        let _ = changed;
+                        Err("remote link is closed".to_owned())
+                    }
+                };
+                if let Err(reason) = write {
+                    if let Some(response) = pending.remove(&id) {
+                        let _ = response.send(Err(DaemonError::Remote(reason.clone())));
+                    }
+                    return reason;
                 }
             }
             incoming = transport.next() => match incoming {
@@ -958,7 +991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nudge_on_a_connected_link_does_not_disturb_it() {
+    async fn nudge_on_a_link_that_never_connected_is_inert() {
         let provider = Arc::new(UnreachableProvider::new());
         let link = RemoteLink::new(
             Arc::clone(&provider) as Arc<dyn MachineProvider>,

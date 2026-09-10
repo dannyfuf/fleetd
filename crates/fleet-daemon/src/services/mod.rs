@@ -148,19 +148,75 @@ impl Services {
     }
 }
 
-fn load_or_create_daemon_id(home: &Path) -> String {
+/// Loads the identity persisted for this Fleet home, minting one when there is none to load.
+///
+/// The value is the host identity remote peers key on, so neither failure here is silent: a file
+/// that is not a valid host id is moved aside to `daemon-id.invalid` and reported rather than
+/// aborting the daemon's startup, and a write that cannot persist a fresh identity says so.
+fn load_or_create_daemon_id(home: &Path) -> HostId {
     let path = home.join("daemon-id");
-    if let Ok(value) = std::fs::read_to_string(&path) {
-        let value = value.trim();
-        if !value.is_empty() {
-            return value.to_owned();
+    let rejected = match std::fs::read_to_string(&path) {
+        Ok(value) => {
+            let value = value.trim().to_owned();
+            match HostId::try_from(value.as_str()) {
+                Ok(id) => return id,
+                // An absent identity and an empty one are the same situation: mint a fresh one.
+                Err(_) if value.is_empty() => None,
+                Err(error) => Some((value, error.to_string())),
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "could not read the persisted daemon identity; minting a new one"
+            );
+            None
+        }
+    };
+    let id = HostId::try_from(uuid::Uuid::new_v4().to_string().as_str())
+        .expect("a generated uuid is a valid host id");
+    if let Some((value, reason)) = rejected {
+        quarantine_daemon_id(&path, &value, &reason, &id);
     }
-    let id = uuid::Uuid::new_v4().to_string();
-    if std::fs::create_dir_all(home).is_ok() {
-        let _ = std::fs::write(path, format!("{id}\n"));
+    match std::fs::create_dir_all(home) {
+        Ok(()) => {
+            if let Err(error) = std::fs::write(&path, format!("{id}\n")) {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "could not persist the daemon identity; it will change on the next restart"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            path = %home.display(),
+            %error,
+            "could not create the Fleet home; the daemon identity will change on the next restart"
+        ),
     }
     id
+}
+
+/// Moves a rejected identity file aside so the replacement is traceable to the value it replaced.
+fn quarantine_daemon_id(path: &Path, rejected: &str, reason: &str, minted: &HostId) {
+    let aside = path.with_extension("invalid");
+    if let Err(error) = std::fs::rename(path, &aside) {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "could not move the rejected daemon identity aside"
+        );
+    }
+    tracing::warn!(
+        path = %path.display(),
+        rejected,
+        aside = %aside.display(),
+        reason,
+        %minted,
+        "the persisted daemon identity is not a valid host id; minting a new one"
+    );
 }
 
 /// Directory holding every prepared copy and worktree of one repository.

@@ -1,4 +1,4 @@
-# 0011 — Terminal agent attention
+# 0012 — Terminal agent attention
 
 **Adopted** for daemon-hosted PTY agents, their protocol/snapshot state, and app notifications.
 

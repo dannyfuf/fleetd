@@ -12,7 +12,6 @@ use std::{
 use async_channel::{Sender, TrySendError};
 use fleet_core::ids::TerminalId;
 use fleet_proto::terminal::{FrameUpdate, ScrollCommand};
-use tracing::warn;
 
 use super::{
     CommandReservation, HOST_EVENT_MAX_BYTES, HostCommand, HostEvent, TerminalActivity,
@@ -67,6 +66,7 @@ impl PtyWakeup {
 
     pub(super) fn notify(&self) {
         if !self.pending.swap(true, Ordering::AcqRel) {
+            // Fire-and-forget: the owner loop is gone only once the terminal has stopped.
             let _ = self.events.send(OwnerEvent::PtyReady);
         }
     }
@@ -197,7 +197,7 @@ impl TerminalOwner {
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    warn!(%error, terminal = %self.terminal, "terminal PTY reader failed");
+                    tracing::warn!(%error, terminal = %self.terminal, "terminal PTY reader failed");
                     self.kill();
                     break;
                 }
@@ -249,7 +249,7 @@ impl TerminalOwner {
                         .then(|| Instant::now() + COMPRESSION_INTERVAL);
                 }
                 Err(error) => {
-                    warn!(%error, terminal = %self.terminal, "failed to compress terminal history");
+                    tracing::warn!(%error, terminal = %self.terminal, "failed to compress terminal history");
                     self.compression_at = Some(Instant::now() + COMPRESSION_INTERVAL);
                 }
             }
@@ -289,7 +289,7 @@ impl TerminalOwner {
             let frame = match self.take_frame(self.force_full) {
                 Ok(frame) => frame,
                 Err(error) => {
-                    warn!(%error, terminal = %self.terminal, "failed to snapshot terminal frame");
+                    tracing::warn!(%error, terminal = %self.terminal, "failed to snapshot terminal frame");
                     self.dirty = true;
                     self.force_full = true;
                     self.last_frame_at = Instant::now();
@@ -317,7 +317,7 @@ impl TerminalOwner {
                 Ok(Some(code)) => self.exit = Some((Some(code), Instant::now())),
                 Ok(None) => {}
                 Err(error) => {
-                    warn!(%error, terminal = %self.terminal, "failed to observe terminal child exit");
+                    tracing::warn!(%error, terminal = %self.terminal, "failed to observe terminal child exit");
                     self.exit = Some((None, Instant::now()));
                 }
             }
@@ -337,7 +337,7 @@ impl TerminalOwner {
                         let frame = match self.take_frame(true) {
                             Ok(frame) => frame,
                             Err(error) => {
-                                warn!(%error, terminal = %self.terminal, "failed to recover final terminal frame");
+                                tracing::warn!(%error, terminal = %self.terminal, "failed to recover final terminal frame");
                                 self.force_send_event(HostEvent::Exited(code));
                                 return true;
                             }
@@ -350,7 +350,7 @@ impl TerminalOwner {
                     }
                 }
                 Err(error) => {
-                    warn!(%error, terminal = %self.terminal, "failed to take final terminal frame");
+                    tracing::warn!(%error, terminal = %self.terminal, "failed to take final terminal frame");
                     self.dirty = true;
                     self.force_full = true;
                     self.exit = Some((code, Instant::now()));
@@ -384,7 +384,7 @@ impl TerminalOwner {
             let event = match event {
                 EngineEvent::PtyWrite(bytes) => {
                     if let Err(error) = self.write(&bytes, None) {
-                        warn!(%error, terminal = %self.terminal, "failed to write terminal PTY reply");
+                        tracing::warn!(%error, terminal = %self.terminal, "failed to write terminal PTY reply");
                     }
                     continue;
                 }
@@ -405,7 +405,7 @@ impl TerminalOwner {
 
     fn try_send_event(&self, event: HostEvent) -> Result<(), HostEvent> {
         if host_event_bytes(&event) > HOST_EVENT_MAX_BYTES {
-            warn!(terminal = %self.terminal, "terminal event exceeded the queue byte budget");
+            tracing::warn!(terminal = %self.terminal, "terminal event exceeded the queue byte budget");
             return Err(event);
         }
         self.events.try_send(event).map_err(|error| match error {
@@ -415,7 +415,7 @@ impl TerminalOwner {
 
     fn force_send_event(&self, event: HostEvent) -> bool {
         if host_event_bytes(&event) > HOST_EVENT_MAX_BYTES {
-            warn!(terminal = %self.terminal, "terminal event exceeded the queue byte budget");
+            tracing::warn!(terminal = %self.terminal, "terminal event exceeded the queue byte budget");
             return false;
         }
         self.events.force_send(event).is_ok()
@@ -441,7 +441,7 @@ impl TerminalOwner {
         if bytes > PENDING_EVENT_BYTES
             || self.pending_event_bytes.saturating_add(bytes) > PENDING_EVENT_BYTES
         {
-            warn!(terminal = %self.terminal, "terminal side effect exceeded the pending-event budget");
+            tracing::warn!(terminal = %self.terminal, "terminal side effect exceeded the pending-event budget");
             return;
         }
         self.pending_event_bytes = self.pending_event_bytes.saturating_add(bytes);
@@ -470,7 +470,7 @@ impl TerminalOwner {
 
     fn kill(&mut self) {
         if let Err(error) = self.pty.kill() {
-            warn!(%error, terminal = %self.terminal, "failed to kill terminal child");
+            tracing::warn!(%error, terminal = %self.terminal, "failed to kill terminal child");
         }
     }
 }

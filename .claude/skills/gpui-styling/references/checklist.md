@@ -39,8 +39,8 @@ rg '\.text_size\(|\.font_family\(|\.line_height\(' crates --glob '!**/text.rs' -
 - [ ] **Both `ColorTokens::dark()` and `ColorTokens::light()` were updated, and the gallery was
       viewed in both** (`t` toggles). A one-mode token is a guaranteed light-mode bug.
       Fix: `cargo run -p fleet-ui-kit --example kit_gallery`.
-- [ ] **No new token without a consumer.** `motion.toast`, `motion.sheet` and `motion.highlight`
-      are the standing example (`theme/tokens.rs:381-396`, no reader). Fix: wire it or drop it.
+- [ ] **No new token without a consumer.** A `Metrics`/`Motion` field nothing reads is a promise
+      the app never keeps; §2.8 is an inventory, not a wish list. Fix: wire it or drop it.
 
 ## Size and spacing
 
@@ -49,9 +49,9 @@ rg '\.text_size\(|\.font_family\(|\.line_height\(' crates --glob '!**/text.rs' -
       Fix: use the token; if none fits, add a `Metrics` field.
 - [ ] **New fixed geometry became a `Metrics` field with a doc comment naming its UX-spec
       clause** — or, if it must live in `fleet-app`, a named `const` with the same doc comment
-      (the accepted shape is `crates/fleet-app/src/dialogs/mod.rs:40-47`). Inline
-      `px(620.0)`-style heights (`dialogs/help.rs:503`, `dialogs/settings/view.rs:68`,
-      `dialogs/clone_repo.rs:467`) are the pattern *not* to copy.
+      (the accepted shape is `crates/fleet-app/src/dialogs/mod.rs:40-47`). Every dialog view now
+      takes both axes from that ladder, and `dialog_views_take_their_geometry_from_named_consts`
+      (`dialogs/mod.rs`) fails the build if a new inline `px()` height appears.
 - [ ] **No `rems(`, `rems_from_px`, `set_rem_size`, `WithRemSize` or `DynamicSpacing` imported
       from Zed.** fleetd has no rem basis and no density setting; a mixed system scales half the
       UI. Fix: use the pixel token scales.

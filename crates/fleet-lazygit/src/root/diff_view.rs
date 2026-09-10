@@ -51,6 +51,9 @@ fn build_model(
             model.long_lines.insert(index, Arc::new(line));
         }
     }
+    if !crate::views::diff::measure_payload_advances(&model, style, &text_system, cancelled) {
+        return None;
+    }
     let jobs = model.syntax_jobs();
     tracing::debug!(
         slot,

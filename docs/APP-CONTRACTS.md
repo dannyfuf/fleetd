@@ -281,8 +281,9 @@ Terminals attach with plain requests (`AttachTerminal`, `ResizeTerminal`, `Termi
 applied them to `AppState::grids` before your screen renders. `fleet-client` re-attaches every
 terminal after a reconnect on its own. Daemon and host share one absolute five-second attach
 deadline. App surfaces await the correlated acknowledgement with a bounded deadline; a refusal or
-timeout clears their optimistic attachment and generation, reports a sticky error, and schedules
-reconciliation again. A request already expired when the owner services it cannot resize the PTY,
+timeout clears their optimistic attachment and generation, reports a sticky error naming the
+terminal, and schedules reconciliation again; the next successful attach of that same terminal,
+by the attempt that still owns the surface, clears that error. A request already expired when the owner services it cannot resize the PTY,
 and no post-deadline result can publish an attachment frame or claim an attachment. Before the
 first valid frame, each app surface retains an ordered prefix of at most
 1,024 key/paste events and 1 MiB; it rejects the newest input after either bound and flushes the
@@ -326,6 +327,17 @@ daemon. The entire `client` value defaults to
 an app client. `HelloResponse` flattens the ordinary correlated `Response` and adds
 `capabilities: Vec<String>`, `daemon_id: String`, and optional `build_commit`; a federating daemon
 advertises `remote-machines`. Proxy links require protocol lockstep before any request is routed.
+
+`Subscribe { events }` is additive: the daemon unions the named kinds with the ones the
+connection already receives, and `Unsubscribe` is the only way to clear the set. `fleet-client`
+replays that union on every reconnect, so a connection delivers the same events before and after
+one. Every connection subscribed to `DaemonShuttingDown` receives it before its socket closes,
+whether the stop came from a `DaemonShutdown` request or from a signal; the connection that
+asked reads the outcome from its own `ShuttingDown` response instead. A close with no notice
+means the daemon died. The notice is always about the daemon the connection is attached to: a
+federating daemon drops a remote peer's `DaemonShuttingDown` at the link boundary instead of
+republishing it, because a remote stop is a change to that host's link and reaches the app as
+`HostLinkChanged { link: down }`.
 
 `Snapshot.hosts` contains `HostStatus { id, provider, version, link, address, agent_binaries,
 reachable, checked_at, error }`. `link` is `connecting`, `ready`, `down`, or `legacy`, and

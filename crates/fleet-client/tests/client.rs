@@ -658,10 +658,7 @@ async fn bind(home: &Path) -> UnixListener {
     UnixListener::bind(home.join("fleetd.sock")).unwrap()
 }
 
-async fn authenticate(
-    transport: &mut ServerTransport,
-    expected_subscription: Option<Vec<EventKind>>,
-) {
+async fn authenticate(transport: &mut ServerTransport, also_subscribed: Option<Vec<EventKind>>) {
     let hello = transport.next().await.unwrap().unwrap();
     assert!(matches!(
         hello.body,
@@ -684,24 +681,29 @@ async fn authenticate(
     let RequestBody::Subscribe { events } = subscribe.body else {
         panic!("expected initial subscription");
     };
-    if let Some(expected) = expected_subscription {
-        assert_eq!(events, expected);
-    } else {
-        assert_eq!(events.len(), 18);
-        for kind in [
-            EventKind::Agent,
-            EventKind::AgentSummary,
-            EventKind::WatchStarted,
-            EventKind::WatchOutput,
-            EventKind::WatchExited,
-            EventKind::WatchDismissed,
-            EventKind::AgentActivityChanged,
-            EventKind::BoardChanged,
-            EventKind::HostLinkChanged,
-            EventKind::TerminalReattach,
-        ] {
-            assert!(events.contains(&kind));
-        }
+    // `Subscribe` is additive on the daemon, so the set the client replays on a reconnect is
+    // the union the daemon holds; a connection never receives fewer kinds after a reconnect
+    // than before one.
+    assert_eq!(events.len(), 18);
+    for kind in [
+        EventKind::Agent,
+        EventKind::AgentSummary,
+        EventKind::WatchStarted,
+        EventKind::WatchOutput,
+        EventKind::WatchExited,
+        EventKind::WatchDismissed,
+        EventKind::AgentActivityChanged,
+        EventKind::BoardChanged,
+        EventKind::HostLinkChanged,
+        EventKind::TerminalReattach,
+    ] {
+        assert!(events.contains(&kind));
+    }
+    for kind in also_subscribed.unwrap_or_default() {
+        assert!(
+            events.contains(&kind),
+            "the replayed handshake keeps {kind:?}"
+        );
     }
     send_response(transport, subscribe.id, ResponseBody::Ack).await;
 }

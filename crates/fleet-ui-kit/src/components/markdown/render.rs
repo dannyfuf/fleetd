@@ -17,7 +17,7 @@ use gpui::{
     SharedString, StyledText, TextStyle, WhiteSpace, div, prelude::*, px,
 };
 
-use super::code::{self, CodeToken};
+use super::code::{CodeHighlights, CodeToken};
 use super::{MarkdownBlock, MarkdownDocument, MarkdownInline};
 use crate::text::styled_with;
 use crate::theme::{ActiveTheme, Theme, TypeStyle, ch};
@@ -63,7 +63,9 @@ fn block(node: &MarkdownBlock, theme: &Theme, depth: usize) -> AnyElement {
             };
             inline_flow(inlines, style, theme, depth).into_any_element()
         }
-        MarkdownBlock::Code { lang, text } => code_block(lang.as_deref(), text, theme),
+        MarkdownBlock::Code {
+            text, highlights, ..
+        } => code_block(text, highlights, theme),
         MarkdownBlock::List { ordered, items } => list(*ordered, items, theme, depth),
         MarkdownBlock::Quote(inner) => quote(inner, theme, depth),
         MarkdownBlock::Rule => div()
@@ -161,7 +163,10 @@ fn quote(inner: &[MarkdownBlock], theme: &Theme, depth: usize) -> AnyElement {
 }
 
 /// A fenced block: the panel token, 4 px radius, 8 × 12 px padding, mono 12.5 / 18.
-fn code_block(lang: Option<&str>, text: &str, theme: &Theme) -> AnyElement {
+///
+/// The colours arrive already resolved into buckets, so drawing one is a clone of a
+/// [`SharedString`] and a walk of spans the parser produced — never a rescan of the block.
+fn code_block(text: &SharedString, highlights: &CodeHighlights, theme: &Theme) -> AnyElement {
     let container = mono(div(), theme)
         .flex_none()
         .w_full()
@@ -175,25 +180,22 @@ fn code_block(lang: Option<&str>, text: &str, theme: &Theme) -> AnyElement {
             .into_any_element();
     }
     let style = code_style(theme);
-    let highlights = highlight_styles(code::highlight(lang, text), theme);
+    let highlights = highlight_styles(highlights.spans(), theme);
     container
-        .child(
-            StyledText::new(SharedString::from(text.to_owned()))
-                .with_default_highlights(&style, highlights),
-        )
+        .child(StyledText::new(text.clone()).with_default_highlights(&style, highlights))
         .into_any_element()
 }
 
 /// Resolve scanner buckets into the highlight ranges `StyledText` wants.
 fn highlight_styles(
-    spans: Vec<(Range<usize>, CodeToken)>,
+    spans: &[(Range<usize>, CodeToken)],
     theme: &Theme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     spans
-        .into_iter()
+        .iter()
         .map(|(range, token)| {
             (
-                range,
+                range.clone(),
                 HighlightStyle {
                     color: Some(token.color(theme)),
                     ..HighlightStyle::default()

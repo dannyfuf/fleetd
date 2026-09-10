@@ -19,6 +19,7 @@ pub(crate) struct Attached {
 }
 
 struct Pump {
+    endpoint: Arc<dyn RemoteEndpoint>,
     cancel: CancellationToken,
 }
 
@@ -26,7 +27,7 @@ struct Pump {
 #[derive(Default)]
 pub(crate) struct RemoteTerminalFrames {
     attached: Arc<Mutex<Attached>>,
-    pumps: Mutex<BTreeMap<HostId, Pump>>,
+    pumps: Arc<Mutex<BTreeMap<HostId, Pump>>>,
 }
 
 impl RemoteTerminalFrames {
@@ -59,8 +60,13 @@ impl RemoteTerminalFrames {
             .or_default()
             .entry(local)
             .or_default() += 1;
-        if pumps.contains_key(host) {
-            return Ok(());
+        if let Some(current) = pumps.get(host) {
+            if Arc::ptr_eq(&current.endpoint, &endpoint) {
+                return Ok(());
+            }
+            // The host's endpoint was replaced; rebind the pump without touching the
+            // attachment counts, which must survive the swap for the restored terminal.
+            current.cancel.cancel();
         }
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
@@ -72,10 +78,12 @@ impl RemoteTerminalFrames {
         pumps.insert(
             host.clone(),
             Pump {
+                endpoint: Arc::clone(&endpoint),
                 cancel: cancel.clone(),
             },
         );
         let attached = Arc::clone(&self.attached);
+        let pumps_handle = Arc::clone(&self.pumps);
         let host = host.clone();
         runtime.spawn(async move {
             loop {
@@ -106,6 +114,7 @@ impl RemoteTerminalFrames {
                     }
                 }
             }
+            finish_pump(&pumps_handle, &host, &endpoint);
         });
         Ok(())
     }
@@ -167,6 +176,21 @@ async fn request_full_frames(
         {
             tracing::debug!(%host, %terminal, %error, "failed to request remote full frame");
         }
+    }
+}
+
+/// Drops the host's pump entry when it still names the endpoint this task was bound to.
+fn finish_pump(
+    pumps: &Mutex<BTreeMap<HostId, Pump>>,
+    host: &HostId,
+    endpoint: &Arc<dyn RemoteEndpoint>,
+) {
+    let mut pumps = lock(pumps);
+    if pumps
+        .get(host)
+        .is_some_and(|current| Arc::ptr_eq(&current.endpoint, endpoint))
+    {
+        pumps.remove(host);
     }
 }
 
@@ -252,6 +276,57 @@ mod tests {
             Ok(Ok(event)) => panic!("received frame after detach: {event:?}"),
             Ok(Err(error)) => panic!("event stream closed after detach: {error}"),
         }
+    }
+
+    #[tokio::test]
+    async fn attach_rebinds_the_frame_pump_after_the_endpoint_is_replaced() {
+        let host = HostId::try_from("devbox").expect("host");
+        let first = Arc::new(FakeRemote::new(host.clone()));
+        let ids = RemoteIds::default();
+        let local = ids.local_terminal(&host, TerminalId(7));
+        let subscriptions = RemoteTerminalFrames::default();
+        let events = BroadcastBus::default();
+        let mut receiver = events.subscribe();
+
+        on_attach(
+            &subscriptions,
+            first.clone(),
+            &host,
+            local,
+            ids.clone(),
+            events.clone(),
+        )
+        .expect("attach");
+        first.emit(Event::TerminalFrame(frame(TerminalId(7), 1)));
+        expect_frame(&mut receiver, local, 1).await;
+
+        let second = Arc::new(FakeRemote::new(host.clone()));
+        on_attach(
+            &subscriptions,
+            second.clone(),
+            &host,
+            local,
+            ids.clone(),
+            events.clone(),
+        )
+        .expect("re-attach on the replacement endpoint");
+        second.emit(Event::TerminalFrame(frame(TerminalId(7), 2)));
+        expect_frame(&mut receiver, local, 2).await;
+    }
+
+    async fn expect_frame(
+        receiver: &mut tokio::sync::broadcast::Receiver<Event>,
+        terminal: TerminalId,
+        seq: u64,
+    ) {
+        let event = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for frame {seq}"))
+            .expect("event");
+        assert!(
+            matches!(event, Event::TerminalFrame(update) if update.terminal == terminal && update.seq == seq),
+            "expected frame {seq} for terminal {terminal}"
+        );
     }
 
     fn frame(terminal: TerminalId, seq: u64) -> FrameUpdate {

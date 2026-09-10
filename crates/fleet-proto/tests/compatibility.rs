@@ -20,6 +20,7 @@ use fleet_proto::{
 use serde::{Serialize, de::DeserializeOwned};
 use tokio_util::codec::{Decoder, Encoder};
 
+#[track_caller]
 fn assert_frame<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     message: T,
     golden: &str,

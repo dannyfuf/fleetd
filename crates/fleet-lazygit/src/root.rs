@@ -65,6 +65,11 @@ const REFRESH_IDLE: Duration = Duration::from_secs(5);
 const TOAST_DWELL: Duration = Duration::from_millis(3_200);
 /// How many commits a sub-commits drill-down loads.
 const SUB_COMMIT_LIMIT: usize = 300;
+/// How many bridge events one turn of the drain loop applies before it yields.
+const EVENT_BATCH_LIMIT: usize = 64;
+/// How long the drain loop steps aside for after a batch, so a busy worker cannot hold the
+/// foreground executor and starve the frame.
+const EVENT_YIELD: Duration = Duration::from_millis(1);
 
 /// The root view.
 pub struct Lazygit {

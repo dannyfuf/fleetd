@@ -376,15 +376,10 @@ impl Elevation {
     }
 }
 
-/// Motion. Fleet animates four things and nothing else.
+/// Motion. Fleet animates one thing — the spinner — and nothing else; the rest of these are
+/// dwell and delay durations, not animations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Motion {
-    /// 140 ms: toast slide + fade.
-    pub toast: u64,
-    /// 160 ms: sheet slide.
-    pub sheet: u64,
-    /// 120 ms: value-swap highlight.
-    pub highlight: u64,
     /// 400 ms: how long the prefix hint waits before appearing.
     pub prefix_hint_delay: u64,
     /// 1000 ms: one full turn of the spinner.
@@ -398,9 +393,6 @@ pub struct Motion {
 impl Default for Motion {
     fn default() -> Self {
         Self {
-            toast: 140,
-            sheet: 160,
-            highlight: 120,
             prefix_hint_delay: 400,
             spinner: 1000,
             toast_short: 1600,
@@ -610,5 +602,144 @@ impl Default for Metrics {
             skeleton_opacity: 0.30,
             no_session_opacity: 0.30,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
+
+    /// This file, read back as text: Rust has no reflection, so the field inventory the doc
+    /// must mirror is parsed out of the source that declares it.
+    const SOURCE: &str = include_str!("tokens.rs");
+    /// The half of the contract written in prose (`docs/README.md:9`).
+    const DOC: &str = include_str!("../../../../docs/DESIGN-SYSTEM.md");
+    /// The sentence §2.8 introduces the opacity ladder with.
+    const LADDER: &str = "The same token set owns the opacity ladder";
+
+    /// The lines of `SOURCE` between `start` and the first line that is exactly `}`.
+    fn block(start: &str) -> impl Iterator<Item = &'static str> {
+        SOURCE
+            .lines()
+            .skip_while(move |line| !line.starts_with(start))
+            .skip(1)
+            .take_while(|line| *line != "}" && *line != "        }")
+    }
+
+    /// `name: value,` pairs from a `Default` body, keyed by field name.
+    fn defaults(start: &str) -> BTreeMap<&'static str, &'static str> {
+        block(start)
+            .filter_map(|line| line.trim().strip_suffix(',')?.split_once(": "))
+            .collect()
+    }
+
+    /// Every backticked `name value` pair in `section`.
+    fn ladder(section: &str) -> BTreeMap<&str, &str> {
+        section
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter_map(|span| span.split_once(' '))
+            .collect()
+    }
+
+    /// The paragraph of §2.8 that lists the opacity ladder.
+    fn documented_ladder() -> BTreeMap<&'static str, &'static str> {
+        let start = DOC
+            .find(LADDER)
+            .unwrap_or_else(|| panic!("§2.8 still introduces the ladder with {LADDER:?}"));
+        let paragraph = &DOC[start..];
+        let end = paragraph
+            .find("\n\n")
+            .unwrap_or_else(|| panic!("the ladder paragraph is terminated by a blank line"));
+        ladder(&paragraph[..end])
+    }
+
+    /// The `| `token` | ms | what |` rows of §2.7.
+    fn documented_motion() -> BTreeMap<&'static str, &'static str> {
+        let start = DOC
+            .find("### 2.7 Motion")
+            .unwrap_or_else(|| panic!("§2.7 is still the motion section"));
+        let section = &DOC[start..];
+        let end = section
+            .find("### 2.8")
+            .unwrap_or_else(|| panic!("§2.7 is followed by §2.8"));
+        section[..end]
+            .lines()
+            .filter(|line| line.starts_with("| `"))
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split('|').map(str::trim).collect();
+                Some((fields.get(1)?.trim_matches('`'), *fields.get(2)?))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_documented_opacity_ladder_matches_the_metrics_tokens() {
+        let declared: BTreeMap<_, _> = defaults("impl Default for Metrics")
+            .into_iter()
+            .filter_map(|(name, value)| Some((name.strip_suffix("_opacity")?, value)))
+            .collect();
+        assert!(!declared.is_empty(), "Metrics still names its opacities");
+        assert_eq!(
+            declared,
+            documented_ladder(),
+            "§2.8's opacity ladder and Metrics must move together"
+        );
+    }
+
+    #[test]
+    fn the_documented_motion_table_matches_the_motion_tokens() {
+        let declared = defaults("impl Default for Motion");
+        assert!(!declared.is_empty(), "Motion still names its durations");
+        assert_eq!(
+            declared,
+            documented_motion(),
+            "§2.7's motion table and Motion must move together"
+        );
+    }
+
+    #[test]
+    fn every_motion_token_has_a_consumer() {
+        let fields: BTreeSet<_> = block("pub struct Motion")
+            .filter_map(|line| line.trim().strip_prefix("pub ")?.split_once(": "))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(!fields.is_empty(), "Motion still declares fields");
+
+        let mut sources = String::new();
+        let mut stack = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    // The token module declares the durations; a consumer lives outside it.
+                    if path.file_name().is_some_and(|name| name != "theme") {
+                        stack.push(path);
+                    }
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    sources.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+                }
+            }
+        }
+
+        let unread: Vec<_> = fields
+            .iter()
+            .filter(|field| {
+                !sources
+                    .match_indices(&format!("motion.{field}"))
+                    .any(|(at, _)| {
+                        let next = sources[at + field.len() + 7..].chars().next();
+                        !next.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    })
+            })
+            .collect();
+        assert!(
+            unread.is_empty(),
+            "these motion tokens have no consumer, so wire them or delete them: {unread:?}"
+        );
     }
 }

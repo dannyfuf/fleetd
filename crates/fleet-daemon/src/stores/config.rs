@@ -12,7 +12,17 @@ use fleet_core::{
 };
 use serde_json::Value;
 
-use crate::{DaemonError, DaemonResult, adapters::files::Files};
+use crate::{
+    DaemonError, DaemonResult,
+    adapters::files::{FileRevision, Files},
+};
+
+/// A parse of `config.json` and the file revision it was read from.
+#[derive(Clone)]
+struct CachedConfig {
+    revision: FileRevision,
+    config: Config,
+}
 
 /// Durable effective-configuration store.
 #[derive(Clone)]
@@ -21,6 +31,7 @@ pub struct ConfigStore {
     path: PathBuf,
     files: Arc<dyn Files>,
     gate: Arc<tokio::sync::Mutex<()>>,
+    cache: Arc<Mutex<Option<CachedConfig>>>,
     sleep_policy: Arc<Mutex<Arc<CompiledSleepPolicy>>>,
 }
 
@@ -35,22 +46,51 @@ impl ConfigStore {
             path,
             files,
             gate: Arc::new(tokio::sync::Mutex::new(())),
+            cache: Arc::new(Mutex::new(None)),
             sleep_policy: Arc::new(Mutex::new(Arc::new(CompiledSleepPolicy::new(&[])))),
         }
     }
 
     /// Loads the effective configuration, deep-merging defaults and creating a missing file.
+    ///
+    /// Every dispatched request loads the configuration, so an unchanged file answers from a
+    /// cached parse validated by one `stat`, without taking the write gate.
     pub async fn load(&self) -> DaemonResult<Config> {
+        if let Some(cached) = self.cached().await {
+            return Ok(cached);
+        }
         let guard = Arc::clone(&self.gate).lock_owned().await;
         let home = self.home.clone();
         let path = self.path.clone();
         let files = Arc::clone(&self.files);
+        let cache = Arc::clone(&self.cache);
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            load_sync(&home, &path, files.as_ref())
+            let config = load_sync(&home, &path, files.as_ref())?;
+            // The gate serializes this against every write, so the stored pair cannot mix a
+            // configuration with a revision written after it.
+            if let Ok(revision) = files.revision(&path) {
+                *lock(&cache) = Some(CachedConfig {
+                    revision,
+                    config: config.clone(),
+                });
+            }
+            Ok(config)
         })
         .await
         .map_err(|error| DaemonError::Join(error.to_string()))?
+    }
+
+    /// Returns the cached configuration when the file has not changed since it was parsed.
+    async fn cached(&self) -> Option<Config> {
+        let cached = lock(&self.cache).clone()?;
+        let files = Arc::clone(&self.files);
+        let path = self.path.clone();
+        let revision = tokio::task::spawn_blocking(move || files.revision(&path))
+            .await
+            .ok()?
+            .ok()?;
+        (revision == cached.revision).then_some(cached.config)
     }
 
     /// Loads rules and retains their compiled matcher across sleep requests and polls.
@@ -72,8 +112,10 @@ impl ConfigStore {
         let guard = Arc::clone(&self.gate).lock_owned().await;
         let path = self.path.clone();
         let files = Arc::clone(&self.files);
+        let cache = Arc::clone(&self.cache);
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
+            *lock(&cache) = None;
             save_sync(&path, files.as_ref(), &config)
         })
         .await
@@ -86,6 +128,7 @@ impl ConfigStore {
         let home = self.home.clone();
         let path = self.path.clone();
         let files = Arc::clone(&self.files);
+        let cache = Arc::clone(&self.cache);
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             let current = if files.exists(&path) {
@@ -97,6 +140,7 @@ impl ConfigStore {
             fleet_core::config::deep_merge_json(&mut merged_patch, patch);
             let config = merge_config(&home, merged_patch)
                 .map_err(|error| DaemonError::Validation(error.to_string()))?;
+            *lock(&cache) = None;
             save_sync(&path, files.as_ref(), &config)?;
             Ok(config)
         })
@@ -109,6 +153,13 @@ impl ConfigStore {
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+}
+
+/// Locks a store mutex, recovering the guard after a previous holder panicked.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn load_sync(
@@ -155,6 +206,109 @@ mod tests {
             [home.join("repos"), home.join("worktrees")],
         ));
         ConfigStore::new(home, files)
+    }
+
+    struct CountingFiles {
+        inner: RealFiles,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingFiles {
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Files for CountingFiles {
+        fn read_text(&self, path: &Path) -> DaemonResult<String> {
+            if path.file_name().is_some_and(|name| name == "config.json") {
+                self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.read_text(path)
+        }
+
+        fn create_dir_all(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn clone_dir(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
+            self.inner.clone_dir(source, destination)
+        }
+
+        fn atomic_write_text(&self, path: &Path, text: &str) -> DaemonResult<()> {
+            self.inner.atomic_write_text(path, text)
+        }
+
+        fn rename(&self, source: &Path, destination: &Path) -> DaemonResult<()> {
+            self.inner.rename(source, destination)
+        }
+
+        fn trash(&self, path: &Path) -> DaemonResult<PathBuf> {
+            self.inner.trash(path)
+        }
+
+        fn remove_detached(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.remove_detached(path)
+        }
+
+        fn remove_file(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn revision(&self, path: &Path) -> DaemonResult<FileRevision> {
+            self.inner.revision(path)
+        }
+
+        fn metadata(&self, path: &Path) -> DaemonResult<crate::adapters::files::FileMetadata> {
+            self.inner.metadata(path)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path)
+        }
+
+        fn list(&self, path: &Path) -> DaemonResult<Vec<PathBuf>> {
+            self.inner.list(path)
+        }
+
+        fn guard_strict_descendant(&self, path: &Path) -> DaemonResult<()> {
+            self.inner.guard_strict_descendant(path)
+        }
+
+        fn set_removable_roots(&self, roots: Vec<PathBuf>) {
+            self.inner.set_removable_roots(roots);
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_loads_reuse_the_parsed_config_until_the_file_changes() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let home = temp.path().join(".fleet");
+        let files = Arc::new(CountingFiles {
+            inner: RealFiles::new(
+                home.join("trash"),
+                [home.join("repos"), home.join("worktrees")],
+            ),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let store = ConfigStore::new(&home, files.clone());
+        store.load().await.unwrap_or_else(|error| panic!("{error}"));
+        let after_first = files.reads();
+
+        for _ in 0..50 {
+            store.load().await.unwrap_or_else(|error| panic!("{error}"));
+        }
+        assert_eq!(
+            files.reads(),
+            after_first,
+            "every dispatched request re-read config.json"
+        );
+
+        // A hand edit that truncates the file in place must still be observed.
+        std::fs::write(store.path(), r#"{"hotPoolSize":4}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let config = store.load().await.unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(config.hot_pool_size, 4);
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Serialized native-agent thread lifecycle manager.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
@@ -273,8 +273,18 @@ impl AgentSessionManager {
             }
         };
         if let Some(error) = index_write_error {
-            if let Some(mut provider) = runtime.provider.lock().await.take() {
-                let _ignored = provider.stop().await;
+            if let Some(mut provider) = runtime.provider.lock().await.take()
+                && let Err(stop_error) = provider.stop().await
+            {
+                // The orphan outlives this log line, but nothing else names it: the thread was
+                // never inserted, so the discarded `Err` was the only trace of the child still
+                // holding the worktree and its port.
+                tracing::warn!(
+                    target: "fleet::agents",
+                    error = %stop_error,
+                    %thread,
+                    "could not stop the provider after a failed index write",
+                );
             }
             return Err(storage_error(error));
         }
@@ -524,9 +534,11 @@ impl AgentSessionManager {
                 provider.kind().display_name()
             )));
         }
-        provider.set_mode(mode).await.map_err(provider_error)?;
+        // §2's mode word is a promise about behaviour, so the row records the mode the session
+        // settled on, not the one the palette asked for.
+        let effective = provider.set_mode(mode).await.map_err(provider_error)?;
         drop(provider_slot);
-        self.update_settings_locked(&runtime, Some(mode), None)?;
+        self.update_settings_locked(&runtime, Some(effective), None)?;
         Ok(ResponseBody::AgentAck)
     }
 
@@ -590,31 +602,28 @@ impl AgentSessionManager {
         let Some(mut provider) = provider_slot.take() else {
             return Ok(ResponseBody::AgentAck);
         };
+        // A provider that will not die is a diagnostic, not a reason to leave the transcript
+        // claiming a turn is still running: the child that exits from its own stdin close
+        // answers `stop` with `Exited`, and returning here skipped every settlement below, so
+        // §2's tab spun on a dead process until the daemon restarted. The handle is dropped
+        // either way — nothing can reach that session again.
         if let Err(error) = provider.stop().await {
-            *provider_slot = Some(provider);
-            return Err(provider_error(error));
+            tracing::warn!(
+                target: "fleet::agents",
+                %error,
+                %thread,
+                "the native-agent provider did not stop cleanly",
+            );
         }
+        drop(provider);
         drop(provider_slot);
 
         for applied in self.settle_open_gates_locked(&runtime)? {
             publish_applied(&self.inner, &runtime, applied);
         }
         if let Some(turn) = runtime_inflight(&runtime) {
-            let projected_running = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .projection
-                .turn
-                == TurnState::Running(turn);
-            if !projected_running {
-                let user_item = ItemId::new();
-                self.apply_one_locked(
-                    &runtime,
-                    AgentEvent::TurnStarted { turn, user_item },
-                    Some("agent_stop".to_owned()),
-                )?;
-                self.drain_claude_inputs_locked(&runtime, turn, user_item)?;
+            for applied in self.flush_pending_claude_inputs_locked(&runtime, turn, "agent_stop")? {
+                publish_applied(&self.inner, &runtime, applied);
             }
             self.apply_one_locked(
                 &runtime,
@@ -754,6 +763,18 @@ impl AgentSessionManager {
         } else {
             Vec::new()
         };
+        // The turn is about to be cleared, so this is the last event that can still carry the
+        // prompts Claude was given under it. Without this a turn whose `TurnStarted` never
+        // arrived strands them, and the next turn's drain would find them ahead of its own.
+        if ends_the_turn(&event)
+            && let Some(turn) = pending_claude_turn(runtime)
+        {
+            applied.extend(self.flush_pending_claude_inputs_locked(
+                runtime,
+                turn,
+                "pending_input",
+            )?);
+        }
         applied.push(self.apply_event_locked(runtime, event, raw)?);
         if let Some((turn, user_item)) = turn_started {
             let provider = runtime
@@ -769,6 +790,41 @@ impl AgentSessionManager {
         Ok(applied)
     }
 
+    /// Records the prompts Claude was already given whose `TurnStarted` never arrived.
+    ///
+    /// §6 makes the log the transcript, and those prompts are already on Claude's stdin: the
+    /// last moment to write them down is the event that settles the turn they were sent under.
+    /// Dropping them instead would make the transcript lie the other way — the model answering
+    /// a question no row shows. A projection that is already running a turn drained the deque
+    /// when that turn started, and the reducer refuses a second `TurnStarted` anyway, so there
+    /// is nothing to do.
+    fn flush_pending_claude_inputs_locked(
+        &self,
+        runtime: &ThreadRuntime,
+        turn: TurnId,
+        raw: &str,
+    ) -> Result<Vec<AppliedEvent>, ProtoError> {
+        if matches!(
+            runtime
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .projection
+                .turn,
+            TurnState::Running(_)
+        ) {
+            return Ok(Vec::new());
+        }
+        let user_item = ItemId::new();
+        let mut applied = vec![self.apply_event_locked(
+            runtime,
+            AgentEvent::TurnStarted { turn, user_item },
+            Some(raw.to_owned()),
+        )?];
+        applied.extend(self.drain_claude_inputs_applied_locked(runtime, turn, user_item)?);
+        Ok(applied)
+    }
+
     fn drain_claude_inputs_applied_locked(
         &self,
         runtime: &ThreadRuntime,
@@ -780,16 +836,19 @@ impl AgentSessionManager {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Keyed by turn, not by position: an entry whose `TurnStarted` never arrived must
+            // not shadow the ones behind it, or every later prompt is written to Claude and
+            // never recorded, and the deque grows for the life of the daemon.
             let mut inputs = Vec::new();
-            while state
-                .pending_claude_inputs
-                .front()
-                .is_some_and(|(pending_turn, _)| *pending_turn == turn)
-            {
-                if let Some((_, input)) = state.pending_claude_inputs.pop_front() {
+            let mut kept = VecDeque::new();
+            for (pending_turn, input) in std::mem::take(&mut state.pending_claude_inputs) {
+                if pending_turn == turn {
                     inputs.push(input);
+                } else {
+                    kept.push_back((pending_turn, input));
                 }
             }
+            state.pending_claude_inputs = kept;
             inputs
         };
         let mut applied = Vec::new();
@@ -814,18 +873,6 @@ impl AgentSessionManager {
             )?);
         }
         Ok(applied)
-    }
-
-    fn drain_claude_inputs_locked(
-        &self,
-        runtime: &ThreadRuntime,
-        turn: TurnId,
-        first_item: ItemId,
-    ) -> Result<(), ProtoError> {
-        for event in self.drain_claude_inputs_applied_locked(runtime, turn, first_item)? {
-            publish_applied(&self.inner, runtime, event);
-        }
-        Ok(())
     }
 
     fn record_user_input_locked(
@@ -1025,16 +1072,12 @@ fn apply_event(
             .projection
             .apply(&sequenced)
             .with_context(|| format!("apply native-agent event {}", sequenced.seq))?;
-        let projection = state.projection.clone();
+        // Reborrowed so `record` and `title` are two disjoint field borrows: taking them both
+        // through the guard would need a clone of the whole transcript per applied event.
+        let state = &mut *state;
         let previous = state.record.clone();
-        update_record(&mut state.record, &sequenced, &projection);
-        if matches!(
-            sequenced.event,
-            AgentEvent::TurnCompleted { .. }
-                | AgentEvent::TurnAborted { .. }
-                | AgentEvent::SessionExited { .. }
-                | AgentEvent::RuntimeError { fatal: true, .. }
-        ) {
+        update_record(&mut state.record, &sequenced, &state.projection.title);
+        if ends_the_turn(&sequenced.event) {
             state.inflight_turn = None;
         }
         // The gate is settled everywhere now, so the answered-once guard can forget it.
@@ -1113,8 +1156,10 @@ fn runtime_inflight(runtime: &ThreadRuntime) -> Option<TurnId> {
     }
 }
 
-fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, projection: &ThreadProjection) {
-    record.title.clone_from(&projection.title);
+fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, title: &str) {
+    if record.title != title {
+        record.title = title.to_owned();
+    }
     record.last_activity = event.at;
     match &event.event {
         AgentEvent::SessionStarted {
@@ -1269,7 +1314,7 @@ fn recover_orphan(
             tracing::warn!(thread = %record.thread, %error, "could not reduce restart recovery");
             return false;
         }
-        update_record(record, &sequenced, projection);
+        update_record(record, &sequenced, &projection.title);
         true
     }
 
@@ -1321,6 +1366,28 @@ fn recover_orphan(
             },
         );
     }
+}
+
+/// The turn the deque is still holding prompts for, when it holds any.
+fn pending_claude_turn(runtime: &ThreadRuntime) -> Option<TurnId> {
+    runtime
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending_claude_inputs
+        .front()
+        .map(|(turn, _)| *turn)
+}
+
+/// The events that clear `inflight_turn`, and with it the turn a queued prompt belongs to.
+fn ends_the_turn(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnAborted { .. }
+            | AgentEvent::SessionExited { .. }
+            | AgentEvent::RuntimeError { fatal: true, .. }
+    )
 }
 
 /// Whether this event ends the provider session, so its open gates go with it.

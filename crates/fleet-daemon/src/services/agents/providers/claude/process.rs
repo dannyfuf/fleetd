@@ -264,7 +264,7 @@ pub(super) async fn spawn(
     };
     tokio::spawn(writer_loop(stdin, writer_receiver));
 
-    let (supervisor_sender, mut supervisor_receiver) = mpsc::channel(2);
+    let (supervisor_sender, supervisor_receiver) = mpsc::channel(2);
     let expected_stop = Arc::new(AtomicBool::new(false));
     let eof_sender = supervisor_sender.clone();
     let reader_writer = writer.clone();
@@ -346,41 +346,13 @@ pub(super) async fn spawn(
         }
     });
 
-    let supervisor_mapper = mapper;
-    let supervisor_events = events;
-    let supervisor_expected_stop = Arc::clone(&expected_stop);
-    let supervisor = tokio::spawn(async move {
-        tokio::select! {
-            status = child.wait() => {
-                let code = status.ok().as_ref().and_then(exit_code);
-                let expected = supervisor_expected_stop.load(Ordering::Acquire);
-                emit_exit(&supervisor_mapper, &supervisor_events, code, expected).await;
-            }
-            command = supervisor_receiver.recv() => {
-                match command {
-                    Some(SupervisorCommand::Stop(done)) => {
-                        let result = terminate(&mut child).await;
-                        let code = result.as_ref().ok().copied().flatten();
-                        emit_exit(&supervisor_mapper, &supervisor_events, code, true).await;
-                        let _ = done.send(result.map(|_| ()).map_err(|error| error.to_string()));
-                    }
-                    Some(SupervisorCommand::StdoutEof) => {
-                        let code = match child.try_wait() {
-                            Ok(Some(status)) => exit_code(&status),
-                            Ok(None) => {
-                                let _ = child.start_kill();
-                                child.wait().await.ok().as_ref().and_then(exit_code)
-                            }
-                            Err(_) => None,
-                        };
-                        let expected = supervisor_expected_stop.load(Ordering::Acquire);
-                        emit_exit(&supervisor_mapper, &supervisor_events, code, expected).await;
-                    }
-                    None => {}
-                }
-            }
-        }
-    });
+    let supervisor = tokio::spawn(supervise(
+        child,
+        supervisor_receiver,
+        mapper,
+        events,
+        Arc::clone(&expected_stop),
+    ));
 
     Ok(RunningProcess {
         writer,
@@ -485,6 +457,60 @@ async fn writer_loop(
                 let result = stdin.shutdown().await.map_err(|error| error.to_string());
                 let _ = accepted.send(result);
                 return;
+            }
+        }
+    }
+}
+
+/// Watches the child until it exits or the provider asks for a stop.
+async fn supervise(
+    mut child: Child,
+    mut commands: mpsc::Receiver<SupervisorCommand>,
+    mapper: Arc<Mutex<ClaudeMapper>>,
+    events: ProviderSink,
+    expected_stop: Arc<AtomicBool>,
+) {
+    tokio::select! {
+        // Checklist 24: the control branch first. A stop pressed on a child that is already
+        // exiting queues its `Stop` and then loses the coin flip to `child.wait()`, and the
+        // dropped `done` reaches `RunningProcess::stop` as `ProviderError::Exited`.
+        biased;
+        command = commands.recv() => {
+            match command {
+                Some(SupervisorCommand::Stop(done)) => {
+                    let result = terminate(&mut child).await;
+                    let code = result.as_ref().ok().copied().flatten();
+                    emit_exit(&mapper, &events, code, true).await;
+                    let _ = done.send(result.map(|_| ()).map_err(|error| error.to_string()));
+                }
+                Some(SupervisorCommand::StdoutEof) => {
+                    let code = match child.try_wait() {
+                        Ok(Some(status)) => exit_code(&status),
+                        Ok(None) => {
+                            let _ = child.start_kill();
+                            child.wait().await.ok().as_ref().and_then(exit_code)
+                        }
+                        Err(_) => None,
+                    };
+                    let expected = expected_stop.load(Ordering::Acquire);
+                    emit_exit(&mapper, &events, code, expected).await;
+                }
+                None => {}
+            }
+        }
+        status = child.wait() => {
+            let code = status.ok().as_ref().and_then(exit_code);
+            let expected = expected_stop.load(Ordering::Acquire);
+            emit_exit(&mapper, &events, code, expected).await;
+            // The child is provably gone, so a stop that arrives from here on has already
+            // happened. Answering it is what keeps `AgentSessionManager::stop` on its
+            // settlement path instead of reporting a conflict.
+            while let Ok(command) = commands.try_recv() {
+                if let SupervisorCommand::Stop(done) = command {
+                    // Fire-and-forget: the receiver is gone only when the caller's `stop`
+                    // future was already dropped, which needs no answer.
+                    let _ignored = done.send(Ok(()));
+                }
             }
         }
     }
@@ -598,6 +624,54 @@ mod tests {
             read_frame(&mut reader).await.expect("eof"),
             Frame::Eof
         ));
+    }
+
+    /// A stop pressed on a child that has just died must still be answered: the manager treats
+    /// an error from `stop` as a conflict and returns before it settles the turn, so losing the
+    /// queued `Stop` leaves the transcript claiming a dead process is still running.
+    #[tokio::test]
+    async fn a_stop_queued_behind_the_childs_exit_is_still_answered() {
+        // The race is a coin flip per attempt while both `select!` arms are ready, so one
+        // attempt proves nothing; thirty make the unfixed supervisor lose with certainty.
+        for attempt in 0..30 {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap_or_else(|error| panic!("spawn the test child: {error}"));
+            // Reap it here so the supervisor's exit arm is ready on its very first poll — the
+            // stop is then queued behind a child that has provably already gone.
+            child
+                .wait()
+                .await
+                .unwrap_or_else(|error| panic!("reap the test child: {error}"));
+
+            let (commands_sender, commands) = mpsc::channel(2);
+            let (done, answered) = oneshot::channel();
+            commands_sender
+                .send(SupervisorCommand::Stop(done))
+                .await
+                .unwrap_or_else(|error| panic!("queue the stop: {error}"));
+
+            let (events, _sink) = tokio::sync::mpsc::unbounded_channel();
+            let expected_stop = Arc::new(AtomicBool::new(true));
+            supervise(
+                child,
+                commands,
+                Arc::new(Mutex::new(ClaudeMapper::default())),
+                events,
+                expected_stop,
+            )
+            .await;
+
+            let answer = answered
+                .await
+                .unwrap_or_else(|_| panic!("attempt {attempt}: the queued stop was dropped"));
+            assert_eq!(answer, Ok(()), "attempt {attempt}");
+        }
     }
 
     #[test]

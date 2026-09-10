@@ -160,8 +160,7 @@ fn safety_block(inspected: Option<&Inspected>, now: i64, cx: &App) -> AnyElement
             .tone(Tone::Warning)
             .into_any_element(),
     };
-    let mut list = KeyValueList::titled("Safety")
-        .trailing(trailing)
+    let mut list = KeyValueList::titled_with_trailing("Safety", trailing)
         .row("dirty", dirty_value(data))
         .row(
             "ahead / behind",

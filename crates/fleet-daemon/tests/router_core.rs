@@ -431,6 +431,79 @@ async fn replacing_an_endpoint_replaces_its_event_pump() {
     .expect("replacement event");
 }
 
+#[tokio::test]
+async fn a_remote_detach_that_fails_still_releases_the_local_attachment() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    router.start_event_pumps(events);
+    let local = router.ids.local_terminal(&host, TerminalId(7));
+
+    remote.push_response(Ok(ResponseBody::Ack));
+    router
+        .forward(
+            &host,
+            RequestBody::AttachTerminal {
+                terminal: local,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .await
+        .expect("attach");
+
+    remote.push_response(Err(fleet_daemon::DaemonError::NotFound(
+        "terminal 7".to_owned(),
+    )));
+    router
+        .forward(&host, RequestBody::DetachTerminal { terminal: local })
+        .await
+        .expect_err("the remote rejects a detach for a terminal it forgot");
+
+    remote.emit(Event::TerminalFrame(frame(TerminalId(7))));
+    let relayed = tokio::time::timeout(Duration::from_millis(100), async {
+        loop {
+            if matches!(
+                receiver.recv().await.expect("router event"),
+                Event::TerminalFrame(_)
+            ) {
+                return true;
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(!relayed, "frames still relayed after a failed detach");
+}
+
+fn frame(terminal: TerminalId) -> fleet_proto::terminal::FrameUpdate {
+    use fleet_proto::terminal::{CursorShape, CursorState, TerminalModes, ViewportInfo};
+
+    fleet_proto::terminal::FrameUpdate {
+        terminal,
+        seq: 1,
+        cols: 80,
+        rows: 24,
+        full: true,
+        shift: None,
+        rows_changed: Vec::new(),
+        cursor: CursorState {
+            row: 0,
+            col: 0,
+            visible: true,
+            shape: CursorShape::Block,
+        },
+        viewport: ViewportInfo {
+            scrollback_len: 0,
+            offset: 0,
+            history_epoch: 0,
+        },
+        modes: TerminalModes::default(),
+        title: None,
+    }
+}
+
 fn router_with_remote(host: HostId) -> (Router, Arc<FakeRemote>) {
     let machines = Arc::new(Machines::from_config(&default_config("/tmp/fleet-router")));
     let remote = Arc::new(FakeRemote::new(host.clone()));
@@ -861,4 +934,39 @@ fn context_sync_expected_requests(
         context_sync_create(repo, None),
     ]);
     context_requests
+}
+
+#[tokio::test]
+async fn a_remote_daemon_shutting_down_never_reaches_the_local_bus() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    router.start_event_pumps(events);
+
+    // A remote daemon stopping is a link-liveness fact about one endpoint; republished verbatim
+    // it would read as *this* daemon shutting down and disconnect every local client.
+    remote.emit(Event::DaemonShuttingDown);
+    remote.emit(Event::Toast {
+        level: fleet_proto::event::ToastLevel::Info,
+        message: "after the remote shutdown".to_owned(),
+    });
+
+    let marker = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match receiver.recv().await.expect("router event") {
+                Event::DaemonShuttingDown => return false,
+                Event::Toast { message, .. } if message == "after the remote shutdown" => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the pump keeps running after a remote shutdown event");
+    assert!(
+        marker,
+        "a remote daemon's shutdown must not be republished as the local daemon's"
+    );
 }

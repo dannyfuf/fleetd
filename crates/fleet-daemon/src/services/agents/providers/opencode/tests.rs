@@ -837,3 +837,57 @@ async fn the_slash_commands_come_from_the_command_endpoint_not_the_agent_list() 
         requested[0]
     );
 }
+
+/// BH9 again, on the other path: `start` reports the mode the server will actually honour, so a
+/// later switch must too. A server whose `permission` config allows everything never opens a
+/// gate, and a row that answers `asks before edits` for it states a scope that is false.
+#[tokio::test]
+async fn set_mode_reports_the_mode_the_server_will_actually_honour() {
+    use std::path::Path;
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::http::HttpClient;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback listener");
+    let addr = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("one request");
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match socket.read(&mut byte).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => head.push(byte[0]),
+            }
+        }
+        // `GET /config`: this server allows every action, so no gate will ever open.
+        let body = r#"{"permission":"allow"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ignored = socket.write_all(response.as_bytes()).await;
+        let _ignored = socket.shutdown().await;
+    });
+
+    let mut provider = OpenCodeProvider::new("opencode");
+    provider.http = Some(
+        HttpClient::new(&format!("http://{addr}"), Path::new("/tmp/repo"), None)
+            .expect("build the client"),
+    );
+    provider.mode = PermissionMode::FullAccess;
+
+    let reported = provider
+        .set_mode(PermissionMode::Ask)
+        .await
+        .expect("set the mode");
+
+    // Asserted before the fixture is joined: a `set_mode` that never asks the server would
+    // otherwise leave this waiting on a connection that is never made.
+    assert_eq!(reported, PermissionMode::FullAccess);
+    assert_eq!(provider.mode, PermissionMode::FullAccess);
+    server.await.expect("the fixture server finishes");
+}

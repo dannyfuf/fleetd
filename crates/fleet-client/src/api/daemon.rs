@@ -34,7 +34,10 @@ impl Client {
         }
     }
 
-    /// Replaces this connection's event subscriptions.
+    /// Adds event kinds to this connection's subscriptions.
+    ///
+    /// The daemon unions them with the kinds this connection already receives;
+    /// `RequestBody::Unsubscribe` is the only way to clear the set.
     pub async fn subscribe(&self, events: Vec<EventKind>) -> Result<()> {
         expect_ack(
             "subscribe",

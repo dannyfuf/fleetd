@@ -38,3 +38,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0009](decisions/0009-jira-board-backend.md) | Jira through `acli`, not through the REST API |
 | [0010](decisions/0010-native-agents.md) | Native agent sessions: structured protocols, completion authority, the reducer in `fleet-core` |
 | [0011](decisions/0011-remote-machines.md) | Remote machines through one-daemon-per-machine federation and pluggable transports |
+| [0012](decisions/0012-terminal-agent-attention.md) | Terminal agent attention: explicit hooks are the only notification source |
