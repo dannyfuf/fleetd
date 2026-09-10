@@ -24,7 +24,8 @@ fn git_stdout(directory: &Path, arguments: &[&str]) -> String {
         "git {arguments:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap()
+    // `git init` echoes the repository path, which these tests deliberately make non-UTF-8.
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn runner() -> Arc<Runner> {
