@@ -18,7 +18,10 @@ use crate::{
     keymap,
     presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
     screens::workspace::status_kind,
-    state::{AppState, HubTab, Overlay, RepoScope, Screen, latest_failed_job, running_jobs},
+    state::{
+        AppState, Cursors, HubPane, HubTab, Overlay, RepoScope, Screen, latest_failed_job,
+        running_jobs,
+    },
 };
 
 /// The palette's total row cap (§3.9).
@@ -35,7 +38,72 @@ pub struct PaletteState {
     pub(crate) cursor: usize,
     rows: std::rc::Rc<[Entry]>,
     total: usize,
-    prepared_query: Option<String>,
+    /// Every input [`candidates`] read to build [`Self::rows`], so a notification that changed
+    /// none of them does not rebuild them.
+    prepared: Option<PreparedKey>,
+}
+
+/// Every input the prepared rows are derived from, as revisions and cheap values.
+///
+/// `refresh` runs on every `AppState` notification while the palette is open (`host::watch`),
+/// and `candidates` indexes the whole snapshot and allocates a label and a detail per row, so
+/// the rebuild is keyed the way the Hub and the board key their projections
+/// (`docs/APP-CONTRACTS.md`, "render prepares nothing").
+///
+/// The palette is modal, so only the daemon-driven halves of this key can move while it is
+/// open; the rest is here because a key that omits an input the rows are derived from is a
+/// palette that keeps drawing rows the state no longer has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedKey {
+    /// `AppState::snapshot_revision`: sessions, worktrees, repos, jobs and contexts.
+    snapshot: u64,
+    /// `BoardState::revision`: a card edit never lands through a snapshot.
+    board: u64,
+    /// The board's selection and filter, which decide which card the `Board:` rows act on.
+    board_focus: crate::state::BoardFocus,
+    board_filter: String,
+    /// `AppState::link_generation` and the link itself, which gate every connected command.
+    connection: u64,
+    connected: bool,
+    /// What the `DO` rows are judged against besides the snapshot.
+    screen: Screen,
+    hub_pane: HubPane,
+    pr_tab: fleet_core::github::PrTab,
+    scope: RepoScope,
+    cursors: Cursors,
+    /// Whether `Update Fleet` has a version to offer.
+    update: bool,
+    /// The typed query, and the dialog the palette replaced.
+    query: String,
+    behind: Option<Dialogs>,
+    detail_card: Option<CardId>,
+}
+
+impl PreparedKey {
+    fn new(
+        state: &AppState,
+        query: String,
+        behind: Option<Dialogs>,
+        detail_card: Option<CardId>,
+    ) -> Self {
+        Self {
+            snapshot: state.snapshot_revision,
+            board: state.board.revision,
+            board_focus: state.board.focus,
+            board_filter: state.board.filter.clone(),
+            connection: state.link_generation,
+            connected: state.daemon.is_connected(),
+            screen: state.screen.clone(),
+            hub_pane: state.hub_pane,
+            pr_tab: state.pr_tab,
+            scope: state.scope.clone(),
+            cursors: state.cursors.clone(),
+            update: state.update_version.is_some(),
+            query,
+            behind,
+            detail_card,
+        }
+    }
 }
 
 /// What a palette row does when `Enter` runs it.
@@ -1078,22 +1146,36 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
             host.card_detail.card_id.clone(),
         )
     });
-    let rows = candidates(state.read(cx), &query, behind, detail_card.as_ref());
+    let key = PreparedKey::new(state.read(cx), query, behind, detail_card);
+    // This runs on every `AppState` notification while the palette is open, and building the
+    // candidates indexes the whole snapshot: a notification that moved none of the inputs the
+    // rows came from does no work at all.
+    if with_host(state, cx, |host| {
+        host.palette.prepared.as_ref() == Some(&key)
+    }) {
+        return;
+    }
+    let rows = candidates(
+        state.read(cx),
+        &key.query,
+        key.behind.clone(),
+        key.detail_card.as_ref(),
+    );
     let total = rows.len();
-    let cap = if is_session_switcher(&query) {
+    let cap = if is_session_switcher(&key.query) {
         usize::MAX
     } else {
         ROW_CAP
     };
     let rows: Vec<Entry> = rows.into_iter().take(cap).collect();
     with_host(state, cx, |host| {
-        // This runs on every `AppState` notification while the palette is open, so rows that
-        // came out the same keep the `Rc` the card already drew instead of a fresh one.
+        // A revision moves for changes the palette does not list, so rows that came out the
+        // same keep the `Rc` the card already drew instead of a fresh one.
         if host.palette.rows.as_ref() != rows.as_slice() {
             host.palette.rows = rows.into();
         }
         host.palette.total = total;
-        host.palette.prepared_query = Some(query);
+        host.palette.prepared = Some(key);
         // A snapshot can lose rows under an open palette; an unclamped cursor would point past
         // the end and make `Enter` a silent no-op (§3.9).
         host.palette.cursor = step(host.palette.cursor, 0, host.palette.rows.len());
@@ -1101,11 +1183,9 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
 }
 
 pub(super) fn refresh_query(state: &Entity<AppState>, cx: &mut App) {
-    let changed = with_host(state, cx, |host| {
-        host.palette_open
-            && host.palette.prepared_query.as_deref() != Some(host.palette.query.text())
-    });
-    if changed {
+    // Every draft edit reaches here through `dialogs::notify`; `refresh` itself is what decides
+    // whether the typed character changed anything the rows are derived from.
+    if with_host(state, cx, |host| host.palette_open) {
         refresh(state, cx);
     }
 }
@@ -2060,6 +2140,67 @@ mod tests {
                     host.palette.cursor,
                     host.palette.rows.len()
                 );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unrelated_notify_does_not_rebuild_the_palette(cx: &mut gpui::TestAppContext) {
+        // `host::watch` refreshes the open palette from every `AppState` notification, and a
+        // busy workspace notifies several times a second. Rebuilding the candidates there
+        // indexes the whole snapshot and allocates a label and a detail per row on the
+        // foreground thread, which is the projection work `docs/APP-CONTRACTS.md` keeps out of
+        // the per-frame path: a notification that moved none of the inputs must not do it.
+        let now = Instant::now();
+        let state = cx.new(|_| {
+            let mut app = AppState::new("/tmp/fleet", now);
+            app.apply_snapshot(multi_session_snapshot(3), now);
+            app.overlay = Some(Overlay::Palette);
+            app.palette_seed = Some("sessions".into());
+            app
+        });
+        cx.update(|cx| {
+            seed(&state, cx);
+            with_host(&state, cx, |host| {
+                assert_eq!(host.palette.rows.len(), 3);
+                // A row no rebuild could ever produce: it survives exactly as long as
+                // `refresh` returns without calling `candidates` again.
+                host.palette.rows = std::rc::Rc::from(vec![Entry {
+                    section: PaletteSectionKind::Do,
+                    label: "sentinel".to_owned(),
+                    detail: None,
+                    key: None,
+                    destructive: false,
+                    icon: Icon::Boxes,
+                    status: None,
+                    run: Run::Command(Command::Help),
+                }]);
+            });
+        });
+
+        cx.update(|cx| {
+            refresh(&state, cx);
+            with_host(&state, cx, |host| {
+                assert_eq!(
+                    host.palette
+                        .rows
+                        .iter()
+                        .map(|row| row.label.as_str())
+                        .collect::<Vec<_>>(),
+                    ["sentinel"],
+                    "a notify that changed nothing rebuilt the candidates"
+                );
+            });
+        });
+
+        cx.update(|cx| {
+            // A snapshot the rows *are* derived from still rebuilds them.
+            state.update(&mut *cx, |app, _| {
+                app.apply_snapshot(multi_session_snapshot(4), now);
+            });
+            refresh(&state, cx);
+            with_host(&state, cx, |host| {
+                assert_eq!(host.palette.rows.len(), 4);
             });
         });
     }

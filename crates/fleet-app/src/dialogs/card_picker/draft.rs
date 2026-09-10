@@ -111,6 +111,10 @@ pub(crate) struct CardPickerState {
     pub(crate) then_detail: bool,
     /// Why the current query cannot be applied.
     pub(super) error: Option<String>,
+    /// The values [`candidates`] offered for the draft below, prepared once per change.
+    pub(super) rows: std::rc::Rc<[PickerOption]>,
+    /// Every input those rows were derived from, so a redraw does not derive them again.
+    pub(super) prepared: Option<PreparedKey>,
 }
 
 impl CardPickerState {
@@ -146,10 +150,22 @@ impl CardPickerState {
     }
 }
 
+/// The offered rows for the open picker's draft, derived only when an input changed.
+///
+/// Every caller — the renderer included — reads the rows through here, so deriving them stays
+/// a per-change cost and never a per-frame one (`docs/APP-CONTRACTS.md`, "render prepares
+/// nothing"): on a board of any size `options` walks every card and `candidates` folds every
+/// label.
+pub(super) fn prepared(state: &Entity<AppState>, cx: &mut App) -> std::rc::Rc<[PickerOption]> {
+    let host = crate::dialogs::host::host_for(state, cx);
+    host.update(cx, |host, cx| {
+        prepare(state.read(cx), &mut host.card_picker)
+    })
+}
+
 /// `j` / `k`: move the highlight, clamped to the candidates the query left.
 pub(super) fn move_cursor(state: &Entity<AppState>, delta: isize, cx: &mut App) {
-    let draft = read_host(state, cx, |host, _| host.card_picker.clone());
-    let len = candidates(state.read(cx), &draft).len();
+    let len = prepared(state, cx).len();
     with_host(state, cx, |host| {
         host.card_picker.cursor = step(host.card_picker.cursor, delta, len);
     });
@@ -188,10 +204,7 @@ pub(super) fn toggle(state: &Entity<AppState>, cx: &mut App) {
         edit_query(state, cx, |input| input.insert(" "));
         return;
     }
-    let Some(option) = candidates(state.read(cx), &draft)
-        .into_iter()
-        .nth(draft.cursor)
-    else {
+    let Some(option) = prepared(state, cx).get(draft.cursor).cloned() else {
         return;
     };
     with_host(state, cx, |host| {

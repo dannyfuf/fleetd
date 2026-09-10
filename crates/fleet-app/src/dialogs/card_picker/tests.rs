@@ -242,3 +242,149 @@ fn every_priority_the_picker_offers_is_one_a_card_can_report() {
         assert!(spelled.contains(&value), "{value} is not an offered row");
     }
 }
+
+/// A two-card board whose cards carry assignees, so the assignee picker has values to offer.
+fn board_with_assignees() -> AppState {
+    let context = fleet_core::model::Context {
+        id: "work".parse().unwrap_or_else(|error| panic!("{error}")),
+        name: "Work".into(),
+        owners: vec![],
+        created_at: "2026-09-06T12:00:00Z".into(),
+    };
+    let mut board = fleet_core::board::new_board(&context, &context.created_at);
+    let mut cards: Vec<fleet_core::board::Card> = Vec::new();
+    for (index, (title, assignee)) in [("Fix login", "Ana Rojas"), ("Ship the board", "Bo Vang")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut card = fleet_core::board::create_card(
+            &mut board,
+            &cards,
+            format!("card-{index}")
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+            fleet_core::board::CardDraft {
+                title: title.to_owned(),
+                ..fleet_core::board::CardDraft::default()
+            },
+            &context.created_at,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        card.assignee = Some(assignee.to_owned());
+        cards.push(card);
+    }
+    let mut state = AppState::new("/tmp/fleet-card-picker", std::time::Instant::now());
+    state.board.view = Some(fleet_core::board::BoardView { board, cards });
+    state
+}
+
+fn labels(rows: &[PickerOption]) -> Vec<&str> {
+    rows.iter().map(|option| option.label.as_str()).collect()
+}
+
+/// The picker's rows are derived from the board, not from the frame: an assignee list walks
+/// every card on the board, so `render` must read rows that a change already prepared
+/// (`docs/APP-CONTRACTS.md`, "render prepares nothing").
+#[test]
+fn candidates_are_prepared_once_per_query() {
+    let mut state = board_with_assignees();
+    let mut draft = CardPickerState {
+        kind: PickerKind::Assignee,
+        ..CardPickerState::default()
+    };
+    assert_eq!(
+        labels(&prepare(&state, &mut draft)),
+        ["Unassigned", "Ana Rojas", "Bo Vang"]
+    );
+
+    // A row no derivation could produce: it survives exactly as long as a second draw returns
+    // the rows the draft already holds instead of walking the cards again.
+    draft.rows = std::rc::Rc::from(vec![PickerOption::new("sentinel", "sentinel")]);
+    assert_eq!(
+        labels(&prepare(&state, &mut draft)),
+        ["sentinel"],
+        "an unchanged draft derived its candidates again"
+    );
+
+    // Typing derives them again — an assignee takes a typed value, so the query leads.
+    draft.query = "bo".into();
+    assert_eq!(labels(&prepare(&state, &mut draft)), ["bo", "Bo Vang"]);
+
+    // and so does a card that changed under the open picker.
+    let mut card = state
+        .board()
+        .unwrap_or_else(|| panic!("no board"))
+        .cards
+        .first()
+        .unwrap_or_else(|| panic!("no card"))
+        .clone();
+    card.assignee = Some("Bobby Tables".into());
+    state.apply_card(card);
+    assert_eq!(
+        labels(&prepare(&state, &mut draft)),
+        ["bo", "Bo Vang", "Bobby Tables"],
+        "a card edit under the open picker left the rows it derived before"
+    );
+}
+
+/// The render path itself: a frame that changed nothing must compose the rows the draft
+/// already holds, not walk the board's cards again (`docs/APP-CONTRACTS.md`).
+#[gpui::test]
+fn a_redraw_composes_the_rows_it_already_prepared(cx: &mut gpui::TestAppContext) {
+    use std::{cell::Cell, rc::Rc};
+
+    struct PickerFixture {
+        state: Entity<AppState>,
+        rows: Rc<Cell<usize>>,
+        draws: Rc<Cell<usize>>,
+    }
+
+    impl gpui::Render for PickerFixture {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            self.draws.set(self.draws.get() + 1);
+            // Exactly what `view::render` reads its list from.
+            self.rows.set(prepared(&self.state, cx).len());
+            div()
+        }
+    }
+
+    let state = cx.new(|_| board_with_assignees());
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.card_picker.kind = PickerKind::Assignee;
+        });
+    });
+    let rows = Rc::new(Cell::new(0));
+    let draws = Rc::new(Cell::new(0));
+    let window = cx.add_window(|_, _| PickerFixture {
+        state: state.clone(),
+        rows: rows.clone(),
+        draws: draws.clone(),
+    });
+    cx.run_until_parked();
+    assert_eq!(rows.get(), 3, "the first draw prepares the offered values");
+    let drawn = draws.get();
+    assert!(drawn > 0, "the fixture never drew");
+
+    // A row no derivation could produce, so a redraw that rebuilt the list would drop it.
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            host.card_picker.rows = std::rc::Rc::from(vec![PickerOption::new("x", "sentinel")]);
+        });
+    });
+    window
+        .update(cx, |_, _, cx| cx.notify())
+        .unwrap_or_else(|error| panic!("{error}"));
+    cx.run_until_parked();
+    assert!(draws.get() > drawn, "the window did not draw again");
+    assert_eq!(rows.get(), 1, "a redraw derived the candidates again");
+    cx.update(|cx| {
+        with_host(&state, cx, |host| {
+            assert_eq!(labels(&host.card_picker.rows), ["sentinel"]);
+        });
+    });
+}
