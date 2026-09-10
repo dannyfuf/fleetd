@@ -34,7 +34,7 @@ use gpui::{AnyElement, Context, MouseButton, SharedString, Task, Window, div};
 
 use crate::views::diff_model::{DiffModel, DiffViewMode, RowKind};
 use crate::views::row_layout::{Gutters, RowPalette, RowStyle, line_row};
-use crate::views::{long_line, syntax};
+use crate::views::{diff, long_line, syntax};
 
 /// How many rows the inline view draws before it folds the rest behind "show all".
 pub const MAX_ROWS: usize = 400;
@@ -261,8 +261,41 @@ fn prepare(
             model.long_lines.insert(index, Arc::new(line));
         }
     }
+    if !diff::measure_payload_advances(&model, style, &text_system, cancelled) {
+        return Prepared::Cancelled;
+    }
     let jobs = model.syntax_jobs();
     Prepared::Ready(Box::new(model), jobs)
+}
+
+/// Highlights one model off the foreground thread and installs the runs on it.
+///
+/// Shared by the two paths that need it: a model this view just built, and one adopted from the
+/// cache whose own pass was cancelled before it landed. The runs go onto the model itself, which
+/// the cache shares, so every view holding it is highlighted at once.
+async fn fill_syntax(
+    this: &gpui::WeakEntity<DiffView>,
+    key: u64,
+    model: Rc<DiffModel>,
+    jobs: Vec<syntax::Job>,
+    cancellation: Arc<AtomicBool>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let syntax_cancel = cancellation.clone();
+    let runs = cx
+        .background_spawn(async move { syntax::run_cancellable(&jobs, &syntax_cancel) })
+        .await;
+    // A cancelled pass returns what it had, which is not the whole model: leave the runs off so
+    // `syntax_ready` stays false and the next view of this patch runs the jobs again.
+    if cancellation.load(Ordering::Relaxed) {
+        return;
+    }
+    model.apply_syntax(runs);
+    let _ignored = this.update(cx, |this, cx| {
+        if this.key == key {
+            cx.notify();
+        }
+    });
 }
 
 /// Which of a model's rows the inline view draws, in order.
@@ -401,7 +434,18 @@ impl DiffView {
         self.error = None;
         self.key = cache_key(&self.unified);
         if let Some(model) = cached(self.key) {
-            self.model = Some(model);
+            self.model = Some(model.clone());
+            // A pass cancelled after its model was cached — the view was dropped or moved on
+            // mid-flight — leaves that model in the cache with no syntax at all. Re-run the jobs
+            // instead of adopting an un-highlighted model for the life of the process.
+            if !model.syntax_ready() {
+                let key = self.key;
+                let jobs = model.syntax_jobs();
+                let cancellation = self.cancelled.clone();
+                self._task = cx.spawn(async move |this, cx| {
+                    fill_syntax(&this, key, model, jobs, cancellation, cx).await;
+                });
+            }
             return;
         }
         self.model = None;
@@ -456,19 +500,7 @@ impl DiffView {
             if !installed {
                 return;
             }
-            let syntax_cancel = cancellation.clone();
-            let runs = cx
-                .background_spawn(async move { syntax::run_cancellable(&jobs, &syntax_cancel) })
-                .await;
-            if cancellation.load(Ordering::Relaxed) {
-                return;
-            }
-            target.apply_syntax(runs);
-            let _ignored = this.update(cx, |this, cx| {
-                if this.key == key {
-                    cx.notify();
-                }
-            });
+            fill_syntax(&this, key, target, jobs, cancellation, cx).await;
         });
     }
 
@@ -763,6 +795,57 @@ mod tests {
             );
         }
         assert!(cached(key).is_none(), "the oldest entry must be evicted");
+        CACHE.with_borrow_mut(Vec::clear);
+    }
+
+    /// A pass that is cancelled after its model is cached leaves that model without syntax, and
+    /// every later view adopts it from the cache. The next view must re-run the pass instead of
+    /// rendering flat text for the life of the process.
+    #[gpui::test]
+    async fn a_cached_model_without_syntax_is_highlighted_by_the_next_view(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+        let flat = Rc::new(model(HEADERLESS));
+        assert!(flat.runs_for(5).is_empty(), "the pass has not run yet");
+        retain(cache_key(HEADERLESS), &flat);
+
+        let view = cx.update(|cx| cx.new(|cx| DiffView::new(HEADERLESS, cx)));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert!(
+                view.read(cx)
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| Rc::ptr_eq(model, &flat)),
+                "the cached model is still the one that is shared"
+            );
+            assert!(
+                !flat.runs_for(5).is_empty(),
+                "an incomplete cached model must have its syntax pass re-run"
+            );
+        });
+        CACHE.with_borrow_mut(Vec::clear);
+    }
+
+    /// Shaping every payload row costs the whole diff, so it belongs to the background pass that
+    /// builds the model rather than to the first frame that draws it.
+    #[gpui::test]
+    async fn payload_advances_are_measured_before_the_model_is_installed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+        let view = cx.update(|cx| cx.new(|cx| DiffView::new(HEADERLESS, cx)));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let model = view.read(cx).model.clone().expect("the model is installed");
+            assert!(
+                model.payload_advances.get().is_some(),
+                "the advances must be measured off the foreground thread, before any draw"
+            );
+        });
         CACHE.with_borrow_mut(Vec::clear);
     }
 

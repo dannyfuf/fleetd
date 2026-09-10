@@ -36,6 +36,21 @@ impl Style {
             muted: theme.colors.text_muted,
         }
     }
+
+    /// The mono font payload glyphs are shaped in.
+    pub(super) fn font(&self) -> &Font {
+        &self.font
+    }
+
+    /// The size they are shaped at.
+    pub(super) fn size(&self) -> Pixels {
+        self.size
+    }
+
+    /// The colour of an ordinary payload glyph.
+    pub(super) fn text(&self) -> Hsla {
+        self.text
+    }
 }
 
 #[derive(Debug)]

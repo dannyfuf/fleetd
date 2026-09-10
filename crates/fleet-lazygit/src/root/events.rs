@@ -7,8 +7,9 @@ impl Lazygit {
         let events = bridge.events();
         cx.spawn(async move |root, cx| {
             while let Ok(event) = events.recv().await {
-                let mut batch = vec![event];
-                for _ in 1..64 {
+                let mut batch = Vec::with_capacity(EVENT_BATCH_LIMIT);
+                batch.push(event);
+                while batch.len() < EVENT_BATCH_LIMIT {
                     let Ok(event) = events.try_recv() else {
                         break;
                     };
@@ -29,6 +30,8 @@ impl Lazygit {
                 {
                     return;
                 }
+                // A busy producer cannot keep the UI executor inside an always-ready receive loop.
+                cx.background_executor().timer(EVENT_YIELD).await;
             }
         })
     }
