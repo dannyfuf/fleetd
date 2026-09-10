@@ -51,15 +51,8 @@ impl Services {
         };
         if let Some((host, repo)) = hosted_create {
             let state = self.state.load().await?;
-            let repository = state
-                .repos
-                .iter()
-                .find(|candidate| candidate.id == repo)
-                .ok_or_else(|| DaemonError::NotFound(format!("repo {repo}")))?
-                .clone();
             return self
-                .router
-                .ensure_repo_then_create(&host, &repository, &state.worktrees, body)
+                .dispatch_hosted_create_from_state(&host, &repo, body, &state)
                 .await;
         }
         match self.router.route(&body) {
@@ -82,6 +75,33 @@ impl Services {
                 "unsupported routed operation: {operation}"
             ))),
         }
+    }
+
+    /// Routes a hosted create from an already validated state snapshot.
+    ///
+    /// [`StateStore`] rejects repository records whose context is absent. The explicit lookup is
+    /// still kept at this boundary so a stale or otherwise inconsistent in-memory snapshot cannot
+    /// cause any remote request before returning the contract's `NotFound` error.
+    async fn dispatch_hosted_create_from_state(
+        &self,
+        host: &fleet_core::ids::HostId,
+        repo: &fleet_core::ids::RepoId,
+        body: RequestBody,
+        state: &fleet_core::state::State,
+    ) -> DaemonResult<ResponseBody> {
+        let repository = state
+            .repos
+            .iter()
+            .find(|candidate| &candidate.id == repo)
+            .ok_or_else(|| DaemonError::NotFound(format!("repo {repo}")))?;
+        let context = state
+            .contexts
+            .iter()
+            .find(|candidate| candidate.id == repository.context_id)
+            .ok_or_else(|| DaemonError::NotFound(format!("context {}", repository.context_id)))?;
+        self.router
+            .ensure_repo_then_create(host, context, repository, &state.worktrees, body)
+            .await
     }
 
     pub(crate) async fn dispatch_owned_with_context(
@@ -187,7 +207,7 @@ impl Services {
             } => {
                 let (card, worktree, created) = if let Some(host) = host {
                     let router = Arc::clone(&self.router);
-                    let local_worktrees = self.state.load().await?.worktrees;
+                    let state_store = Arc::clone(&self.state);
                     self.boards
                         .create_worktree_from_card_routed(
                             &card_id,
@@ -208,11 +228,24 @@ impl Services {
                                     host: Some(host.clone()),
                                     hooks: repo.hooks.clone(),
                                 };
+                                let state = state_store.load().await?;
+                                let context = state
+                                    .contexts
+                                    .iter()
+                                    .find(|candidate| candidate.id == repo.context_id)
+                                    .ok_or_else(|| {
+                                        DaemonError::NotFound(format!(
+                                            "context {}",
+                                            repo.context_id
+                                        ))
+                                    })?
+                                    .clone();
                                 match router
                                     .ensure_repo_then_create(
                                         &host,
+                                        &context,
                                         &repo,
-                                        &local_worktrees,
+                                        &state.worktrees,
                                         request,
                                     )
                                     .await?
@@ -751,5 +784,75 @@ impl Services {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use fleet_core::{model::Repo, state::default_state};
+
+    use crate::{
+        adapters::{Adapters, clock::SystemClock, files::RealFiles},
+        jobs::JobManager,
+        stores::{config::ConfigStore, state::StateStore},
+        testing::FakeRemote,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn hosted_create_with_a_missing_local_context_is_not_found_without_remote_requests() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path().join(".fleet");
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let services = Services::new(
+            &home,
+            Arc::new(ConfigStore::new(&home, files.clone())),
+            Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(&home)),
+            Adapters::system(files),
+        );
+        let host: fleet_core::ids::HostId = "dispatch-orphan".parse().expect("host id");
+        let remote = Arc::new(FakeRemote::new(host.clone()));
+        services
+            .machines
+            .install_endpoint(host.clone(), remote.clone());
+
+        // StateStore rejects this orphan on load; pass the post-load routing boundary an
+        // inconsistent snapshot directly to prove its defensive contract.
+        let repo_id: fleet_core::ids::RepoId = "acme/api".parse().expect("repo id");
+        let mut state = default_state();
+        state.repos.push(Repo {
+            id: repo_id.clone(),
+            owner: "acme".to_owned(),
+            name: "api".to_owned(),
+            url: "ssh://git.example/acme/api.git".to_owned(),
+            context_id: "personal".parse().expect("context id"),
+            default_branch: "main".to_owned(),
+            path: "/tmp/dispatch-orphan/repos/acme/api".to_owned(),
+            cloned_at: "2026-09-09T12:00:00Z".to_owned(),
+            hooks: Default::default(),
+        });
+        let request = RequestBody::CreateWorktree {
+            repo: repo_id.clone(),
+            slug: "feature".to_owned(),
+            branch: None,
+            base: None,
+            host: Some(host.clone()),
+            hooks: Default::default(),
+        };
+
+        let error = services
+            .dispatch_hosted_create_from_state(&host, &repo_id, request, &state)
+            .await
+            .expect_err("orphaned repository must fail");
+
+        assert!(matches!(error, DaemonError::NotFound(message) if message == "context personal"));
+        assert!(remote.requests().is_empty());
     }
 }

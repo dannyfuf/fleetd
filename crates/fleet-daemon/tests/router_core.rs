@@ -485,3 +485,380 @@ async fn wait_until(predicate: impl Fn() -> bool) {
     .await
     .expect("condition timeout");
 }
+
+#[tokio::test]
+async fn hosted_create_creates_and_updates_a_missing_remote_context_before_cloning() {
+    let target = host("context-sync-create");
+    let (router, remote) = router_with_remote(target.clone());
+    let context = context_sync_local_context("Personal");
+    let repo = context_sync_repo();
+    script_context_sync_responses(
+        &remote,
+        vec![
+            Ok(ResponseBody::Snapshot(context_sync_snapshot(None))),
+            Ok(ResponseBody::Context(context_sync_remote_context(
+                "personal",
+                &["dannyfuf"],
+            ))),
+            Ok(ResponseBody::Context(context.clone())),
+        ],
+        &repo,
+    );
+
+    router
+        .ensure_repo_then_create(
+            &target,
+            &context,
+            &repo,
+            &[],
+            context_sync_create(&repo, Some(target.clone())),
+        )
+        .await
+        .expect("create with missing remote context");
+
+    assert_eq!(
+        remote.requests(),
+        context_sync_expected_requests(
+            &context,
+            &repo,
+            vec![
+                RequestBody::GetSnapshot,
+                RequestBody::CreateContext {
+                    name: "personal".to_owned(),
+                    owners: vec!["dannyfuf".to_owned()],
+                },
+                context_sync_update_request(&context),
+            ],
+        )
+    );
+}
+
+#[tokio::test]
+async fn hosted_create_rejects_a_context_create_response_with_a_different_id() {
+    let target = host("context-sync-wrong-create-id");
+    let (router, remote) = router_with_remote(target.clone());
+    let context = context_sync_local_context("Personal");
+    let repo = context_sync_repo();
+    let mut mismatched = context_sync_remote_context("personal", &["dannyfuf"]);
+    mismatched.id = "other".parse().expect("context id");
+    remote.push_response(Ok(ResponseBody::Snapshot(context_sync_snapshot(None))));
+    remote.push_response(Ok(ResponseBody::Context(mismatched.clone())));
+
+    let error = router
+        .ensure_repo_then_create(
+            &target,
+            &context,
+            &repo,
+            &[],
+            context_sync_create(&repo, Some(target.clone())),
+        )
+        .await
+        .expect_err("mismatched create response must fail");
+
+    assert!(matches!(error, fleet_daemon::DaemonError::Protocol(message)
+    if message == format!(
+        "remote context ensure returned unexpected response {:?}",
+        ResponseBody::Context(mismatched)
+    )));
+    assert_eq!(
+        remote.requests(),
+        vec![
+            RequestBody::GetSnapshot,
+            RequestBody::CreateContext {
+                name: "personal".to_owned(),
+                owners: vec!["dannyfuf".to_owned()],
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn hosted_create_leaves_an_identical_remote_context_unchanged_before_cloning() {
+    let target = host("context-sync-identical");
+    let (router, remote) = router_with_remote(target.clone());
+    let context = context_sync_local_context("Personal");
+    let repo = context_sync_repo();
+    script_context_sync_responses(
+        &remote,
+        vec![Ok(ResponseBody::Snapshot(context_sync_snapshot(Some(
+            context.clone(),
+        ))))],
+        &repo,
+    );
+
+    router
+        .ensure_repo_then_create(
+            &target,
+            &context,
+            &repo,
+            &[],
+            context_sync_create(&repo, Some(target.clone())),
+        )
+        .await
+        .expect("create with identical remote context");
+
+    assert_eq!(
+        remote.requests(),
+        context_sync_expected_requests(&context, &repo, vec![RequestBody::GetSnapshot])
+    );
+}
+
+#[tokio::test]
+async fn hosted_create_updates_each_mismatched_remote_context_once_before_cloning() {
+    let cases = [
+        (
+            "context-sync-name",
+            context_sync_remote_context("Old Personal", &["dannyfuf"]),
+        ),
+        (
+            "context-sync-owners",
+            context_sync_remote_context("Personal", &["someone-else"]),
+        ),
+    ];
+
+    for (host_name, remote_context) in cases {
+        let target = host(host_name);
+        let (router, remote) = router_with_remote(target.clone());
+        let context = context_sync_local_context("Personal");
+        let repo = context_sync_repo();
+        script_context_sync_responses(
+            &remote,
+            vec![
+                Ok(ResponseBody::Snapshot(context_sync_snapshot(Some(
+                    remote_context,
+                )))),
+                Ok(ResponseBody::Context(context.clone())),
+            ],
+            &repo,
+        );
+
+        router
+            .ensure_repo_then_create(
+                &target,
+                &context,
+                &repo,
+                &[],
+                context_sync_create(&repo, Some(target.clone())),
+            )
+            .await
+            .expect("create with mismatched remote context");
+
+        assert_eq!(
+            remote.requests(),
+            context_sync_expected_requests(
+                &context,
+                &repo,
+                vec![
+                    RequestBody::GetSnapshot,
+                    context_sync_update_request(&context)
+                ],
+            ),
+            "mismatch case {host_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hosted_create_recovers_from_a_remote_context_create_conflict() {
+    let target = host("context-sync-conflict");
+    let (router, remote) = router_with_remote(target.clone());
+    let context = context_sync_local_context("Personal");
+    let repo = context_sync_repo();
+    script_context_sync_responses(
+        &remote,
+        vec![
+            Ok(ResponseBody::Snapshot(context_sync_snapshot(None))),
+            Err(fleet_daemon::DaemonError::Conflict(
+                "context personal already exists".to_owned(),
+            )),
+            Ok(ResponseBody::Snapshot(context_sync_snapshot(Some(
+                context.clone(),
+            )))),
+        ],
+        &repo,
+    );
+
+    router
+        .ensure_repo_then_create(
+            &target,
+            &context,
+            &repo,
+            &[],
+            context_sync_create(&repo, Some(target.clone())),
+        )
+        .await
+        .expect("create after context conflict");
+
+    assert_eq!(
+        remote.requests(),
+        context_sync_expected_requests(
+            &context,
+            &repo,
+            vec![
+                RequestBody::GetSnapshot,
+                RequestBody::CreateContext {
+                    name: "personal".to_owned(),
+                    owners: vec!["dannyfuf".to_owned()],
+                },
+                RequestBody::GetSnapshot,
+            ],
+        )
+    );
+}
+
+#[tokio::test]
+async fn hosted_create_uses_context_id_then_restores_a_renamed_display_name() {
+    let target = host("context-sync-renamed");
+    let (router, remote) = router_with_remote(target.clone());
+    let context = context_sync_local_context("Personal Stuff");
+    let repo = context_sync_repo();
+    script_context_sync_responses(
+        &remote,
+        vec![
+            Ok(ResponseBody::Snapshot(context_sync_snapshot(None))),
+            Ok(ResponseBody::Context(context_sync_remote_context(
+                "personal",
+                &["dannyfuf"],
+            ))),
+            Ok(ResponseBody::Context(context.clone())),
+        ],
+        &repo,
+    );
+
+    router
+        .ensure_repo_then_create(
+            &target,
+            &context,
+            &repo,
+            &[],
+            context_sync_create(&repo, Some(target.clone())),
+        )
+        .await
+        .expect("create with renamed local context");
+
+    assert_eq!(
+        remote.requests(),
+        context_sync_expected_requests(
+            &context,
+            &repo,
+            vec![
+                RequestBody::GetSnapshot,
+                RequestBody::CreateContext {
+                    name: "personal".to_owned(),
+                    owners: vec!["dannyfuf".to_owned()],
+                },
+                context_sync_update_request(&context),
+            ],
+        )
+    );
+}
+
+fn context_sync_local_context(name: &str) -> fleet_core::model::Context {
+    context_sync_remote_context(name, &["dannyfuf"])
+}
+
+fn context_sync_remote_context(name: &str, owners: &[&str]) -> fleet_core::model::Context {
+    fleet_core::model::Context {
+        id: "personal".parse().expect("context id"),
+        name: name.to_owned(),
+        owners: owners.iter().map(|owner| (*owner).to_owned()).collect(),
+        created_at: "2026-09-09T12:00:00Z".to_owned(),
+    }
+}
+
+fn context_sync_repo() -> fleet_core::model::Repo {
+    fleet_core::model::Repo {
+        id: "acme/api".parse().expect("repo id"),
+        owner: "acme".to_owned(),
+        name: "api".to_owned(),
+        url: "ssh://git.example/acme/api.git".to_owned(),
+        context_id: "personal".parse().expect("context id"),
+        default_branch: "main".to_owned(),
+        path: "/tmp/context-sync/repos/acme/api".to_owned(),
+        cloned_at: "2026-09-09T12:00:00Z".to_owned(),
+        hooks: fleet_core::model::RepoHooks {
+            prepare: vec!["mise install".to_owned()],
+            post_create: vec!["bin/setup".to_owned()],
+        },
+    }
+}
+
+fn context_sync_snapshot(
+    context: Option<fleet_core::model::Context>,
+) -> fleet_proto::snapshot::Snapshot {
+    fleet_proto::snapshot::Snapshot {
+        boards: Vec::new(),
+        generated_at: "2026-09-09T12:00:00Z".to_owned(),
+        contexts: context.into_iter().collect(),
+        repos: Vec::new(),
+        clones: Vec::new(),
+        worktrees: Vec::new(),
+        active_context: None,
+        sessions: Vec::new(),
+        agent_threads: Vec::new(),
+        statuses: Vec::new(),
+        pools: Vec::new(),
+        hosts: Vec::new(),
+        jobs: Vec::new(),
+        daemon: fleet_proto::snapshot::DaemonInfo {
+            version: "fleetd context-sync test".to_owned(),
+            pid: 1,
+            started_at: "2026-09-09T12:00:00Z".to_owned(),
+            home: "/tmp/context-sync".to_owned(),
+        },
+    }
+}
+
+fn context_sync_create(repo: &fleet_core::model::Repo, host: Option<HostId>) -> RequestBody {
+    RequestBody::CreateWorktree {
+        repo: repo.id.clone(),
+        slug: "context-sync".to_owned(),
+        branch: Some("feature/context-sync".to_owned()),
+        base: Some("origin/main".to_owned()),
+        host,
+        hooks: repo.hooks.clone(),
+    }
+}
+
+fn context_sync_update_request(context: &fleet_core::model::Context) -> RequestBody {
+    RequestBody::UpdateContext {
+        id: context.id.clone(),
+        name: Some(context.name.clone()),
+        owners: Some(context.owners.clone()),
+    }
+}
+
+fn script_context_sync_responses(
+    remote: &FakeRemote,
+    context_responses: Vec<Result<ResponseBody, fleet_daemon::DaemonError>>,
+    repo: &fleet_core::model::Repo,
+) {
+    for response in context_responses {
+        remote.push_response(response);
+    }
+    remote.push_response(Ok(ResponseBody::Repo(repo.clone())));
+    remote.push_response(Ok(ResponseBody::Repo(repo.clone())));
+    remote.push_response(Ok(ResponseBody::Ack));
+}
+
+fn context_sync_expected_requests(
+    context: &fleet_core::model::Context,
+    repo: &fleet_core::model::Repo,
+    mut context_requests: Vec<RequestBody>,
+) -> Vec<RequestBody> {
+    context_requests.extend([
+        RequestBody::CloneRepo {
+            owner: repo.owner.clone(),
+            name: repo.name.clone(),
+            url: repo.url.clone(),
+            context: context.id.clone(),
+            default_branch: Some(repo.default_branch.clone()),
+        },
+        RequestBody::SetRepoHooks {
+            repo: repo.id.clone(),
+            hooks: repo.hooks.clone(),
+        },
+        context_sync_create(repo, None),
+    ]);
+    context_requests
+}

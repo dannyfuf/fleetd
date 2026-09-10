@@ -106,11 +106,13 @@ fn validate_context_id(value: &str) -> Result<(), IdError> {
         || !chars.all(|character| {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
         })
+        || value.ends_with('-')
+        || value.contains("--")
     {
         return Err(IdError::new(
             "context id",
             value,
-            "expected /^[a-z0-9][a-z0-9-]*$/",
+            "expected /^[a-z0-9]+(?:-[a-z0-9]+)*$/",
         ));
     }
     Ok(())
@@ -190,7 +192,19 @@ fn validate_job_id(value: &str) -> Result<(), IdError> {
 }
 
 fn validate_slug(value: &str) -> Result<(), IdError> {
-    validate_context_id(value)
+    let mut chars = value.chars();
+    if !matches!(chars.next(), Some('a'..='z' | '0'..='9'))
+        || !chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+    {
+        return Err(IdError::new(
+            "context id",
+            value,
+            "expected /^[a-z0-9][a-z0-9-]*$/",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_opaque_id(value: &str) -> Result<(), IdError> {
@@ -308,6 +322,8 @@ mod tests {
     fn validates_context_ids() {
         assert!(ContextId::try_from("alpha-2").is_ok());
         assert!(ContextId::try_from("-alpha").is_err());
+        assert!(ContextId::try_from("alpha-").is_err());
+        assert!(ContextId::try_from("alpha--2").is_err());
         assert!(ContextId::try_from("Alpha").is_err());
     }
 
