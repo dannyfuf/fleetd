@@ -24,7 +24,12 @@ use crate::{
     model::CommandKind,
 };
 
+/// Deadline for local reads and mutations, which are CPU- and disk-bound.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Deadline for [`CommandKind::Network`], which waits on a remote and a link fleetd does not
+/// control. It stays bounded because a stalled TCP connection or an SSH askpass would otherwise
+/// hold the per-repository mutation lock forever.
+const DEFAULT_NETWORK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_PREVIEW_LIMIT: usize = 16 * 1024;
 const DEFAULT_OUTPUT_LIMIT: usize = 64 * 1024 * 1024;
 
@@ -164,6 +169,8 @@ pub struct Runner {
     git_program: OsString,
     env: Arc<BTreeMap<OsString, OsString>>,
     output_limit: usize,
+    read_timeout: Duration,
+    network_timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -189,6 +196,8 @@ impl Runner {
             git_program: OsString::from("git"),
             env: Arc::new(BTreeMap::new()),
             output_limit: DEFAULT_OUTPUT_LIMIT,
+            read_timeout: DEFAULT_TIMEOUT,
+            network_timeout: DEFAULT_NETWORK_TIMEOUT,
         }
     }
 
@@ -205,6 +214,14 @@ impl Runner {
         self
     }
 
+    /// Replaces the `git` executable, for tests that script a fake `git`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_program(mut self, program: impl Into<OsString>) -> Self {
+        self.git_program = program.into();
+        self
+    }
+
     /// Subscribes to started and finished command events.
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<crate::CommandEvent> {
         self.inner.log.subscribe()
@@ -213,6 +230,17 @@ impl Runner {
     /// Returns a snapshot of the bounded command history.
     pub(crate) fn recent(&self) -> Vec<CommandRecord> {
         self.inner.log.recent()
+    }
+
+    /// Picks the deadline for one command.
+    ///
+    /// A fetch, pull, or push waits on a remote and on a link fleetd does not control, so it
+    /// cannot share the deadline that bounds a local read or mutation.
+    fn deadline_for(&self, kind: CommandKind) -> Duration {
+        match kind {
+            CommandKind::Read | CommandKind::Mutation => self.read_timeout,
+            CommandKind::Network => self.network_timeout,
+        }
     }
 
     /// Runs one command without shell interpolation.
@@ -298,7 +326,8 @@ impl Runner {
             start,
         ));
 
-        let output = match tokio::time::timeout(DEFAULT_TIMEOUT, &mut supervisor).await {
+        let deadline = self.deadline_for(specification.kind);
+        let output = match tokio::time::timeout(deadline, &mut supervisor).await {
             Ok(Ok(Ok(output))) => {
                 cancellation.disarm();
                 output
@@ -351,7 +380,7 @@ impl Runner {
                 self.inner.log.finished(record);
                 return Err(GitError::Timeout {
                     argv: display_argv,
-                    timeout: DEFAULT_TIMEOUT,
+                    timeout: deadline,
                 });
             }
         };
@@ -683,6 +712,30 @@ mod tests {
         };
         assert_eq!(message, "fatal: https://[REDACTED]@example.test/org/repo");
         assert_eq!(raw_stderr, stderr);
+    }
+
+    #[tokio::test]
+    async fn network_commands_get_their_own_deadline() {
+        let mut runner = shell_runner();
+        runner.read_timeout = Duration::from_millis(100);
+        runner.network_timeout = Duration::from_secs(30);
+        assert!(runner.network_timeout > runner.read_timeout);
+        let sleeper =
+            |kind| GitCommand::new(std::env::temp_dir(), kind).args(["-c", "exec sleep 0.4"]);
+
+        runner
+            .run(sleeper(CommandKind::Network))
+            .await
+            .expect("a network command outlives the read deadline");
+
+        let error = runner
+            .run(sleeper(CommandKind::Read))
+            .await
+            .expect_err("a read is still bounded by the read deadline");
+        let GitError::Timeout { timeout, .. } = error else {
+            panic!("expected a timeout error");
+        };
+        assert_eq!(timeout, Duration::from_millis(100));
     }
 
     #[tokio::test]

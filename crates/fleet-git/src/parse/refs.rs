@@ -34,11 +34,16 @@ pub fn local_branches(input: &[u8]) -> Result<Vec<Branch>> {
 }
 
 /// Parses and groups remote-tracking branch records.
+///
+/// A remote's symbolic HEAD is recognised by its `%(symref)` field, the only field that
+/// distinguishes it: `%(refname:short)` shortens `refs/remotes/origin/HEAD` to `origin`, not to
+/// `origin/HEAD`. Grouping splits at the first `/`, so a remote whose own name contains a slash
+/// is reported under its first segment.
 pub fn remote_branches(input: &[u8]) -> Result<Vec<RemoteBranchGroup>> {
     let mut groups: BTreeMap<String, Vec<RemoteBranch>> = BTreeMap::new();
     for fields in records(input, 5, "remote branches")? {
         let name = crate::parse::text(fields[0]).into_owned();
-        if name.ends_with("/HEAD") {
+        if !fields[4].is_empty() {
             continue;
         }
         let Some((remote, branch)) = name.split_once('/') else {
@@ -190,7 +195,9 @@ mod tests {
 
     #[test]
     fn groups_remote_branches_and_skips_symbolic_head() {
-        let input: &[u8] = b"origin/main\x00aaa\x00subject\x001\x00\x00\norigin/topic\x00bbb\x00other\x002\x00\x00\nupstream/main\x00ccc\x00third\x003\x00\x00\norigin/HEAD\x00aaa\x00\x000\x00refs/remotes/origin/main\x00\n";
+        // `%(refname:short)` renders `refs/remotes/origin/HEAD` as `origin`, never as
+        // `origin/HEAD`; the last field is `%(symref)`, which only a symbolic ref fills in.
+        let input: &[u8] = b"origin/main\x00aaa\x00subject\x001\x00\x00\norigin/topic\x00bbb\x00other\x002\x00\x00\nupstream/main\x00ccc\x00third\x003\x00\x00\norigin\x00aaa\x00\x000\x00refs/remotes/origin/main\x00\n";
         let groups = remote_branches(input).expect("parse remotes");
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].remote, "origin");
@@ -198,6 +205,22 @@ mod tests {
         assert_eq!(groups[0].branches[0].branch, "main");
         assert_eq!(groups[0].branches[0].name, "origin/main");
         assert_eq!(groups[1].remote, "upstream");
+    }
+
+    #[test]
+    fn skips_the_symbolic_head_of_a_remote_whose_name_contains_a_slash() {
+        // Git accepts `git remote add up/stream <url>`, and its symbolic HEAD then shortens to
+        // `up/stream` — a name that no suffix test can tell apart from a branch.
+        let input: &[u8] = b"up/stream/main\x00aaa\x00subject\x001\x00\x00\nup/stream\x00aaa\x00\x000\x00refs/remotes/up/stream/main\x00\n";
+        let groups = remote_branches(input).expect("parse remotes");
+
+        assert!(
+            groups.iter().all(|group| group
+                .branches
+                .iter()
+                .all(|branch| branch.name != "up/stream")),
+            "the symbolic HEAD must not be listed as a branch: {groups:?}"
+        );
     }
 
     #[test]

@@ -113,16 +113,28 @@ impl Repository {
         for command in commands {
             match self.run_reword_command(command).await {
                 Ok(output) => outputs.push(output),
-                Err(error) => {
-                    let _ = self
-                        .runner
-                        .run(self.rebase_control_command("--abort"))
-                        .await;
-                    return Err(error);
-                }
+                Err(error) => return Err(self.roll_back_reword(error).await),
             }
         }
         Ok(reword_result(outputs))
+    }
+
+    /// Undoes the rebase this transaction started, folding a failed undo into `error`.
+    ///
+    /// The first command of the transaction *is* the rebase, so when that one is what failed
+    /// there is usually nothing to abort and Git's "no rebase in progress" is the expected
+    /// answer. Any other abort failure means the worktree is still stopped mid-rebase and every
+    /// later mutation will refuse, which the caller has to be able to say.
+    async fn roll_back_reword(&self, error: GitError) -> GitError {
+        match self
+            .runner
+            .run(self.rebase_control_command("--abort"))
+            .await
+        {
+            Ok(_) => error,
+            Err(abort) if is_no_rebase_in_progress(&abort) => error,
+            Err(_) => with_failed_rollback(error),
+        }
     }
 
     async fn run_reword_command(&self, command: GitCommand) -> Result<GitOutput> {
@@ -303,6 +315,57 @@ impl Repository {
     }
 }
 
+/// What the caller is told when the rollback itself failed.
+const FAILED_ROLLBACK: &str = "and `git rebase --abort` failed too, so the worktree is left \
+                               mid-rebase";
+
+/// Whether Git refused an abort because there was nothing to abort.
+fn is_no_rebase_in_progress(error: &GitError) -> bool {
+    let (GitError::Exit { message, .. } | GitError::Conflict { message, .. }) = error else {
+        return false;
+    };
+    message
+        .to_ascii_lowercase()
+        .contains("no rebase in progress")
+}
+
+/// Appends [`FAILED_ROLLBACK`] to the text the UI displays for `error`.
+///
+/// Only the two variants that carry Git's own message can say it; a spawn, timeout, or parse
+/// failure of the transaction would have failed the abort the same way, and the abort's own
+/// record is in the command log either way.
+fn with_failed_rollback(error: GitError) -> GitError {
+    match error {
+        GitError::Exit {
+            status,
+            stdout,
+            stderr,
+            argv,
+            message,
+        } => GitError::Exit {
+            status,
+            stdout,
+            stderr,
+            argv,
+            message: format!("{message} ({FAILED_ROLLBACK})"),
+        },
+        GitError::Conflict {
+            status,
+            stdout,
+            stderr,
+            argv,
+            message,
+        } => GitError::Conflict {
+            status,
+            stdout,
+            stderr,
+            argv,
+            message: format!("{message} ({FAILED_ROLLBACK})"),
+        },
+        other => other,
+    }
+}
+
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -316,5 +379,90 @@ fn reword_result(outputs: Vec<GitOutput>) -> MutationResult {
     MutationResult {
         records: outputs.into_iter().map(|output| output.record).collect(),
         warning: (!warnings.is_empty()).then(|| warnings.join("\n")),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::Repository;
+    use crate::{GitError, RepoPaths, Runner};
+    use std::{
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicU32, AtomicU64},
+        },
+    };
+    use tokio::sync::Mutex;
+
+    /// A `git` that succeeds at everything a reword needs except `commit --amend`, and whose
+    /// `rebase --abort` fails with `$FLEET_GIT_TEST_ABORT_ERROR`.
+    const FAKE_GIT: &str = r#"#!/bin/sh
+case " $* " in
+  *' --abort '*) printf '%s\n' "$FLEET_GIT_TEST_ABORT_ERROR" >&2; exit 128 ;;
+  *' rev-list '*) printf 'aaa\nbbb\nccc\n' ;;
+  *' --amend '*) printf 'fatal: commit --amend refused\n' >&2; exit 1 ;;
+  *) exit 0 ;;
+esac
+"#;
+
+    fn fake_git(directory: &Path) -> PathBuf {
+        let program = directory.join("fake-git");
+        std::fs::write(&program, FAKE_GIT).expect("write fake git");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake git executable");
+        program
+    }
+
+    fn repository(worktree: &Path, abort_error: &str) -> Repository {
+        let runner = Runner::default()
+            .with_program(fake_git(worktree))
+            .env("FLEET_GIT_TEST_ABORT_ERROR", abort_error);
+        Repository {
+            paths: RepoPaths {
+                worktree_root: worktree.to_path_buf(),
+                git_dir: worktree.join(".git"),
+                common_dir: worktree.join(".git"),
+            },
+            runner: Arc::new(runner),
+            mutation_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
+            snapshot_invalidation: AtomicU64::new(0),
+            diff_context: AtomicU32::new(crate::DEFAULT_DIFF_CONTEXT),
+        }
+    }
+
+    /// Rewords with a `git` whose `commit --amend` fails, so the transaction rolls back.
+    async fn failed_reword(abort_error: &str) -> String {
+        let temp = tempfile::tempdir().expect("temp worktree");
+        let repository = repository(temp.path(), abort_error);
+        let error = repository
+            .reword_commit(
+                &crate::ObjectId::from("aaa"),
+                "new subject",
+                Path::new("/nonexistent/helper"),
+            )
+            .await
+            .expect_err("the amend must fail");
+        let GitError::Exit { message, .. } = error else {
+            panic!("expected an exit error, got {error:?}");
+        };
+        message
+    }
+
+    #[tokio::test]
+    async fn failed_reword_rollback_reaches_the_caller() {
+        let message = failed_reword("fatal: cannot abort: .git/index.lock exists").await;
+
+        assert!(message.contains("commit --amend refused"), "{message}");
+        assert!(message.contains("mid-rebase"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn rollback_without_a_rebase_to_abort_is_not_reported() {
+        let message = failed_reword("fatal: No rebase in progress?").await;
+
+        assert_eq!(message, "fatal: commit --amend refused");
     }
 }
