@@ -459,17 +459,19 @@ fn facts_section(cx: &mut App) -> AnyElement {
         LAYOUT.labeled(
             "key/value list",
             &t,
-            KeyValueList::titled("safety")
-                .trailing(FreshnessStamp::new("checked", 14).action("I", "re-check"))
-                .row("dirty", FactValue::known("12 files"))
-                .row("ahead / behind", FactValue::known("⇡3 ⇣0"))
-                .row("unique commits", FactValue::Null)
-                .row("published", FactValue::known("no"))
-                .mono_row(
-                    "path",
-                    FactValue::known("~/.fleet/worktrees/buk/payroll/feat"),
-                )
-                .row("warning", FactValue::warning("gh unavailable")),
+            KeyValueList::titled_with_trailing(
+                "safety",
+                FreshnessStamp::new("checked", 14).action("I", "re-check"),
+            )
+            .row("dirty", FactValue::known("12 files"))
+            .row("ahead / behind", FactValue::known("⇡3 ⇣0"))
+            .row("unique commits", FactValue::Null)
+            .row("published", FactValue::known("no"))
+            .mono_row(
+                "path",
+                FactValue::known("~/.fleet/worktrees/buk/payroll/feat"),
+            )
+            .row("warning", FactValue::warning("gh unavailable")),
         ),
         LAYOUT.labeled("fact list · compact (y)", &t, compact),
         LAYOUT.labeled("fact list · expanded (Y)", &t, expanded),
@@ -944,15 +946,22 @@ fn terminal_section(cx: &mut App) -> AnyElement {
     let strip_el = box_of(
         &t,
         t.metrics.pane_header_h,
+        // Tab 2 is the active one and carries the attention dot: NATIVE-AGENTS.md §3.3's amber
+        // is the single mark that survives selection, so the overview has to show it selected.
         TerminalTabStrip::new([
             TerminalTab::new(1, "nvim").keep_alive(Icon::FilePen),
             TerminalTab::new(2, "cc")
                 .keep_alive(Icon::Bot)
-                .activity(true),
-            TerminalTab::new(3, "lg"),
+                .attention(true),
+            TerminalTab::new(3, "lg").activity(true),
             TerminalTab::new(4, "test").exited(1),
             TerminalTab::new(5, "server").exited(None),
             TerminalTab::new(6, "waking").starting(true),
+            TerminalTab::new(7, "agent").agent_status(TerminalAgentState::Working),
+            TerminalTab::new(8, "done")
+                .agent_status(TerminalAgentState::Finished)
+                .unread(true),
+            TerminalTab::new(9, "review").kind(TerminalTabKind::Native),
         ])
         .active(1),
     );
@@ -1120,7 +1129,19 @@ fn input_section(cx: &mut App) -> AnyElement {
         LAYOUT.labeled(
             "cycler",
             &t,
-            Cycler::labeled("host", "local").has_prev(false),
+            div()
+                .flex()
+                .flex_col()
+                .w(px(360.0))
+                .child(Cycler::labeled("host", "local").has_prev(false))
+                // Off grid: a persisted value outside the configured steps keeps both arrows
+                // live so the next move returns to a known one.
+                .child(
+                    Cycler::labeled("host", "devbox (removed)")
+                        .off_grid(true)
+                        .has_prev(false)
+                        .has_next(false),
+                ),
         ),
         LAYOUT.labeled(
             "toggles",
@@ -1164,6 +1185,14 @@ fn input_section(cx: &mut App) -> AnyElement {
                 SegmentedTab::new("review", 4).loading(true),
             ])
             .active(0),
+        ),
+        LAYOUT.labeled(
+            // The parent Hub's treatment: selected background, no accent underline.
+            "segmented tabs · not underlined",
+            &t,
+            SegmentedTabs::new([SegmentedTab::new("mine", 7), SegmentedTab::new("review", 4)])
+                .active(0)
+                .underlined(false),
         ),
         LAYOUT.labeled(
             "select + fuzzy list",

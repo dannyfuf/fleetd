@@ -500,27 +500,29 @@ fn facts_section(cx: &mut App) -> AnyElement {
         .faint()
     };
 
-    let kv = KeyValueList::titled("safety")
-        .trailing(FreshnessStamp::new("checked", 14).action("I", "re-check"))
-        .row("dirty", FactValue::known("12 files"))
-        .row("ahead / behind", FactValue::known("\u{21e1}3 \u{21e3}0"))
-        .row("unique commits", FactValue::Null)
-        .row("published", FactValue::known("no"))
-        .mono_row(
-            "path",
-            FactValue::known("~/.fleet/worktrees/buk/payroll/feat"),
-        )
-        .row("warning", FactValue::warning("gh unavailable"));
+    let kv = KeyValueList::titled_with_trailing(
+        "safety",
+        FreshnessStamp::new("checked", 14).action("I", "re-check"),
+    )
+    .row("dirty", FactValue::known("12 files"))
+    .row("ahead / behind", FactValue::known("\u{21e1}3 \u{21e3}0"))
+    .row("unique commits", FactValue::Null)
+    .row("published", FactValue::known("no"))
+    .mono_row(
+        "path",
+        FactValue::known("~/.fleet/worktrees/buk/payroll/feat"),
+    )
+    .row("warning", FactValue::warning("gh unavailable"));
 
-    let kv_refreshing = KeyValueList::titled("safety")
-        .trailing(
-            FreshnessStamp::new("checked", 240)
-                .refreshing("kv-refreshing")
-                .action("I", "re-check"),
-        )
-        .row("dirty", FactValue::known("12 files"))
-        .row("unique commits", FactValue::Null)
-        .refreshing(true);
+    let kv_refreshing = KeyValueList::titled_with_trailing(
+        "safety",
+        FreshnessStamp::new("checked", 240)
+            .refreshing("kv-refreshing")
+            .action("I", "re-check"),
+    )
+    .row("dirty", FactValue::known("12 files"))
+    .row("unique commits", FactValue::Null)
+    .refreshing(true);
 
     let doctor = DoctorTable::new([
         DoctorRow::new("git", DoctorStatus::Ok, "git version 2.49.0"),

@@ -745,6 +745,16 @@ fn choice_section(gallery: &InputGallery, theme: &Theme) -> AnyElement {
                             Cycler::labeled("theme", "system")
                                 .label_width(px(140.0))
                                 .disabled(true),
+                        )
+                        // A persisted value that is no longer one of the configured steps:
+                        // both arrows stay live even though neither neighbour exists, so the
+                        // next move lands back on a known step.
+                        .child(
+                            Cycler::labeled("host", "devbox (removed)")
+                                .label_width(px(140.0))
+                                .off_grid(true)
+                                .has_prev(false)
+                                .has_next(false),
                         ),
                 ),
             ),
@@ -847,6 +857,19 @@ fn tabs_and_select_section(gallery: &InputGallery, theme: &Theme) -> AnyElement 
                 theme,
                 SegmentedTabs::new([SegmentedTab::bare("keys"), SegmentedTab::bare("glossary")])
                     .active(1),
+            ),
+            LAYOUT.labeled(
+                // The parent Hub's treatment: a selected background instead of the accent
+                // underline (DESIGN-SYSTEM.md §6 `SegmentedTabs`).
+                "tabs \u{b7} not underlined",
+                theme,
+                SegmentedTabs::new([
+                    SegmentedTab::new("mine", 7),
+                    SegmentedTab::new("review", 4),
+                    SegmentedTab::bare("closed"),
+                ])
+                .active(gallery.tab)
+                .underlined(false),
             ),
             LAYOUT.labeled(
                 "select, open (o)",

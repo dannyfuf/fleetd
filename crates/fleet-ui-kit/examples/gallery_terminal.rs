@@ -406,7 +406,7 @@ fn tabs_section(cx: &mut App) -> AnyElement {
             .id("tabs-default"),
         ),
         LAYOUT.labeled(
-            "every mark",
+            "every mark \u{b7} process",
             &t,
             TerminalTabStrip::new([
                 TerminalTab::new(1, "nvim").keep_alive(Icon::FilePen),
@@ -420,6 +420,27 @@ fn tabs_section(cx: &mut App) -> AnyElement {
             ])
             .id("tabs-marks")
             .active(2),
+        ),
+        // NATIVE-AGENTS.md §3.3: neutral = the agent wrote while you were away, amber = the
+        // agent is blocked on you, and amber is the one mark that survives being the selected
+        // tab — which is why tab 6 is the active one here.
+        LAYOUT.labeled(
+            "every mark \u{b7} agent",
+            &t,
+            TerminalTabStrip::new([
+                TerminalTab::new(1, "cc").agent_status(TerminalAgentState::Working),
+                TerminalTab::new(2, "codex").agent_status(TerminalAgentState::Finished),
+                TerminalTab::new(3, "notes").unread(true),
+                TerminalTab::new(4, "review")
+                    .kind(TerminalTabKind::Native)
+                    .unread(true),
+                TerminalTab::new(5, "gate").attention(true),
+                TerminalTab::new(6, "open gate")
+                    .kind(TerminalTabKind::Native)
+                    .attention(true),
+            ])
+            .id("tabs-agent-marks")
+            .active(5),
         ),
         LAYOUT.labeled(
             "waking \u{b7} every PTY still spawning",
