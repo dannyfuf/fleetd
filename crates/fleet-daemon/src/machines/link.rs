@@ -23,7 +23,7 @@ use fleet_proto::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::{
-    sync::{broadcast, mpsc, oneshot, watch},
+    sync::{Notify, broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, sleep, timeout_at},
 };
@@ -76,6 +76,11 @@ pub trait RemoteEndpoint: Send + Sync {
         None
     }
     async fn request(&self, body: RequestBody) -> DaemonResult<ResponseBody>;
+    /// Wakes a link that is sleeping in reconnect backoff so its next attempt runs immediately
+    /// and its backoff restarts from the configured floor.
+    ///
+    /// Implementations must treat this as a no-op for a link that is already connected.
+    fn nudge_reconnect(&self) {}
     fn events(&self) -> broadcast::Receiver<Event>;
     fn state_changes(&self) -> watch::Receiver<LinkState>;
     async fn close(&self);
@@ -102,6 +107,7 @@ pub struct RemoteLink {
     started: AtomicBool,
     closed: Arc<AtomicBool>,
     shutdown_tx: watch::Sender<bool>,
+    reconnect: Arc<Notify>,
     task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -140,6 +146,7 @@ impl RemoteLink {
             started: AtomicBool::new(false),
             closed: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
+            reconnect: Arc::new(Notify::new()),
             task: tokio::sync::Mutex::new(None),
         })
     }
@@ -184,6 +191,7 @@ impl RemoteLink {
             last_error: Arc::clone(&self.last_error),
             closed: Arc::clone(&self.closed),
             shutdown: self.shutdown_tx.subscribe(),
+            reconnect: Arc::clone(&self.reconnect),
         };
         let task = tokio::spawn(run_link(actor, initial.ok()));
         *self.task.lock().await = Some(task);
@@ -296,6 +304,15 @@ impl RemoteEndpoint for RemoteLink {
         }
     }
 
+    fn nudge_reconnect(&self) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        // A permit is retained when the actor is not currently sleeping, so a nudge that races a
+        // disconnect still shortens the following backoff instead of being lost.
+        self.reconnect.notify_one();
+    }
+
     fn events(&self) -> broadcast::Receiver<Event> {
         self.events_tx.subscribe()
     }
@@ -333,6 +350,7 @@ struct LinkActor {
     last_error: Arc<RwLock<Option<String>>>,
     closed: Arc<AtomicBool>,
     shutdown: watch::Receiver<bool>,
+    reconnect: Arc<Notify>,
 }
 
 async fn run_link(actor: LinkActor, mut established: Option<Established>) {
@@ -348,6 +366,7 @@ async fn run_link(actor: LinkActor, mut established: Option<Established>) {
         last_error,
         closed,
         mut shutdown,
+        reconnect,
     } = actor;
     let mut pending = HashMap::<u64, oneshot::Sender<DaemonResult<ResponseBody>>>::new();
     let backoff_floor = options.backoff_min.min(options.backoff_max);
@@ -358,8 +377,10 @@ async fn run_link(actor: LinkActor, mut established: Option<Established>) {
             return;
         }
         if established.is_none() {
+            let mut nudged = false;
             tokio::select! {
                 () = sleep(backoff) => {}
+                () = reconnect.notified() => nudged = true,
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         fail_pending(&mut pending, "remote link is closed");
@@ -367,6 +388,9 @@ async fn run_link(actor: LinkActor, mut established: Option<Established>) {
                     }
                     continue;
                 }
+            }
+            if nudged {
+                backoff = backoff_floor;
             }
             state.send_replace(LinkState::Connecting);
             match establish(&provider, &local_daemon_id, options.hello_timeout).await {
@@ -774,4 +798,120 @@ fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     lock.write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+    use crate::machines::{ExecOutput, MachineAddress, MachineError, ProbeReport};
+
+    /// Provider whose stream never opens, so every reconnect attempt fails immediately.
+    struct UnreachableProvider {
+        id: HostId,
+        attempts: AtomicUsize,
+    }
+
+    impl UnreachableProvider {
+        fn new() -> Self {
+            Self {
+                id: HostId::try_from("backoff-box").unwrap_or_else(|error| panic!("{error}")),
+                attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl MachineProvider for UnreachableProvider {
+        fn id(&self) -> &HostId {
+            &self.id
+        }
+        fn provider_name(&self) -> &'static str {
+            "command"
+        }
+        async fn resolve(&self) -> Result<MachineAddress, MachineError> {
+            Err(MachineError::Unreachable("offline".to_owned()))
+        }
+        async fn probe(&self, _timeout: Duration) -> ProbeReport {
+            ProbeReport {
+                reachable: false,
+                latency_ms: None,
+                version: None,
+                error: Some("offline".to_owned()),
+                stderr: None,
+            }
+        }
+        async fn exec(
+            &self,
+            _argv: &[String],
+            _timeout: Duration,
+        ) -> Result<ExecOutput, MachineError> {
+            Err(MachineError::Unreachable("offline".to_owned()))
+        }
+        async fn open_stream(&self) -> Result<Box<dyn AsyncDuplex>, MachineError> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            Err(MachineError::Unreachable("offline".to_owned()))
+        }
+        fn fleetd_binary(&self) -> &str {
+            "fleetd"
+        }
+        fn fleet_home(&self) -> Option<&str> {
+            Some("~/.fleet")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nudge_wakes_a_sleeping_link_and_restarts_backoff_from_the_floor() {
+        let provider = Arc::new(UnreachableProvider::new());
+        let link = RemoteLink::new(
+            Arc::clone(&provider) as Arc<dyn MachineProvider>,
+            LinkOptions {
+                backoff_min: Duration::from_secs(1),
+                backoff_max: Duration::from_secs(60),
+                hello_timeout: Duration::from_secs(1),
+            },
+        );
+        link.connect().await.expect_err("provider is unreachable");
+
+        // Let the backoff grow well past its floor (1s, 2s, 4s, 8s, 16s, ...).
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        let grown = provider.attempts();
+        assert!(grown >= 5, "expected several failed attempts, got {grown}");
+
+        link.nudge_reconnect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            provider.attempts(),
+            grown + 1,
+            "a nudge must retry immediately instead of waiting out the grown backoff"
+        );
+
+        // With the backoff reset to the floor the next attempt lands ~2s later; without the reset
+        // the link would still be sleeping for tens of seconds.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            provider.attempts() >= grown + 2,
+            "a nudge must reset the backoff to its floor"
+        );
+
+        link.close().await;
+    }
+
+    #[tokio::test]
+    async fn nudge_on_a_connected_link_does_not_disturb_it() {
+        let provider = Arc::new(UnreachableProvider::new());
+        let link = RemoteLink::new(
+            Arc::clone(&provider) as Arc<dyn MachineProvider>,
+            LinkOptions::default(),
+        );
+        // Not connected yet: the nudge must be inert rather than panic or spawn work.
+        link.nudge_reconnect();
+        assert_eq!(provider.attempts(), 0);
+        assert_eq!(link.state(), LinkState::Down);
+    }
 }
