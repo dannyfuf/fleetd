@@ -570,7 +570,16 @@ impl ConnectionEffect {
     fn apply(self, state: &mut ConnectionState) {
         match self {
             Self::None => {}
-            Self::Subscribe(events) => state.subscriptions = events,
+            // The daemon adds the kinds a Subscribe names to the set it already holds
+            // (`server/connection.rs`), so the reconnect handshake must replay that union or the
+            // same connection would deliver a narrower event set after a reconnect than before.
+            Self::Subscribe(events) => {
+                for kind in events {
+                    if !state.subscriptions.contains(&kind) {
+                        state.subscriptions.push(kind);
+                    }
+                }
+            }
             Self::Unsubscribe => state.subscriptions.clear(),
             Self::Attach(terminal, attachment) => {
                 state.attachments.insert(terminal, attachment);
@@ -1064,11 +1073,217 @@ mod tests {
     }
 
     #[test]
-    fn nearly_expired_command_retains_connection_write_budget() {
-        let request_expiry = Instant::now() + Duration::from_millis(1);
-        let write_deadline = socket_write_deadline();
+    fn a_second_subscribe_adds_to_the_set_the_daemon_holds() {
+        let mut state = ConnectionState {
+            subscriptions: vec![EventKind::JobUpdated],
+            ..ConnectionState::default()
+        };
 
-        assert!(write_deadline > request_expiry + WRITE_BUDGET / 2);
+        ConnectionEffect::Subscribe(vec![EventKind::Toast, EventKind::JobUpdated])
+            .apply(&mut state);
+
+        assert_eq!(
+            state.subscriptions,
+            vec![EventKind::JobUpdated, EventKind::Toast],
+            "Subscribe is additive on the daemon, so the replayed handshake must add too"
+        );
+        ConnectionEffect::Unsubscribe.apply(&mut state);
+        assert!(
+            state.subscriptions.is_empty(),
+            "Unsubscribe is the only way to clear the set"
+        );
+    }
+
+    fn resize(
+        terminal: u64,
+        cols: u16,
+        awaited: bool,
+    ) -> (
+        Command,
+        Option<oneshot::Receiver<Result<ResponseBody, ProtoError>>>,
+    ) {
+        let (response, receiver) = if awaited {
+            let (sender, receiver) = oneshot::channel();
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        (
+            Command {
+                request: Request {
+                    id: terminal,
+                    body: RequestBody::ResizeTerminal {
+                        terminal: TerminalId(terminal),
+                        cols,
+                        rows: 24,
+                    },
+                },
+                response,
+                expires_at: Some(Instant::now() + REQUEST_TIMEOUT),
+            },
+            receiver,
+        )
+    }
+
+    fn queued_resize_sizes(queued: &VecDeque<Command>) -> Vec<(TerminalId, u16)> {
+        queued
+            .iter()
+            .filter_map(|command| match &command.request.body {
+                RequestBody::ResizeTerminal { terminal, cols, .. } => Some((*terminal, *cols)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_queued_resize_is_superseded_only_for_the_same_terminal() {
+        let mut queued = VecDeque::new();
+        for (terminal, cols) in [(1, 80), (2, 90), (1, 100)] {
+            let (command, _) = resize(terminal, cols, false);
+            queue_disconnected_command(&mut queued, command);
+        }
+
+        assert_eq!(
+            queued_resize_sizes(&queued),
+            vec![(TerminalId(2), 90), (TerminalId(1), 100)],
+            "only the same terminal's older resize is superseded"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_awaited_resize_is_never_dropped_by_coalescing() {
+        let mut queued = VecDeque::new();
+        let (awaited, mut receiver) = resize(1, 80, true);
+        queue_disconnected_command(&mut queued, awaited);
+        let (background, _) = resize(1, 100, false);
+        queue_disconnected_command(&mut queued, background);
+
+        assert_eq!(
+            queued_resize_sizes(&queued),
+            vec![(TerminalId(1), 80), (TerminalId(1), 100)],
+            "a caller awaiting its resize keeps its queued command"
+        );
+        let receiver = receiver.as_mut().expect("awaited resize has a receiver");
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "the awaited resize is still queued, not failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_reconnect_attempt_expires_its_queued_commands() {
+        let mut queued = VecDeque::new();
+        let (response, mut receiver) = oneshot::channel();
+        queued.push_back(Command {
+            request: Request {
+                id: 7,
+                body: RequestBody::DaemonPing,
+            },
+            response: Some(response),
+            expires_at: Some(Instant::now() - Duration::from_millis(1)),
+        });
+        let (live, _) = resize(1, 80, false);
+        queued.push_back(live);
+
+        discard_obsolete_commands(&mut queued);
+
+        assert_eq!(queued.len(), 1, "the unexpired command stays queued");
+        let error = receiver
+            .try_recv()
+            .expect("expired command reports its failure")
+            .expect_err("expired command cannot succeed");
+        assert!(
+            error.message.contains("while reconnecting"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_nearly_expired_request_is_still_written_to_the_socket() {
+        let (client, peer) = UnixStream::pair().expect("socket pair");
+        let transport = protocol_transport(client);
+        let (mut writer, mut reader) = transport.split();
+        let (response, _receiver) = oneshot::channel();
+        let command = Command {
+            request: Request {
+                id: 1,
+                body: RequestBody::DaemonPing,
+            },
+            response: Some(response),
+            expires_at: Some(Instant::now() + Duration::from_millis(1)),
+        };
+        let mut pending = HashMap::new();
+        let mut state = ConnectionState::default();
+        let events = broadcast::Sender::new(16);
+        let metadata = RwLock::new(ConnectionMetadata::default());
+
+        let outcome = send_command(
+            &mut writer,
+            &mut reader,
+            command,
+            &mut pending,
+            &mut state,
+            &events,
+            &metadata,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            DispatchOutcome::Sent,
+            "a request one millisecond from expiry still gets the connection write budget"
+        );
+        assert!(pending.contains_key(&1), "the request awaits its response");
+        drop(peer);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_socket_write_budget_is_not_clamped_to_the_request_expiry() {
+        // A peer that never reads parks the frame mid-write, so the deadline is the only thing
+        // that can end the dispatch and the virtual clock reports which deadline was used.
+        let (client, _peer) = tokio::io::duplex(1);
+        let transport = protocol_transport(client);
+        let (mut writer, mut reader) = transport.split();
+        let (response, _receiver) = oneshot::channel();
+        let command = Command {
+            request: Request {
+                id: 1,
+                body: RequestBody::DaemonPing,
+            },
+            response: Some(response),
+            expires_at: Some(Instant::now() + Duration::from_millis(1)),
+        };
+        let mut pending = HashMap::new();
+        let mut state = ConnectionState::default();
+        let events = broadcast::Sender::new(16);
+        let metadata = RwLock::new(ConnectionMetadata::default());
+        let started = Instant::now();
+
+        let outcome = send_command(
+            &mut writer,
+            &mut reader,
+            command,
+            &mut pending,
+            &mut state,
+            &events,
+            &metadata,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            DispatchOutcome::Disconnected,
+            "a write nobody drains ends by giving up on the socket"
+        );
+        assert!(
+            started.elapsed() >= WRITE_BUDGET,
+            "the write waited {:?}, not the connection's {WRITE_BUDGET:?} budget",
+            started.elapsed()
+        );
     }
 
     #[test]
