@@ -474,6 +474,7 @@ key_table! {
     "2",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose2;
     "3",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose3;
     "4",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose4;
+    "5",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose5;
     "space",         "Agent > AgentDecision > AgentQuestion" => native_agent::Toggle;
     "enter",         "Agent > AgentDecision > AgentQuestion" => native_agent::Answer;
 
@@ -589,6 +590,7 @@ key_table! {
     "r",            "Daemon > Down" => daemon::Retry;
     "L",            "Daemon > Down" => daemon::OpenLog;
     "D",            "Daemon > Down" => daemon::RunDoctor;
+    "r",            "Daemon > Doctor" => daemon::Retry;
     "D",            "Daemon > Doctor" => daemon::RunDoctor;
     "L",            "Daemon > Doctor" => daemon::OpenLog;
     "escape",       "Daemon > Doctor" => daemon::DismissBanner;
@@ -658,6 +660,7 @@ mod tests {
         "Dialog > QuitDaemon",
         "Daemon > Down",
         "Daemon > Banner",
+        "Daemon > Doctor",
         "FirstRun",
     ];
 
@@ -730,6 +733,17 @@ mod tests {
                 .any(|spec| spec.context == "Dialog > CardDetail"
                     && spec.action.ends_with("OpenPalette")),
             "nothing opens the palette from the card detail"
+        );
+    }
+
+    /// The doctor report replaces the whole context chain (`shell/root/focus.rs`), so every
+    /// recovery key the surface it was raised from documented has to live on it too.
+    #[test]
+    fn the_doctor_report_keeps_the_case_b_retry_key() {
+        assert_eq!(
+            action_for_keystroke("Daemon > Doctor", &Keystroke::parse("r").unwrap())
+                .map(|action| action.name()),
+            Some("daemon::Retry")
         );
     }
 

@@ -22,6 +22,13 @@ pub(super) struct AgentTab {
     pub(super) view: Entity<AgentThreadView>,
     /// Repaint on notify plus the command relay. Dropping these ends both.
     pub(super) _subscriptions: Vec<Subscription>,
+    /// The one `@` completion listing this tab asked for.
+    ///
+    /// The latch lives on the tab it guards, not in a screen-wide set: a thread the snapshot
+    /// stops listing loses its view, and a set that outlived it refused to list the rebuilt
+    /// tab's paths for the rest of the session. Holding the `Task` also ends an in-flight scan
+    /// with the view it was for.
+    pub(super) files: Option<Task<()>>,
 }
 
 /// The agent threads of the worktree a session belongs to, in daemon order.
@@ -184,10 +191,7 @@ impl WorkspaceScreen {
             };
             let view = cx.new(|cx| AgentThreadView::new(projection, cx));
             let mut subscriptions = Vec::new();
-            let repaint = state.clone();
-            subscriptions.push(cx.observe(&view, move |_view, cx| {
-                repaint.update(cx, |_, cx| cx.notify());
-            }));
+            subscriptions.push(observe_view_state(&view, thread, state, cx));
             let (relay_bridge, relay_state) = (bridge.clone(), state.clone());
             subscriptions.push(cx.subscribe(&view, move |_view, event, cx| match event {
                 AgentThreadEvent::Command(command) => relay_bridge.send_agent(command.clone()),
@@ -207,6 +211,7 @@ impl WorkspaceScreen {
                 AgentTab {
                     view,
                     _subscriptions: subscriptions,
+                    files: None,
                 },
             );
             // §6: opening a tab asks for the projection and the events after what we hold.
@@ -252,17 +257,7 @@ impl WorkspaceScreen {
             return;
         }
         view.update(cx, |view, cx| view.focus_composer(window, cx));
-        let composing = view.read(cx).is_composing(cx);
-        let scrolling = view.read(cx).is_scrolling();
-        let question_cursor = view.read(cx).question_cursor();
-        state.update(cx, |app, cx| {
-            let mut changed = app.agents.set_composing(thread, composing);
-            changed |= app.agents.set_scrolling(thread, scrolling);
-            changed |= app.agents.set_question_cursor(thread, question_cursor);
-            if changed {
-                cx.notify();
-            }
-        });
+        relay_view_state(&view, thread, state, cx);
         mark_seen(bridge, state, view.read(cx).last_seq(), thread, cx);
     }
 
@@ -270,7 +265,7 @@ impl WorkspaceScreen {
     ///
     /// The scan runs on the background executor because a render must never touch the disk;
     /// the view keeps whatever it already has until the listing arrives.
-    fn offer_worktree_files(&self, model: &Model, thread: ThreadId, cx: &mut App) {
+    pub(super) fn offer_worktree_files(&self, model: &Model, thread: ThreadId, cx: &mut App) {
         // §12: a remote worktree's path belongs to the other machine's filesystem. Walking it
         // here would either find nothing or complete against an unrelated local directory, so
         // a remote thread is simply offered no `@` listing until the daemon can serve one.
@@ -281,7 +276,12 @@ impl WorkspaceScreen {
         else {
             return;
         };
-        if !self.agent_files.borrow_mut().insert(thread) {
+        if self
+            .agent_views
+            .borrow()
+            .get(&thread)
+            .is_none_or(|tab| tab.files.is_some())
+        {
             return;
         }
         let Some(view) = self.agent_view(thread) else {
@@ -290,13 +290,15 @@ impl WorkspaceScreen {
         let listing = cx
             .background_executor()
             .spawn(async move { worktree_files(&path) });
-        cx.spawn(async move |cx| {
+        let scan = cx.spawn(async move |cx| {
             let files = listing.await;
             cx.update(|cx| {
                 view.update(cx, |view, _| view.set_files(files));
             });
-        })
-        .detach();
+        });
+        if let Some(tab) = self.agent_views.borrow_mut().get_mut(&thread) {
+            tab.files = Some(scan);
+        }
     }
 
     /// The entity behind one open agent tab.
@@ -516,6 +518,7 @@ impl WorkspaceScreen {
         root = on_decision!(root, native_agent::Choose2, DecisionKey::Choose(1));
         root = on_decision!(root, native_agent::Choose3, DecisionKey::Choose(2));
         root = on_decision!(root, native_agent::Choose4, DecisionKey::Choose(3));
+        root = on_decision!(root, native_agent::Choose5, DecisionKey::Choose(4));
         root = on_decision!(root, native_agent::Toggle, DecisionKey::Toggle);
         root = on_decision!(root, native_agent::Answer, DecisionKey::Answer);
         root = on_decision!(root, native_agent::ApprovePlan, DecisionKey::ApprovePlan);
@@ -542,6 +545,45 @@ impl WorkspaceScreen {
             open_terminal_fallback(&fallback_state, provider, worktree, cx);
         })
     }
+}
+
+/// Mirrors one thread view's `AppState`-visible state, notifying only when it actually moved.
+///
+/// `AppState` is the single model, so `state.update(cx, |_, cx| cx.notify())` re-runs every
+/// observer the shell has — `synchronize_surfaces` included — for a repaint the view's own
+/// notify already scheduled. Only three values are read off the view by `AppState`-derived
+/// chrome, so the relay writes those and notifies on change, which is the guarded shape
+/// gpui-state-and-memory asks for.
+pub(super) fn relay_view_state(
+    view: &Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) {
+    let composing = view.read(cx).is_composing(cx);
+    let scrolling = view.read(cx).is_scrolling();
+    let question_cursor = view.read(cx).question_cursor();
+    state.update(cx, |app, cx| {
+        let mut changed = app.agents.set_composing(thread, composing);
+        changed |= app.agents.set_scrolling(thread, scrolling);
+        changed |= app.agents.set_question_cursor(thread, question_cursor);
+        if changed {
+            cx.notify();
+        }
+    });
+}
+
+/// The subscription that keeps that mirror current, installed once per tab.
+pub(super) fn observe_view_state(
+    view: &Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    cx: &mut App,
+) -> Subscription {
+    let repaint = state.clone();
+    cx.observe(view, move |view, cx| {
+        relay_view_state(&view, thread, &repaint, cx);
+    })
 }
 
 /// The entity behind the tab the strip is showing, when it is an agent tab.

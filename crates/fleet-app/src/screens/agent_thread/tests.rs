@@ -1479,6 +1479,107 @@ fn a_local_thread_has_no_host_badge(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// A permission gate the provider is waiting on, which takes the card's bare keys.
+fn permission_gate() -> OpenGate {
+    OpenGate {
+        id: GateId::new(),
+        turn: None,
+        kind: GateKind::Permission {
+            tool: ToolKind::Bash,
+            title: "run a command".to_owned(),
+            payload: "rm -rf target".to_owned(),
+            rationale: None,
+            options: vec![PermissionOption {
+                id: ProviderOptionId("once".to_owned()),
+                label: PermissionChoice::AllowOnce,
+            }],
+        },
+        opened_seq: Seq(2),
+        blocked_since: None,
+    }
+}
+
+/// docs/APP-CONTRACTS.md:101 — render prepares nothing.
+///
+/// The composer's focus ring was written from `Render::render` through
+/// `MultilineInput::set_focus_visible`, which notifies: opening a card dirtied the input from
+/// inside the frame that had already drawn it, so gpui ran a second one. The ring belongs to
+/// the update path that opens the gate, and is observable there without drawing anything.
+#[gpui::test]
+fn the_composer_ring_is_written_when_the_card_opens_not_when_it_renders(
+    cx: &mut gpui::TestAppContext,
+) {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::AppContext as _;
+
+    use super::AgentThreadView;
+
+    let view = cx.new(|cx| AgentThreadView::new(projection(), cx));
+    let input = view.read_with(cx, |view, _| view.input().clone());
+    let dirtied: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&dirtied);
+    cx.update(|cx| {
+        cx.observe(&input, move |_, _| counted.set(counted.get() + 1))
+            .detach();
+    });
+
+    // The gate opens. Nothing is drawn: no window is attached to this view at all.
+    let mut deciding = projection();
+    deciding.gates = vec![permission_gate()];
+    deciding.last_seq = Seq(2);
+    view.update(cx, |view, cx| view.set_projection(deciding, cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        dirtied.get(),
+        1,
+        "the ring follows the open gate, and no render pass may be what writes it"
+    );
+}
+
+/// gpui-app-shell: every surface the shell hands focus to must end up with a focus owner.
+///
+/// `focus_surface` returns for `FocusTarget::AgentThread` and never touches focus again, so a
+/// `focus_composer` that simply declined left an unreachable agent tab with no focused node
+/// once an overlay closed, and every `Agent > …` binding stopped resolving.
+#[gpui::test]
+fn an_unreachable_thread_still_owns_the_keyboard(cx: &mut gpui::TestAppContext) {
+    use gpui::{Focusable as _, VisualTestContext};
+
+    use super::{AgentThreadView, ThreadHost};
+
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let window = cx.add_window(|_, cx| AgentThreadView::new(projection(), cx));
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+
+    window
+        .update(&mut visual, |view, window, cx| {
+            view.set_host(
+                Some(ThreadHost {
+                    name: "dev-box".into(),
+                    unreachable: true,
+                }),
+                cx,
+            );
+            view.focus_composer(window, cx);
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    window
+        .update(&mut visual, |view, window, cx| {
+            assert!(
+                !view.input().read(cx).focus_handle().is_focused(window),
+                "a stood-down composer must not take the keyboard"
+            );
+            assert!(
+                view.focus_handle(cx).is_focused(window),
+                "but the thread view itself has to, or the tab has no focus owner at all"
+            );
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
 /// The three unreachable sentences all name the host and never repeat one another.
 #[test]
 fn the_unreachable_copy_names_the_machine_in_every_place_it_appears() {

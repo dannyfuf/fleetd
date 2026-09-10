@@ -541,7 +541,7 @@ on `y`; a focused transcript row is `AgentRow`. `^s` stays the only global prefi
 | Idle | `⏎` send · `⇧⏎` newline · `⇧⇥` plan mode · `/` commands · `@` files · `↑` history · `^s m` model · `^s [` scroll (toggles; `esc` also leaves) · `^s a`/`^s A` new thread · `^s x` close tab · `^s F` terminal fallback |
 | Working | `esc` stop · `⏎` queue message · `^s [` scroll · `^s a`/`^s A` new thread · `^s x` close tab · `^s F` terminal fallback |
 | Decision: permission | `y` allow once · `a` allow for this session · `n` deny · `e` edit the command (only where the provider accepts one) · `esc` deny and stop |
-| Decision: question | `1–4` choose · `space` toggle (multi-select) · `⏎` answer |
+| Decision: question | `1–5` choose (four provider options plus the "Something else…" row) · `space` toggle (multi-select) · `⏎` answer |
 | Decision: plan | `y` approve and build · `n` ask for changes · `⏎` view full plan |
 | Row focus | `⏎` expand/collapse · `u` revert edit or turn · `o` open in editor |
 

@@ -297,6 +297,8 @@ pub mod native_agent {
             Choose3,
             /// `4` — choose question option four.
             Choose4,
+            /// `5` — choose question option five, the free-text row a question appends.
+            Choose5,
             /// `Space` — toggle a multi-select option.
             Toggle,
             /// `Enter` — submit question answers.

@@ -1085,3 +1085,134 @@ fn a_reattach_request_reaches_the_workspace_model_for_the_shown_terminal() {
     );
     assert!(!model_of(&app).reattach);
 }
+
+/// gpui-state-and-memory: `cx.notify()` follows a real state change.
+///
+/// Every `AgentThreadView` repaint was relayed into an unconditional `AppState` notify, so each
+/// streamed delta re-ran every observer the shell has — `synchronize_surfaces` and its whole
+/// reconcile included — for a frame the view's own notify had already scheduled. The relay has
+/// to stay, because the composer, scroll and question-cursor words on the status bar are read
+/// off the view; it just has to notify only when one of those three actually moved.
+#[gpui::test]
+fn a_view_repaint_notifies_appstate_only_when_its_mirror_moved(cx: &mut gpui::TestAppContext) {
+    use std::cell::Cell;
+
+    use crate::screens::agent_thread::AgentThreadView;
+    use gpui::AppContext as _;
+
+    let (app, thread) = app_showing_an_agent_tab();
+    let state = cx.new(|_| app);
+    let projection = fleet_core::agents::ThreadProjection::new(
+        thread,
+        worktree_id(),
+        fleet_core::agents::AgentKind::Claude,
+    );
+    let view = cx.new(|cx| AgentThreadView::new(projection, cx));
+    let _relay = cx.update(|cx| observe_view_state(&view, thread, &state, cx));
+    // `sync_agent_views` primes the mirror on every pass; do the same before counting, so the
+    // first write of a value the mirror has never held is not mistaken for a repaint.
+    cx.update(|cx| relay_view_state(&view, thread, &state, cx));
+
+    let passes: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&passes);
+    cx.update(|cx| {
+        cx.observe(&state, move |_, _| counted.set(counted.get() + 1))
+            .detach();
+    });
+
+    // A streamed delta repaints the view and moves none of the three mirrored values.
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(
+        passes.get(),
+        0,
+        "a view-local repaint must not wake every AppState observer"
+    );
+
+    // `^s [` does move one, and the status bar's SCROLL word is derived from it.
+    view.update(cx, |view, cx| view.set_scroll_mode(true, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        passes.get(),
+        1,
+        "a change the chrome reads off the view still has to reach AppState"
+    );
+    state.read_with(cx, |app, _| assert!(app.agents.is_scrolling(thread)));
+}
+
+/// rust-async-background-work checklist 19: a latch lives exactly as long as what it guards.
+///
+/// A snapshot that momentarily stops listing a thread drops its `AgentTab`, and the next frame
+/// builds a fresh view. A screen-wide `@`-listing latch outlived that eviction and refused the
+/// rebuilt tab any paths at all — silently, with no error, for the rest of the session.
+#[gpui::test]
+fn a_rebuilt_agent_tab_is_offered_its_file_listing_again(cx: &mut gpui::TestAppContext) {
+    use crate::screens::agent_thread::AgentThreadView;
+    use gpui::AppContext as _;
+
+    let root = std::env::temp_dir().join("fleet-agent-completion-listing");
+    std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("{error}"));
+    std::fs::write(root.join("lib.rs"), "").unwrap_or_else(|error| panic!("{error}"));
+
+    let (mut app, thread) = app_showing_an_agent_tab();
+    let mut snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("app_with_session installs a snapshot"));
+    snapshot.worktrees = vec![Worktree {
+        id: worktree_id(),
+        repo_id: "buk/payroll"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+        slug: "feat".to_owned(),
+        branch: "feat".to_owned(),
+        base_ref: "main".to_owned(),
+        path: root.display().to_string(),
+        session: "payroll/feat".to_owned(),
+        host: None,
+        created_at: "2026-09-04T12:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    }];
+    app.apply_snapshot(snapshot, Instant::now());
+    app.agents.activate(worktree_id(), thread);
+    let model = model_of(&app);
+
+    let screen = cx.update(WorkspaceScreen::new);
+    let open_tab = |cx: &mut gpui::TestAppContext| {
+        let projection = fleet_core::agents::ThreadProjection::new(
+            thread,
+            worktree_id(),
+            fleet_core::agents::AgentKind::Claude,
+        );
+        let view = cx.new(|cx| AgentThreadView::new(projection, cx));
+        screen.agent_views.borrow_mut().insert(
+            thread,
+            AgentTab {
+                view: view.clone(),
+                _subscriptions: Vec::new(),
+                files: None,
+            },
+        );
+        cx.update(|cx| screen.offer_worktree_files(&model, thread, cx));
+        cx.run_until_parked();
+        view
+    };
+
+    let first = open_tab(cx);
+    first.read_with(cx, |view, _| {
+        assert_eq!(view.files(), ["lib.rs".to_owned()]);
+    });
+
+    // The thread leaves the snapshot for one frame and comes back: `sync_agent_views` evicts
+    // the tab and rebuilds it from scratch.
+    screen.agent_views.borrow_mut().remove(&thread);
+    let rebuilt = open_tab(cx);
+    rebuilt.read_with(cx, |view, _| {
+        assert_eq!(
+            view.files(),
+            ["lib.rs".to_owned()],
+            "a rebuilt tab has to be offered the listing again, not left with none"
+        );
+    });
+}

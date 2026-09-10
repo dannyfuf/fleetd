@@ -25,13 +25,7 @@ use terminal::*;
 pub use model::Location;
 pub(crate) use model::status_kind;
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    rc::Rc,
-    time::Instant,
-};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Instant};
 
 use fleet_core::{
     agents::{ThreadId, ThreadProjection},
@@ -55,7 +49,7 @@ use fleet_ui_kit::{
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, ScrollWheelEvent, SharedString, Size, Subscription,
-    UniformListScrollHandle, Window, div, prelude::*, px,
+    Task, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::{
@@ -90,8 +84,6 @@ pub(crate) struct WorkspaceScreen {
     panes: HashMap<WorktreeId, Pane>,
     /// One live view per opened agent thread, shared with the root's action listeners.
     agent_views: Rc<RefCell<AgentViews>>,
-    /// Threads whose `@` completion listing has already been requested.
-    agent_files: Rc<RefCell<HashSet<ThreadId>>>,
 }
 
 impl WorkspaceScreen {
@@ -103,7 +95,6 @@ impl WorkspaceScreen {
             model: None,
             panes: HashMap::new(),
             agent_views: Rc::new(RefCell::new(AgentViews::new())),
-            agent_files: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
