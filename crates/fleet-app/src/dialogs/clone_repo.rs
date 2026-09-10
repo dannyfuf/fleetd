@@ -5,7 +5,7 @@ use std::time::Duration;
 use fleet_core::{cache::RepoCache, config::CloneProtocol, github::RemoteRepo, ids::ContextId};
 use fleet_proto::{request::RequestBody, response::ResponseBody};
 use fleet_ui_kit::{Icon, prelude::*};
-use gpui::{AnyElement, App, Entity, FocusHandle, Window, div, px};
+use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
     actions::dialog,
@@ -464,7 +464,7 @@ pub(crate) fn render(
     let card = Dialog::new("Clone repo")
         .icon(Icon::CloudDownload)
         .width(super::Dialogs::CloneRepo.width(cx))
-        .height(px(420.0))
+        .when_some(super::Dialogs::CloneRepo.height(), Dialog::height)
         .subtitle(format!("\u{00b7} into context \"{}\"", draft.context_name))
         .body(body)
         .hint_row(

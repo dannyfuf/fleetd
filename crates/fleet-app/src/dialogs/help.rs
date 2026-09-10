@@ -500,7 +500,7 @@ pub(crate) fn render(
             Dialog::new("Keymap")
                 .icon(Icon::CircleQuestionMark)
                 .width(super::Dialogs::Help.width(cx))
-                .height(px(620.0))
+                .when_some(super::Dialogs::Help.height(), Dialog::height)
                 .body(body)
                 .hint_row(
                     KeyHintRow::new()

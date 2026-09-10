@@ -46,6 +46,13 @@ const WIDE_W: Pixels = px(720.0);
 /// §3.8 card width for the three-column keymap.
 const HELP_W: Pixels = px(880.0);
 
+/// §3.8.2 card height for the clone-repo list: `560 × 420`.
+const CLONE_H: Pixels = px(420.0);
+/// §3.8.6 card height for the settings rail plus pane: `720 × 560`.
+const SETTINGS_H: Pixels = px(560.0);
+/// §3.8.7 card height for the three-column keymap: `880 × 620`.
+const HELP_H: Pixels = px(620.0);
+
 /// Which dialog is open (§3.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dialogs {
@@ -127,6 +134,18 @@ impl Dialogs {
             Self::Settings => WIDE_W,
             Self::CardDetail | Self::Help => HELP_W,
             Self::Quit => PROMPT_W,
+        }
+    }
+
+    /// The card height §3.8 fixes for this dialog, if it fixes one. The rest size to their
+    /// content and stop at 90 % of the window, which is what [`Dialog::height`] omitted means.
+    #[must_use]
+    pub(crate) const fn height(&self) -> Option<Pixels> {
+        match self {
+            Self::CloneRepo => Some(CLONE_H),
+            Self::Settings => Some(SETTINGS_H),
+            Self::Help => Some(HELP_H),
+            _ => None,
         }
     }
 
@@ -244,6 +263,53 @@ mod tests {
             Dialogs::NewContext.context_name(),
             Dialogs::EditContext.context_name(),
             "KEYMAP gives both context dialogs one row"
+        );
+    }
+
+    /// Fixed dialog geometry is a named const with a doc comment naming its §3.8 clause, so
+    /// the whole ladder moves together. `mod.rs` is where those consts live, so it is the one
+    /// file this walk skips.
+    #[test]
+    fn dialog_views_take_their_geometry_from_named_consts() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dialogs");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Ok(relative) = path.strip_prefix(&root) else {
+                    continue;
+                };
+                let name = relative.to_string_lossy().replace('\\', "/");
+                if path.extension().is_none_or(|ext| ext != "rs") || name == "mod.rs" {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("reading {name}: {e}"));
+                offenders.extend(
+                    body.lines()
+                        .enumerate()
+                        .filter(|(_, line)| {
+                            // `px(0.0)` is a zero origin, not geometry: `ListState` takes one.
+                            !line.contains("px(0.0)")
+                                && line
+                                    .split("px(")
+                                    .skip(1)
+                                    .any(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+                        })
+                        .map(|(ix, line)| format!("{name}:{}: {}", ix + 1, line.trim())),
+                );
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "dialog geometry belongs in a named const beside NARROW_W: {offenders:#?}"
         );
     }
 

@@ -119,8 +119,12 @@ fn tabs(
                 .gap(theme.space.xs)
                 .px(theme.space.sm)
                 .py(theme.space.xs)
+                // Hover is pointer feedback only (§3): it never paints over the selection
+                // background of the tab the keyboard already put the cursor on.
                 .when(id == selected, |el| el.bg(theme.colors.row_selected))
-                .hover(|s| s.bg(theme.colors.row_hover))
+                .when(id != selected, |el| {
+                    el.hover(|s| s.bg(theme.colors.row_hover))
+                })
                 .on_click(move |_, _, cx| {
                     state.update(cx, |app, cx| {
                         app.watches.select(&session, id);
