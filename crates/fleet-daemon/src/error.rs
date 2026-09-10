@@ -5,6 +5,15 @@ use std::{io, path::PathBuf};
 use fleet_proto::error::{ErrorKind, ProtoError};
 use thiserror::Error;
 
+const NOT_FOUND_PREFIX: &str = "not found: ";
+const CONFLICT_PREFIX: &str = "conflict: ";
+const VALIDATION_PREFIX: &str = "validation failed: ";
+const GIT_PREFIX: &str = "git operation failed: ";
+const GITHUB_PREFIX: &str = "GitHub operation failed: ";
+const PROTOCOL_PREFIX: &str = "protocol error: ";
+const REMOTE_PREFIX: &str = "remote operation failed: ";
+const UNSUPPORTED_PREFIX: &str = "unsupported: ";
+
 /// The result type used throughout the daemon.
 pub type DaemonResult<T> = Result<T, DaemonError>;
 
@@ -12,13 +21,13 @@ pub type DaemonResult<T> = Result<T, DaemonError>;
 #[derive(Debug, Error)]
 pub enum DaemonError {
     /// A requested entity or file does not exist.
-    #[error("not found: {0}")]
+    #[error("{NOT_FOUND_PREFIX}{0}")]
     NotFound(String),
     /// Existing state conflicts with a requested operation.
-    #[error("conflict: {0}")]
+    #[error("{CONFLICT_PREFIX}{0}")]
     Conflict(String),
     /// Input or persisted data failed validation.
-    #[error("validation failed: {0}")]
+    #[error("{VALIDATION_PREFIX}{0}")]
     Validation(String),
     /// A filesystem operation failed.
     #[error("filesystem operation failed for {path}: {source}")]
@@ -36,10 +45,10 @@ pub enum DaemonError {
     #[error("command failed: {0}")]
     Shell(String),
     /// A Git operation failed.
-    #[error("git operation failed: {0}")]
+    #[error("{GIT_PREFIX}{0}")]
     Git(String),
     /// A GitHub CLI operation failed.
-    #[error("GitHub operation failed: {0}")]
+    #[error("{GITHUB_PREFIX}{0}")]
     Github(String),
     /// Process inspection failed.
     #[error("process inspection failed: {0}")]
@@ -51,16 +60,16 @@ pub enum DaemonError {
     #[error("operation cancelled")]
     Cancelled,
     /// Protocol framing or transport failed.
-    #[error("protocol error: {0}")]
+    #[error("{PROTOCOL_PREFIX}{0}")]
     Protocol(String),
     /// A remote machine or daemon could not be reached.
-    #[error("remote operation failed: {0}")]
+    #[error("{REMOTE_PREFIX}{0}")]
     Remote(String),
     /// A recognized operation is unavailable in this daemon build.
     #[error("unimplemented service operation: {0}")]
     Unimplemented(&'static str),
     /// A requested protocol or operation is not supported by this daemon.
-    #[error("unsupported: {0}")]
+    #[error("{UNSUPPORTED_PREFIX}{0}")]
     Unsupported(String),
     /// A Tokio blocking or worker task failed to join.
     #[error("background task failed: {0}")]
@@ -73,6 +82,27 @@ pub(crate) const REMOTE_UNSUPPORTED: &str = "remote operation requires host rout
 /// Builds the refusal returned when a request bypasses remote-host routing.
 pub(crate) fn remote_unsupported() -> DaemonError {
     DaemonError::Unsupported(REMOTE_UNSUPPORTED.to_owned())
+}
+
+/// Removes one prefix that the local error variant will restore when displayed.
+pub(crate) fn strip_proto_error_prefix(kind: ErrorKind, message: String) -> String {
+    let prefix = match kind {
+        ErrorKind::NotFound => NOT_FOUND_PREFIX,
+        ErrorKind::Conflict => CONFLICT_PREFIX,
+        ErrorKind::Validation => VALIDATION_PREFIX,
+        ErrorKind::Unsupported => UNSUPPORTED_PREFIX,
+        ErrorKind::Remote => REMOTE_PREFIX,
+        ErrorKind::Git => GIT_PREFIX,
+        ErrorKind::Github => GITHUB_PREFIX,
+        ErrorKind::Fs | ErrorKind::Tmux | ErrorKind::Unknown => PROTOCOL_PREFIX,
+        ErrorKind::Cancelled => return message,
+    };
+
+    if let Some(stripped) = message.strip_prefix(prefix) {
+        stripped.to_owned()
+    } else {
+        message
+    }
 }
 
 impl DaemonError {
