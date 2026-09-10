@@ -646,7 +646,7 @@ impl Services {
             fleet_proto::error::ErrorKind::Git => DaemonError::Git(error.message),
             fleet_proto::error::ErrorKind::Github => DaemonError::Github(error.message),
             fleet_proto::error::ErrorKind::Fs => DaemonError::fs(
-                self.home.join("agents"),
+                fleet_core::paths::FleetHome::new(self.home.clone()).agents_path(),
                 std::io::Error::other(error.message),
             ),
             fleet_proto::error::ErrorKind::Tmux

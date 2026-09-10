@@ -68,15 +68,16 @@ impl Services {
             &adapters,
             sessions.clone(),
         );
+        let fleet_home = fleet_core::paths::FleetHome::new(home.clone());
         let agents = agents::AgentSessionManager::new(
-            agents::AgentStore::new(home.join("agents")),
+            fleet_home.agents_db_path(),
             events.clone(),
             worktrees.clone(),
             Arc::clone(&config),
         );
         let boards = Arc::new(boards::Boards::new(
             Arc::new(crate::stores::board::BoardStore::new(
-                fleet_core::paths::FleetHome::new(home.clone()),
+                fleet_home,
                 Arc::clone(&adapters.files),
             )),
             Arc::clone(&state),

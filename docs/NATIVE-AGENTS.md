@@ -838,15 +838,66 @@ row, with **denormalized** `open_gate_count`, `running_turn_id`, `head_seq`, `pr
 list read never touches `items`, `turns` or `gates`), `turns`, `items` (with append-only `text` and
 `reasoning` columns concatenated **in SQL**, which collapses thousands of delta rows into one row
 for reads while the log keeps every delta for replay), `gates`, `checkpoints`, `sessions`,
-`item_attachments`, and `fleet_migrations`. No foreign keys — deletes are explicit multi-table
-statements in the projector, which is what you want when you also have to delete files.
+`item_attachments`, `seen` (the per-client read cursor `AgentMarkSeen` has nowhere to land
+today), `agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
+multi-table statements in the projector, which is what you want when you also have to delete
+files.
+
+Three columns exist to keep the denormalized `attention` byte-identical to what
+`ThreadProjection::attention` derives, rather than approximately equal to it: `threads.retrying_json`
+(a provider retry is what separates a thread that is working from a thread that is idle, and the
+reducer clears it on the next event of any other kind), `gates.blocked_since` (a run of overlapping
+gates is **one** wait, so answering the first must not restart the clock for the second and the
+turn footer must not be charged twice), and `turns.gate_blocked_ms`, which the resolution charges.
+
+A fourth, `threads.turn_json`, carries the reducer's `TurnState` verbatim so the list row holds the
+turn **and its identity** without a second query. `running_turn_id` alone cannot: `Completed`,
+`Interrupted` and `Failed` all clear it, and re-deriving which of the three a settled turn was from
+`last_outcome` is ambiguous — an authoritative `Interrupted` result and an aborted turn write the
+same outcome. `AgentThreadList` is one `SELECT` against `threads` and joins nothing, which is the
+whole point of the table.
+
+**Daemon start replays nothing.** The manager holds reducer state only for the threads something is
+using: a thread is hydrated on first use — an open, a send, a resume — under a hydration gate, so
+one thread is never built twice and two writers never mint the same sequence. Start-time work is a
+census of two index lookups taken on the writer's connection before the writer thread exists, and it
+is worked through **in the background, one thread at a time**: a thread whose `projected_seq` lags
+its `head_seq` is replayed through the same projector a live append uses, and one that cannot be
+replayed is marked `session_state = 'error'` while the daemon starts anyway. Taking the census
+before anything can write is what makes the pass safe — a thread created afterwards can never be in
+it, so a live thread is never mistaken for an orphan of the previous run.
+
+`index.json` is gone, and with it the whole-file rewrite on every metadata change: a record is one
+upsert on one row, which touches no projected column.
+
+`agent_events_quarantine` is where `truncate_after` puts the events it drops. A transaction has no
+torn tail, so the NDJSON `events.ndjson.broken-*` machinery is gone — but the other reason it
+existed is not: an event that decodes, is in sequence, and is then refused by the projection on
+replay has to leave the log so the next append does not collide with it, and it is the only
+evidence of why the replay stopped. It is moved with its reason, never deleted, and the thread's
+read model is rebuilt from the log that remains in the same transaction.
 
 Retention: no compaction, no `VACUUM`, no prefix delete. Deletion happens per **thread**, never
 per sequence prefix, because a prefix delete invalidates the meaning of a projector cursor.
 
 `state.sqlite` is **not** part of `PersistedState`. It gets its own migration ladder and its own
-failure mode: a database the daemon cannot open or migrate is fatal at start, exactly as an
-unreadable `state.json` is, and for the same reason — the daemon must not run with half a truth.
+failure mode: a database that cannot be opened or migrated is fatal **for the agent service** — the
+manager holds the open failure instead of a store and answers every agent request with it, loudly
+and once. It is deliberately not fatal for the daemon: `Services::build` is infallible across twenty
+call sites, and taking terminals, jobs and worktrees down over an agent transcript database is a
+worse failure than refusing agent work. The service still never runs with half a truth, because it
+refuses all of it. Making the whole composition fallible, so the process exits the way an unreadable
+`state.json` makes it exit, is a follow-up that belongs with `Services::build`, not here.
+
+The one-shot NDJSON import is **not** a migration slot, though ADR 0013 sketched it as one. It runs
+at store construction on the writer's own connection, before the writer thread is spawned, because
+it needs one transaction *per thread* — so one unreadable log costs one thread — and because it moves
+files, which has to happen strictly after the commit that made the rows durable. Both are the
+opposite of what a single migration transaction gives you. It imports the readable prefix of a torn
+log, records the tear as a `Notice` in the transcript, quarantines the rest, and **moves** the file
+to `agents/imported/` rather than deleting it; a log whose header names a schema this build does not
+implement is refused whole and left exactly where it is. Idempotency does not depend on the move
+having worked: a thread that already has rows in `agent_events` is skipped.
 
 Four disciplines survive from `store.rs` and must be reproduced: a header-versioned log, torn-tail
 quarantine rather than data loss, selective durability, and restart-recovery-as-appended-events. A
@@ -1015,7 +1066,7 @@ revision targets Claude Code + OpenCode and is being replaced. This table is the
 | # | Phase | Status |
 | --- | --- | --- |
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle`, Codex fixtures under `research/fixtures/agents/codex/` | **not started** |
-| 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import | **not started** |
+| 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**; the windowed read and its cursor are built and tested but unreachable until stage 4 puts a cursor on the wire |
 | 3 | **Harnesses.** The `Harness` trait and probe; the Claude adapter rewritten against the 2.1.266 wire; the Codex adapter over app-server with generated `wire.rs`/`methods.rs`; **`providers/opencode/**` deleted** | **not started** |
 | 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability string | **not started** |
 | 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **not started** |

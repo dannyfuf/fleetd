@@ -8,6 +8,7 @@ use fleet_core::{
     config::default_config,
     ids::{ContextId, HostId, RepoId, WorktreeId},
     model::{Context, HostConfigEntry, Repo, RepoHooks, Worktree},
+    paths::FleetHome,
     state::default_state,
 };
 use fleet_daemon::{
@@ -39,7 +40,7 @@ mod infra;
 #[tokio::test]
 async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let local_agents = temp.path().join("agents");
+    let local_agents = FleetHome::new(temp.path()).agents_path();
     let host = host("dev-box");
     let worktree = worktree("remote-agent");
     let thread = ThreadId::new();
@@ -355,7 +356,7 @@ async fn two_daemon_agent_resume_over_real_remote_link() {
         "persisted transcript must survive the remote daemon restart"
     );
     assert!(
-        !local_home.join("agents").exists(),
+        !FleetHome::new(&local_home).agents_path().exists(),
         "remote transcripts must never be persisted by the local daemon"
     );
     link.close().await;

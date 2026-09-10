@@ -5,7 +5,12 @@
 append-only NDJSON log per thread plus the whole-file `agents/index.json`.
 `docs/NATIVE-AGENTS.md` §8 and §9 are the specification; this file records why.
 
-**Not built.** This ADR fixes the decision so the implementation does not relitigate it.
+**Built**, with two amendments the implementation forced and `docs/NATIVE-AGENTS.md` §8 now
+carries: the one-shot NDJSON import is a start-time step on the writer's own connection rather than
+a migration slot, because it needs one transaction per thread and it moves files after the commit;
+and "fatal at start" means fatal for the agent service — the manager holds the open failure and
+refuses every agent request — because `Services::build` is infallible and killing terminals and jobs
+over a transcript database is a worse failure. Everything below stands as decided.
 
 ## What the NDJSON design could not do
 
