@@ -148,9 +148,8 @@ impl Services {
             update::runtime_checkout(),
         );
         let hosts = Hosts::new(home.clone(), Arc::clone(&adapters.shell));
-        let daemon_id = load_or_create_daemon_id(&home);
-        let local_daemon_id = HostId::try_from(daemon_id.as_str())
-            .expect("persisted daemon identity must be a valid host id");
+        let local_daemon_id = load_or_create_daemon_id(&home);
+        let daemon_id = local_daemon_id.to_string();
         let machines = Arc::new(
             Machines::from_config_with_runtime(
                 &default_config(&home),
@@ -255,6 +254,71 @@ mod tests {
         );
 
         assert_eq!(services.update.checkout(), update::runtime_checkout());
+    }
+
+    #[test]
+    fn an_invalid_daemon_id_file_is_quarantined_instead_of_aborting_startup() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        // `local` is a reserved host id, so this file cannot become the daemon identity.
+        std::fs::write(home.join("daemon-id"), "local\n").expect("write daemon id");
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+
+        let services = Services::new(
+            home,
+            Arc::new(ConfigStore::new(home, files.clone())),
+            Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(home)),
+            Adapters::system(files),
+        );
+
+        assert_ne!(services.daemon_id(), "local");
+        assert!(HostId::try_from(services.daemon_id()).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(home.join("daemon-id.invalid"))
+                .expect("the rejected identity is kept for diagnosis")
+                .trim(),
+            "local"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("daemon-id"))
+                .expect("daemon id file")
+                .trim(),
+            services.daemon_id()
+        );
+    }
+
+    #[test]
+    fn a_daemon_id_that_cannot_be_read_or_written_still_starts_the_daemon() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        // A directory where the identity file belongs: neither the read nor the write can
+        // succeed, and startup must survive both rather than abort or hand out an invalid id.
+        std::fs::create_dir(home.join("daemon-id")).expect("occupy the identity path");
+        let build = || {
+            let files = Arc::new(RealFiles::new(
+                home.join("trash"),
+                [home.join("repos"), home.join("worktrees")],
+            ));
+            Services::new(
+                home,
+                Arc::new(ConfigStore::new(home, files.clone())),
+                Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+                Arc::new(JobManager::new(home)),
+                Adapters::system(files),
+            )
+        };
+        let first = build();
+        let second = build();
+        assert!(HostId::try_from(first.daemon_id()).is_ok());
+        assert_ne!(
+            first.daemon_id(),
+            second.daemon_id(),
+            "an identity that cannot be persisted cannot be stable, which is what the warning says"
+        );
     }
 
     #[test]

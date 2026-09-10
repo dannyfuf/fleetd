@@ -9,7 +9,7 @@ ordinary `cargo` commands use the correct compiler automatically.
 Run the project commands through the checked-in `Makefile` (`make help` lists them):
 
 ```sh
-make run         # build the workspace and open Fleet (ARGS="..." is forwarded)
+make run         # build the workspace, restart fleetd, and open Fleet (ARGS="..." is forwarded)
 make run-release # the same with the release profile
 make restart     # restart fleetd from this build — run it after changing daemon code
 make daemon      # restart fleetd and follow its log
@@ -41,8 +41,8 @@ artifacts on top. Two things keep it in check:
 
 When `target/` still grows past what you want, `make fresh` wipes it and rebuilds from scratch.
 
-`make run` does **not** restart the daemon: an already-running `fleetd` keeps its terminal
-sessions across an app rebuild. Restarting is explicit, through `make restart` or:
+`make run` restarts the daemon: it depends on `make restart`, so the freshly built app never talks
+to a stale `fleetd`. Restarting is also explicit through `make restart` or:
 
 ```sh
 fleet daemon restart
@@ -50,7 +50,9 @@ fleet daemon restart
 
 That command requests a graceful shutdown, falls back to `SIGTERM` when the daemon cannot answer,
 waits for its socket to disappear, and starts the newly built sibling `fleetd` binary. PTYs do not
-survive it.
+survive it, so an already-running `fleetd` keeps its terminal sessions only when the app is started
+without the restart: after `make build`, run the built binary directly
+(`FLEET_HOME=… FLEET_DAEMON=… ./target/debug/fleet`) or `cargo run -p fleet-app`.
 
 `make test` and `make ci` build `fleetd` before running workspace tests because app
 integration tests launch the ordinary daemon binary. These targets set `FLEET_DAEMON`
@@ -148,6 +150,14 @@ actions:
 
 ```sh
 RUST_LOG=fleet_app=debug ./target/debug/fleet > /tmp/fleet-gui/app.log 2>&1
+```
+
+`fleetd` installs the same filter and honours `$RUST_LOG` (default `info`) for both its stderr and
+its rotating `$FLEET_HOME/logs/fleetd.log`, so raising the level is how the daemon's `debug`
+records — the full argv of a failed shell command, for instance — become visible:
+
+```sh
+RUST_LOG=fleet_daemon=debug ./target/debug/fleetd
 ```
 
 ## Crate map

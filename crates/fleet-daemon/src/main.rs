@@ -17,7 +17,7 @@ use fleet_daemon::{
     stores::{config::ConfigStore, state::StateStore},
 };
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::{EnvFilter, fmt::writer::MakeWriterExt};
 
 #[derive(Debug, Parser)]
 #[command(name = "fleetd", about = "Fleet background daemon", version)]
@@ -54,7 +54,11 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(layout.logs_dir())?;
     let file = RotatingLog::new(layout.logs_dir().join("fleetd.log"), 10 * 1024 * 1024, 4)?;
     let (file_writer, _log_guard) = tracing_appender::non_blocking(file);
+    // `$RUST_LOG` selects the daemon's level the way it selects the app's; without a filter the
+    // builder caps itself at INFO and every `debug!`/`trace!` site here is unreachable at runtime.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
+        .with_env_filter(filter)
         .with_writer((|| std::io::stderr()).and(file_writer))
         .init();
 
