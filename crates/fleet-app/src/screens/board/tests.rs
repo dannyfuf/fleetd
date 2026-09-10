@@ -295,3 +295,128 @@ fn a_columns_list_follows_the_row_count_it_is_given(cx: &mut gpui::TestAppContex
         .sum();
     assert_eq!(rows, 1, "the lists follow the filter, not the raw board");
 }
+
+/// A card edited in the background leaves the column's scroll where the user put it.
+///
+/// `gpui-performance` rule 5 and `docs/DESIGN-SYSTEM.md` "background events must never re-sort,
+/// re-scroll or re-focus": `ListState::splice` moves the scroll anchor to the start of the
+/// spliced range whenever the range contains it, which is what `reset` does — so a column
+/// spliced whole (`0..len`) on every row change scrolls back to the top and re-measures every
+/// tile the moment the daemon answers with one edited card.
+#[gpui::test]
+fn an_edited_card_leaves_the_column_where_the_user_scrolled_it(cx: &mut gpui::TestAppContext) {
+    let mut state = fifty_cards("/tmp/fleet-board-scroll");
+    let cache = RefCell::default();
+    let mut screen = cx.update(BoardScreen::new);
+    let model = projection::prepare(&state, &cache, 1_788_523_200);
+    screen.sync_lists(&model);
+    let column = full_column(&model);
+    scroll_to_row(&screen.column_lists[column], 20);
+
+    let mut card = state.board().unwrap_or_else(|| panic!("no board")).cards[0].clone();
+    card.title = "Renamed by the daemon".to_owned();
+    state.apply_card(card);
+    let updated = projection::prepare(&state, &cache, 1_788_523_201);
+    screen.sync_lists(&updated);
+
+    assert_eq!(screen.column_lists[column].item_count(), 50);
+    assert_eq!(
+        screen.column_lists[column].logical_scroll_top().item_ix,
+        20,
+        "one edited row is no reason to scroll the column back to the top"
+    );
+}
+
+/// A card arriving above the viewport moves the anchor by one row, not to the top.
+///
+/// The narrowed splice is only worth its comparison if it really is narrow: the fifty tiles
+/// below the arrival keep their measured heights, which the list reports by keeping the anchor
+/// on the same card — one row further down, because one row arrived above it.
+#[gpui::test]
+fn a_new_card_shifts_the_anchor_by_the_row_that_arrived(cx: &mut gpui::TestAppContext) {
+    let mut state = fifty_cards("/tmp/fleet-board-insert");
+    let cache = RefCell::default();
+    let mut screen = cx.update(BoardScreen::new);
+    let model = projection::prepare(&state, &cache, 1_788_523_200);
+    screen.sync_lists(&model);
+    let column = full_column(&model);
+    scroll_to_row(&screen.column_lists[column], 20);
+
+    let mut arrival = state.board().unwrap_or_else(|| panic!("no board")).cards[0].clone();
+    arrival.id = "card-arrival"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    arrival.number = 500;
+    arrival.title = "Arrived second".to_owned();
+    // Cards are positioned 0, 10, 20, …: 5 lands between the first two.
+    arrival.position = 5;
+    state.apply_card(arrival);
+    let updated = projection::prepare(&state, &cache, 1_788_523_201);
+    screen.sync_lists(&updated);
+
+    assert_eq!(screen.column_lists[column].item_count(), 51);
+    assert_eq!(
+        screen.column_lists[column].logical_scroll_top().item_ix,
+        21,
+        "the anchor follows its own card past the row that arrived above it"
+    );
+}
+
+/// Editing the card the viewport is anchored on keeps the offset inside it.
+///
+/// A same-length change is [`gpui::ListState::remeasure_items`], not a splice: splicing the
+/// anchor's own row keeps its index but zeroes `offset_in_item`, so a title edited two rows up
+/// would still jolt the column by the part of the tile the user had scrolled past.
+#[gpui::test]
+fn editing_the_anchor_row_keeps_the_offset_inside_it(cx: &mut gpui::TestAppContext) {
+    let mut state = fifty_cards("/tmp/fleet-board-anchor");
+    let cache = RefCell::default();
+    let mut screen = cx.update(BoardScreen::new);
+    let model = projection::prepare(&state, &cache, 1_788_523_200);
+    screen.sync_lists(&model);
+    let column = full_column(&model);
+    screen.column_lists[column].scroll_to(gpui::ListOffset {
+        item_ix: 20,
+        offset_in_item: gpui::px(7.0),
+    });
+
+    let mut card = state.board().unwrap_or_else(|| panic!("no board")).cards[20].clone();
+    card.title = "Renamed under the viewport".to_owned();
+    state.apply_card(card);
+    let updated = projection::prepare(&state, &cache, 1_788_523_201);
+    screen.sync_lists(&updated);
+
+    let top = screen.column_lists[column].logical_scroll_top();
+    assert_eq!(top.item_ix, 20);
+    assert_eq!(
+        top.offset_in_item,
+        gpui::px(7.0),
+        "the row was remeasured, not replaced"
+    );
+}
+
+/// A board of fifty cards, all of them in one column.
+fn fifty_cards(root: &str) -> AppState {
+    let titles: Vec<String> = (0..50).map(|index| format!("Card {index}")).collect();
+    let mut state = AppState::new(root, Instant::now());
+    state.board.view = Some(titled(&titles));
+    state
+}
+
+/// The index of the column holding every card.
+fn full_column(model: &BoardModel) -> usize {
+    model
+        .columns
+        .iter()
+        .position(|column| column.rows.len() >= 50)
+        .unwrap_or_else(|| panic!("no full column"))
+}
+
+/// Puts the column's viewport on `row`, as a user scrolling down to it would.
+fn scroll_to_row(list: &ListState, row: usize) {
+    list.scroll_to(gpui::ListOffset {
+        item_ix: row,
+        offset_in_item: gpui::px(0.0),
+    });
+    assert_eq!(list.logical_scroll_top().item_ix, row);
+}

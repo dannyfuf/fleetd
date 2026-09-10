@@ -18,7 +18,7 @@ use crate::{
     bridge::Bridge,
     dialogs::{self, ConfirmRequest, Dialogs, card_picker::PickerKind, typed_char},
     state::{AppState, HubPane, HubTab, Overlay, Screen, StickyError},
-    views::board_screen::{self, BoardClick, BoardModel, BoardProps},
+    views::board_screen::{self, BoardClick, BoardModel, BoardProps, CardRow},
 };
 use fleet_core::{
     board::Card,
@@ -254,11 +254,16 @@ impl BoardScreen {
 
     /// Gives every column a list that knows the rows it now holds.
     ///
-    /// A [`ListState`] carries the measured height of each tile, so it is told what changed
-    /// rather than rebuilt: only the columns whose rows actually moved are spliced, and every
-    /// other column keeps its measurements (`gpui-performance` rule 5). The comparison is on the
-    /// rows and not only on their count, because a tile's height follows its title and its meta
-    /// row — a card edited in place is a new height at the same index.
+    /// A [`ListState`] carries the measured height of each tile and the scroll anchor, so it is
+    /// told what changed rather than rebuilt: only the columns whose rows actually moved are
+    /// touched, and inside such a column only the span between the unchanged prefix and the
+    /// unchanged suffix (`gpui-performance` rule 5). Splicing the whole column instead is what
+    /// [`ListState::reset`] does — it moves the anchor to the start of the spliced range and
+    /// marks every tile unmeasured — so a single card the daemon answers with would scroll the
+    /// column back to the top under the user's hands (`docs/DESIGN-SYSTEM.md`: background events
+    /// never re-scroll). The comparison is on the rows and not only on their count, because a
+    /// tile's height follows its title and its meta row — a card edited in place is a new height
+    /// at the same index, which is [`ListState::remeasure_items`] and not a splice.
     fn sync_lists(&mut self, model: &Rc<BoardModel>) {
         if self
             .listed
@@ -270,18 +275,27 @@ impl BoardScreen {
         self.column_lists
             .resize_with(model.columns.len(), KanbanColumn::list_state);
         for (index, column) in model.columns.iter().enumerate() {
-            let previous = self
+            let old: &[CardRow] = self
                 .listed
                 .as_ref()
-                .and_then(|listed| listed.columns.get(index));
-            if previous.is_some_and(|old| old.rows == column.rows) {
+                .and_then(|listed| listed.columns.get(index))
+                .map_or(&[], |previous| &previous.rows);
+            let new: &[CardRow] = &column.rows;
+            if old == new {
                 continue;
             }
-            if let Some(list) = self.column_lists.get(index) {
-                list.splice(
-                    0..previous.map_or(0, |old| old.rows.len()),
-                    column.rows.len(),
-                );
+            let Some(list) = self.column_lists.get(index) else {
+                continue;
+            };
+            let (prefix, suffix) = unchanged_ends(old, new);
+            let changed = prefix..old.len() - suffix;
+            let arriving = new.len() - prefix - suffix;
+            if changed.len() == arriving {
+                // Same rows, new heights: `remeasure_items` keeps the anchor by design, where a
+                // splice of the same span would drop the offset inside its first item.
+                list.remeasure_items(changed);
+            } else {
+                list.splice(changed, arriving);
             }
         }
         self.listed = Some(Rc::clone(model));
@@ -294,4 +308,19 @@ impl BoardScreen {
             list.scroll_to_reveal_item(row);
         }
     }
+}
+
+/// How many rows at the head and at the tail of a column did not move.
+///
+/// The tail is counted over what the head left, on both sides, so no row is ever claimed twice
+/// and the span between them is a range in both the old list and the new one.
+fn unchanged_ends(old: &[CardRow], new: &[CardRow]) -> (usize, usize) {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (prefix, suffix)
 }
