@@ -27,6 +27,9 @@ use crate::{
 };
 
 const MAX_CONNECTIONS: usize = 128;
+/// Pause after an `accept(2)` failure that leaves the pending connection in the backlog, so the
+/// loop cannot spin on a client it has no file descriptor to accept.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Bound Fleet Unix listener and graceful-shutdown coordinator.
 pub struct Listener {
@@ -181,13 +184,35 @@ impl Listener {
         );
         let mut connections = JoinSet::new();
         let admission = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let mut accept_failure_logged = false;
         let result = loop {
             tokio::select! {
+                biased;
                 () = self.shutdown.cancelled() => break Ok(()),
                 accepted = self.listener.accept() => {
                     let (stream, _address) = match accepted {
-                        Ok(accepted) => accepted,
-                        Err(error) => break Err(DaemonError::fs(&self.socket_path, error)),
+                        Ok(accepted) => {
+                            accept_failure_logged = false;
+                            accepted
+                        }
+                        Err(error) if accept_error_is_fatal(&error) => {
+                            break Err(DaemonError::fs(&self.socket_path, error));
+                        }
+                        // Every terminal, PTY and job the daemon hosts dies with the process, so a
+                        // transient `accept(2)` failure — a client that reset before we accepted it,
+                        // or an exhausted descriptor table — degrades this loop instead of ending it.
+                        Err(error) => {
+                            // One line per burst: an exhausted descriptor table would otherwise
+                            // flood the log with an entry per retry.
+                            if !accept_failure_logged {
+                                accept_failure_logged = true;
+                                tracing::warn!(%error, "accept failed; the listener keeps serving");
+                            }
+                            if accept_error_exhausted_resources(&error) {
+                                tokio::time::sleep(ACCEPT_BACKOFF).await;
+                            }
+                            continue;
+                        }
                     };
                     let Some(permit) = try_admit(&admission) else {
                         tracing::warn!(limit = MAX_CONNECTIONS, "rejecting client above connection limit");
@@ -237,6 +262,25 @@ fn try_admit(admission: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
     Arc::clone(admission).try_acquire_owned().ok()
 }
 
+/// Whether an `accept(2)` failure leaves the listening socket permanently unusable.
+///
+/// Everything else — a reset client, an interrupted call, an exhausted descriptor table — is a
+/// condition the daemon recovers from once the pressure passes, and must survive.
+fn accept_error_is_fatal(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
+    )
+}
+
+/// Whether the failure left the connection in the backlog because a resource ran out.
+fn accept_error_exhausted_resources(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
+}
+
 /// Republishes job records as client events, with an error toast and a snapshot on completion.
 fn spawn_job_forwarder(
     services: Arc<Services>,
@@ -247,6 +291,7 @@ fn spawn_job_forwarder(
     tokio::spawn(async move {
         loop {
             tokio::select! {
+                biased;
                 () = shutdown.cancelled() => break,
                 update = updates.recv() => match update {
                     Ok(job) => {
@@ -295,6 +340,7 @@ fn spawn_session_forwarder(
     tokio::spawn(async move {
         loop {
             tokio::select! {
+                biased;
                 () = shutdown.cancelled() => break,
                 event = async {
                     match &mut forwarded_events {
@@ -349,6 +395,40 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn transient_accept_errors_do_not_stop_the_listener() {
+        for code in [
+            libc::ECONNABORTED,
+            libc::EINTR,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOBUFS,
+            libc::ENOMEM,
+        ] {
+            let error = std::io::Error::from_raw_os_error(code);
+            assert!(
+                !accept_error_is_fatal(&error),
+                "errno {code} must not stop the accept loop"
+            );
+        }
+        for code in [libc::EBADF, libc::EINVAL, libc::ENOTSOCK] {
+            let error = std::io::Error::from_raw_os_error(code);
+            assert!(
+                accept_error_is_fatal(&error),
+                "errno {code} leaves the listener unusable"
+            );
+        }
+        assert!(accept_error_exhausted_resources(
+            &std::io::Error::from_raw_os_error(libc::EMFILE)
+        ));
+        assert!(accept_error_exhausted_resources(
+            &std::io::Error::from_raw_os_error(libc::ENFILE)
+        ));
+        assert!(!accept_error_exhausted_resources(
+            &std::io::Error::from_raw_os_error(libc::ECONNABORTED)
+        ));
+    }
 
     #[test]
     fn connection_admission_is_bounded() {

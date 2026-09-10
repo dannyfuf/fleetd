@@ -138,9 +138,29 @@ impl Connection {
         let mut events = self.events.subscribe();
         let mut frames = self.services.sessions.subscribe_frames();
         let mut pending = FuturesUnordered::<DispatchFuture>::new();
+        let mut shutdown_announced = false;
         let mut result = loop {
+            // Shutdown is settled here rather than with `biased;`: biasing this select's six
+            // arms in their current order would let a client that never stops sending starve
+            // the two buses and manufacture the very lag the arms below have to recover from.
+            // Checking the token first instead keeps the select fair while stopping a saturated
+            // terminal or event stream from winning rounds after the daemon was told to stop.
+            if self.shutdown.is_cancelled() {
+                // `Listener::run` publishes `DaemonShuttingDown` only after its accept loop
+                // has broken on this same token, by which time every connection actor has
+                // left this loop, so on a signal shutdown the bus event reaches no reader.
+                // A subscribed client is told the daemon is stopping rather than left to
+                // infer it from a closed socket (docs/APP-CONTRACTS.md §4).
+                if !shutdown_announced
+                    && subscriptions.contains(&EventKind::DaemonShuttingDown)
+                    && let Err(error) = enqueue_event(&outbound, Event::DaemonShuttingDown).await
+                {
+                    tracing::debug!(%error, "client missed the daemon shutdown notice");
+                }
+                break Ok(());
+            }
             tokio::select! {
-                () = self.shutdown.cancelled() => break Ok(()),
+                () = self.shutdown.cancelled() => continue,
                 joined = &mut writer => {
                     writer_finished = true;
                     break match joined {
@@ -259,6 +279,7 @@ impl Connection {
                 event = events.recv() => {
                     match event {
                         Ok(event) if event_visible(&event, &subscriptions, &attached) => {
+                            shutdown_announced |= matches!(event, Event::DaemonShuttingDown);
                             if let Err(error) = enqueue_event(&outbound, event).await {
                                 break Err(error);
                             }
@@ -339,10 +360,31 @@ impl Connection {
             let _ignored = writer.await;
         }
         drop(watch_owner);
-        let detached_any = !attached.is_empty();
+        if detach_attached_terminals(&self.services, owner_id, &client, attached).await {
+            self.events.request_snapshot(Arc::clone(&self.services));
+        }
+        result
+    }
+}
+
+/// Detaches every terminal this client held and reports whether anything was detached.
+///
+/// The whole loop is bounded: a terminal on a remote host reaches `RemoteEndpoint::request`,
+/// which waits for an answer that a wedged-but-`Ready` link never sends. This task holds the
+/// connection's admission permit until it returns, so an unbounded cleanup would retire one of
+/// `MAX_CONNECTIONS` slots on every such disconnect.
+async fn detach_attached_terminals(
+    services: &Services,
+    owner_id: u64,
+    client: &HelloClient,
+    attached: HashSet<fleet_core::ids::TerminalId>,
+) -> bool {
+    if attached.is_empty() {
+        return false;
+    }
+    let cleanup = async {
         for terminal in attached {
-            if let Err(error) = self
-                .services
+            if let Err(error) = services
                 .dispatch_routed_with_owner(
                     RequestBody::DetachTerminal { terminal },
                     owner_id,
@@ -356,11 +398,14 @@ impl Connection {
                 tracing::warn!(%error, %terminal, "failed to detach disconnected client");
             }
         }
-        if detached_any {
-            self.events.request_snapshot(Arc::clone(&self.services));
-        }
-        result
+    };
+    if tokio::time::timeout(SOCKET_WRITE_TIMEOUT, cleanup)
+        .await
+        .is_err()
+    {
+        tracing::warn!("timed out detaching a disconnected client's terminals");
     }
+    true
 }
 
 /// Answers the mandatory opening Hello and reports whether the session may proceed.
@@ -513,7 +558,7 @@ async fn request_full_frames(
 ) {
     // A broadcast gap does not identify which terminal lost rows.
     for terminal in attached {
-        let _ignored = services
+        if let Err(error) = services
             .dispatch_routed_with_owner(
                 RequestBody::RequestFullFrame {
                     terminal: *terminal,
@@ -523,7 +568,13 @@ async fn request_full_frames(
                     client: client.clone(),
                 },
             )
-            .await;
+            .await
+            && !matches!(error, DaemonError::NotFound(_))
+        {
+            // This is the only recovery a lagged client gets: without a replacement grid it
+            // keeps applying dirty-row diffs to rows it never received.
+            tracing::warn!(%error, %terminal, "failed to resync a lagged client");
+        }
     }
 }
 
@@ -1213,6 +1264,216 @@ mod tests {
             .kill(session.id)
             .await
             .expect("kill test session");
+    }
+
+    /// A remote link that reports itself `Ready` and never answers a request.
+    struct WedgedRemote {
+        host: fleet_core::ids::HostId,
+        events: tokio::sync::broadcast::Sender<Event>,
+        states: tokio::sync::watch::Sender<fleet_proto::snapshot::LinkState>,
+    }
+
+    impl WedgedRemote {
+        fn new(host: fleet_core::ids::HostId) -> Self {
+            let (events, _) = tokio::sync::broadcast::channel(8);
+            let (states, _) = tokio::sync::watch::channel(fleet_proto::snapshot::LinkState::Ready);
+            Self {
+                host,
+                events,
+                states,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::machines::RemoteEndpoint for WedgedRemote {
+        fn host(&self) -> &fleet_core::ids::HostId {
+            &self.host
+        }
+        fn state(&self) -> fleet_proto::snapshot::LinkState {
+            *self.states.borrow()
+        }
+        fn hello(&self) -> Option<crate::machines::RemoteHello> {
+            None
+        }
+        async fn request(&self, _body: RequestBody) -> DaemonResult<ResponseBody> {
+            std::future::pending().await
+        }
+        fn events(&self) -> tokio::sync::broadcast::Receiver<Event> {
+            self.events.subscribe()
+        }
+        fn state_changes(&self) -> tokio::sync::watch::Receiver<fleet_proto::snapshot::LinkState> {
+            self.states.subscribe()
+        }
+        async fn close(&self) {}
+    }
+
+    #[tokio::test]
+    async fn a_wedged_remote_cannot_stall_disconnect_cleanup() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let services = test_services(temp.path()).await;
+        let host = fleet_core::ids::HostId::try_from("wedged").expect("host id");
+        services
+            .machines
+            .install_endpoint(host.clone(), Arc::new(WedgedRemote::new(host.clone())));
+        let terminal = services.router.ids.local_terminal(&host, TerminalId(1));
+
+        let detached = tokio::time::timeout(
+            Duration::from_secs(20),
+            detach_attached_terminals(
+                &services,
+                0,
+                &HelloClient::default(),
+                HashSet::from([terminal]),
+            ),
+        )
+        .await
+        .expect("a wedged remote link cannot hold the connection's admission permit");
+
+        assert!(detached, "the cleanup reports the terminals it released");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_shutdown_token_tells_a_subscribed_client_before_the_socket_closes() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let services = test_services(temp.path()).await;
+        // Nothing else ever publishes on this bus, so the only way the client can learn the
+        // daemon is stopping is the connection's own shutdown branch. `Listener::run` publishes
+        // the same event, but only after its accept loop has broken on this very token, by
+        // which time every connection actor has already left its loop.
+        let events = BroadcastBus::default();
+        let shutdown = CancellationToken::new();
+        let (server, client) = UnixStream::pair().expect("create socket pair");
+        let actor = tokio::spawn(
+            Connection::new(server, Arc::clone(&services), events, shutdown.clone()).run(),
+        );
+        let mut client = Framed::new(client, FleetCodec::<Request, serde_json::Value>::new());
+        for (id, body) in [
+            (
+                1,
+                RequestBody::Hello {
+                    protocol: fleet_proto::PROTOCOL_VERSION,
+                    client: "shutdown-notice-test".into(),
+                },
+            ),
+            (
+                2,
+                RequestBody::Subscribe {
+                    events: vec![EventKind::DaemonShuttingDown],
+                },
+            ),
+        ] {
+            client.send(Request { id, body }).await.expect("send setup");
+            let value = client
+                .next()
+                .await
+                .expect("setup response")
+                .expect("decode setup response");
+            let response: Response =
+                serde_json::from_value(value).expect("setup response envelope");
+            response.result.expect("setup succeeds");
+        }
+
+        shutdown.cancel();
+
+        let announced = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(frame) = client.next().await {
+                let value = frame.expect("decode frame");
+                if value.get("type").and_then(serde_json::Value::as_str)
+                    == Some("daemon_shutting_down")
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("shutdown notice deadline");
+
+        assert!(
+            announced,
+            "a subscribed client is told the daemon is stopping, not left to infer it from a close"
+        );
+        actor
+            .await
+            .expect("connection task")
+            .expect("connection ends cleanly");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_shutdown_publishes_daemon_shutting_down_after_the_response() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let services = test_services(temp.path()).await;
+        let events = BroadcastBus::default();
+        let mut bus = events.subscribe();
+        let shutdown = CancellationToken::new();
+        let (server, client) = UnixStream::pair().expect("create socket pair");
+        let actor = tokio::spawn(
+            Connection::new(
+                server,
+                Arc::clone(&services),
+                events.clone(),
+                shutdown.clone(),
+            )
+            .run(),
+        );
+        let mut client = Framed::new(client, FleetCodec::<Request, Response>::new());
+        client
+            .send(Request {
+                id: 1,
+                body: RequestBody::Hello {
+                    protocol: fleet_proto::PROTOCOL_VERSION,
+                    client: "shutdown-test".into(),
+                },
+            })
+            .await
+            .expect("send hello");
+        client
+            .next()
+            .await
+            .expect("hello response")
+            .expect("decode hello response")
+            .result
+            .expect("hello succeeds");
+
+        client
+            .send(Request {
+                id: 2,
+                body: RequestBody::DaemonShutdown {
+                    stop_sessions: false,
+                },
+            })
+            .await
+            .expect("send shutdown");
+        let response = client
+            .next()
+            .await
+            .expect("shutdown response")
+            .expect("decode shutdown response")
+            .result
+            .expect("shutdown succeeds");
+
+        // The client that asked learns the outcome from its own response; every other
+        // connection learns it from the bus event this test asserts below.
+        assert_eq!(response, ResponseBody::ShuttingDown);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match bus.recv().await.expect("event bus stays open") {
+                    Event::DaemonShuttingDown => return,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("an explicit shutdown publishes DaemonShuttingDown");
+        assert!(
+            shutdown.is_cancelled(),
+            "the shutdown request cancels the daemon token"
+        );
+        actor
+            .await
+            .expect("connection task")
+            .expect("connection ends cleanly");
     }
 
     #[test]

@@ -327,6 +327,14 @@ an app client. `HelloResponse` flattens the ordinary correlated `Response` and a
 `capabilities: Vec<String>`, `daemon_id: String`, and optional `build_commit`; a federating daemon
 advertises `remote-machines`. Proxy links require protocol lockstep before any request is routed.
 
+`Subscribe { events }` is additive: the daemon unions the named kinds with the ones the
+connection already receives, and `Unsubscribe` is the only way to clear the set. `fleet-client`
+replays that union on every reconnect, so a connection delivers the same events before and after
+one. Every connection subscribed to `DaemonShuttingDown` receives it before its socket closes,
+whether the stop came from a `DaemonShutdown` request or from a signal; the connection that
+asked reads the outcome from its own `ShuttingDown` response instead. A close with no notice
+means the daemon died.
+
 `Snapshot.hosts` contains `HostStatus { id, provider, version, link, address, agent_binaries,
 reachable, checked_at, error }`. `link` is `connecting`, `ready`, `down`, or `legacy`, and
 `agent_binaries` is the optional `{ claude, opencode }` result of host diagnostics. Two additive

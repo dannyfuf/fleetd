@@ -136,11 +136,19 @@ async fn explicit_agent_activity_updates_status_and_emits_one_transition_and_sna
         })
         .await
         .unwrap_or_else(|error| panic!("{error}"));
+    // A PTY reports its title asynchronously, so unrelated `SessionChanged` traffic can land in
+    // any quiet window. The contract here is about activity events, so assert about those.
+    let mut late = Vec::new();
+    while let Ok(Ok(event)) =
+        tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await
+    {
+        late.push(event);
+    }
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), receiver.recv())
-            .await
-            .is_err(),
-        "unchanged explicit activity emitted another event"
+        !late
+            .iter()
+            .any(|event| matches!(event, Event::AgentActivityChanged { .. })),
+        "unchanged explicit activity emitted another event, got {late:?}"
     );
 
     services
@@ -293,10 +301,16 @@ async fn socket_session_mutations_publish_one_transition() {
                 transitions
                     .push(serde_json::from_value::<Event>(value.expect("decode")).expect("event"));
             }
+            // The PTY reports its own title asynchronously, and on some shells that lands
+            // inside the scavenge window above. A title update is not part of the rename's
+            // contract, so compare the transitions with titles erased: what must not happen
+            // is the same session state being published twice for one mutation.
+            let mut distinct: Vec<Event> = transitions.iter().cloned().map(untitled).collect();
+            distinct.dedup();
             assert_eq!(
-                transitions.len(),
+                distinct.len(),
                 1,
-                "one mutation must publish one session transition"
+                "one mutation must publish one session transition, got {transitions:?}"
             );
             let Event::SessionChanged(session) = &transitions[0] else {
                 panic!("session transition");
@@ -325,6 +339,175 @@ async fn socket_session_mutations_publish_one_transition() {
             .expect("listener deadline")
             .expect("listener task")
             .expect("listener shutdown");
+    }
+}
+
+#[tokio::test]
+async fn a_signal_shutdown_tells_connected_clients_the_daemon_stopped() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("fleet");
+    let shutdown = CancellationToken::new();
+    let listener = Listener::bind(
+        &home,
+        services(&home),
+        BroadcastBus::default(),
+        shutdown.clone(),
+    )
+    .await
+    .expect("bind");
+    let socket = listener.socket_path().to_path_buf();
+    let task = tokio::spawn(listener.run());
+    let stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect");
+    let mut client = Framed::new(stream, FleetCodec::<Request, serde_json::Value>::new());
+    for (id, body) in [
+        (
+            1,
+            RequestBody::Hello {
+                protocol: PROTOCOL_VERSION,
+                client: "shutdown-test".into(),
+            },
+        ),
+        (
+            2,
+            RequestBody::Subscribe {
+                events: vec![EventKind::DaemonShuttingDown],
+            },
+        ),
+    ] {
+        client
+            .send(Request { id, body })
+            .await
+            .expect("send setup request");
+        let value = client
+            .next()
+            .await
+            .expect("setup response")
+            .expect("decode");
+        let response: Response = serde_json::from_value(value).expect("response envelope");
+        assert!(response.result.is_ok());
+    }
+
+    // The signal handler cancels this token; nothing else tells the client the daemon is going.
+    shutdown.cancel();
+
+    let announced = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = client.next().await {
+            let value = frame.expect("decode frame");
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("daemon_shutting_down")
+            {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("shutdown deadline");
+
+    assert!(
+        announced,
+        "a subscribed client is told the daemon stopped, not left to infer it from a close"
+    );
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("listener deadline")
+        .expect("listener task")
+        .expect("listener shutdown");
+}
+
+#[tokio::test]
+async fn a_second_subscribe_adds_to_the_kinds_a_connection_already_receives() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let home = temp.path().join("fleet");
+    let events = BroadcastBus::default();
+    let shutdown = CancellationToken::new();
+    let _cancel_on_drop = shutdown.clone().drop_guard();
+    let listener = Listener::bind(&home, services(&home), events.clone(), shutdown.clone())
+        .await
+        .expect("bind");
+    let socket = listener.socket_path().to_path_buf();
+    let task = tokio::spawn(listener.run());
+    let stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect");
+    let mut client = Framed::new(stream, FleetCodec::<Request, serde_json::Value>::new());
+    for (id, body) in [
+        (
+            1,
+            RequestBody::Hello {
+                protocol: PROTOCOL_VERSION,
+                client: "subscribe-test".into(),
+            },
+        ),
+        (
+            2,
+            RequestBody::Subscribe {
+                events: vec![EventKind::Toast],
+            },
+        ),
+        // A narrower second Subscribe must not retire the kinds the first one asked for:
+        // `Mirror::refresh` issues exactly this on a link already subscribed to every kind.
+        (
+            3,
+            RequestBody::Subscribe {
+                events: vec![EventKind::DaemonShuttingDown],
+            },
+        ),
+    ] {
+        client
+            .send(Request { id, body })
+            .await
+            .expect("send setup request");
+        let value = client
+            .next()
+            .await
+            .expect("setup response")
+            .expect("decode");
+        let response: Response = serde_json::from_value(value).expect("response envelope");
+        assert!(response.result.is_ok());
+    }
+
+    events.publish(Event::Toast {
+        level: fleet_proto::event::ToastLevel::Info,
+        message: "still subscribed".into(),
+    });
+
+    let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(frame) = client.next().await {
+            let value = frame.expect("decode frame");
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("toast") {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("toast deadline");
+
+    assert!(
+        delivered,
+        "Subscribe is additive: the kinds named by an earlier Subscribe keep arriving"
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("listener deadline")
+        .expect("listener task")
+        .expect("listener shutdown");
+}
+
+/// A `SessionChanged` with every terminal title cleared, so a test can compare transitions
+/// without the PTY's asynchronous title updates counting as state changes of their own.
+fn untitled(event: Event) -> Event {
+    match event {
+        Event::SessionChanged(mut session) => {
+            for terminal in &mut session.terminals {
+                terminal.title = None;
+            }
+            Event::SessionChanged(session)
+        }
+        other => other,
     }
 }
 
