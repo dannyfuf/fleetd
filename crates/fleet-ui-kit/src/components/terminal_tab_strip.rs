@@ -326,6 +326,9 @@ fn tab_element(
     on_select: Option<SelectHandler>,
 ) -> gpui::Stateful<gpui::Div> {
     let hover_bg = theme.colors.row_hover;
+    // The strip is a row of anonymous hit targets without this: the tab's own name is the only
+    // thing that tells `nvim` from `cc` outside the pixels.
+    let name = tab.name.clone();
 
     div()
         .id(tab.element_id())
@@ -343,7 +346,7 @@ fn tab_element(
         .when(is_active, |el| el.bg(theme.colors.surface))
         .when(!is_active, |el| el.hover(move |s| s.bg(hover_bg)))
         .when_some(on_select, |el, select| {
-            super::control::on_activate(el, move |window, cx| select(pos, window, cx))
+            super::control::on_activate(el, name, move |window, cx| select(pos, window, cx))
         })
         .child(tab_body(tab, is_active, theme))
         .child(
@@ -439,7 +442,9 @@ fn new_tab_button(theme: &Theme, on_new: Option<NewHandler>) -> gpui::Stateful<g
         .w(theme.metrics.new_terminal_tab_w)
         .h_full()
         .hover(|s| s.bg(theme.colors.row_hover))
-        .when_some(on_new, |el, on_new| super::control::on_activate(el, on_new))
+        .when_some(on_new, |el, on_new| {
+            super::control::on_activate(el, "new terminal", on_new)
+        })
         .child(
             Icon::Plus
                 .el()
@@ -581,6 +586,37 @@ mod tests {
     fn exited_accepts_both_a_code_and_none() {
         assert_eq!(TerminalTab::new(1, "cc").exited(1).exited, Some(Some(1)));
         assert_eq!(TerminalTab::new(1, "cc").exited(None).exited, Some(None));
+    }
+
+    /// `docs/DESIGN-SYSTEM.md` §8: "if a state is not in a gallery, it is not implemented".
+    /// A `#[test]` inside `examples/*.rs` is compiled but never run, so the guard that every
+    /// mark this component can draw is previewable lives here, beside the marks themselves.
+    #[test]
+    fn every_mark_this_strip_draws_appears_in_a_gallery_panel() {
+        const MARKS: [&str; 5] = [
+            ".attention(true)",
+            ".unread(true)",
+            "TerminalAgentState::Working",
+            "TerminalAgentState::Finished",
+            "TerminalTabKind::Native",
+        ];
+        for (gallery, source) in [
+            (
+                "gallery_terminal.rs",
+                include_str!("../../examples/gallery_terminal.rs"),
+            ),
+            (
+                "kit_gallery.rs",
+                include_str!("../../examples/kit_gallery.rs"),
+            ),
+        ] {
+            for mark in MARKS {
+                assert!(
+                    source.contains(mark),
+                    "{gallery} has no tab-strip panel showing `{mark}`"
+                );
+            }
+        }
     }
 
     #[test]
