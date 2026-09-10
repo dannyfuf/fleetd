@@ -22,7 +22,6 @@ use libghostty_vt::{
         SizeReportSize, TertiaryDeviceAttributes,
     },
 };
-use tracing::warn;
 
 use crate::{
     engine::{EngineError, EngineEvent, VtEngine, WheelAction},
@@ -385,7 +384,7 @@ impl VtEngine for GhosttyEngine {
         match <Self as VtEngine>::try_take_frame(self, full) {
             Ok(frame) => frame,
             Err(error) => {
-                warn!(%error, "failed to snapshot Ghostty terminal");
+                tracing::warn!(%error, "failed to snapshot Ghostty terminal");
                 FrameUpdate {
                     terminal: TerminalId(0),
                     seq: 0,
@@ -488,7 +487,7 @@ impl VtEngine for GhosttyEngine {
         match <Self as VtEngine>::try_wheel(self, event) {
             Ok(action) => action,
             Err(error) => {
-                warn!(%error, "failed to encode Ghostty wheel event");
+                tracing::warn!(%error, "failed to encode Ghostty wheel event");
                 WheelAction::Drop
             }
         }
@@ -531,7 +530,7 @@ impl VtEngine for GhosttyEngine {
 
     fn compress_idle(&mut self) {
         if let Err(error) = <Self as VtEngine>::try_compress_idle(self) {
-            warn!(%error, "failed to compress Ghostty history");
+            tracing::warn!(%error, "failed to compress Ghostty history");
         }
     }
 
@@ -575,7 +574,7 @@ impl VtEngine for GhosttyEngine {
         match <Self as VtEngine>::try_encode_key(self, event) {
             Ok(bytes) => bytes,
             Err(error) => {
-                warn!(%error, "failed to encode Ghostty key event");
+                tracing::warn!(%error, "failed to encode Ghostty key event");
                 Vec::new()
             }
         }
@@ -602,7 +601,7 @@ impl VtEngine for GhosttyEngine {
         match <Self as VtEngine>::try_encode_mouse(self, event) {
             Ok(bytes) => bytes,
             Err(error) => {
-                warn!(%error, "failed to encode Ghostty mouse event");
+                tracing::warn!(%error, "failed to encode Ghostty mouse event");
                 Vec::new()
             }
         }
@@ -640,7 +639,7 @@ impl VtEngine for GhosttyEngine {
         match <Self as VtEngine>::try_encode_paste(self, text) {
             Ok(bytes) => bytes,
             Err(error) => {
-                warn!(%error, "failed to encode Ghostty paste");
+                tracing::warn!(%error, "failed to encode Ghostty paste");
                 Vec::new()
             }
         }

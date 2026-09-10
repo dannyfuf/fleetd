@@ -154,3 +154,25 @@ fn attach_rejects_frame_returned_after_deadline() {
 
     host.join().unwrap();
 }
+
+#[test]
+fn kill_is_delivered_even_when_the_command_queue_is_full() {
+    let (sender, receiver) = mpsc::channel();
+    let host = detached_host(sender, thread::spawn(|| {}));
+    host.command_bytes
+        .store(COMMAND_QUEUE_BYTES, std::sync::atomic::Ordering::Release);
+
+    assert!(matches!(
+        host.paste("blocked"),
+        Err(HostError::QueueFull { .. })
+    ));
+    host.kill()
+        .unwrap_or_else(|error| panic!("kill must not be refused by backpressure: {error}"));
+    assert!(matches!(
+        receiver.recv().expect("kill command"),
+        OwnerEvent::BudgetedCommand {
+            command: HostCommand::Kill,
+            ..
+        }
+    ));
+}
