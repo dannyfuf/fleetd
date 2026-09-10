@@ -1,7 +1,10 @@
 //! Fleet's length-prefixed JSON wire contract between clients and the daemon, covering requests, responses, events, snapshots, jobs, terminal frames, and errors.
 
 /// Current wire protocol version spoken by compatible Fleet clients and daemons.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
+
+/// Capability advertised by daemons that support machine federation.
+pub const REMOTE_MACHINES_CAPABILITY: &str = "remote-machines";
 
 pub mod codec;
 pub mod error;

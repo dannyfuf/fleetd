@@ -26,8 +26,14 @@ native GPUI conversation that Fleet understands: it knows when a turn is running
 agent is blocked on a permission, a question or a plan, when a turn finished, and when a
 process died. The terminal path stays as an explicit fallback, now on `^s F`.
 
-Non-goals for the first release: Codex app-server, ACP agents, remote hosts, a thread sidebar,
-voice, and a full editor as the composer.
+Remote worktrees use the same native experience through daemon federation. Thread creation routes
+by the worktree's owning host; the returned thread id registers that owner, and every later open,
+send, response, interrupt, configuration, seen, and stop request follows it. The owning daemon runs
+the provider and persists its transcript; the local daemon only routes requests and mirrors events
+and summaries.
+
+Non-goals for the first release: Codex app-server, ACP agents, cross-host thread migration or
+transcript replication, a thread sidebar, voice, and a full editor as the composer.
 
 ## 2. Product shape
 
@@ -119,6 +125,14 @@ fleet-lazygit
 Ownership boundary, copied from t3code: **provider IO produces normalised events; a
 serialised reducer persists them and updates projections; views render projections.** GPUI
 never owns lifecycle truth. Provider wire types never leave `fleet-daemon`.
+
+On the local daemon, `services/router/agents.rs` classifies `AgentThreadCreate` from the owning
+worktree and registers the returned thread UUID to that host. Thread lists fan out; all other agent
+requests use the registered thread owner. Remote snapshots and thread-created events rebuild the
+registration after reconnect. The request then reaches the ordinary `AgentSessionManager` on the
+owning daemon, so path resolution, provider launch, sequencing, and persistence remain local to
+the worktree machine. Thread UUIDs and sequenced agent events pass through unchanged; only any
+embedded session or terminal ids need federation translation.
 
 ### 3.1 Provider adapter trait
 
@@ -334,7 +348,9 @@ Transport: one managed `opencode serve --hostname 127.0.0.1 --port <free>` per t
 in the worktree with its own process group, readiness checked over HTTP within 30 s, stopped
 with `SIGTERM` to the group then `SIGKILL`. Per thread rather than shared, because MCP and
 directory registration are server-wide while the working directory belongs to the thread.
-An external-server mode (user supplies a URL) is a later option.
+An external-server mode (user supplies a URL) is a later option. For a remote worktree, both the
+server and its HTTP/SSE consumer run inside the remote daemon on loopback; Fleet never exposes or
+tunnels an OpenCode port over the tailnet.
 
 - Every request carries `?directory=<canonical worktree path>`; the server can host several
   directories, so the routing key is `(base_url, directory, session_id)`. If a password is
@@ -451,6 +467,10 @@ silently doing nothing or running a different, destructive action (§10).
   cursor, model, mode, last outcome) in a small `agents/index.json` handled with the same
   discipline as `StateStore` (serialised mutation, atomic write, quarantine on corruption). It
   is not part of `PersistedState` version 1; it gets its own file and version.
+- **Remote ownership:** a remote thread's log, index entry, provider cursor, and live process all
+  belong to the remote daemon's `$FLEET_HOME/agents/`. The local daemon retains no transcript copy;
+  it mirrors summaries/events and routes by thread id. If the link is down, cached summaries stay
+  visible and new mutations fail as unreachable until reconnect.
 - **Client reconnect:** `Snapshot` carries thread summaries; opening a tab requests
   `AgentThreadSnapshot { thread, snapshot, from_seq }` and then subscribes to
   `AgentEvent { thread, seq, event }`. A gap in `seq` triggers a resync from the last applied
@@ -464,7 +484,7 @@ silently doing nothing or running a different, destructive action (§10).
 
 ## 7. Protocol additions (`fleet-proto`)
 
-`PROTOCOL_VERSION` is **6**. The `RequestBody` variants beside the session requests are
+`PROTOCOL_VERSION` is **7**. The native-agent request family introduced in version 6 remains:
 `AgentThreadList`, `AgentThreadCreate { worktree, provider, model, mode, resume_cursor, title }`,
 `AgentThreadOpen { thread, from_seq }`, `AgentThreadClose`, `AgentSend { thread, input }`,
 `AgentInterrupt`, `AgentRespond { thread, gate, answer }`, `AgentSetMode`, `AgentSetModel`,
@@ -475,6 +495,11 @@ silently doing nothing or running a different, destructive action (§10).
 `Event::AgentSummary(AgentThreadSummary)` carry the stream and the tab/context-bar state.
 `Snapshot::agent_threads: Vec<AgentThreadSummary>` is `#[serde(default)]`, so a version-4
 snapshot payload still decodes.
+
+Federation adds no agent-specific wire variant. `AgentThreadCreate` routes by its published
+worktree, thread lists fan out, and all other variants route through the thread-owner registry.
+Remote agent events are rebroadcast through the local daemon in sequence, and transcript replay
+is requested from the owning daemon after a gap or reconnect.
 
 `AgentRevert { thread, checkpoint }` is **not** in the protocol: the checkpoint service it would
 address does not exist yet (§5, §10).
@@ -533,7 +558,7 @@ surface — a follow-up is a surface that is not there yet and says so where the
 
 | # | Phase | Status |
 | --- | --- | --- |
-| 1 | **Domain, protocol, fixtures.** `fleet-core::agents` types and the reducer, `fleet-proto` variants at version 6, harness captures under `research/fixtures/agents/`, replay tests asserting thread state and attention for a plain turn, a tool turn, a permission, a question, a plan, an interrupt and process death | **done** |
+| 1 | **Domain, protocol, fixtures.** `fleet-core::agents` types and the reducer, native-agent `fleet-proto` variants introduced at version 6 (current protocol 7), harness captures under `research/fixtures/agents/`, replay tests asserting thread state and attention for a plain turn, a tool turn, a permission, a question, a plan, an interrupt and process death | **done** |
 | 2 | **Daemon adapters and store.** Claude over stream-json, OpenCode over HTTP + SSE, `AgentSessionManager`, per-thread append-only log, versioned index, 16 ms delta coalescing, restart recovery, `fleet agent` CLI | **done** |
 | 3 | **Read-only transcript.** `AgentThreadView` with user blocks, assistant Markdown, thinking, tool rows, folds, footers, checkpoints and error cards; the tab badge, the session-header word, the context-bar counters and `NeedsYou` notifications | **done** |
 | 4 | **Composer and decisions.** `MultilineInput`, send, queue, steer, interrupt, the three decision cards with key routing, the `/` `@` and model pickers, mode switching, empty state | **done** |

@@ -17,13 +17,20 @@ use crate::args::{
 
 pub(super) async fn list(client: &Client) -> Result<CommandOutput, ProtoError> {
     let threads = client.agent_thread_list().await?;
+    let worktrees = client.get_snapshot().await?.worktrees;
     let text = threads
         .iter()
         .map(|thread| {
+            let host = worktrees
+                .iter()
+                .find(|worktree| worktree.id == thread.worktree)
+                .and_then(|worktree| worktree.host.as_ref())
+                .map_or("local", |host| host.as_str());
             format!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 thread.thread,
                 thread.provider.executable(),
+                host,
                 session_word(thread.session),
                 attention_word(thread.attention),
                 thread.worktree,

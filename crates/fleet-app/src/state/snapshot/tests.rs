@@ -36,6 +36,11 @@ fn chip_counts_never_collapse_unknown_into_another_chip() {
     .collect();
     snapshot.hosts = vec![fleet_proto::snapshot::HostStatus {
         id: "devbox".parse().unwrap_or_else(|error| panic!("{error}")),
+        provider: "tailscale".to_owned(),
+        version: None,
+        link: fleet_proto::snapshot::LinkState::Down,
+        address: None,
+        agent_binaries: None,
         reachable: false,
         checked_at: "2026-09-04T12:00:00Z".to_owned(),
         error: None,

@@ -1,6 +1,6 @@
 //! Persisted state schemas and their domain-level invariants.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -12,6 +12,47 @@ use crate::{
 
 /// The supported persisted state schema version.
 pub const STATE_VERSION: u32 = 1;
+
+/// Recoverable archive of remote worktrees persisted by pre-federation Fleet builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyRemoteRecords {
+    /// Archive schema version.
+    pub version: u32,
+    /// Last-known records, keyed logically by host and worktree id.
+    pub worktrees: Vec<Worktree>,
+}
+
+impl LegacyRemoteRecords {
+    /// Creates an empty version-one archive.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            version: STATE_VERSION,
+            worktrees: Vec::new(),
+        }
+    }
+
+    /// Adds records without duplicating a previously archived host/worktree pair.
+    pub fn merge(&mut self, records: impl IntoIterator<Item = Worktree>) {
+        let mut merged = self
+            .worktrees
+            .drain(..)
+            .map(|worktree| ((worktree.host.clone(), worktree.id.clone()), worktree))
+            .collect::<BTreeMap<_, _>>();
+        for worktree in records {
+            merged.insert((worktree.host.clone(), worktree.id.clone()), worktree);
+        }
+        self.version = STATE_VERSION;
+        self.worktrees = merged.into_values().collect();
+    }
+}
+
+impl Default for LegacyRemoteRecords {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 /// Fleet's complete persisted state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -86,6 +127,15 @@ impl State {
     /// Validates this state's schema version, uniqueness, and references.
     pub fn validate(&self) -> Result<(), StateValidationError> {
         validate_state(self)
+    }
+
+    /// Removes records owned by remote hosts so their daemon mirror is authoritative.
+    pub fn take_remote_worktrees(&mut self) -> Vec<Worktree> {
+        let (remote, local) = std::mem::take(&mut self.worktrees)
+            .into_iter()
+            .partition(|worktree| worktree.host.is_some());
+        self.worktrees = local;
+        remote
     }
 }
 
@@ -310,5 +360,38 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn remote_worktrees_move_into_a_deduplicated_legacy_archive() {
+        let remote = Worktree {
+            id: "acme/api#remote".parse().unwrap(),
+            repo_id: "acme/api".parse().unwrap(),
+            slug: "remote".into(),
+            branch: "remote".into(),
+            base_ref: "origin/main".into(),
+            path: "/remote/acme/api/remote".into(),
+            session: "api/remote".into(),
+            host: Some("dev-box".parse().unwrap()),
+            created_at: "2026-09-08T00:00:00Z".into(),
+            last_opened_at: None,
+            degraded: None,
+        };
+        let mut local = remote.clone();
+        local.id = "acme/api#local".parse().unwrap();
+        local.slug = "local".into();
+        local.path = "/local/acme/api/local".into();
+        local.session = "api/local".into();
+        local.host = None;
+        let mut state = default_state();
+        state.worktrees = vec![remote.clone(), local.clone()];
+
+        let migrated = state.take_remote_worktrees();
+        let mut archive = LegacyRemoteRecords::empty();
+        archive.merge(migrated.clone());
+        archive.merge(migrated);
+
+        assert_eq!(state.worktrees, vec![local]);
+        assert_eq!(archive.worktrees, vec![remote]);
     }
 }

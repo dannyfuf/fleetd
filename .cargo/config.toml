@@ -1,2 +1,0 @@
-[env]
-ZIG_GLOBAL_CACHE_DIR = { value = "/Users/danny/.cache/zig", force = false }

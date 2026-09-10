@@ -66,6 +66,17 @@ pub fn event_damage(event: &Event) -> EventDamage {
                 ..EventDamage::default()
             }
         }
+        Event::TerminalReattach { terminal } => EventDamage {
+            terminal: Some(*terminal),
+            sessions: true,
+            ..EventDamage::default()
+        },
+        Event::HostLinkChanged { .. } => EventDamage {
+            domain: true,
+            chrome: true,
+            connection: true,
+            ..EventDamage::default()
+        },
         Event::WatchStarted(watch) | Event::WatchExited(watch) => EventDamage {
             watch: Some(watch.id),
             watch_structure: true,

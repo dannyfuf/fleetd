@@ -1,3 +1,14 @@
+> **Fleet deviations — remote execution.** This inventory is the Swarm compatibility baseline,
+> not a requirement to preserve implementation topology 1:1. Fleet intentionally replaces the
+> SSH-per-command and one-pane tmux proxy-session design described below with one `fleetd` per
+> machine and local-daemon federation, as adopted in [ADR 0011](decisions/0011-remote-machines.md)
+> and specified by the [remote machines contract](REMOTE-MACHINES.md). The owning daemon performs
+> filesystem, Git, PTY, lifecycle, and native-agent work; clients still connect only to the local
+> daemon. `<host>/<remote-session>` survives only as a local id-remapping convention, not as a tmux
+> SSH proxy. Legacy `{ssh, swarmCommand}` host entries are probe-only. References below to remote
+> argv, proxy sessions, direct SSH lifecycle calls, and a remote protocol-1 CLI describe Swarm's
+> historical behavior, not Fleet's current remote path.
+
 ## 1. Domain model
 
 ### Identity and validation

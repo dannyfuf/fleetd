@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use fleet_core::paths::FleetHome;
 use fleet_daemon::{
     adapters::{
@@ -23,20 +23,32 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 #[command(name = "fleetd", about = "Fleet background daemon", version)]
 struct Args {
     /// Fleet's configuration and data directory.
-    #[arg(long, env = "FLEET_HOME")]
+    #[arg(long, env = "FLEET_HOME", global = true)]
     home: Option<PathBuf>,
+    /// Process mode; omitted starts the long-lived daemon.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Bridge standard input/output to this Fleet home's daemon socket.
+    Connect,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let home = match args.home {
-        Some(home) => home,
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(".fleet"))
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass --home or FLEET_HOME"))?,
-    };
+    if matches!(args.command, Some(Command::Connect)) {
+        if let Err(error) = fleet_daemon::server::bridge::run_connect(args.home).await {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        // Tokio's stdin reader uses a blocking helper that can outlive a closed daemon socket.
+        // This bridge process has no state to flush once relay finishes, so exit immediately.
+        std::process::exit(0);
+    }
+    let home = fleet_core::paths::resolve_home(args.home)?;
     let layout = FleetHome::new(home.clone());
     let singleton = SingletonGuard::acquire(&home).await?;
     std::fs::create_dir_all(layout.logs_dir())?;

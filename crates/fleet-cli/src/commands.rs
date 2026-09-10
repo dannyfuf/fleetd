@@ -2,6 +2,7 @@
 
 mod agents;
 mod board;
+mod hosts;
 mod jobs;
 mod sessions;
 mod watches;
@@ -166,6 +167,7 @@ async fn run_command(mut command: Command) -> Result<CommandOutput, ProtoError> 
 async fn execute(client: &Client, command: Command) -> Result<CommandOutput, ProtoError> {
     match command {
         Command::Board(arguments) => board(client, arguments).await,
+        Command::Host(arguments) => hosts::run(client, arguments).await,
         Command::Exec(_) | Command::WatchChild(_) => {
             Err(validation("exec must run before daemon autostart"))
         }
@@ -223,22 +225,22 @@ where
 }
 
 pub(crate) fn fleet_home() -> Result<PathBuf, ProtoError> {
-    if let Some(home) = std::env::var_os("FLEET_HOME") {
-        return Ok(PathBuf::from(home));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".fleet"))
-        .ok_or_else(|| validation("HOME is not set; set FLEET_HOME"))
+    let selected = std::env::var_os("FLEET_HOME").map(PathBuf::from);
+    fleet_core::paths::resolve_home(selected).map_err(|error| validation(error.to_string()))
 }
 
 fn command_requests_json(command: &Command) -> bool {
     match command {
         Command::Board(arguments) => arguments.json,
+        Command::Host(arguments) => matches!(
+            arguments.command,
+            crate::args::HostCommand::List { json: true }
+        ),
         Command::Watch(arguments) => {
             matches!(&arguments.command, WatchCommand::List(arguments) if arguments.json)
         }
         Command::Create(arguments) => arguments.json,
+        Command::Path(arguments) => arguments.json,
         Command::List(arguments) | Command::Status(arguments) => arguments.json,
         Command::Inspect(arguments) => arguments.json,
         Command::Delete(arguments) => arguments.json,
@@ -250,7 +252,6 @@ fn command_requests_json(command: &Command) -> bool {
         Command::Exec(_)
         | Command::WatchChild(_)
         | Command::Open(_)
-        | Command::Path(_)
         | Command::Agent(_)
         | Command::Import(_)
         | Command::Update

@@ -11,13 +11,13 @@ use fleet_core::{
     board::BackendDescriptor,
     config::{Agent, NotificationsConfig},
     github::PrTab,
-    ids::{ContextId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
+    ids::{ContextId, HostId, JobId, RepoId, SessionId, TerminalId, WorktreeId},
     sessions::{AgentActivity, Session, SessionKind, aggregate_agent_activity},
 };
 use fleet_proto::{
     event::{Event, ToastLevel},
     job::{JobRecord, JobStatus},
-    snapshot::Snapshot,
+    snapshot::{LinkState, Snapshot},
     terminal::{
         Cell, CellWidth, CursorShape, CursorState, FrameUpdate, TerminalModes, ViewportInfo,
     },
@@ -189,6 +189,12 @@ pub struct AppState {
     pub renamed_terminals: HashSet<TerminalId>,
     /// Each new connection has no attachments. Screens reattach when this generation changes.
     pub link_generation: u64,
+    /// Terminals the daemon asked this client to attach again (§3 `TerminalReattach`).
+    ///
+    /// A remote link that comes back re-creates the daemon-side attachment set without changing
+    /// a single terminal id, so nothing a screen already reads would tell it to act. The event
+    /// is recorded here and consumed by the surface that owns the terminal.
+    pub reattach_pending: HashSet<TerminalId>,
     /// Diagnostic results shared by the daemon splash and Settings.
     pub doctor: Option<Vec<fleet_proto::response::DoctorCheck>>,
 }
@@ -248,6 +254,7 @@ impl AppState {
             breadcrumb_row: None,
             renamed_terminals: HashSet::new(),
             link_generation: 0,
+            reattach_pending: HashSet::new(),
             doctor: None,
         }
     }

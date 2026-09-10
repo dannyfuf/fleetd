@@ -4,10 +4,11 @@ use std::collections::{HashMap, HashSet};
 
 use fleet_core::{
     github::{PrTab, PullRequest, derive_pr_state},
-    ids::{RepoId, WorktreeId},
+    ids::{HostId, RepoId, WorktreeId},
     model::Worktree,
 };
 use fleet_proto::response::PrSlice;
+use fleet_proto::snapshot::LinkState;
 use fleet_ui_kit::{
     ActiveTheme, AgeLabel, ColumnLadder, Icon, IconSize, ListView, Pane, PaneBorder, PrBadge,
     PrBadgeState, ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows,
@@ -52,6 +53,10 @@ pub struct PrRow {
     pub presence: StatusKind,
     /// The local worktree, when one matches — this is what `Enter` opens instead of creating.
     pub local: Option<WorktreeId>,
+    /// Machine owning the matching worktree, when it is remote.
+    pub host: Option<HostId>,
+    /// Current daemon-link state for that machine.
+    pub host_link: Option<LinkState>,
     /// The PR's canonical URL, for `y` and `b`.
     pub url: SharedString,
 }
@@ -106,35 +111,44 @@ pub fn build_rows(inputs: &PrInputs<'_>, index: &SnapshotIndex<'_>) -> Vec<PrRow
                 .chain(base)
                 .min()
                 .and_then(|position| inputs.worktrees.get(*position));
-            let (presence_glyph, local) = if creating.contains(&(&pr.repo_id, pr.number)) {
-                (StatusKind::JobRunning, None)
-            } else if let Some(worktree) = local {
-                let status = index.status(&worktree.id);
-                let slept = index
-                    .sessions_for_worktree(&worktree.id)
-                    .iter()
-                    .any(|session| session.slept_at.is_some());
-                let unreachable = worktree
-                    .host
-                    .as_ref()
-                    .is_some_and(|host| index.host(host).is_some_and(|host| !host.reachable));
-                let job_running = index
-                    .jobs_for_target(worktree.id.as_str())
-                    .iter()
-                    .any(|job| crate::views::worktrees_list::owns_row(job));
-                (
-                    resolved_worktree_status(
-                        status,
-                        slept,
-                        worktree.degraded.is_some(),
-                        unreachable,
-                        job_running,
-                    ),
-                    Some(worktree.id.clone()),
-                )
-            } else {
-                (StatusKind::NoSession, None)
-            };
+            let (presence_glyph, local, host, host_link) =
+                if creating.contains(&(&pr.repo_id, pr.number)) {
+                    (StatusKind::JobRunning, None, None, None)
+                } else if let Some(worktree) = local {
+                    let status = index.status(&worktree.id);
+                    let slept = index
+                        .sessions_for_worktree(&worktree.id)
+                        .iter()
+                        .any(|session| session.slept_at.is_some());
+                    let unreachable = worktree.host.as_ref().is_some_and(|host| {
+                        index.host(host).is_none_or(|status| {
+                            !status.reachable || status.link == LinkState::Down
+                        })
+                    });
+                    let host_link = worktree
+                        .host
+                        .as_ref()
+                        .and_then(|host| index.host(host))
+                        .map(|status| status.link);
+                    let job_running = index
+                        .jobs_for_target(worktree.id.as_str())
+                        .iter()
+                        .any(|job| crate::views::worktrees_list::owns_row(job));
+                    (
+                        resolved_worktree_status(
+                            status,
+                            slept,
+                            worktree.degraded.is_some(),
+                            unreachable,
+                            job_running,
+                        ),
+                        Some(worktree.id.clone()),
+                        worktree.host.clone(),
+                        host_link,
+                    )
+                } else {
+                    (StatusKind::NoSession, None, None, None)
+                };
             PrRow {
                 repo: pr.repo_id.clone(),
                 number: pr.number,
@@ -146,6 +160,8 @@ pub fn build_rows(inputs: &PrInputs<'_>, index: &SnapshotIndex<'_>) -> Vec<PrRow
                 age: age_secs(&pr.updated_at, inputs.now),
                 presence: presence_glyph,
                 local,
+                host,
+                host_link,
                 url: SharedString::from(pr.url.clone()),
             }
         })
@@ -604,7 +620,12 @@ mod tests {
         let mut offline_snapshot = snapshot(vec![remote]);
         offline_snapshot.hosts.push(HostStatus {
             id: host,
-            reachable: false,
+            provider: "tailscale".to_owned(),
+            version: None,
+            link: fleet_proto::snapshot::LinkState::Down,
+            address: None,
+            agent_binaries: None,
+            reachable: true,
             checked_at: "2026-09-04T11:59:00Z".to_owned(),
             error: Some("ssh timed out".to_owned()),
         });
@@ -612,6 +633,9 @@ mod tests {
             rows(&pull_requests, &offline_snapshot, &[])[0].presence,
             StatusKind::HostUnreachable
         );
+        let row = &rows(&pull_requests, &offline_snapshot, &[])[0];
+        assert_eq!(row.host.as_ref().map(HostId::as_str), Some("devbox"));
+        assert_eq!(row.host_link, Some(LinkState::Down));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use fleet_core::{
         ThreadProjection, TurnId, TurnOutcome, TurnState, UserInput,
     },
     config::AgentCommands,
-    ids::WorktreeId,
+    ids::{HostId, WorktreeId},
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
@@ -38,6 +38,7 @@ const DELTA_TICK: Duration = Duration::from_millis(16);
 type ProviderFactory = dyn Fn(AgentKind, &StartRequest, &AgentCommands) -> anyhow::Result<Box<dyn AgentProvider>>
     + Send
     + Sync;
+type RemoteHostResolver = dyn Fn(&WorktreeId) -> Option<HostId> + Send + Sync;
 
 struct ManagerInner {
     store: AgentStore,
@@ -47,6 +48,7 @@ struct ManagerInner {
     threads: RwLock<HashMap<ThreadId, ThreadRuntime>>,
     index: std::sync::Mutex<AgentIndex>,
     provider_factory: Arc<ProviderFactory>,
+    remote_host_resolver: RwLock<Option<Arc<RemoteHostResolver>>>,
 }
 
 /// Owns native-agent threads, providers, sequencing, projections, and client seen cursors.
@@ -65,13 +67,15 @@ impl AgentSessionManager {
         worktrees: Worktrees,
         config: Arc<ConfigStore>,
     ) -> Self {
-        Self::new_with_factory(
+        let manager = Self::new_with_factory(
             store,
             events,
             worktrees,
             Some(config),
             Arc::new(spawn_provider),
-        )
+        );
+        manager.set_remote_host_resolver(Arc::new(|_| None));
+        manager
     }
 
     fn new_with_factory(
@@ -119,8 +123,22 @@ impl AgentSessionManager {
                 threads: RwLock::new(threads),
                 index: std::sync::Mutex::new(index),
                 provider_factory,
+                remote_host_resolver: RwLock::new(None),
             }),
         }
+    }
+
+    /// Installs the router's remote-worktree ownership lookup.
+    ///
+    /// Routing normally prevents a remote create request from reaching this local manager. This
+    /// second guard makes that invariant explicit and, crucially, runs before local path lookup,
+    /// provider startup, or any write under the local agent store.
+    pub(crate) fn set_remote_host_resolver(&self, resolver: Arc<RemoteHostResolver>) {
+        *self
+            .inner
+            .remote_host_resolver
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
     }
 
     /// The configured provider command lines, falling back to the packaged defaults.
@@ -182,6 +200,21 @@ impl AgentSessionManager {
         resume_cursor: Option<String>,
         title: Option<String>,
     ) -> Result<ResponseBody, ProtoError> {
+        let remote_host = self
+            .inner
+            .remote_host_resolver
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|resolver| resolver(&worktree));
+        if let Some(host) = remote_host {
+            return Err(ProtoError {
+                kind: ErrorKind::Remote,
+                message: format!(
+                    "agent thread for worktree {worktree} belongs to remote host {host}; local manager refused it"
+                ),
+            });
+        }
         let path = self
             .inner
             .worktrees

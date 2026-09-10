@@ -243,7 +243,57 @@ pub(super) fn commit(state: &Entity<AppState>, bridge: &Bridge, pressed: Confirm
                     return;
                 }
             };
-            bridge.send(request);
+            let seq = with_host(state, cx, |host| {
+                host.confirm.loading = true;
+                host.confirm.error = None;
+                host.confirm.seq
+            });
+            notify(state, cx);
+            let reply = bridge.request(request);
+            crate::dialogs::host::complete_request(state, cx, async move |state, cx| {
+                let outcome = match reply.recv().await {
+                    Ok(Ok(ResponseBody::Pruned(result))) => Ok(result),
+                    Ok(Ok(_)) => Err("unexpected prune response".to_owned()),
+                    Ok(Err(failure)) => Err(failure.message),
+                    Err(_) => Err("fleetd disconnected before prune completed".to_owned()),
+                };
+                let Some(state) = state.upgrade() else { return };
+                cx.update(|cx| {
+                    let live = with_host(&state, cx, |host| host.confirm.seq == seq);
+                    if !live {
+                        return;
+                    }
+                    match outcome {
+                        Ok(result) if !prune_requires_review(&result) => {
+                            state.update(cx, |app, cx| {
+                                app.close_overlay();
+                                cx.notify();
+                            });
+                        }
+                        Ok(result) => {
+                            let skipped = result.skipped.len();
+                            with_host(&state, cx, |host| {
+                                host.confirm.loading = false;
+                                host.confirm.show_keep = true;
+                                host.confirm.error = Some(format!(
+                                    "{skipped} worktree(s) were kept; review every reason below"
+                                ));
+                                host.confirm.prune = Some(result);
+                                host.confirm.update_list();
+                            });
+                            notify(&state, cx);
+                        }
+                        Err(message) => {
+                            with_host(&state, cx, |host| {
+                                host.confirm.loading = false;
+                                host.confirm.error = Some(message);
+                            });
+                            notify(&state, cx);
+                        }
+                    }
+                });
+            });
+            return;
         }
         ConfirmRequest::KillSession { session, .. } => {
             bridge.send(RequestBody::KillSession { session });
@@ -303,6 +353,10 @@ pub(super) fn commit(state: &Entity<AppState>, bridge: &Bridge, pressed: Confirm
         app.close_overlay();
         cx.notify();
     });
+}
+
+pub(super) fn prune_requires_review(result: &fleet_proto::response::PruneResult) -> bool {
+    !result.skipped.is_empty()
 }
 
 pub(super) fn reviewed_prune_ids(confirm: &ConfirmState) -> Vec<WorktreeId> {

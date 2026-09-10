@@ -383,6 +383,7 @@ impl ThreadProjection {
         AgentThreadSummary {
             thread: self.thread,
             worktree: self.worktree.clone(),
+            host: None,
             provider: self.provider,
             title: self.title.clone(),
             attention: self.attention(last_seen),
@@ -1008,6 +1009,9 @@ pub struct AgentThreadSummary {
     pub thread: ThreadId,
     /// Owning worktree.
     pub worktree: WorktreeId,
+    /// Owning remote host, or `None` for a daemon-local thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<crate::ids::HostId>,
     /// Provider kind.
     pub provider: AgentKind,
     /// Display title.

@@ -450,6 +450,7 @@ mod tests {
         ];
         let session = |id: &str, kind| Session {
             id: SessionId::try_from(id).unwrap(),
+            host: None,
             kind,
             cwd: String::new(),
             terminals: Vec::new(),

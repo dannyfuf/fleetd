@@ -4,7 +4,8 @@ use crate::{
     actions::native_agent,
     bridge::BridgeCommand,
     screens::agent_thread::{
-        AgentThreadEvent, AgentThreadView, decisions::DecisionKey, presentation::header_word,
+        AgentThreadEvent, AgentThreadView, ThreadHost, decisions::DecisionKey,
+        presentation::header_word,
     },
     views::workspace_tabs::TabTarget,
 };
@@ -230,6 +231,13 @@ impl WorkspaceScreen {
                 view.sync(&projection, cx);
             });
         }
+        // P3-T04: the thread states the machine it runs on, and a link the daemon reports as
+        // `Down` is what stands the composer down instead of letting a send fail on submit.
+        let host = model.host.as_ref().map(|(name, reachability)| ThreadHost {
+            name: name.clone(),
+            unreachable: reachability.is_unreachable(),
+        });
+        view.update(cx, |view, cx| view.set_host(host, cx));
         self.offer_worktree_files(model, thread, cx);
         // A resync is requested exactly once per detected gap (§6, client reconnect).
         if state.read(cx).agents.needs_resync(thread) {
@@ -263,12 +271,19 @@ impl WorkspaceScreen {
     /// The scan runs on the background executor because a render must never touch the disk;
     /// the view keeps whatever it already has until the listing arrives.
     fn offer_worktree_files(&self, model: &Model, thread: ThreadId, cx: &mut App) {
+        // §12: a remote worktree's path belongs to the other machine's filesystem. Walking it
+        // here would either find nothing or complete against an unrelated local directory, so
+        // a remote thread is simply offered no `@` listing until the daemon can serve one.
+        let Some(path) = model
+            .worktree
+            .as_ref()
+            .and_then(|(_, location)| location.local_path())
+        else {
+            return;
+        };
         if !self.agent_files.borrow_mut().insert(thread) {
             return;
         }
-        let Some((_, path)) = model.worktree.clone() else {
-            return;
-        };
         let Some(view) = self.agent_view(thread) else {
             return;
         };

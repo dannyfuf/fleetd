@@ -1,5 +1,28 @@
 use super::*;
 
+use std::sync::{OnceLock, atomic::AtomicU64};
+
+type TerminalIdCounters = BTreeMap<PathBuf, Arc<AtomicU64>>;
+
+fn terminal_id_counters() -> &'static Mutex<TerminalIdCounters> {
+    static COUNTERS: OnceLock<Mutex<TerminalIdCounters>> = OnceLock::new();
+    COUNTERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+impl Sessions {
+    /// Returns the allocator shared with remote terminal-id translation.
+    pub(crate) fn terminal_id_counter(&self) -> Arc<AtomicU64> {
+        let key = self.config.path().to_path_buf();
+        Arc::clone(
+            terminal_id_counters()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(key)
+                .or_insert_with(|| Arc::new(AtomicU64::new(1))),
+        )
+    }
+}
+
 impl SessionRuntime {
     pub(super) fn new(frames: broadcast::Sender<FrameUpdate>) -> Self {
         Self {

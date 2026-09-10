@@ -23,6 +23,12 @@ impl AgentPopup {
             local.discard_pending();
         }
         local.wheel.reconcile(model.terminal);
+        let reattaching = model
+            .terminal
+            .is_some_and(|id| state.read(cx).reattach_pending.contains(&id));
+        if reattaching {
+            local.attached = None;
+        }
         let relinked = local.attached_generation != model.generation;
         if local.attached != model.terminal || relinked {
             local.clear_selections();
@@ -48,6 +54,11 @@ impl AgentPopup {
                 cx,
             );
             local = self.local.borrow_mut();
+        }
+        if let Some(terminal) = model.terminal {
+            state.update(cx, |app, _| {
+                app.reattach_pending.remove(&terminal);
+            });
         }
         if model.primed
             && (local.mouse_selection.is_some_and(|selection| {

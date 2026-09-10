@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use fleet_proto::{
     codec::FleetCodec,
     event::{Event, EventKind},
-    request::{Request, RequestBody},
+    request::{HelloClient, Request, RequestBody},
     response::{
         DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response,
         ResponseBody,
@@ -120,9 +120,11 @@ impl Connection {
         #[cfg(test)]
         let mut last_request_read = self.last_request_read;
         let mut framed = Framed::new(self.stream, FleetCodec::<Outbound, Request>::new());
-        if !negotiate_hello_with_timeout(&mut framed, HANDSHAKE_TIMEOUT).await? {
+        let Some(client) =
+            negotiate_hello_with_timeout(&mut framed, HANDSHAKE_TIMEOUT, &self.services).await?
+        else {
             return Ok(());
-        }
+        };
 
         let (writer, mut reader) = framed.split();
         let (outbound, outbound_rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
@@ -175,7 +177,13 @@ impl Connection {
                             Some(Ok(ResponseBody::Ack))
                         }
                         body if terminal_request_is_serialized(&body) => {
-                            let result = run_terminal_request(&self.services, owner_id, body, &mut attached).await;
+                            let result = run_terminal_request(
+                                &self.services,
+                                owner_id,
+                                crate::services::RequestContext { client: client.clone() },
+                                body,
+                                &mut attached,
+                            ).await;
                             if result.is_ok() && snapshot_changed {
                                 self.events.request_snapshot(Arc::clone(&self.services));
                             }
@@ -188,6 +196,9 @@ impl Connection {
                         }
                         body => {
                             let services = Arc::clone(&self.services);
+                            let context = crate::services::RequestContext {
+                                client: client.clone(),
+                            };
                             #[cfg(test)]
                             let dispatch_gate = dispatch_gate.clone();
                             pending.push(Box::pin(async move {
@@ -195,7 +206,9 @@ impl Connection {
                                 if let Some(gate) = dispatch_gate {
                                     gate.cancelled().await;
                                 }
-                                let result = services.dispatch_owned(body, owner_id).await;
+                                let result = services
+                                    .dispatch_routed_with_owner(body, owner_id, context)
+                                    .await;
                                 CompletedRequest { id, result, snapshot_changed, shutdown_request }
                             }));
                             #[cfg(test)]
@@ -265,7 +278,12 @@ impl Connection {
                                 skipped,
                                 "event stream lagged; resyncing the client instead of dropping it"
                             );
-                            request_full_frames(&self.services, &attached).await;
+                            request_full_frames(
+                                &self.services,
+                                owner_id,
+                                &client,
+                                &attached,
+                            ).await;
                             self.events.request_snapshot(Arc::clone(&self.services));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
@@ -283,7 +301,12 @@ impl Connection {
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            request_full_frames(&self.services, &attached).await;
+                            request_full_frames(
+                                &self.services,
+                                owner_id,
+                                &client,
+                                &attached,
+                            ).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break Ok(()),
                     }
@@ -318,7 +341,16 @@ impl Connection {
         drop(watch_owner);
         let detached_any = !attached.is_empty();
         for terminal in attached {
-            if let Err(error) = self.services.sessions.detach(terminal).await
+            if let Err(error) = self
+                .services
+                .dispatch_routed_with_owner(
+                    RequestBody::DetachTerminal { terminal },
+                    owner_id,
+                    crate::services::RequestContext {
+                        client: client.clone(),
+                    },
+                )
+                .await
                 && !matches!(error, DaemonError::NotFound(_))
             {
                 tracing::warn!(%error, %terminal, "failed to detach disconnected client");
@@ -334,26 +366,36 @@ impl Connection {
 /// Answers the mandatory opening Hello and reports whether the session may proceed.
 async fn negotiate_hello(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
-) -> DaemonResult<bool> {
+    services: &Services,
+) -> DaemonResult<Option<HelloClient>> {
     let Some(first) = framed.next().await else {
-        return Ok(false);
+        return Ok(None);
     };
     let first = first.map_err(|error| DaemonError::Protocol(error.to_string()))?;
-    let result = match first.body {
+    let (result, client) = match first.body {
         RequestBody::Hello {
             protocol: fleet_proto::PROTOCOL_VERSION,
-            ..
-        } => Ok(ResponseBody::Hello {
-            protocol: fleet_proto::PROTOCOL_VERSION,
-            server: Services::version(),
-        }),
-        RequestBody::Hello { protocol, .. } => Err(DaemonError::Unsupported(format!(
-            "unsupported protocol {protocol}; expected {}",
-            fleet_proto::PROTOCOL_VERSION
-        ))),
-        _ => Err(DaemonError::Protocol(
-            "Hello must be the first request".to_owned(),
-        )),
+            client,
+        } => (
+            Ok(ResponseBody::Hello {
+                protocol: fleet_proto::PROTOCOL_VERSION,
+                server: Services::version(),
+            }),
+            Some(client),
+        ),
+        RequestBody::Hello { protocol, .. } => (
+            Err(DaemonError::Unsupported(format!(
+                "unsupported protocol {protocol}; expected {}",
+                fleet_proto::PROTOCOL_VERSION
+            ))),
+            None,
+        ),
+        _ => (
+            Err(DaemonError::Protocol(
+                "Hello must be the first request".to_owned(),
+            )),
+            None,
+        ),
     };
     let accepted = result.is_ok();
     write_response(
@@ -362,16 +404,18 @@ async fn negotiate_hello(
             id: first.id,
             result: result.map_err(Into::into),
         },
+        services.daemon_id(),
     )
     .await?;
-    Ok(accepted)
+    Ok(accepted.then_some(client).flatten())
 }
 
 async fn negotiate_hello_with_timeout(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     timeout: Duration,
-) -> DaemonResult<bool> {
-    tokio::time::timeout(timeout, negotiate_hello(framed))
+    services: &Services,
+) -> DaemonResult<Option<HelloClient>> {
+    tokio::time::timeout(timeout, negotiate_hello(framed, services))
         .await
         .map_err(|_| DaemonError::Timeout("client Hello handshake".to_owned()))?
 }
@@ -384,6 +428,7 @@ async fn negotiate_hello_with_timeout(
 async fn run_terminal_request(
     services: &Services,
     owner_id: u64,
+    context: crate::services::RequestContext,
     body: RequestBody,
     attached: &mut HashSet<fleet_core::ids::TerminalId>,
 ) -> DaemonResult<ResponseBody> {
@@ -397,15 +442,27 @@ async fn run_terminal_request(
             terminal,
             cols,
             rows,
-        } if attached.contains(&terminal) => services
-            .sessions
-            .resize(terminal, cols, rows)
-            .await
-            .map(|()| ResponseBody::Ack),
+        } if attached.contains(&terminal) => {
+            services
+                .dispatch_routed_with_owner(
+                    RequestBody::ResizeTerminal {
+                        terminal,
+                        cols,
+                        rows,
+                    },
+                    owner_id,
+                    context,
+                )
+                .await
+        }
         RequestBody::DetachTerminal { terminal } if !attached.contains(&terminal) => {
             Ok(ResponseBody::Ack)
         }
-        body => services.dispatch_owned(body, owner_id).await,
+        body => {
+            services
+                .dispatch_routed_with_owner(body, owner_id, context)
+                .await
+        }
     };
     if result.is_ok()
         && let Some((attach, terminal)) = membership
@@ -448,10 +505,25 @@ fn terminal_request_is_serialized(body: &RequestBody) -> bool {
         )
 }
 
-async fn request_full_frames(services: &Services, attached: &HashSet<fleet_core::ids::TerminalId>) {
+async fn request_full_frames(
+    services: &Services,
+    owner_id: u64,
+    client: &HelloClient,
+    attached: &HashSet<fleet_core::ids::TerminalId>,
+) {
     // A broadcast gap does not identify which terminal lost rows.
     for terminal in attached {
-        let _ignored = services.sessions.request_full_frame(*terminal).await;
+        let _ignored = services
+            .dispatch_routed_with_owner(
+                RequestBody::RequestFullFrame {
+                    terminal: *terminal,
+                },
+                owner_id,
+                crate::services::RequestContext {
+                    client: client.clone(),
+                },
+            )
+            .await;
     }
 }
 
@@ -533,6 +605,8 @@ fn event_kind(event: &Event) -> EventKind {
         Event::TerminalFrame(_) => EventKind::TerminalFrame,
         Event::TerminalExited { .. } => EventKind::TerminalExited,
         Event::TerminalTitle { .. } => EventKind::TerminalTitle,
+        Event::HostLinkChanged { .. } => EventKind::HostLinkChanged,
+        Event::TerminalReattach { .. } => EventKind::TerminalReattach,
         Event::Toast { .. } => EventKind::Toast,
         Event::DaemonShuttingDown => EventKind::DaemonShuttingDown,
     }
@@ -595,11 +669,17 @@ async fn enqueue_outbound(
 async fn write_response(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     response: Response,
+    daemon_id: &str,
 ) -> DaemonResult<()> {
     let message = if matches!(&response.result, Ok(ResponseBody::Hello { .. })) {
         Outbound::Hello(HelloResponse {
             response,
-            capabilities: vec![PRUNE_REVIEWED_IDS_CAPABILITY.to_owned()],
+            capabilities: vec![
+                PRUNE_REVIEWED_IDS_CAPABILITY.to_owned(),
+                fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
+            ],
+            daemon_id: daemon_id.to_owned(),
+            build_commit: option_env!("FLEET_BUILD_COMMIT").map(str::to_owned),
         })
     } else {
         Outbound::Response(response)
@@ -674,12 +754,17 @@ mod tests {
                     server: Services::version(),
                 }),
             },
-            capabilities: vec![PRUNE_REVIEWED_IDS_CAPABILITY.to_owned()],
+            capabilities: vec![
+                PRUNE_REVIEWED_IDS_CAPABILITY.to_owned(),
+                fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
+            ],
+            daemon_id: "test-daemon".to_owned(),
+            build_commit: None,
         });
         let hello = serde_json::to_value(hello).expect("serialize Hello");
         assert_eq!(
             hello["capabilities"],
-            serde_json::json!(["prune.reviewed_ids"])
+            serde_json::json!(["prune.reviewed_ids", "remote-machines"])
         );
 
         let identity = daemon_identity();
@@ -707,7 +792,7 @@ mod tests {
             let expected: serde_json::Value =
                 serde_json::from_str(golden).expect("response golden");
             let response = serde_json::from_value(expected.clone()).expect("response shape");
-            write_response(&mut server, response)
+            write_response(&mut server, response, "test-daemon")
                 .await
                 .expect("send response");
             let actual = tokio::time::timeout(Duration::from_secs(1), client.next())
@@ -736,9 +821,12 @@ mod tests {
 
     #[tokio::test]
     async fn silent_client_handshake_has_deadline() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let services = test_services(temp.path()).await;
         let (server, _client) = UnixStream::pair().expect("socket pair");
         let mut framed = Framed::new(server, FleetCodec::<Outbound, Request>::new());
-        let result = negotiate_hello_with_timeout(&mut framed, Duration::from_millis(10)).await;
+        let result =
+            negotiate_hello_with_timeout(&mut framed, Duration::from_millis(10), &services).await;
         assert!(matches!(result, Err(DaemonError::Timeout(_))));
     }
 

@@ -77,6 +77,7 @@ fn terminal(id: u64, kind: TerminalKind) -> Terminal {
 fn session(id: &str, terminal: Terminal) -> Session {
     Session {
         id: SessionId::try_from(id).unwrap_or_else(|error| panic!("{error}")),
+        host: None,
         kind: SessionKind::Agent(fleet_core::config::Agent::Claude),
         cwd: "/tmp".to_owned(),
         active_terminal: Some(terminal.id),
@@ -870,4 +871,217 @@ fn row_cache_is_untouched_without_a_selection_and_retains_only_selected_rows() {
         vec![101, 102]
     );
     assert_eq!((cache.last_seq, cache.last_viewport_base), (3, 100));
+}
+
+// -- remote worktrees (contract §12, plan P2-T07 / P3-T02) --------------------------------
+
+fn worktree_id() -> WorktreeId {
+    "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// The remote worktree path is deliberately one that also exists locally on every machine:
+/// a `local_path` that leaked would open a Git view on the wrong repository rather than fail.
+const REMOTE_PATH: &str = "/tmp";
+
+/// A worktree session, on `dev-box` with the given link state or on this machine.
+fn app_with_worktree(host: Option<LinkState>) -> AppState {
+    let id = worktree_id();
+    let mut record = session("payroll/feat", terminal(1, TerminalKind::Pty));
+    record.kind = SessionKind::Worktree(id.clone());
+    let mut app = app_with_session(record);
+    let host_id: HostId = "dev-box".parse().unwrap_or_else(|error| panic!("{error}"));
+    let mut snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("app_with_session installs a snapshot"));
+    snapshot.worktrees = vec![Worktree {
+        id,
+        repo_id: "buk/payroll"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+        slug: "feat".to_owned(),
+        branch: "feat".to_owned(),
+        base_ref: "main".to_owned(),
+        path: REMOTE_PATH.to_owned(),
+        session: "payroll/feat".to_owned(),
+        host: host.map(|_| host_id.clone()),
+        created_at: "2026-09-04T12:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    }];
+    if let Some(link) = host {
+        snapshot.hosts = vec![HostStatus {
+            id: host_id,
+            provider: "tailscale".to_owned(),
+            version: Some("0.1.0".to_owned()),
+            link,
+            address: None,
+            agent_binaries: None,
+            reachable: link == LinkState::Ready,
+            checked_at: "2026-09-04T12:00:00Z".to_owned(),
+            error: None,
+        }];
+    }
+    app.apply_snapshot(snapshot, Instant::now());
+    app
+}
+
+fn model_of(app: &AppState) -> Model {
+    let session = app
+        .active_session()
+        .unwrap_or_else(|| panic!("the workspace screen names a session"));
+    Model::build(app, session)
+}
+
+/// §12: `local_path` is the only door to the filesystem, and a remote worktree has no key.
+#[test]
+fn a_remote_worktree_never_yields_a_local_path() {
+    let remote = model_of(&app_with_worktree(Some(LinkState::Ready)));
+    let (_, location) = remote
+        .worktree
+        .as_ref()
+        .unwrap_or_else(|| panic!("the session names a worktree"));
+
+    assert_eq!(
+        location.host.as_ref().map(ToString::to_string),
+        Some("dev-box".to_owned())
+    );
+    assert_eq!(location.path, REMOTE_PATH);
+    assert_eq!(
+        location.local_path(),
+        None,
+        "a remote path may never be handed to local filesystem or embedded Git code"
+    );
+
+    let local = model_of(&app_with_worktree(None));
+    let (_, location) = local
+        .worktree
+        .as_ref()
+        .unwrap_or_else(|| panic!("the session names a worktree"));
+    assert_eq!(location.host, None);
+    assert_eq!(location.local_path(), Some(PathBuf::from(REMOTE_PATH)));
+}
+
+/// The empty Fleet-drawn tab has to say which of the two reasons it is empty for.
+#[test]
+fn the_empty_git_pane_names_the_remote_case_separately() {
+    assert_ne!(no_pane_reason(true), no_pane_reason(false));
+    assert!(no_pane_reason(true).contains("remote"));
+}
+
+/// The daemon link — not the last probe — is what the workspace calls (un)reachable (§3, §10).
+#[test]
+fn the_daemon_link_decides_whether_a_remote_workspace_is_reachable() {
+    let ready = model_of(&app_with_worktree(Some(LinkState::Ready)));
+    assert_eq!(
+        ready.host.as_ref().map(|(_, reachability)| *reachability),
+        Some(HostReachability::Reachable)
+    );
+    assert_ne!(ready.status, StatusKind::HostUnreachable);
+
+    let down = model_of(&app_with_worktree(Some(LinkState::Down)));
+    assert_eq!(
+        down.host.as_ref().map(|(_, reachability)| *reachability),
+        Some(HostReachability::Unreachable)
+    );
+    assert!(
+        down.host
+            .as_ref()
+            .is_some_and(|(_, reachability)| reachability.is_unreachable())
+    );
+    assert_eq!(down.status, StatusKind::HostUnreachable);
+
+    // A connection attempt in flight has decided nothing yet, so it may not read as a failure.
+    let connecting = model_of(&app_with_worktree(Some(LinkState::Connecting)));
+    assert_eq!(
+        connecting
+            .host
+            .as_ref()
+            .map(|(_, reachability)| *reachability),
+        Some(HostReachability::Unknown)
+    );
+    assert_eq!(connecting.status, StatusKind::Unknown);
+
+    let local = model_of(&app_with_worktree(None));
+    assert_eq!(local.host, None);
+    assert_ne!(local.status, StatusKind::HostUnreachable);
+}
+
+/// P3-T02: a remote thread is a tab like any other — same strip, same order, same position.
+#[test]
+fn remote_agent_summaries_build_the_same_tabs_as_local_ones() {
+    fn strip(app: &mut AppState) -> (Vec<workspace_tabs::TabTarget>, usize, ThreadId) {
+        let projection = ThreadProjection::new(
+            ThreadId::new(),
+            worktree_id(),
+            fleet_core::agents::AgentKind::Claude,
+        );
+        let thread = projection.thread;
+        let mut snapshot = app
+            .snapshot
+            .clone()
+            .unwrap_or_else(|| panic!("app_with_worktree installs a snapshot"));
+        snapshot.agent_threads = vec![projection.summary(fleet_core::agents::Seq::default())];
+        app.apply_snapshot(snapshot, Instant::now());
+        app.agents.activate(worktree_id(), thread);
+        let session = app
+            .active_session()
+            .cloned()
+            .unwrap_or_else(|| panic!("the workspace screen names a session"));
+        let agents = threads_of(app, &session);
+        let model = Model::build(app, &session);
+        let targets = workspace_tabs::targets(&session, &agents);
+        let position = workspace_tabs::active_position(&session, &agents, active_target(&model));
+        assert_eq!(model.agent, Some(thread));
+        (targets, position, thread)
+    }
+
+    let (local_targets, local_position, local_thread) = strip(&mut app_with_worktree(None));
+    let (remote_targets, remote_position, remote_thread) =
+        strip(&mut app_with_worktree(Some(LinkState::Down)));
+
+    assert_eq!(
+        local_targets,
+        vec![
+            workspace_tabs::TabTarget::Terminal(TerminalId(1)),
+            workspace_tabs::TabTarget::Agent(local_thread),
+        ]
+    );
+    assert_eq!(
+        remote_targets,
+        vec![
+            workspace_tabs::TabTarget::Terminal(TerminalId(1)),
+            workspace_tabs::TabTarget::Agent(remote_thread),
+        ],
+        "an unreachable host takes no tab out of the strip"
+    );
+    assert_eq!(local_position, remote_position);
+}
+
+/// P2-T08: the daemon rebuilt the attachment behind an unchanged id, so the model has to carry
+/// the ask — nothing else in a frame would differ from the frame before the link dropped.
+#[test]
+fn a_reattach_request_reaches_the_workspace_model_for_the_shown_terminal() {
+    let mut app = app_with_worktree(Some(LinkState::Ready));
+    assert!(!model_of(&app).reattach);
+
+    app.apply_daemon_event(
+        fleet_proto::event::Event::TerminalReattach {
+            terminal: TerminalId(1),
+        },
+        Instant::now(),
+    );
+    assert!(model_of(&app).reattach);
+
+    // Another session's terminal is not this workspace's business.
+    app.reattach_pending.clear();
+    app.apply_daemon_event(
+        fleet_proto::event::Event::TerminalReattach {
+            terminal: TerminalId(9),
+        },
+        Instant::now(),
+    );
+    assert!(!model_of(&app).reattach);
 }

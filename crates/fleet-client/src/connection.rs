@@ -24,6 +24,7 @@ use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::UnixStream,
     runtime::Handle,
     sync::{broadcast, mpsc, oneshot},
@@ -40,13 +41,24 @@ const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 1_024;
 const HANDSHAKE_EVENT_CAPACITY: usize = 1_024;
 
-type Transport = Framed<UnixStream, FleetCodec<Request, Value>>;
-type TransportWriter = SplitSink<Transport, Request>;
-type TransportReader = SplitStream<Transport>;
+/// Fleet's framed client transport over any Tokio byte stream.
+pub type ProtocolTransport<S> = Framed<S, FleetCodec<Request, Value>>;
+
+type Transport = ProtocolTransport<UnixStream>;
+type TransportWriter<S> = SplitSink<ProtocolTransport<S>, Request>;
+type TransportReader<S> = SplitStream<ProtocolTransport<S>>;
+
+/// Wraps an arbitrary Tokio duplex stream in Fleet's client-side codec.
+pub fn protocol_transport<S>(stream: S) -> ProtocolTransport<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    Framed::new(stream, FleetCodec::new())
+}
 
 #[derive(Debug)]
-struct Established {
-    transport: Transport,
+struct Established<S> {
+    transport: ProtocolTransport<S>,
     buffered_events: Vec<Event>,
 }
 
@@ -275,7 +287,7 @@ impl Client {
 
 async fn run_connection(
     home: PathBuf,
-    established: Established,
+    established: Established<UnixStream>,
     mut state: ConnectionState,
     mut commands: mpsc::Receiver<Command>,
     events: broadcast::Sender<Event>,
@@ -380,15 +392,18 @@ enum DispatchOutcome {
     ShuttingDown,
 }
 
-async fn send_command(
-    writer: &mut TransportWriter,
-    reader: &mut TransportReader,
+async fn send_command<S>(
+    writer: &mut TransportWriter<S>,
+    reader: &mut TransportReader<S>,
     command: Command,
     pending: &mut HashMap<u64, Pending>,
     state: &mut ConnectionState,
     events: &broadcast::Sender<Event>,
     metadata: &RwLock<ConnectionMetadata>,
-) -> DispatchOutcome {
+) -> DispatchOutcome
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let Some(command) = command_for_dispatch(command) else {
         return DispatchOutcome::Sent;
     };
@@ -669,9 +684,12 @@ fn discard_obsolete_commands(queued: &mut VecDeque<Command>) {
     *queued = active;
 }
 
-async fn establish(home: &Path, state: &mut ConnectionState) -> Result<Established, ConnectError> {
+async fn establish(
+    home: &Path,
+    state: &mut ConnectionState,
+) -> Result<Established<UnixStream>, ConnectError> {
     let socket = UnixStream::connect(FleetHome::new(home).socket_path()).await?;
-    let mut transport = Framed::new(socket, FleetCodec::new());
+    let mut transport = protocol_transport(socket);
     let mut buffered_events = Vec::new();
     let capabilities = exchange(
         &mut transport,
@@ -680,7 +698,7 @@ async fn establish(home: &Path, state: &mut ConnectionState) -> Result<Establish
             id: 0,
             body: RequestBody::Hello {
                 protocol: PROTOCOL_VERSION,
-                client: format!("fleet-client/{}", env!("CARGO_PKG_VERSION")),
+                client: fleet_proto::request::HelloClient::default(),
             },
         },
         negotiated_capabilities,
@@ -830,12 +848,15 @@ fn process_started_at(_pid: u32) -> Option<(u64, u64)> {
     None
 }
 
-async fn exchange<T>(
-    transport: &mut Transport,
+async fn exchange<S, T>(
+    transport: &mut ProtocolTransport<S>,
     buffered_events: &mut Vec<Event>,
     request: Request,
     validate: impl FnOnce(ResponseBody, &Value) -> Result<T, ConnectError>,
-) -> Result<T, ConnectError> {
+) -> Result<T, ConnectError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let expected_id = request.id;
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     timeout_at(deadline, transport.send(request))
@@ -909,6 +930,8 @@ fn all_event_kinds() -> Vec<EventKind> {
         EventKind::TerminalFrame,
         EventKind::TerminalExited,
         EventKind::TerminalTitle,
+        EventKind::HostLinkChanged,
+        EventKind::TerminalReattach,
         EventKind::Toast,
         EventKind::DaemonShuttingDown,
     ]

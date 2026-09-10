@@ -451,6 +451,19 @@ pub fn normalize_imported_windows(windows: &mut [WindowConfig]) {
     }
 }
 
+impl Config {
+    /// Returns the configured default remote host, or none for local placement.
+    #[must_use]
+    pub fn default_host(&self) -> Option<&HostId> {
+        if self.default_host == LOCAL_HOST {
+            return None;
+        }
+        self.hosts
+            .keys()
+            .find(|host| host.as_ref() == self.default_host)
+    }
+}
+
 /// Validates cross-field and non-empty constraints in a complete configuration.
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     if config.terminal.scrollback_bytes == 0
@@ -479,11 +492,50 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
-    for HostConfigEntry { ssh, swarm_command } in config.hosts.values() {
-        if ssh.is_empty() || swarm_command.is_empty() {
-            return Err(ConfigError::Validation(
-                "host ssh and swarmCommand must be non-empty".to_owned(),
-            ));
+    for entry in config.hosts.values() {
+        match entry {
+            HostConfigEntry::Tailscale {
+                node,
+                user,
+                ssh_options,
+                fleetd,
+                fleet_home,
+            } => {
+                if node.is_empty()
+                    || user.as_ref().is_some_and(String::is_empty)
+                    || ssh_options.iter().any(String::is_empty)
+                    || fleetd.is_empty()
+                    || fleet_home.as_ref().is_some_and(String::is_empty)
+                {
+                    return Err(ConfigError::Validation(
+                        "tailscale host fields must be non-empty when present".to_owned(),
+                    ));
+                }
+            }
+            HostConfigEntry::Command {
+                run,
+                fleetd,
+                fleet_home,
+                display,
+            } => {
+                if run.is_empty()
+                    || run.iter().any(String::is_empty)
+                    || fleetd.is_empty()
+                    || fleet_home.as_ref().is_some_and(String::is_empty)
+                    || display.as_ref().is_some_and(String::is_empty)
+                {
+                    return Err(ConfigError::Validation(
+                        "command host fields must be non-empty when present".to_owned(),
+                    ));
+                }
+            }
+            HostConfigEntry::Legacy { ssh, swarm_command } => {
+                if ssh.is_empty() || swarm_command.is_empty() {
+                    return Err(ConfigError::Validation(
+                        "host ssh and swarmCommand must be non-empty".to_owned(),
+                    ));
+                }
+            }
         }
     }
     if config.agent_commands.claude.is_empty() || config.agent_commands.opencode.is_empty() {
@@ -757,5 +809,51 @@ mod tests {
         let round_trip =
             merge_config("/home/me/.fleet", value).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(round_trip, config);
+    }
+
+    #[test]
+    fn host_variants_round_trip_with_defaults() {
+        let config = merge_config(
+            "/home/me/.fleet",
+            json!({
+                "hosts": {
+                    "dev-box": {"provider":"tailscale","node":"dev-box","user":"df"},
+                    "loopback": {"provider":"command","run":["sh","-c","exec \"$@\"","--"],"fleetd":"/tmp/fleetd","fleetHome":"/tmp/remote","display":"Loopback"},
+                    "old-box": {"ssh":"arch-dev","swarmCommand":"swarm"}
+                },
+                "defaultHost": "dev-box"
+            }),
+        )
+        .expect("host config");
+        assert_eq!(config.default_host().map(HostId::as_str), Some("dev-box"));
+        assert!(
+            matches!(config.hosts.values().next(), Some(HostConfigEntry::Tailscale { fleetd, fleet_home, .. }) if fleetd == "fleetd" && fleet_home.as_deref() == Some("~/.fleet"))
+        );
+        let value = serde_json::to_value(&config).expect("serialize hosts");
+        let round_trip = merge_config("/home/me/.fleet", value).expect("round trip hosts");
+        assert_eq!(round_trip, config);
+    }
+
+    #[test]
+    fn every_host_nonempty_constraint_is_validated() {
+        let invalid_hosts = [
+            json!({"provider":"tailscale","node":""}),
+            json!({"provider":"tailscale","node":"node","user":""}),
+            json!({"provider":"tailscale","node":"node","sshOptions":[""]}),
+            json!({"provider":"tailscale","node":"node","fleetd":""}),
+            json!({"provider":"tailscale","node":"node","fleetHome":""}),
+            json!({"provider":"command","run":[]}),
+            json!({"provider":"command","run":[""]}),
+            json!({"provider":"command","run":["ssh"],"fleetd":""}),
+            json!({"provider":"command","run":["ssh"],"fleetHome":""}),
+            json!({"provider":"command","run":["ssh"],"display":""}),
+            json!({"ssh":"","swarmCommand":"swarm"}),
+            json!({"ssh":"node","swarmCommand":""}),
+        ];
+        for host in invalid_hosts {
+            let result = merge_config("/home/me/.fleet", json!({"hosts":{"broken":host}}));
+            assert!(result.is_err(), "accepted invalid host entry");
+        }
+        assert!(merge_config("/home/me/.fleet", json!({"defaultHost":"missing"}),).is_err());
     }
 }

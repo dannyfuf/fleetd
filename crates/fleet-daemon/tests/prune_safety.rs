@@ -403,6 +403,48 @@ async fn newly_dirty_candidate_is_not_deleted() {
     assert_eq!(shell.status_calls.load(Ordering::SeqCst), 2);
 }
 
+// A missing reviewed id is itself a reviewed outcome; it must never widen or abort the prune.
+#[tokio::test]
+async fn selected_missing_worktree_is_skipped_instead_of_failing_the_prune() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let home = temp.path().join("fleet");
+    let files = Arc::new(FakeFiles::new(
+        home.join("trash"),
+        vec![home.join("repos"), home.join("worktrees")],
+    ));
+    let clock = Arc::new(FixedClock::new(chrono::Utc::now()));
+    let state = Arc::new(StateStore::new(&home, files.clone(), clock.clone()));
+    let jobs = Arc::new(JobManager::with_clock(&home, clock));
+    let config = Arc::new(ConfigStore::new(&home, files));
+    let sessions = Sessions::new(config, Arc::clone(&state));
+    let shell = Arc::new(FakeShell::new());
+    let inspect = Inspect::new(
+        state,
+        Arc::clone(&jobs),
+        Arc::new(FakeGit::new(Arc::clone(&shell))),
+        Arc::new(FakeGithub::new(shell)),
+        sessions.clone(),
+    );
+    let prune = Prune::new(
+        jobs,
+        inspect,
+        sessions,
+        Arc::new(RecordingDeleter::default()),
+    );
+    let missing =
+        WorktreeId::try_from("acme/api#missing").unwrap_or_else(|error| panic!("{error}"));
+
+    let result = prune
+        .worktrees(false, false, false, None, Some(vec![missing.clone()]))
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(result.deleted.is_empty());
+    assert_eq!(result.skipped.len(), 1);
+    assert_eq!(result.skipped[0].worktree_id, missing);
+    assert!(result.skipped[0].reason.contains("not found"));
+}
+
 fn success(stdout: &str) -> fleet_daemon::adapters::shell::ShellResult {
     fleet_daemon::adapters::shell::ShellResult {
         status: 0,

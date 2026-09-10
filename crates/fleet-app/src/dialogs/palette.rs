@@ -1534,6 +1534,7 @@ mod tests {
             id: "widgets/feature-one"
                 .parse()
                 .unwrap_or_else(|error| panic!("{error}")),
+            host: None,
             kind: SessionKind::Worktree(id.clone()),
             cwd: "/tmp/widgets/feature-one".to_owned(),
             terminals: Vec::new(),

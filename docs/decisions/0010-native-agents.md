@@ -6,6 +6,11 @@ Fleet understands — turns, tools, permissions, questions, plans — instead of
 reads. `docs/NATIVE-AGENTS.md` is the specification; this file records why the load-bearing
 choices are what they are.
 
+**Superseded in part by [ADR 0011](0011-remote-machines.md):** remote worktrees now route native
+agent requests to the daemon that owns the worktree. That daemon runs the provider and stores the
+transcript; the structured protocol, reducer, completion authority, and UI decisions below remain
+in force.
+
 - **Speak the structured protocol, never parse the terminal.** Both adapters consume a machine
   protocol and normalise it into one `AgentEvent` stream. Screen-scraping a harness's TUI was
   rejected: the output is a rendering, not a contract, and every state Fleet needs (a turn
@@ -43,8 +48,8 @@ choices are what they are.
   `fleet_lazygit::diff_view` takes unified-diff *text*, so an embedder needs no git plumbing and
   `fleet-ui-kit` gains no `fleet-git` dependency, while the rows keep the ADR 0005 stack
   (`syntect`, `similar`, uniform rows) and therefore the same geometry as a full-window diff.
-- **Rejected for the first release:** Codex app-server and ACP agents, remote hosts, a thread
-  sidebar, a detached inspector or diff pane, voice, and a full editor as the composer. Also
+- **Rejected for the first release:** Codex app-server and ACP agents, a thread sidebar, a
+  detached inspector or diff pane, voice, and a full editor as the composer. Also
   rejected: modal permission dialogs — a decision is a card in the thread, because the reason it
   is being asked is the transcript above it.
 - **Still the fallback:** the PTY popup on `^s F` (ADR-era `^s a`/`^s A`). A provider that

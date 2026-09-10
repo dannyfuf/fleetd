@@ -435,7 +435,7 @@ impl WorkspaceScreen {
                 cx.spawn(async move |cx| {
                     let answer = reply.recv().await;
                     cx.update(|cx| match answer {
-                        Ok(Ok(ResponseBody::Path(path))) => {
+                        Ok(Ok(ResponseBody::Path { path, .. })) => {
                             cx.write_to_clipboard(ClipboardItem::new_string(path));
                             state.update(cx, |app, cx| {
                                 app.toast_short(

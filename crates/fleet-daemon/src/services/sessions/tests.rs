@@ -1,5 +1,104 @@
 use super::*;
 
+use crate::adapters::{clock::SystemClock, files::RealFiles};
+
+#[tokio::test]
+async fn proxied_ensure_uses_executing_daemon_layout_and_only_degrades_lazygit() {
+    let temp = tempfile::tempdir().expect("temp home");
+    let home = temp.path();
+    let repos = home.join("repos");
+    let worktrees = home.join("worktrees");
+    let worktree_path = worktrees.join("owner/repo/feature");
+    std::fs::create_dir_all(&repos).expect("repos directory");
+    std::fs::create_dir_all(&worktree_path).expect("worktree directory");
+    let files = Arc::new(RealFiles::new(
+        home.join("trash"),
+        [repos.clone(), worktrees],
+    ));
+    let config = Arc::new(ConfigStore::new(home, files.clone()));
+    let mut effective = config.load().await.expect("config");
+    effective.agent_commands.claude = "/bin/sleep 30".to_owned();
+    effective.windows = vec![
+        fleet_core::config::WindowConfig {
+            name: "lg".to_owned(),
+            command: fleet_core::config::NATIVE_LAZYGIT.to_owned(),
+        },
+        fleet_core::config::WindowConfig {
+            name: "agent".to_owned(),
+            command: "{agent}".to_owned(),
+        },
+    ];
+    config.save(effective).await.expect("save config");
+
+    let state = Arc::new(StateStore::new(home, files, Arc::new(SystemClock)));
+    let context: fleet_core::ids::ContextId = "team".parse().expect("context");
+    let repo: RepoId = "owner/repo".parse().expect("repo");
+    let worktree: WorktreeId = "owner/repo#feature".parse().expect("worktree");
+    let mut persisted = fleet_core::state::default_state();
+    persisted.contexts.push(fleet_core::model::Context {
+        id: context.clone(),
+        name: "Team".to_owned(),
+        owners: vec!["owner".to_owned()],
+        created_at: "2026-09-08T00:00:00Z".to_owned(),
+    });
+    persisted.repos.push(fleet_core::model::Repo {
+        id: repo.clone(),
+        owner: "owner".to_owned(),
+        name: "repo".to_owned(),
+        url: "https://example.invalid/owner/repo".to_owned(),
+        context_id: context,
+        default_branch: "main".to_owned(),
+        path: repos.join("owner/repo").display().to_string(),
+        cloned_at: "2026-09-08T00:00:00Z".to_owned(),
+        hooks: fleet_core::model::RepoHooks::default(),
+    });
+    persisted.worktrees.push(fleet_core::model::Worktree {
+        id: worktree.clone(),
+        repo_id: repo,
+        slug: "feature".to_owned(),
+        branch: "feature".to_owned(),
+        base_ref: "main".to_owned(),
+        path: worktree_path.display().to_string(),
+        session: "repo/feature".to_owned(),
+        host: None,
+        created_at: "2026-09-08T00:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    });
+    state.save(persisted).await.expect("save state");
+    let sessions = Sessions::new(config, state);
+
+    let ensured = sessions
+        .ensure_proxied(Some(worktree.clone()), None, false)
+        .await
+        .expect("proxied worktree session");
+    assert_eq!(
+        ensured
+            .terminals
+            .iter()
+            .map(|terminal| (
+                terminal.name.as_str(),
+                terminal.command.as_str(),
+                terminal.kind
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("lg", "lazygit", TerminalKind::Pty),
+            ("agent", "/bin/sleep 30", TerminalKind::Pty),
+        ]
+    );
+
+    let agent = sessions
+        .ensure_proxied(Some(worktree), Some(Agent::Claude), false)
+        .await
+        .expect("proxied agent session");
+    assert_eq!(agent.terminals.len(), 1);
+    assert_eq!(agent.terminals[0].command, "/bin/sleep 30");
+
+    sessions.kill(ensured.id).await.expect("kill worktree");
+    sessions.kill(agent.id).await.expect("kill agent");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn attach_timeout_does_not_block_executor() {
     use std::{sync::atomic::AtomicBool, time::Duration};
@@ -85,6 +184,7 @@ async fn ensure_lock_entry_is_pruned_after_its_session_is_gone() {
             session.clone(),
             Session {
                 id: session.clone(),
+                host: None,
                 kind: SessionKind::Agent(Agent::Claude),
                 cwd: "/tmp".to_owned(),
                 terminals: Vec::new(),
@@ -175,6 +275,7 @@ async fn unchanged_process_observation_does_not_publish_again() {
             session_id.clone(),
             Session {
                 id: session_id,
+                host: None,
                 kind: SessionKind::Agent(Agent::Claude),
                 cwd: "/tmp".to_owned(),
                 terminals: vec![Terminal {
@@ -247,6 +348,7 @@ fn viewport_frames_do_not_mark_output() {
         session_id.clone(),
         Session {
             id: session_id,
+            host: None,
             kind: SessionKind::Agent(Agent::Claude),
             cwd: "/tmp".to_owned(),
             terminals: vec![Terminal {

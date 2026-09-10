@@ -1,8 +1,11 @@
 use super::*;
 
+const LEGACY_REMOTE_ARCHIVE: &str = "cache/legacy-remote.json";
+
 impl Worktrees {
     /// Reconciles publish intents and removes abandoned private attempts.
     pub async fn recover_startup(&self) -> DaemonResult<()> {
+        self.migrate_legacy_remote_records().await?;
         let config = self.config.load().await?;
         self.reconcile_trash_expiries(&config)?;
         let state = self.state.load().await?;
@@ -27,6 +30,72 @@ impl Worktrees {
         }
         self.recover_post_create_intents().await?;
         Ok(())
+    }
+
+    /// Returns pre-federation remote records retained for doctor diagnostics.
+    pub async fn legacy_remote_records(
+        &self,
+    ) -> DaemonResult<fleet_core::state::LegacyRemoteRecords> {
+        let path = self.legacy_remote_archive_path()?;
+        if !self.files.exists(&path) {
+            return Ok(fleet_core::state::LegacyRemoteRecords::empty());
+        }
+        let records = serde_json::from_str(&self.files.read_text(&path)?)?;
+        Ok(records)
+    }
+
+    async fn migrate_legacy_remote_records(&self) -> DaemonResult<()> {
+        let remote = self
+            .state
+            .load()
+            .await?
+            .worktrees
+            .into_iter()
+            .filter(|worktree| worktree.host.is_some())
+            .collect::<Vec<_>>();
+        if remote.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.legacy_remote_archive_path()?;
+        let mut archive = if self.files.exists(&path) {
+            serde_json::from_str(&self.files.read_text(&path)?)?
+        } else {
+            fleet_core::state::LegacyRemoteRecords::empty()
+        };
+        archive.merge(remote.iter().cloned());
+        let mut text = serde_json::to_string_pretty(&archive)?;
+        text.push('\n');
+        self.files.atomic_write_text(&path, &text)?;
+
+        let migrated = remote
+            .iter()
+            .map(|worktree| (worktree.host.clone(), worktree.id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        self.state
+            .transaction(move |state| {
+                state.worktrees.retain(|worktree| {
+                    !migrated.contains(&(worktree.host.clone(), worktree.id.clone()))
+                });
+                Ok(())
+            })
+            .await?;
+        tracing::info!(
+            count = remote.len(),
+            path = %path.display(),
+            "migrated persisted remote worktrees into legacy archive"
+        );
+        Ok(())
+    }
+
+    fn legacy_remote_archive_path(&self) -> DaemonResult<PathBuf> {
+        let home = self.state.path().parent().ok_or_else(|| {
+            DaemonError::Validation(format!(
+                "state path has no parent: {}",
+                self.state.path().display()
+            ))
+        })?;
+        Ok(home.join(LEGACY_REMOTE_ARCHIVE))
     }
 
     pub(super) fn schedule_startup_recovery(&self) {

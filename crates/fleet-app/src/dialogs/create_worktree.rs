@@ -15,7 +15,11 @@ use fleet_core::{
     slug::slugify,
     validate::{ValidationError, validate_branch},
 };
-use fleet_proto::{request::RequestBody, response::ResponseBody};
+use fleet_proto::{
+    request::RequestBody,
+    response::ResponseBody,
+    snapshot::{HostStatus, LinkState},
+};
 use fleet_ui_kit::{Icon, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
@@ -61,6 +65,67 @@ pub enum Field {
     Host,
 }
 
+/// One entry of the host cycler: the local machine, then every configured host.
+///
+/// The daemon is the only source of truth for whether a host can be created on, so the entry
+/// carries the refusal reason it reported rather than any local-path assumption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostChoice {
+    /// The host id, or `None` for `local`.
+    pub id: Option<HostId>,
+    /// What the cycler shows.
+    pub label: String,
+    /// The machine provider (`tailscale`, `command`, `legacy`), absent for `local`.
+    pub provider: Option<String>,
+    /// Why a create on this host would be refused, when it would be.
+    pub blocked: Option<String>,
+}
+
+impl HostChoice {
+    /// The always-present first entry.
+    #[must_use]
+    pub fn local() -> Self {
+        Self {
+            id: None,
+            label: "local".to_owned(),
+            provider: None,
+            blocked: None,
+        }
+    }
+
+    /// A configured host as its last reported status describes it.
+    #[must_use]
+    pub fn from_status(status: &HostStatus) -> Self {
+        Self {
+            id: Some(status.id.clone()),
+            label: status.id.as_str().to_owned(),
+            provider: (!status.provider.is_empty()).then(|| status.provider.clone()),
+            blocked: host_blocker(status),
+        }
+    }
+}
+
+/// Why this host cannot take a create, in the daemon's own words where it has them.
+///
+/// A legacy entry has no daemon to create on at all; an unreachable host and a dropped daemon
+/// link are the same refusal to the user.
+#[must_use]
+fn host_blocker(status: &HostStatus) -> Option<String> {
+    if status.link == LinkState::Legacy {
+        return Some("legacy entry \u{2014} migrate it to a tailscale host".to_owned());
+    }
+    if status.reachable && status.link != LinkState::Down {
+        return None;
+    }
+    Some(
+        status
+            .error
+            .clone()
+            .filter(|error| !error.is_empty())
+            .unwrap_or_else(|| "unreachable".to_owned()),
+    )
+}
+
 /// The Create dialog's draft.
 #[derive(Debug, Default)]
 pub struct CreateState {
@@ -75,9 +140,11 @@ pub struct CreateState {
     /// Whether the pool has a prepared copy ready for this repo.
     pub(crate) prepared_ready: bool,
     /// `local` plus every configured host; empty when no host is configured.
-    pub(crate) hosts: Vec<String>,
+    pub(crate) hosts: Vec<HostChoice>,
     /// Which host the cycler shows.
     pub(crate) host_index: usize,
+    /// Whether the user moved the cycler, which freezes the late `defaultHost` seeding.
+    pub(crate) host_touched: bool,
     /// The branch input.
     pub(crate) branch: TextFieldState,
     /// Which field owns the keyboard.
@@ -141,11 +208,46 @@ impl CreateState {
         self.base_candidates().get(self.base_cursor).cloned()
     }
 
+    /// The entry the cycler shows.
+    #[must_use]
+    pub fn selected_choice(&self) -> Option<&HostChoice> {
+        self.hosts.get(self.host_index)
+    }
+
     /// The host the cycler shows, or `None` for `local`.
     #[must_use]
     pub fn selected_host(&self) -> Option<HostId> {
-        let name = self.hosts.get(self.host_index)?;
-        HostId::try_from(name.as_str()).ok()
+        self.selected_choice()?.id.clone()
+    }
+
+    /// Why `Enter` is refused by the host cycler, when it is.
+    #[must_use]
+    pub fn host_blocked(&self) -> Option<&str> {
+        self.selected_choice()?.blocked.as_deref()
+    }
+
+    /// Moves the cycler onto `default`, unless the user already moved it or that host is
+    /// unreachable — seeding a picker onto an entry that refuses `Enter` is worse than
+    /// leaving it on `local`.
+    pub(crate) fn select_default_host(&mut self, default: Option<&HostId>) -> bool {
+        if self.host_touched {
+            return false;
+        }
+        let Some(default) = default else {
+            return false;
+        };
+        let Some(index) = self
+            .hosts
+            .iter()
+            .position(|choice| choice.id.as_ref() == Some(default))
+        else {
+            return false;
+        };
+        if self.hosts[index].blocked.is_some() {
+            return false;
+        }
+        self.host_index = index;
+        true
     }
 
     /// The worktree id the current branch would produce.
@@ -178,6 +280,7 @@ impl CreateState {
             && !self.branch.is_empty()
             && self.branch_error().is_none()
             && !slugify(self.branch.text()).is_empty()
+            && self.host_blocked().is_none()
     }
 
     fn start_base_ref_fetch(&mut self) {
@@ -287,17 +390,15 @@ fn seed_with_transport<T: CreateTransport>(state: &Entity<AppState>, transport: 
                 .iter()
                 .any(|pool| &pool.repo == repo && pool.ready > 0);
             if !snapshot.hosts.is_empty() {
-                draft.hosts.push("local".to_owned());
-                draft.hosts.extend(
-                    snapshot
-                        .hosts
-                        .iter()
-                        .map(|host| host.id.as_str().to_owned()),
-                );
+                draft.hosts.push(HostChoice::local());
+                draft
+                    .hosts
+                    .extend(snapshot.hosts.iter().map(HostChoice::from_status));
             }
         }
     }
     let repo = draft.repo.clone();
+    let has_hosts = !draft.hosts.is_empty();
     if repo.is_some() {
         draft.start_base_ref_fetch();
     }
@@ -310,6 +411,42 @@ fn seed_with_transport<T: CreateTransport>(state: &Entity<AppState>, transport: 
     if let Some(repo) = repo {
         poll_base_refs(repo, seq, state, transport, cx);
     }
+    if has_hosts {
+        poll_default_host(seq, state, transport, cx);
+    }
+}
+
+/// Seeds the cycler onto `config.defaultHost`.
+///
+/// `defaultHost` is configuration, not snapshot state, so it costs one request. The answer is
+/// dropped when the dialog moved on (`seq`) or when the user already touched the cycler, so a
+/// late reply never moves the selection under the user's hands.
+fn poll_default_host<T: CreateTransport>(
+    seq: u64,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    let reply = transport.request(RequestBody::GetConfig);
+    let weak_state = state.downgrade();
+    let task = cx.spawn(async move |cx| {
+        let Ok(Ok(ResponseBody::Config(config))) = reply.recv().await else {
+            return;
+        };
+        let default = config.default_host().cloned();
+        cx.update(|cx| {
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            let moved = with_host(&state, cx, |host| {
+                host.create.seq == seq && host.create.select_default_host(default.as_ref())
+            });
+            if moved {
+                notify(&state, cx);
+            }
+        });
+    });
+    crate::dialogs::retain_task(state, cx, "create-default-host", task);
 }
 
 /// Shows cached base refs first, then replaces them with one bounded forced refresh.
@@ -517,6 +654,38 @@ fn base_section(draft: &CreateState, tight: gpui::Pixels) -> Div {
         .child(base_list)
 }
 
+/// The `Host` cycler, plus the one line that says why the shown host cannot take a create.
+///
+/// The cycler itself stays live even on a blocked host: the way out of an unreachable choice is
+/// `\u{2190}` / `\u{2192}`, so locking the control would trap the user on it. What the blocked
+/// entry loses is `Enter` (`can_submit`), and the reason says so in the daemon's own words.
+fn host_section(draft: &CreateState, tight: gpui::Pixels, cx: &App) -> Option<Div> {
+    let choice = draft.selected_choice()?;
+    let warning = Tone::Warning.color(cx.theme());
+    let cycler = Cycler::labeled("Host", choice.label.clone())
+        .has_prev(draft.host_index > 0)
+        .has_next(draft.host_index + 1 < draft.hosts.len())
+        .focused(draft.field == Field::Host);
+    // The note is one line in every state, so cycling hosts never moves the rest of the dialog.
+    let note = div().flex().items_center().gap(tight);
+    let note = match choice.blocked.as_deref() {
+        Some(reason) => note
+            .child(Icon::CloudOff.el().size(IconSize::Small).color(warning))
+            .child(
+                Text::ui(format!("{} \u{2014} {reason}", choice.label))
+                    .tone(Tone::Warning)
+                    .ellipsize(),
+            ),
+        None => note.child(Text::hint(
+            choice
+                .provider
+                .clone()
+                .unwrap_or_else(|| "this machine".to_owned()),
+        )),
+    };
+    Some(div().flex().flex_col().gap(tight).child(cycler).child(note))
+}
+
 /// The two lines under the fields: how long a create will take, and what runs after it.
 fn expectation(draft: &CreateState, cx: &App) -> Div {
     let hair = cx.theme().space.xxs;
@@ -589,19 +758,7 @@ pub(crate) fn render(
         .gap(gap)
         .child(branch_field(draft, duplicate.as_deref()))
         .child(base_section(draft, tight))
-        .children((!draft.hosts.is_empty()).then(|| {
-            Cycler::labeled(
-                "Host",
-                draft
-                    .hosts
-                    .get(draft.host_index)
-                    .cloned()
-                    .unwrap_or_else(|| "local".to_owned()),
-            )
-            .has_prev(draft.host_index > 0)
-            .has_next(draft.host_index + 1 < draft.hosts.len())
-            .focused(draft.field == Field::Host)
-        }))
+        .children(host_section(draft, tight, cx))
         .child(expectation(draft, cx));
 
     let mut card = Dialog::new("New worktree")
@@ -816,6 +973,7 @@ fn move_base(state: &Entity<AppState>, delta: isize, cx: &mut App) {
 fn cycle_host(state: &Entity<AppState>, delta: isize, cx: &mut App) {
     with_host(state, cx, |host| {
         let len = host.create.hosts.len();
+        host.create.host_touched = true;
         host.create.host_index = step(host.create.host_index, delta, len);
         if len > 0 {
             host.create.field = Field::Host;
@@ -1132,15 +1290,94 @@ mod tests {
         assert!(!state.can_submit());
     }
 
+    fn host_status(id: &str, provider: &str, link: LinkState, reachable: bool) -> HostStatus {
+        HostStatus {
+            id: HostId::try_from(id).unwrap_or_else(|error| panic!("{error}")),
+            provider: provider.to_owned(),
+            version: None,
+            link,
+            address: None,
+            agent_binaries: None,
+            reachable,
+            checked_at: "2026-09-04T12:00:00Z".to_owned(),
+            error: (!reachable).then(|| "ssh: connect timed out after 5s".to_owned()),
+        }
+    }
+
+    fn hosts(statuses: &[HostStatus]) -> Vec<HostChoice> {
+        std::iter::once(HostChoice::local())
+            .chain(statuses.iter().map(HostChoice::from_status))
+            .collect()
+    }
+
     #[test]
     fn the_host_cycler_maps_local_to_no_host() {
         let mut state = draft();
-        state.hosts = vec!["local".to_owned(), "devbox".to_owned()];
+        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Ready, true)]);
         assert_eq!(state.selected_host(), None, "`local` is not a host id");
         state.host_index = 1;
         assert_eq!(
             state.selected_host().map(|host| host.as_str().to_owned()),
             Some("devbox".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_unreachable_host_is_disabled_with_the_daemons_reason() {
+        let mut state = draft();
+        state.branch = TextFieldState::from_text("feat/ok");
+        state.hosts = hosts(&[
+            host_status("devbox", "tailscale", LinkState::Down, false),
+            host_status("archdev", "legacy", LinkState::Legacy, true),
+            host_status("loopback", "command", LinkState::Ready, true),
+        ]);
+        assert!(state.can_submit(), "`local` is always submittable");
+
+        state.host_index = 1;
+        assert_eq!(
+            state.host_blocked(),
+            Some("ssh: connect timed out after 5s"),
+            "the refusal is the daemon's own probe error, not a local guess"
+        );
+        assert!(!state.can_submit());
+
+        state.host_index = 2;
+        assert_eq!(
+            state.host_blocked(),
+            Some("legacy entry \u{2014} migrate it to a tailscale host")
+        );
+        assert!(!state.can_submit());
+
+        state.host_index = 3;
+        assert_eq!(state.host_blocked(), None);
+        assert_eq!(
+            state
+                .selected_choice()
+                .and_then(|choice| choice.provider.as_deref()),
+            Some("command")
+        );
+        assert!(state.can_submit());
+    }
+
+    #[test]
+    fn a_blocked_default_host_never_becomes_the_seeded_selection() {
+        let devbox = HostId::try_from("devbox").unwrap();
+        let mut state = draft();
+        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Down, false)]);
+        assert!(!state.select_default_host(Some(&devbox)));
+        assert_eq!(state.host_index, 0, "a refused host is not preselected");
+
+        let mut state = draft();
+        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Ready, true)]);
+        assert!(state.select_default_host(Some(&devbox)));
+        assert_eq!(state.host_index, 1);
+
+        let mut state = draft();
+        state.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Ready, true)]);
+        state.host_touched = true;
+        assert!(
+            !state.select_default_host(Some(&devbox)),
+            "a late config answer never moves a cycler the user already moved"
         );
     }
 
@@ -1366,6 +1603,141 @@ mod tests {
                 })
             ] if id == ensured
         ));
+    }
+
+    fn tailscale_entry(node: &str) -> fleet_core::model::HostConfigEntry {
+        fleet_core::model::HostConfigEntry::Tailscale {
+            node: node.to_owned(),
+            user: Some("df".to_owned()),
+            ssh_options: Vec::new(),
+            fleetd: "fleetd".to_owned(),
+            fleet_home: Some("~/.fleet".to_owned()),
+        }
+    }
+
+    fn config_with_default(default: &str) -> fleet_core::config::Config {
+        let mut config = fleet_core::config::default_config("/tmp/fleet");
+        config.hosts.insert(
+            HostId::try_from("devbox").unwrap_or_else(|error| panic!("{error}")),
+            tailscale_entry("devbox"),
+        );
+        config.default_host = default.to_owned();
+        config
+    }
+
+    fn seeded_with_hosts(
+        statuses: Vec<HostStatus>,
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<AppState>, FakeTransport) {
+        let repo = RepoId::try_from("buk/payroll").unwrap();
+        let mut snapshot = snapshot_with_worktree();
+        snapshot.hosts = statuses;
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.scope = RepoScope::Repo(repo);
+            state.snapshot = Some(snapshot);
+            state
+        });
+        let transport = FakeTransport::default();
+        cx.update(|cx| seed_with_transport(&state, &transport, cx));
+        (state, transport)
+    }
+
+    fn answer_get_config(transport: &FakeTransport, config: fleet_core::config::Config) {
+        let index = transport
+            .requests
+            .borrow()
+            .iter()
+            .position(|request| {
+                matches!(request, RecordedRequest::Requested(RequestBody::GetConfig))
+            })
+            .unwrap_or_else(|| panic!("the dialog never asked for the configuration"));
+        transport
+            .replies
+            .borrow_mut()
+            .remove(index)
+            .unwrap_or_else(|| panic!("no reply slot for the configuration request"))
+            .try_send(Ok(ResponseBody::Config(config)))
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[gpui::test]
+    fn the_picker_seeds_the_configured_default_host(cx: &mut gpui::TestAppContext) {
+        let (state, transport) = seeded_with_hosts(
+            vec![
+                host_status("devbox", "tailscale", LinkState::Ready, true),
+                host_status("archdev", "legacy", LinkState::Legacy, true),
+            ],
+            cx,
+        );
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                let labels: Vec<&str> = host
+                    .create
+                    .hosts
+                    .iter()
+                    .map(|choice| choice.label.as_str())
+                    .collect();
+                assert_eq!(labels, ["local", "devbox", "archdev"]);
+                assert_eq!(host.create.host_index, 0, "local until config answers");
+            });
+        });
+        answer_get_config(&transport, config_with_default("devbox"));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                assert_eq!(host.create.host_index, 1);
+                assert_eq!(
+                    host.create.selected_host().map(|id| id.as_str().to_owned()),
+                    Some("devbox".to_owned())
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_unreachable_default_host_leaves_the_picker_on_local(cx: &mut gpui::TestAppContext) {
+        let (state, transport) = seeded_with_hosts(
+            vec![host_status("devbox", "tailscale", LinkState::Down, false)],
+            cx,
+        );
+        answer_get_config(&transport, config_with_default("devbox"));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                assert_eq!(host.create.host_index, 0);
+                assert_eq!(host.create.selected_host(), None);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_blocked_host_renders_its_reason_and_keeps_the_cycler_live(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(fleet_ui_kit::Theme::dark());
+            let tight = cx.theme().space.xs;
+            let mut draft = draft();
+            draft.branch = TextFieldState::from_text("feat/ok");
+            draft.hosts = hosts(&[host_status("devbox", "tailscale", LinkState::Down, false)]);
+
+            draft.host_index = 1;
+            assert!(draft.host_blocked().is_some());
+            assert!(!draft.can_submit(), "`Enter` is refused on a blocked host");
+            assert!(
+                host_section(&draft, tight, cx).is_some(),
+                "the blocked host still draws its cycler and its reason"
+            );
+
+            draft.host_index = 0;
+            assert!(draft.can_submit());
+            assert!(host_section(&draft, tight, cx).is_some());
+
+            draft.hosts.clear();
+            assert!(
+                host_section(&draft, tight, cx).is_none(),
+                "the whole row is zero-suppressed when no host is configured"
+            );
+        });
     }
 
     #[test]

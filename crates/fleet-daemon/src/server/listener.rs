@@ -445,7 +445,7 @@ mod tests {
                 id: 1,
                 body: RequestBody::Hello {
                     protocol: PROTOCOL_VERSION,
-                    client: "test".to_owned(),
+                    client: "test".into(),
                 },
             })
             .await

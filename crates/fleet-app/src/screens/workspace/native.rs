@@ -29,9 +29,27 @@ impl WorkspaceScreen {
         }
 
         let active = model.native.then(|| model.worktree.clone()).flatten();
-        let Some((worktree, path)) = active else {
+        let Some((worktree, location)) = active else {
             // Not on a Fleet-drawn tab: nothing owns the keyboard on our behalf, and every
             // pane that exists is idle in the background.
+            self.local.borrow_mut().state.pane_focused = false;
+            for pane in self.panes.values() {
+                pane.view
+                    .update(cx, |pane, cx| pane.set_active(false, window, cx));
+            }
+            return;
+        };
+
+        // §8, §12: the embedded view runs `fleet-git` against a real directory, and a remote
+        // worktree's path names a directory on the other machine. The daemon already degraded
+        // that tab to a plain `lazygit` PTY, so reaching here means a stale frame — it must
+        // never become a `git status` on whatever this path happens to be locally.
+        let Some(path) = location.local_path() else {
+            tracing::debug!(
+                worktree = %worktree,
+                host = %location.host.as_ref().map_or_else(String::new, HostId::to_string),
+                "no embedded git pane for a remote worktree"
+            );
             self.local.borrow_mut().state.pane_focused = false;
             for pane in self.panes.values() {
                 pane.view
@@ -95,17 +113,21 @@ impl WorkspaceScreen {
             .worktree
             .as_ref()
             .and_then(|(worktree, _)| self.panes.get(worktree));
+        let remote = model
+            .worktree
+            .as_ref()
+            .is_some_and(|(_, location)| location.local_path().is_none());
         let body: AnyElement = match pane {
             Some(pane) => pane.view.clone().into_any_element(),
             // One frame at most: `sync_panes` creates the view before this runs, unless the
             // snapshot has no worktree for the session (an agent session, or a race with a
-            // deletion), in which case the tab has nothing to show and says so.
+            // deletion) or the worktree is remote, in which case the tab says which it is.
             None => div()
                 .flex()
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(Text::ui("no worktree for this tab").muted())
+                .child(Text::ui(no_pane_reason(remote)).muted())
                 .into_any_element(),
         };
         let id = model.worktree.as_ref().map_or_else(
@@ -123,6 +145,20 @@ impl WorkspaceScreen {
             .bg(theme.colors.bg)
             .child(body)
             .into_any_element()
+    }
+}
+
+/// What an empty Fleet-drawn tab says, which is never the same sentence for both reasons.
+///
+/// §8 degrades a remote worktree's `fleet://lazygit` tab to a plain PTY, so a remote worktree
+/// on this tab is a state the user can only reach transiently — it still has to read as a
+/// deliberate refusal rather than as a missing record.
+#[must_use]
+pub(super) const fn no_pane_reason(remote: bool) -> &'static str {
+    if remote {
+        "git is not drawn here for a remote worktree"
+    } else {
+        "no worktree for this tab"
     }
 }
 

@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod error;
 pub mod jobs;
+pub mod machines;
 pub mod server;
 pub mod services;
 pub mod stores;

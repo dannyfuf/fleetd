@@ -119,6 +119,7 @@ mod tests {
         };
         let session = Session {
             id: "acme/api#feature".try_into().expect("session"),
+            host: None,
             kind: SessionKind::Worktree(worktree.id.clone()),
             cwd: worktree.path.clone(),
             terminals: vec![],
