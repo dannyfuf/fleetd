@@ -12,7 +12,7 @@ pub mod tailscale;
 pub use child::ChildStream;
 pub use command::CommandMachine;
 pub use legacy::LegacyMachine;
-pub use link::{LinkOptions, RemoteEndpoint, RemoteHello, RemoteLink};
+pub use link::{LinkOptions, RemoteEndpoint, RemoteHello, RemoteLink, WRITE_BUDGET};
 pub use provider::{
     AsyncDuplex, ExecOutput, MachineAddress, MachineError, MachineLifecycle, MachineProvider,
     ProbeReport,

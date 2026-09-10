@@ -275,7 +275,9 @@ async fn run_bootstrap(
         ))
     })?;
     // The restart drops the link. Wake it out of any reconnect backoff so the probe observes the
-    // new daemon instead of waiting out a grown backoff; a Ready link is unaffected.
+    // new daemon instead of waiting out a grown backoff. The transport of a link that still reads
+    // as Ready is untouched, and the permit is retained, so a nudge that races the restart being
+    // noticed locally still shortens the attempt that follows.
     endpoint.nudge_reconnect();
     context.progress(format!("waiting for host {host} build {checkout_ref}"))?;
     probe_for_build(
