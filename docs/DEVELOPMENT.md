@@ -20,7 +20,26 @@ make fmt         # cargo fmt --all
 make lint        # fmt --check plus Clippy with warnings denied
 make doctor      # build Fleet and run its diagnostics
 make bootstrap   # install and verify the pinned Zig toolchain
+make prune       # drop build artifacts unused for SWEEP_DAYS (7) days; runs before every build
+make fresh       # cargo clean, then rebuild from scratch (RELEASE=1 supported)
 ```
+
+## Keeping `target/` small
+
+A debug build of this workspace used to weigh ~19 GB, mostly per-crate debuginfo objects for
+dependencies (macOS keeps them unpacked next to the `.rlib`s) plus `incremental/` state. Cargo
+also never garbage-collects `target/`, so dependency bumps and toolchain updates accumulate stale
+artifacts on top. Two things keep it in check:
+
+- The dev profile disables debuginfo for dependencies (`[profile.dev.package."*"]` in
+  `Cargo.toml`). They are already optimized, so that debuginfo was mostly dead weight; workspace
+  crates keep full debuginfo.
+- `make build` (and therefore `make run`) runs `make prune` first, which uses
+  [`cargo-sweep`](https://github.com/holmgr/cargo-sweep) (installed on first use) to delete
+  artifacts not touched in `SWEEP_DAYS` days or built by toolchains no longer installed. Anything
+  it removes is simply rebuilt on demand.
+
+When `target/` still grows past what you want, `make fresh` wipes it and rebuilds from scratch.
 
 `make run` does **not** restart the daemon: an already-running `fleetd` keeps its terminal
 sessions across an app rebuild. Restarting is explicit, through `make restart` or:
