@@ -340,11 +340,19 @@ async fn watcher_emits_after_worktree_write() {
     let (_watcher, receiver) = RepoWatcher::new(repo.repository.paths()).unwrap();
     tokio::time::sleep(Duration::from_millis(250)).await;
     repo.write("watched.txt", "changed\n");
-    let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(event.paths.iter().any(|path| path.ends_with("watched.txt")));
+    // The watcher reports whatever the filesystem coalesces into a batch, and an unrelated
+    // path can lead. What must hold is that the write is reported, not that it arrives first.
+    let saw_write = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Ok(event) = receiver.recv().await {
+            if event.paths.iter().any(|path| path.ends_with("watched.txt")) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("watcher deadline");
+    assert!(saw_write, "the worktree write never reached the watcher");
 }
 
 #[tokio::test]
@@ -1334,4 +1342,25 @@ async fn diff_paths_combines_tracked_and_untracked_children() {
         .await
         .unwrap();
     assert!(empty.files.is_empty());
+}
+
+#[tokio::test]
+async fn diffs_parse_under_a_users_mnemonic_prefix_configuration() {
+    let repo = TestRepo::new().await;
+    repo.write("notes.txt", "one\n");
+    repo.commit("base");
+    // `diff.mnemonicPrefix` renames the patch prefixes to `c/` and `i/`. It is an ordinary user
+    // setting, and it must not reach the parser, which matches on `a/` and `b/`.
+    git(repo.path(), &["config", "diff.mnemonicPrefix", "true"]);
+    repo.write("notes.txt", "one\ntwo\n");
+
+    let diff = repo
+        .repository
+        .diff_file(Path::new("notes.txt"), DiffSide::Unstaged)
+        .await
+        .unwrap();
+
+    assert_eq!(diff.files.len(), 1);
+    assert_eq!(diff.files[0].new_path, Some(PathBuf::from("notes.txt")));
+    assert_eq!(diff.files[0].hunks.len(), 1);
 }
