@@ -225,13 +225,8 @@ where
 }
 
 pub(crate) fn fleet_home() -> Result<PathBuf, ProtoError> {
-    if let Some(home) = std::env::var_os("FLEET_HOME") {
-        return Ok(PathBuf::from(home));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".fleet"))
-        .ok_or_else(|| validation("HOME is not set; set FLEET_HOME"))
+    let selected = std::env::var_os("FLEET_HOME").map(PathBuf::from);
+    fleet_core::paths::resolve_home(selected).map_err(|error| validation(error.to_string()))
 }
 
 fn command_requests_json(command: &Command) -> bool {

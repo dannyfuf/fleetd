@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use fleet_core::paths::FleetHome;
+use fleet_core::paths::{FleetHome, resolve_home};
 use tokio::{net::UnixStream, time::Instant};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,32 +21,9 @@ pub async fn run_connect(home: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves the selected Fleet home, including a shell-quoted leading `~`.
-pub fn resolve_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    resolve_home_with(home, std::env::var_os("HOME").map(PathBuf::from))
-}
-
-fn resolve_home_with(
-    home: Option<PathBuf>,
-    environment_home: Option<PathBuf>,
-) -> anyhow::Result<PathBuf> {
-    match home {
-        Some(path) => match path.strip_prefix("~") {
-            Ok(suffix) => environment_home
-                .map(|home| home.join(suffix))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("HOME is not set; cannot expand {}", path.display())
-                }),
-            Err(_) => Ok(path),
-        },
-        None => environment_home
-            .map(|home| home.join(".fleet"))
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass --home or FLEET_HOME")),
-    }
-}
-
 async fn connect_or_start(home: &Path) -> anyhow::Result<UnixStream> {
-    let socket_path = FleetHome::new(home).socket_path();
+    let layout = FleetHome::new(home);
+    let socket_path = layout.socket_path();
     if let Ok(socket) = UnixStream::connect(&socket_path).await {
         return Ok(socket);
     }
@@ -106,33 +83,5 @@ fn configure_detached(command: &mut Command) {
                 Ok(())
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_default_and_shell_quoted_tilde_homes() {
-        let environment_home = PathBuf::from("/home/df");
-
-        assert_eq!(
-            resolve_home_with(None, Some(environment_home.clone())).unwrap(),
-            environment_home.join(".fleet")
-        );
-        assert_eq!(
-            resolve_home_with(Some(PathBuf::from("~/.fleet")), Some(environment_home)).unwrap(),
-            PathBuf::from("/home/df/.fleet")
-        );
-    }
-
-    #[test]
-    fn preserves_explicit_paths_and_requires_home_only_for_tilde() {
-        assert_eq!(
-            resolve_home_with(Some(PathBuf::from("/srv/fleet")), None).unwrap(),
-            PathBuf::from("/srv/fleet")
-        );
-        assert!(resolve_home_with(Some(PathBuf::from("~/.fleet")), None).is_err());
     }
 }

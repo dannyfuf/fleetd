@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         // This bridge process has no state to flush once relay finishes, so exit immediately.
         std::process::exit(0);
     }
-    let home = fleet_daemon::server::bridge::resolve_home(args.home)?;
+    let home = fleet_core::paths::resolve_home(args.home)?;
     let layout = FleetHome::new(home.clone());
     let singleton = SingletonGuard::acquire(&home).await?;
     std::fs::create_dir_all(layout.logs_dir())?;

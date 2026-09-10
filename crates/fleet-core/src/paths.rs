@@ -123,6 +123,47 @@ impl FleetHome {
     }
 }
 
+/// Reason a Fleet home could not be resolved from its argument and the environment.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HomeError {
+    /// A leading `~` was given but `$HOME` is unset.
+    #[error("HOME is not set; cannot expand {}", .path.display())]
+    UnexpandableTilde {
+        /// The unexpandable path as given.
+        path: PathBuf,
+    },
+    /// No home was given and `$HOME` is unset.
+    #[error("HOME is not set; pass --home or set FLEET_HOME")]
+    Missing,
+}
+
+/// Resolves the selected Fleet home, including a shell-quoted leading `~`.
+///
+/// Defaults to `$HOME/.fleet` when no home is given. Every Fleet binary resolves
+/// `--home`/`FLEET_HOME` through this function so they agree on one directory.
+pub fn resolve_home(home: Option<PathBuf>) -> Result<PathBuf, HomeError> {
+    resolve_home_with(home, std::env::var_os("HOME").map(PathBuf::from))
+}
+
+/// Resolves a Fleet home against an explicit environment home, for callers that discover
+/// `$HOME` themselves.
+pub fn resolve_home_with(
+    home: Option<PathBuf>,
+    environment_home: Option<PathBuf>,
+) -> Result<PathBuf, HomeError> {
+    match home {
+        Some(path) => match path.strip_prefix("~") {
+            Ok(suffix) => environment_home
+                .map(|home| home.join(suffix))
+                .ok_or(HomeError::UnexpandableTilde { path }),
+            Err(_) => Ok(path),
+        },
+        None => environment_home
+            .map(|home| home.join(".fleet"))
+            .ok_or(HomeError::Missing),
+    }
+}
+
 /// Returns prepared-copy slot 0 (`.hot`) or slot n (`.hot.<n>`).
 #[must_use]
 pub fn slot_path(repo_worktrees_dir: impl AsRef<Path>, slot: usize) -> PathBuf {
@@ -241,6 +282,33 @@ mod tests {
             clone_publish_marker_path("/tmp/repo"),
             PathBuf::from("/tmp/repo/.git/.fleet-clone-publish.json")
         );
+    }
+
+    #[test]
+    fn resolves_default_and_shell_quoted_tilde_homes() {
+        let environment_home = PathBuf::from("/home/df");
+
+        assert_eq!(
+            resolve_home_with(None, Some(environment_home.clone())).unwrap(),
+            environment_home.join(".fleet")
+        );
+        assert_eq!(
+            resolve_home_with(Some(PathBuf::from("~/.fleet")), Some(environment_home)).unwrap(),
+            PathBuf::from("/home/df/.fleet")
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_paths_and_requires_home_only_for_tilde() {
+        assert_eq!(
+            resolve_home_with(Some(PathBuf::from("/srv/fleet")), None).unwrap(),
+            PathBuf::from("/srv/fleet")
+        );
+        assert_eq!(
+            resolve_home_with(Some(PathBuf::from("~df/.fleet")), None).unwrap(),
+            PathBuf::from("~df/.fleet")
+        );
+        assert!(resolve_home_with(Some(PathBuf::from("~/.fleet")), None).is_err());
     }
 
     #[test]
