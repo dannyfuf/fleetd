@@ -935,3 +935,38 @@ fn context_sync_expected_requests(
     ]);
     context_requests
 }
+
+#[tokio::test]
+async fn a_remote_daemon_shutting_down_never_reaches_the_local_bus() {
+    let host = host("alpha");
+    let (router, remote) = router_with_remote(host.clone());
+    let events = BroadcastBus::default();
+    let mut receiver = events.subscribe();
+    router.start_event_pumps(events);
+
+    // A remote daemon stopping is a link-liveness fact about one endpoint; republished verbatim
+    // it would read as *this* daemon shutting down and disconnect every local client.
+    remote.emit(Event::DaemonShuttingDown);
+    remote.emit(Event::Toast {
+        level: fleet_proto::event::ToastLevel::Info,
+        message: "after the remote shutdown".to_owned(),
+    });
+
+    let marker = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match receiver.recv().await.expect("router event") {
+                Event::DaemonShuttingDown => return false,
+                Event::Toast { message, .. } if message == "after the remote shutdown" => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the pump keeps running after a remote shutdown event");
+    assert!(
+        marker,
+        "a remote daemon's shutdown must not be republished as the local daemon's"
+    );
+}

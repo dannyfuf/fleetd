@@ -334,7 +334,10 @@ replays that union on every reconnect, so a connection delivers the same events 
 one. Every connection subscribed to `DaemonShuttingDown` receives it before its socket closes,
 whether the stop came from a `DaemonShutdown` request or from a signal; the connection that
 asked reads the outcome from its own `ShuttingDown` response instead. A close with no notice
-means the daemon died.
+means the daemon died. The notice is always about the daemon the connection is attached to: a
+federating daemon drops a remote peer's `DaemonShuttingDown` at the link boundary instead of
+republishing it, because a remote stop is a change to that host's link and reaches the app as
+`HostLinkChanged { link: down }`.
 
 `Snapshot.hosts` contains `HostStatus { id, provider, version, link, address, agent_binaries,
 reachable, checked_at, error }`. `link` is `connecting`, `ready`, `down`, or `legacy`, and

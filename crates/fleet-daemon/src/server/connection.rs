@@ -369,10 +369,13 @@ impl Connection {
 
 /// Detaches every terminal this client held and reports whether anything was detached.
 ///
-/// The whole loop is bounded: a terminal on a remote host reaches `RemoteEndpoint::request`,
-/// which waits for an answer that a wedged-but-`Ready` link never sends. This task holds the
-/// connection's admission permit until it returns, so an unbounded cleanup would retire one of
-/// `MAX_CONNECTIONS` slots on every such disconnect.
+/// Every detach is bounded and they all run together: a terminal on a remote host reaches
+/// `RemoteEndpoint::request`, which waits for an answer that a wedged-but-`Ready` link never
+/// sends. This task holds the connection's admission permit until it returns, so an unbounded
+/// cleanup would retire one of `MAX_CONNECTIONS` slots on every such disconnect. One budget
+/// spanning the whole set would be just as wrong the other way: `attached` is unordered, so a
+/// single wedged host visited first would eat it and leave every remaining terminal — local ones
+/// included — attached, holding their frame pumps open for a client that is already gone.
 async fn detach_attached_terminals(
     services: &Services,
     owner_id: u64,
@@ -382,28 +385,33 @@ async fn detach_attached_terminals(
     if attached.is_empty() {
         return false;
     }
-    let cleanup = async {
-        for terminal in attached {
-            if let Err(error) = services
-                .dispatch_routed_with_owner(
+    let mut cleanup = attached
+        .into_iter()
+        .map(|terminal| async move {
+            let detached = tokio::time::timeout(
+                SOCKET_WRITE_TIMEOUT,
+                services.dispatch_routed_with_owner(
                     RequestBody::DetachTerminal { terminal },
                     owner_id,
                     crate::services::RequestContext {
                         client: client.clone(),
                     },
-                )
-                .await
-                && !matches!(error, DaemonError::NotFound(_))
-            {
+                ),
+            )
+            .await;
+            (terminal, detached)
+        })
+        .collect::<FuturesUnordered<_>>();
+    while let Some((terminal, detached)) = cleanup.next().await {
+        match detached {
+            Ok(Ok(_)) | Ok(Err(DaemonError::NotFound(_))) => {}
+            Ok(Err(error)) => {
                 tracing::warn!(%error, %terminal, "failed to detach disconnected client");
             }
+            Err(_) => {
+                tracing::warn!(%terminal, "timed out detaching a disconnected client's terminal");
+            }
         }
-    };
-    if tokio::time::timeout(SOCKET_WRITE_TIMEOUT, cleanup)
-        .await
-        .is_err()
-    {
-        tracing::warn!("timed out detaching a disconnected client's terminals");
     }
     true
 }
@@ -1271,6 +1279,7 @@ mod tests {
         host: fleet_core::ids::HostId,
         events: tokio::sync::broadcast::Sender<Event>,
         states: tokio::sync::watch::Sender<fleet_proto::snapshot::LinkState>,
+        requests: AtomicUsize,
     }
 
     impl WedgedRemote {
@@ -1281,7 +1290,13 @@ mod tests {
                 host,
                 events,
                 states,
+                requests: AtomicUsize::new(0),
             }
+        }
+
+        /// Requests this link has swallowed without ever answering.
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
         }
     }
 
@@ -1297,6 +1312,7 @@ mod tests {
             None
         }
         async fn request(&self, _body: RequestBody) -> DaemonResult<ResponseBody> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
             std::future::pending().await
         }
         fn events(&self) -> tokio::sync::broadcast::Receiver<Event> {
@@ -1313,24 +1329,62 @@ mod tests {
         let temp = tempfile::tempdir().expect("create temp dir");
         let services = test_services(temp.path()).await;
         let host = fleet_core::ids::HostId::try_from("wedged").expect("host id");
+        let wedged = Arc::new(WedgedRemote::new(host.clone()));
+        services.machines.install_endpoint(
+            host.clone(),
+            Arc::clone(&wedged) as Arc<dyn crate::machines::RemoteEndpoint>,
+        );
+        let first = services.router.ids.local_terminal(&host, TerminalId(1));
+        let second = services.router.ids.local_terminal(&host, TerminalId(2));
+        let session = services
+            .sessions
+            .ensure(None, Some(Agent::Claude), false)
+            .await
+            .expect("ensure agent session");
+        let local = session.terminals[0].id;
         services
-            .machines
-            .install_endpoint(host.clone(), Arc::new(WedgedRemote::new(host.clone())));
-        let terminal = services.router.ids.local_terminal(&host, TerminalId(1));
+            .sessions
+            .attach(local, 80, 24)
+            .await
+            .expect("attach the local terminal");
+        assert_eq!(services.sessions.attachment_count(local), 1);
 
-        let detached = tokio::time::timeout(
-            Duration::from_secs(20),
-            detach_attached_terminals(
-                &services,
-                0,
-                &HelloClient::default(),
-                HashSet::from([terminal]),
-            ),
-        )
+        let cleanup = tokio::spawn({
+            let services = Arc::clone(&services);
+            async move {
+                detach_attached_terminals(
+                    &services,
+                    0,
+                    &HelloClient::default(),
+                    HashSet::from([first, second, local]),
+                )
+                .await
+            }
+        });
+
+        // The set is unordered, so a budget spent on the first terminal visited is a budget the
+        // rest never see: the local detach answers in microseconds and neither wedged detach may
+        // wait behind the other.
+        tokio::time::timeout(SOCKET_WRITE_TIMEOUT / 2, async {
+            while services.sessions.attachment_count(local) != 0 || wedged.requests() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .expect("a wedged remote link cannot hold the connection's admission permit");
+        .expect("one unreachable host cannot starve the rest of the cleanup");
+
+        let detached = tokio::time::timeout(Duration::from_secs(20), cleanup)
+            .await
+            .expect("a wedged remote link cannot hold the connection's admission permit")
+            .expect("the cleanup task does not panic");
 
         assert!(detached, "the cleanup reports the terminals it released");
+
+        services
+            .sessions
+            .kill(session.id)
+            .await
+            .expect("kill test session");
     }
 
     #[tokio::test]
