@@ -9,9 +9,10 @@
 | [DESIGN-SYSTEM.md](DESIGN-SYSTEM.md) | The `fleet-ui-kit` tokens and component contracts |
 | [BOARD.md](BOARD.md) | The card model, the reconciliation engine, and the board surface |
 | [BOARD-JIRA.md](BOARD-JIRA.md) | The Jira backend, and what `acli` can and cannot do |
-| [NATIVE-AGENTS.md](NATIVE-AGENTS.md) | Native Claude Code / OpenCode sessions: adapters, event model, thread state, the agent tab |
+| [NATIVE-AGENTS.md](NATIVE-AGENTS.md) | Native Claude Code / Codex sessions: adapters, event model, thread state, the transcript, the decision surfaces, the agent tab |
 | [REMOTE-MACHINES.md](REMOTE-MACHINES.md) | Authoritative remote-machine config, protocol, provider, routing, mirror, and recovery contract |
-| [research/harness-protocols.md](research/harness-protocols.md) | Wire reference for the installed Claude Code and OpenCode versions |
+| [research/harness-protocols.md](research/harness-protocols.md) | Wire reference for the installed Claude Code version (OpenCode kept as a historical appendix) |
+| [research/harness-codex-app-server.md](research/harness-codex-app-server.md) | Wire reference for the installed Codex app-server protocol |
 | [research/agents-contracts.md](research/agents-contracts.md) | The shipped native-agent public API: names, signatures, serialized shapes, module paths |
 | [SWARM-INVENTORY.md](SWARM-INVENTORY.md) | The swarm compatibility baseline; its Fleet deviations explicitly replace selected legacy behavior |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Building, running, testing, and driving the app |
@@ -39,3 +40,5 @@ what was rejected and why, and cites the research it was distilled from.
 | [0010](decisions/0010-native-agents.md) | Native agent sessions: structured protocols, completion authority, the reducer in `fleet-core` |
 | [0011](decisions/0011-remote-machines.md) | Remote machines through one-daemon-per-machine federation and pluggable transports |
 | [0012](decisions/0012-terminal-agent-attention.md) | Terminal agent attention: explicit hooks are the only notification source |
+| [0013](decisions/0013-sqlite-agent-transcripts.md) | SQLite for agent transcripts: one event log, synchronous projections, one owned writer |
+| [0014](decisions/0014-drop-opencode-add-codex.md) | Drop OpenCode, add Codex, and gate it on a capability string rather than a protocol bump |
