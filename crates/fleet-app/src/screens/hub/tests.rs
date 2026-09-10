@@ -22,7 +22,7 @@ struct PendingHubRequest {
 }
 
 #[derive(Clone, Default)]
-struct HubRequestHarness(Rc<RefCell<VecDeque<PendingHubRequest>>>);
+pub(crate) struct HubRequestHarness(Rc<RefCell<VecDeque<PendingHubRequest>>>);
 
 impl HubRequestHarness {
     fn bridge(&self) -> HubBridge {
@@ -63,8 +63,17 @@ impl HubRequestHarness {
 }
 
 fn test_hub_ctx(state: AppState, cx: &mut gpui::TestAppContext) -> (HubCtx, HubRequestHarness) {
-    let harness = HubRequestHarness::default();
     let state = cx.new(|_| state);
+    test_hub_ctx_for(state, cx)
+}
+
+/// The same harness over a state entity the caller keeps, so a test outside this module can
+/// read the state the Hub writes (`dialogs::filter` drives the real `accept` through it).
+pub(crate) fn test_hub_ctx_for(
+    state: Entity<AppState>,
+    cx: &mut gpui::TestAppContext,
+) -> (HubCtx, HubRequestHarness) {
+    let harness = HubRequestHarness::default();
     let hub = cx.new(|_| HubState::default());
     (
         HubCtx {

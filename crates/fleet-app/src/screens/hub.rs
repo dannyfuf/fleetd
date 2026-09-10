@@ -45,7 +45,7 @@ mod composition;
 mod navigation;
 mod projection;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use cache::PrCache;
 pub(crate) use cache::PrFreshness;
@@ -128,6 +128,8 @@ pub struct HubState {
     pub inspect_generation: u64,
     inspect_task: Option<Task<()>>,
     pr_refresh_task: Option<Task<()>>,
+    /// Bumped on every reschedule; an older PR refresh timer wakes up and does nothing.
+    pr_refresh_generation: u64,
     inspect_target: Option<WorktreeId>,
     inspection_sequence: u64,
     inspection_requests: HashMap<WorktreeId, u64>,
