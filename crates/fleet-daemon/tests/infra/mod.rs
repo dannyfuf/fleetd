@@ -61,8 +61,9 @@ pub struct RemoteDaemon {
 
 impl RemoteDaemon {
     pub fn start(home: &Path) -> Self {
-        let fleetd = std::env::var("FLEET_DAEMON")
-            .unwrap_or_else(|_| env!("CARGO_BIN_EXE_fleetd").to_owned());
+        // Both halves of a loopback link must be this crate's own binary: an ambient
+        // `FLEET_DAEMON` from another checkout would mix builds and fail the link tests.
+        let fleetd = env!("CARGO_BIN_EXE_fleetd").to_owned();
         let run = vec![
             "sh".to_owned(),
             "-c".to_owned(),
