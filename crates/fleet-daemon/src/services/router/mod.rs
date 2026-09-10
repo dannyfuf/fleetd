@@ -84,8 +84,6 @@ impl Router {
     /// Builds a router around an explicitly shared id allocator.
     #[must_use]
     pub fn with_ids(machines: Arc<Machines>, mirror: Arc<Mirror>, ids: RemoteIds) -> Self {
-        let _ = create::ensure_repo_then_create;
-        let _ = lifecycle::merge_lifecycle_fanout;
         let thread_registrations = Arc::new(agents::ThreadRegistrations::default());
         for (host, _) in machines.iter() {
             if let Some(fragment) = mirror.fragment(&host) {
@@ -167,8 +165,10 @@ impl Router {
         let session_request =
             matches!(remote, RequestBody::EnsureSession { .. }).then(|| remote.clone());
         let response = endpoint.request(remote).await;
+        // A detach releases the local attachment whatever the remote answers; an attach
+        // releases it only when the remote refused.
         if let Some(terminal) = local_terminal
-            && attaching != response.is_ok()
+            && (!attaching || response.is_err())
         {
             sessions::on_detach(&self.terminal_frames, host, terminal);
         }

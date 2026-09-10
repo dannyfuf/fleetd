@@ -227,19 +227,6 @@ impl Router {
     }
 }
 
-pub(crate) async fn ensure_repo_then_create(
-    router: &Router,
-    host: &HostId,
-    context: &Context,
-    repo: &Repo,
-    local_worktrees: &[Worktree],
-    create: RequestBody,
-) -> DaemonResult<ResponseBody> {
-    router
-        .ensure_repo_then_create(host, context, repo, local_worktrees, create)
-        .await
-}
-
 fn requested_worktree_id(create: &RequestBody) -> DaemonResult<Option<WorktreeId>> {
     let RequestBody::CreateWorktree { repo, slug, .. } = create else {
         return Ok(None);
