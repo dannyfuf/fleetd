@@ -8,8 +8,8 @@ use fleet_ui_kit::{Banner, DaemonSplash, DaemonState, Icon, KeyHintRow};
 use gpui::{AnyElement, Entity, IntoElement, SharedString, prelude::*};
 
 use crate::state::{
-    AppState, DaemonLink, RECONNECT_BANNER_DWELL, RESTART_BANNER_DWELL, SPLASH_DETAIL_DELAY,
-    reconnect_backoff,
+    AppState, DaemonLink, DaemonLossReason, RECONNECT_BANNER_DWELL, RESTART_BANNER_DWELL,
+    SPLASH_DETAIL_DELAY, reconnect_backoff,
 };
 
 /// PTYs do not survive a daemon restart; the recovery banner must say so explicitly.
@@ -55,8 +55,12 @@ fn banner_spec(
         DaemonLink::Lost {
             attempt,
             dismissed: false,
+            reason,
         } => Some(BannerSpec {
-            text: "fleetd stopped",
+            text: match reason {
+                DaemonLossReason::ConnectionLost => "fleetd connection lost",
+                DaemonLossReason::Stopped => "fleetd stopped",
+            },
             countdown: Some(countdown_label(
                 daemon_since + reconnect_backoff(*attempt),
                 now,
@@ -115,7 +119,10 @@ pub(super) const fn dot_state(daemon: &DaemonLink) -> DaemonState {
 pub(super) const fn dot_label(daemon: &DaemonLink) -> Option<&'static str> {
     match daemon {
         DaemonLink::Starting => Some("starting"),
-        DaemonLink::Lost { .. } => Some("stopped"),
+        DaemonLink::Lost { reason, .. } => Some(match reason {
+            DaemonLossReason::ConnectionLost => "connection lost",
+            DaemonLossReason::Stopped => "stopped",
+        }),
         DaemonLink::Failed { .. } => Some("down"),
         DaemonLink::Connected | DaemonLink::Reconnected { .. } => None,
     }
@@ -178,6 +185,9 @@ pub(super) fn splash(
 mod tests {
     use std::time::Duration;
 
+    use crate::bridge::BridgeEvent;
+    use fleet_proto::event::Event;
+
     use super::*;
 
     #[test]
@@ -186,6 +196,7 @@ mod tests {
         let lost = DaemonLink::Lost {
             attempt: 0,
             dismissed: true,
+            reason: DaemonLossReason::ConnectionLost,
         };
         assert_eq!(banner_spec(&lost, now, false, now), None);
         assert_eq!(dot_state(&lost), DaemonState::Lost);
@@ -204,6 +215,29 @@ mod tests {
             countdown_label(retry_at, now + Duration::from_millis(2_250)),
             "reconnecting…"
         );
+    }
+
+    #[test]
+    fn lost_wording_distinguishes_a_failed_health_probe_from_daemon_shutdown() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+
+        state.apply_bridge_event(BridgeEvent::Disconnected { attempt: 0 }, now);
+        let connection_lost = banner_spec(&state.daemon, state.daemon_since, false, now)
+            .unwrap_or_else(|| panic!("expected a connection-lost banner"));
+        assert_eq!(connection_lost.text, "fleetd connection lost");
+        assert_eq!(dot_label(&state.daemon), Some("connection lost"));
+
+        state.apply_daemon_event(Event::DaemonShuttingDown, now);
+        let stopped = banner_spec(&state.daemon, state.daemon_since, false, now)
+            .unwrap_or_else(|| panic!("expected a stopped banner"));
+        assert_eq!(stopped.text, "fleetd stopped");
+        assert_eq!(dot_label(&state.daemon), Some("stopped"));
+
+        state.apply_bridge_event(BridgeEvent::Disconnected { attempt: 1 }, now);
+        let retrying = banner_spec(&state.daemon, state.daemon_since, false, now)
+            .unwrap_or_else(|| panic!("expected the stopped banner during retries"));
+        assert_eq!(retrying.text, "fleetd stopped");
     }
 
     #[test]

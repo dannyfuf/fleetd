@@ -42,7 +42,7 @@ mod test_support;
 
 pub use agents::{AgentCounts, AgentThreads};
 pub use board::{BoardFocus, BoardState, GroupBy};
-pub use connection::{DaemonLink, daemon_log_path, reconnect_backoff};
+pub use connection::{DaemonLink, DaemonLossReason, daemon_log_path, reconnect_backoff};
 use navigation::clamp_cursor;
 pub use navigation::{
     AgentPopupMode, AgentPopupState, AgentPopupTransition, Cursors, FilterEscape, FilterState,

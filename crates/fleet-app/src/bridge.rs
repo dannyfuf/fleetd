@@ -113,7 +113,7 @@ pub enum BridgeEvent {
         /// The last few lines of `~/.fleet/logs/fleetd.log`.
         log_tail: Vec<String>,
     },
-    /// A health ping failed: the daemon died while we were attached (§3.12 C).
+    /// A health ping and fresh connection both failed while we were attached (§3.12 C).
     Disconnected {
         /// How many reconnect attempts have failed so far.
         attempt: u32,

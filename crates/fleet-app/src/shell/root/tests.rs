@@ -2,7 +2,7 @@ use super::{first_run_import_allowed, focus::*};
 use crate::{
     actions::prefix,
     dialogs::Dialogs,
-    state::{AppState, DaemonLink, Overlay, Screen, TerminalMode},
+    state::{AppState, DaemonLink, DaemonLossReason, Overlay, Screen, TerminalMode},
 };
 use fleet_core::config::Agent;
 use gpui::{Action, KeyDownEvent, Keystroke};
@@ -119,6 +119,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
     state.daemon = DaemonLink::Lost {
         attempt: 1,
         dismissed: false,
+        reason: DaemonLossReason::ConnectionLost,
     };
 
     state.enter_prefix();
@@ -161,6 +162,7 @@ fn agent_prefix_consumes_bound_and_unbound_keys_and_restores_scroll_with_daemon_
     state.daemon = DaemonLink::Lost {
         attempt: 1,
         dismissed: false,
+        reason: DaemonLossReason::ConnectionLost,
     };
 
     state.enter_agent_prefix();
@@ -198,6 +200,7 @@ fn daemon_banner_bindings_resolve_before_live_prefix_fallback() {
     state.daemon = DaemonLink::Lost {
         attempt: 1,
         dismissed: false,
+        reason: DaemonLossReason::ConnectionLost,
     };
 
     for key in ["r", "l", "escape"] {

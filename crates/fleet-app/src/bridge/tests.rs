@@ -286,7 +286,61 @@ async fn shutdown_is_observed_while_initial_connection_is_waiting() {
 }
 
 #[tokio::test]
-async fn ticker_does_not_reset_reconnect_deadline() {
+async fn failed_health_ping_recovers_on_a_fresh_connection_without_disconnect() {
+    let mut pings = 0;
+    let daemon = TestDaemon::start(move |body| match body {
+        RequestBody::DaemonPing => {
+            pings += 1;
+            Some(if pings == 2 {
+                ResponseBody::Ack
+            } else {
+                ResponseBody::Pong
+            })
+        }
+        RequestBody::GetConfig => Some(ResponseBody::Config(fleet_core::config::default_config(
+            "/tmp/fleet-test",
+        ))),
+        RequestBody::GetSnapshot => Some(ResponseBody::Snapshot(empty_snapshot())),
+        _ => Some(ResponseBody::Ack),
+    });
+    let (commands, command_rx) = async_channel::unbounded();
+    let (events, event_rx) = async_channel::unbounded();
+    let resync_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let home = daemon.home.path().to_owned();
+    let runtime_resync = resync_pending.clone();
+    let task = tokio::spawn(async move {
+        runtime::run_with_intervals(
+            &home,
+            &command_rx,
+            &events,
+            &runtime_resync,
+            Duration::from_millis(10),
+            IDENTITY_INTERVAL,
+        )
+        .await
+    });
+
+    let reconnected = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await.unwrap() {
+                BridgeEvent::Disconnected { attempt } => {
+                    panic!("recovery probe emitted Disconnected {{ attempt: {attempt} }}")
+                }
+                BridgeEvent::Reconnected { restarted, .. } => break restarted,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(!reconnected, "the recovery connection kept the daemon PID");
+    commands.send(Command::Shutdown).await.unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_recovery_probe_enters_normal_backoff() {
     let mut pings = 0;
     let daemon = TestDaemon::start(move |body| match body {
         RequestBody::DaemonPing => {
@@ -321,13 +375,15 @@ async fn ticker_does_not_reset_reconnect_deadline() {
     });
     daemon.connections.recv().await.unwrap();
     loop {
-        if matches!(
-            event_rx.recv().await.unwrap(),
-            BridgeEvent::Disconnected { .. }
-        ) {
-            break;
+        match event_rx.recv().await.unwrap() {
+            BridgeEvent::Disconnected { attempt: 0 } => break,
+            BridgeEvent::Disconnected { attempt } => {
+                panic!("first disconnect had attempt {attempt}")
+            }
+            _ => {}
         }
     }
+    daemon.connections.recv().await.unwrap();
 
     assert!(
         tokio::time::timeout(Duration::from_millis(100), daemon.connections.recv())
@@ -358,7 +414,7 @@ fn manual_reconnect_reports_restart_identity() {
 }
 
 #[tokio::test]
-async fn health_probe_uses_daemon_ping_without_loading_a_snapshot() {
+async fn health_check_uses_daemon_ping_without_loading_a_snapshot() {
     let (snapshots, snapshot_requested) = async_channel::bounded(1);
     let daemon = TestDaemon::start(move |body| match body {
         RequestBody::GetSnapshot => {
@@ -370,7 +426,7 @@ async fn health_probe_uses_daemon_ping_without_loading_a_snapshot() {
     });
     let client = Client::connect(daemon.home.path()).await.unwrap();
 
-    assert!(connection::is_alive(&client).await);
+    assert!(connection::check_health(&client).await.is_ok());
     assert!(snapshot_requested.try_recv().is_err());
 }
 

@@ -85,11 +85,26 @@ fn spawn_failure_cause(error: &SpawnError) -> FailureCause {
     }
 }
 
-pub(super) async fn is_alive(client: &Client) -> bool {
-    matches!(
-        tokio::time::timeout(HEALTH_TIMEOUT, client.daemon_ping()).await,
-        Ok(Ok(()))
-    )
+#[derive(Debug)]
+pub(super) enum HealthCheckError {
+    Timeout,
+    Request(ProtoError),
+}
+
+impl std::fmt::Display for HealthCheckError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => write!(formatter, "timed out after {HEALTH_TIMEOUT:?}"),
+            Self::Request(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+pub(super) async fn check_health(client: &Client) -> Result<(), HealthCheckError> {
+    tokio::time::timeout(HEALTH_TIMEOUT, client.daemon_ping())
+        .await
+        .map_err(|_| HealthCheckError::Timeout)?
+        .map_err(HealthCheckError::Request)
 }
 
 pub(super) async fn daemon_identity(client: &Client) -> Option<(u32, String)> {
