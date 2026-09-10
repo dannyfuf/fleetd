@@ -85,11 +85,15 @@ impl CommandLog {
 
     pub(crate) fn started(&self, record: CommandRecord) {
         self.store(record.clone());
+        // Fire-and-forget: the broadcast has no receiver only while nothing is watching the
+        // command log, and the record is already in the history either way.
         let _ = self.events.send(CommandEvent::Started(record));
     }
 
     pub(crate) fn finished(&self, record: CommandRecord) {
         self.store(record.clone());
+        // Fire-and-forget: the broadcast has no receiver only while nothing is watching the
+        // command log, and the record is already in the history either way.
         let _ = self.events.send(CommandEvent::Finished(record));
     }
 

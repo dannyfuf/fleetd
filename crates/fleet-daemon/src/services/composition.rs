@@ -237,6 +237,55 @@ mod tests {
     use super::*;
     use crate::{adapters::clock::SystemClock, adapters::files::RealFiles};
 
+    /// Collects formatted `tracing` output so a log-only failure path can be asserted.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_owned()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `work` with every event it logs captured instead of printed.
+    fn capturing_logs<T>(work: impl FnOnce() -> T) -> (T, String) {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, work);
+        (value, logs.text())
+    }
+
     #[test]
     fn services_build_uses_runtime_update_checkout() {
         let temp = tempfile::tempdir().unwrap();
@@ -311,13 +360,40 @@ mod tests {
                 Adapters::system(files),
             )
         };
-        let first = build();
-        let second = build();
+        let ((first, second), logs) = capturing_logs(|| (build(), build()));
         assert!(HostId::try_from(first.daemon_id()).is_ok());
         assert_ne!(
             first.daemon_id(),
             second.daemon_id(),
             "an identity that cannot be persisted cannot be stable, which is what the warning says"
+        );
+        // The failed write is the whole reason the identity is unstable, so it has to be
+        // reported rather than discarded: this is the only place that failure is observable.
+        assert!(
+            logs.contains("could not persist the daemon identity"),
+            "{logs}"
+        );
+
+        // Control: the same startup on a writable home says nothing, so the assertion above is
+        // reading the failed write and not a warning the daemon logs unconditionally.
+        let writable = tempfile::tempdir().expect("temp home");
+        let home = writable.path();
+        let (_services, logs) = capturing_logs(|| {
+            let files = Arc::new(RealFiles::new(
+                home.join("trash"),
+                [home.join("repos"), home.join("worktrees")],
+            ));
+            Services::new(
+                home,
+                Arc::new(ConfigStore::new(home, files.clone())),
+                Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+                Arc::new(JobManager::new(home)),
+                Adapters::system(files),
+            )
+        });
+        assert!(
+            !logs.contains("could not persist the daemon identity"),
+            "{logs}"
         );
     }
 

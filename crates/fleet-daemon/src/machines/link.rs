@@ -86,9 +86,10 @@ pub trait RemoteEndpoint: Send + Sync {
     /// Wakes a link that is sleeping in reconnect backoff so its next attempt runs immediately
     /// and its backoff restarts from the configured floor.
     ///
-    /// A nudge never disturbs an established transport, and it is not discarded on a connected
-    /// link either: the permit is retained, so a nudge that races a disconnect shortens the
-    /// following attempt instead of being lost.
+    /// Implementations that sleep in backoff must honour this: never disturb an established
+    /// transport, and never drop a nudge that arrives while the link is up, because callers use
+    /// it to shorten the attempt that follows a disconnect they just caused. The default body
+    /// does nothing, which is correct only for an endpoint that has no backoff to wake.
     fn nudge_reconnect(&self) {}
     fn events(&self) -> broadcast::Receiver<Event>;
     fn state_changes(&self) -> watch::Receiver<LinkState>;
@@ -313,12 +314,13 @@ impl RemoteEndpoint for RemoteLink {
         }
     }
 
+    /// A nudge is not discarded on a connected link: `Notify::notify_one` retains a permit when
+    /// the actor is not currently sleeping, so a nudge that races a disconnect shortens the
+    /// following backoff instead of being lost. A closed link has nothing left to wake.
     fn nudge_reconnect(&self) {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        // A permit is retained when the actor is not currently sleeping, so a nudge that races a
-        // disconnect still shortens the following backoff instead of being lost.
         self.reconnect.notify_one();
     }
 

@@ -314,11 +314,13 @@ with grid padding already removed. Settings load on connection/reconnection and 
 
 PTY output, PTY writes, and host commands each have a 4 MiB byte budget; host events use two
 16 MiB slots. The isolated writer thread prevents a blocked child from blocking the terminal
-owner. Queue exhaustion is an explicit error, never silent loss. The host drains at most 256 KiB
-or 2 ms of PTY output per iteration and batches at most 1,024 commands, coalescing adjacent
-viewport moves with per-command boundary clamping. Key/resize and application-directed wheel
-input preserve ordering by ending the current viewport batch. Viewport moves emit frames
-immediately, bypassing the normal 16,667 µs output frame gate. A blocking command receive wakes
+owner. Queue exhaustion is an explicit error, never silent loss. A kill is the one command
+admitted regardless of the command budget: it is not user input, and refusing it because queued
+writes filled the budget would strand the child process and the threads that own it. The host
+drains at most 256 KiB or 2 ms of PTY output per iteration and batches at most 1,024 commands,
+coalescing adjacent viewport moves with per-command boundary clamping. Key/resize and
+application-directed wheel input preserve ordering by ending the current viewport batch. Viewport
+moves emit frames immediately, bypassing the normal 16,667 µs output frame gate. A blocking command receive wakes
 immediately for input, with a 4 ms timeout for PTY polling.
 
 Small viewport-only moves use `FrameUpdate.shift`: positive shifts move existing mirror rows

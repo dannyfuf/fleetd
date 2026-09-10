@@ -554,7 +554,7 @@ async fn extreme_retention_does_not_overflow_date_arithmetic() {
 async fn quiescing_reports_a_job_it_cannot_stop() {
     let temp = tempfile::tempdir().expect("temp dir");
     let manager = JobManager::new(temp.path());
-    manager.set_quiesce_timeout(StdDuration::from_millis(50));
+    manager.set_quiesce_budget(StdDuration::from_millis(50));
     let repo = RepoId::try_from("acme/api").expect("repo id");
     let _id = manager
         .submit_for_repo(
@@ -579,6 +579,36 @@ async fn quiescing_reports_a_job_it_cannot_stop() {
     // The tombstone taken by the caller is released by its own guard, so the repository stays
     // usable once the conflict is reported.
     assert!(manager.ensure_repo_available(&repo).is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiescing_waits_out_the_graces_of_every_cancellable_job() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let manager = JobManager::new(temp.path());
+    let repo = RepoId::try_from("acme/api").expect("repo id");
+    for target in ["acme/api#one", "acme/api#two"] {
+        manager
+            .submit_for_repo(
+                repo.clone(),
+                JobKind::PostCreateHooks,
+                target,
+                "Post-create hooks",
+                JobPolicy::new(true, false),
+                |context| async move {
+                    // Neither the operation nor its cleanup answers cancellation, so this job
+                    // becomes terminal only once both graces have run out: the worst case the
+                    // quiesce budget has to cover.
+                    context.cleanup.spawn(std::future::pending());
+                    std::future::pending::<DaemonResult<()>>().await
+                },
+            )
+            .expect("submission");
+    }
+
+    manager
+        .quiesce_repo(&repo)
+        .await
+        .expect("a job that uses its full grace still quiesces");
 }
 
 #[tokio::test]

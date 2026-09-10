@@ -123,9 +123,11 @@ link actor. `close()` bounds the join on that actor the same way and aborts it i
 passes, so a closed endpoint never keeps its stream or ssh child alive.
 
 `nudge_reconnect` wakes a link sleeping in reconnect backoff so its next attempt runs immediately
-and its backoff restarts at `backoff_min`. It is not a no-op on a Ready link: the permit is retained
-when the actor is not sleeping, so a nudge that races a disconnect shortens the following attempt
-instead of being lost. It never tears down an established transport.
+and its backoff restarts at `backoff_min`. The trait's default body does nothing — correct only for
+an endpoint with no backoff to wake, and the reason any endpoint that does sleep in backoff has to
+override it. `RemoteLink` does: a nudge on a Ready link is not discarded, because the permit is
+retained when the actor is not sleeping, so a nudge that races a disconnect shortens the following
+attempt instead of being lost. It never tears down an established transport.
 
 ## 6. Router
 

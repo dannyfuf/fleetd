@@ -124,14 +124,27 @@ struct JobManagerInner {
     retention: Mutex<RetentionPolicy>,
     cancellation_grace: Mutex<StdDuration>,
     cleanup_grace: Mutex<StdDuration>,
-    quiesce_timeout: Mutex<StdDuration>,
+    quiesce_budget: Mutex<StdDuration>,
 }
 
-/// Longest `quiesce_repo` waits for one active job before reporting it.
+/// Longest a cancelled job keeps running after its cancellation token fires.
+const CANCELLATION_GRACE: StdDuration = StdDuration::from_secs(3);
+
+/// Longest a cancelled job's registered cleanup is awaited once the operation itself is gone.
+const CLEANUP_GRACE: StdDuration = StdDuration::from_secs(3);
+
+/// Longest `quiesce_repo` waits for a repository's active jobs, taken as one budget for all of
+/// them rather than one per job.
 ///
-/// Kept well under the client's ten-second request timeout so a repository deletion blocked by a
+/// `quiesce_repo` cancels every cancellable job before it waits, so their graces run down
+/// concurrently and the wait is bounded by the slowest job, not by their sum. The budget is
+/// therefore sized above `CANCELLATION_GRACE + CLEANUP_GRACE` — the worst case for a job that
+/// answers neither — so a job that is quiescing correctly is never reported as blocking the
+/// repository, and kept under the client's ten-second request timeout so a deletion blocked by a
 /// non-cancellable job answers with a conflict instead of a transport timeout.
-const QUIESCE_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+const QUIESCE_BUDGET: StdDuration = CANCELLATION_GRACE
+    .saturating_add(CLEANUP_GRACE)
+    .saturating_add(StdDuration::from_secs(1));
 
 /// Detached background-job registry, scheduler resources, and progress log owner.
 #[derive(Clone)]
@@ -169,9 +182,9 @@ impl JobManager {
                     keep_finished_for: Duration::minutes(10),
                     max_finished: 200,
                 }),
-                cancellation_grace: Mutex::new(StdDuration::from_secs(3)),
-                cleanup_grace: Mutex::new(StdDuration::from_secs(3)),
-                quiesce_timeout: Mutex::new(QUIESCE_TIMEOUT),
+                cancellation_grace: Mutex::new(CANCELLATION_GRACE),
+                cleanup_grace: Mutex::new(CLEANUP_GRACE),
+                quiesce_budget: Mutex::new(QUIESCE_BUDGET),
             }),
         }
     }
@@ -584,8 +597,8 @@ impl JobManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_quiesce_timeout(&self, quiesce_timeout: StdDuration) {
-        *lock(&self.inner.quiesce_timeout) = quiesce_timeout;
+    pub(crate) fn set_quiesce_budget(&self, quiesce_budget: StdDuration) {
+        *lock(&self.inner.quiesce_budget) = quiesce_budget;
     }
 
     /// Returns one retained job record.
@@ -689,7 +702,7 @@ impl JobManager {
                 let _ignored = self.cancel(&job.id);
             }
         }
-        let deadline = tokio::time::Instant::now() + *lock(&self.inner.quiesce_timeout);
+        let deadline = tokio::time::Instant::now() + *lock(&self.inner.quiesce_budget);
         for job in active {
             match tokio::time::timeout_at(deadline, self.wait(&job.id)).await {
                 Ok(record) => {
@@ -700,7 +713,7 @@ impl JobManager {
                         job = %job.id,
                         target = %job.target,
                         %repo,
-                        "job did not quiesce before the deadline"
+                        "job did not quiesce inside the repository's quiesce budget"
                     );
                     // Reporting instead of proceeding keeps the caller from deleting a tree a
                     // non-cancellable job is still working in; its guard drops the tombstone.
