@@ -9,10 +9,11 @@ control cluster, and the SQLite store that makes all of it feel instant. `ARCHIT
 `0014-drop-opencode-add-codex.md` carry the seams that touch them; where one of those disagrees
 with this file about its own surface, that file wins.
 
-**This document describes a system that is not built.** §13 is the status table and every row in
-it says so. The previous revision of this file described a shipped Claude Code + OpenCode
-implementation; that implementation is being replaced, OpenCode is being deleted, and §13 records
-what survives.
+This document is the design **and** what shipped. §13 is the status table, and every "owed" line
+in it is a thing this build does not do, named there rather than softened in the section that
+specifies it; `TODO.md` at the repo root carries the same list with what each one costs. The
+previous revision described a Claude Code + OpenCode implementation, which has been replaced —
+OpenCode is deleted (ADR 0014).
 
 Sources this was distilled from:
 
@@ -1175,6 +1176,7 @@ nothing. `esc` never quits.
 The shipped implementation described by the previous revision targeted Claude Code + OpenCode and
 has been replaced. This table is the plan and its progress. **Every "owed" line below is a thing
 this build does not do**, named here rather than softened in the section that specifies it.
+`TODO.md` at the repo root restates them with a starting file, a cost, and a done-when for each.
 
 | # | Phase | Status |
 | --- | --- | --- |
