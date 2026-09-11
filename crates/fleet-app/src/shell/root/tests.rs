@@ -1,6 +1,6 @@
 use super::{first_run_import_allowed, focus::*};
 use crate::{
-    actions::prefix,
+    actions::{native_agent, prefix},
     dialogs::Dialogs,
     state::{AppState, DaemonLink, DaemonLossReason, Overlay, Screen, TerminalMode},
 };
@@ -133,6 +133,8 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
     assert_eq!(state.terminal_mode, TerminalMode::Terminal);
 
     for (keys, expected) in [
+        ("a", Action::name(&native_agent::NewClaude)),
+        ("A", Action::name(&native_agent::NewCodex)),
         ("v", Action::name(&prefix::ToggleWatchPane)),
         ("V", Action::name(&prefix::DismissWatch)),
         ("N", Action::name(&prefix::NextWatch)),
