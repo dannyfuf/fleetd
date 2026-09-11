@@ -146,7 +146,7 @@ pub fn cycle(config: &mut Config, id: &RowId, delta: isize) {
                 .unwrap_or(0);
             config.agent = match step(index, delta, AGENTS.len()) {
                 0 => Agent::Claude,
-                _ => Agent::Opencode,
+                _ => Agent::Codex,
             };
         }
         RowId::CloneProtocol => {
@@ -195,7 +195,7 @@ pub fn commit_value(config: &mut Config, id: &RowId, raw: &str) -> bool {
     let number = |min: i64| raw.trim().parse::<i64>().ok().filter(|value| *value >= min);
     match id {
         RowId::ClaudeCommand => config.agent_commands.claude = raw.to_owned(),
-        RowId::OpencodeCommand => config.agent_commands.opencode = raw.to_owned(),
+        RowId::CodexCommand => config.agent_commands.codex = raw.to_owned(),
         RowId::GraceMs => {
             let Some(value) = number(0) else { return false };
             config.sleep.grace_ms = value;
@@ -265,7 +265,7 @@ impl SettingsState {
     fn row_id(&self) -> Option<RowId> {
         use RowId::*;
         let ids: &[RowId] = match self.current_section() {
-            Section::General => &[Agent, ClaudeCommand, OpencodeCommand],
+            Section::General => &[Agent, ClaudeCommand, CodexCommand],
             Section::Sleep => {
                 return match self.row {
                     0 => Some(SleepOnSwitch),
@@ -298,7 +298,7 @@ impl SettingsState {
         };
         let kind = match id {
             RowId::ClaudeCommand => RowKind::Text(config.agent_commands.claude.clone()),
-            RowId::OpencodeCommand => RowKind::Text(config.agent_commands.opencode.clone()),
+            RowId::CodexCommand => RowKind::Text(config.agent_commands.codex.clone()),
             RowId::GraceMs => number(config.sleep.grace_ms, 0),
             RowId::HotFreshnessMs => number(
                 i64::try_from(config.hot_freshness_ms).unwrap_or(i64::MAX),

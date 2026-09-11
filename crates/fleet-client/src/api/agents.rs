@@ -1,27 +1,37 @@
 //! Typed native-agent requests and the ordered client projection mirror.
 
+mod events;
 mod mirror;
+mod window;
 
-pub use mirror::{AgentMirror, MirrorOutcome};
+pub use events::AgentEvents;
+pub use mirror::{AgentMirror, MirrorOutcome, PageOutcome, WindowState};
+pub use window::{AgentWindowRequest, applied_seq, projection_from_window};
 
 use super::{Result, unexpected};
 use crate::Client;
 use fleet_core::{
     agents::{
-        AgentKind, AgentThreadSummary, GateAnswer, GateId, ModelSelection, PermissionMode, Seq,
-        SeqEvent, ThreadId, ThreadProjection, UserInput,
+        AgentKind, AgentThreadSummary, GateAnswer, GateId, ItemId, ModelSelection, PermissionMode,
+        Seq, SeqEvent, StreamKind, ThreadId, ThreadProjection, UserInput,
     },
     ids::WorktreeId,
 };
 use fleet_proto::{
+    AGENT_CHECKPOINTS_CAPABILITY, AGENT_ITEM_BODY_CAPABILITY, AGENT_WINDOW_CAPABILITY,
+    agents::{
+        AgentRevertReport, AgentThreadWindow, CheckpointId, TurnCheckpoint,
+        checkpoints_capability_error, clamp_item_body_limit, window_capability_error,
+    },
     error::{ErrorKind, ProtoError},
-    event::Event,
     request::RequestBody,
     response::ResponseBody,
 };
-use tokio::sync::broadcast::{self, error::RecvError};
 
 /// Projection and ordered event tail returned when opening a thread.
+///
+/// The version-6 unbounded shape. A daemon advertising `agent.window` is opened with
+/// [`Client::agent_thread_open_window`] instead, which is bounded and pages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentSnapshot {
     /// Materialized state at the snapshot cursor.
@@ -30,95 +40,28 @@ pub struct AgentSnapshot {
     pub events_after: Vec<SeqEvent>,
 }
 
-/// Ordered native-agent event subscription with automatic per-thread gap recovery.
-pub struct AgentEvents {
-    client: Client,
-    receiver: broadcast::Receiver<Event>,
-    mirror: AgentMirror,
+/// One slice of a stored item body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentItemBody {
+    /// Byte offset this slice starts at.
+    pub offset: u64,
+    /// Total stored bytes in the stream, so a caller knows when it has read it all.
+    pub total: u64,
+    /// The slice itself.
+    pub text: String,
 }
 
-impl AgentEvents {
-    /// Returns the live projection mirror maintained by this subscription.
+impl AgentItemBody {
+    /// The offset to ask for next, or `None` once the whole body has been read.
     #[must_use]
-    pub fn mirror(&self) -> &AgentMirror {
-        &self.mirror
-    }
-
-    /// Installs an initial thread snapshot before consuming live events.
-    pub fn install(&mut self, snapshot: AgentSnapshot) -> MirrorOutcome {
-        self.mirror
-            .install_snapshot(snapshot.projection, &snapshot.events_after)
-    }
-
-    /// Waits for the next thread event, repairing gaps from the last applied sequence.
-    pub async fn recv(&mut self) -> Result<(ThreadId, SeqEvent)> {
-        loop {
-            match self.receiver.recv().await {
-                Ok(Event::Agent { thread, event }) => {
-                    let client = self.client.clone();
-                    let outcome = self
-                        .mirror
-                        .apply_or_resync(thread, &event, move |thread, from_seq| async move {
-                            client.agent_thread_open(thread, from_seq).await
-                        })
-                        .await?;
-                    // A gap that survived its own resync leaves a stale projection: reporting the
-                    // event as delivered would render it as if it had been applied. `resync_all`
-                    // already refuses that, and both paths have to agree (§6). A rejection is
-                    // not that: the sequence is intact, one event did not reduce, and the next
-                    // one gaps and repairs it — killing the subscription over it would be worse
-                    // than the stale row it leaves behind.
-                    match outcome {
-                        MirrorOutcome::Gap { expected, got } => {
-                            return Err(out_of_sequence(thread, expected, got));
-                        }
-                        MirrorOutcome::Rejected { seq } => {
-                            tracing::warn!(%thread, %seq, "agent event refused by the client projection");
-                        }
-                        MirrorOutcome::Applied | MirrorOutcome::Duplicate { .. } => {}
-                    }
-                    return Ok((thread, event));
-                }
-                Ok(_) => {}
-                Err(RecvError::Lagged(_)) => self.resync_all().await?,
-                Err(RecvError::Closed) => {
-                    return Err(ProtoError {
-                        kind: ErrorKind::Unknown,
-                        message: "Fleet daemon event stream is closed".to_owned(),
-                    });
-                }
-            }
-        }
-    }
-
-    async fn resync_all(&mut self) -> Result<()> {
-        let cursors = self
-            .mirror
-            .projections
-            .iter()
-            .map(|(thread, projection)| (*thread, projection.last_seq))
-            .collect::<Vec<_>>();
-        for (thread, cursor) in cursors {
-            let snapshot = self.client.agent_thread_open(thread, Some(cursor)).await?;
-            let outcome = self
-                .mirror
-                .install_snapshot(snapshot.projection, &snapshot.events_after);
-            match outcome {
-                MirrorOutcome::Gap { expected, got } => {
-                    return Err(out_of_sequence(thread, expected, got));
-                }
-                MirrorOutcome::Rejected { seq } => {
-                    tracing::warn!(%thread, %seq, "agent event refused by the client projection");
-                }
-                MirrorOutcome::Applied | MirrorOutcome::Duplicate { .. } => {}
-            }
-        }
-        Ok(())
+    pub fn next_offset(&self) -> Option<u64> {
+        let next = self.offset.saturating_add(self.text.len() as u64);
+        (next < self.total).then_some(next)
     }
 }
 
 /// The one error both delivery paths report when a resync did not repair the mirror.
-fn out_of_sequence(thread: ThreadId, expected: Seq, got: Seq) -> ProtoError {
+pub(crate) fn out_of_sequence(thread: ThreadId, expected: Seq, got: Seq) -> ProtoError {
     ProtoError {
         kind: ErrorKind::Unknown,
         message: format!(
@@ -131,11 +74,7 @@ impl Client {
     /// Creates an ordered agent-event subscription with its own projection mirror.
     #[must_use]
     pub fn agent_events(&self) -> AgentEvents {
-        AgentEvents {
-            client: self.clone(),
-            receiver: self.events(),
-            mirror: AgentMirror::default(),
-        }
+        AgentEvents::new(self.clone())
     }
 
     /// Lists persisted and live native-agent thread summaries.
@@ -180,7 +119,14 @@ impl Client {
         from_seq: Option<Seq>,
     ) -> Result<AgentSnapshot> {
         match self
-            .request(RequestBody::AgentThreadOpen { thread, from_seq })
+            .request(RequestBody::AgentThreadOpen {
+                thread,
+                from_seq,
+                after_seq: None,
+                turn_limit: None,
+                before_cursor: None,
+                request_sync_marker: false,
+            })
             .await?
         {
             ResponseBody::AgentThreadSnapshot {
@@ -191,6 +137,78 @@ impl Client {
                 events_after,
             }),
             response => Err(unexpected("agent_thread_open", response)),
+        }
+    }
+
+    /// Opens a thread and reads a bounded window of its transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Unsupported`] *without sending anything* when the negotiated daemon
+    /// did not advertise `agent.window`. A window field on an older daemon is not a harmless
+    /// unknown key: it ignores the field and answers the whole transcript, which is the frame
+    /// the window exists to avoid — and above the ceiling that frame is undecodable. Capabilities
+    /// reset on disconnect, so this is asked per request and never cached.
+    pub async fn agent_thread_open_window(
+        &self,
+        thread: ThreadId,
+        request: AgentWindowRequest,
+    ) -> Result<AgentThreadWindow> {
+        if !self.supports_capability(AGENT_WINDOW_CAPABILITY) {
+            return Err(window_capability_error());
+        }
+        match self.request(request.into_body(thread)).await? {
+            ResponseBody::AgentThreadWindow(window) => Ok(*window),
+            response => Err(unexpected("agent_thread_open_window", response)),
+        }
+    }
+
+    /// Reads one slice of a stored item body, for an output the window elided.
+    ///
+    /// `limit` is clamped to 256 KiB before it is sent, so the answer is one page and the caller
+    /// walks `offset` against the returned `total`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Unsupported`] without sending anything when the daemon cannot serve
+    /// body ranges.
+    pub async fn agent_item_body(
+        &self,
+        thread: ThreadId,
+        item: ItemId,
+        stream: StreamKind,
+        offset: u64,
+        limit: u32,
+    ) -> Result<AgentItemBody> {
+        if !self.supports_capability(AGENT_ITEM_BODY_CAPABILITY) {
+            return Err(ProtoError {
+                kind: ErrorKind::Unsupported,
+                message: format!(
+                    "this daemon cannot serve stored item bodies (capability `{AGENT_ITEM_BODY_CAPABILITY}`)"
+                ),
+            });
+        }
+        match self
+            .request(RequestBody::AgentItemBody {
+                thread,
+                item,
+                stream,
+                offset,
+                limit: clamp_item_body_limit(limit),
+            })
+            .await?
+        {
+            ResponseBody::AgentItemBodyChunk {
+                offset,
+                total,
+                text,
+                ..
+            } => Ok(AgentItemBody {
+                offset,
+                total,
+                text,
+            }),
+            response => Err(unexpected("agent_item_body", response)),
         }
     }
 
@@ -271,6 +289,55 @@ impl Client {
             "agent_stop",
             self.request(RequestBody::AgentStop { thread }).await?,
         )
+    }
+
+    /// Lists the Fleet-owned checkpoints a thread's worktree can be reverted to, oldest first.
+    ///
+    /// This is what `[u]` is drawn from, so the capability check matters: a daemon without the
+    /// checkpoint service must answer "unsupported", never an empty list, or the surface would
+    /// read "nothing to revert to" and silently stop offering an undo that exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Unsupported`] without sending anything when the daemon does not keep
+    /// checkpoints.
+    pub async fn agent_checkpoints(&self, thread: ThreadId) -> Result<Vec<TurnCheckpoint>> {
+        if !self.supports_capability(AGENT_CHECKPOINTS_CAPABILITY) {
+            return Err(checkpoints_capability_error());
+        }
+        match self
+            .request(RequestBody::AgentCheckpoints { thread })
+            .await?
+        {
+            ResponseBody::AgentCheckpoints(checkpoints) => Ok(checkpoints),
+            response => Err(unexpected("agent_checkpoints", response)),
+        }
+    }
+
+    /// Restores a thread's worktree from one of its checkpoints, and reports what changed.
+    ///
+    /// Files only: the harness's conversation is untouched (`docs/NATIVE-AGENTS.md` §5).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Unsupported`] without sending anything when the daemon does not keep
+    /// checkpoints, and [`ErrorKind::NotFound`] when the checkpoint is gone — which is what a
+    /// `[u]` drawn from a stale listing gets, and is distinguishable from a Git failure.
+    pub async fn agent_revert(
+        &self,
+        thread: ThreadId,
+        checkpoint: CheckpointId,
+    ) -> Result<AgentRevertReport> {
+        if !self.supports_capability(AGENT_CHECKPOINTS_CAPABILITY) {
+            return Err(checkpoints_capability_error());
+        }
+        match self
+            .request(RequestBody::AgentRevert { thread, checkpoint })
+            .await?
+        {
+            ResponseBody::AgentReverted(report) => Ok(report),
+            response => Err(unexpected("agent_revert", response)),
+        }
     }
 }
 

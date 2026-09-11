@@ -1,16 +1,23 @@
 use super::*;
 
+mod requests;
+
+use requests::{
+    close_agent_tab, load_older_page, mark_seen, open_in_editor, open_terminal_fallback,
+    open_thread, refresh_checkpoints, resend_seen_cursors,
+};
+
 use crate::{
     actions::native_agent,
     bridge::BridgeCommand,
     screens::agent_thread::{
-        AgentThreadEvent, AgentThreadView, ThreadHost, decisions::DecisionKey,
+        AgentThreadEvent, AgentThreadView, ThreadHost, picker::PickerKind,
         presentation::header_word,
     },
     views::workspace_tabs::TabTarget,
 };
 use fleet_core::{
-    agents::{AgentKind, AgentThreadSummary, PermissionMode, Seq, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, PermissionMode, ThreadId},
     ids::WorktreeId,
 };
 
@@ -193,10 +200,20 @@ impl WorkspaceScreen {
             let mut subscriptions = Vec::new();
             subscriptions.push(observe_view_state(&view, thread, state, cx));
             let (relay_bridge, relay_state) = (bridge.clone(), state.clone());
-            subscriptions.push(cx.subscribe(&view, move |_view, event, cx| match event {
+            subscriptions.push(cx.subscribe(&view, move |view, event, cx| match event {
                 AgentThreadEvent::Command(command) => relay_bridge.send_agent(command.clone()),
+                // The one answer that has to come back into the view: `[u]` is drawn from it.
+                AgentThreadEvent::RefreshCheckpoints => {
+                    refresh_checkpoints(&relay_bridge, &view, thread, cx);
+                }
+                AgentThreadEvent::LoadOlder => {
+                    load_older_page(&relay_bridge, &relay_state, thread, cx);
+                }
                 AgentThreadEvent::OpenInEditor(path) => {
                     open_in_editor(&relay_bridge, &relay_state, path, cx);
+                }
+                AgentThreadEvent::Copy(text) => {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 }
                 AgentThreadEvent::Notice(text) => {
                     let text = text.clone();
@@ -216,6 +233,10 @@ impl WorkspaceScreen {
             );
             // §6: opening a tab asks for the projection and the events after what we hold.
             open_thread(bridge, state, thread, None, cx);
+            // And what the worktree can be reverted to, which decides whether `[u]` is drawn.
+            if let Some(view) = self.agent_view(thread) {
+                refresh_checkpoints(bridge, &view, thread, cx);
+            }
         }
 
         let Some(view) = self.agent_view(thread) else {
@@ -223,16 +244,18 @@ impl WorkspaceScreen {
         };
         // The mirror is authoritative; the view adopts it and moves only the rows a stream
         // touched, so a fast model does not rebuild the transcript per token (§5).
-        let (projection, commands) = {
+        let (projection, commands, skills) = {
             let app = state.read(cx);
             (
                 app.agents.projection(thread).cloned(),
                 app.agents.commands(thread),
+                app.agents.skills(thread),
             )
         };
         if let Some(projection) = projection {
             view.update(cx, |view, cx| {
                 view.set_commands(commands);
+                view.set_skills(skills);
                 view.sync(&projection, cx);
             });
         }
@@ -344,8 +367,18 @@ impl WorkspaceScreen {
         &self,
         state: &AppState,
         model: &Model,
+        cx: &App,
     ) -> Option<SharedString> {
         let thread = model.agent?;
+        // spec-B §B5.5 rule 4: `stopping…` is held until the daemon reports liveness
+        // cleared, not until the interrupt request returns, so it is the view — not the
+        // summary — that knows whether one is still in flight.
+        if self
+            .agent_view(thread)
+            .is_some_and(|view| view.read(cx).is_stopping())
+        {
+            return Some(SharedString::new_static("stopping\u{2026}"));
+        }
         // The tab badge and the context-bar counters read this same value, which is what §3.3
         // means by "the tab, the header and the context bar agree".
         Some(SharedString::new_static(header_word(
@@ -374,16 +407,39 @@ impl WorkspaceScreen {
             }};
         }
 
+        // §12's row-focus verbs act on the row the transcript's focus ring is on, which exists
+        // only inside scroll mode — the `AgentRow` context is never on the chain outside it.
+        macro_rules! on_row {
+            ($root:expr, $action:ty, $verb:expr) => {{
+                let view_state = state.clone();
+                let views = Rc::clone(&self.agent_views);
+                $root.on_action(move |_: &$action, _window, cx| {
+                    let Some(view) = active_view(&views, &view_state, cx) else {
+                        return;
+                    };
+                    view.update(cx, |view, cx| view.focused_row_verb($verb, cx));
+                })
+            }};
+        }
+
         let mut root = root;
         root = on_view!(
             root,
             native_agent::Send,
             |view: &mut AgentThreadView, cx| { view.send(cx) }
         );
+        // §7.2: `⏎` while a turn runs is a **steer**, dispatched immediately. It is the same
+        // intent as an idle send, which is why one function serves both bindings — there is no
+        // queue to put it in.
         root = on_view!(
             root,
-            native_agent::Queue,
-            |view: &mut AgentThreadView, cx| { view.queue(cx) }
+            native_agent::Steer,
+            |view: &mut AgentThreadView, cx| { view.send(cx) }
+        );
+        root = on_view!(
+            root,
+            native_agent::SendBackground,
+            |view: &mut AgentThreadView, cx| { view.send_background(cx) }
         );
         root = on_view!(
             root,
@@ -408,43 +464,46 @@ impl WorkspaceScreen {
         root = on_view!(
             root,
             native_agent::Files,
-            |view: &mut AgentThreadView, cx| view
-                .open_picker(crate::screens::agent_thread::picker::PickerKind::Files, cx)
+            |view: &mut AgentThreadView, cx| view.open_picker(PickerKind::Files, cx)
         );
         root = on_view!(
             root,
             native_agent::Commands,
-            |view: &mut AgentThreadView, cx| view.open_picker(
-                crate::screens::agent_thread::picker::PickerKind::Commands,
-                cx
-            )
+            |view: &mut AgentThreadView, cx| view.open_picker(PickerKind::Commands, cx)
         );
         root = on_view!(
             root,
             native_agent::Model,
-            |view: &mut AgentThreadView, cx| view
-                .open_picker(crate::screens::agent_thread::picker::PickerKind::Models, cx)
+            |view: &mut AgentThreadView, cx| view.open_picker(PickerKind::Models, cx)
+        );
+        root = on_view!(
+            root,
+            native_agent::Traits,
+            |view: &mut AgentThreadView, cx| view.open_picker(PickerKind::Traits, cx)
+        );
+        root = on_view!(
+            root,
+            native_agent::AccessMode,
+            |view: &mut AgentThreadView, cx| view.open_picker(PickerKind::Access, cx)
+        );
+        root = on_view!(
+            root,
+            native_agent::Skills,
+            |view: &mut AgentThreadView, cx| view.open_picker(PickerKind::Skills, cx)
         );
         root = on_view!(
             root,
             native_agent::ExpandRow,
             |view: &mut AgentThreadView, cx| view.expand_row(cx)
         );
-        root = on_view!(
-            root,
-            native_agent::Revert,
-            |view: &mut AgentThreadView, cx| { view.revert(cx) }
-        );
-        root = on_view!(
+        root = on_row!(root, native_agent::Revert, fleet_ui_kit::RowAction::Revert);
+        root = on_row!(
             root,
             native_agent::OpenInEditor,
-            |view: &mut AgentThreadView, cx| view.open_in_editor(cx)
+            fleet_ui_kit::RowAction::Open
         );
-        root = on_view!(
-            root,
-            native_agent::EditCommand,
-            |view: &mut AgentThreadView, cx| view.edit_command(cx)
-        );
+        root = on_row!(root, native_agent::CopyRow, fleet_ui_kit::RowAction::Copy);
+        root = on_row!(root, native_agent::DiffRow, fleet_ui_kit::RowAction::Diff);
         root = on_view!(
             root,
             native_agent::Scroll,
@@ -452,15 +511,17 @@ impl WorkspaceScreen {
         );
         // §9's scroll mode moves the transcript itself, not the terminal underneath: these are
         // the native agent's own actions so they can never reach the PTY handlers beside them.
+        // §12: `j`/`k` move the **focused row** and scroll to it, rather than nudging the
+        // viewport: the focus is what `⏎`/`u`/`o`/`y`/`d` then act on.
         root = on_view!(
             root,
             native_agent::ScrollLineDown,
-            |view: &mut AgentThreadView, cx| view.scroll_rows(1.0, cx)
+            |view: &mut AgentThreadView, cx| view.move_row_focus(1, cx)
         );
         root = on_view!(
             root,
             native_agent::ScrollLineUp,
-            |view: &mut AgentThreadView, cx| view.scroll_rows(-1.0, cx)
+            |view: &mut AgentThreadView, cx| view.move_row_focus(-1, cx)
         );
         root = on_view!(
             root,
@@ -498,6 +559,10 @@ impl WorkspaceScreen {
             |view: &mut AgentThreadView, cx| view.set_scroll_mode(false, cx)
         );
 
+        // §6.2: the drawer owns the key *vocabulary*, and the status bar mirrors the same
+        // source, so neither can advertise a scope the other does not offer. Each binding hands
+        // the keystroke to `Decision::action_for_key` rather than naming an action of its own —
+        // which is also what keeps `⏎` unbound on an approval, because the decision refuses it.
         macro_rules! on_decision {
             ($root:expr, $action:ty, $key:expr) => {{
                 let view_state = state.clone();
@@ -506,32 +571,33 @@ impl WorkspaceScreen {
                     let Some(view) = active_view(&views, &view_state, cx) else {
                         return;
                     };
-                    view.update(cx, |view, cx| view.decide($key, cx));
+                    view.update(cx, |view, cx| view.decide_key($key, cx));
                 })
             }};
         }
-        root = on_decision!(root, native_agent::AllowOnce, DecisionKey::AllowOnce);
-        root = on_decision!(root, native_agent::AllowSession, DecisionKey::AllowSession);
-        root = on_decision!(root, native_agent::Deny, DecisionKey::Deny);
-        root = on_decision!(root, native_agent::DenyAndStop, DecisionKey::DenyAndStop);
-        root = on_decision!(root, native_agent::Choose1, DecisionKey::Choose(0));
-        root = on_decision!(root, native_agent::Choose2, DecisionKey::Choose(1));
-        root = on_decision!(root, native_agent::Choose3, DecisionKey::Choose(2));
-        root = on_decision!(root, native_agent::Choose4, DecisionKey::Choose(3));
-        root = on_decision!(root, native_agent::Choose5, DecisionKey::Choose(4));
-        root = on_decision!(root, native_agent::Toggle, DecisionKey::Toggle);
-        root = on_decision!(root, native_agent::Answer, DecisionKey::Answer);
-        root = on_decision!(root, native_agent::ApprovePlan, DecisionKey::ApprovePlan);
-        root = on_decision!(root, native_agent::AskChanges, DecisionKey::AskChanges);
-        root = on_decision!(root, native_agent::ViewPlan, DecisionKey::ViewPlan);
+        root = on_decision!(root, native_agent::AllowOnce, "y");
+        root = on_decision!(root, native_agent::AllowSession, "a");
+        root = on_decision!(root, native_agent::Deny, "n");
+        root = on_decision!(root, native_agent::DenyAndStop, "escape");
+        root = on_decision!(root, native_agent::EditCommand, "e");
+        root = on_decision!(root, native_agent::Choose1, "1");
+        root = on_decision!(root, native_agent::Choose2, "2");
+        root = on_decision!(root, native_agent::Choose3, "3");
+        root = on_decision!(root, native_agent::Choose4, "4");
+        root = on_decision!(root, native_agent::Choose5, "5");
+        root = on_decision!(root, native_agent::Toggle, "space");
+        root = on_decision!(root, native_agent::Answer, "enter");
+        root = on_decision!(root, native_agent::Previous, "p");
+        root = on_decision!(root, native_agent::Implement, "y");
+        root = on_decision!(root, native_agent::Refine, "n");
 
         let (new_bridge, new_state) = (bridge.clone(), state.clone());
         root = root.on_action(move |_: &native_agent::NewClaude, _window, cx| {
             create_thread(&new_bridge, &new_state, AgentKind::Claude, cx);
         });
         let (open_bridge, open_state) = (bridge.clone(), state.clone());
-        root = root.on_action(move |_: &native_agent::NewOpenCode, _window, cx| {
-            create_thread(&open_bridge, &open_state, AgentKind::OpenCode, cx);
+        root = root.on_action(move |_: &native_agent::NewCodex, _window, cx| {
+            create_thread(&open_bridge, &open_state, AgentKind::Codex, cx);
         });
         let (close_bridge, close_state) = (bridge.clone(), state.clone());
         root = root.on_action(move |_: &native_agent::CloseTab, _window, cx| {
@@ -563,10 +629,14 @@ pub(super) fn relay_view_state(
     let composing = view.read(cx).is_composing(cx);
     let scrolling = view.read(cx).is_scrolling();
     let question_cursor = view.read(cx).question_cursor();
+    // §12: the `AgentRow` context is derived from whether a row actually carries the focus ring,
+    // so `⏎`/`u`/`o`/`y`/`d` are bound exactly when there is a row for them to act on.
+    let row_focus = scrolling && view.read(cx).transcript().read(cx).focused_row().is_some();
     state.update(cx, |app, cx| {
         let mut changed = app.agents.set_composing(thread, composing);
         changed |= app.agents.set_scrolling(thread, scrolling);
         changed |= app.agents.set_question_cursor(thread, question_cursor);
+        changed |= app.agents.set_row_focus(thread, row_focus);
         if changed {
             cx.notify();
         }
@@ -599,145 +669,6 @@ fn active_view(
     };
     let thread = app.agents.active(worktree)?;
     views.borrow().get(&thread).map(|tab| tab.view.clone())
-}
-
-/// `ctrl-s x` on an agent tab drops the client lease; the thread keeps running.
-///
-/// The daemon answers the close with an ack and goes on listing the thread — §6 keeps every
-/// thread browsable — so taking the tab out of the strip is the client's own bookkeeping. Without
-/// it the tab is redrawn by the very next summary broadcast and `^s x` looks like it did nothing.
-fn close_agent_tab(bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
-    let Some(thread) = state.read(cx).active_session().and_then(|session| {
-        let SessionKind::Worktree(worktree) = &session.kind else {
-            return None;
-        };
-        state.read(cx).agents.active(worktree)
-    }) else {
-        return;
-    };
-    bridge.send_agent(BridgeCommand::AgentThreadClose { thread });
-    leave_agent_tab(state, cx);
-    state.update(cx, |app, cx| {
-        if app.agents.close(thread) {
-            cx.notify();
-        }
-    });
-}
-
-/// Asks for a thread's projection and event tail, and installs whatever comes back (§6).
-///
-/// A gap in the reply is recorded rather than papered over: the mirror refuses the tail and the
-/// next frame issues one more open from the sequence it did apply.
-fn open_thread(
-    bridge: &Bridge,
-    state: &Entity<AppState>,
-    thread: ThreadId,
-    from_seq: Option<Seq>,
-    cx: &mut App,
-) {
-    let reply = bridge.request_agent(BridgeCommand::AgentThreadOpen { thread, from_seq });
-    // One request is in flight from here: the flag comes back only if the reply is a gap.
-    state.update(cx, |app, _| app.agents.clear_resync(thread));
-    let state = state.clone();
-    cx.spawn(async move |cx| {
-        let answer = reply.recv().await;
-        cx.update(|cx| match answer {
-            Ok(Ok(ResponseBody::AgentThreadSnapshot {
-                projection,
-                events_after,
-            })) => state.update(cx, |app, cx| {
-                app.agents.install_snapshot(projection, &events_after);
-                cx.notify();
-            }),
-            Ok(Err(error)) => state.update(cx, |app, cx| {
-                record_mutation_failure(app, format!("agent thread: {}", error.message));
-                cx.notify();
-            }),
-            // A lost or unexpected reply leaves the tab on its placeholder projection; the next
-            // summary or event re-arms the resync rather than clearing the transcript.
-            Ok(Ok(_)) | Err(_) => {}
-        });
-    })
-    .detach();
-}
-
-/// `o` on a focused row: the same `$EDITOR` terminal tab Settings' `E` opens.
-fn open_in_editor(bridge: &Bridge, state: &Entity<AppState>, path: &str, cx: &mut App) {
-    let (session, cwd) = {
-        let app = state.read(cx);
-        let Some(session) = app.active_session().cloned() else {
-            return;
-        };
-        let cwd = worktree_of(app, &session)
-            .map(|worktree| worktree.path.clone())
-            .unwrap_or_else(|| session.cwd.clone());
-        (session, cwd)
-    };
-    bridge.send(RequestBody::NewTerminal {
-        session: session.id.clone(),
-        name: workspace_tabs::unique_terminal_name(&session, "edit"),
-        command: format!("{} {}", crate::dialogs::editor_command(), shell_quote(path)),
-        cwd,
-    });
-}
-
-/// Single-quotes a path so a name with spaces survives the daemon's shell.
-fn shell_quote(path: &str) -> String {
-    format!("'{}'", path.replace('\'', "'\\''"))
-}
-
-/// The explicit migration escape hatch: the PTY agent popup, on demand (§10).
-///
-/// §1 makes the terminal the fallback *for the thread you are in*, so the popup runs that
-/// thread's provider rather than always Claude.
-fn open_terminal_fallback(
-    state: &Entity<AppState>,
-    provider: Option<AgentKind>,
-    worktree: Option<WorktreeId>,
-    cx: &mut App,
-) {
-    let agent = match provider {
-        Some(AgentKind::OpenCode) => fleet_core::config::Agent::Opencode,
-        _ => fleet_core::config::Agent::Claude,
-    };
-    state.update(cx, |app, cx| {
-        app.toggle_agent_popup(agent, worktree);
-        cx.notify();
-    });
-}
-
-/// Tells the daemon what this window has actually shown, clearing `finished` and `unread`.
-fn mark_seen(bridge: &Bridge, state: &Entity<AppState>, seq: Seq, thread: ThreadId, cx: &mut App) {
-    let already = state.read(cx).agents.seen(thread);
-    if already >= seq {
-        return;
-    }
-    state.update(cx, |app, cx| {
-        app.agents.mark_seen(thread, seq);
-        cx.notify();
-    });
-    bridge.send_agent(BridgeCommand::AgentMarkSeen { thread, seq });
-}
-
-/// Re-reports what this window has read for every thread the daemon has forgotten.
-///
-/// The daemon keeps `last_seen_seq` in runtime state only (§3.3), so a restart brings every
-/// already-read tab back as amber `needs you`. The local cursor is the surviving truth, and it
-/// is sent for every thread rather than only for the tab that is being shown — a tab the user
-/// never revisits would otherwise keep its dot forever.
-fn resend_seen_cursors(bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
-    let stale = state.read(cx).agents.stale_seen();
-    if stale.is_empty() {
-        return;
-    }
-    state.update(cx, |app, _| {
-        for (thread, seq) in &stale {
-            app.agents.mark_reported(*thread, *seq);
-        }
-    });
-    for (thread, seq) in stale {
-        bridge.send_agent(BridgeCommand::AgentMarkSeen { thread, seq });
-    }
 }
 
 /// How many worktree paths `@` offers before it stops walking.

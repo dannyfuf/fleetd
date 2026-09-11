@@ -31,6 +31,9 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | AgentSetMode { .. }
         | AgentSetModel { .. }
         | AgentMarkSeen { .. }
+        | AgentItemBody { .. }
+        | AgentCheckpoints { .. }
+        | AgentRevert { .. }
         | AgentStop { .. } => classify_agent(body, resolver),
 
         CreateWorktree {
@@ -267,11 +270,13 @@ pub(crate) fn local_fanout_part(
                 .collect::<Vec<_>>();
             (!jobs.is_empty()).then_some(RequestBody::DismissJobs { jobs })
         }
-        RequestBody::PruneWorktrees { ids: None, .. } | RequestBody::AgentThreadList => {
-            Some(body.clone())
-        }
+        RequestBody::AgentItemBody { .. }
+        | RequestBody::PruneWorktrees { ids: None, .. }
+        | RequestBody::AgentThreadList => Some(body.clone()),
         RequestBody::AgentThreadCreate { .. }
         | RequestBody::AgentThreadOpen { .. }
+        | RequestBody::AgentCheckpoints { .. }
+        | RequestBody::AgentRevert { .. }
         | RequestBody::AgentThreadClose { .. }
         | RequestBody::AgentSend { .. }
         | RequestBody::AgentInterrupt { .. }

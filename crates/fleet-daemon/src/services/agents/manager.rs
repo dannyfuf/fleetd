@@ -1,74 +1,142 @@
 //! Serialized native-agent thread lifecycle manager.
+//!
+//! It owns providers, sequencing and the hydrated reducer state of the threads something is
+//! actually using. It owns neither the transcript nor the thread list: both live in
+//! [`super::store::SqliteAgentStore`], which is why a daemon start replays nothing and
+//! `AgentThreadList` is one `SELECT` (`docs/NATIVE-AGENTS.md` §8). See [`hydrate`] for how a
+//! thread's reducer state appears on first use and [`apply`] for the write path's ordering.
+
+mod apply;
+mod bodies;
+mod checkpoints;
+mod commands;
+mod controls;
+mod hydrate;
+mod mirror;
+#[cfg(test)]
+mod tests;
+mod window;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
 };
 
-use anyhow::Context;
+use crate::{server::BroadcastBus, services::worktrees::Worktrees, stores::config::ConfigStore};
+use anyhow::anyhow;
 use chrono::Utc;
 use fleet_core::{
     agents::{
-        AbortReason, AgentEvent, AgentKind, AgentThreadSummary, CheckpointKind, GateAnswer, GateId,
-        GateKind, GateResolver, ItemId, ItemKind, ItemStatus, ModelSelection, PermissionChoice,
-        PermissionMode, PlanAnswer, Seq, SeqEvent, SessionState, StartRequest, ThreadId,
-        ThreadProjection, TurnId, TurnOutcome, TurnState, UserInput,
+        AgentEvent, AgentKind, AgentThreadSummary, ApprovalPolicy, CheckpointKind, GateResolver,
+        HarnessCapabilities, ItemId, ItemStatus, SandboxPolicy, SessionState, StartRequest,
+        ThreadId, TurnId, TurnState, UserInput,
     },
     config::AgentCommands,
     ids::{HostId, WorktreeId},
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
-    event::Event,
     response::ResponseBody,
 };
 
-use crate::{server::BroadcastBus, services::worktrees::Worktrees, stores::config::ConfigStore};
-
 use super::{
-    AgentIndex, AgentStore, AgentThreadRecord,
+    AgentThreadRecord,
     providers::{AgentProvider, ProviderError, ProviderEvents, spawn_provider},
-    thread::{AppliedEvent, ThreadRuntime, coalesce_deltas},
+    store::SqliteAgentStore,
+    thread,
 };
+use apply::{
+    Serialized, apply_event, closed_gate_answer, edited_paths, ends_the_session, ends_the_turn,
+    pending_input_turn, publish_applied, runtime_inflight, user_item_started,
+};
+use thread::{AppliedEvent, ThreadRuntime, coalesce_deltas};
 
 const DELTA_TICK: Duration = Duration::from_millis(16);
+
+/// Emission-to-read skew worth a log line.
+///
+/// Codex stamps `emittedAtMs` on every notification and it is the only server-side clock Fleet
+/// gets (§9.4). It is not put on the wire — `SeqEvent` has no reader for it — so the one use it
+/// has is here: a frame read this far behind its own emission means the harness, the pipe or the
+/// remote link is the source of a stall, which is precisely the question a latency budget asks.
+/// Well above the 16 ms merge tick so a normal turn logs nothing.
+const EMISSION_SKEW_FLOOR: Duration = Duration::from_millis(250);
 
 type ProviderFactory = dyn Fn(AgentKind, &StartRequest, &AgentCommands) -> anyhow::Result<Box<dyn AgentProvider>>
     + Send
     + Sync;
 type RemoteHostResolver = dyn Fn(&WorktreeId) -> Option<HostId> + Send + Sync;
 
+/// The store, or the reason there is none.
+///
+/// A database this build cannot open or migrate is fatal *for the agent service* and for nothing
+/// else. `Services::build` is infallible and is constructed from twenty call sites, and taking
+/// terminals, jobs and worktrees down over an agent transcript database would be a worse failure
+/// than refusing agent work: every agent request answers with the reason instead, once, loudly.
+enum StoreSlot {
+    Ready(SqliteAgentStore),
+    Unavailable(String),
+}
+
 struct ManagerInner {
-    store: AgentStore,
+    store: StoreSlot,
     events: BroadcastBus,
     worktrees: Worktrees,
     config: Option<Arc<ConfigStore>>,
+    /// The threads whose reducer state is currently in memory. Absence means "not hydrated yet",
+    /// never "does not exist": existence is a question for the database.
     threads: RwLock<HashMap<ThreadId, ThreadRuntime>>,
-    index: std::sync::Mutex<AgentIndex>,
+    /// Serializes first-use hydration, so one thread is never built twice concurrently.
+    ///
+    /// One gate for the whole manager rather than one per thread, which is what makes the
+    /// background repair pass safe to run while a user is working: `tokio::sync::Mutex` hands the
+    /// gate out in FIFO order, so a request waiting behind the pass is served after the current
+    /// thread rather than after all of them.
+    hydration: tokio::sync::Mutex<()>,
     provider_factory: Arc<ProviderFactory>,
     remote_host_resolver: RwLock<Option<Arc<RemoteHostResolver>>>,
+    /// Fleet-owned worktree checkpoints, or `None` on a manager built without them.
+    ///
+    /// Installed after construction, like the remote-host resolver: `Services::build` creates
+    /// both services and neither can take the other as a constructor argument. `None` means
+    /// nothing is captured, so `[u]` is simply not drawn — never that a turn is refused.
+    checkpoints: RwLock<Option<crate::services::checkpoints::Checkpoints>>,
 }
 
-/// Owns native-agent threads, providers, sequencing, projections, and client seen cursors.
+impl ManagerInner {
+    /// The store, or the open failure that stands in for it.
+    fn store(&self) -> anyhow::Result<&SqliteAgentStore> {
+        match &self.store {
+            StoreSlot::Ready(store) => Ok(store),
+            StoreSlot::Unavailable(reason) => Err(anyhow!(
+                "the native-agent database is unavailable: {reason}"
+            )),
+        }
+    }
+}
+
+/// Owns native-agent threads, providers, sequencing, and projections.
 #[derive(Clone)]
 pub struct AgentSessionManager {
     inner: Arc<ManagerInner>,
 }
 
 impl AgentSessionManager {
-    /// Creates a manager around the agent store, daemon event bus, worktree path lookup, and
+    /// Creates a manager over the agent database, daemon event bus, worktree path lookup, and
     /// the configuration that names each provider's executable.
+    ///
+    /// `database` is `FleetHome::agents_db_path()`.
     #[must_use]
     pub fn new(
-        store: AgentStore,
+        database: PathBuf,
         events: BroadcastBus,
         worktrees: Worktrees,
         config: Arc<ConfigStore>,
     ) -> Self {
         let manager = Self::new_with_factory(
-            store,
+            database,
             events,
             worktrees,
             Some(config),
@@ -79,53 +147,60 @@ impl AgentSessionManager {
     }
 
     fn new_with_factory(
-        store: AgentStore,
+        database: PathBuf,
         events: BroadcastBus,
         worktrees: Worktrees,
         config: Option<Arc<ConfigStore>>,
         provider_factory: Arc<ProviderFactory>,
     ) -> Self {
-        let mut index = match store.read_index() {
-            Ok(index) => index,
+        // Opening the database migrates it and runs the one-shot NDJSON import. It reads no
+        // transcript: the boot census it takes is two index lookups, and the replay it may imply
+        // happens in `repair`, in the background, one thread at a time.
+        let store = match SqliteAgentStore::open(database) {
+            Ok(store) => StoreSlot::Ready(store),
             Err(error) => {
-                tracing::warn!(%error, "could not load native-agent index");
-                AgentIndex::default()
+                let reason = format!("{error:#}");
+                tracing::error!(
+                    target: "fleet::agents",
+                    error = %reason,
+                    "the native-agent database could not be opened; agent requests will be refused"
+                );
+                StoreSlot::Unavailable(reason)
             }
         };
-        let mut threads = HashMap::new();
-        let mut recovered = false;
-        for record in &mut index.threads {
-            match load_projection(&store, record) {
-                Ok(mut projection) => {
-                    if orphaned(&projection) {
-                        recovered = true;
-                        recover_orphan(&store, record, &mut projection);
-                    }
-                    threads.insert(
-                        record.thread,
-                        ThreadRuntime::new(projection, record.clone()),
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(thread = %record.thread, %error, "could not replay native-agent thread");
-                }
-            }
-        }
-        if recovered && let Err(error) = store.write_index(&index) {
-            tracing::warn!(%error, "could not persist native-agent restart recovery");
-        }
-        Self {
+        let manager = Self {
             inner: Arc::new(ManagerInner {
                 store,
                 events,
                 worktrees,
                 config,
-                threads: RwLock::new(threads),
-                index: std::sync::Mutex::new(index),
+                threads: RwLock::new(HashMap::new()),
+                hydration: tokio::sync::Mutex::new(()),
                 provider_factory,
                 remote_host_resolver: RwLock::new(None),
+                checkpoints: RwLock::new(None),
             }),
-        }
+        };
+        manager.spawn_repair();
+        manager
+    }
+
+    /// Starts the background boot repair, if this manager was built inside a runtime.
+    ///
+    /// `Services::build` is synchronous and a handful of tests construct a manager with no
+    /// runtime at all, so the spawn is conditional rather than assumed. Nothing is lost when it
+    /// does not happen: the census is recomputed at the next start, and a thread reached before
+    /// the repair gets to it is hydrated — and therefore settled — by that request instead.
+    fn spawn_repair(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!(
+                target: "fleet::agents",
+                "no runtime to repair native-agent threads on; deferring to first use"
+            );
+            return;
+        };
+        let manager = self.clone();
+        handle.spawn(async move { manager.repair().await });
     }
 
     /// Installs the router's remote-worktree ownership lookup.
@@ -139,6 +214,18 @@ impl AgentSessionManager {
             .remote_host_resolver
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
+    }
+
+    /// Installs the checkpoint service a capture runs against.
+    ///
+    /// Separate from the constructor for the same reason the remote-host resolver is: both
+    /// services are built by `Services::build`, and one cannot be an argument to the other.
+    pub(crate) fn set_checkpoints(&self, checkpoints: crate::services::checkpoints::Checkpoints) {
+        *self
+            .inner
+            .checkpoints
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checkpoints);
     }
 
     /// The configured provider command lines, falling back to the packaged defaults.
@@ -160,500 +247,47 @@ impl AgentSessionManager {
     }
 
     /// Current summaries for inclusion in the daemon's global snapshot.
-    #[must_use]
-    pub fn summaries(&self) -> Vec<AgentThreadSummary> {
-        let threads = self
-            .inner
-            .threads
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut summaries = threads
-            .values()
-            .map(|runtime| {
-                let state = runtime
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (
-                    state.record.created,
-                    state.projection.summary(Seq::default()),
-                )
-            })
-            .collect::<Vec<_>>();
-        summaries.sort_by_key(|(created, _)| *created);
-        summaries.into_iter().map(|(_, summary)| summary).collect()
+    ///
+    /// One `SELECT` against `threads`, whatever the transcript history is. It deliberately does
+    /// *not* consult the hydrated map: every append commits its projection rows before the reply
+    /// resolves, so the database is never behind memory, and reading one source keeps a hydrated
+    /// thread and a cold one from being described differently.
+    pub async fn summaries(&self) -> Vec<AgentThreadSummary> {
+        match self.inner.store() {
+            Ok(store) => match store.summaries().await {
+                Ok(summaries) => summaries,
+                Err(error) => {
+                    tracing::warn!(%error, "could not list the native-agent threads");
+                    Vec::new()
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "could not list the native-agent threads");
+                Vec::new()
+            }
+        }
+    }
+
+    /// The capabilities the live harness negotiated for this thread, when one is running.
+    ///
+    /// Read off the adapter rather than a column: a capability set belongs to one *process*
+    /// (§3.1 freezes it for that process's life), and a thread with no process has no capability
+    /// set to report. `None` gates every control off, which is the safe direction — a button that
+    /// silently means something weaker than it says is worse than no button (§4.5).
+    async fn harness_capabilities(&self, thread: ThreadId) -> Option<HarnessCapabilities> {
+        let runtime = self.hydrated(thread)?;
+        let provider = runtime.provider.lock().await;
+        provider.as_ref().map(|provider| provider.capabilities())
     }
 
     /// Handles `AgentThreadList`.
     pub async fn list(&self) -> Result<ResponseBody, ProtoError> {
-        Ok(ResponseBody::AgentThreads(self.summaries()))
-    }
-
-    /// Handles `AgentThreadCreate`.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create(
-        &self,
-        worktree: WorktreeId,
-        provider_kind: AgentKind,
-        model: Option<ModelSelection>,
-        mode: PermissionMode,
-        resume_cursor: Option<String>,
-        title: Option<String>,
-    ) -> Result<ResponseBody, ProtoError> {
-        let remote_host = self
-            .inner
-            .remote_host_resolver
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|resolver| resolver(&worktree));
-        if let Some(host) = remote_host {
-            return Err(ProtoError {
-                kind: ErrorKind::Remote,
-                message: format!(
-                    "agent thread for worktree {worktree} belongs to remote host {host}; local manager refused it"
-                ),
-            });
-        }
-        let path = self
-            .inner
-            .worktrees
-            .path(worktree.clone())
+        let store = self.inner.store().map_err(storage_error)?;
+        store
+            .summaries()
             .await
-            .map(PathBuf::from)
-            .map_err(daemon_error)?;
-        let thread = ThreadId::new();
-        let request = StartRequest {
-            thread,
-            worktree_path: path,
-            provider: provider_kind,
-            model: model.clone(),
-            mode,
-            resume_cursor: resume_cursor.clone(),
-            title: title.clone(),
-        };
-        let commands = self.agent_commands().await;
-        let mut provider = (self.inner.provider_factory)(provider_kind, &request, &commands)
-            .map_err(provider_factory_error)?;
-        provider.start(request).await.map_err(provider_error)?;
-        let provider_events = provider.events();
-        let created = Utc::now();
-        let resolved_title = title.unwrap_or_else(|| provider_kind.display_name().to_owned());
-        let record = AgentThreadRecord {
-            thread,
-            worktree: worktree.clone(),
-            provider: provider_kind,
-            title: resolved_title.clone(),
-            created,
-            last_activity: created,
-            resume_cursor,
-            model: model.clone(),
-            mode,
-            last_outcome: None,
-        };
-        let mut projection = ThreadProjection::new(thread, worktree, provider_kind);
-        projection.title = resolved_title;
-        projection.model = model;
-        projection.mode = mode;
-        let runtime = ThreadRuntime::new(projection, record.clone());
-        *runtime.provider.lock().await = Some(provider);
-
-        let index_write_error = {
-            let mut index = self
-                .inner
-                .index
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            index.threads.push(record);
-            if let Err(error) = self.inner.store.write_index(&index) {
-                index.threads.retain(|entry| entry.thread != thread);
-                Some(error)
-            } else {
-                None
-            }
-        };
-        if let Some(error) = index_write_error {
-            if let Some(mut provider) = runtime.provider.lock().await.take()
-                && let Err(stop_error) = provider.stop().await
-            {
-                // The orphan outlives this log line, but nothing else names it: the thread was
-                // never inserted, so the discarded `Err` was the only trace of the child still
-                // holding the worktree and its port.
-                tracing::warn!(
-                    target: "fleet::agents",
-                    error = %stop_error,
-                    %thread,
-                    "could not stop the provider after a failed index write",
-                );
-            }
-            return Err(storage_error(error));
-        }
-        self.inner
-            .threads
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(thread, runtime.clone());
-        self.spawn_event_task(runtime, provider_events);
-        let runtime = self.runtime(thread)?;
-        let state = runtime
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let summary = state.projection.summary(Seq::default());
-        drop(state);
-        self.inner
-            .events
-            .publish(Event::AgentSummary(summary.clone()));
-        Ok(ResponseBody::AgentThreadCreated(summary))
-    }
-
-    /// Handles `AgentThreadOpen`.
-    pub async fn open(
-        &self,
-        thread: ThreadId,
-        from_seq: Option<Seq>,
-    ) -> Result<ResponseBody, ProtoError> {
-        let runtime = self.runtime(thread)?;
-        // A catch-up open is a client repairing a sequence gap, not a user opening a tab: §6
-        // resumes a stopped thread lazily "the next time it is opened", which is a user action.
-        // Relaunching a provider process for every mirror that lagged is not.
-        if from_seq.is_none() {
-            self.resume_if_stopped(&runtime).await?;
-        }
-
-        let Some(cursor) = from_seq else {
-            let state = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            return Ok(ResponseBody::AgentThreadSnapshot {
-                projection: state.projection.clone(),
-                events_after: Vec::new(),
-            });
-        };
-        let record = {
-            let state = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if cursor > state.projection.last_seq {
-                return Err(validation(format!(
-                    "thread {thread} has no sequence {cursor}; latest is {}",
-                    state.projection.last_seq
-                )));
-            }
-            state.record.clone()
-        };
-        // A whole-transcript read is disk work, and a rendering client is waiting on it: it
-        // runs on the blocking pool rather than on an executor worker (§3, never block on IO).
-        let store = self.inner.store.clone();
-        let events = tokio::task::spawn_blocking(move || store.load(thread))
-            .await
-            .map_err(|error| storage_error(anyhow::anyhow!(error)))?
-            .map_err(storage_error)?;
-        let mut projection = projection_seed(&record);
-        for event in events.iter().filter(|event| event.seq <= cursor) {
-            projection.apply(event).map_err(|error| {
-                storage_error(anyhow::anyhow!(error).context("replay agent snapshot"))
-            })?;
-        }
-        let events_after = events
-            .into_iter()
-            .filter(|event| event.seq > cursor)
-            .collect();
-        Ok(ResponseBody::AgentThreadSnapshot {
-            projection,
-            events_after,
-        })
-    }
-
-    /// Handles `AgentThreadClose`.
-    pub async fn close(&self, thread: ThreadId) -> Result<ResponseBody, ProtoError> {
-        let _runtime = self.runtime(thread)?;
-        Ok(ResponseBody::AgentAck)
-    }
-
-    /// Handles `AgentSend`.
-    pub async fn send(
-        &self,
-        thread: ThreadId,
-        input: UserInput,
-    ) -> Result<ResponseBody, ProtoError> {
-        if input.text.trim().is_empty() && input.attachments.is_empty() {
-            return Err(validation("agent input cannot be empty"));
-        }
-        let runtime = self.runtime(thread)?;
-        // §6 resumes a stopped thread lazily; §7 makes `AgentSend` a first-class verb of the
-        // same request set the app uses. Taken together, a send to a thread whose provider a
-        // restart took away resumes it rather than refusing until something else opens the tab.
-        // Resuming takes the operation lock itself, so it happens before this one does.
-        self.resume_if_stopped(&runtime).await?;
-        let _operation = runtime.operation.lock().await;
-        let (turn, projected_running, kind) = {
-            let state = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let projected = match state.projection.turn {
-                TurnState::Running(turn) => Some(turn),
-                _ => None,
-            };
-            (
-                projected
-                    .or(state.inflight_turn)
-                    .unwrap_or_else(TurnId::new),
-                projected.is_some(),
-                state.record.provider,
-            )
-        };
-        let had_inflight = runtime_inflight(&runtime).is_some();
-        let mut provider_slot = runtime.provider.lock().await;
-        let provider = provider_slot
-            .as_mut()
-            .ok_or_else(|| conflict(format!("agent thread {thread} is not live")))?;
-        if (projected_running || had_inflight) && !provider.capabilities().steer {
-            return Err(conflict(format!(
-                "{} does not support steering",
-                kind.display_name()
-            )));
-        }
-        provider
-            .send(turn, input.clone())
-            .await
-            .map_err(provider_error)?;
-        drop(provider_slot);
-        {
-            let mut state = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.inflight_turn = Some(turn);
-            if kind == AgentKind::Claude && !projected_running {
-                state.pending_claude_inputs.push_back((turn, input.clone()));
-            }
-        }
-        if kind == AgentKind::Claude && projected_running {
-            self.record_user_input_locked(&runtime, turn, ItemId::new(), input)?;
-        }
-        Ok(ResponseBody::AgentAck)
-    }
-
-    /// Handles `AgentInterrupt`.
-    ///
-    /// Interrupting a turn that has already settled is a no-op, not a conflict: `esc` and the
-    /// `result` frame that ends the turn race by milliseconds, and the client cannot see the
-    /// settle coming. Reporting that race as an error put a sticky `conflict: agent thread …
-    /// has no active turn` in the status bar for something the user did nothing wrong to cause.
-    pub async fn interrupt(&self, thread: ThreadId) -> Result<ResponseBody, ProtoError> {
-        let runtime = self.runtime(thread)?;
-        let _operation = runtime.operation.lock().await;
-        let Some(turn) = runtime_inflight(&runtime) else {
-            return Ok(ResponseBody::AgentAck);
-        };
-        let mut provider_slot = runtime.provider.lock().await;
-        let provider = provider_slot
-            .as_mut()
-            .ok_or_else(|| conflict(format!("agent thread {thread} is not live")))?;
-        if !provider.capabilities().interrupt {
-            return Err(conflict(format!(
-                "{} does not support interruption",
-                provider.kind().display_name()
-            )));
-        }
-        provider.interrupt(turn).await.map_err(provider_error)?;
-        Ok(ResponseBody::AgentAck)
-    }
-
-    /// Handles `AgentRespond`.
-    pub async fn respond(
-        &self,
-        thread: ThreadId,
-        gate: GateId,
-        answer: GateAnswer,
-    ) -> Result<ResponseBody, ProtoError> {
-        let runtime = self.runtime(thread)?;
-        let _operation = runtime.operation.lock().await;
-        // The projection only drops the gate when the provider's `GateResolved` is drained, so
-        // two answers issued back to back would both pass an open-gate check and both write a
-        // control response for one request id. §4.3: duplicate settlements are idempotent.
-        {
-            let mut state = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.answered_gates.contains(&gate) {
-                return Ok(ResponseBody::AgentAck);
-            }
-            if !state
-                .projection
-                .gates
-                .iter()
-                .any(|candidate| candidate.id == gate)
-            {
-                return Err(conflict(format!(
-                    "gate {gate} is not open in agent thread {thread}"
-                )));
-            }
-            state.answered_gates.insert(gate);
-        }
-        let answered = runtime
-            .provider
-            .lock()
-            .await
-            .as_mut()
-            .ok_or_else(|| conflict(format!("agent thread {thread} is not live")))?
-            .respond(gate, answer)
-            .await;
-        if let Err(error) = answered {
-            runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .answered_gates
-                .remove(&gate);
-            return Err(provider_error(error));
-        }
-        Ok(ResponseBody::AgentAck)
-    }
-
-    /// Handles `AgentSetMode`.
-    pub async fn set_mode(
-        &self,
-        thread: ThreadId,
-        mode: PermissionMode,
-    ) -> Result<ResponseBody, ProtoError> {
-        let runtime = self.runtime(thread)?;
-        let _operation = runtime.operation.lock().await;
-        let mut provider_slot = runtime.provider.lock().await;
-        let provider = provider_slot
-            .as_mut()
-            .ok_or_else(|| conflict(format!("agent thread {thread} is not live")))?;
-        if !provider.capabilities().modes {
-            return Err(conflict(format!(
-                "{} does not support changing mode",
-                provider.kind().display_name()
-            )));
-        }
-        // §2's mode word is a promise about behaviour, so the row records the mode the session
-        // settled on, not the one the palette asked for.
-        let effective = provider.set_mode(mode).await.map_err(provider_error)?;
-        drop(provider_slot);
-        self.update_settings_locked(&runtime, Some(effective), None)?;
-        Ok(ResponseBody::AgentAck)
-    }
-
-    /// Handles `AgentSetModel`.
-    pub async fn set_model(
-        &self,
-        thread: ThreadId,
-        model: ModelSelection,
-    ) -> Result<ResponseBody, ProtoError> {
-        let runtime = self.runtime(thread)?;
-        let _operation = runtime.operation.lock().await;
-        let mut provider_slot = runtime.provider.lock().await;
-        let provider = provider_slot
-            .as_mut()
-            .ok_or_else(|| conflict(format!("agent thread {thread} is not live")))?;
-        if !provider.capabilities().models {
-            return Err(conflict(format!(
-                "{} does not support changing model",
-                provider.kind().display_name()
-            )));
-        }
-        provider
-            .set_model(model.clone())
-            .await
-            .map_err(provider_error)?;
-        drop(provider_slot);
-        self.update_settings_locked(&runtime, None, Some(model))?;
-        Ok(ResponseBody::AgentAck)
-    }
-
-    /// Handles `AgentMarkSeen`.
-    ///
-    /// §3.3 makes the seen cursor "per client, not persisted daemon-side", and one
-    /// [`Event::AgentSummary`] reaches every subscriber: a cursor folded into it here would be
-    /// one client's and would clear the amber dot on all the others. So the daemon validates
-    /// the cursor and keeps none — the reading client narrows the broadcast attention with
-    /// `AgentThreadSummary::attention_for` against the cursor it holds itself.
-    pub async fn mark_seen(&self, thread: ThreadId, seq: Seq) -> Result<ResponseBody, ProtoError> {
-        let runtime = self.runtime(thread)?;
-        let _operation = runtime.operation.lock().await;
-        let last_seq = {
-            let state = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.projection.last_seq
-        };
-        if seq > last_seq {
-            return Err(validation(format!(
-                "cannot mark unseen sequence {seq}; latest is {last_seq}"
-            )));
-        }
-        Ok(ResponseBody::AgentAck)
-    }
-
-    /// Handles `AgentStop`.
-    pub async fn stop(&self, thread: ThreadId) -> Result<ResponseBody, ProtoError> {
-        let runtime = self.runtime(thread)?;
-        let _operation = runtime.operation.lock().await;
-        let mut provider_slot = runtime.provider.lock().await;
-        let Some(mut provider) = provider_slot.take() else {
-            return Ok(ResponseBody::AgentAck);
-        };
-        // A provider that will not die is a diagnostic, not a reason to leave the transcript
-        // claiming a turn is still running: the child that exits from its own stdin close
-        // answers `stop` with `Exited`, and returning here skipped every settlement below, so
-        // §2's tab spun on a dead process until the daemon restarted. The handle is dropped
-        // either way — nothing can reach that session again.
-        if let Err(error) = provider.stop().await {
-            tracing::warn!(
-                target: "fleet::agents",
-                %error,
-                %thread,
-                "the native-agent provider did not stop cleanly",
-            );
-        }
-        drop(provider);
-        drop(provider_slot);
-
-        for applied in self.settle_open_gates_locked(&runtime)? {
-            publish_applied(&self.inner, &runtime, applied);
-        }
-        if let Some(turn) = runtime_inflight(&runtime) {
-            for applied in self.flush_pending_claude_inputs_locked(&runtime, turn, "agent_stop")? {
-                publish_applied(&self.inner, &runtime, applied);
-            }
-            self.apply_one_locked(
-                &runtime,
-                AgentEvent::TurnAborted {
-                    turn,
-                    reason: AbortReason::SessionStopped,
-                },
-                Some("agent_stop".to_owned()),
-            )?;
-        }
-        self.apply_one_locked(
-            &runtime,
-            AgentEvent::SessionExited {
-                code: None,
-                expected: true,
-            },
-            Some("agent_stop".to_owned()),
-        )?;
-        runtime.abort_task();
-        Ok(ResponseBody::AgentAck)
-    }
-
-    fn runtime(&self, thread: ThreadId) -> Result<ThreadRuntime, ProtoError> {
-        self.inner
-            .threads
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&thread)
-            .cloned()
-            .ok_or_else(|| not_found(format!("agent thread {thread}")))
+            .map(ResponseBody::AgentThreads)
+            .map_err(storage_error)
     }
 
     /// Resumes a thread whose provider is gone but whose cursor can bring it back.
@@ -677,8 +311,22 @@ impl AgentSessionManager {
         Ok(())
     }
 
+    /// Starts a provider for a thread whose cursor can bring it back.
+    ///
+    /// The owner check is the enforcement point of §9.3's second authority rule: with
+    /// `create`, this is one of exactly two places in the daemon that starts a harness process,
+    /// and a mirrored thread must never be one of them. The owner is running that session; a
+    /// second process on this machine would be a second writer on the owner's sequence.
     async fn resume_runtime(&self, runtime: &ThreadRuntime) -> Result<(), ProtoError> {
-        let _operation = runtime.operation.lock().await;
+        if let Some(owner) = runtime.owner() {
+            return Err(ProtoError {
+                kind: ErrorKind::Remote,
+                message: one_line(&format!(
+                    "agent thread is owned by host {owner}; its provider runs there, not here"
+                )),
+            });
+        }
+        let operation = runtime.operation.lock().await;
         if runtime.provider.lock().await.is_some() {
             return Ok(());
         }
@@ -711,6 +359,11 @@ impl AgentSessionManager {
             model: record.model,
             mode: record.mode,
             resume_cursor: Some(cursor),
+            fork: false,
+            env: BTreeMap::new(),
+            sandbox: SandboxPolicy::default(),
+            approval_policy: ApprovalPolicy::default(),
+            permission_profile: None,
             title: Some(record.title),
         };
         let commands = self.agent_commands().await;
@@ -721,16 +374,20 @@ impl AgentSessionManager {
         // The provider process is up; `claude -p` only emits `system/init` once it is prompted,
         // so waiting for that would leave a resumed tab on a state §3.3 has no row for. The
         // resume checkpoint below is the visible marker instead.
-        self.apply_one_locked(
+        self.apply_one(
             runtime,
+            &operation,
             AgentEvent::SessionStateChanged(SessionState::Ready),
             Some("resume".to_owned()),
-        )?;
-        self.apply_one_locked(
+        )
+        .await?;
+        self.apply_one(
             runtime,
-            AgentEvent::Checkpoint(CheckpointKind::Resumed { age_ms }),
+            &operation,
+            AgentEvent::Compacted(CheckpointKind::Resumed { age_ms }),
             Some("resume".to_owned()),
-        )?;
+        )
+        .await?;
         *runtime.provider.lock().await = Some(provider);
         self.spawn_event_task(runtime.clone(), provider_events);
         Ok(())
@@ -745,9 +402,10 @@ impl AgentSessionManager {
         runtime.set_task(task.abort_handle());
     }
 
-    fn apply_provider_event_locked(
+    async fn apply_provider_event(
         &self,
         runtime: &ThreadRuntime,
+        operation: Serialized<'_>,
         event: AgentEvent,
         raw: Option<String>,
     ) -> Result<Vec<AppliedEvent>, ProtoError> {
@@ -759,7 +417,7 @@ impl AgentSessionManager {
         // would strand the card at the top of `NeedsYou` for the life of the thread, with no
         // adapter left to answer it. The settlement is appended, exactly like `control_cancel`.
         let mut applied = if ends_the_session(&event) {
-            self.settle_open_gates_locked(runtime)?
+            self.settle_open_gates(runtime, operation).await?
         } else {
             Vec::new()
         };
@@ -767,25 +425,41 @@ impl AgentSessionManager {
         // prompts Claude was given under it. Without this a turn whose `TurnStarted` never
         // arrived strands them, and the next turn's drain would find them ahead of its own.
         if ends_the_turn(&event)
-            && let Some(turn) = pending_claude_turn(runtime)
+            && let Some(turn) = pending_input_turn(runtime)
         {
-            applied.extend(self.flush_pending_claude_inputs_locked(
-                runtime,
-                turn,
-                "pending_input",
-            )?);
+            applied.extend(
+                self.flush_pending_inputs(runtime, operation, turn, "pending_input")
+                    .await?,
+            );
         }
-        applied.push(self.apply_event_locked(runtime, event, raw)?);
+        // Before the event is applied, because this is the earliest the daemon can know an edit
+        // is coming. It is **best effort and says so**: neither harness waits for Fleet before
+        // running an auto-approved tool, so a file-scope checkpoint can land after the write and
+        // then restore what is already there. The turn-scope checkpoint taken in `send` is the
+        // guarantee; this one is the finer-grained revert when the race goes Fleet's way — which
+        // it always does for a gated edit, the case where the user is watching.
+        if let Some((turn, paths)) = edited_paths(&event) {
+            let (thread, worktree) = {
+                let state = runtime
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (state.record.thread, state.record.worktree.clone())
+            };
+            self.capture_file_checkpoint(thread, turn, &worktree, paths)
+                .await;
+        }
+        applied.push(self.apply(runtime, operation, event, raw).await?);
+        // Both harnesses announce the turn on the stream rather than as the submit's return
+        // value, so this is the moment the prompt that opened it becomes a transcript row. It is
+        // not Claude-only: Codex suppresses the echo of a message Fleet itself sent (it carries
+        // Fleet's own `clientId`), so without this the user's bubble would exist in no log at
+        // all and vanish on the next open.
         if let Some((turn, user_item)) = turn_started {
-            let provider = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record
-                .provider;
-            if provider == AgentKind::Claude {
-                applied.extend(self.drain_claude_inputs_applied_locked(runtime, turn, user_item)?);
-            }
+            applied.extend(
+                self.drain_inputs_applied(runtime, operation, turn, user_item)
+                    .await?,
+            );
         }
         Ok(applied)
     }
@@ -798,9 +472,10 @@ impl AgentSessionManager {
     /// a question no row shows. A projection that is already running a turn drained the deque
     /// when that turn started, and the reducer refuses a second `TurnStarted` anyway, so there
     /// is nothing to do.
-    fn flush_pending_claude_inputs_locked(
+    async fn flush_pending_inputs(
         &self,
         runtime: &ThreadRuntime,
+        operation: Serialized<'_>,
         turn: TurnId,
         raw: &str,
     ) -> Result<Vec<AppliedEvent>, ProtoError> {
@@ -815,19 +490,37 @@ impl AgentSessionManager {
         ) {
             return Ok(Vec::new());
         }
-        let user_item = ItemId::new();
-        let mut applied = vec![self.apply_event_locked(
-            runtime,
-            AgentEvent::TurnStarted { turn, user_item },
-            Some(raw.to_owned()),
-        )?];
-        applied.extend(self.drain_claude_inputs_applied_locked(runtime, turn, user_item)?);
+        // The prompt already parked for this turn carries the identity the client drew its
+        // optimistic bubble under, so the synthesized announcement names that item rather than a
+        // second one the client cannot recognise.
+        let user_item = runtime
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_inputs
+            .front()
+            .and_then(|(_, input)| input.item)
+            .unwrap_or_default();
+        let mut applied = vec![
+            self.apply(
+                runtime,
+                operation,
+                AgentEvent::TurnStarted { turn, user_item },
+                Some(raw.to_owned()),
+            )
+            .await?,
+        ];
+        applied.extend(
+            self.drain_inputs_applied(runtime, operation, turn, user_item)
+                .await?,
+        );
         Ok(applied)
     }
 
-    fn drain_claude_inputs_applied_locked(
+    async fn drain_inputs_applied(
         &self,
         runtime: &ThreadRuntime,
+        operation: Serialized<'_>,
         turn: TurnId,
         first_item: ItemId,
     ) -> Result<Vec<AppliedEvent>, ProtoError> {
@@ -841,62 +534,86 @@ impl AgentSessionManager {
             // never recorded, and the deque grows for the life of the daemon.
             let mut inputs = Vec::new();
             let mut kept = VecDeque::new();
-            for (pending_turn, input) in std::mem::take(&mut state.pending_claude_inputs) {
+            for (pending_turn, input) in std::mem::take(&mut state.pending_inputs) {
                 if pending_turn == turn {
                     inputs.push(input);
                 } else {
                     kept.push_back((pending_turn, input));
                 }
             }
-            state.pending_claude_inputs = kept;
+            state.pending_inputs = kept;
             inputs
         };
         let mut applied = Vec::new();
         for (index, input) in inputs.into_iter().enumerate() {
+            // Position zero is the prompt the announcement named, so it keeps that identity —
+            // which is the client's own when it sent one, because the adapter adopts it. Every
+            // later prompt in the same turn keeps the id its own client drew it under.
             let item = if index == 0 {
                 first_item
             } else {
-                ItemId::new()
+                input.item.unwrap_or_else(ItemId::new)
             };
-            applied.push(self.apply_event_locked(
-                runtime,
-                user_item_started(turn, item, input),
-                None,
-            )?);
-            applied.push(self.apply_event_locked(
-                runtime,
-                AgentEvent::ItemCompleted {
-                    item,
-                    status: ItemStatus::Done,
-                },
-                None,
-            )?);
+            applied.push(
+                self.apply(
+                    runtime,
+                    operation,
+                    // Nothing parked here was a steer: a submission the harness folded into a
+                    // running turn is recorded by `send` itself and never queued.
+                    user_item_started(turn, item, input, false),
+                    None,
+                )
+                .await?,
+            );
+            applied.push(
+                self.apply(
+                    runtime,
+                    operation,
+                    AgentEvent::ItemCompleted {
+                        item,
+                        status: ItemStatus::Completed,
+                    },
+                    None,
+                )
+                .await?,
+            );
         }
         Ok(applied)
     }
 
-    fn record_user_input_locked(
+    async fn record_user_input(
         &self,
         runtime: &ThreadRuntime,
+        operation: Serialized<'_>,
         turn: TurnId,
         item: ItemId,
         input: UserInput,
+        steered: bool,
     ) -> Result<(), ProtoError> {
-        self.apply_one_locked(runtime, user_item_started(turn, item, input), None)?;
-        self.apply_one_locked(
+        self.apply_one(
             runtime,
+            operation,
+            user_item_started(turn, item, input, steered),
+            None,
+        )
+        .await?;
+        self.apply_one(
+            runtime,
+            operation,
             AgentEvent::ItemCompleted {
                 item,
-                status: ItemStatus::Done,
+                status: ItemStatus::Completed,
             },
             None,
         )
+        .await
     }
 
     /// Closes every gate still open, as the appended events §6 requires.
-    fn settle_open_gates_locked(
+    async fn settle_open_gates(
         &self,
         runtime: &ThreadRuntime,
+        operation: Serialized<'_>,
     ) -> Result<Vec<AppliedEvent>, ProtoError> {
         let open = runtime
             .state
@@ -905,10 +622,12 @@ impl AgentSessionManager {
             .projection
             .gates
             .clone();
-        open.into_iter()
-            .map(|gate| {
-                self.apply_event_locked(
+        let mut applied = Vec::with_capacity(open.len());
+        for gate in open {
+            applied.push(
+                self.apply(
                     runtime,
+                    operation,
                     AgentEvent::GateResolved {
                         gate: gate.id,
                         answer: closed_gate_answer(&gate.kind),
@@ -916,50 +635,34 @@ impl AgentSessionManager {
                     },
                     Some("provider_closed".to_owned()),
                 )
-            })
-            .collect()
+                .await?,
+            );
+        }
+        Ok(applied)
     }
 
-    fn apply_one_locked(
+    async fn apply_one(
         &self,
         runtime: &ThreadRuntime,
+        operation: Serialized<'_>,
         event: AgentEvent,
         raw: Option<String>,
     ) -> Result<(), ProtoError> {
-        let applied = self.apply_event_locked(runtime, event, raw)?;
+        let applied = self.apply(runtime, operation, event, raw).await?;
         publish_applied(&self.inner, runtime, applied);
         Ok(())
     }
 
-    fn apply_event_locked(
+    async fn apply(
         &self,
         runtime: &ThreadRuntime,
+        operation: Serialized<'_>,
         event: AgentEvent,
         raw: Option<String>,
     ) -> Result<AppliedEvent, ProtoError> {
-        apply_event(&self.inner, runtime, event, raw).map_err(storage_error)
-    }
-
-    /// Records a mode or model change as a durable event rather than a silent projection edit.
-    ///
-    /// §3 makes the reducer the only writer of projected state and §6 makes the log the
-    /// transcript, so a client mirror learns the new model from the same stream as everything
-    /// else instead of keeping the old one until its tab is re-opened.
-    fn update_settings_locked(
-        &self,
-        runtime: &ThreadRuntime,
-        mode: Option<PermissionMode>,
-        model: Option<ModelSelection>,
-    ) -> Result<(), ProtoError> {
-        self.apply_one_locked(
-            runtime,
-            AgentEvent::MetadataChanged {
-                title: None,
-                mode,
-                model,
-            },
-            None,
-        )
+        apply_event(&self.inner, runtime, operation, event, raw)
+            .await
+            .map_err(storage_error)
     }
 }
 
@@ -982,9 +685,22 @@ async fn run_provider_events(
         // §5: one event per item per tick. The run is merged *before* it is reduced, so the tick
         // costs one sequence, one stored line and one broadcast frame rather than one per token.
         for event in coalesce_deltas(batch) {
-            let _operation = runtime.operation.lock().await;
+            let operation = runtime.operation.lock().await;
             let exited = matches!(event.event, AgentEvent::SessionExited { .. });
-            match manager.apply_provider_event_locked(&runtime, event.event, event.raw) {
+            if let Some(skew) = event.emission_skew
+                && skew >= EMISSION_SKEW_FLOOR
+            {
+                tracing::debug!(
+                    target: "fleet::agents",
+                    skew_ms = skew.as_millis(),
+                    frame = event.raw.as_deref().unwrap_or("unnamed"),
+                    "a harness frame was read well after the harness says it emitted it",
+                );
+            }
+            match manager
+                .apply_provider_event(&runtime, &operation, event.event, event.raw)
+                .await
+            {
                 Ok(events) => {
                     for applied in events {
                         publish_applied(&inner, &runtime, applied);
@@ -1006,7 +722,7 @@ async fn run_provider_events(
         }
     }
 
-    let _operation = runtime.operation.lock().await;
+    let operation = runtime.operation.lock().await;
     let should_mark_exit = {
         let state = runtime
             .state
@@ -1018,14 +734,18 @@ async fn run_provider_events(
         )
     };
     if should_mark_exit {
-        match manager.apply_provider_event_locked(
-            &runtime,
-            AgentEvent::SessionExited {
-                code: None,
-                expected: false,
-            },
-            Some("provider_event_stream_closed".to_owned()),
-        ) {
+        match manager
+            .apply_provider_event(
+                &runtime,
+                &operation,
+                AgentEvent::SessionExited {
+                    code: None,
+                    expected: false,
+                },
+                Some("provider_event_stream_closed".to_owned()),
+            )
+            .await
+        {
             Ok(events) => {
                 for applied in events {
                     publish_applied(&inner, &runtime, applied);
@@ -1034,426 +754,19 @@ async fn run_provider_events(
             Err(error) => tracing::warn!(%error, "could not record provider event-stream exit"),
         }
     }
+    // The gate is still held: the slot is emptied under the same serialization every settlement
+    // above ran under, so nothing can pick up a provider this loop is retiring.
     *runtime.provider.lock().await = None;
-}
-
-fn apply_event(
-    inner: &ManagerInner,
-    runtime: &ThreadRuntime,
-    event: AgentEvent,
-    raw: Option<String>,
-) -> anyhow::Result<AppliedEvent> {
-    let (applied, record, persist_index) = {
-        let mut state = runtime
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = state.projection.summary(Seq::default());
-        let sequenced = SeqEvent {
-            seq: state.projection.last_seq.next(),
-            at: Utc::now(),
-            raw: raw.or_else(|| Some(event_name(&event).to_owned())),
-            event,
-        };
-        // §6 makes the transcript what the reducer wrote *before* the event was broadcast, so
-        // memory, log and broadcast must not diverge. The event is settled against the
-        // projection first, made durable second, and only then applied: a write that fails
-        // therefore leaves `last_seq` where it was, instead of advancing memory past a sequence
-        // the log never received and making every later append discontinuous on disk.
-        state
-            .projection
-            .accepts(&sequenced)
-            .with_context(|| format!("apply native-agent event {}", sequenced.seq))?;
-        inner
-            .store
-            .append(state.record.thread, &sequenced)
-            .context("persist native-agent event")?;
-        state
-            .projection
-            .apply(&sequenced)
-            .with_context(|| format!("apply native-agent event {}", sequenced.seq))?;
-        // Reborrowed so `record` and `title` are two disjoint field borrows: taking them both
-        // through the guard would need a clone of the whole transcript per applied event.
-        let state = &mut *state;
-        let previous = state.record.clone();
-        update_record(&mut state.record, &sequenced, &state.projection.title);
-        if ends_the_turn(&sequenced.event) {
-            state.inflight_turn = None;
-        }
-        // The gate is settled everywhere now, so the answered-once guard can forget it.
-        if let AgentEvent::GateResolved { gate, .. } = &sequenced.event {
-            state.answered_gates.remove(gate);
-        }
-        let after = state.projection.summary(Seq::default());
-        let persist_index = index_metadata_changed(&previous, &state.record);
-        (
-            AppliedEvent {
-                event: sequenced,
-                summary: summary_transition(&before, &after).then_some(after),
-            },
-            state.record.clone(),
-            persist_index,
-        )
-    };
-    // The index is thread *metadata*, not a second event log: writing it costs two fsyncs and a
-    // rename, which a streaming turn must not pay per delta. `last_activity` alone rides along
-    // with the next real metadata transition, and every consumer reads the log for the rest.
-    replace_index_record(inner, &record);
-    if persist_index && let Err(error) = write_index(inner) {
-        tracing::warn!(%error, "could not update native-agent index");
-    }
-    Ok(applied)
-}
-
-/// Whether a record changed in a way the durable index has to learn about now.
-///
-/// `last_activity` moves on every event and is deliberately excluded: it is a listing nicety,
-/// and it is persisted anyway by the next transition that matters.
-fn index_metadata_changed(before: &AgentThreadRecord, after: &AgentThreadRecord) -> bool {
-    before.title != after.title
-        || before.resume_cursor != after.resume_cursor
-        || before.model != after.model
-        || before.mode != after.mode
-        || before.last_outcome != after.last_outcome
-}
-
-fn publish_applied(inner: &ManagerInner, runtime: &ThreadRuntime, applied: AppliedEvent) {
-    let thread = runtime
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .record
-        .thread;
-    inner.events.publish(Event::Agent {
-        thread,
-        event: applied.event,
-    });
-    if let Some(summary) = applied.summary {
-        inner.events.publish(Event::AgentSummary(summary));
-    }
-}
-
-fn user_item_started(turn: TurnId, item: ItemId, input: UserInput) -> AgentEvent {
-    AgentEvent::ItemStarted {
-        turn,
-        item,
-        kind: ItemKind::UserMessage {
-            text: input.text,
-            attachments: input.attachments,
-        },
-        parent: None,
-    }
-}
-
-fn runtime_inflight(runtime: &ThreadRuntime) -> Option<TurnId> {
-    let state = runtime
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match state.projection.turn {
-        TurnState::Running(turn) => Some(turn),
-        _ => state.inflight_turn,
-    }
-}
-
-fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, title: &str) {
-    if record.title != title {
-        record.title = title.to_owned();
-    }
-    record.last_activity = event.at;
-    match &event.event {
-        AgentEvent::SessionStarted {
-            resume_cursor,
-            model,
-            mode,
-            ..
-        } => {
-            if resume_cursor.is_some() {
-                record.resume_cursor.clone_from(resume_cursor);
-            }
-            record.model.clone_from(model);
-            record.mode = *mode;
-        }
-        AgentEvent::MetadataChanged { mode, model, .. } => {
-            if let Some(mode) = mode {
-                record.mode = *mode;
-            }
-            if model.is_some() {
-                record.model.clone_from(model);
-            }
-        }
-        AgentEvent::TurnCompleted { outcome, .. } => {
-            record.last_outcome = Some(outcome.clone());
-        }
-        AgentEvent::TurnAborted { .. } => {
-            record.last_outcome = Some(TurnOutcome::Interrupted);
-        }
-        AgentEvent::SessionExited {
-            expected: false, ..
-        }
-        | AgentEvent::RuntimeError { fatal: true, .. } => {
-            record.last_outcome = Some(TurnOutcome::Error {
-                message: Some("provider exited unexpectedly".to_owned()),
-            });
-        }
-        _ => {}
-    }
-}
-
-fn replace_index_record(inner: &ManagerInner, record: &AgentThreadRecord) {
-    let mut index = inner
-        .index
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(existing) = index
-        .threads
-        .iter_mut()
-        .find(|candidate| candidate.thread == record.thread)
-    {
-        *existing = record.clone();
-    }
-}
-
-fn write_index(inner: &ManagerInner) -> anyhow::Result<()> {
-    let index = inner
-        .index
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    inner.store.write_index(&index)
-}
-
-/// Replays a thread's log as far as the reducer accepts it, quarantining anything it does not.
-///
-/// §6 replays every thread's whole log at start and keeps threads "browsable read-only
-/// regardless". One event the reducer rejects — a shape an older daemon wrote, a tail a crash
-/// tore — must therefore cost that event and the ones behind it, never the whole thread: a
-/// thread that fails to load is absent from `summaries()` and answers `NotFound` for good. The
-/// log is trimmed to what replayed, so the next append continues from the sequence the
-/// projection actually holds instead of colliding with the events it skipped.
-fn load_projection(
-    store: &AgentStore,
-    record: &AgentThreadRecord,
-) -> anyhow::Result<ThreadProjection> {
-    let mut projection = projection_seed(record);
-    let events = store.load(record.thread)?;
-    let logged = events.last().map(|event| event.seq);
-    let mut replayed = None;
-    for event in &events {
-        if let Err(error) = projection.apply(event) {
-            tracing::warn!(
-                thread = %record.thread,
-                seq = %event.seq,
-                %error,
-                "quarantining a native-agent event the reducer rejected on replay"
-            );
-            break;
-        }
-        replayed = Some(event.seq);
-    }
-    if replayed != logged
-        && let Err(error) = store.truncate_after(record.thread, replayed)
-    {
-        tracing::warn!(thread = %record.thread, %error, "could not trim a native-agent log");
-    }
-    Ok(projection)
-}
-
-fn projection_seed(record: &AgentThreadRecord) -> ThreadProjection {
-    let mut projection =
-        ThreadProjection::new(record.thread, record.worktree.clone(), record.provider);
-    projection.title.clone_from(&record.title);
-    projection.model.clone_from(&record.model);
-    projection.mode = record.mode;
-    projection
-}
-
-/// Whether the log leaves this thread claiming a provider the restart already killed.
-///
-/// §6 settles an orphan explicitly. `Ready` is as much a live-provider state as `Running` is —
-/// the child is gone either way — so leaving it out would strand the thread advertising a
-/// session it does not have, with no state `open` is willing to resume from.
-fn orphaned(projection: &ThreadProjection) -> bool {
-    matches!(
-        projection.session,
-        SessionState::Starting | SessionState::Ready | SessionState::Running
-    ) || matches!(projection.turn, TurnState::Running(_))
-}
-
-fn recover_orphan(
-    store: &AgentStore,
-    record: &mut AgentThreadRecord,
-    projection: &mut ThreadProjection,
-) {
-    /// Appends one recovery event in the same order the reducer uses: settle, persist, apply.
-    ///
-    /// Returns whether the caller may append another one. Applying before persisting would put
-    /// `last_seq` ahead of the log, so the next append would leave a hole on disk that the
-    /// following start quarantines — taking the whole tail of the transcript with it (§6).
-    fn append_recovery(
-        store: &AgentStore,
-        record: &mut AgentThreadRecord,
-        projection: &mut ThreadProjection,
-        event: AgentEvent,
-    ) -> bool {
-        let sequenced = SeqEvent {
-            seq: projection.last_seq.next(),
-            at: Utc::now(),
-            raw: Some("daemon_restart_recovery".to_owned()),
-            event,
-        };
-        if let Err(error) = projection.accepts(&sequenced) {
-            tracing::warn!(thread = %record.thread, %error, "could not reduce restart recovery");
-            return true;
-        }
-        if let Err(error) = store.append(record.thread, &sequenced) {
-            tracing::warn!(thread = %record.thread, %error, "could not persist restart recovery");
-            return false;
-        }
-        if let Err(error) = projection.apply(&sequenced) {
-            tracing::warn!(thread = %record.thread, %error, "could not reduce restart recovery");
-            return false;
-        }
-        update_record(record, &sequenced, &projection.title);
-        true
-    }
-
-    // §3.3 rule 4 and §6: a gate the restart orphaned is settled explicitly, as appended
-    // events. Otherwise the card outlives the adapter that could answer it and the thread stays
-    // on the highest-priority `NeedsYou` forever.
-    for gate in projection.gates.clone() {
-        if !append_recovery(
-            store,
-            record,
-            projection,
-            AgentEvent::GateResolved {
-                gate: gate.id,
-                answer: closed_gate_answer(&gate.kind),
-                by: GateResolver::ProviderClosed,
-            },
-        ) {
-            return;
-        }
-    }
-    if record.resume_cursor.is_some() {
-        if let TurnState::Running(turn) = projection.turn
-            && !append_recovery(
-                store,
-                record,
-                projection,
-                AgentEvent::TurnAborted {
-                    turn,
-                    reason: AbortReason::ProviderExited,
-                },
-            )
-        {
-            return;
-        }
-        append_recovery(
-            store,
-            record,
-            projection,
-            AgentEvent::SessionStateChanged(SessionState::Stopped),
-        );
-    } else {
-        append_recovery(
-            store,
-            record,
-            projection,
-            AgentEvent::SessionExited {
-                code: None,
-                expected: false,
-            },
-        );
-    }
-}
-
-/// The turn the deque is still holding prompts for, when it holds any.
-fn pending_claude_turn(runtime: &ThreadRuntime) -> Option<TurnId> {
-    runtime
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pending_claude_inputs
-        .front()
-        .map(|(turn, _)| *turn)
-}
-
-/// The events that clear `inflight_turn`, and with it the turn a queued prompt belongs to.
-fn ends_the_turn(event: &AgentEvent) -> bool {
-    matches!(
-        event,
-        AgentEvent::TurnCompleted { .. }
-            | AgentEvent::TurnAborted { .. }
-            | AgentEvent::SessionExited { .. }
-            | AgentEvent::RuntimeError { fatal: true, .. }
-    )
-}
-
-/// Whether this event ends the provider session, so its open gates go with it.
-fn ends_the_session(event: &AgentEvent) -> bool {
-    matches!(
-        event,
-        AgentEvent::SessionExited { .. }
-            | AgentEvent::RuntimeError { fatal: true, .. }
-            | AgentEvent::SessionStateChanged(SessionState::Stopped)
-    )
-}
-
-/// The answer a gate nobody can respond to any more settles with.
-///
-/// It mirrors the one `control_cancel_request` already writes: the request is gone, so the safe
-/// reading is that nothing was allowed.
-fn closed_gate_answer(kind: &GateKind) -> GateAnswer {
-    match kind {
-        GateKind::Permission { .. } => GateAnswer::Permission {
-            choice: PermissionChoice::Deny,
-            edited_payload: None,
-        },
-        GateKind::Question { .. } => GateAnswer::Question {
-            answers: Vec::new(),
-        },
-        GateKind::Plan { .. } => GateAnswer::Plan(PlanAnswer::AskForChanges {
-            note: String::new(),
-        }),
-    }
-}
-
-fn summary_transition(before: &AgentThreadSummary, after: &AgentThreadSummary) -> bool {
-    before.attention != after.attention
-        || before.session != after.session
-        || before.turn != after.turn
-        || before.title != after.title
-        || before.exit_code != after.exit_code
-}
-
-fn event_name(event: &AgentEvent) -> &'static str {
-    match event {
-        AgentEvent::SessionStarted { .. } => "session_started",
-        AgentEvent::MetadataChanged { .. } => "metadata_changed",
-        AgentEvent::SessionStateChanged(_) => "session_state_changed",
-        AgentEvent::SessionExited { .. } => "session_exited",
-        AgentEvent::TurnStarted { .. } => "turn_started",
-        AgentEvent::TurnCompleted { .. } => "turn_completed",
-        AgentEvent::TurnAborted { .. } => "turn_aborted",
-        AgentEvent::ItemStarted { .. } => "item_started",
-        AgentEvent::ContentDelta { .. } => "content_delta",
-        AgentEvent::ItemUpdated { .. } => "item_updated",
-        AgentEvent::ItemCompleted { .. } => "item_completed",
-        AgentEvent::GateOpened { .. } => "gate_opened",
-        AgentEvent::GateResolved { .. } => "gate_resolved",
-        AgentEvent::TokenUsage { .. } => "token_usage",
-        AgentEvent::Checkpoint(_) => "checkpoint",
-        AgentEvent::Retrying { .. } => "retrying",
-        AgentEvent::RuntimeError { .. } => "runtime_error",
-        AgentEvent::Notice(_) => "notice",
-    }
+    drop(operation);
 }
 
 fn default_agent_commands() -> AgentCommands {
     AgentCommands {
         claude: AgentKind::Claude.executable().to_owned(),
-        opencode: AgentKind::OpenCode.executable().to_owned(),
+        codex: AgentKind::Codex.executable().to_owned(),
+        // ADR 0014 keeps the legacy field readable for one release, so the terminal an
+        // existing config still points at OpenCode with keeps a command to run.
+        opencode: "opencode".to_owned(),
     }
 }
 
@@ -1519,6 +832,3 @@ fn validation(message: impl Into<String>) -> ProtoError {
 fn one_line(message: &str) -> String {
     message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
-
-#[cfg(test)]
-mod tests;

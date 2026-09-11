@@ -38,16 +38,26 @@ returns `None` for local and the configured `HostId` otherwise.
 ## 3. Protocol v7
 
 `PROTOCOL_VERSION` is 7. `Hello { protocol, client: HelloClient }` defaults the client to
-`ClientKind::App`; kinds are `App | Cli | Proxy`, with optional `host_id`. `HelloResponse` retains
+`ClientKind::App`; kinds are `App | Cli | Proxy`, with optional `host_id` and a defaulted
+`capabilities: Vec<String>` — the peer's own, by the same names the daemon advertises. A proxy
+names them too, because it decodes the owner's events before forwarding them. `HelloResponse` retains
 the correlated response and capabilities and adds `daemon_id: String` (persisted as
 `$FLEET_HOME/daemon-id`; a file whose contents are not a valid `HostId` is moved aside to
 `daemon-id.invalid` and a fresh identity is minted, with both ids logged, rather than aborting
 startup) plus `build_commit: Option<String>`. Capability `remote-machines` marks
 federation support.
 
+Capabilities advertised by this build are `prune.reviewed_ids`, `remote-machines`, and the six of
+`fleet_proto::AGENT_CAPABILITIES` — `agent.window`, `agent.sync_marker`, `agent.resync`,
+`agent.item_body`, `agent.checkpoints`, `agent.codex`. A peer infers behaviour from those strings
+and never from a version number, so an unimplemented one is never advertised. The negotiation is
+symmetric: because `Event` is adjacently tagged and a variant a peer cannot name fails its whole
+frame, the three agent stream-control events are sent only to a connection whose `HelloClient`
+named the capability defining them.
+
 `HostStatus` keeps `id`, `reachable`, `error`, and `checked_at`, and defaultably adds `provider`,
 `version`, `link: Connecting | Ready | Down | Legacy`, `address`, and `agent_binaries: Option<
-AgentBinaries { claude, opencode }>`. Requests add `BootstrapHost { host, git_ref }`; PR creation
+AgentBinaries { claude, codex, opencode }>` (`codex` defaulted, ADR 0014). Requests add `BootstrapHost { host, git_ref }`; PR creation
 adds defaultable `host`; `DoctorHost { host }` provides scoped diagnostics. `ResponseBody::Path { path, host }` carries optional ownership.
 `DeleteWorktrees -> WorktreesDeleted`, `InspectWorktrees -> Inspections`, and `PruneWorktrees ->
 Pruned` preserve per-item outcomes. Mixed-host dismiss/sleep/kill extensions must likewise return
@@ -159,6 +169,15 @@ their host and remote session ids are prefixed. Local state wins for local recor
 daemon's fragment is the only source of truth for records owned by that host. Snapshot merge keeps
 local contexts/repos/jobs and adds host-tagged remote worktrees/statuses/sessions/threads without
 persisting the remote copies locally.
+
+**Native-agent threads are the one exception, and they are not persisted through this mirror.** The
+local daemon keeps a durable read-through mirror of a remote thread's transcript in its own
+`agents/state.sqlite`, in the same tables as a local thread with one nullable `threads.owner_host`
+set (`docs/NATIVE-AGENTS.md` §9.3). It is a cache, never a replica: the owner's daemon remains the
+only writer of that sequence space, no harness process is ever started for a mirrored thread, every
+mutation routes upstream, and only the owner's own `AgentSynchronized` moves a client to `Live`.
+`Mirror::fragment` stays the in-memory fallback for a host whose threads the database has not
+cached.
 
 ## 8. Proxied degradation
 

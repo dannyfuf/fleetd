@@ -1,19 +1,28 @@
-//! Decision-card presentation and key routing (`docs/NATIVE-AGENTS.md` §2, §9).
+//! Gate presentation and key routing for the docked decision drawer (§6, `spec-B` §B4).
 //!
-//! A gate is projected into the kit's domain-neutral [`DecisionCard`], and the bare keys the
-//! `Agent > AgentDecision > *` contexts dispatch are turned back into a provider-neutral
-//! [`GateAnswer`]. Both directions are pure so the whole routing table is testable.
+//! A gate is projected into the kit's domain-neutral [`Decision`], and the bare keys the
+//! `Agent > AgentDecision > *` contexts dispatch are turned back into a harness-neutral
+//! [`GateAnswer`]. Both directions are pure, so the whole routing table is testable without a
+//! window — and the key *vocabulary* lives in the kit, which is what lets the status bar mirror
+//! the drawer from the same source and never advertise a scope the drawer does not offer.
 
 use fleet_core::agents::{
-    AgentKind, GateAnswer, GateKind, OpenGate, PermissionChoice, PlanAnswer, ToolKind,
+    AgentKind, GateAnswer, GateId, GateKind, ItemId, ItemKind, OpenGate, PermissionChoice,
+    PlanAnswer, Question, ThreadProjection, TurnState,
 };
 use fleet_ui_kit::{
-    DecisionAction, DecisionCard, DecisionCardKind, DecisionOption, DecisionQuestion,
-    question_actions,
+    ApprovalRequest, Decision, DecisionAction, DecisionKind, DecisionQuestion, QuestionOption,
+    QuestionSet, SOMETHING_ELSE, parse_markdown_document,
 };
 use gpui::SharedString;
 
-/// The key context a gate owns while it is open.
+use super::rows::item::{kind_word, split_plan};
+
+/// The de-facto prefix both harnesses read as "go do it". Copied verbatim: rewording it risks
+/// changing the harness's behaviour.
+pub(crate) const PLAN_IMPLEMENTATION_PROMPT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
+
+/// The key context one gate owns while it is open.
 #[must_use]
 pub(crate) const fn decision_context(gate: &OpenGate) -> &'static str {
     match gate.kind {
@@ -23,259 +32,307 @@ pub(crate) const fn decision_context(gate: &OpenGate) -> &'static str {
     }
 }
 
-/// The user's in-progress answer to a question gate.
+/// The key context a plan the harness produced as an *item* owns.
+pub(crate) const PLAN_CONTEXT: &str = "AgentPlan";
+
+/// The user's in-progress answer to a question request (`spec-B` §B4.3).
+///
+/// One request carries one to four questions and they are answered one at a time. The wizard
+/// position is per request, and the per-question free-text drafts are kept beside the
+/// selections: pressing `[p]` must never lose a typed answer.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct QuestionSelection {
-    /// Selected option indexes, one set per question, in question order.
-    chosen: Vec<Vec<usize>>,
-    /// The question the bare keys currently address.
+pub(crate) struct QuestionWizard {
+    /// The question the bare keys address.
     cursor: usize,
-    /// The option `space` toggles.
-    highlight: usize,
+    /// Chosen option indices, one entry per question.
+    selected: Vec<Vec<usize>>,
+    /// Free-text answers, one entry per question.
+    custom: Vec<String>,
 }
 
-impl QuestionSelection {
-    /// An empty selection sized for `questions`.
+impl QuestionWizard {
+    /// A wizard sized for `questions`, at its first question with nothing chosen.
     pub(crate) fn new(questions: usize) -> Self {
         Self {
-            chosen: vec![Vec::new(); questions],
             cursor: 0,
-            highlight: 0,
+            selected: vec![Vec::new(); questions],
+            custom: vec![String::new(); questions],
         }
     }
 
-    /// A selection sized for `questions` whose keys address question `cursor`.
+    /// A wizard sized for `questions` whose keys address question `cursor`.
     ///
-    /// The status bar mirrors the open card's keys, and it rebuilds the card from the app state
-    /// rather than from the view's live selection, so it needs the cursor without the choices.
+    /// The status bar mirrors the drawer's keys and rebuilds the decision from `AppState` rather
+    /// than from the view's live selection, so it needs the cursor without the choices.
     pub(crate) fn at(questions: usize, cursor: usize) -> Self {
-        let mut selection = Self::new(questions);
-        selection.cursor = cursor.min(questions.saturating_sub(1));
-        selection
+        let mut wizard = Self::new(questions);
+        wizard.cursor = cursor.min(questions.saturating_sub(1));
+        wizard
     }
 
-    /// The question bare keys address.
+    /// Resize the wizard for a different request, keeping nothing.
+    pub(crate) fn resize(&mut self, questions: usize) {
+        if self.selected.len() != questions {
+            *self = Self::new(questions);
+        }
+    }
+
+    /// The question the bare keys address.
     pub(crate) const fn cursor(&self) -> usize {
         self.cursor
     }
 
-    /// Selected indexes for one question.
-    pub(crate) fn selected(&self, question: usize) -> &[usize] {
-        self.chosen.get(question).map_or(&[], Vec::as_slice)
-    }
-
-    /// Whether every question carries at least one answer.
-    pub(crate) fn complete(&self) -> bool {
-        !self.chosen.is_empty() && self.chosen.iter().all(|answers| !answers.is_empty())
-    }
-
-    /// The index the free-text option occupies for one question, when it offers one.
-    fn other_index(question: &fleet_core::agents::Question) -> Option<usize> {
-        question.allow_other.then_some(question.options.len())
-    }
-
-    /// Whether the question the keys address is currently answered with "Something else…".
+    /// Whether a free-text answer is being typed for the question under the cursor.
     ///
-    /// §3.2 keys that option to free text the composer carries, so choosing it hands the
-    /// keyboard back: the answer may contain a space, and `space` is a card key.
-    pub(crate) fn wants_free_text(&self, gate: &OpenGate) -> bool {
-        let GateKind::Question { questions } = &gate.kind else {
-            return false;
-        };
-        let Some(question) = questions.get(self.cursor) else {
-            return false;
-        };
-        Self::other_index(question).is_some_and(|other| self.selected(self.cursor).contains(&other))
+    /// While one is, the gate's key context stands down: the answer may start with a `y`, and
+    /// `space` is one of the drawer's keys.
+    pub(crate) fn is_composing(&self) -> bool {
+        self.custom
+            .get(self.cursor)
+            .is_some_and(|text| !text.trim().is_empty())
     }
 
-    /// `1`–`4`: pick an option, toggling instead of replacing when the question is multi-select.
+    /// The free-text answer of the question under the cursor.
+    pub(crate) fn custom(&self) -> &str {
+        self.custom.get(self.cursor).map_or("", String::as_str)
+    }
+
+    /// Writes the free-text answer of the question under the cursor.
+    ///
+    /// Typing and selecting are **mutually exclusive**, enforced here rather than in the view:
+    /// a non-empty custom answer clears the selection, and choosing an option clears the text.
+    pub(crate) fn set_custom(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        let cursor = self.cursor;
+        if !text.trim().is_empty()
+            && let Some(selected) = self.selected.get_mut(cursor)
+        {
+            selected.clear();
+        }
+        if let Some(slot) = self.custom.get_mut(cursor) {
+            *slot = text;
+        }
+    }
+
+    /// `1`–`9`: choose an option, toggling instead of replacing on a multi-select question.
     pub(crate) fn choose(&mut self, option: usize, multi_select: bool) {
         let cursor = self.cursor;
-        let Some(answers) = self.chosen.get_mut(cursor) else {
+        if let Some(slot) = self.custom.get_mut(cursor) {
+            slot.clear();
+        }
+        let Some(selected) = self.selected.get_mut(cursor) else {
             return;
         };
-        self.highlight = option;
         if multi_select {
-            if let Some(position) = answers.iter().position(|chosen| *chosen == option) {
-                answers.remove(position);
+            if let Some(position) = selected.iter().position(|chosen| *chosen == option) {
+                selected.remove(position);
             } else {
-                answers.push(option);
+                selected.push(option);
             }
             return;
         }
-        answers.clear();
-        answers.push(option);
-        self.advance();
+        selected.clear();
+        selected.push(option);
     }
 
-    /// `space`: toggle the highlighted option of a multi-select question.
+    /// `space`: toggle the newest selection of a multi-select question.
     pub(crate) fn toggle(&mut self, multi_select: bool) {
-        if multi_select {
-            let highlight = self.highlight;
-            self.choose(highlight, true);
+        if !multi_select {
+            return;
         }
+        let cursor = self.cursor;
+        let newest = self
+            .selected
+            .get(cursor)
+            .and_then(|selected| selected.last().copied())
+            .unwrap_or(0);
+        self.choose(newest, true);
     }
 
-    /// Moves to the next unanswered question, staying on the last one.
-    fn advance(&mut self) {
-        if self.cursor + 1 < self.chosen.len() {
+    /// `⏎` on a question that is not the last: step forward.
+    pub(crate) fn advance(&mut self, questions: usize) -> bool {
+        if self.cursor + 1 < questions {
             self.cursor += 1;
-            self.highlight = 0;
+            return true;
         }
+        false
     }
 
-    /// The provider answer, one label array per question in question order.
+    /// `[p]`: step back, keeping every answer already given.
+    pub(crate) fn previous(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor -= 1;
+        true
+    }
+
+    /// Whether the question under the cursor carries an answer.
+    fn answered(&self, index: usize) -> bool {
+        self.selected
+            .get(index)
+            .is_some_and(|selected| !selected.is_empty())
+            || self
+                .custom
+                .get(index)
+                .is_some_and(|text| !text.trim().is_empty())
+    }
+
+    /// The harness answer, one label array per question in question order.
     ///
-    /// §3.2 keys the "other" option to free text, which the composer carries. A question whose
-    /// only selection is that option and has no text is *not* answered: returning `None` keeps
-    /// the card open instead of sending an empty array the user was shown as a choice.
-    fn answers(&self, gate: &OpenGate, other: Option<&str>) -> Option<Vec<Vec<String>>> {
-        let GateKind::Question { questions } = &gate.kind else {
-            return None;
-        };
+    /// All-or-nothing: `None` while any question is unanswered, so `⏎` on an incomplete wizard
+    /// keeps the drawer open rather than sending an empty array the user was shown as a choice.
+    /// A selection whose index the question no longer offers drops silently, and an option's own
+    /// `label` is sent rather than its display text — never a label when the option carries a
+    /// value, and option identifiers are never trimmed.
+    pub(crate) fn answers(&self, questions: &[Question]) -> Option<Vec<Vec<String>>> {
         let mut answers = Vec::with_capacity(questions.len());
         for (index, question) in questions.iter().enumerate() {
-            let mut labels = Vec::new();
-            for option in self.selected(index) {
-                if let Some(choice) = question.options.get(*option) {
-                    labels.push(choice.label.clone());
-                } else if Self::other_index(question) == Some(*option) {
-                    labels.push(other?.to_owned());
-                }
+            if !self.answered(index) {
+                return None;
             }
+            let custom = self.custom.get(index).map_or("", String::as_str).trim();
+            // A custom answer wins over a selection, but only where one is allowed.
+            if question.allows_other && !custom.is_empty() {
+                answers.push(vec![custom.to_owned()]);
+                continue;
+            }
+            let mut labels: Vec<String> = self
+                .selected
+                .get(index)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| match question.options.get(*option) {
+                    Some(choice) => Some(choice.label.clone()),
+                    // The free-text row sits one past the harness's own options.
+                    None if question.allows_other && !custom.is_empty() => Some(custom.to_owned()),
+                    None => None,
+                })
+                .collect();
             if labels.is_empty() {
                 return None;
+            }
+            if !question.multi_select {
+                labels.truncate(1);
             }
             answers.push(labels);
         }
         Some(answers)
     }
+
+    /// The selection, as the kit's drawer draws it.
+    fn selection(&self) -> Vec<Vec<usize>> {
+        self.selected.clone()
+    }
 }
 
-/// One bare key pressed while a decision card owns the keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DecisionKey {
-    /// `y` on a permission.
-    AllowOnce,
-    /// `a` on a permission.
-    AllowSession,
-    /// `n` on a permission.
-    Deny,
-    /// `esc` on a permission.
-    DenyAndStop,
-    /// `1`–`4` on a question.
-    Choose(usize),
-    /// `space` on a multi-select question.
-    Toggle,
-    /// `⏎` on a question.
-    Answer,
-    /// `y` on a plan.
-    ApprovePlan,
-    /// `n` on a plan.
-    AskChanges,
-    /// `⏎` on a plan: show the whole proposal, which answers nothing.
-    ViewPlan,
+/// What a routed key did.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Routed {
+    /// Send this answer to the daemon and clear the gate optimistically.
+    Answer(GateAnswer),
+    /// Send this text as a new turn — a plan the harness produced as an item has no gate.
+    Send {
+        /// The turn's text.
+        text: String,
+        /// Whether the turn runs in plan mode.
+        plan_mode: bool,
+    },
+    /// The key changed local state only: a selection, a wizard step, an expansion.
+    Local,
+    /// Seed the composer with this text and stand the gate's keys down.
+    Compose(String),
+    /// The key claimed nothing.
+    None,
 }
 
-/// Turns one decision key into the answer the daemon receives, when the key completes a gate.
+/// The pending decisions of one thread, newest gate last, in creation order.
 ///
-/// `edited` carries the composer text after `e`, and `note` the feedback typed for a plan; both
-/// are ignored by the gates they do not belong to. `None` means the key changed local selection
-/// only — a multi-select toggle, or an incomplete question — and nothing is dispatched yet.
-pub(crate) fn answer_for(
-    gate: &OpenGate,
-    key: DecisionKey,
-    selection: &mut QuestionSelection,
-    edited: Option<String>,
-) -> Option<GateAnswer> {
-    match (&gate.kind, key) {
-        (GateKind::Permission { options, .. }, key) => {
-            let choice = match key {
-                DecisionKey::AllowOnce => PermissionChoice::AllowOnce,
-                DecisionKey::AllowSession => session_choice(gate),
-                DecisionKey::Deny => PermissionChoice::Deny,
-                DecisionKey::DenyAndStop => PermissionChoice::DenyAndStop,
-                _ => return None,
-            };
-            // A provider that does not offer the scope keyed here falls back to the narrow one,
-            // so `a` can never widen a grant the adapter cannot actually map.
-            let choice = if matches!(choice, PermissionChoice::AllowOnce)
-                || options.iter().any(|option| option.label == choice)
-            {
-                choice
-            } else {
-                PermissionChoice::AllowOnce
-            };
-            Some(GateAnswer::Permission {
-                choice,
-                edited_payload: edited,
-            })
-        }
-        (GateKind::Question { questions }, key) => {
-            let cursor = questions.get(selection.cursor());
-            let multi = cursor.is_some_and(|question| question.multi_select);
-            // DESIGN-SYSTEM §4: an invalid command is not listed, and `card` only advertises
-            // the digits a question actually has. `1`-`4` are bound unconditionally, so a `3`
-            // on a two-option question would otherwise store an index no label answers and
-            // wedge the card: every later `⏎` would find an unresolvable selection.
-            let options = cursor.map_or(0, |question| {
-                question.options.len() + usize::from(question.allow_other)
-            });
-            match key {
-                DecisionKey::Choose(option) if option < options => {
-                    selection.choose(option, multi);
-                    None
-                }
-                DecisionKey::Choose(_) => None,
-                DecisionKey::Toggle => {
-                    selection.toggle(multi);
-                    None
-                }
-                DecisionKey::Answer => selection
-                    .complete()
-                    .then(|| selection.answers(gate, edited.as_deref()))
-                    .flatten()
-                    .map(|answers| GateAnswer::Question { answers }),
-                _ => None,
-            }
-        }
-        (GateKind::Plan { .. }, DecisionKey::ApprovePlan) => {
-            Some(GateAnswer::Plan(PlanAnswer::Approve))
-        }
-        (GateKind::Plan { .. }, DecisionKey::AskChanges) => {
-            Some(GateAnswer::Plan(PlanAnswer::AskForChanges {
-                note: edited.unwrap_or_default(),
-            }))
-        }
-        // Viewing the plan is a local expansion, not an answer: the gate stays open.
-        (GateKind::Plan { .. }, DecisionKey::ViewPlan) => None,
-        _ => None,
-    }
-}
-
-/// The wider grant `a` means for this provider, which OpenCode stores per directory (§4.2).
-fn session_choice(gate: &OpenGate) -> PermissionChoice {
-    let GateKind::Permission { options, .. } = &gate.kind else {
-        return PermissionChoice::AllowSession;
-    };
-    if options
+/// The kit's [`Decision::head`] applies the priority ladder — approval > question > plan-ready —
+/// over this list, so the ordering here is creation order and nothing else.
+pub(crate) fn decisions(
+    projection: &ThreadProjection,
+    wizard: &QuestionWizard,
+    answering: Option<GateId>,
+) -> Vec<Decision> {
+    let mut pending: Vec<Decision> = projection
+        .gates
         .iter()
-        .any(|option| option.label == PermissionChoice::AllowDirectory)
-    {
-        PermissionChoice::AllowDirectory
-    } else {
-        PermissionChoice::AllowSession
+        .map(|gate| decision_for(gate, projection.provider, wizard))
+        .collect();
+    if let Some(plan) = plan_ready(projection) {
+        pending.push(plan);
     }
+    let total = pending.len();
+    for (index, decision) in pending.iter_mut().enumerate() {
+        let answering = answering.is_some_and(|gate| gate.to_string() == decision.id.as_ref());
+        *decision = decision.clone().queued(index, total).answering(answering);
+    }
+    pending
 }
 
-/// The card one open gate presents, with the exact §9 keys for this provider.
-#[must_use]
-pub(crate) fn card(
+/// The drawer's one-line plan reminder, when a plan the harness produced as an item is ready.
+///
+/// Claude's plan arrives as a gate and is covered by the loop above; Codex's arrives as an
+/// `item/completed` with no request pending, so the verbs have to be derived. All of the §6.4
+/// conditions that Fleet can answer locally hold here: the latest turn has settled, the thread
+/// is in plan mode, and no user message follows the plan.
+fn plan_ready(projection: &ThreadProjection) -> Option<Decision> {
+    if projection.mode != fleet_core::agents::PermissionMode::Plan {
+        return None;
+    }
+    if matches!(projection.turn, TurnState::Running(_)) {
+        return None;
+    }
+    let (index, item) = projection
+        .items
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, item)| matches!(item.kind, ItemKind::Plan { .. }))?;
+    // A plan the user has already answered by typing something else is not actionable: the
+    // implicit rejection §6.4 describes is exactly "a user message after the plan".
+    let answered = projection
+        .items
+        .iter()
+        .skip(index + 1)
+        .any(|later| matches!(later.kind, ItemKind::UserMessage { .. }));
+    if answered {
+        return None;
+    }
+    let ItemKind::Plan { text } = &item.kind else {
+        return None;
+    };
+    let (title, body) = split_plan(text);
+    Some(Decision::new(
+        item.id.to_string(),
+        SharedString::from(format!("plan ready \u{b7} {title}")),
+        DecisionKind::PlanReady {
+            title,
+            markdown: Some(parse_markdown_document(&body)),
+        },
+    ))
+}
+
+/// The plan item the composer's verbs act on, when the drawer is showing one.
+pub(crate) fn plan_item(projection: &ThreadProjection) -> Option<(ItemId, String)> {
+    let decision = plan_ready(projection)?;
+    let item = projection
+        .items
+        .iter()
+        .find(|item| item.id.to_string() == decision.id.as_ref())?;
+    let ItemKind::Plan { text } = &item.kind else {
+        return None;
+    };
+    Some((item.id, text.clone()))
+}
+
+/// One gate, as the drawer draws it.
+pub(crate) fn decision_for(
     gate: &OpenGate,
     provider: AgentKind,
-    selection: &QuestionSelection,
-    expanded: bool,
-) -> DecisionCard {
+    wizard: &QuestionWizard,
+) -> Decision {
     let id = SharedString::from(gate.id.to_string());
     match &gate.kind {
         GateKind::Permission {
@@ -285,152 +342,252 @@ pub(crate) fn card(
             rationale,
             options,
         } => {
-            let mut actions = vec![option("y", "allow once", DecisionAction::AllowOnce)];
-            // DESIGN-SYSTEM §6.6: "an action always spells out its effective scope", and §4:
-            // "an invalid command is **not listed**". The Claude adapter withholds the session
-            // grant for a request the CLI says needs a human, and `answer_for` then silently
-            // narrows `a` back to `allow once` — a card promising a session-wide grant the wire
-            // cannot carry, after which the same tool asks again.
-            if options.iter().any(|provider| {
-                matches!(
-                    provider.label,
-                    PermissionChoice::AllowSession | PermissionChoice::AllowDirectory
-                )
-            }) {
-                actions.push(match session_choice(gate) {
-                    PermissionChoice::AllowDirectory => option(
-                        "a",
-                        "allow for this directory",
-                        DecisionAction::AllowDirectory,
-                    ),
-                    _ => option("a", "allow for this session", DecisionAction::AllowSession),
-                });
-            }
-            actions.push(option("n", "deny", DecisionAction::Deny));
-            // §7: a command the provider cannot accept a correction for does not advertise one.
-            if options
-                .iter()
-                .any(|provider| provider.label == PermissionChoice::Edit)
+            let mut approval = ApprovalRequest::new(
+                SharedString::from(kind_word(tool)),
+                SharedString::new(payload.as_str()),
+            )
+            // §6.2 / DESIGN-SYSTEM §7: `[e]` is drawn only where the harness accepts an
+            // amended invocation — Claude does, Codex never does.
+            .allows_edit(
+                options
+                    .iter()
+                    .any(|option| option.label == PermissionChoice::Edit),
+            );
+            if let Some(rationale) = rationale
+                .as_deref()
+                .filter(|rationale| adds_to(rationale, title, payload))
             {
-                actions.push(option("e", "edit the command", DecisionAction::Edit));
+                approval = approval.rationale(SharedString::new(rationale));
             }
-            actions.push(option("esc", "deny and stop", DecisionAction::DenyAndStop));
-            DecisionCard {
+            // The `[a]` label always spells the promise it makes. The word "always" never
+            // appears on a command or a file change on either harness.
+            approval = approval.session_label(session_label(gate));
+            Decision::new(
                 id,
-                cursor: 0,
-                selected: Vec::new(),
-                title: SharedString::new(title.as_str()),
-                kind: DecisionCardKind::Permission {
-                    tool: SharedString::from(tool_word(tool)),
-                    payload: SharedString::new(payload.as_str()),
-                    rationale: rationale
-                        .as_deref()
-                        .filter(|rationale| adds_to(rationale, title, payload))
-                        .map(SharedString::new),
-                },
-                expanded,
-                actions,
-            }
+                SharedString::from(format!(
+                    "{} wants to {}",
+                    provider.executable(),
+                    kind_word(tool)
+                )),
+                DecisionKind::Approval(approval),
+            )
         }
         GateKind::Question { questions } => {
-            let cursor = selection.cursor();
-            let multi = questions
-                .get(cursor)
-                .is_some_and(|question| question.multi_select);
-            // DESIGN-SYSTEM §4: an invalid command is not listed. A two-option question does
-            // not advertise `3`, `4`, and a single-select one does not advertise `space`.
-            let options = questions.get(cursor).map_or(0, |question| {
-                question.options.len() + usize::from(question.allow_other)
-            });
-            let actions = question_actions(options, multi);
-            DecisionCard {
+            let mut wizard = wizard.clone();
+            wizard.resize(questions.len());
+            let set = QuestionSet::new(questions.iter().map(question_for).collect())
+                .cursor(wizard.cursor().min(questions.len().saturating_sub(1)))
+                .selected(wizard.selection());
+            let set = QuestionSet {
+                custom: wizard.is_composing(),
+                ..set
+            };
+            Decision::new(
                 id,
-                expanded,
-                // The kit bounds its own digit routing against the question the keys address,
-                // which is the same one `question_actions` advertised the range for.
-                cursor,
-                // The card is rebuilt on every key, so the choice travels with it (§3).
-                selected: (0..questions.len())
-                    .map(|question| selection.selected(question).to_vec())
-                    .collect(),
-                title: SharedString::from(format!("{} asks", provider.executable())),
-                kind: DecisionCardKind::Question {
-                    questions: questions
-                        .iter()
-                        .map(|question| DecisionQuestion {
-                            header: SharedString::new(question.header.as_str()),
-                            text: SharedString::new(question.text.as_str()),
-                            options: question
-                                .options
-                                .iter()
-                                .map(|choice| SharedString::new(choice.label.as_str()))
-                                .collect(),
-                            multi_select: question.multi_select,
-                            allow_other: question.allow_other,
-                        })
-                        .collect(),
+                SharedString::from(format!("{} asks", provider.executable())),
+                DecisionKind::Question(set),
+            )
+        }
+        GateKind::Plan { markdown, .. } => {
+            let (title, body) = split_plan(markdown);
+            Decision::new(
+                id,
+                SharedString::from(format!("plan ready \u{b7} {title}")),
+                DecisionKind::PlanReady {
+                    title,
+                    markdown: Some(parse_markdown_document(&body)),
                 },
-                actions,
+            )
+        }
+    }
+}
+
+/// One harness question, as the drawer draws it.
+///
+/// The free-text row is appended by Fleet, not by the harness, and only where the harness
+/// accepts one — so a question that forbids custom answers draws no row no key can honour.
+fn question_for(question: &Question) -> DecisionQuestion {
+    let mut options: Vec<QuestionOption> = question
+        .options
+        .iter()
+        .map(|choice| {
+            let option = QuestionOption::new(SharedString::new(choice.label.as_str()));
+            if choice.description.trim().is_empty() {
+                option
+            } else {
+                option.description(SharedString::new(choice.description.as_str()))
+            }
+        })
+        .collect();
+    if question.allows_other {
+        options.push(QuestionOption::new(SharedString::new_static(
+            SOMETHING_ELSE,
+        )));
+    }
+    DecisionQuestion::new(
+        SharedString::new(question.header.as_str()),
+        SharedString::new(question.prompt.as_str()),
+    )
+    .options(options)
+    .multi_select(question.multi_select)
+    .allow_other(question.allows_other)
+}
+
+/// The `[a]` label of one permission, which always states the scope it really grants.
+fn session_label(gate: &OpenGate) -> SharedString {
+    let GateKind::Permission { options, .. } = &gate.kind else {
+        return SharedString::new_static("allow for this session");
+    };
+    if options
+        .iter()
+        .any(|option| option.label == PermissionChoice::AllowDirectory)
+    {
+        return SharedString::new_static("allow for this directory");
+    }
+    SharedString::new_static("allow for this session")
+}
+
+/// The wider grant `[a]` means for this gate, narrowed to what the adapter mapped.
+///
+/// §6.2 offers no directory or project scope in v1, so `[a]` is a session grant on both
+/// harnesses; a harness whose own option list carries a directory scope is still honoured,
+/// because the drawer renders exactly the options the adapter mapped and never a wider one.
+fn session_choice(gate: &OpenGate) -> PermissionChoice {
+    let GateKind::Permission { options, .. } = &gate.kind else {
+        return PermissionChoice::AllowSession;
+    };
+    for wider in [
+        PermissionChoice::AllowSession,
+        PermissionChoice::AllowDirectory,
+    ] {
+        if options.iter().any(|option| option.label == wider) {
+            return wider;
+        }
+    }
+    // A harness that advertises no wider scope gets the narrow one rather than a promise the
+    // wire cannot carry.
+    PermissionChoice::AllowOnce
+}
+
+/// Routes one drawer action against the gate that owns the keyboard.
+pub(crate) fn route(
+    gate: &OpenGate,
+    action: &DecisionAction,
+    wizard: &mut QuestionWizard,
+    typed: &str,
+) -> Routed {
+    match (&gate.kind, action) {
+        (GateKind::Permission { .. }, DecisionAction::Edit) => {
+            let GateKind::Permission { payload, .. } = &gate.kind else {
+                return Routed::None;
+            };
+            // `[e]` *opens* the composer rather than answering at once, so the correction can
+            // start with a `y` and contain spaces.
+            Routed::Compose(payload.clone())
+        }
+        (GateKind::Permission { .. }, action) => {
+            let choice = match action {
+                DecisionAction::AllowOnce => PermissionChoice::AllowOnce,
+                DecisionAction::AllowSession => session_choice(gate),
+                DecisionAction::Deny => PermissionChoice::Deny,
+                DecisionAction::DenyAndStop => PermissionChoice::DenyAndStop,
+                _ => return Routed::None,
+            };
+            Routed::Answer(GateAnswer::Permission {
+                choice,
+                edited_payload: None,
+            })
+        }
+        (GateKind::Question { questions }, action) => {
+            let multi = questions
+                .get(wizard.cursor())
+                .is_some_and(|question| question.multi_select);
+            match action {
+                DecisionAction::Choose(option) => {
+                    let offered = questions.get(wizard.cursor()).map_or(0, |question| {
+                        question.options.len() + usize::from(question.allows_other)
+                    });
+                    // A `3` on a two-option question is ignored, never stored as an answer no
+                    // label matches.
+                    if *option >= offered {
+                        return Routed::None;
+                    }
+                    wizard.choose(*option, multi);
+                    // Single-select advances so the wizard walks itself; multi-select waits for
+                    // `⏎`, because the next `space` still belongs to this question.
+                    if !multi {
+                        wizard.advance(questions.len());
+                    }
+                    Routed::Local
+                }
+                DecisionAction::Toggle => {
+                    wizard.toggle(multi);
+                    Routed::Local
+                }
+                DecisionAction::Previous => {
+                    wizard.previous();
+                    Routed::Local
+                }
+                DecisionAction::Answer => {
+                    if !typed.trim().is_empty() {
+                        wizard.set_custom(typed);
+                    }
+                    if wizard.advance(questions.len()) {
+                        return Routed::Local;
+                    }
+                    wizard.answers(questions).map_or(Routed::Local, |answers| {
+                        Routed::Answer(GateAnswer::Question { answers })
+                    })
+                }
+                _ => Routed::None,
             }
         }
-        GateKind::Plan { markdown, steps } => DecisionCard {
-            id,
-            expanded,
-            cursor: 0,
-            selected: Vec::new(),
-            title: SharedString::new_static("plan"),
-            kind: DecisionCardKind::Plan {
-                markdown: SharedString::new(markdown.as_str()),
-                steps: steps
-                    .iter()
-                    .map(|step| SharedString::new(step.as_str()))
-                    .collect(),
-            },
-            actions: vec![
-                option("y", "approve and build", DecisionAction::ApprovePlan),
-                option("n", "ask for changes", DecisionAction::AskForChanges),
-                option("\u{23ce}", "view full plan", DecisionAction::ViewPlan),
-            ],
-        },
+        (GateKind::Plan { .. }, DecisionAction::Implement) => {
+            Routed::Answer(GateAnswer::Plan(PlanAnswer::Approve))
+        }
+        (GateKind::Plan { .. }, DecisionAction::Refine) if typed.trim().is_empty() => {
+            // `[n]` opens the composer rather than answering at once: refining *is* the note.
+            Routed::Compose(String::new())
+        }
+        (GateKind::Plan { .. }, DecisionAction::Refine) => {
+            Routed::Answer(GateAnswer::Plan(PlanAnswer::AskForChanges {
+                note: typed.trim().to_owned(),
+            }))
+        }
+        _ => Routed::None,
     }
 }
 
-/// One keycap action of a card.
-fn option(key: &'static str, label: &'static str, action: DecisionAction) -> DecisionOption {
-    DecisionOption {
-        key: SharedString::new_static(key),
-        label: SharedString::new_static(label),
-        action,
-    }
-}
-
-/// Whether a provider rationale is worth a line of its own on a permission card.
+/// Routes one drawer action against a plan the harness produced as an item, which has no gate.
 ///
-/// §2's card is title + payload + keys; a rationale earns the fourth line only by *adding*
+/// The verbs live on the composer, and which one fires is decided by whether the user typed
+/// anything: empty implements, non-empty refines. There is no reject verb and none on the wire.
+pub(crate) fn route_plan_item(action: &DecisionAction, markdown: &str, typed: &str) -> Routed {
+    match action {
+        DecisionAction::Implement if typed.trim().is_empty() => Routed::Send {
+            text: format!("{PLAN_IMPLEMENTATION_PROMPT_PREFIX}{markdown}"),
+            plan_mode: false,
+        },
+        // A composer holding text means refine, whichever key was pressed: the state decides.
+        DecisionAction::Implement | DecisionAction::Refine if !typed.trim().is_empty() => {
+            Routed::Send {
+                text: typed.trim().to_owned(),
+                plan_mode: true,
+            }
+        }
+        DecisionAction::Refine => Routed::Compose(String::new()),
+        _ => Routed::None,
+    }
+}
+
+/// Whether a harness rationale is worth its own line on a permission drawer.
+///
+/// The drawer is title + payload + keys; a rationale earns the fourth line only by *adding*
 /// something. Claude's `description` is often the bare file name the payload already spells out
-/// in full (r2-04 stated `/…/smoke-7a8f27.txt` in the payload and `smoke-7a8f27.txt` under it),
-/// and a card that says the same thing three times reads as three separate facts.
+/// in full, and a card that says the same thing three times reads as three separate facts.
 fn adds_to(rationale: &str, title: &str, payload: &str) -> bool {
     let rationale = rationale.trim();
     !rationale.is_empty()
         && !title.contains(rationale)
         && !payload.lines().any(|line| line.trim().contains(rationale))
-}
-
-/// The kind column word a permission card shows for its tool.
-fn tool_word(kind: &ToolKind) -> String {
-    match kind {
-        ToolKind::Read => "read".to_owned(),
-        ToolKind::Edit => "edit".to_owned(),
-        ToolKind::Write => "write".to_owned(),
-        ToolKind::Bash => "bash".to_owned(),
-        ToolKind::Search => "search".to_owned(),
-        ToolKind::Grep => "grep".to_owned(),
-        ToolKind::Fetch => "fetch".to_owned(),
-        ToolKind::Agent => "agent".to_owned(),
-        ToolKind::Todo => "todo".to_owned(),
-        ToolKind::Skill => "skill".to_owned(),
-        ToolKind::Mcp { server } => format!("mcp:{server}"),
-        ToolKind::Unknown { name } => name.clone(),
-    }
 }

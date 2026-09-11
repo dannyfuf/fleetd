@@ -29,6 +29,7 @@ pub fn to_remote(
     match &mut body {
         AgentThreadCreate { worktree, .. } => ids.register_worktree(host, worktree.clone()),
         AgentThreadOpen { .. }
+        | AgentItemBody { .. }
         | AgentThreadClose { .. }
         | AgentSend { .. }
         | AgentInterrupt { .. }
@@ -36,6 +37,8 @@ pub fn to_remote(
         | AgentSetMode { .. }
         | AgentSetModel { .. }
         | AgentMarkSeen { .. }
+        | AgentCheckpoints { .. }
+        | AgentRevert { .. }
         | AgentStop { .. } => {}
         CreateWorktree {
             host: placement, ..
@@ -180,6 +183,11 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         }
         AgentThreadCreated(summary) => translate_summary(summary, host, ids),
         AgentThreadSnapshot { projection, .. } => translate_projection(projection, host, ids),
+        // A window carries the owner's own thread id inside its summary; the storage stage owns
+        // rewriting its rows, and until then the id space is left as the owner sent it.
+        AgentThreadWindow(window) => translate_summary(&mut window.summary, host, ids),
+        // A checkpoint identity is scoped to its thread, and thread ids pass through unchanged.
+        AgentItemBodyChunk { .. } | AgentCheckpoints(_) | AgentReverted(_) => {}
         CardWorktree { worktree, .. } => translate_worktree(worktree, host, ids),
         Watches(watches) => {
             for watch in watches {
@@ -286,11 +294,15 @@ pub fn event_to_local(mut event: Event, host: &HostId, ids: &RemoteIds) -> Optio
         Event::HostLinkChanged {
             host: event_host, ..
         } => *event_host = host.clone(),
+        Event::AgentResync { thread, .. }
+        | Event::AgentSynchronized { thread }
+        | Event::AgentWindow { thread } => ids.register_thread(host, *thread),
         Event::BoardChanged { .. }
         | Event::WatchOutput { .. }
         | Event::WatchDismissed(_)
         | Event::Toast { .. }
-        | Event::DaemonShuttingDown => {}
+        | Event::DaemonShuttingDown
+        | Event::Unknown => {}
     }
     Some(event)
 }
@@ -498,6 +510,9 @@ pub(crate) fn unavailable_fanout_response(
 ) -> Option<ResponseBody> {
     let reason = error.to_string();
     match body {
+        RequestBody::AgentItemBody { .. }
+        | RequestBody::AgentCheckpoints { .. }
+        | RequestBody::AgentRevert { .. } => None,
         RequestBody::DeleteWorktrees { ids } => Some(ResponseBody::WorktreesDeleted(
             ids.iter()
                 .cloned()

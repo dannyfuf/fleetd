@@ -53,6 +53,21 @@ impl FleetHome {
     pub fn state_path(&self) -> PathBuf {
         self.root.join("state.json")
     }
+    /// Returns the agents directory.
+    #[must_use]
+    pub fn agents_path(&self) -> PathBuf {
+        self.root.join("agents")
+    }
+    /// Returns the agents database path.
+    #[must_use]
+    pub fn agents_db_path(&self) -> PathBuf {
+        self.agents_path().join("state.sqlite")
+    }
+    /// Returns the agents attachments directory.
+    #[must_use]
+    pub fn agents_attachments_path(&self) -> PathBuf {
+        self.agents_path().join("attachments")
+    }
     /// Returns the cross-process state lock path.
     #[must_use]
     pub fn lock_path(&self) -> PathBuf {
@@ -272,6 +287,15 @@ mod tests {
     fn constructs_layout_paths() {
         let home = FleetHome::new("/tmp/.fleet");
         assert_eq!(home.config_path(), PathBuf::from("/tmp/.fleet/config.json"));
+        assert_eq!(home.agents_path(), PathBuf::from("/tmp/.fleet/agents"));
+        assert_eq!(
+            home.agents_db_path(),
+            PathBuf::from("/tmp/.fleet/agents/state.sqlite")
+        );
+        assert_eq!(
+            home.agents_attachments_path(),
+            PathBuf::from("/tmp/.fleet/agents/attachments")
+        );
         assert_eq!(home.socket_path(), PathBuf::from("/tmp/.fleet/fleetd.sock"));
         let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(

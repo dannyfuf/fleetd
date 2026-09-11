@@ -114,7 +114,7 @@ impl Services {
             }
         }
         sessions.extend(remote_sessions);
-        let local_threads = self.agents.summaries();
+        let local_threads = self.agents.summaries().await;
         let local_thread_ids = local_threads
             .iter()
             .map(|summary| summary.thread)

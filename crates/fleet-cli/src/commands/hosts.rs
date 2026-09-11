@@ -143,6 +143,9 @@ fn agent_label(status: &HostStatus) -> String {
     if agents.claude {
         available.push("claude");
     }
+    if agents.codex {
+        available.push("codex");
+    }
     if agents.opencode {
         available.push("opencode");
     }

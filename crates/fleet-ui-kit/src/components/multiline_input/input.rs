@@ -37,7 +37,8 @@ const MAX_VISIBLE_LINES: usize = 8;
 /// });
 /// cx.subscribe(&composer, |this, composer, event: &MultilineInputEvent, cx| match event {
 ///     MultilineInputEvent::Submit(text) => this.send(text.clone(), cx),
-///     MultilineInputEvent::Trigger(ch) => this.open_completions(*ch, cx),
+///     MultilineInputEvent::Trigger(trigger) => this.open_completions(trigger.clone(), cx),
+///     MultilineInputEvent::Changed => this.refilter_picker(cx),
 ///     MultilineInputEvent::Escape => this.interrupt(cx),
 /// })
 /// .detach();
@@ -126,6 +127,16 @@ impl MultilineInput {
     #[must_use]
     pub fn history(&self) -> &PromptHistory {
         &self.history
+    }
+
+    /// The completion surface the caret is currently inside, with what has been typed into it.
+    ///
+    /// An owner opens a picker on [`MultilineInputEvent::Trigger`] and re-filters it from here
+    /// on every [`MultilineInputEvent::Changed`], which is what lets `@`, `$` and `/` stay
+    /// ordinary typable characters.
+    #[must_use]
+    pub fn active_trigger(&self) -> Option<super::Trigger> {
+        self.buffer.active_trigger()
     }
 
     /// Replaces the composer text.
@@ -234,11 +245,16 @@ impl MultilineInput {
     }
 
     /// Run a text-changing edit: history navigation ends where typing begins.
+    ///
+    /// Browsing ends on **any** edit, even one the user immediately undoes by hand: typing a
+    /// character and deleting it leaves the text equal to the recall, and `↓` must then move
+    /// the caret rather than clear the composer.
     fn edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut MultilineBuffer)) -> bool {
         edit(&mut self.buffer);
         self.history.reset();
         self.goal_x = None;
         self.sync(cx);
+        cx.emit(MultilineInputEvent::Changed);
         true
     }
 
@@ -290,7 +306,10 @@ impl MultilineInput {
     /// `↑`: the previous prompt when the caret is parked at the top of an untouched buffer,
     /// otherwise one row up.
     fn on_up(&mut self, select: bool, cx: &mut Context<Self>) -> bool {
-        if self.buffer.on_first_line() && (self.buffer.is_empty() || self.history.is_active()) {
+        if self.recall_allowed(select)
+            && self.on_first_visual_row()
+            && (self.buffer.is_empty() || self.history.is_active())
+        {
             self.recall_previous(cx);
             return true;
         }
@@ -299,7 +318,7 @@ impl MultilineInput {
 
     /// `↓`: the next prompt while walking history, otherwise one row down.
     fn on_down(&mut self, select: bool, cx: &mut Context<Self>) -> bool {
-        if self.history.is_active() && self.buffer.on_last_line() {
+        if self.recall_allowed(select) && self.history.is_active() && self.on_last_visual_row() {
             if let Some(entry) = self.history.newer() {
                 self.buffer.set_text(entry);
                 self.goal_x = None;
@@ -308,6 +327,53 @@ impl MultilineInput {
             return true;
         }
         self.vertical(true, select, cx)
+    }
+
+    /// Whether `↑` / `↓` may recall at all.
+    ///
+    /// It declines while a selection is being extended and while an IME composition is live:
+    /// replacing a preedit with a recalled prompt loses text the user is still committing.
+    fn recall_allowed(&self, select: bool) -> bool {
+        !select && self.buffer.marked_range().is_none()
+    }
+
+    /// Whether the caret is on the first **visual** row.
+    ///
+    /// A caret at a soft-wrap boundary belongs to two visual rows, and this takes the one
+    /// *farthest from the edge under test*: gpui reports the boundary as the start of the
+    /// following row, which is already the lower of the two, so an ambiguous caret never
+    /// claims `↑`. With no layout to consult the logical line is the fallback.
+    fn on_first_visual_row(&mut self) -> bool {
+        if self.line_height <= Pixels::ZERO || self.line_layout.is_empty() {
+            return self.buffer.on_first_line();
+        }
+        match self.position_for_offset(self.buffer.cursor()) {
+            Some(position) => position.y < self.line_height,
+            None => self.buffer.on_first_line(),
+        }
+    }
+
+    /// Whether the caret is on the last **visual** row, resolved away from that edge at a
+    /// soft-wrap boundary for the same reason as [`Self::on_first_visual_row`].
+    fn on_last_visual_row(&mut self) -> bool {
+        if self.line_height <= Pixels::ZERO || self.line_layout.is_empty() {
+            return self.buffer.on_last_line();
+        }
+        let cursor = self.buffer.cursor();
+        let Some(position) = self.position_for_offset(cursor) else {
+            return self.buffer.on_last_line();
+        };
+        // A soft wrap, not a hard newline: the caret sits at column zero of a row it did not
+        // start. Take the row above it, which is the farther one from the bottom edge.
+        let wrapped = position.x == Pixels::ZERO
+            && position.y > Pixels::ZERO
+            && self.buffer.line_start(cursor) != cursor;
+        let y = if wrapped {
+            position.y - self.line_height
+        } else {
+            position.y
+        };
+        y + self.line_height >= self.content_height()
     }
 
     /// One row up or down, visually when there is a layout to walk and logically otherwise.
@@ -673,6 +739,8 @@ impl EntityInputHandler for MultilineInput {
         self.history.reset();
         self.goal_x = None;
         self.sync(cx);
+        // The character is already in the buffer: the trigger is a report, not a consumption.
+        cx.emit(MultilineInputEvent::Changed);
         if let Some(trigger) = trigger {
             cx.emit(MultilineInputEvent::Trigger(trigger));
         }
@@ -705,6 +773,7 @@ impl EntityInputHandler for MultilineInput {
         self.history.reset();
         self.goal_x = None;
         self.sync(cx);
+        cx.emit(MultilineInputEvent::Changed);
     }
 
     fn bounds_for_range(

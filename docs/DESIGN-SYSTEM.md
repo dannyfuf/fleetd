@@ -197,6 +197,8 @@ are dwell and delay durations, not animations: they time how long something wait
 | --- | --- | --- |
 | `prefix_hint_delay` | 400 | how long `^S` waits before showing its keys |
 | `spinner` | 1000 | one turn of `loader-circle` |
+| `jump_chip_delay` | 150 | how long the transcript's jump-to-latest chip waits before appearing |
+| `working_tick` | 1000 | how often the working row's elapsed label re-reads the clock |
 | `toast_short` | 1600 | dwell for instant acknowledgements |
 | `toast_normal` | 3200 | dwell for everything else the toast law allows |
 
@@ -221,12 +223,13 @@ with one of these rather than adding a near-duplicate token or a bare float:
 `banner_border 0.35` · `error_hover 0.22` · `neutral_fill 0.08` · `semantic_fill 0.14` ·
 `skeleton 0.30` · `no_session 0.30`.
 
-The native-agent canvas has its own six constants, and they live in
-`components::agent::metrics` rather than in `Metrics`: `AGENT_CONTENT_W 760` ·
-`AGENT_TOOL_KIND_W 60` · `AGENT_CARET_H 17` · `AGENT_BODY_MAX_H 240` ·
-`AGENT_LIST_OVERDRAW 256` · `AGENT_SCROLLBAR_INSET 3`. `Metrics` is the density ladder a
-theme may restate; these are fixed product decisions from `NATIVE-AGENTS.md` §2 that no theme
-may move, which is exactly why they are constants and not tokens. They are still exported from
+The native-agent canvas has its own constants, and they live in `components::agent::metrics`
+rather than in `Metrics`: `AGENT_CONTENT_W 760` · `AGENT_TOOL_KIND_W 60` · `AGENT_CARET_H 17` ·
+`AGENT_BODY_MAX_H 240` · `AGENT_WELL_MAX_H 66` · `AGENT_LIST_OVERDRAW 256` ·
+`AGENT_SCROLLBAR_INSET 3` · `AGENT_FOLLOW_REARM_PX 40` · `AGENT_USER_MAX_W 456` ·
+`AGENT_PREVIEW_MAX_H 144` · `AGENT_PLAN_PREVIEW_H 180`. `Metrics` is the density ladder a theme
+may restate; these are fixed product decisions from `NATIVE-AGENTS.md` §5 that no theme may
+move, which is exactly why they are constants and not tokens. They are still exported from
 `fleet_ui_kit`, so no app-side copy of `760` exists.
 
 ---
@@ -306,7 +309,7 @@ if let Some(bytes) = fleet_ui_kit::kit_asset(path) { return Ok(Some(Cow::Borrowe
 An absent asset must return `Ok(None)`, never `Err`: `svg()` logs nothing, so an erroring source
 turns an invisible icon into an invisible crash.
 
-### 5.1 The closed icon set (68 glyphs)
+### 5.1 The closed icon set (75 glyphs)
 
 | Purpose | Icons |
 | --- | --- |
@@ -318,7 +321,8 @@ turns an invisible icon into an invisible crash.
 | Keep-alive | `zap` `bot` `sparkles` `server` `file-pen` |
 | Terminal | `terminal` `square-terminal` `chevrons-up` `command` `maximize-2` `plus` |
 | Dialogs | `trash` `scissors` `power` `x` `boxes` `arrow-right-left` `settings-2` `hourglass` |
-| Chrome | `flag` `circle-arrow-up` `circle-arrow-down` `search` `clipboard-check` `delete` `ellipsis` `check` `minus` `chevron-left` `chevron-right` `sailboat` |
+| Chrome | `flag` `circle-arrow-up` `circle-arrow-down` `search` `clipboard-check` `delete` `ellipsis` `check` `minus` `chevron-left` `chevron-right` `chevron-down` `sailboat` |
+| Native agent | `brain` `wrench` `square-pen` `paperclip` `minimize-2` `undo-2` |
 
 Two Lucide renames the UX spec predates: `circle-help` is now **`circle-question-mark`**, and
 `arrow-up-circle` is now **`circle-arrow-up`**. The kit keeps both `trash` and `trash-2`, since
@@ -1063,106 +1067,185 @@ renders the scrim and `drops_keys()` states the contract the caller must honour.
 
 ### 6.6 Native agent transcript
 
-Four of these are the exception to §6's "no component owns state": a transcript, a composer and
-their key routing cannot be `RenderOnce`, because the list caches measured row heights and the
-composer owns a caret, a selection and an IME session. They are gpui **entities** that emit
+Three of these are the exception to §6's "no component owns state": a transcript and a composer
+cannot be `RenderOnce`, because the list caches measured row heights and the scroll machine, and
+the composer owns a caret, a selection and an IME session. They are gpui **entities** that emit
 events and never act on a thread; the screen that owns them decides what an event means.
-`components::agent::metrics` holds their six fixed dimensions (§2.8), and
-`components::agent::format` holds their copy — `format_duration`, `format_token_count`,
-`format_file_delta`, `format_files_changed`, `format_turn_footer`, `format_worked`,
-`format_thinking`, `format_retrying`, `format_compacted`, `format_resumed`, and `MINUS`, the
-U+2212 the design uses for a removed-line count. Keycaps are never inside those strings: they
-are `KeyHint`s drawn by the row that owns them.
+`components::agent::metrics` holds their fixed dimensions (§2.8); `components::agent::format`
+holds their copy — `format_duration`, `format_token_count`, `format_file_delta`,
+`format_files_changed`, `format_cost`, `turn_footer_segments`, `format_worked`,
+`format_stopped_after`, `format_thought`, `format_working`, `format_exit`, `format_counter`,
+`format_retrying`, `format_compacted`, `format_resumed`, and `MINUS`, the U+2212 the design uses
+for a removed-line count — and `components::agent::group` holds the group summarizer
+(`ToolGroupCounts` + `format_group_summary`: `read 3 files and ran 2 commands`, with named MCP
+servers hoisted to the front). Keycaps are never inside those strings: they are `KeyHint`s drawn
+by the row that owns them.
 
 #### `TranscriptList`
 **Purpose.** The bottom-anchored, variable-height conversation.
 **API.** Entity. `TranscriptList::new(&mut Context<Self>)`, `set_rows(Vec<TranscriptRow>, cx)`,
-`set_tool_body(ToolBodyRenderer, cx)`, `scroll_to_bottom(cx)`, `scroll_mode(bool, cx)`,
-`set_streaming(bool, cx)`, `focus_row(Option<usize>, cx)`; the scroll-mode motions
-`scroll_rows(f32, cx)`, `scroll_viewports(f32, cx)`, `scroll_to_top(cx)` and `scroll_to_end(cx)`;
-readers `rows()`, `focused_row()`,
-`is_scroll_mode()`, `is_at_bottom()`, `open_decision()`, `focus_handle()`,
+`set_thread(Vec<TranscriptRow>, cx)`, `set_row_body(RowBodyRenderer, cx)`; the scroll machine —
+`scroll_to_latest(cx)`, `scroll_to_end(cx)`, `anchor_new_turn(cx)`, `release_anchor(cx)`,
+`gesture(Gesture, cx) -> bool`, `scroll_mode(bool, cx)`, `scroll_rows(f32, cx)`,
+`scroll_viewports(f32, cx)`, `scroll_to_top(cx)`; the row focus — `focus_row(Option<usize>, cx)`,
+`move_row_focus(isize, cx)`, `focused_row()`; readers `rows()`, `scroll_state()`,
+`is_following()`, `is_scroll_mode()`, `shows_jump_to_latest()`, `focus_handle()`,
 `event_for_key(&str) -> Option<TranscriptEvent>`. Free helpers: `diff_rows` (the `RowSplice`
-`set_rows` applies), `scroll_fraction`, `user_block`, `user_block_with`, `attachment_pill`,
-`error_card`.
-**Rows.** `TranscriptRow::{UserBlock{attachments}, AssistantText, Thinking, ToolRow{children},
-WorkedFold, TurnFooter, DecisionCard, ErrorCard{retrying}, CheckpointLine, Notice,
-QueuedMessage, EmptyState}`. `Notice` is a provider's own user-facing message — a config warning,
-a deprecation — which is not an error and must not be drawn as one.
-**States.** following the tail · scroll mode (tail frozen) · streaming (caret after the last
-paragraph) · empty (`EmptyState`).
+`set_rows` applies), `scroll_thumb`, and the pure scroll machine `FollowState` / `ScrollMode` /
+`Gesture` / `breaks_follow` / `is_at_end`.
+**Rows.** `TranscriptRow { id: TranscriptRowId, kind: TranscriptRowKind, attached }` — flat by
+construction: a turn is a *run* of rows, never a container, because nested containers make
+variable-height virtualization and scroll anchoring unsolvable. The eighteen kinds are `User`,
+`Assistant`, `AssistantMeta`, `Reasoning`, `Work`, `WorkLive`, `WorkGroup`, `Subagent`, `Diff`,
+`TurnFold`, `TurnFooter`, `Plan`, `Gate`, `Checkpoint`, `Notice`, `Error`, `Working`, `Empty`.
+`Notice` is a harness's own user-facing message — a config warning, a deprecation — which is not
+an error and must not be drawn as one; `Error` is the **severe** tier only (a runtime error or a
+broken side effect), because a nonzero command exit is carried by the failing `Work` row.
+**Identity.** `TranscriptRowId::LiveActivity` is shared by `WorkLive`, a streaming `Reasoning`
+and `Working`, so *thinking → tool A running → tool A done* is **one row changing its label**,
+not three mounts; `TranscriptRowId::Item` is shared by a `Work` row, the `Diff` under it and a
+`Subagent`, so an update merging forward never remounts.
+**States.** following the tail · anchoring the first turn · free scrolling · scroll mode (tail
+frozen, a row focused) · streaming (caret and shimmer) · empty.
+**Events.** `TranscriptEvent::{Toggle, RowAction, ReachedOldest}`. `ReachedOldest` fires when the
+reader comes within `OLDEST_PREFETCH_ROWS` of the top of the rows in hand, **once per row set**:
+the transcript cannot know whether older history exists — that is the owner's page cursor — so it
+reports the gesture and nothing else, and the owner's answer is itself a new row set, which is
+what re-arms it. A splice that touches index 0 is the re-arm signal, so a page prepended above the
+reader asks again and a fully loaded thread asks nothing.
 **Usage rule.** GPUI `list`, **not** `uniform_list` — an assistant paragraph, a 30 px tool row
 and an inline diff are not one height. ADR 0005's uniform-row rule still governs the diff, which
 stays uniform *inside* its row. `set_rows` splices only what `diff_rows` says changed, so a
-streaming turn re-measures its last row and nothing else.
-**Usage rule (key routing).** `event_for_key` resolves the open decision card **before** the
-focused row, so a `y` can never toggle a row behind an unanswered permission.
+streaming turn re-measures its last row and nothing else, and `ListState::reset` is called from
+`set_thread` alone — never from `render`, where it would discard every measured height.
+**Usage rule (follow).** A gesture may break follow **only when it can actually move the
+viewport away from the live edge**, because follow gates the list's own auto-pin: a spurious
+break produces no scroll event, never re-arms, and streaming silently stops following. The
+re-arm band is `AGENT_FOLLOW_REARM_PX`, and the list's own `is_at_end` flag is a fallback, never
+a short-circuit. Follow is armed at a *generation* that every manual navigation bumps, which is
+what makes a stale async callback harmless with no cancellation token.
+**Usage rule (nothing ticks but the clock).** The `Working` row carries `started_at`, never an
+elapsed figure; the list owns a 1 Hz task that writes one `SharedString`. The jump-to-latest chip
+is debounced on **show** only (`motion.jump_chip_delay`) and immediate on hide, so it cannot
+flash while a thread switch settles. An animation runs only for a row inside the viewport.
 
 #### `ToolRow`
 **Purpose.** The 30 px row every tool call is drawn as.
-**Anatomy.** state glyph · 60 px kind column (`AGENT_TOOL_KIND_W`) · one-line summary ·
-right-aligned result. Children indent 16 px behind a 1 px left divider; an expanded body is
-capped at `AGENT_BODY_MAX_H` and scrolls inside the row.
-**API.** `ToolRow::new(id, kind, summary).state(ToolRowState).result(..).output(..).diff(..)
-.expanded(bool)`; `.has_body()`; `tool_row(&ToolRow, &App)` for the plain element, or
-`ToolRowElement::new(row).focused(bool).body(..).children(..).on_toggle(..)`; `expand_hint(bool)`.
-**States.** `ToolRowState::{Running, Done, Error, Denied}` → `.glyph()` gives the icon and tone.
-**Usage rule.** The geometry does not change while the row streams — a row that grows under the
-reader is how a transcript starts to jitter. Only successful rows fold into `WorkedFold`; a
-failed row stays exposed after the turn settles.
+**Anatomy.** state glyph · 60 px kind column (`AGENT_TOOL_KIND_W`) · one-line summary
+(`flex_1 min_w_0`, ellipsized) · right-aligned result · expand hint. Children indent behind a
+1 px left divider; an expanded body is capped at `AGENT_BODY_MAX_H` and scrolls inside the row.
+**API.** `ToolRow::new(id, kind, summary).icon(Icon).state(ToolRowState).result(..).body(..)
+.expanded(bool)`; `.is_expandable()`; `ToolRowElement::new(row, key).focused(bool).body(..)
+.children(..).on_toggle(..)`; `expand_hint(bool)`. `key` is the row's list index, not an
+`ElementId`: the row needs three stable ids and `("tool-line", key)` tuples produce them with no
+per-frame `String`.
+**States.** `ToolRowState::{Running, Done, Failed, Denied, Stopped, Severe}` → `.glyph(kind,
+dimmed)` gives the icon, tone, opacity and whether it spins; `.heading_tone()` and
+`.is_severe()` give the summary's voice.
+**Usage rule (five states plus one).** `Severe` is reserved for a runtime error or a broken side
+effect — *the turn or a core side effect broke, not that a command exited nonzero*. A `git grep`
+finding nothing is not red, and an exit status is a structured field (`format_exit`), never a
+colour. Fleet never substring-matches English error text to infer failure.
+**Usage rule (geometry).** The geometry does not change while the row streams — a row that grows
+under the reader is how a transcript starts to jitter. The click target is **the 30 px line
+only**, so clicking inside an expanded body or a nested child never folds the row; the expand
+chevron is `invisible`, not absent, when a row cannot expand, so alignment never shifts. A
+`Failed` row is always expandable, so its truncated label can be read in full.
 
-#### `DecisionCard`
-**Purpose.** A permission, question or plan asked **inside** the thread.
-**Anatomy.** `AGENT_CONTENT_W` wide, panel background, radius 6, a 2 px amber bar flush left,
-always the last row.
-**API.** `DecisionCard::new(id, title, DecisionCardKind).actions(Vec<DecisionOption>)`;
-`.option_count(usize)`, `.action_for_key(&str) -> Option<DecisionAction>`;
-`DecisionCardElement::new(card).default_action(..).selected(..).expanded(bool).answer(..)
-.on_action(..)`; `permission_actions`, `question_actions`, `plan_actions`, `decision_key_hints`,
-and `SOMETHING_ELSE` (the `Something else…` free-text option).
-**Variants.** `Permission { tool, payload, rationale }` · `Question { questions }` ·
-`Plan { markdown, steps }`.
-**Usage rule.** The card owns the key *vocabulary*; the surface holding the focus handle owns
-the key *event* and routes it here. That split is what stops one thread from answering another
-thread's card. This type mirrors rather than imports `fleet_core::agents::GateKind`, so the kit
-keeps its "no domain dependencies" rule.
+#### `DecisionDock`
+**Purpose.** A permission approval or a model question, in a drawer docked to the top edge of the
+composer. Nothing is ever a modal, and an approval is never a transcript card: a card can be
+scrolled off screen while it owns the keyboard, which is a modal with the chrome removed.
+**Anatomy.** `AGENT_CONTENT_W` wide, panel background, a 2 px amber bar flush left, rounded on
+its **top** corners only, overlapping the composer by one hairline and masking the border they
+share, so the two read as one panel rather than a card stacked on a field. Title, `1/N` counter,
+body, then a row of `KeyHint`s.
+**API.** `DecisionDock::new(Decision).diff(..).payload_focus(FocusHandle).on_action(..)`.
+`Decision::new(id, title, DecisionKind).queued(index, total).answering(bool)`;
+`Decision::head(&[Decision])`, `.options()`, `.key_hints()`,
+`.action_for_key(&str) -> Option<DecisionAction>`.
+**Variants.** `DecisionKind::{Approval(ApprovalRequest), Question(QuestionSet), PlanReady{title,
+markdown}}`, in that strict priority order — one slot, one occupant, and **no "approve all"**.
+The proposed plan itself is a transcript row (`TranscriptRowKind::Plan`) with no buttons; only
+its verbs live here.
+**States.** approval (with and without `[e]`, with a caution) · question (single, multi-select,
+free-text) · wizard at `i+1/n` with `[p]` · plan ready · queued `1/N` · `answering…`.
+**Usage rule (keys).** The type owns the key *vocabulary*; the surface holding the focus handle
+owns the key *event* and routes it here. That split is what stops one thread from answering
+another thread's request, and it is why the status bar mirrors `key_hints()` — the bar can never
+advertise a scope the drawer does not offer. **`⏎` is not bound on an approval**: a queued Return
+keystroke must never approve a shell command. While a reply is in flight nothing is claimed.
 **Usage rule (copy).** An action always spells out its effective scope — `allow once`, `allow
-for this session`, `allow for this directory` — never the word "always".
+for this session`. The word "always" never appears, and there is no directory or project scope in
+v1. `[e]` is drawn only where the harness accepts an amended invocation.
+**Usage rule (payload).** The payload well is the **invocation**, never the model's prose about
+it, because it is what `[e]` seeds the composer with. It is bounded by `AGENT_WELL_MAX_H`, scrolls
+in both axes, and is **never truncated and never line-clamped**.
+
+#### `MetadataRow`
+**Purpose.** The composer's ordered strip of harness-reported blocks.
+**API.** `MetadataRow::new(Vec<MetadataSegment>, MetadataFitResult).trailing(..)`;
+`MetadataSegment::new(text)` / `::pinned(text)` / `.width(px)`; the owner holds a `MetadataFit`
+and calls `fit(available, revision, &segments, gap, overflow)`, or the free `metadata_fit` for a
+one-shot.
+**States.** everything visible · collapsed from the right with an overflow count · the pinned
+segment alone, truncating.
+**Usage rule.** **The hidden count is memoised per width**, in a `MetadataFit` the owner holds
+across frames, never recomputed per frame. **The model segment never collapses; it truncates** —
+losing which model is answering is worse than losing its name's tail. No segment is ever
+invented: a tab that has not published an effort has three blocks, not four.
 
 #### `MultilineInput`
 **Purpose.** The docked composer: `TextInput`'s wrapping, multi-line sibling.
 **API.** Entity. `MultilineInput::new(&mut Context<Self>, placeholder)`, `text()`, `is_empty()`,
 `set_text(.., cx)`, `clear(cx)`, `set_placeholder(.., cx)`, `set_focus_visible(bool, cx)`,
-`submit(cx)`, `push_history(..)`, `focus_handle()`, readers `buffer()` and `history()`, and the
-three `-> bool` motions an owner falls through on — `recall_previous(cx)`, `caret_up(cx)`,
-`caret_down(cx)`, each answering whether it moved; emits
-`MultilineInputEvent::{Submit(String), Trigger(char), Escape}` under
-`MULTILINE_INPUT_KEY_CONTEXT`. `MultilineBuffer` is the pure editing model and `PromptHistory`
-the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` was opened from.
+`set_read_only(bool, cx)`, `submit(cx)`, `push_history(..)`, `active_trigger()`,
+`focus_handle()`, readers `buffer()` and `history()`, and the three `-> bool` motions an owner
+falls through on — `recall_previous(cx)`, `caret_up(cx)`, `caret_down(cx)`, each answering
+whether it moved; emits `MultilineInputEvent::{Submit(String), Trigger(Trigger), Changed,
+Escape}` under `MULTILINE_INPUT_KEY_CONTEXT`. `MultilineBuffer` is the pure editing model and
+`PromptHistory` the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` was opened from.
 **States.** empty (placeholder) · typing · multi-line (grows one line at a time, to eight) ·
-IME composition · dimmed while a decision card is open.
-**Keyboard.** printable · `⏎` submit · `⇧⏎` newline · `Backspace`/`Delete` · word-wise deletion ·
-line/word motion · shift-selection · select-all · paste · `↑` history · `/` and `@` emit
-`Trigger`.
-**Usage rule.** It never acts on a thread: a submit, a completion trigger and an escape are
-reported, and the owner decides what they mean. Like `TextField`, an entity installing the
-platform input handler calls `handle_edit_keystroke`, and bare-letter bindings above it must be
-shadowed in its key context.
+IME composition · read-only · dimmed while a decision owns the bare keys.
+**Keyboard.** printable · `⏎` submit · `⇧⏎` newline (the **only** newline modifier) ·
+`Backspace`/`Delete` · word-wise deletion · line/word motion · shift-selection · select-all ·
+paste · `↑`/`↓` history at the **visual** buffer edge · `@` `$` `/` report a `Trigger`.
+**Usage rule (triggers report).** A trigger character is **inserted and reported, never
+consumed**, so all three stay typable: the owner opens a picker on `Trigger` and re-filters it
+from `active_trigger()` on every `Changed`. `@` and `$` fire wherever a token starts; `/` fires
+at **line start only**, because a harness expands a slash command only when it opens the whole
+message and offering it elsewhere is a whole class of "why didn't my command run?" bugs.
+**Usage rule (history).** `↑` recalls only at the **visual** (soft-wrapped) edge, and a caret at
+a wrap boundary belongs to two rows — the one *farthest* from the edge under test wins, so an
+ambiguous caret never claims the key. It declines while a selection is being extended and while
+an IME composition is live, and browsing ends on any edit, even one the user immediately undoes.
+**Usage rule.** It never acts on a thread: a submit, a trigger, a change and an escape are
+reported, and the owner decides what they mean. Bare-letter bindings above it must be shadowed
+in its key context.
 
 #### `Markdown`
 **Purpose.** Assistant prose, rendered from a stream.
-**API.** `parse_markdown_document(&str) -> MarkdownDocument`; `markdown(&MarkdownDocument, &App)`.
-`MarkdownBlock::{Paragraph, Code{lang,text,highlights}, List{ordered,items},
-Heading{level,inlines}, Quote, Rule}` built through `MarkdownBlock::code(lang, text)`,
-`MarkdownInline::{Text, Code, Strong, Emphasis, Link}`.
-**Usage rule.** Two invariants, both tested: `parse_markdown_document` never panics or loops on any
-input, and for any prefix `p` of `s`, every block of `parse_markdown_document(p)` except its last is a
-block of `parse_markdown_document(s)` at the same index — a transcript must not reflow behind the reader
-while the model keeps typing. Tables, images and indented code are out of scope and survive as
-their own source text.
+**API.** `parse_markdown_document(&str) -> MarkdownDocument`;
+`parse_markdown_prefix(&str, &HighlightCache)` for the streaming path;
+`markdown(&MarkdownDocument, &App)`. `MarkdownBlock::{Paragraph,
+Code{lang,text,highlights,closed}, List{ordered,items}, Heading{level,inlines}, Quote, Rule}`
+built through `MarkdownBlock::code(lang, text)`, `::cached_code(lang, text, &cache)` or
+`::streaming_code(lang, text)`; `MarkdownInline::{Text, Code, Strong, Emphasis, Link}`.
+**Usage rule.** Two invariants, both tested: parsing never panics or loops on any input, and for
+any prefix `p` of `s`, every block of `parse_markdown_document(p)` except its last is a block of
+`parse_markdown_document(s)` at the same index — a transcript must not reflow behind the reader
+while the model keeps typing. Setext headings are deliberately absent, because they would
+retroactively turn a finished paragraph into a heading. Tables, images and indented code are out
+of scope and survive as their own source text.
+**Usage rule (highlighting).** A fence is lexed when the document is built, never in `render`.
+Code fences are **not** highlighted while streaming, and **a partial fence is neither read from
+nor written to the `HighlightCache`** — it must never poison it, and a fence whose colours
+changed per chunk would move the reader's eye on every token.
 
 #### `DiffView` (`fleet_lazygit::diff_view`, not the kit)
-**Purpose.** The inline diff under an `Edit` / `Write` tool row.
+**Purpose.** The inline diff under an `Edit` / `Write` tool row, emitted as its own
+`TranscriptRowKind::Diff` row so its height is measured independently and an expanded diff never
+inflates the tool row's own measurement.
 **API.** Entity. `DiffView::new(unified, cx)`, `DiffView::for_path(..)`, `unified()`,
 `set_unified(.., cx)`, `expanded()`, `set_actions(..)`.
 **Usage rule.** It takes unified-diff *text*, so an embedder needs no git plumbing and

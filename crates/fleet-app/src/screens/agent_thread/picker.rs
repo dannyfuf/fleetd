@@ -12,10 +12,19 @@ use gpui::SharedString;
 pub(crate) enum PickerKind {
     /// `@` — a worktree file path.
     Files,
-    /// `/` — a provider slash command.
+    /// `/` — a harness slash command. Offered at **line start only**: a harness expands a slash
+    /// command only when it opens the whole message, and anywhere else it reaches the model as
+    /// literal text, which is a whole class of "why didn't my command run?" bugs.
     Commands,
+    /// `$` — a skill. Selecting one always inserts `$name`, never `/name`; the rewrite to the
+    /// harness's own invocation happens at the daemon's adapter boundary.
+    Skills,
     /// `^s m` — a model and effort.
     Models,
+    /// `^s e` — the harness-declared traits of the selected model.
+    Traits,
+    /// `^s t` — the access ladder.
+    Access,
 }
 
 impl PickerKind {
@@ -24,8 +33,24 @@ impl PickerKind {
         match self {
             Self::Files => Some('@'),
             Self::Commands => Some('/'),
-            Self::Models => None,
+            Self::Skills => Some('$'),
+            Self::Models | Self::Traits | Self::Access => None,
         }
+    }
+
+    /// The picker opened by one composer trigger character.
+    pub(crate) const fn for_trigger(symbol: char) -> Option<Self> {
+        match symbol {
+            '@' => Some(Self::Files),
+            '/' => Some(Self::Commands),
+            '$' => Some(Self::Skills),
+            _ => None,
+        }
+    }
+
+    /// Whether an accepted row replaces text in the composer rather than dispatching a control.
+    pub(crate) const fn completes_text(self) -> bool {
+        self.prefix().is_some()
     }
 
     /// The picker's heading.
@@ -33,7 +58,10 @@ impl PickerKind {
         match self {
             Self::Files => "files",
             Self::Commands => "commands",
+            Self::Skills => "skills",
             Self::Models => "model",
+            Self::Traits => "traits",
+            Self::Access => "access mode",
         }
     }
 }

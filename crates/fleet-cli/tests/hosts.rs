@@ -151,6 +151,7 @@ fn renders_aligned_host_rows_and_protocol_json_statuses() {
         address: Some("100.77.28.11".to_owned()),
         agent_binaries: Some(AgentBinaries {
             claude: true,
+            codex: true,
             opencode: false,
         }),
         reachable: true,
@@ -161,7 +162,7 @@ fn renders_aligned_host_rows_and_protocol_json_statuses() {
     assert_eq!(
         render_statuses(std::slice::from_ref(&status)),
         "ID       PROVIDER   ADDRESS       LINK   VERSION              REACHABLE  AGENTS\n\
-         dev-box  tailscale  100.77.28.11  ready  fleetd 0.1.0+abc123  yes        claude"
+         dev-box  tailscale  100.77.28.11  ready  fleetd 0.1.0+abc123  yes        claude,codex"
     );
     let value = serde_json::from_str::<serde_json::Value>(
         &render_json(std::slice::from_ref(&status)).unwrap_or_else(|error| panic!("{error}")),

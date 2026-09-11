@@ -68,15 +68,23 @@ impl Services {
             &adapters,
             sessions.clone(),
         );
+        let fleet_home = fleet_core::paths::FleetHome::new(home.clone());
         let agents = agents::AgentSessionManager::new(
-            agents::AgentStore::new(home.join("agents")),
+            fleet_home.agents_db_path(),
             events.clone(),
             worktrees.clone(),
             Arc::clone(&config),
         );
+        // Checkpoints are Git-only: the ref namespace is their whole store, so the service needs
+        // the process boundary and nothing else — no database handle, no event bus, no state.
+        let checkpoints = checkpoints::Checkpoints::new(Arc::clone(&adapters.shell));
+        // The manager takes the capture side: the turn identifier is minted inside its `send`,
+        // and it already holds the `Worktrees` a capture needs to resolve a path
+        // (`docs/NATIVE-AGENTS.md` §13 phase 8).
+        agents.set_checkpoints(checkpoints.clone());
         let boards = Arc::new(boards::Boards::new(
             Arc::new(crate::stores::board::BoardStore::new(
-                fleet_core::paths::FleetHome::new(home.clone()),
+                fleet_home,
                 Arc::clone(&adapters.files),
             )),
             Arc::clone(&state),
@@ -168,6 +176,12 @@ impl Services {
             let router = Arc::clone(&router);
             move |id| router::Resolver::host_of_worktree(router.as_ref(), id)
         }));
+        // The durable read-through mirror of the threads other hosts own
+        // (`docs/NATIVE-AGENTS.md` §9.3). The ownership census goes in first, so a mirrored
+        // thread routes upstream from this daemon's very first request rather than only after
+        // the owner's first snapshot has arrived.
+        router.adopt_mirrored_threads(agents.mirrored_threads());
+        router.set_agent_mirror(Arc::new(agents.clone()));
         let bootstrap = Arc::new(bootstrap::Bootstrap::with_registry(
             Arc::clone(&jobs),
             Arc::clone(&machines),
@@ -195,6 +209,7 @@ impl Services {
             repos,
             worktrees,
             agents,
+            checkpoints,
             pool,
             github,
             watches,

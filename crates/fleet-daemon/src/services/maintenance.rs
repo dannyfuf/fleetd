@@ -102,6 +102,7 @@ impl Services {
                 shutdown.clone(),
             )),
             tokio::spawn(run_pool_refresh(Arc::clone(self), events, shutdown.clone())),
+            tokio::spawn(checkpoints::run_sweep(Arc::clone(self), shutdown.clone())),
             tokio::spawn(run_pr_cache_expiry(Arc::clone(self), shutdown)),
         ];
         Ok(PeriodicTasks { handles })

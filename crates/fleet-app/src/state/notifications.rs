@@ -288,7 +288,12 @@ impl AppState {
                 Tone::Warning,
             ),
             Attention::Failed => (format!("{label}: failed"), Icon::CircleX, Tone::Danger),
-            Attention::Working | Attention::Unread | Attention::Idle => return,
+            // `waiting` is a provider park, not a signal: the tab already carries the spinner
+            // and the countdown, and `AgentThreads::attention_edges` only ever offers the two
+            // states the design notifies on.
+            Attention::Waiting | Attention::Working | Attention::Unread | Attention::Idle => {
+                return;
+            }
         };
         if self.notifications.toast {
             self.toast(

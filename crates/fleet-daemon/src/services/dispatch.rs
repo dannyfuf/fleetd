@@ -124,8 +124,26 @@ impl Services {
                     .create(worktree, provider, model, mode, resume_cursor, title)
                     .await,
             ),
-            RequestBody::AgentThreadOpen { thread, from_seq } => {
-                self.agent_response(self.agents.open(thread, from_seq).await)
+            // The open resolves its own window fields: `RequestBody::wants_window` is the one
+            // predicate that decides the response shape, and `resume_seq` the one that resolves
+            // the version-6 and version-7 spellings of the cursor.
+            ref open @ RequestBody::AgentThreadOpen { .. } => {
+                self.agent_response(self.agents.open(open).await)
+            }
+            RequestBody::AgentItemBody {
+                thread,
+                item,
+                stream,
+                offset,
+                limit,
+            } => self.agent_response(
+                self.agents
+                    .item_body(thread, item, stream, offset, limit)
+                    .await,
+            ),
+            RequestBody::AgentCheckpoints { thread } => self.agent_checkpoints(thread).await,
+            RequestBody::AgentRevert { thread, checkpoint } => {
+                self.revert_agent_checkpoint(thread, checkpoint).await
             }
             RequestBody::AgentThreadClose { thread } => {
                 self.agent_response(self.agents.close(thread).await)
@@ -633,7 +651,7 @@ impl Services {
         }
     }
 
-    fn agent_response(
+    pub(crate) fn agent_response(
         &self,
         result: Result<ResponseBody, fleet_proto::error::ProtoError>,
     ) -> DaemonResult<ResponseBody> {
@@ -646,7 +664,7 @@ impl Services {
             fleet_proto::error::ErrorKind::Git => DaemonError::Git(error.message),
             fleet_proto::error::ErrorKind::Github => DaemonError::Github(error.message),
             fleet_proto::error::ErrorKind::Fs => DaemonError::fs(
-                self.home.join("agents"),
+                fleet_core::paths::FleetHome::new(self.home.clone()).agents_path(),
                 std::io::Error::other(error.message),
             ),
             fleet_proto::error::ErrorKind::Tmux

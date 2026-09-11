@@ -5,6 +5,8 @@ impl AgentPopup {
         let theme = cx.theme();
         let label = match model.agent {
             Agent::Claude => "claude",
+            Agent::Codex => "codex",
+            // ADR 0014: a config still naming OpenCode runs OpenCode in this terminal.
             Agent::Opencode => "opencode",
         };
         div()

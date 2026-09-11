@@ -21,7 +21,7 @@ this file; where the two disagree, this file wins.
 | Native | `Workspace > Native` | selecting a tab whose configured command is a `fleet://` surface (the default third tab, `lg`) | `ctrl-s` (prefix), or selecting a PTY tab |
 | Prefix | `Workspace > Prefix` (one-shot) | `ctrl-s` inside Terminal or Native | any key (consumed) or `Esc` |
 | Scroll | `Workspace > Scroll` | `ctrl-s [` | `Esc`, `q`, `i` |
-| Agent thread | `Agent > AgentIdle` / `Agent > AgentWorking` / `Agent > AgentDecision > *` (`Agent > AgentRow` is bound but not yet entered) | `ctrl-s a`/`ctrl-s A` in Workspace, selecting a native agent tab | selecting another tab, `ctrl-s x` |
+| Agent thread | `Agent > AgentIdle` / `Agent > AgentWorking` / `Agent > AgentDecision > *` / `Agent > AgentNativeScroll` (`> AgentRow` under it) | `ctrl-s a`/`ctrl-s A` in Workspace, selecting a native agent tab | selecting another tab, `ctrl-s x` |
 | Agent terminal | `Agent > Terminal` | `a`/`A` in Hub, `ctrl-s F` in Workspace | `ctrl-s` (agent prefix), `ctrl-q` (hide) |
 | Agent prefix | `Agent > Prefix` (one-shot) | `ctrl-s` inside the popup | any key (consumed) or `Esc` |
 | Agent scroll | `Agent > Scroll` | `ctrl-s [` inside the popup | `Esc`, `q`, `i` |
@@ -63,7 +63,7 @@ behind it (`shell/root/focus.rs`, `focus_owner`).
 | `!` | focus the sticky error slot: the last failed job, offering `R retry` [A18] |
 | `i` | toggle the detail panel (never focusable; it mirrors the cursor row) |
 | `H` | collapse / expand the repos rail (240 ↔ 44 px icon rail) [A22] |
-| `a` / `A` | open the floating Claude / OpenCode agent popup [A21] |
+| `a` / `A` | open the floating Claude / Codex agent popup [A21] |
 | `r` | refresh (status, PRs, discovery) — runs as a job, never blocks |
 | `U` | update Fleet (job) |
 | `N` / `E` / `D` | new context / edit active context / delete active context (confirm) [A15] |
@@ -170,7 +170,7 @@ alone preserves them.
 | `,` | rename current terminal |
 | `[` | Scroll mode |
 | `]` | paste clipboard (bracketed when the app requests it) |
-| `a` / `A` | new native Claude / OpenCode agent thread in this worktree |
+| `a` / `A` | new native Claude / Codex agent thread in this worktree |
 | `F` | the terminal fallback: the floating agent PTY popup (§10) |
 | `z` | zoom: hide the session header and terminal tab strip; watch pane stays visible (toggle) |
 | `v` | hide/show the cooperative/discovered subagent watch pane; no watches → `no subagent watches` |
@@ -218,7 +218,7 @@ After `ctrl-s`:
 | `ctrl-s` | send a literal `ctrl-s` to the agent PTY |
 | `q` | hide the popup |
 | `a` | hide when Claude is visible; otherwise switch to Claude |
-| `A` | hide when OpenCode is visible; otherwise switch to OpenCode |
+| `A` | hide when Codex is visible; otherwise switch to Codex |
 | `[` | enter Agent Scroll mode |
 | `]` | paste clipboard |
 | `r` | restart the exited agent command [A10] |
@@ -237,63 +237,77 @@ card shadows everything else, and the focused transcript row is last.
 | Context | Key | Action |
 | --- | --- | --- |
 | `Agent > AgentIdle` | `Enter` | send the composer |
-| `Agent > AgentIdle` | `Shift-Enter` | newline |
-| `Agent > AgentIdle` | `Shift-Tab` | cycle plan / permission mode |
-| `Agent > AgentIdle` | `/` · `@` | slash-command · worktree-file completion |
-| `Agent > AgentIdle` | `Up` / `ctrl-p`, `Down` / `ctrl-n` | move an open completion picker; with no picker, the composer's own caret motion (and prompt history at the top of the buffer) |
-| `Agent > AgentIdle` | `ctrl-s m` | model picker |
-| `Agent > AgentWorking` | `Esc` | interrupt the turn |
-| `Agent > AgentWorking` | `Enter` | queue the composer behind the active turn |
+| `Agent > AgentIdle` | `cmd-Enter` | on a thread that has not started: start it in the background |
+| `Agent > AgentIdle` | `Shift-Enter` | newline *(not bound — the composer owns it)* |
+| `Agent > AgentIdle` | `Shift-Tab` | toggle build ⇄ plan |
+| `Agent > AgentIdle` | `/` · `@` · `$` | *(not bound — the composer inserts the character and reports a trigger)* |
+| `Agent > AgentIdle` | `Up` / `ctrl-p`, `Down` / `ctrl-n` | move an open completion picker; with no picker, the composer's own caret motion (and prompt history at the visual buffer edge) |
+| `Agent > AgentWorking` | `Esc` | interrupt the **active** turn |
+| `Agent > AgentWorking` | `Enter` | send — a **steer**, dispatched immediately, never a queue |
+| both | `ctrl-s m` · `ctrl-s e` · `ctrl-s t` | model picker · reasoning / traits menu · access mode |
 | both | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close tab · new thread · terminal fallback |
-| both | `Esc` | close a picker, else abandon a note/correction draft, else leave scroll mode, else unqueue, else interrupt |
+| both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
 | `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |
-| `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` | choose · toggle (multi-select) · answer |
-| `Agent > AgentDecision > AgentPlan` | `y` · `n` · `Enter` | approve · ask for changes · view the plan |
-| `Agent > AgentRow` | `Enter` · `u` · `o` | expand/collapse · revert the edit or turn · open in the editor |
-| `Agent > AgentNativeScroll` | `j`/`k` · `ctrl-d`/`ctrl-u` · `ctrl-f`/`ctrl-b` · `gg`/`G` · `q`/`i`/`Esc` · `ctrl-s [` | line · half page · page · oldest/newest · leave scroll mode |
+| `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` · `p` | choose · toggle (multi-select) · answer / next · previous question |
+| `Agent > AgentDecision > AgentPlan` | `y` · `n` · `Enter` | implement · refine · send whatever the composer holds |
+| `Agent > AgentNativeScroll` | `j`/`k` · `ctrl-d`/`ctrl-u` · `ctrl-f`/`ctrl-b` · `gg`/`G` · `q`/`i`/`Esc` · `ctrl-s [` | move the focused row · half page · page · oldest/newest · leave scroll mode |
+| `Agent > AgentNativeScroll > AgentRow` | `Enter` · `u` · `o` · `y` · `d` | expand/collapse · revert the edit or turn · open in the editor · copy the payload · open the diff |
 
-`ctrl-s [` freezes the transcript's tail and enters `Agent > AgentNativeScroll`, which owns the
-same `j`/`k`, half/page and `gg`/`G` vocabulary the terminal scroll mode has; the status bar's
-mode word reads `SCROLL` for as long as it is on. `G` jumps to the newest row without leaving
-the mode — the tail stays frozen until `q`, `i` or `Esc` leaves it, which is what re-arms the
-follow.
+Every one of these contexts is derived from **daemon state**, not from the view, which is what
+makes a decision own the keyboard in the same frame its gate appears rather than one frame later.
+Precedence: `AgentNativeScroll` (a frozen tail beats everything, including an open gate) >
+`AgentDecision > AgentPermission | AgentQuestion | AgentPlan` > `AgentWorking` > `AgentIdle`.
 
-The `Agent > AgentRow` bindings are declared and handled, but nothing gives a transcript row the
-focus yet, so that context never enters a chain and those three keys cannot fire today. Row
-focus is the follow-up in `NATIVE-AGENTS.md` §10; until it lands, **clicking** a tool row, a
-`thinking · 6s` line or a `worked …` fold expands and collapses it, which is what every `[⏎]
-show` hint in the transcript is currently offering.
+`ctrl-s [` freezes the transcript's tail, enters `Agent > AgentNativeScroll` and focuses the row
+nearest the bottom of the viewport; the status bar's mode word reads `SCROLL` for as long as it is
+on. `G` jumps to the newest row without leaving the mode — the tail stays frozen until `q`, `i` or
+`Esc` leaves it, which is what re-arms the follow.
 
-`e` is offered only by a provider whose gate carries an edit answer (Claude's Bash permission).
-`e` on a permission, `n` on a plan and choosing a question's "Something else…" option all *open*
-a composer field rather than answering at once: while the corrected command, the plan note or
-the free-text answer is being typed the composer keeps the bare letters and the card's keys
-stand down, so the text can start with a `y`, an `n` or contain a space. `Enter` sends it, `Esc`
-abandons it and leaves the card open.
+**Row focus lives inside scroll mode.** `Agent > AgentNativeScroll > AgentRow` is on the chain
+exactly while a row carries the focus ring, which is what finally makes `Enter`/`u`/`o`/`y`/`d`
+fire and retires the caveat that those keys were bound, handled and never entered. `j`/`k` move
+the focus and scroll to it. Clicking a tool row, a `thought …` line or a `worked …` fold still
+expands and collapses it, so the mouse reaches every `[⏎] show` hint too.
 
-`Esc` is a keymap binding only in `Agent > AgentWorking` and `Agent > AgentNativeScroll`. In
-`Agent > AgentIdle` the composer owns the key and reports it as `MultilineInputEvent::Escape`,
-which runs the same cascade — binding it there as well would take `Esc` away from the buffer that
-has to cancel an IME preedit and a selection first.
+Note that gpui matches `>` as a **subsequence**, not as a parent test, so the `ctrl-s` escape rows
+and every control are repeated on each `AgentDecision > *` context — `AgentIdle`/`AgentWorking` are
+not on that chain — and an embedded pane may not reuse any context word this table uses.
+
+**`Enter` is not bound on a permission.** A queued Return keystroke must never approve a shell
+command. `e` is offered only by a harness whose gate carries an edit answer (Claude, never Codex).
+`e` on a permission, `n` on a plan and a question's free-text answer all *open* the composer rather
+than answering at once: while that draft is being typed the composer keeps the bare letters and the
+gate's keys stand down, so the text can start with a `y`, an `n` or contain a space. `Enter` sends
+it, `Esc` abandons it and leaves the gate open.
+
+`Esc` is a keymap binding only in `Agent > AgentWorking`, `Agent > AgentNativeScroll` and
+`Agent > AgentDecision > AgentPermission`. In `Agent > AgentIdle` the composer owns the key and
+reports it, which runs the same cascade — binding it there as well would take `Esc` away from the
+buffer that has to cancel an IME preedit and a selection first. On an idle thread with nothing
+open, `Esc` does nothing, and it never quits.
 
 `1`-`5` are bound unconditionally but only the digits a question actually offers are honoured: a
 `3` on a two-option question is ignored rather than stored as an answer no label matches. The
 fifth digit exists because a question that accepts free text appends a "Something else…" row
 after its options, so a four-option question of that kind numbers its last row `5`.
 
-`/` and `@` are not bound in `Agent > AgentIdle`: the composer inserts the character and reports
-it (`MultilineInputEvent::Trigger`), which is what opens the picker, so both characters stay
-typable inside a prompt and the picker can filter on what follows them.
+`/`, `@` and `$` are not bound in `Agent > AgentIdle`: the composer inserts the character and
+reports it (`MultilineInputEvent::Trigger`), which is what opens the picker, so all three stay
+typable inside a prompt and the picker can filter on what follows them. `/` is offered at **line
+start only**, because a harness expands a slash command only when it opens the whole message.
 
 An open completion picker is a list under a text field, so DESIGN-SYSTEM §4's `ctrl-n`/`ctrl-p`
 and `↓`/`↑` move it, in that sense: `↑` moves the highlight up. All four keys are handed
 straight back to the composer when no picker is open, so a `Shift-Enter` draft still moves its
-caret and `↑` at the top of an untouched buffer still recalls the previous prompt.
+caret and `↑` at the visual top of an untouched buffer still recalls the previous prompt.
 
-`u` also reports that turn checkpoints are not built yet: reverting restores files from a
-Fleet-owned checkpoint (`NATIVE-AGENTS.md` §5), and neither the checkpoint service nor an
-`AgentRevert` request exists. The key answers, rather than silently doing nothing or quietly
-running a different, destructive action.
+`u` reverts **files** and never the conversation: it restores the worktree from a Fleet-owned
+checkpoint taken before the turn was submitted (`NATIVE-AGENTS.md` §5). The key is drawn only on a
+turn footer whose turn has a checkpoint, because a `[u]` that answers "unsupported" is worse than
+no `[u]` — a daemon that keeps none answers `Unsupported` and the hint is simply absent. A **tool
+row** never draws it: `TurnCheckpoint` names the turn a file-scope checkpoint was taken in rather
+than the edit it covered, so one row has nothing to key on, and pressing `u` there says so rather
+than reverting a turn the row did not offer to revert (`NATIVE-AGENTS.md` §13 phase 8).
 
 **Rationale [A25].** The agent surface is a detachable view of the fixed daemon session, not a
 navigation destination. Repeating the visible agent key therefore hides it, switching agent keys

@@ -70,8 +70,8 @@ pub enum RowId {
     Agent,
     /// `agentCommands.claude`.
     ClaudeCommand,
-    /// `agentCommands.opencode`.
-    OpencodeCommand,
+    /// `agentCommands.codex`.
+    CodexCommand,
     /// `sleep.enabled`.
     SleepOnSwitch,
     /// `sleep.graceMs`.
@@ -184,9 +184,9 @@ fn general_rows(config: &Config) -> Vec<SettingRow> {
             &config.agent_commands.claude,
         ),
         text_row(
-            RowId::OpencodeCommand,
-            "OpenCode command",
-            &config.agent_commands.opencode,
+            RowId::CodexCommand,
+            "Codex command",
+            &config.agent_commands.codex,
         ),
     ]
 }
@@ -469,7 +469,7 @@ pub(super) fn about_rows(app: &AppState) -> Vec<SettingRow> {
     list
 }
 
-pub(super) const AGENTS: &[&str] = &["claude", "opencode"];
+pub(super) const AGENTS: &[&str] = &["claude", "codex"];
 pub(super) const PROTOCOLS: &[&str] = &["ssh", "https"];
 /// The `Keep finished jobs for` and `Trash retention` steps, in milliseconds.
 pub(super) const DURATIONS: &[u64] = &[60_000, 300_000, 600_000, 1_800_000, 3_600_000];
@@ -479,6 +479,10 @@ pub(super) const POOL_SIZES: &[u64] = &[0, 1, 2, 3];
 pub(super) const fn agent_name(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "claude",
+        Agent::Codex => "codex",
+        // ADR 0014 keeps the legacy value decodable for one release. The row names what the
+        // config actually says rather than the harness that replaced it, because cycling the
+        // row is what moves it forward and a relabelled value would hide that it needs to.
         Agent::Opencode => "opencode",
     }
 }

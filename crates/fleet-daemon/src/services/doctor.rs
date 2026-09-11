@@ -280,6 +280,7 @@ fn host_checks(diagnostics: HostDiagnostics, legacy: bool) -> Vec<DoctorCheck> {
         let binaries = status.agent_binaries.as_ref();
         checks.extend([
             agent_binary_check(&prefix, "claude", binaries.map(|value| value.claude)),
+            agent_binary_check(&prefix, "codex", binaries.map(|value| value.codex)),
             agent_binary_check(&prefix, "opencode", binaries.map(|value| value.opencode)),
         ]);
     }

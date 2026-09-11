@@ -22,7 +22,7 @@
 //! Out of scope, per `docs/NATIVE-AGENTS.md` §8: tables, images and indented code blocks. They
 //! are kept as their own source text so nothing is silently lost.
 
-use super::{MarkdownBlock, MarkdownDocument, MarkdownInline};
+use super::{HighlightCache, MarkdownBlock, MarkdownDocument, MarkdownInline};
 
 /// How deep quotes and lists may nest before the source is kept as literal paragraphs.
 const MAX_BLOCK_DEPTH: usize = 6;
@@ -33,19 +33,23 @@ const MAX_INLINE_DEPTH: usize = 8;
 /// The largest indent that still counts as "not indented" for a block opener.
 const MAX_OPENER_INDENT: usize = 3;
 
-/// Parse a whole document.
-pub(super) fn parse(source: &str) -> MarkdownDocument {
+/// Parse a whole document, optionally reusing already-lexed fences.
+pub(super) fn parse(source: &str, cache: Option<&HighlightCache>) -> MarkdownDocument {
     let lines: Vec<&str> = source
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
         .collect();
     MarkdownDocument {
-        blocks: parse_blocks(&lines, 0),
+        blocks: parse_blocks(&lines, 0, cache),
     }
 }
 
 /// Parse a run of already-dedented lines into blocks.
-fn parse_blocks(lines: &[&str], depth: usize) -> Vec<MarkdownBlock> {
+fn parse_blocks(
+    lines: &[&str],
+    depth: usize,
+    cache: Option<&HighlightCache>,
+) -> Vec<MarkdownBlock> {
     if depth > MAX_BLOCK_DEPTH {
         return literal_paragraphs(lines);
     }
@@ -67,7 +71,7 @@ fn parse_blocks(lines: &[&str], depth: usize) -> Vec<MarkdownBlock> {
         }
 
         if let Some(fence) = fence_open(rest) {
-            let (block, next) = code_block(lines, index, indent, fence);
+            let (block, next) = code_block(lines, index, indent, fence, cache);
             blocks.push(block);
             index = next;
         } else if is_thematic_break(rest) {
@@ -83,9 +87,9 @@ fn parse_blocks(lines: &[&str], depth: usize) -> Vec<MarkdownBlock> {
             // A container that consumed nothing would spin here forever, so the paragraph
             // fallback is what actually guarantees the parser terminates on every input.
             let container = if rest.starts_with('>') {
-                Some(quote(lines, index, depth))
+                Some(quote(lines, index, depth, cache))
             } else {
-                list_marker(rest).map(|marker| list(lines, index, marker.ordered, depth))
+                list_marker(rest).map(|marker| list(lines, index, marker.ordered, depth, cache))
             };
             let (block, next) = match container {
                 Some((block, next)) if next > index => (block, next),
@@ -271,6 +275,7 @@ fn code_block(
     start: usize,
     indent: usize,
     fence: Fence<'_>,
+    cache: Option<&HighlightCache>,
 ) -> (MarkdownBlock, usize) {
     let lang = (!fence.info.is_empty()).then(|| {
         fence
@@ -282,20 +287,40 @@ fn code_block(
     });
     let mut body = Vec::new();
     let mut index = start + 1;
+    let mut closed = false;
     while index < lines.len() {
         let (line_indent, rest) = split_indent(lines[index]);
         if line_indent <= MAX_OPENER_INDENT && fence_close(rest, fence) {
             index += 1;
+            closed = true;
             break;
         }
         body.push(dedent(lines[index], indent));
         index += 1;
     }
-    (MarkdownBlock::code(lang, body.join("\n")), index)
+    let text = body.join("\n");
+    // A fence that has not closed is still streaming: it is drawn as code from its first line,
+    // but it is **not** highlighted, and it neither reads from nor writes to the cache. A
+    // partial fence must never poison it, and a fence whose colours changed per chunk would
+    // move the reader's eye on every token.
+    let block = if closed {
+        match cache {
+            Some(cache) => MarkdownBlock::cached_code(lang, text, cache),
+            None => MarkdownBlock::code(lang, text),
+        }
+    } else {
+        MarkdownBlock::streaming_code(lang, text)
+    };
+    (block, index)
 }
 
 /// Collect a block quote, including CommonMark's lazy continuation lines.
-fn quote(lines: &[&str], start: usize, depth: usize) -> (MarkdownBlock, usize) {
+fn quote(
+    lines: &[&str],
+    start: usize,
+    depth: usize,
+    cache: Option<&HighlightCache>,
+) -> (MarkdownBlock, usize) {
     let mut inner: Vec<&str> = Vec::new();
     let mut index = start;
     while index < lines.len() {
@@ -315,11 +340,20 @@ fn quote(lines: &[&str], start: usize, depth: usize) -> (MarkdownBlock, usize) {
         }
         index += 1;
     }
-    (MarkdownBlock::Quote(parse_blocks(&inner, depth + 1)), index)
+    (
+        MarkdownBlock::Quote(parse_blocks(&inner, depth + 1, cache)),
+        index,
+    )
 }
 
 /// Collect one list and every item of the same kind that follows it.
-fn list(lines: &[&str], start: usize, ordered: bool, depth: usize) -> (MarkdownBlock, usize) {
+fn list(
+    lines: &[&str],
+    start: usize,
+    ordered: bool,
+    depth: usize,
+    cache: Option<&HighlightCache>,
+) -> (MarkdownBlock, usize) {
     let mut items: Vec<Vec<MarkdownBlock>> = Vec::new();
     let mut index = start;
     while index < lines.len() {
@@ -364,7 +398,7 @@ fn list(lines: &[&str], start: usize, ordered: bool, depth: usize) -> (MarkdownB
             }
             index += 1;
         }
-        items.push(parse_blocks(&item, depth + 1));
+        items.push(parse_blocks(&item, depth + 1, cache));
     }
     (MarkdownBlock::List { ordered, items }, index)
 }

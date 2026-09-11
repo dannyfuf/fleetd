@@ -55,6 +55,10 @@ pub struct Router {
     session_intents: Arc<Mutex<BTreeMap<HostId, Vec<SessionIntent>>>>,
     terminal_frames: sessions::RemoteTerminalFrames,
     thread_registrations: Arc<agents::ThreadRegistrations>,
+    /// The durable read-through mirror of the threads other hosts own, once the agent service
+    /// has been built. `None` until then, and in every test that routes without one — which is
+    /// what keeps the routing model itself independent of the cache hanging off it.
+    agent_mirror: Mutex<Option<Arc<dyn agents::AgentMirror>>>,
 }
 
 struct EndpointPump {
@@ -105,7 +109,32 @@ impl Router {
             session_intents: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_frames: sessions::RemoteTerminalFrames::default(),
             thread_registrations,
+            agent_mirror: Mutex::new(None),
         }
+    }
+
+    /// Installs the durable native-agent mirror.
+    ///
+    /// Separate from construction because the agent service is built before the router and the
+    /// two need each other: the router asks the mirror whether it can answer an open, and the
+    /// mirror needs the router's classification to have already sent mutations upstream.
+    pub fn set_agent_mirror(&self, mirror: Arc<dyn agents::AgentMirror>) {
+        *lock(&self.agent_mirror) = Some(mirror);
+    }
+
+    /// Registers the thread ownership the local daemon's mirror already knows about.
+    ///
+    /// Without this a mirrored thread classifies as *local* between a daemon start and the
+    /// owner's first snapshot, which is exactly the window in which a mutation must be routed
+    /// upstream rather than answered here (`docs/NATIVE-AGENTS.md` §9.3).
+    pub fn adopt_mirrored_threads(&self, owners: impl IntoIterator<Item = (ThreadId, HostId)>) {
+        for (thread, host) in owners {
+            self.ids.register_thread(&host, thread);
+        }
+    }
+
+    fn agent_mirror(&self) -> Option<Arc<dyn agents::AgentMirror>> {
+        lock(&self.agent_mirror).clone()
     }
 
     #[must_use]
@@ -131,6 +160,16 @@ impl Router {
 
     pub async fn forward(&self, host: &HostId, body: RequestBody) -> DaemonResult<ResponseBody> {
         let endpoint = self.endpoint(host)?;
+        let mirror = self.agent_mirror();
+        // Snapshot-then-delta: a warm mirrored thread is answered from this daemon's own database
+        // and the owner is asked for the rest in the background (§9.3). It runs before the link
+        // state is consulted, because disconnection changes the status of a transcript and never
+        // its readability.
+        if let Some(answer) =
+            agents::open_from_mirror(mirror.as_ref(), &endpoint, host, &body).await
+        {
+            return answer;
+        }
         if endpoint.state() == LinkState::Down {
             return Err(unreachable(host));
         }
@@ -141,6 +180,17 @@ impl Router {
             _ => None,
         };
         let attaching = matches!(body, RequestBody::AttachTerminal { .. });
+        // Kept for the mirror, which records what the owner answered against the request that
+        // asked for it, because `body` is consumed by the id translation below. Only the three
+        // requests whose answers a cache may take are cloned: terminal input is forwarded through
+        // here too, and a clone per keystroke-sized frame is a cost with nothing to show for it.
+        let mirrored_body = matches!(
+            body,
+            RequestBody::AgentThreadOpen { .. }
+                | RequestBody::AgentThreadList
+                | RequestBody::AgentThreadCreate { .. }
+        )
+        .then(|| body.clone());
         if attaching
             && let (Some(terminal), Some(events)) = (local_terminal, lock(&self.event_bus).clone())
         {
@@ -172,7 +222,7 @@ impl Router {
         {
             sessions::on_detach(&self.terminal_frames, host, terminal);
         }
-        response
+        let response = response
             .map(|response| {
                 if let (Some(request), ResponseBody::Session(session)) =
                     (session_request, &response)
@@ -188,7 +238,13 @@ impl Router {
                 }
                 translate::response_to_local(response, host, &self.ids)
             })
-            .map_err(|error| annotate_remote_error(host, error))
+            .map_err(|error| annotate_remote_error(host, error));
+        // A cold mirror warms up on the way back, so the *next* open of this thread is a local
+        // read. The answer the client gets is the owner's either way.
+        if let (Ok(answer), Some(request)) = (&response, &mirrored_body) {
+            agents::absorb_forwarded(mirror.as_ref(), host, request, answer).await;
+        }
+        response
     }
 
     pub async fn fanout(
@@ -199,11 +255,18 @@ impl Router {
             let result = match self.forward(&host, body.clone()).await {
                 Err(error) => {
                     if matches!(body, RequestBody::AgentThreadList) {
-                        let cached = self
-                            .mirror
-                            .fragment(&host)
-                            .map(|fragment| fragment.snapshot.agent_threads)
-                            .unwrap_or_default();
+                        // Cached summaries stay visible while a host is unreachable, from the
+                        // durable mirror first and from the in-memory snapshot fragment when
+                        // this daemon has no mirror installed (§9.3).
+                        let mut cached =
+                            agents::cached_threads(self.agent_mirror().as_ref(), &host).await;
+                        if cached.is_empty() {
+                            cached = self
+                                .mirror
+                                .fragment(&host)
+                                .map(|fragment| fragment.snapshot.agent_threads)
+                                .unwrap_or_default();
+                        }
                         Ok(translate::response_to_local(
                             ResponseBody::AgentThreads(cached),
                             &host,
@@ -294,6 +357,7 @@ impl Router {
         let event_cancel = cancel.clone();
         let event_pumps = Arc::clone(&self.endpoint_pumps);
         let event_endpoint = Arc::clone(&endpoint);
+        let event_agent_mirror = self.agent_mirror();
         runtime.spawn(async move {
             loop {
                 let event = match tokio::select! {
@@ -307,6 +371,16 @@ impl Router {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
+                // Mirrored before it is republished: a client that reacts to an event by
+                // opening the thread must not be able to read a transcript older than the event
+                // that woke it (§9.3).
+                agents::ingest_remote_event(
+                    event_agent_mirror.as_ref(),
+                    &event_endpoint,
+                    &event_host,
+                    &event,
+                )
+                .await;
                 if let Event::SnapshotChanged(snapshot) = &event {
                     event_mirror.apply(&event_host, snapshot.clone());
                     agents::register_thread_events(&event_threads, &event, &event_host, &event_ids);
@@ -347,6 +421,7 @@ impl Router {
         let state_cancel = cancel;
         let state_pumps = Arc::clone(&self.endpoint_pumps);
         let state_endpoint = Arc::clone(&endpoint);
+        let state_agent_mirror = self.agent_mirror();
         runtime.spawn(async move {
             loop {
                 let state = *states.borrow_and_update();
@@ -374,6 +449,11 @@ impl Router {
                     }
                 } else if state == LinkState::Ready {
                     if let Some(snapshot) = endpoint.last_snapshot_seen() {
+                        // The durable mirror learns the host's threads before anything asks for
+                        // one, so a reconnect leaves every header cached even if no tab is open.
+                        if let Some(mirror) = &state_agent_mirror {
+                            mirror.adopt(&state_host, &snapshot.agent_threads).await;
+                        }
                         state_mirror.apply(&state_host, snapshot.clone());
                         state_ids.replace_host_inventory(
                             &state_host,

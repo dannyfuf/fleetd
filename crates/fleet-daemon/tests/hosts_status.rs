@@ -38,7 +38,7 @@ async fn fake_machine_and_remote_assemble_ready_status_and_skip_probe() {
     });
     machine.push_exec(Ok(ExecOutput {
         status: 0,
-        stdout: "claude\nopencode\n".to_owned(),
+        stdout: "claude\ncodex\nopencode\n".to_owned(),
         stderr: String::new(),
     }));
     machine.push_exec(Ok(ExecOutput {
@@ -70,6 +70,7 @@ async fn fake_machine_and_remote_assemble_ready_status_and_skip_probe() {
         ready.agent_binaries,
         Some(AgentBinaries {
             claude: true,
+            codex: true,
             opencode: true,
         })
     );
@@ -80,6 +81,7 @@ async fn fake_machine_and_remote_assemble_ready_status_and_skip_probe() {
             "-lc",
             concat!(
                 "if command -v claude >/dev/null 2>&1; then printf 'claude\\n'; fi; ",
+                "if command -v codex >/dev/null 2>&1; then printf 'codex\\n'; fi; ",
                 "if command -v opencode >/dev/null 2>&1; then printf 'opencode\\n'; fi",
             ),
         ]
@@ -94,6 +96,7 @@ async fn fake_machine_and_remote_assemble_ready_status_and_skip_probe() {
         down.agent_binaries,
         Some(AgentBinaries {
             claude: true,
+            codex: false,
             opencode: false,
         })
     );
@@ -134,6 +137,7 @@ async fn fake_machine_preserves_down_probe_error_and_resolved_address() {
         status.agent_binaries,
         Some(AgentBinaries {
             claude: false,
+            codex: false,
             opencode: false,
         })
     );

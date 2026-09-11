@@ -73,6 +73,7 @@ impl Sessions {
                     .map_err(|error| DaemonError::Validation(error.to_string()))?;
                 let name = match agent {
                     Agent::Claude => "claude",
+                    Agent::Codex => "codex",
                     Agent::Opencode => "opencode",
                 };
                 (
@@ -97,6 +98,7 @@ impl Sessions {
                 .map_err(|error| DaemonError::Join(error.to_string()))??;
                 let name = match agent {
                     Agent::Claude => "claude",
+                    Agent::Codex => "codex",
                     Agent::Opencode => "opencode",
                 };
                 (

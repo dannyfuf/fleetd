@@ -114,8 +114,8 @@ pub use list_view::{
 pub use list_view::{ListCursor, ListView};
 pub use log_view::{LOG_TAIL_LINES, LogCommand, LogView};
 pub use markdown::{
-    CodeHighlights, MarkdownBlock, MarkdownDocument, MarkdownInline, markdown,
-    parse_markdown as parse_markdown_document,
+    CodeHighlights, HighlightCache, MarkdownBlock, MarkdownDocument, MarkdownInline, markdown,
+    parse_markdown as parse_markdown_document, parse_markdown_cached as parse_markdown_prefix,
 };
 pub use markdown_text::{
     LIST_MARKER_CH, MAX_HEADING_LEVEL, MarkdownText, MdBlock, MdSpan, parse_markdown,
@@ -123,7 +123,7 @@ pub use markdown_text::{
 pub use mode_word::{Mode, ModeWord};
 pub use multiline_input::{
     HISTORY_LIMIT, MULTILINE_INPUT_KEY_CONTEXT, MultilineBuffer, MultilineInput,
-    MultilineInputEvent, PromptHistory,
+    MultilineInputEvent, PromptHistory, Trigger,
 };
 pub use number_field::NumberField;
 pub use overlay::{Overlay, OverlayLayer};

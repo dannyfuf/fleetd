@@ -49,8 +49,8 @@ fn creation_input_is_discarded_on_agent_switch_or_generation_change() {
         agent: Agent::Claude,
         generation: 7,
     };
-    let opencode = PendingOwner {
-        agent: Agent::Opencode,
+    let codex = PendingOwner {
+        agent: Agent::Codex,
         generation: 7,
     };
     let reconnected = PendingOwner {
@@ -59,10 +59,10 @@ fn creation_input_is_discarded_on_agent_switch_or_generation_change() {
     };
     let mut local = Local::default();
     assert!(local.queue_input(claude, PendingInput::Paste("stale".to_owned())));
-    assert!(local.queue_input(opencode, PendingInput::Paste("switched".to_owned())));
+    assert!(local.queue_input(codex, PendingInput::Paste("switched".to_owned())));
     assert!(local.take_pending(claude).is_empty());
     assert_eq!(
-        local.take_pending(opencode),
+        local.take_pending(codex),
         vec![PendingInput::Paste("switched".to_owned())]
     );
 

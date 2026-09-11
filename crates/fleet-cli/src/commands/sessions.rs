@@ -74,7 +74,7 @@ pub(super) async fn agent(
 ) -> Result<CommandOutput, ProtoError> {
     let selected = match requested {
         Some(AgentChoice::Claude) => Agent::Claude,
-        Some(AgentChoice::Opencode) => Agent::Opencode,
+        Some(AgentChoice::Codex) => Agent::Codex,
         None => client.get_config().await?.agent,
     };
     let session = client.ensure_session(None, Some(selected), false).await?;

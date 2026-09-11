@@ -164,6 +164,7 @@ impl DaemonClient {
                 client: HelloClient {
                     kind: ClientKind::Cli,
                     host_id: None,
+                    capabilities: Vec::new(),
                 },
             })
             .await;

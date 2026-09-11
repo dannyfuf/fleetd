@@ -11,6 +11,19 @@ agent requests to the daemon that owns the worktree. That daemon runs the provid
 transcript; the structured protocol, reducer, completion authority, and UI decisions below remain
 in force.
 
+**Superseded in part by [ADR 0013](0013-sqlite-agent-transcripts.md)** (SQLite replaces the
+NDJSON log and `index.json`) **and by [ADR 0014](0014-drop-opencode-add-codex.md)** (Codex
+replaces OpenCode). Two bullets below are therefore historical and are kept because they record
+what was verified: "one managed `opencode serve` per thread" is withdrawn with the harness, and
+"Rejected for the first release: Codex app-server" is the decision 0014 reversed, with its reasons
+written down there.
+
+**Amended by the harness seam of `NATIVE-AGENTS.md` §3.1.** "The daemon owns the process" is
+narrower than it reads: the *adapter* owns the process and the *manager* owns the decision to
+replace it. `Harness::apply_runtime` reports a `RestartPlan` rather than performing one, because
+Claude's model, effort and mode are launch flags and only the manager knows whether a turn is
+running. A control change that costs a restart is refused mid-turn rather than killing the turn.
+
 - **Speak the structured protocol, never parse the terminal.** Both adapters consume a machine
   protocol and normalise it into one `AgentEvent` stream. Screen-scraping a harness's TUI was
   rejected: the output is a rendering, not a contract, and every state Fleet needs (a turn

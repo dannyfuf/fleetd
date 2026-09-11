@@ -231,6 +231,7 @@ impl CommandEndpoint {
                     client: HelloClient {
                         kind: ClientKind::Proxy,
                         host_id: Some("mirror-test".parse().expect("proxy id")),
+                        capabilities: Vec::new(),
                     },
                 },
             })

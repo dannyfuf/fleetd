@@ -8,19 +8,21 @@ use fleet_core::{
     config::default_config,
     ids::{ContextId, HostId, RepoId, WorktreeId},
     model::{Context, HostConfigEntry, Repo, RepoHooks, Worktree},
+    paths::FleetHome,
     state::default_state,
 };
 use fleet_daemon::{
+    DaemonResult,
     adapters::{clock::SystemClock, files::RealFiles},
-    machines::{LinkOptions, MachineProvider, Machines, RemoteEndpoint, RemoteLink},
+    machines::{LinkOptions, MachineProvider, Machines, RemoteEndpoint, RemoteHello, RemoteLink},
     server::BroadcastBus,
     services::{
         mirror::Mirror,
         router::{
             Router, Target,
             agents::{
-                ThreadRegistrations, agent_list_target, register_mirror_threads,
-                register_thread_events,
+                AgentMirror, MirrorWrite, ThreadRegistrations, agent_list_target,
+                register_mirror_threads, register_thread_events,
             },
         },
     },
@@ -36,10 +38,13 @@ use fleet_proto::{
 
 mod infra;
 
+#[path = "agents_remote/mirror.rs"]
+mod mirror;
+
 #[tokio::test]
 async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let local_agents = temp.path().join("agents");
+    let local_agents = FleetHome::new(temp.path()).agents_path();
     let host = host("dev-box");
     let worktree = worktree("remote-agent");
     let thread = ThreadId::new();
@@ -108,6 +113,7 @@ async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
         input: UserInput {
             text: "continue".to_owned(),
             attachments: Vec::new(),
+            item: None,
         },
     };
     assert_eq!(router.route(&send), Target::Host(host.clone()));
@@ -125,6 +131,10 @@ async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
     let open = RequestBody::AgentThreadOpen {
         thread,
         from_seq: None,
+        after_seq: None,
+        turn_limit: None,
+        before_cursor: None,
+        request_sync_marker: false,
     };
     assert_eq!(router.route(&open), Target::Host(host.clone()));
     remote.push_response(Ok(ResponseBody::AgentThreadSnapshot {
@@ -322,6 +332,7 @@ async fn two_daemon_agent_resume_over_real_remote_link() {
                 input: UserInput {
                     text: "continue".to_owned(),
                     attachments: Vec::new(),
+                    item: None,
                 },
             },
         )
@@ -340,6 +351,10 @@ async fn two_daemon_agent_resume_over_real_remote_link() {
             RequestBody::AgentThreadOpen {
                 thread: summary.thread,
                 from_seq: None,
+                after_seq: None,
+                turn_limit: None,
+                before_cursor: None,
+                request_sync_marker: false,
             },
         )
         .await
@@ -351,11 +366,11 @@ async fn two_daemon_agent_resume_over_real_remote_link() {
         projection
             .items
             .iter()
-            .any(|item| item.text.as_deref() == Some("remote continuity")),
+            .any(|item| matches!(&item.kind, fleet_core::agents::ItemKind::AssistantText { text } if text == "remote continuity")),
         "persisted transcript must survive the remote daemon restart"
     );
     assert!(
-        !local_home.join("agents").exists(),
+        !FleetHome::new(&local_home).agents_path().exists(),
         "remote transcripts must never be persisted by the local daemon"
     );
     link.close().await;
@@ -371,13 +386,17 @@ async fn wait_for_remote_text(router: &Router, host: &HostId, thread: ThreadId, 
                     RequestBody::AgentThreadOpen {
                         thread,
                         from_seq: None,
+                        after_seq: None,
+                        turn_limit: None,
+                        before_cursor: None,
+                        request_sync_marker: false,
                     },
                 )
                 .await
                 && projection
                     .items
                     .iter()
-                    .any(|item| item.text.as_deref() == Some(expected))
+                    .any(|item| matches!(&item.kind, fleet_core::agents::ItemKind::AssistantText { text } if text == expected))
             {
                 return;
             }
@@ -416,9 +435,9 @@ async fn prepare_remote_agent_home(home: &std::path::Path) -> WorktreeId {
         &script,
         r##"#!/bin/sh
 case " $* " in
-  *" --version "*) printf '%s\n' '2.1.0 (Claude Code)'; exit 0 ;;
+  *" --version "*) printf '%s\n' '2.1.266 (Claude Code)'; exit 0 ;;
 esac
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"cursor-remote","model":"test","tools":[],"slash_commands":[]}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"cursor-remote","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}'
 while IFS= read -r line; do
   printf '%s\n' '{"type":"assistant","message":{"id":"msg-1","content":[{"type":"text","text":"remote continuity"}]},"parent_tool_use_id":null}'
   printf '%s\n' '{"type":"result","subtype":"success","terminal_reason":"completed","usage":{}}'

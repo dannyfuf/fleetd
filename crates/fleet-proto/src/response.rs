@@ -1,7 +1,7 @@
 //! Daemon-to-client request responses.
 
 use fleet_core::{
-    agents::{AgentThreadSummary, SeqEvent, ThreadProjection},
+    agents::{AgentThreadSummary, ItemId, SeqEvent, StreamKind, ThreadId, ThreadProjection},
     board::{BackendDescriptor, BackendSchema, BoardSummary, BoardView, Card},
     cache::RepoCache,
     config::Config,
@@ -13,7 +13,12 @@ use fleet_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ProtoError, job::JobRecord, snapshot::Snapshot};
+use crate::{
+    agents::{AgentRevertReport, AgentThreadWindow, TurnCheckpoint},
+    error::ProtoError,
+    job::JobRecord,
+    snapshot::Snapshot,
+};
 
 /// A correlated daemon response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -219,14 +224,49 @@ pub enum ResponseBody {
     /// Summary of a newly allocated native-agent thread.
     AgentThreadCreated(AgentThreadSummary),
     /// Materialized thread state and the ordered persisted tail after it.
+    ///
+    /// The version-6 unbounded answer to `AgentThreadOpen`, retained byte for byte for peers
+    /// without [`AGENT_WINDOW_CAPABILITY`](crate::AGENT_WINDOW_CAPABILITY). `projection` never
+    /// changes meaning: narrowing it from "the whole thread" to "a window" would repurpose a
+    /// field (`rust-ipc-protocol` Rule 7), so the bounded answer is
+    /// [`ResponseBody::AgentThreadWindow`] instead. Above
+    /// [`SNAPSHOT_MAX_WIRE_BYTES`](crate::agents::SNAPSHOT_MAX_WIRE_BYTES) the daemon refuses
+    /// this shape with [`snapshot_ceiling_error`](crate::agents::snapshot_ceiling_error) rather
+    /// than emitting a frame the peer cannot decode.
     AgentThreadSnapshot {
         /// Materialized reducer projection.
         projection: ThreadProjection,
         /// Events after the snapshot or requested cursor.
         events_after: Vec<SeqEvent>,
     },
+    /// A bounded window of a thread's transcript, with the page metadata to walk backwards.
+    ///
+    /// Answers an `AgentThreadOpen` for which
+    /// [`RequestBody::wants_window`](crate::request::RequestBody::wants_window) holds. Boxed
+    /// because most responses on this wire are an ack: an inline window would make every
+    /// `ResponseBody` as large as the largest transcript slice.
+    AgentThreadWindow(Box<AgentThreadWindow>),
+    /// A slice of a stored item body, for an output a window elided.
+    AgentItemBodyChunk {
+        /// Owning thread.
+        thread: ThreadId,
+        /// Item whose body this slices.
+        item: ItemId,
+        /// Stream the slice came from.
+        stream: StreamKind,
+        /// Byte offset this slice starts at.
+        offset: u64,
+        /// Total stored bytes in that stream, so the client knows when it is done.
+        total: u64,
+        /// The slice itself.
+        text: String,
+    },
     /// A native-agent mutation was accepted.
     AgentAck,
+    /// The Fleet-owned checkpoints one thread's worktree can be reverted to, oldest first.
+    AgentCheckpoints(Vec<TurnCheckpoint>),
+    /// What a revert put back, and what it removed.
+    AgentReverted(AgentRevertReport),
     /// Board summaries for a context or all contexts.
     Boards(Vec<BoardSummary>),
     /// Full board document view.
@@ -420,20 +460,141 @@ mod tests {
             ThreadId::new(),
             WorktreeId::try_from("acme/api#native-agents")
                 .unwrap_or_else(|error| panic!("{error}")),
-            AgentKind::OpenCode,
+            AgentKind::Codex,
         );
         let summary = projection.summary(Default::default());
+        let turn = fleet_core::agents::TurnId::new();
+        let checkpoint =
+            crate::agents::CheckpointId::from_parts(4, crate::agents::CheckpointScope::File, turn);
         for body in [
             ResponseBody::AgentThreads(vec![summary.clone()]),
-            ResponseBody::AgentThreadCreated(summary),
+            ResponseBody::AgentThreadCreated(summary.clone()),
             ResponseBody::AgentThreadSnapshot {
                 projection,
                 events_after: Vec::new(),
             },
+            ResponseBody::AgentThreadWindow(Box::new(AgentThreadWindow {
+                summary,
+                session: crate::agents::AgentSessionView {
+                    tools: vec!["Read".to_owned()],
+                    ..crate::agents::AgentSessionView::default()
+                },
+                window: crate::agents::TranscriptWindow::default(),
+                page: Some(crate::agents::TranscriptPage {
+                    before_cursor: Some("fat.1.0000".to_owned()),
+                    has_more: true,
+                    thread_seq: fleet_core::agents::Seq(12),
+                }),
+                head_seq: fleet_core::agents::Seq(12),
+                projected_seq: fleet_core::agents::Seq(12),
+                events_after: Vec::new(),
+                synchronized: true,
+            })),
+            ResponseBody::AgentItemBodyChunk {
+                thread: ThreadId::new(),
+                item: ItemId::new(),
+                stream: StreamKind::CommandOutput,
+                offset: 262_144,
+                total: 1_048_576,
+                text: "…".to_owned(),
+            },
             ResponseBody::AgentAck,
+            ResponseBody::AgentCheckpoints(vec![crate::agents::TurnCheckpoint {
+                id: checkpoint.clone(),
+                scope: crate::agents::CheckpointScope::File,
+                turn,
+                ordinal: 4,
+                at: chrono::Utc::now(),
+            }]),
+            ResponseBody::AgentReverted(crate::agents::AgentRevertReport {
+                thread: ThreadId::new(),
+                checkpoint,
+                restored: 1,
+                deleted: 0,
+                paths: vec!["src/lib.rs".to_owned()],
+            }),
         ] {
             assert_round_trip(body);
         }
         assert_round_trip(PermissionMode::Ask);
+    }
+
+    #[test]
+    fn a_window_response_is_measured_against_the_two_mebibyte_budget() {
+        use fleet_core::{
+            agents::{AgentKind, Item, ItemKind, Seq, ThreadProjection, TurnId},
+            ids::WorktreeId,
+        };
+
+        let thread = ThreadId::new();
+        let worktree = WorktreeId::try_from("acme/api#native-agents")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let projection = ThreadProjection::new(thread, worktree, AgentKind::Codex);
+        let turn = TurnId::new();
+        // One item per 4 KiB of output; 2 MiB of tool output is what a `cargo build` transcript
+        // looks like, and it is the shape that made the unbounded snapshot undecodable.
+        // Built from the wire shape rather than a struct literal: `fleet-proto` deliberately
+        // does not depend on `chrono`, and a fixture that decodes is a fixture that proves the
+        // field names too.
+        let template: Item = serde_json::from_value(serde_json::json!({
+            "id": ItemId::new(),
+            "turn": turn,
+            "kind": {"type": "assistant_text", "data": {"text": ""}},
+            "status": "completed",
+            "started": "2026-09-07T12:00:00Z",
+        }))
+        .unwrap_or_else(|error| panic!("{error}"));
+        let heavy = crate::agents::TranscriptWindow {
+            items: (0..600)
+                .map(|index| Item {
+                    id: ItemId::new(),
+                    kind: ItemKind::AssistantText {
+                        text: format!("{index}").repeat(2_048),
+                    },
+                    ..template.clone()
+                })
+                .collect(),
+            ..crate::agents::TranscriptWindow::default()
+        };
+        let bytes = heavy.wire_bytes().unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(
+            bytes > crate::agents::WINDOW_MAX_WIRE_BYTES,
+            "the fixture has to be heavier than the budget to prove the budget bites: {bytes}"
+        );
+        assert!(
+            !heavy
+                .fits_wire_budget()
+                .unwrap_or_else(|error| panic!("{error}")),
+        );
+
+        // The same window narrowed to what a first paint needs fits with room to spare, which is
+        // the property the daemon's `turn_limit` clamp has to preserve.
+        let narrowed = crate::agents::TranscriptWindow {
+            items: heavy.items.into_iter().take(10).collect(),
+            ..crate::agents::TranscriptWindow::default()
+        };
+        assert!(
+            narrowed
+                .fits_wire_budget()
+                .unwrap_or_else(|error| panic!("{error}"))
+        );
+
+        let window = AgentThreadWindow {
+            summary: projection.summary(Default::default()),
+            session: crate::agents::AgentSessionView::default(),
+            window: narrowed,
+            page: None,
+            head_seq: Seq(600),
+            projected_seq: Seq(600),
+            events_after: Vec::new(),
+            synchronized: true,
+        };
+        assert!(
+            window
+                .fits_wire_budget()
+                .unwrap_or_else(|error| panic!("{error}")),
+            "a window response is measured whole, envelope included"
+        );
     }
 }

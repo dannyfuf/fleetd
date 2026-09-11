@@ -38,7 +38,7 @@ use crate::actions::{
     agent, board, card_detail, confirm, context_dialog, create_worktree, daemon, dialog, filter,
     first_run,
     fleet::{
-        FocusStickyError, OpenAgentClaude, OpenAgentOpencode, OpenHelp, OpenJobs, OpenPalette,
+        FocusStickyError, OpenAgentClaude, OpenAgentCodex, OpenHelp, OpenJobs, OpenPalette,
         OpenSettings, Quit, QuitAndStopDaemon, Refresh, UpdateFleet,
     },
     help, hub, jobs, native_agent, palette, prefix, prs, quit_daemon_dialog, quit_dialog, repos,
@@ -234,7 +234,7 @@ key_table! {
     "i",            "Hub" => hub::ToggleDetail;
     "H",            "Hub" => hub::ToggleRepoRail;
     "a",            "Hub" => OpenAgentClaude;
-    "A",            "Hub" => OpenAgentOpencode;
+    "A",            "Hub" => OpenAgentCodex;
     "r",            "Hub" => Refresh;
     "U",            "Hub" => UpdateFleet;
     "N",            "Hub" => hub::NewContext;
@@ -318,7 +318,7 @@ key_table! {
     // §10 phase 6: `^s a` / `^s A` default to a native thread; the PTY popup stays reachable
     // as an explicit fallback on `^s F`, and `a` / `A` on the Hub still open the popup.
     "a",            "Workspace > Prefix" => native_agent::NewClaude;
-    "A",            "Workspace > Prefix" => native_agent::NewOpenCode;
+    "A",            "Workspace > Prefix" => native_agent::NewCodex;
     "F",            "Workspace > Prefix" => native_agent::TerminalFallback;
     "z",            "Workspace > Prefix" => prefix::ToggleZoom;
     "v",            "Workspace > Prefix" => prefix::ToggleWatchPane;
@@ -373,7 +373,7 @@ key_table! {
     "cmd-v",        "Agent > Prefix" => agent::PasteClipboard;
     "q",            "Agent > Prefix" => agent::Hide;
     "a",            "Agent > Prefix" => OpenAgentClaude;
-    "A",            "Agent > Prefix" => OpenAgentOpencode;
+    "A",            "Agent > Prefix" => OpenAgentCodex;
     "[",            "Agent > Prefix" => prefix::EnterScroll;
     "]",            "Agent > Prefix" => prefix::Paste;
     "r",            "Agent > Prefix" => prefix::RestartCommand;
@@ -400,17 +400,20 @@ key_table! {
     "i",            "Agent > Scroll" => scroll::Exit;
     "escape",       "Agent > Scroll" => scroll::Escape;
 
-    // Native structured agent contexts coexist with the legacy Terminal/Prefix/Scroll popup
-    // during migration. Deeper gate-shape contexts resolve the deliberately reused bare keys.
+    // The native structured agent contexts coexist with the legacy Terminal/Prefix/Scroll popup
+    // during migration. `docs/NATIVE-AGENTS.md` §12 is the authoritative table and
+    // `docs/KEYMAP.md` § *Native agent thread* mirrors it.
+    //
+    // Three rules come with it. **gpui matches `>` as a subsequence, not as a parent test**, so
+    // the `^s` escape rows have to be repeated on every `AgentDecision > *` context —
+    // `AgentIdle`/`AgentWorking` are not on that chain. **Row focus lives inside scroll mode**,
+    // which is why `AgentRow` is only ever entered under `AgentNativeScroll`. And `/`, `@`, `$`,
+    // `⇧⏎` and `esc`-on-idle are deliberately **unbound**: the composer inserts the character
+    // and reports it, which is what keeps all three triggers typable and lets an IME preedit and
+    // a selection cancel before the `esc` cascade runs.
     "enter",         "Agent > AgentIdle" => native_agent::Send;
+    "cmd-enter",     "Agent > AgentIdle" => native_agent::SendBackground;
     "shift-tab",     "Agent > AgentIdle" => native_agent::PlanMode;
-    // `/`, `@` and `⇧⏎` are deliberately unbound: DESIGN-SYSTEM §6.6 has the composer *insert*
-    // the character and report it as `MultilineInputEvent::Trigger`, which is what opens the
-    // picker. Binding them here consumes the keystroke, so neither character could be typed
-    // into a prompt and the picker's query stayed empty forever. `⇧⏎` was bound to an action
-    // no listener entered (APP-CONTRACTS §6: "actions stop at the first listener … the failure
-    // is silent"), and only worked because gpui let the unhandled key fall through to the
-    // composer that already owns it.
     // DESIGN-SYSTEM §4: "a list under a text field moves with `ctrl-n`/`ctrl-p` or `↓`/`↑`".
     // With no picker open both keys are handed straight back to the composer's own caret
     // motion, so binding them costs a draft nothing.
@@ -419,14 +422,33 @@ key_table! {
     "down",          "Agent > AgentIdle" => native_agent::HistoryNext;
     "ctrl-n",        "Agent > AgentIdle" => native_agent::HistoryNext;
     "ctrl-s m",      "Agent > AgentIdle" => native_agent::Model;
+    "ctrl-s e",      "Agent > AgentIdle" => native_agent::Traits;
+    "ctrl-s t",      "Agent > AgentIdle" => native_agent::AccessMode;
     "ctrl-s [",      "Agent > AgentIdle" => native_agent::Scroll;
     "ctrl-s a",      "Agent > AgentIdle" => native_agent::NewClaude;
-    "ctrl-s A",      "Agent > AgentIdle" => native_agent::NewOpenCode;
+    "ctrl-s A",      "Agent > AgentIdle" => native_agent::NewCodex;
     "ctrl-s x",      "Agent > AgentIdle" => native_agent::CloseTab;
     "ctrl-s F",      "Agent > AgentIdle" => native_agent::TerminalFallback;
 
-    // §9's `^s [` is a mode, not just a frozen tail: the transcript takes the same vocabulary
-    // the terminal scroll mode has for as long as it is on.
+    "escape",        "Agent > AgentWorking" => native_agent::Stop;
+    "enter",         "Agent > AgentWorking" => native_agent::Steer;
+    "cmd-enter",     "Agent > AgentWorking" => native_agent::Steer;
+    "shift-tab",     "Agent > AgentWorking" => native_agent::PlanMode;
+    "up",            "Agent > AgentWorking" => native_agent::History;
+    "ctrl-p",        "Agent > AgentWorking" => native_agent::History;
+    "down",          "Agent > AgentWorking" => native_agent::HistoryNext;
+    "ctrl-n",        "Agent > AgentWorking" => native_agent::HistoryNext;
+    "ctrl-s m",      "Agent > AgentWorking" => native_agent::Model;
+    "ctrl-s e",      "Agent > AgentWorking" => native_agent::Traits;
+    "ctrl-s t",      "Agent > AgentWorking" => native_agent::AccessMode;
+    "ctrl-s [",      "Agent > AgentWorking" => native_agent::Scroll;
+    "ctrl-s a",      "Agent > AgentWorking" => native_agent::NewClaude;
+    "ctrl-s A",      "Agent > AgentWorking" => native_agent::NewCodex;
+    "ctrl-s x",      "Agent > AgentWorking" => native_agent::CloseTab;
+    "ctrl-s F",      "Agent > AgentWorking" => native_agent::TerminalFallback;
+
+    // §12: `^s [` is a real mode — the transcript takes the same vocabulary the terminal scroll
+    // mode has for as long as it is on, and `G` is "newest", not a way out of the mode.
     "j",             "Agent > AgentNativeScroll" => native_agent::ScrollLineDown;
     "k",             "Agent > AgentNativeScroll" => native_agent::ScrollLineUp;
     "ctrl-d",        "Agent > AgentNativeScroll" => native_agent::ScrollHalfPageDown;
@@ -442,28 +464,47 @@ key_table! {
     "ctrl-s x",      "Agent > AgentNativeScroll" => native_agent::CloseTab;
     "ctrl-s F",      "Agent > AgentNativeScroll" => native_agent::TerminalFallback;
 
-    "escape",        "Agent > AgentWorking" => native_agent::Stop;
-    "enter",         "Agent > AgentWorking" => native_agent::Queue;
-    "ctrl-s [",      "Agent > AgentWorking" => native_agent::Scroll;
-    "ctrl-s a",      "Agent > AgentWorking" => native_agent::NewClaude;
-    "ctrl-s A",      "Agent > AgentWorking" => native_agent::NewOpenCode;
-    "ctrl-s x",      "Agent > AgentWorking" => native_agent::CloseTab;
-    "ctrl-s F",      "Agent > AgentWorking" => native_agent::TerminalFallback;
+    // Row focus: entered only under `AgentNativeScroll`, which is what finally makes these five
+    // fire and retires the long-standing caveat that `Agent > AgentRow` was bound, handled and
+    // never entered.
+    "enter",         "Agent > AgentNativeScroll > AgentRow" => native_agent::ExpandRow;
+    "u",             "Agent > AgentNativeScroll > AgentRow" => native_agent::Revert;
+    "o",             "Agent > AgentNativeScroll > AgentRow" => native_agent::OpenInEditor;
+    "y",             "Agent > AgentNativeScroll > AgentRow" => native_agent::CopyRow;
+    "d",             "Agent > AgentNativeScroll > AgentRow" => native_agent::DiffRow;
 
     // §1 keeps the terminal path "as an explicit fallback, now on `^s F`" and §3.3 rule 4 lets
-    // an unanswered gate outlive its turn: without these the escape hatches are dead keys for
-    // as long as a card is open. gpui matches `>` as a subsequence in the other direction, so
-    // the `AgentIdle` / `AgentWorking` bindings do not reach these contexts.
+    // an unanswered gate outlive its turn: without these rows the escape hatches and every
+    // control are dead keys for as long as a decision is open. gpui's subsequence match in the
+    // other direction is why they cannot be inherited from `AgentIdle`.
     "ctrl-s [",      "Agent > AgentDecision > AgentPermission" => native_agent::Scroll;
     "ctrl-s x",      "Agent > AgentDecision > AgentPermission" => native_agent::CloseTab;
     "ctrl-s F",      "Agent > AgentDecision > AgentPermission" => native_agent::TerminalFallback;
+    "ctrl-s m",      "Agent > AgentDecision > AgentPermission" => native_agent::Model;
+    "ctrl-s e",      "Agent > AgentDecision > AgentPermission" => native_agent::Traits;
+    "ctrl-s t",      "Agent > AgentDecision > AgentPermission" => native_agent::AccessMode;
+    "ctrl-s a",      "Agent > AgentDecision > AgentPermission" => native_agent::NewClaude;
+    "ctrl-s A",      "Agent > AgentDecision > AgentPermission" => native_agent::NewCodex;
     "ctrl-s [",      "Agent > AgentDecision > AgentQuestion" => native_agent::Scroll;
     "ctrl-s x",      "Agent > AgentDecision > AgentQuestion" => native_agent::CloseTab;
     "ctrl-s F",      "Agent > AgentDecision > AgentQuestion" => native_agent::TerminalFallback;
+    "ctrl-s m",      "Agent > AgentDecision > AgentQuestion" => native_agent::Model;
+    "ctrl-s e",      "Agent > AgentDecision > AgentQuestion" => native_agent::Traits;
+    "ctrl-s t",      "Agent > AgentDecision > AgentQuestion" => native_agent::AccessMode;
+    "ctrl-s a",      "Agent > AgentDecision > AgentQuestion" => native_agent::NewClaude;
+    "ctrl-s A",      "Agent > AgentDecision > AgentQuestion" => native_agent::NewCodex;
     "ctrl-s [",      "Agent > AgentDecision > AgentPlan" => native_agent::Scroll;
     "ctrl-s x",      "Agent > AgentDecision > AgentPlan" => native_agent::CloseTab;
     "ctrl-s F",      "Agent > AgentDecision > AgentPlan" => native_agent::TerminalFallback;
+    "ctrl-s m",      "Agent > AgentDecision > AgentPlan" => native_agent::Model;
+    "ctrl-s e",      "Agent > AgentDecision > AgentPlan" => native_agent::Traits;
+    "ctrl-s t",      "Agent > AgentDecision > AgentPlan" => native_agent::AccessMode;
+    "ctrl-s a",      "Agent > AgentDecision > AgentPlan" => native_agent::NewClaude;
+    "ctrl-s A",      "Agent > AgentDecision > AgentPlan" => native_agent::NewCodex;
 
+    // §6.2: the keys are bare letters in a derived context so they cannot fire anywhere else,
+    // and **`⏎` is not bound on an approval** — a queued Return keystroke must never approve a
+    // shell command. That is the one property worth keeping exactly.
     "y",             "Agent > AgentDecision > AgentPermission" => native_agent::AllowOnce;
     "a",             "Agent > AgentDecision > AgentPermission" => native_agent::AllowSession;
     "n",             "Agent > AgentDecision > AgentPermission" => native_agent::Deny;
@@ -477,14 +518,13 @@ key_table! {
     "5",             "Agent > AgentDecision > AgentQuestion" => native_agent::Choose5;
     "space",         "Agent > AgentDecision > AgentQuestion" => native_agent::Toggle;
     "enter",         "Agent > AgentDecision > AgentQuestion" => native_agent::Answer;
+    "p",             "Agent > AgentDecision > AgentQuestion" => native_agent::Previous;
 
-    "y",             "Agent > AgentDecision > AgentPlan" => native_agent::ApprovePlan;
-    "n",             "Agent > AgentDecision > AgentPlan" => native_agent::AskChanges;
-    "enter",         "Agent > AgentDecision > AgentPlan" => native_agent::ViewPlan;
-
-    "enter",         "Agent > AgentRow" => native_agent::ExpandRow;
-    "u",             "Agent > AgentRow" => native_agent::Revert;
-    "o",             "Agent > AgentRow" => native_agent::OpenInEditor;
+    // §6.4: the plan card carries no buttons; its verbs are these two, and which one an empty
+    // `⏎` means is decided by whether the composer holds anything.
+    "y",             "Agent > AgentDecision > AgentPlan" => native_agent::Implement;
+    "n",             "Agent > AgentDecision > AgentPlan" => native_agent::Refine;
+    "enter",         "Agent > AgentDecision > AgentPlan" => native_agent::Send;
 
     "enter",        "Filter" => filter::Accept;
     "escape",       "Filter" => filter::Escape;
@@ -644,8 +684,11 @@ mod tests {
         "Agent > AgentDecision > AgentPermission",
         "Agent > AgentDecision > AgentQuestion",
         "Agent > AgentDecision > AgentPlan",
-        "Agent > AgentRow",
+        // §12: row focus lives **inside** scroll mode, so the row context is only ever on the
+        // chain under `AgentNativeScroll`. Binding it as a sibling was the shape that made
+        // `⏎`/`u`/`o` bound, handled and never entered.
         "Agent > AgentNativeScroll",
+        "Agent > AgentNativeScroll > AgentRow",
         "Filter",
         "Palette",
         "Jobs",
@@ -946,7 +989,7 @@ mod tests {
         for (keys, expected) in [
             ("q", "agent::Hide"),
             ("a", "fleet::OpenAgentClaude"),
-            ("A", "fleet::OpenAgentOpencode"),
+            ("A", "fleet::OpenAgentCodex"),
             ("[", "prefix::EnterScroll"),
             ("]", "prefix::Paste"),
             ("r", "prefix::RestartCommand"),

@@ -384,6 +384,10 @@ pub struct Motion {
     pub prefix_hint_delay: u64,
     /// 1000 ms: one full turn of the spinner.
     pub spinner: u64,
+    /// 150 ms: how long the jump-to-latest chip waits before appearing.
+    pub jump_chip_delay: u64,
+    /// 1000 ms: how often the working row's elapsed label re-reads the clock.
+    pub working_tick: u64,
     /// 1600 ms: short toast dwell.
     pub toast_short: u64,
     /// 3200 ms: normal toast dwell.
@@ -395,6 +399,8 @@ impl Default for Motion {
         Self {
             prefix_hint_delay: 400,
             spinner: 1000,
+            jump_chip_delay: 150,
+            working_tick: 1000,
             toast_short: 1600,
             toast_normal: 3200,
         }

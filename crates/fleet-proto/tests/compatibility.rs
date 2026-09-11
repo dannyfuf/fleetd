@@ -1,4 +1,5 @@
-use bytes::BytesMut;
+mod support;
+
 use fleet_core::{
     agents::AttentionKind,
     board::{BoardSummary, BoardView, CardDraft},
@@ -9,7 +10,6 @@ use fleet_core::{
 };
 use fleet_proto::{
     PROTOCOL_VERSION,
-    codec::FleetCodec,
     error::{ErrorKind, ProtoError},
     event::{BoardChangeReason, Event},
     request::{Request, RequestBody},
@@ -17,27 +17,7 @@ use fleet_proto::{
         DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, WorktreeDeleteResult,
     },
 };
-use serde::{Serialize, de::DeserializeOwned};
-use tokio_util::codec::{Decoder, Encoder};
-
-#[track_caller]
-fn assert_frame<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
-    message: T,
-    golden: &str,
-) {
-    let mut codec = FleetCodec::<&T, T>::new();
-    let mut frame = BytesMut::new();
-    codec.encode(&message, &mut frame).unwrap();
-    assert_eq!(&frame[..4], &(golden.len() as u32).to_be_bytes());
-    assert_eq!(&frame[4..], golden.as_bytes());
-
-    // Decode the fixed fixture independently of the encoder's output.
-    let mut fixture = BytesMut::new();
-    fixture.extend_from_slice(&(golden.len() as u32).to_be_bytes());
-    fixture.extend_from_slice(golden.as_bytes());
-    assert_eq!(codec.decode(&mut fixture).unwrap(), Some(message));
-    assert!(fixture.is_empty());
-}
+use support::assert_frame;
 
 #[test]
 fn request_wire_goldens() {

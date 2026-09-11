@@ -38,10 +38,12 @@ pub(super) struct AgentEnsureFlights {
 }
 
 impl AgentEnsureFlights {
+    /// The popup slot one agent occupies. The legacy OpenCode value shares the second slot
+    /// with Codex, which is safe because `config.agent` names exactly one of them at a time.
     const fn agent_index(agent: Agent) -> usize {
         match agent {
             Agent::Claude => 0,
-            Agent::Opencode => 1,
+            Agent::Codex | Agent::Opencode => 1,
         }
     }
 
@@ -85,13 +87,13 @@ impl Shell {
         self.toggle_agent(Agent::Claude, cx);
     }
 
-    pub(super) fn open_agent_opencode(
+    pub(super) fn open_agent_codex(
         &mut self,
-        _: &fleet::OpenAgentOpencode,
+        _: &fleet::OpenAgentCodex,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_agent(Agent::Opencode, cx);
+        self.toggle_agent(Agent::Codex, cx);
     }
 
     /// Opens or switches the independent popup and ensures its fixed daemon session exists.

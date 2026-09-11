@@ -1,16 +1,68 @@
-<!-- Distilled from the Claude Agent SDK 0.3.263 and OpenCode SDK 1.17.18 sources plus live captures (docs/research/fixtures/agents). Regenerate the OpenCode OpenAPI with: opencode serve --hostname 127.0.0.1 --port 4597 and GET http://127.0.0.1:4597/doc. -->
+<!-- Distilled from the Claude Agent SDK plus live captures from the installed CLI.
+     The OpenCode half (§B) is HISTORICAL: Fleet dropped OpenCode in ADR 0014. -->
 
-# Headless wire protocols: Claude Code 2.1.263 and OpenCode 1.17.18
+# Headless wire protocols: Claude Code 2.1.266
 
-Verified 2026-09-07 against:
+Authority over: the Claude Code stream-json surface Fleet's adapter is written against.
+`NATIVE-AGENTS.md` §4.1 fixes the decisions; this file is the reference.
+The Codex reference is [harness-codex-app-server.md](harness-codex-app-server.md).
 
-- `/Users/me/.local/bin/claude --version` → `2.1.263 (Claude Code)`.
-- `@anthropic-ai/claude-agent-sdk@0.3.263`; its package declares `claudeCodeVersion: 2.1.263`. Sources: `sdk-claude/package/{sdk.d.ts,sdk-tools.d.ts,sdk.mjs}`.
-- `/Users/me/.opencode/bin/opencode --version` → `1.17.18`.
-- Matching `@opencode-ai/sdk@1.17.18` and live OpenAPI: `sdk-opencode-1.17.18/package/dist/v2/gen/{types.gen.d.ts,sdk.gen.js}` and `fixtures/opencode-openapi.json`.
-- Unversioned `npm pack @opencode-ai/sdk` resolved to 1.18.29 and is unpacked in `sdk-opencode/`; it is not authoritative for installed 1.17.18.
+Verified 2026-09-10 against `claude --version` -> `2.1.266 (Claude Code)`, from a live driven
+session over stdio: handshake, one ordinary turn with a tool call, a real permission gate, and a
+real `AskUserQuestion`.
 
-Names and discriminants are case-sensitive. Both protocols evolve additively: ignore unknown fields/variants; do not reinterpret them.
+§B (OpenCode 1.17.18) is retained **as a historical appendix**. Fleet no longer supports OpenCode
+(ADR 0014); the section is kept because it is the record of what was verified, and deleting
+verified research to tidy a document destroys the evidence the decisions were informed.
+
+Names and discriminants are case-sensitive. The protocol evolves additively: ignore unknown
+fields and variants, and never reinterpret them.
+
+## Corrections applied on 2026-09-10 (2.1.263 -> 2.1.266)
+
+The previous revision of this file was verified against 2.1.263 and had drifted. Each row below
+was confirmed from a live capture, and each one changed a design decision in
+`NATIVE-AGENTS.md`.
+
+| Previous claim | 2.1.266 |
+| --- | --- |
+| Claude exposes no reasoning-effort control | `--effort <low\|medium\|high\|xhigh\|max>` is a real session flag. It is **not** echoed on `system/init` (`.effort` is absent), so the launcher must remember what it passed. |
+| `--permission-prompt-tool stdio` is the way to receive permission asks | Still **required**. `--permission-prompts <host\|none>` was added alongside it, but with `host` and no prompt tool a gated tool produces **no** `control_request` — it produces `system/permission_denied` and the tool is silently refused. |
+| The permission modes are the plan/acceptEdits/bypass set | Six: `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. The mode passed is not necessarily the mode reported back — `manual` comes back as `permissionMode: "default"`, so init's value is advisory. |
+| No capability negotiation exists | `system/init.capabilities` is real: `["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"]`. Gate on this, never on a version-string compare. |
+| Echo the permission suggestion to allow "for this session" | The live suggestion came back `destination: "localSettings"`. Echoing it verbatim writes a **persistent** rule into the user's `.claude/settings.local.json`. Rewrite `destination` to `"session"` for a session-scoped choice. |
+| — | Three frame kinds were undocumented here: `system/status` (a spinner sub-label, never terminal), `system/thinking_tokens` (a live reasoning-token estimate, `{estimated_tokens, estimated_tokens_delta}`), and `rate_limit_event` (two utilisation windows — see below). |
+| — | `can_use_tool` carries `display_name`, which is the label to show rather than `tool_name`. |
+
+### `rate_limit_event`
+
+Arrives unsolicited, mid-stream:
+
+```json
+{"type":"rate_limit_event","rate_limit_info":{
+  "status":"allowed","resetsAt":1789029000,"rateLimitType":"five_hour",
+  "overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,
+  "unifiedWindows":{"five_hour":{"utilization":0.67,"resetsAt":1789029000},
+                    "seven_day":{"utilization":0.18,"resetsAt":1789596000}}}}
+```
+
+Two windows, each a utilisation fraction and an epoch-seconds reset. **A window whose `status` is
+`"rejected"` with no allowed overage parks the turn inside the CLI: no further frames arrive and
+no `result` ever lands.** That is the one case where waiting for the completion authority hangs
+forever, and `NATIVE-AGENTS.md` §4.1.2 gives it a first-class `Waiting{UsageLimit}` state rather
+than a warning row.
+
+### `system/permission_denied`
+
+```json
+{"type":"system","subtype":"permission_denied","tool_name":"Bash",
+ "tool_use_id":"toolu_01QKUC…","decision_reason_type":"other",
+ "decision_reason":"This command requires approval",
+ "message":"This command requires approval","uuid":"…","session_id":"…"}
+```
+
+This is the frame that says "this was refused without asking you". It **must** render as a denied
+tool row; dropping it makes a refusal look like a hang.
 
 ## A. Claude Code stream-json over stdio
 
@@ -243,9 +295,9 @@ Allow and deny:
 
 Multi-select values may be arrays of labels; custom text is a string. Cancellation is deny.
 
-`ExitPlanMode` is also `can_use_tool`. Declared input has only deprecated `allowedPrompts?` plus unknown keys; 2.1.263 may provide `input.plan`. The assistant `tool_use` block is another place to capture it. To approve execution, allow with unchanged input. To make the proposal a terminal handoff, deny with a message saying the client captured the plan and Claude must wait; t3code does this. There is no separate plan-response frame.
+`ExitPlanMode` is also `can_use_tool`. Declared input has only deprecated `allowedPrompts?` plus unknown keys; the plan markdown arrives as `input.plan`. The assistant `tool_use` block is another place to capture it. To approve execution, allow with unchanged input. To make the proposal a terminal handoff, deny with a message saying the client captured the plan and Claude must wait; t3code does this. There is no separate plan-response frame.
 
-Without stdio permission prompting, asks do not become controls. `--permission-prompts none` immediately denies asks. `system/permission_denied` is advisory; `result.permission_denials` is authoritative.
+Without stdio permission prompting, asks do not become controls. `--permission-prompts none` immediately denies asks. `system/permission_denied` is advisory *as a tally* — `result.permission_denials` is the authoritative list — but the frame must still render as a denied tool row, or a refusal looks like a hang.
 
 ### stdout catalog
 
@@ -351,7 +403,12 @@ Both variants may also carry `fast_mode_state` and `fast_mode_disabled_reason`. 
 - `fixtures/claude-basic.ndjson`: 16 raw lines, successful `pong`; includes hook lifecycle, init/status, partial sequence, complete assistant, rate event, result. SessionStart hooks reported sandbox-denied `~/.claude/session-env` writes but the turn succeeded.
 - `fixtures/claude-permission-{stdin,stdout}.ndjson`: one allowed attempt. Local rules auto-allowed `Bash(echo fixture)`, so no `can_use_tool` and no control response occurred. Tool result and final result succeeded. The capture then timed out at 120 s because stdin stayed open waiting for a request. The invocation was configured to route asks through stdio, but the flag does not force an already-allowed action to ask.
 
-## B. OpenCode 1.17.18 HTTP + SSE
+## B. OpenCode 1.17.18 HTTP + SSE — HISTORICAL
+
+> **Fleet does not support OpenCode.** It was dropped in
+> [ADR 0014](../decisions/0014-drop-opencode-add-codex.md) in favour of Codex. Everything below
+> was verified against OpenCode 1.17.18 and is retained as the record of that verification. Do
+> not implement against it.
 
 ### Base transport and scoping
 
@@ -716,7 +773,7 @@ type SessionStatus=
 
 Use these as provider-specific authoritative signals. “Authoritative” means the signal that commits adapter state; earlier events may be used for optimistic UI only.
 
-| Contract event | Claude Code 2.1.263 | OpenCode 1.17.18 |
+| Contract event | Claude Code 2.1.266 | OpenCode 1.17.18 (historical) |
 |---|---|---|
 | Turn started | Host request is accepted when the NDJSON user line is written. CLI-side start is `system/init` (documented at each turn start), or the first response frame stamped with the submitted `user_message_uuid`; `--replay-user-messages` supplies an explicit stdout user acknowledgement if desired. | `session.status {status:{type:"busy"}}` for the target session. `prompt_async` 204 is admission only; sync request being open is not a wire start signal. |
 | Streaming delta | `stream_event/event.type:"content_block_delta"`; append only `text_delta.text` for assistant text. Buffer `input_json_delta.partial_json` for tool input and route thinking/citation deltas separately. | `message.part.delta {field,delta}` or the newer `session.next.text.delta`/reasoning/tool-input deltas. `message.part.updated.part` is cumulative replacement, not append. |

@@ -127,6 +127,9 @@ fn agent_key_hints(state: &AppState) -> Option<fleet_ui_kit::KeyHintRow> {
     let gate = projection.and_then(|projection| projection.gates.last());
     // §9: while a correction or a plan note is being typed the card's keys stand down, so the
     // status bar must not keep advertising `y allow once` at a composer that owns the letters.
+    if state.agents.is_scrolling(thread) {
+        return Some(key_hints(false, true));
+    }
     if let Some(gate) = gate.filter(|_| !state.agents.is_composing(thread)) {
         let provider = projection.map_or(AgentKind::Claude, |projection| projection.provider);
         return Some(decision_hints(
@@ -135,9 +138,13 @@ fn agent_key_hints(state: &AppState) -> Option<fleet_ui_kit::KeyHintRow> {
             state.agents.question_cursor(thread),
         ));
     }
-    // §9 and DESIGN-SYSTEM §4: the bar mirrors the keys that actually fire, so it reads the
-    // same working predicate `agent_context_chain` picks the key context from.
-    Some(key_hints(state.agents.is_working(thread)))
+    // §12 and DESIGN-SYSTEM §4: the bar mirrors the keys that actually fire, so it reads the
+    // same two predicates `agent_context_chain` picks the key context from — a frozen tail
+    // beats everything, including an open gate.
+    Some(key_hints(
+        state.agents.is_working(thread),
+        state.agents.is_scrolling(thread),
+    ))
 }
 
 /// The status-bar breadcrumb `context › repo › row` (§2.2).

@@ -189,8 +189,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "Agent > AgentDecision > AgentPermission",
             "Agent > AgentDecision > AgentQuestion",
             "Agent > AgentDecision > AgentPlan",
-            "Agent > AgentRow",
             "Agent > AgentNativeScroll",
+            "Agent > AgentNativeScroll > AgentRow",
         ],
     ),
     (

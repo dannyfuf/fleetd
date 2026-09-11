@@ -243,7 +243,7 @@ impl Shell {
         .on_action(cx.listener(Self::open_help))
         .on_action(cx.listener(Self::open_jobs))
         .on_action(cx.listener(Self::open_agent_claude))
-        .on_action(cx.listener(Self::open_agent_opencode))
+        .on_action(cx.listener(Self::open_agent_codex))
         .on_action(cx.listener(Self::focus_sticky_error))
         .on_action(cx.listener(Self::cancel))
         // First run (§3.13) — fallbacks for the three keys the card advertises

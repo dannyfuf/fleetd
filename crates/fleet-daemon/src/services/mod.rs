@@ -34,6 +34,7 @@ mod agent_activity;
 pub mod agents;
 pub mod boards;
 pub mod bootstrap;
+pub mod checkpoints;
 pub mod contexts;
 pub mod doctor;
 pub mod github;
@@ -104,6 +105,8 @@ pub struct Services {
     pub sessions: Sessions,
     /// Native structured coding-agent threads.
     pub agents: AgentService,
+    /// Fleet-owned turn checkpoints and the revert that restores one.
+    pub checkpoints: checkpoints::Checkpoints,
     /// Cooperative and discovered child output and lifecycle registry.
     pub watches: watches::Watches,
     watch_discovery: watch_discovery::WatchDiscovery,

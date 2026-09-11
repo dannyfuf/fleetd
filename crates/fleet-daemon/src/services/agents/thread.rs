@@ -5,8 +5,11 @@ use std::{
     sync::Arc,
 };
 
-use fleet_core::agents::{
-    AgentEvent, AgentThreadSummary, GateId, SeqEvent, ThreadProjection, TurnId, UserInput,
+use fleet_core::{
+    agents::{
+        AgentEvent, AgentThreadSummary, GateId, SeqEvent, ThreadProjection, TurnId, UserInput,
+    },
+    ids::HostId,
 };
 use tokio::{sync::Mutex, task::AbortHandle};
 
@@ -19,8 +22,22 @@ use super::{
 pub(super) struct ThreadState {
     pub projection: ThreadProjection,
     pub record: AgentThreadRecord,
+    /// The host that owns this thread's log and sequence, or `None` when this daemon does.
+    ///
+    /// Read once, at hydration, and never again: a thread does not change owner in its life.
+    /// Holding it here is what makes every authority check on the mutation path an in-memory
+    /// comparison rather than a database round trip on the keystroke path
+    /// (`docs/NATIVE-AGENTS.md` §9.3).
+    pub owner: Option<HostId>,
     pub inflight_turn: Option<TurnId>,
-    pub pending_claude_inputs: VecDeque<(TurnId, UserInput)>,
+    /// Prompts already written to the harness whose `TurnStarted` has not been drained yet.
+    ///
+    /// Both harnesses announce the turn on the event stream, not as the submit's return value, so
+    /// a fresh submission is parked here and recorded when that announcement lands — which is
+    /// also what makes the user's own bubble part of the log rather than only of the sending
+    /// client's optimistic row. A steer is never parked: it is recorded immediately, because the
+    /// turn it joined is already running.
+    pub pending_inputs: VecDeque<(TurnId, UserInput)>,
     /// Gates an answer has already been written for, so a repeat is a no-op rather than a
     /// second control response for a request the provider has closed.
     pub answered_gates: HashSet<GateId>,
@@ -36,19 +53,33 @@ pub(super) struct ThreadRuntime {
 }
 
 impl ThreadRuntime {
-    pub fn new(projection: ThreadProjection, record: AgentThreadRecord) -> Self {
+    pub fn new(
+        projection: ThreadProjection,
+        record: AgentThreadRecord,
+        owner: Option<HostId>,
+    ) -> Self {
         Self {
             operation: Arc::new(Mutex::new(())),
             state: Arc::new(std::sync::Mutex::new(ThreadState {
                 projection,
                 record,
+                owner,
                 inflight_turn: None,
-                pending_claude_inputs: VecDeque::new(),
+                pending_inputs: VecDeque::new(),
                 answered_gates: HashSet::new(),
             })),
             provider: Arc::new(Mutex::new(None)),
             task_abort: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// The host that owns this thread, or `None` when this daemon does.
+    pub fn owner(&self) -> Option<HostId> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owner
+            .clone()
     }
 
     pub fn set_task(&self, handle: AbortHandle) {
@@ -163,7 +194,7 @@ mod tests {
             delta(item, "a"),
             AgentEvent::ItemCompleted {
                 item,
-                status: fleet_core::agents::ItemStatus::Done,
+                status: fleet_core::agents::ItemStatus::Completed,
             }
             .into(),
             delta(item, "b"),

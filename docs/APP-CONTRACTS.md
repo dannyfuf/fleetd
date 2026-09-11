@@ -40,10 +40,13 @@ optional owning host, and PR worktree creation carries optional placement.
 Each of those roots holds the type and its composition only. Preparation, lifecycle, actions and
 tests live in sibling modules — `screens/hub/{projection,cache,navigation,actions,composition}`,
 `screens/workspace/{model,lifecycle,terminal,native,agent,chrome,actions}` and so on.
-The agent thread follows the same split: `screens/agent_thread/{rows,decisions,presentation,picker}`
-prepare, `state/agents.rs` holds the per-worktree tab order and the client mirror, and the view
-itself issues no I/O — it emits `AgentThreadEvent`, which `screens/workspace/agent.rs` relays as
-`BridgeCommand`s.
+The agent thread follows the same split:
+`screens/agent_thread/{rows/,decisions,composer,presentation,picker,actions}` prepare,
+`state/agents.rs` holds the per-worktree tab order and the client mirror, and the view itself
+issues no I/O — it emits `AgentThreadEvent`, which `screens/workspace/agent.rs` relays as
+`BridgeCommand`s. `rows/` is the flat row projection (`NATIVE-AGENTS.md` §5): a turn is an
+emergent run of rows, never a container, and every row is memoised behind a revision key so a
+stream chunk never re-runs grouping, folding or summarization.
 
 ---
 
