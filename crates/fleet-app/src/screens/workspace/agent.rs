@@ -87,7 +87,17 @@ pub(super) fn leave_agent_tab(state: &Entity<AppState>, cx: &mut App) {
 /// Shows one agent thread as the active tab of its worktree's workspace.
 pub(super) fn activate_agent_tab(state: &Entity<AppState>, thread: ThreadId, cx: &mut App) {
     state.update(cx, |app, cx| {
-        let Some(worktree) = active_worktree(app) else {
+        let Some(worktree) = app
+            .agents
+            .summary(thread)
+            .map(|summary| summary.worktree.clone())
+        else {
+            tracing::warn!(
+                %thread,
+                "refused to activate a native agent tab whose summary is unavailable"
+            );
+            record_mutation_failure(app, format!("agent thread {thread} is no longer available"));
+            cx.notify();
             return;
         };
         app.agents.activate(worktree, thread);
@@ -104,15 +114,55 @@ fn active_worktree(app: &AppState) -> Option<WorktreeId> {
     }
 }
 
+trait AgentThreadRequester {
+    fn request_agent(
+        &self,
+        command: BridgeCommand,
+    ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>>;
+}
+
+impl AgentThreadRequester for Bridge {
+    fn request_agent(
+        &self,
+        command: BridgeCommand,
+    ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>> {
+        Self::request_agent(self, command)
+    }
+}
+
+fn create_worktree(app: &AppState) -> Result<WorktreeId, &'static str> {
+    let Some(session) = app.active_session() else {
+        return Err("no active session is available to attach the native agent thread to");
+    };
+    match &session.kind {
+        SessionKind::Worktree(worktree) => Ok(worktree.clone()),
+        SessionKind::Agent { .. } => Err(
+            "the active session is a legacy repository-level agent session and has no worktree to attach the native agent thread to",
+        ),
+    }
+}
+
 /// Creates a thread and selects its tab, falling back to the PTY path when it is unavailable.
-pub(super) fn create_thread(
-    bridge: &Bridge,
+fn create_thread(
+    bridge: &impl AgentThreadRequester,
     state: &Entity<AppState>,
     provider: AgentKind,
     cx: &mut App,
 ) {
-    let Some(worktree) = active_worktree(state.read(cx)) else {
-        return;
+    let worktree = match create_worktree(state.read(cx)) {
+        Ok(worktree) => worktree,
+        Err(reason) => {
+            tracing::warn!(
+                provider = %provider.executable(),
+                reason,
+                "refused to create a native agent thread"
+            );
+            state.update(cx, |app, cx| {
+                record_mutation_failure(app, create_failure(provider, reason));
+                cx.notify();
+            });
+            return;
+        }
     };
     let reply = bridge.request_agent(BridgeCommand::AgentThreadCreate {
         worktree,
@@ -715,3 +765,6 @@ fn starting_projection(app: &AppState, thread: ThreadId) -> Option<ThreadProject
         summary.provider,
     ))
 }
+
+#[cfg(test)]
+mod tests;

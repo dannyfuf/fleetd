@@ -121,7 +121,12 @@ impl WorkspaceScreen {
         cx: &mut App,
     ) -> AnyElement {
         let Some(model) = self.model.as_ref() else {
-            return self.empty(focus, cx);
+            // The shell can still enter `Workspace > Prefix` while a snapshot temporarily has
+            // no active session. Keep the native-agent listeners mounted so `ctrl-s a` reaches
+            // `create_thread`, which explains the refusal instead of consuming the action.
+            return self
+                .with_agent_actions(self.empty(focus, cx), bridge, state)
+                .into_any_element();
         };
         let focused = focus.is_focused(window);
         let pr = model.repo.as_ref().and_then(|repo| {

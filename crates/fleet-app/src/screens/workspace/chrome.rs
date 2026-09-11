@@ -101,7 +101,7 @@ impl WorkspaceScreen {
     }
 
     /// The screen with no session behind it, which only happens between two snapshots.
-    pub(super) fn empty(&self, focus: &FocusHandle, cx: &mut App) -> AnyElement {
+    pub(super) fn empty(&self, focus: &FocusHandle, cx: &mut App) -> Div {
         let theme = cx.theme();
         div()
             .track_focus(focus)
@@ -111,7 +111,6 @@ impl WorkspaceScreen {
             .justify_center()
             .bg(theme.colors.bg)
             .child(Text::ui("no session").muted())
-            .into_any_element()
     }
 }
 
