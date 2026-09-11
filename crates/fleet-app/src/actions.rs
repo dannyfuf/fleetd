@@ -33,8 +33,8 @@ pub mod fleet {
             Cancel,
             /// `a` / `ctrl-s a` — toggle the floating Claude agent popup.
             OpenAgentClaude,
-            /// `A` / `ctrl-s A` — toggle the floating OpenCode agent popup.
-            OpenAgentOpencode,
+            /// `A` / `ctrl-s A` — toggle the floating Codex agent popup.
+            OpenAgentCodex,
         ]
     );
 }
@@ -239,18 +239,29 @@ pub mod native_agent {
         [
             /// `Enter` — send the composer text.
             Send,
+            /// `Enter` while a turn runs — a **steer**, dispatched immediately. There is no
+            /// queue: both harnesses already fold a second message into the live turn.
+            Steer,
+            /// `cmd-Enter` on a thread that has not started — start it in the background.
+            SendBackground,
             /// `Shift+Tab` — enter plan mode.
             PlanMode,
-            /// `/` — open command completion.
+            /// `/` — open command completion, at line start only.
             Commands,
+            /// `$` — open skill completion.
+            Skills,
             /// `@` — open file completion.
             Files,
             /// `Up` / `ctrl-p` — the previous completion row, else composer history.
             History,
             /// `Down` / `ctrl-n` — the next completion row, else one caret row down.
             HistoryNext,
-            /// `ctrl-s m` — choose model and effort.
+            /// `ctrl-s m` — choose the model and the instance it routes to.
             Model,
+            /// `ctrl-s e` — the harness-declared traits of the selected model.
+            Traits,
+            /// `ctrl-s t` — the access ladder.
+            AccessMode,
             /// `ctrl-s [` — enter transcript scroll mode.
             Scroll,
             /// `j` in transcript scroll mode — move the viewport down one row.
@@ -273,12 +284,10 @@ pub mod native_agent {
             ScrollExit,
             /// `ctrl-s a` — create a Claude thread.
             NewClaude,
-            /// `ctrl-s A` — create an OpenCode thread.
-            NewOpenCode,
-            /// `Esc` — interrupt active work.
+            /// `ctrl-s A` — create a Codex thread.
+            NewCodex,
+            /// `Esc` — interrupt the active turn.
             Stop,
-            /// `Enter` while working — queue composer text.
-            Queue,
             /// `y` — allow this invocation once.
             AllowOnce,
             /// `a` — allow matching calls for this session or directory.
@@ -301,20 +310,24 @@ pub mod native_agent {
             Choose5,
             /// `Space` — toggle a multi-select option.
             Toggle,
-            /// `Enter` — submit question answers.
+            /// `Enter` — submit the question, or advance the wizard.
             Answer,
-            /// `y` — approve the plan and build.
-            ApprovePlan,
-            /// `n` — ask the agent to change its plan.
-            AskChanges,
-            /// `Enter` — view the full plan.
-            ViewPlan,
+            /// `p` — step back to the previous question of a multi-question request.
+            Previous,
+            /// `y` — implement the ready plan.
+            Implement,
+            /// `n` — refine the ready plan, which opens the composer rather than answering.
+            Refine,
             /// `Enter` on a focused row — expand or collapse it.
             ExpandRow,
-            /// `u` — revert the focused edit or turn.
+            /// `u` — revert the focused edit, or this turn on a footer.
             Revert,
-            /// `o` — open the focused path in the editor.
+            /// `o` — open the focused row's file in the editor.
             OpenInEditor,
+            /// `y` — copy the focused row's payload.
+            CopyRow,
+            /// `d` — open the diff of a focused edit row or turn footer.
+            DiffRow,
             /// `ctrl-s x` — close the native agent tab.
             CloseTab,
             /// `ctrl-s F` — open the PTY agent session instead (migration fallback).

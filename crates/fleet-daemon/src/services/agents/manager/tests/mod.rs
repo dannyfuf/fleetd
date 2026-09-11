@@ -14,9 +14,10 @@ use std::sync::{
 use async_trait::async_trait;
 use fleet_core::{
     agents::{
-        AbortReason, Attention, AttentionKind, Capabilities, GateAnswer, GateId, GateKind,
-        ItemKind, PermissionChoice, Seq, SeqEvent, StreamKind, ThreadProjection, ToolKind,
-        TurnOutcome, Usage,
+        AbortReason, Attention, AttentionKind, ControlCost, GateAnswer, GateId, GateKind,
+        HarnessCapabilities, InterruptSupport, ItemKind, ModelSelection, PermissionChoice,
+        PermissionMode, ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind, ThreadProjection,
+        ToolKind, TurnOutcome, Usage,
     },
     ids::{ContextId, RepoId},
     model::{Context as ContextRecord, Repo, RepoHooks, Worktree},
@@ -28,6 +29,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     adapters::{Adapters, clock::SystemClock, files::RealFiles},
+    agents::harness::{RestartPlan, RuntimeApplied, RuntimeChange, RuntimeField, Submitted},
     jobs::JobManager,
     services::{
         agents::providers::{ProviderResult, ProviderSink, empty_events},
@@ -38,7 +40,9 @@ use crate::{
 
 use super::*;
 
+mod controls;
 mod lifecycle;
+mod mirror;
 mod restart;
 
 const SETTLE: Duration = Duration::from_secs(5);
@@ -52,6 +56,7 @@ enum FakeCall {
     Respond(GateId),
     SetMode(PermissionMode),
     SetModel(ModelSelection),
+    Restart(bool),
     Stop,
 }
 
@@ -59,20 +64,29 @@ enum FakeCall {
 struct FakeScript {
     calls: StdMutex<Vec<FakeCall>>,
     senders: StdMutex<Vec<ProviderSink>>,
-    capabilities: Capabilities,
+    capabilities: HarnessCapabilities,
     unavailable: AtomicBool,
     /// Makes every `stop` fail, as a child that exits from the stdin close does.
     stop_fails: AtomicBool,
+    /// The turn the scripted harness considers running, as both real adapters track one.
+    ///
+    /// It is what `send` answers `Submitted::queued` from, so the fake decides steer-versus-fresh
+    /// the way a harness does rather than letting the manager guess from its own projection.
+    active_turn: StdMutex<Option<TurnId>>,
+    /// Makes every control change cost a restart, as Claude's launch flags do.
+    restarts_on_control: AtomicBool,
 }
 
 impl FakeScript {
-    fn new(capabilities: Capabilities) -> Arc<Self> {
+    fn new(capabilities: HarnessCapabilities) -> Arc<Self> {
         Arc::new(Self {
             calls: StdMutex::new(Vec::new()),
             senders: StdMutex::new(Vec::new()),
             capabilities,
             unavailable: AtomicBool::new(false),
             stop_fails: AtomicBool::new(false),
+            active_turn: StdMutex::new(None),
+            restarts_on_control: AtomicBool::new(false),
         })
     }
 
@@ -97,8 +111,36 @@ impl FakeScript {
             .len()
     }
 
+    /// The turn the scripted harness is running, if any.
+    fn active_turn(&self) -> Option<TurnId> {
+        *self
+            .active_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Pushes one normalized event into the newest provider's stream.
+    ///
+    /// Announcing or settling a turn also moves the fake's own turn bookkeeping, because that is
+    /// what a real adapter does and it is what `send` answers `queued` from.
     async fn emit(&self, event: AgentEvent) {
+        match &event {
+            AgentEvent::TurnStarted { turn, .. } => {
+                *self
+                    .active_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*turn);
+            }
+            AgentEvent::TurnSettled { .. }
+            | AgentEvent::TurnAborted { .. }
+            | AgentEvent::SessionExited { .. } => {
+                *self
+                    .active_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            _ => {}
+        }
         let sender = self
             .senders
             .lock()
@@ -123,8 +165,8 @@ impl AgentProvider for FakeProvider {
         self.kind
     }
 
-    fn capabilities(&self) -> Capabilities {
-        self.script.capabilities
+    fn capabilities(&self) -> HarnessCapabilities {
+        self.script.capabilities.clone()
     }
 
     async fn start(&mut self, req: StartRequest) -> ProviderResult<()> {
@@ -133,9 +175,12 @@ impl AgentProvider for FakeProvider {
         Ok(())
     }
 
-    async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<()> {
+    async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted> {
         self.script.record(FakeCall::Send(turn, input.text));
-        Ok(())
+        // Exactly what both real adapters answer: a submission into a turn the harness is
+        // already running joined it, and anything else opened one.
+        let queued = self.script.active_turn() == Some(turn);
+        Ok(Submitted { turn, queued })
     }
 
     async fn interrupt(&mut self, turn: TurnId) -> ProviderResult<()> {
@@ -148,13 +193,43 @@ impl AgentProvider for FakeProvider {
         Ok(())
     }
 
-    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<PermissionMode> {
-        self.script.record(FakeCall::SetMode(mode));
-        Ok(mode)
+    async fn apply_runtime(&mut self, change: RuntimeChange) -> ProviderResult<RuntimeApplied> {
+        if let Some(mode) = change.mode {
+            self.script.record(FakeCall::SetMode(mode));
+        }
+        if let Some(model) = change.model.clone() {
+            self.script.record(FakeCall::SetModel(model));
+        }
+        let mut fields = std::collections::BTreeSet::new();
+        if self.script.restarts_on_control.load(Ordering::SeqCst) {
+            if change.mode.is_some() {
+                fields.insert(RuntimeField::Mode);
+            }
+            if change.model.is_some() {
+                fields.insert(RuntimeField::Model);
+            }
+        }
+        Ok(RuntimeApplied {
+            applied_now: if fields.is_empty() {
+                change
+                    .mode
+                    .map(|_| RuntimeField::Mode)
+                    .into_iter()
+                    .chain(change.model.map(|_| RuntimeField::Model))
+                    .collect()
+            } else {
+                std::collections::BTreeSet::new()
+            },
+            applies_next_turn: std::collections::BTreeSet::new(),
+            restart: (!fields.is_empty()).then_some(RestartPlan {
+                resume: true,
+                fields,
+            }),
+        })
     }
 
-    async fn set_model(&mut self, model: ModelSelection) -> ProviderResult<()> {
-        self.script.record(FakeCall::SetModel(model));
+    async fn restart(&mut self, plan: &RestartPlan, _change: &RuntimeChange) -> ProviderResult<()> {
+        self.script.record(FakeCall::Restart(plan.resume));
         Ok(())
     }
 
@@ -222,7 +297,7 @@ fn empty_worktrees(home: &std::path::Path) -> Worktrees {
 }
 
 impl Harness {
-    async fn start(capabilities: Capabilities) -> Self {
+    async fn start(capabilities: HarnessCapabilities) -> Self {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("fleet");
         let repos = home.join("repos");
@@ -336,7 +411,12 @@ impl Harness {
     }
 
     async fn projection(&self, thread: ThreadId) -> ThreadProjection {
-        match self.manager.open(thread, None).await.expect("open thread") {
+        match self
+            .manager
+            .open(&open_body(thread))
+            .await
+            .expect("open thread")
+        {
             ResponseBody::AgentThreadSnapshot { projection, .. } => projection,
             other => panic!("expected AgentThreadSnapshot, got {other:?}"),
         }
@@ -365,6 +445,42 @@ impl Harness {
         })
         .await
         .unwrap_or_else(|_| panic!("agent thread never reached {what}"))
+    }
+}
+
+/// A version-6 open: no window field, so the answer is the unbounded snapshot.
+fn open_body(thread: ThreadId) -> fleet_proto::request::RequestBody {
+    fleet_proto::request::RequestBody::AgentThreadOpen {
+        thread,
+        from_seq: None,
+        after_seq: None,
+        turn_limit: None,
+        before_cursor: None,
+        request_sync_marker: false,
+    }
+}
+
+/// A version-6 catch-up open from a cursor.
+fn resume_body(thread: ThreadId, from_seq: Seq) -> fleet_proto::request::RequestBody {
+    fleet_proto::request::RequestBody::AgentThreadOpen {
+        thread,
+        from_seq: Some(from_seq),
+        after_seq: None,
+        turn_limit: None,
+        before_cursor: None,
+        request_sync_marker: false,
+    }
+}
+
+/// A windowed open, which is the shape every client that can be told "cached" sends.
+fn window_body(thread: ThreadId, turn_limit: Option<u32>) -> fleet_proto::request::RequestBody {
+    fleet_proto::request::RequestBody::AgentThreadOpen {
+        thread,
+        from_seq: None,
+        after_seq: None,
+        turn_limit: turn_limit.or(Some(10)),
+        before_cursor: None,
+        request_sync_marker: false,
     }
 }
 
@@ -397,23 +513,100 @@ fn attentions(events: &[Event]) -> Vec<Attention> {
         .collect()
 }
 
-fn full() -> Capabilities {
-    Capabilities {
-        resume: true,
-        fork: false,
-        steer: true,
-        interrupt: true,
-        modes: true,
-        models: true,
+fn full() -> HarnessCapabilities {
+    HarnessCapabilities {
+        resume: ResumeSupport::ByCursor { fork: false },
+        steer: SteerSupport::Explicit {
+            compare_and_swap: false,
+        },
+        interrupt: InterruptSupport::Receipted {
+            cancel_queued: false,
+        },
+        mode_switch: ControlCost::InPlace,
+        model_switch: ControlCost::InPlace,
+        ..HarnessCapabilities::default()
+    }
+}
+
+/// A shell that records every invocation and refuses everything after the worktree probe.
+///
+/// It exists to observe the *wiring* — does `send` ask for a checkpoint, and does a steer ask for
+/// a second one — and not the checkpoint itself, which
+/// [`crate::services::checkpoints`]'s own suite tests against a real `git` in a real worktree.
+/// Refusing after the probe also exercises the rule that matters most here: a capture that fails
+/// never refuses the turn.
+#[derive(Default)]
+struct RecordingShell {
+    calls: StdMutex<Vec<Vec<String>>>,
+}
+
+impl RecordingShell {
+    fn git_calls(&self) -> Vec<Vec<String>> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl crate::adapters::shell::Shell for RecordingShell {
+    async fn run(
+        &self,
+        command: crate::adapters::shell::ShellCommand,
+    ) -> crate::DaemonResult<crate::adapters::shell::ShellResult> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command.args.clone());
+        // The probe answers "yes, this is a working tree"; everything after it fails, so the
+        // capture ends in the log line the rule promises rather than in a refused turn.
+        let probe = command.args == ["rev-parse", "--is-inside-work-tree"];
+        Ok(crate::adapters::shell::ShellResult {
+            status: i32::from(!probe),
+            stdout: if probe {
+                "true\n".to_owned()
+            } else {
+                String::new()
+            },
+            stderr: String::new(),
+        })
+    }
+
+    async fn run_detached(
+        &self,
+        _command: crate::adapters::shell::ShellCommand,
+        _log_path: &std::path::Path,
+    ) -> crate::DaemonResult<crate::adapters::shell::DetachedProcess> {
+        Err(crate::DaemonError::Shell(
+            "the recording shell detaches nothing".to_owned(),
+        ))
+    }
+
+    async fn run_streaming(
+        &self,
+        command: crate::adapters::shell::ShellCommand,
+        _cancel: tokio_util::sync::CancellationToken,
+        _on_line: crate::adapters::shell::LineCallback,
+    ) -> crate::DaemonResult<crate::adapters::shell::ShellResult> {
+        self.run(command).await
+    }
+}
+
+/// `full()`, but with the control costs Claude actually has: a restart per model or mode change.
+fn restarting_controls() -> HarnessCapabilities {
+    HarnessCapabilities {
+        mode_switch: ControlCost::RestartWithResume,
+        model_switch: ControlCost::RestartWithResume,
+        ..full()
     }
 }
 
 fn assistant_text(projection: &ThreadProjection) -> Option<&str> {
-    projection
-        .items
-        .iter()
-        .find(|entry| matches!(entry.kind, ItemKind::AssistantText))
-        .and_then(|entry| entry.text.as_deref())
+    projection.items.iter().find_map(|entry| match &entry.kind {
+        ItemKind::AssistantText { text } => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 fn permission_gate(gate: GateId) -> AgentEvent {
@@ -431,7 +624,7 @@ fn permission_gate(gate: GateId) -> AgentEvent {
 }
 
 fn completed(turn: TurnId) -> AgentEvent {
-    AgentEvent::TurnCompleted {
+    AgentEvent::TurnSettled {
         turn,
         outcome: TurnOutcome::Completed,
         usage: Usage::default(),

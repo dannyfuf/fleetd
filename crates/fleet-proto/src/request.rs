@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use fleet_core::{
     agents::{
-        AgentKind, AttentionKind, GateAnswer, GateId, ModelSelection, PermissionMode, Seq,
-        ThreadId, UserInput,
+        AgentKind, AttentionKind, GateAnswer, GateId, ItemId, ModelSelection, PermissionMode, Seq,
+        StreamKind, ThreadId, UserInput,
     },
     board::{BackendRef, BoardPatch, CardDraft, CardPatch, ConflictResolution},
     config::Agent,
@@ -21,6 +21,7 @@ use fleet_core::{
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
+    agents::CheckpointId,
     event::EventKind,
     terminal::{KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
@@ -48,6 +49,23 @@ pub struct HelloClient {
     /// Identity of the forwarding daemon when `kind` is proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<HostId>,
+    /// Optional behaviours this **client** can handle, by the same names the daemon advertises.
+    ///
+    /// Capability negotiation runs both ways for one reason: an adjacently tagged `Event` variant
+    /// an older peer has no arm for kills its whole frame, not just that event. So an event
+    /// family added after a client shipped — [`Event::AgentResync`](crate::event::Event::AgentResync)
+    /// and its two siblings — is sent only to a connection that named it here. Absent means "the
+    /// original set", which is what every client before this field is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+}
+
+impl HelloClient {
+    /// Whether this peer named `capability` in its handshake.
+    #[must_use]
+    pub fn supports(&self, capability: &str) -> bool {
+        self.capabilities.iter().any(|held| held == capability)
+    }
 }
 
 impl<'de> Deserialize<'de> for HelloClient {
@@ -62,6 +80,8 @@ impl<'de> Deserialize<'de> for HelloClient {
             kind: ClientKind,
             #[serde(default)]
             host_id: Option<HostId>,
+            #[serde(default)]
+            capabilities: Vec<String>,
         }
 
         #[derive(Deserialize)]
@@ -76,6 +96,7 @@ impl<'de> Deserialize<'de> for HelloClient {
             WireClient::Metadata(metadata) => Self {
                 kind: metadata.kind,
                 host_id: metadata.host_id,
+                capabilities: metadata.capabilities,
             },
         })
     }
@@ -124,12 +145,64 @@ pub enum RequestBody {
         /// Optional display title.
         title: Option<String>,
     },
-    /// Open a thread and request its projection plus an event tail.
+    /// Open a thread and request a bounded window of its transcript plus an event tail.
+    ///
+    /// The four window fields are additive on protocol 7 and are sent **only** to a daemon that
+    /// advertised [`AGENT_WINDOW_CAPABILITY`](crate::AGENT_WINDOW_CAPABILITY). An older daemon
+    /// ignores them and answers the version-6
+    /// [`ResponseBody::AgentThreadSnapshot`](crate::response::ResponseBody::AgentThreadSnapshot);
+    /// a windowing daemon answers
+    /// [`ResponseBody::AgentThreadWindow`](crate::response::ResponseBody::AgentThreadWindow)
+    /// exactly when [`RequestBody::wants_window`] holds, so a peer never receives a payload
+    /// shape it cannot decode.
     AgentThreadOpen {
         /// Thread to open.
         thread: ThreadId,
         /// Return persisted events strictly after this sequence.
+        ///
+        /// The version-6 name for the resume cursor. It is neither renamed nor repurposed —
+        /// `rust-ipc-protocol` Rule 7 — so a version-6 peer keeps working unchanged;
+        /// [`RequestBody::resume_seq`] resolves the pair for the daemon in one place.
         from_seq: Option<Seq>,
+        /// Resume cursor for a windowed open.
+        ///
+        /// When set the daemon replays events after this sequence instead of reading a window.
+        /// Overlap with live delivery is expected and deduped by sequence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_seq: Option<Seq>,
+        /// Turns in the returned window; absent means the daemon's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_limit: Option<u32>,
+        /// Opaque exclusive keyset cursor from a previous window's `page.before_cursor`.
+        ///
+        /// Never parsed by a client: a malformed, foreign, or unknown-version token degrades to
+        /// the newest page rather than erroring, because the client that sends a stale one is
+        /// usually one that just reconnected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_cursor: Option<String>,
+        /// Ask for an explicit [`Event::AgentSynchronized`](crate::event::Event::AgentSynchronized)
+        /// between catch-up and live delivery.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        request_sync_marker: bool,
+    },
+    /// Read a stored item body in offset ranges, for an output a window elided.
+    ///
+    /// Sent only to daemons advertising
+    /// [`AGENT_ITEM_BODY_CAPABILITY`](crate::AGENT_ITEM_BODY_CAPABILITY). `limit` is clamped
+    /// server-side by [`clamp_item_body_limit`](crate::agents::clamp_item_body_limit), so a
+    /// client asking for a whole 40 MiB build log gets a 256 KiB page and a `total` to walk.
+    AgentItemBody {
+        /// Owning thread.
+        thread: ThreadId,
+        /// Item whose body is being read.
+        item: ItemId,
+        /// Which of the item's append-only streams to read.
+        stream: StreamKind,
+        /// Byte offset into that stream.
+        offset: u64,
+        /// Requested byte count, clamped to
+        /// [`ITEM_BODY_MAX_CHUNK_BYTES`](crate::agents::ITEM_BODY_MAX_CHUNK_BYTES).
+        limit: u32,
     },
     /// Release one client's interest in a native-agent thread.
     AgentThreadClose {
@@ -182,6 +255,31 @@ pub enum RequestBody {
     AgentStop {
         /// Target thread.
         thread: ThreadId,
+    },
+    /// List the Fleet-owned checkpoints a thread's worktree can be reverted to.
+    ///
+    /// Sent only to daemons advertising
+    /// [`AGENT_CHECKPOINTS_CAPABILITY`](crate::AGENT_CHECKPOINTS_CAPABILITY). The answer is
+    /// what `[u]` is drawn from, so a daemon without the service refuses it with
+    /// [`checkpoints_capability_error`](crate::agents::checkpoints_capability_error) rather than
+    /// answering an empty list.
+    AgentCheckpoints {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Restore a thread's worktree from one of its checkpoints.
+    ///
+    /// **Files only.** The harness's conversation is untouched: reverting a working tree and
+    /// rewinding a model's context are different operations, and conflating them is how a user
+    /// loses work they meant to keep (`docs/NATIVE-AGENTS.md` §5). Nothing here maps to Codex's
+    /// deprecated `thread/rollback`, which rewrites history and leaves the files alone —
+    /// precisely the opposite trade.
+    AgentRevert {
+        /// Target thread.
+        thread: ThreadId,
+        /// Checkpoint to restore, from a previous
+        /// [`ResponseBody::AgentCheckpoints`](crate::response::ResponseBody::AgentCheckpoints).
+        checkpoint: CheckpointId,
     },
     /// List boards.
     ListBoards {
@@ -763,194 +861,78 @@ pub enum RequestBody {
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        assert_round_trip,
-        terminal::{Key, KeyAction, Modifiers},
-    };
-
-    #[test]
-    fn request_bodies_round_trip() {
-        let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
-        let job = JobId::try_from("job-1").unwrap_or_else(|error| panic!("{error}"));
-        let thread = ThreadId::new();
-        let model = ModelSelection {
-            model: "claude-sonnet-5".to_owned(),
-            effort: Some("high".to_owned()),
-            provider: None,
-        };
-        let bodies = vec![
-            RequestBody::Hello {
-                protocol: crate::PROTOCOL_VERSION,
-                client: HelloClient {
-                    kind: ClientKind::Proxy,
-                    host_id: Some(HostId::try_from("local-daemon").expect("host")),
-                },
-            },
-            RequestBody::BootstrapHost {
-                host: HostId::try_from("dev-box").expect("host"),
-                git_ref: Some("fix/remote-agents".to_owned()),
-            },
-            RequestBody::DoctorHost {
-                host: HostId::try_from("dev-box").expect("host"),
-            },
-            RequestBody::AgentThreadList,
-            RequestBody::AgentThreadCreate {
-                worktree: WorktreeId::try_from("acme/api#native-agents")
-                    .unwrap_or_else(|error| panic!("{error}")),
-                provider: AgentKind::Claude,
-                model: Some(model.clone()),
-                mode: PermissionMode::Ask,
-                resume_cursor: Some("session-1".to_owned()),
-                title: Some("native agents".to_owned()),
-            },
-            RequestBody::AgentThreadOpen {
-                thread,
-                from_seq: Some(Seq(41)),
-            },
-            RequestBody::AgentThreadClose { thread },
-            RequestBody::AgentSend {
-                thread,
-                input: UserInput {
-                    text: "inspect the failing test".to_owned(),
-                    attachments: Vec::new(),
-                },
-            },
-            RequestBody::AgentInterrupt { thread },
-            RequestBody::AgentRespond {
-                thread,
-                gate: GateId::new(),
-                answer: GateAnswer::Question {
-                    answers: vec![vec!["SQLite".to_owned()]],
-                },
-            },
-            RequestBody::AgentSetMode {
-                thread,
-                mode: PermissionMode::Plan,
-            },
-            RequestBody::AgentSetModel { thread, model },
-            RequestBody::AgentMarkSeen {
-                thread,
-                seq: Seq(42),
-            },
-            RequestBody::AgentStop { thread },
-            RequestBody::AttachTerminal {
-                terminal: TerminalId(4),
-                cols: 120,
-                rows: 40,
-            },
-            RequestBody::SetConfig {
-                patch: serde_json::json!({"agent":"opencode"}),
-            },
-            RequestBody::ScrollOrKeyTerminal {
-                terminal: TerminalId(8),
-                scroll: ScrollCommand::Pages(-1),
-                key: KeyEvent {
-                    key: Key::PageUp,
-                    mods: Modifiers::SHIFT,
-                    text: None,
-                    action: KeyAction::Press,
-                },
-            },
-            RequestBody::WheelTerminal {
-                terminal: TerminalId(8),
-                wheel: WheelEvent {
-                    steps: -3,
-                    col: 12,
-                    row: 8,
-                    mods: Modifiers::SHIFT | Modifiers::SUPER,
-                },
-            },
-            RequestBody::ListBaseRefs {
-                repo: repo.clone(),
-                force: true,
-            },
-            RequestBody::CreateWorktreeFromPr {
-                repo: repo.clone(),
-                number: 42,
-                host: Some(HostId::try_from("dev-box").expect("host")),
-            },
-            RequestBody::SetRepoHooks {
-                repo: repo.clone(),
-                hooks: RepoHooks::default(),
-            },
-            RequestBody::DismissClone { repo: repo.clone() },
-            RequestBody::RestoreTrash {
-                entry: "123-api".to_owned(),
-            },
-            RequestBody::RefreshStatuses { repo: Some(repo) },
-            RequestBody::SetAgentActivity {
-                session: SessionId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}")),
-                terminal_id: TerminalId(8),
-                activity: AgentActivity::Idle,
-                attention: Some(AttentionKind::Finished),
-            },
-            RequestBody::RestartTerminal {
-                terminal: TerminalId(8),
-            },
-            RequestBody::RetryJob { job },
-            RequestBody::MatchKeepAliveRules,
-            RequestBody::ImportFromSwarm,
-        ];
-        for body in bodies {
-            assert_round_trip(body);
+impl RequestBody {
+    /// Whether this open asks for a bounded window rather than the unbounded snapshot.
+    ///
+    /// The daemon uses exactly this predicate to choose the response shape, which is what makes
+    /// adding the window additive: a peer that sent no window field cannot be handed a variant
+    /// it has no arm for. A client only ever sets one of these fields after checking
+    /// [`AGENT_WINDOW_CAPABILITY`](crate::AGENT_WINDOW_CAPABILITY).
+    #[must_use]
+    pub const fn wants_window(&self) -> bool {
+        match self {
+            Self::AgentThreadOpen {
+                after_seq,
+                turn_limit,
+                before_cursor,
+                request_sync_marker,
+                ..
+            } => {
+                after_seq.is_some()
+                    || turn_limit.is_some()
+                    || before_cursor.is_some()
+                    || *request_sync_marker
+            }
+            _ => false,
         }
     }
 
-    #[test]
-    fn every_board_request_uses_contracted_snake_case_names() {
-        let requests = [
-            serde_json::json!({"type":"list_boards","context_id":null}),
-            serde_json::json!({"type":"get_board","board_id":"work"}),
-            serde_json::json!({"type":"ensure_board","context_id":"work"}),
-            serde_json::json!({"type":"create_board","context_id":"work","name":null,"prefix":null,"backend":null}),
-            serde_json::json!({"type":"update_board","board_id":"work","patch":{}}),
-            serde_json::json!({"type":"delete_board","board_id":"work"}),
-            serde_json::json!({"type":"create_card","board_id":"work","draft":{"title":"Task"}}),
-            serde_json::json!({"type":"update_card","card_id":"card-1","patch":{"assignee":null}}),
-            serde_json::json!({"type":"move_card","card_id":"card-1","status_id":"todo","index":1}),
-            serde_json::json!({"type":"delete_card","card_id":"card-1"}),
-            serde_json::json!({"type":"add_card_comment","card_id":"card-1","body":"Hello"}),
-            serde_json::json!({"type":"create_worktree_from_card","card_id":"card-1","repo_id":null,"base":null,"host":null}),
-            serde_json::json!({"type":"sync_board","board_id":"work"}),
-            serde_json::json!({"type":"resolve_card_conflict","card_id":"card-1","resolution":"take_remote"}),
-            serde_json::json!({"type":"describe_board_backend","board_id":"work"}),
-        ];
-        for json in requests {
-            let request: RequestBody =
-                serde_json::from_value(json.clone()).unwrap_or_else(|error| panic!("{error}"));
-            let encoded = serde_json::to_value(&request).unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(encoded["type"], json["type"]);
-            let fields = encoded.as_object().expect("tagged request object");
-            for (key, value) in json.as_object().expect("fixture object") {
-                // A patch and a draft carry their own camelCase contract; only the variant's
-                // own fields are snake_case.
-                if key != "patch" && key != "draft" {
-                    assert_eq!(&encoded[key], value, "wire field {key}");
-                }
-            }
-            assert!(!fields.keys().any(|key| key.contains(char::is_uppercase)));
-            assert_round_trip(request);
+    /// The resume cursor of an open, whichever field carried it.
+    ///
+    /// `after_seq` wins when both are set: a peer that speaks the window shape means the newer
+    /// field, and resolving the pair here keeps the precedence out of the daemon's dispatch.
+    #[must_use]
+    pub const fn resume_seq(&self) -> Option<Seq> {
+        match self {
+            Self::AgentThreadOpen {
+                from_seq,
+                after_seq,
+                ..
+            } => match after_seq {
+                Some(seq) => Some(*seq),
+                None => *from_seq,
+            },
+            _ => None,
         }
-    }
-
-    #[test]
-    fn hello_accepts_the_protocol_v6_string_client_wire_shape() {
-        let request: Request = serde_json::from_str(
-            r#"{"id":1,"body":{"type":"hello","protocol":6,"client":"fleet"}}"#,
-        )
-        .expect("legacy Hello request");
-        assert!(matches!(
-            request.body,
-            RequestBody::Hello {
-                protocol: 6,
-                client: HelloClient {
-                    kind: ClientKind::App,
-                    host_id: None,
-                },
-            }
-        ));
     }
 }
+
+/// The thread whose agent mutations must not interleave, for a request that is one.
+///
+/// The seven agent mutations for one thread are stream-ordered exactly as PTY input is: a mode
+/// change overtaking the send it was meant to precede is the terminal resize-overtakes-input bug
+/// in another costume. The daemon serializes on the returned thread — **per thread, never
+/// globally**, so two threads still run concurrently — and everything else joins the concurrent
+/// pool. Reads (`AgentThreadOpen`, `AgentItemBody`, `AgentThreadList`, `AgentCheckpoints`) are
+/// deliberately absent: they mutate nothing, and holding a slow remote open ahead of a keystroke
+/// is the stall this carve-out exists to prevent.
+///
+/// `AgentRevert` is in the list for a stronger reason than ordering taste: it rewrites the very
+/// worktree the harness is editing, so a revert that interleaved with a send would restore files
+/// underneath a running turn.
+#[must_use]
+pub const fn agent_request_is_serialized(body: &RequestBody) -> Option<ThreadId> {
+    match body {
+        RequestBody::AgentSend { thread, .. }
+        | RequestBody::AgentRespond { thread, .. }
+        | RequestBody::AgentInterrupt { thread }
+        | RequestBody::AgentSetMode { thread, .. }
+        | RequestBody::AgentSetModel { thread, .. }
+        | RequestBody::AgentStop { thread }
+        | RequestBody::AgentRevert { thread, .. } => Some(*thread),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests;

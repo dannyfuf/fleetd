@@ -41,6 +41,8 @@ pub struct PermissionOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionOption {
+    /// Stable provider-native option identity. Claude uses the exact label.
+    pub id: ProviderOptionId,
     /// Answer text returned to the provider.
     pub label: String,
     /// Human-readable consequence or clarification.
@@ -51,10 +53,12 @@ pub struct QuestionOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Question {
-    /// Full question text; Claude uses it as the answer-map key.
-    pub text: String,
+    /// Stable question identity. Claude uses the exact prompt as this identity.
+    pub id: String,
     /// Short card heading.
     pub header: String,
+    /// Full question text; retained verbatim for Claude's answer-map key.
+    pub prompt: String,
     /// Ordered predefined choices.
     pub options: Vec<QuestionOption>,
     /// Whether more than one choice may be selected.
@@ -62,7 +66,17 @@ pub struct Question {
     pub multi_select: bool,
     /// Whether the user may supply free text.
     #[serde(default)]
-    pub allow_other: bool,
+    pub allows_other: bool,
+    /// Whether answers must be masked and excluded from durable records.
+    #[serde(default)]
+    pub is_secret: bool,
+    /// Whether the harness is parked until this question is answered.
+    #[serde(default = "default_true")]
+    pub blocking: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// The three human-in-the-loop gate shapes rendered in a thread.

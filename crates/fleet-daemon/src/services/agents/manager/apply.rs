@@ -27,7 +27,7 @@ use anyhow::Context;
 use chrono::Utc;
 use fleet_core::agents::{
     AgentEvent, AgentThreadSummary, GateAnswer, GateKind, ItemId, ItemKind, PermissionChoice,
-    PlanAnswer, Seq, SeqEvent, SessionState, TurnId, TurnOutcome, TurnState, UserInput,
+    PlanAnswer, Seq, SeqEvent, SessionState, ToolKind, TurnId, TurnOutcome, TurnState, UserInput,
 };
 use fleet_proto::event::Event;
 use tokio::sync::MutexGuard;
@@ -154,16 +154,59 @@ pub(super) fn publish_applied(
 }
 
 /// The `ItemStarted` that records what the user typed.
-pub(super) fn user_item_started(turn: TurnId, item: ItemId, input: UserInput) -> AgentEvent {
+///
+/// `steered` is the harness's own answer to "did this message join a turn that was already
+/// running?" ([`crate::agents::harness::Submitted::queued`]), never a guess from the projection:
+/// §7.2 marks a steer with a leading `↳` and the mark has to survive a reload.
+pub(super) fn user_item_started(
+    turn: TurnId,
+    item: ItemId,
+    input: UserInput,
+    steered: bool,
+) -> AgentEvent {
     AgentEvent::ItemStarted {
         turn,
         item,
         kind: ItemKind::UserMessage {
             text: input.text,
             attachments: input.attachments,
+            steered,
         },
         parent: None,
     }
+}
+
+/// The worktree-relative or absolute paths an edit-shaped tool call is about to write.
+///
+/// Provider-neutral by reading both shapes rather than by branching on the harness: Codex's
+/// `fileChange` item maps to `{"paths": [...]}` and Claude's `Edit`/`Write`/`NotebookEdit` to a
+/// single `file_path`. A tool that names no path yields nothing, and nothing is captured — which
+/// is the same outcome as a capture that fails.
+pub(super) fn edited_paths(event: &AgentEvent) -> Option<(TurnId, Vec<String>)> {
+    let AgentEvent::ItemStarted { turn, kind, .. } = event else {
+        return None;
+    };
+    let ItemKind::Tool(call) = kind else {
+        return None;
+    };
+    if !matches!(call.kind, ToolKind::Edit | ToolKind::Write) {
+        return None;
+    }
+    let mut paths = Vec::new();
+    if let Some(listed) = call.input.get("paths").and_then(|value| value.as_array()) {
+        paths.extend(
+            listed
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(ToOwned::to_owned),
+        );
+    }
+    for key in ["file_path", "notebook_path", "path"] {
+        if let Some(path) = call.input.get(key).and_then(|value| value.as_str()) {
+            paths.push(path.to_owned());
+        }
+    }
+    (!paths.is_empty()).then_some((*turn, paths))
 }
 
 /// The turn this thread is working on, projected or merely in flight.
@@ -179,12 +222,12 @@ pub(super) fn runtime_inflight(runtime: &ThreadRuntime) -> Option<TurnId> {
 }
 
 /// The turn the deque is still holding prompts for, when it holds any.
-pub(super) fn pending_claude_turn(runtime: &ThreadRuntime) -> Option<TurnId> {
+pub(super) fn pending_input_turn(runtime: &ThreadRuntime) -> Option<TurnId> {
     runtime
         .state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pending_claude_inputs
+        .pending_inputs
         .front()
         .map(|(turn, _)| *turn)
 }
@@ -196,7 +239,7 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
     }
     record.last_activity = event.at;
     match &event.event {
-        AgentEvent::SessionStarted {
+        AgentEvent::SessionConfigured {
             resume_cursor,
             model,
             mode,
@@ -216,7 +259,7 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
                 record.model.clone_from(model);
             }
         }
-        AgentEvent::TurnCompleted { outcome, .. } => {
+        AgentEvent::TurnSettled { outcome, .. } => {
             record.last_outcome = Some(outcome.clone());
         }
         AgentEvent::TurnAborted { .. } => {
@@ -238,7 +281,7 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
 pub(super) fn ends_the_turn(event: &AgentEvent) -> bool {
     matches!(
         event,
-        AgentEvent::TurnCompleted { .. }
+        AgentEvent::TurnSettled { .. }
             | AgentEvent::TurnAborted { .. }
             | AgentEvent::SessionExited { .. }
             | AgentEvent::RuntimeError { fatal: true, .. }
@@ -286,23 +329,31 @@ pub(super) fn summary_transition(before: &AgentThreadSummary, after: &AgentThrea
 /// The `raw` label an event carries when the provider gave none.
 pub(super) fn event_name(event: &AgentEvent) -> &'static str {
     match event {
-        AgentEvent::SessionStarted { .. } => "session_started",
+        AgentEvent::SessionConfigured { .. } => "session_configured",
         AgentEvent::MetadataChanged { .. } => "metadata_changed",
         AgentEvent::SessionStateChanged(_) => "session_state_changed",
+        AgentEvent::SessionActivity { .. } => "session_activity",
         AgentEvent::SessionExited { .. } => "session_exited",
         AgentEvent::TurnStarted { .. } => "turn_started",
-        AgentEvent::TurnCompleted { .. } => "turn_completed",
+        AgentEvent::TurnSettled { .. } => "turn_settled",
         AgentEvent::TurnAborted { .. } => "turn_aborted",
+        AgentEvent::TurnDiff { .. } => "turn_diff",
+        AgentEvent::PlanSteps { .. } => "plan_steps",
         AgentEvent::ItemStarted { .. } => "item_started",
         AgentEvent::ContentDelta { .. } => "content_delta",
         AgentEvent::ItemUpdated { .. } => "item_updated",
         AgentEvent::ItemCompleted { .. } => "item_completed",
         AgentEvent::GateOpened { .. } => "gate_opened",
         AgentEvent::GateResolved { .. } => "gate_resolved",
+        AgentEvent::GateWithdrawn { .. } => "gate_withdrawn",
+        AgentEvent::PlanProposed { .. } => "plan_proposed",
         AgentEvent::TokenUsage { .. } => "token_usage",
-        AgentEvent::Checkpoint(_) => "checkpoint",
+        AgentEvent::RateLimits { .. } => "rate_limits",
+        AgentEvent::Compacted(_) => "compacted",
         AgentEvent::Retrying { .. } => "retrying",
+        AgentEvent::ModelRerouted { .. } => "model_rerouted",
         AgentEvent::RuntimeError { .. } => "runtime_error",
         AgentEvent::Notice(_) => "notice",
+        AgentEvent::Unknown { .. } => "unknown",
     }
 }

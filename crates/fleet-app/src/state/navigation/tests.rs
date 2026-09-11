@@ -227,17 +227,17 @@ fn agent_popup_open_switch_hide_preserves_the_underlying_focus_state() {
     assert_eq!(state.context_chain(), vec!["Agent", "Prefix"]);
     assert!(state.leave_agent_prefix());
     assert_eq!(
-        state.toggle_agent_popup(Agent::Opencode, None),
+        state.toggle_agent_popup(Agent::Codex, None),
         AgentPopupTransition::Switched
     );
     assert_eq!(state.screen, base);
     assert_eq!(
         state.agent_popup.as_ref().map(|popup| popup.agent),
-        Some(Agent::Opencode)
+        Some(Agent::Codex)
     );
 
     assert_eq!(
-        state.toggle_agent_popup(Agent::Opencode, None),
+        state.toggle_agent_popup(Agent::Codex, None),
         AgentPopupTransition::Hidden
     );
     assert!(state.agent_popup.is_none());

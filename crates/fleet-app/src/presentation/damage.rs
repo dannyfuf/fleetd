@@ -53,6 +53,18 @@ pub fn event_damage(event: &Event) -> EventDamage {
             notifications: true,
             ..EventDamage::default()
         },
+        // The three stream-control events change which rows a thread view may trust, not any
+        // cached Hub row, so they damage the domain projection and the chrome and nothing else.
+        Event::AgentResync { .. } | Event::AgentSynchronized { .. } | Event::AgentWindow { .. } => {
+            EventDamage {
+                domain: true,
+                chrome: true,
+                ..EventDamage::default()
+            }
+        }
+        // An event family this build cannot decode invalidates nothing: it is data the client
+        // never read, and repainting for it would be a frame spent on a guess.
+        Event::Unknown => EventDamage::default(),
         Event::TerminalFrame(frame) => EventDamage {
             terminal: Some(frame.terminal),
             sessions: frame.title.is_some(),

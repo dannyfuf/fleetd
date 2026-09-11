@@ -33,6 +33,12 @@ use tokio::{
 use tokio_util::codec::Framed;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Deadline for an agent mutation that may cost a harness start, resume, or interrupt ladder.
+///
+/// Strictly longer than the 30 s the daemon allows a harness start, which is the property that
+/// matters: a transport deadline shorter than the deadline it triggers turns a slow success into
+/// a reported failure, and a reported failure into a duplicate send.
+const AGENT_HARNESS_TIMEOUT: Duration = Duration::from_secs(45);
 const WRITE_BUDGET: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(50);
@@ -498,10 +504,14 @@ fn handle_incoming(
         return false;
     }
 
-    match serde_json::from_value::<Event>(value) {
+    // `Event::from_wire` rather than a strict decode: an event family this build has no arm for
+    // must cost one skipped frame, not the subscription. Emission is capability-gated, so an
+    // undecodable frame still deserves a warning — it means a gate was missed or a frame is
+    // corrupt, and the tag says which.
+    match Event::from_wire(value) {
         Ok(event) => publish(events, event),
-        Err(error) => {
-            tracing::warn!(%error, "ignored malformed Fleet event");
+        Err(unknown) => {
+            tracing::warn!(%unknown, "skipped an undecodable Fleet event");
             false
         }
     }
@@ -597,23 +607,54 @@ impl ConnectionEffect {
 }
 
 fn request_timeout(body: &RequestBody) -> Option<Duration> {
-    if matches!(
-        body,
+    match body {
         RequestBody::CreateWorktree { .. }
-            | RequestBody::CreateWorktreeFromPr { .. }
-            | RequestBody::CreateWorktreeFromCard { .. }
-            // A board backend validates and describes itself by shelling out to its own CLI,
-            // which has a deadline and a retry budget of its own an order of magnitude past
-            // this one. Timing these out here replaces the backend's own sentence — the
-            // install hint, the throttling notice, the JQL Jira refused — with a transport
-            // error, while the daemon keeps running the call the client stopped waiting for.
-            | RequestBody::CreateBoard { .. }
-            | RequestBody::UpdateBoard { .. }
-            | RequestBody::DescribeBoardBackend { .. }
-    ) {
-        None
-    } else {
-        Some(REQUEST_TIMEOUT)
+        | RequestBody::CreateWorktreeFromPr { .. }
+        | RequestBody::CreateWorktreeFromCard { .. }
+        // A board backend validates and describes itself by shelling out to its own CLI,
+        // which has a deadline and a retry budget of its own an order of magnitude past
+        // this one. Timing these out here replaces the backend's own sentence — the
+        // install hint, the throttling notice, the JQL Jira refused — with a transport
+        // error, while the daemon keeps running the call the client stopped waiting for.
+        | RequestBody::CreateBoard { .. }
+        | RequestBody::UpdateBoard { .. }
+        | RequestBody::DescribeBoardBackend { .. }
+        // Creating a thread probes and starts a harness: a login-shell environment slurp, a
+        // `--version` subprocess, and a spawn, for which the daemon is allowed 30 s. It is
+        // meant to answer immediately with a `Starting` summary and report readiness as an
+        // event, and the exemption is what documents that intent — a 10 s transport deadline
+        // would replace "claude is not on PATH" with "request timed out" for a failure the
+        // user can only fix if they are told what it was.
+        | RequestBody::AgentThreadCreate { .. }
+        // An open may wait on a remote owner across SSH, and the mirror answers a warm read in
+        // about a millisecond. There is no middle deadline that is right for both, and the one
+        // that matters is the owner's own error text (ADR 0008).
+        | RequestBody::AgentThreadOpen { .. }
+        // A body read is bounded by `limit` server-side, is cold-path by construction — the
+        // user expanded a tool row — and routes to the owner for a mirrored thread.
+        | RequestBody::AgentItemBody { .. } => None,
+        // The six agent mutations are serialized per thread by the daemon, and each of them can
+        // legitimately outlast the default: a mode or model change costs a restart-with-resume
+        // on a harness that cannot switch in place, a send to a stopped thread resumes one, and
+        // an interrupt walks a per-child deadline ladder before it hard-closes. All three are
+        // allowed 30 s harness-side, so a 10 s transport deadline reports a failure for work
+        // that lands at 12 s — and the user retries a send that has already been accepted.
+        RequestBody::AgentSend { .. }
+        | RequestBody::AgentRespond { .. }
+        | RequestBody::AgentInterrupt { .. }
+        | RequestBody::AgentSetMode { .. }
+        | RequestBody::AgentSetModel { .. }
+        | RequestBody::AgentStop { .. }
+        // A revert is `git add -A` plus a checkout of everything the turn touched, on a worktree
+        // the user chose the size of. It shares the mutation deadline rather than the default
+        // because a 10 s transport error on a revert that lands at 12 s invites the user to
+        // press `[u]` again on a tree that is already half restored.
+        | RequestBody::AgentRevert { .. } => Some(AGENT_HARNESS_TIMEOUT),
+        // `AgentThreadList` is one `SELECT` against a denormalized table, `AgentMarkSeen` is one
+        // upsert, and `AgentCheckpoints` is one `git for-each-ref` over a namespace bounded by
+        // the thread's turn count; none touches a harness, so all three keep the default
+        // deliberately.
+        _ => Some(REQUEST_TIMEOUT),
     }
 }
 
@@ -707,7 +748,15 @@ async fn establish(
             id: 0,
             body: RequestBody::Hello {
                 protocol: PROTOCOL_VERSION,
-                client: fleet_proto::request::HelloClient::default(),
+                // Named so the daemon knows which agent event families this build can decode;
+                // without it the three stream-control events are withheld (`AGENT_CAPABILITIES`).
+                client: fleet_proto::request::HelloClient {
+                    capabilities: fleet_proto::AGENT_CAPABILITIES
+                        .iter()
+                        .map(|capability| (*capability).to_owned())
+                        .collect(),
+                    ..fleet_proto::request::HelloClient::default()
+                },
             },
         },
         negotiated_capabilities,
@@ -1023,6 +1072,105 @@ mod tests {
     }
 
     #[test]
+    fn every_agent_request_has_a_deadline_decision_and_none_of_them_is_the_bare_default() {
+        use fleet_core::agents::{
+            AgentKind, GateAnswer, GateId, ItemId, ModelSelection, PermissionChoice,
+            PermissionMode, Seq, StreamKind, ThreadId, UserInput,
+        };
+
+        let thread = ThreadId::new();
+        // A harness start is allowed 30 s daemon-side. These three wait for it — or for a
+        // remote owner across SSH — rather than replacing its error text with a timeout.
+        for exempt in [
+            RequestBody::AgentThreadCreate {
+                worktree: "acme/api#agents"
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{error}")),
+                provider: AgentKind::Codex,
+                model: None,
+                mode: PermissionMode::Ask,
+                resume_cursor: None,
+                title: None,
+            },
+            RequestBody::AgentThreadOpen {
+                thread,
+                from_seq: None,
+                after_seq: None,
+                turn_limit: Some(10),
+                before_cursor: None,
+                request_sync_marker: true,
+            },
+            RequestBody::AgentItemBody {
+                thread,
+                item: ItemId::new(),
+                stream: StreamKind::CommandOutput,
+                offset: 0,
+                limit: 4_096,
+            },
+        ] {
+            assert_eq!(request_timeout(&exempt), None, "{exempt:?}");
+        }
+
+        // The six mutations outlive the harness deadline they can trigger, strictly.
+        for mutation in [
+            RequestBody::AgentSend {
+                thread,
+                input: UserInput {
+                    text: "go".to_owned(),
+                    attachments: Vec::new(),
+                    item: None,
+                },
+            },
+            RequestBody::AgentRespond {
+                thread,
+                gate: GateId::new(),
+                answer: GateAnswer::Permission {
+                    choice: PermissionChoice::AllowOnce,
+                    edited_payload: None,
+                },
+            },
+            RequestBody::AgentInterrupt { thread },
+            RequestBody::AgentSetMode {
+                thread,
+                mode: PermissionMode::Plan,
+            },
+            RequestBody::AgentSetModel {
+                thread,
+                model: ModelSelection {
+                    model: "gpt-5-codex".to_owned(),
+                    effort: None,
+                    provider: None,
+                },
+            },
+            RequestBody::AgentStop { thread },
+        ] {
+            assert_eq!(
+                request_timeout(&mutation),
+                Some(AGENT_HARNESS_TIMEOUT),
+                "{mutation:?}"
+            );
+        }
+        assert!(
+            AGENT_HARNESS_TIMEOUT > Duration::from_secs(30),
+            "a transport deadline shorter than the harness deadline it triggers reports a \
+             failure for work that succeeds"
+        );
+
+        // The two that touch no harness keep the default, on purpose rather than by omission.
+        assert_eq!(
+            request_timeout(&RequestBody::AgentThreadList),
+            Some(REQUEST_TIMEOUT)
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::AgentMarkSeen {
+                thread,
+                seq: Seq(1)
+            }),
+            Some(REQUEST_TIMEOUT)
+        );
+    }
+
+    #[test]
     fn board_backend_requests_wait_for_the_backend_to_answer() {
         let board_id = "board".parse().unwrap_or_else(|error| panic!("{error}"));
         // `describe` is two or three CLI calls, each with its own retry budget: a deadline
@@ -1208,13 +1356,24 @@ mod tests {
         let transport = protocol_transport(client);
         let (mut writer, mut reader) = transport.split();
         let (response, _receiver) = oneshot::channel();
+        // "Nearly expired" means `expires_at` is orders of magnitude closer than
+        // `WRITE_BUDGET`, which is the whole claim: the write budget is not clamped to
+        // the request deadline. The margin is not one millisecond, because this test runs on a
+        // real clock and `command_for_dispatch` refuses an *already* expired command — a
+        // millisecond is a race with the scheduler, and losing it fails the test for a reason
+        // that has nothing to do with what it asserts.
+        let nearly = WRITE_BUDGET / 100;
+        assert!(
+            nearly < WRITE_BUDGET,
+            "the request deadline is the nearer one"
+        );
         let command = Command {
             request: Request {
                 id: 1,
                 body: RequestBody::DaemonPing,
             },
             response: Some(response),
-            expires_at: Some(Instant::now() + Duration::from_millis(1)),
+            expires_at: Some(Instant::now() + nearly),
         };
         let mut pending = HashMap::new();
         let mut state = ConnectionState::default();

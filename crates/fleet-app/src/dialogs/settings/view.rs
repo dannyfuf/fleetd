@@ -101,7 +101,7 @@ pub(crate) fn render(
             let bridge = bridge.clone();
             move |_: &settings_actions::OpenConfigFile, _window, cx| {
                 // §3.8.6 surrenders every bound printable key to a focused input, `E` and `D`
-                // included: `Claude command` and `OpenCode command` are free text, and a key
+                // included: `Claude command` and `Codex command` are free text, and a key
                 // that replaced the screen instead of typing dropped the draft silently.
                 if insert_literal(&state, "E", cx) {
                     return;

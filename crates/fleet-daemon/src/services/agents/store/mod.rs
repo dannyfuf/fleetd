@@ -32,7 +32,7 @@
 //! [`import`] the one-shot NDJSON migration, [`project`] the event → rows projector, [`list`] the
 //! one-`SELECT` thread list, [`index`] the `AgentThreadRecord` mapping, [`writer`] the owned
 //! writer thread, [`read`] the read-only pool and its bounded queries, [`cursor`] the pagination
-//! cursor.
+//! cursor, [`mirror`] the `owner_host` columns and the only statements allowed to write them.
 //!
 //! **Two deviations from the NDJSON seam this replaces,** both forced by the design:
 //!
@@ -42,16 +42,12 @@
 //!   `oneshot` the caller awaits, and a read runs under `spawn_blocking`; blocking a tokio worker
 //!   on either is the thing this store was built to stop doing.
 
-// The pagination cursor and the bounded window read below it are the read path
-// `docs/NATIVE-AGENTS.md` §9 specifies, and they are complete and tested. Nothing in production
-// reaches them yet: `AgentThreadSnapshot` carries no cursor field, so exposing a page needs a
-// `fleet-proto` change that belongs with the live path, not with this store.
-#[allow(dead_code)]
 mod cursor;
 mod import;
 mod index;
 mod list;
 mod migrations;
+mod mirror;
 mod project;
 mod read;
 mod schema;
@@ -65,13 +61,17 @@ use std::{
 };
 
 use anyhow::Context;
-use fleet_core::agents::{AgentThreadSummary, Seq, SeqEvent, ThreadId};
+use fleet_core::{
+    agents::{AgentThreadSummary, Seq, SeqEvent, ThreadId},
+    ids::HostId,
+};
 
 use super::{AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord};
 use cursor::TranscriptCursor;
 pub(crate) use list::BootWork;
+pub(crate) use mirror::{Admission, MirrorRefusal, ThreadOwnership, admits_append};
 use read::ReaderPool;
-pub(crate) use read::TranscriptWindow;
+pub(crate) use read::{SessionRuntime, TranscriptWindow, TurnKeyset};
 use writer::Writer;
 
 /// The ceiling on one page, whatever a caller asks for.
@@ -79,8 +79,21 @@ use writer::Writer;
 /// A page's size is a wire-budget decision, not a caller's: the budget it protects is first paint
 /// staying around 100 KB on the heaviest threads. A caller that wants more history pages for it
 /// with the cursor the previous page returned.
-#[allow(dead_code)]
 const MAX_PAGE_EVENTS: usize = 256;
+
+/// Decodes a client page cursor into the exclusive upper bound it opens.
+///
+/// Total by construction: a malformed, foreign or unknown-version token answers `None`, which
+/// every caller reads as "serve the newest page". A stale cursor after a reconnect must degrade
+/// to "reload recent history", never to an error.
+pub(crate) fn page_cursor(token: &str, thread: ThreadId) -> Option<Seq> {
+    TranscriptCursor::decode(token, thread).map(TranscriptCursor::before_seq)
+}
+
+/// Mints the opaque cursor a client sends back to read the slice older than `before`.
+pub(crate) fn page_token(thread: ThreadId, before: Seq) -> String {
+    TranscriptCursor::new(thread, before).to_string()
+}
 
 /// The native-agent transcript store: one log, every read model, one owned writer.
 ///
@@ -277,6 +290,115 @@ impl SqliteAgentStore {
     /// metadata transition: one row, one statement, no other thread read or written.
     pub(crate) async fn write_record(&self, record: &AgentThreadRecord) -> anyhow::Result<()> {
         self.inner.writer.write_record(record).await
+    }
+
+    /// Where a thread is owned, and how much of its log this daemon holds.
+    ///
+    /// One primary-key lookup against `threads`, which is why every authority check on the
+    /// mirror path can afford to take it first. `None` means this daemon has never heard of the
+    /// thread — not that it is local.
+    pub(crate) async fn ownership(
+        &self,
+        thread: ThreadId,
+    ) -> anyhow::Result<Option<ThreadOwnership>> {
+        self.inner
+            .readers
+            .read("read a thread's ownership", move |conn| {
+                mirror::read_ownership(conn, thread)
+            })
+            .await
+    }
+
+    /// Records — or refreshes — the header of a thread that `host` owns.
+    ///
+    /// This is the only way a mirrored row comes into existence, and the only field-shaped write
+    /// the mirror performs (`docs/NATIVE-AGENTS.md` §9.3). It starts no provider and touches no
+    /// projected row.
+    pub(crate) async fn mirror_claim(
+        &self,
+        host: HostId,
+        summary: &AgentThreadSummary,
+    ) -> anyhow::Result<()> {
+        self.inner.writer.mirror_claim(host, summary).await
+    }
+
+    /// Appends owner-sequenced events to a mirrored thread's prefix.
+    ///
+    /// Refused unless `host` is the recorded owner and the events continue the prefix exactly;
+    /// a sequence the prefix already holds is dropped, because a catch-up replay and live
+    /// delivery are expected to overlap.
+    pub(crate) async fn mirror_append(
+        &self,
+        host: HostId,
+        thread: ThreadId,
+        events: &[SeqEvent],
+        owner_head: Option<Seq>,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .writer
+            .mirror_append(host, thread, events, owner_head)
+            .await
+    }
+
+    /// Throws one mirrored thread's cached transcript away, leaving its header.
+    ///
+    /// The answer to an owner whose head is behind this mirror: the cache is never right against
+    /// the owner, so it is discarded whole rather than reconciled.
+    pub(crate) async fn mirror_discard(&self, thread: ThreadId) -> anyhow::Result<()> {
+        self.inner.writer.mirror_discard(thread).await
+    }
+
+    /// How many events and payload bytes sit in `(after, head]`, for the admission ladder.
+    ///
+    /// Sums the `bytes` column instead of reading payloads: deciding whether a replay is
+    /// admissible must not cost the replay.
+    pub(crate) async fn resume_admission(
+        &self,
+        thread: ThreadId,
+        after: Seq,
+    ) -> anyhow::Result<(u64, u64)> {
+        self.inner
+            .readers
+            .read("measure a resumable tail", move |conn| {
+                mirror::resume_admission(conn, thread, after)
+            })
+            .await
+    }
+
+    /// Which turns one bounded window covers, and whether older ones exist.
+    ///
+    /// `before` is the exclusive upper bound from a previous page's cursor; `None` reads the
+    /// newest turns. One index-only statement, so a "load earlier" is a keyset read rather than
+    /// a scan of everything newer than the page.
+    pub(crate) async fn turn_keyset(
+        &self,
+        thread: ThreadId,
+        before: Option<Seq>,
+        limit: usize,
+    ) -> anyhow::Result<TurnKeyset> {
+        self.inner
+            .readers
+            .read("read a turn keyset", move |conn| {
+                read::turn_keyset(conn, thread, before, limit)
+            })
+            .await
+    }
+
+    /// The harness runtime one thread's session row last recorded.
+    ///
+    /// The tools, commands and skills the composer gates its controls on live in `sessions`
+    /// rather than in the reducer's projection, so a windowed open reads them here instead of
+    /// blanking them.
+    pub(crate) async fn session_runtime(
+        &self,
+        thread: ThreadId,
+    ) -> anyhow::Result<Option<SessionRuntime>> {
+        self.inner
+            .readers
+            .read("read a session runtime", move |conn| {
+                read::session_runtime(conn, thread)
+            })
+            .await
     }
 
     /// Reads the whole thread index.

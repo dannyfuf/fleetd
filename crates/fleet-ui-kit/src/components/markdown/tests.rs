@@ -388,12 +388,65 @@ fn a_lone_angle_bracket_is_text() {
 // Streaming safety
 // -----------------------------------------------------------------------------------------
 
+/// An open fence is code from its first line — so the block does not appear as prose and then
+/// reflow — but it is **not** highlighted while it is still growing.
 #[test]
-fn an_unterminated_fence_is_still_a_code_block() {
+fn an_unterminated_fence_is_code_but_is_not_highlighted() {
     assert_eq!(
         parse_markdown("```py\nprint(1)\n").blocks,
-        vec![MarkdownBlock::code(Some("py".to_owned()), "print(1)\n")]
+        vec![MarkdownBlock::streaming_code(
+            Some("py".to_owned()),
+            "print(1)\n"
+        )]
     );
+    // The same fence, closed, keeps its colours.
+    assert_eq!(
+        parse_markdown("```py\nprint(1)\n```").blocks,
+        vec![MarkdownBlock::code(Some("py".to_owned()), "print(1)")]
+    );
+}
+
+/// The cache is the streaming path's one piece of shared state, so the poisoning rule is
+/// pinned: a partial fence is neither read from nor written to it.
+#[test]
+fn a_partial_fence_never_reaches_the_highlight_cache() {
+    let cache = HighlightCache::new();
+    let mut source = String::from("```rust\n");
+    for line in ["let x = 1;", "let y = 2;", "let z = 3;"] {
+        source.push_str(line);
+        source.push('\n');
+        let document = parse_markdown_cached(&source, &cache);
+        assert!(cache.is_empty(), "a partial fence was cached: {source:?}");
+        let [
+            MarkdownBlock::Code {
+                highlights, closed, ..
+            },
+        ] = document.blocks.as_slice()
+        else {
+            panic!("an open fence is one code block, got {:?}", document.blocks)
+        };
+        assert!(!closed);
+        assert!(
+            highlights.spans().is_empty(),
+            "a streaming fence must not be coloured"
+        );
+    }
+
+    source.push_str("```");
+    let document = parse_markdown_cached(&source, &cache);
+    assert_eq!(cache.len(), 1, "the closed fence is cached exactly once");
+    let [MarkdownBlock::Code { closed: true, .. }] = document.blocks.as_slice() else {
+        panic!("the closed fence is one code block")
+    };
+
+    // A second parse of the settled document is a cache hit, not a re-lex.
+    code::HIGHLIGHT_CALLS.with(|calls| calls.set(0));
+    let _ = parse_markdown_cached(&source, &cache);
+    assert_eq!(code::HIGHLIGHT_CALLS.with(std::cell::Cell::get), 0);
+    assert_eq!(cache.len(), 1);
+
+    cache.clear();
+    assert!(cache.is_empty());
 }
 
 #[test]

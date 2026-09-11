@@ -1,7 +1,10 @@
 //! Per-client protocol decoding, dispatch, responses, and subscriptions.
 
+mod events;
+
+use events::event_visible;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
     sync::{Arc, OnceLock},
@@ -135,10 +138,18 @@ impl Connection {
         let owner_id = watch_owner.id;
         let mut subscriptions = HashSet::new();
         let mut attached = HashSet::new();
+        // The highest agent sequence this connection was actually handed, per thread. It is the
+        // only place that knows it — the bus is shared and the store's head is ahead of any one
+        // slow reader — so it is what makes a dropped agent event nameable rather than silent.
+        let mut agent_cursors: HashMap<fleet_core::agents::ThreadId, fleet_core::agents::Seq> =
+            HashMap::new();
         let mut events = self.events.subscribe();
         let mut frames = self.services.sessions.subscribe_frames();
         let mut pending = FuturesUnordered::<DispatchFuture>::new();
         let mut shutdown_announced = false;
+        // A write failure inside the per-thread resync loop, carried out so the `break` leaves
+        // the `select!` arm rather than the `for`.
+        let mut break_on_resync: Option<DaemonError> = None;
         let mut result = loop {
             // Shutdown is settled here rather than with `biased;`: biasing this select's six
             // arms in their current order would let a client that never stops sending starve
@@ -278,8 +289,11 @@ impl Connection {
                 }
                 event = events.recv() => {
                     match event {
-                        Ok(event) if event_visible(&event, &subscriptions, &attached) => {
+                        Ok(event) if event_visible(&event, &subscriptions, &attached, &client) => {
                             shutdown_announced |= matches!(event, Event::DaemonShuttingDown);
+                            if let Event::Agent { thread, event: seq_event } = &event {
+                                agent_cursors.insert(*thread, seq_event.seq);
+                            }
                             if let Err(error) = enqueue_event(&outbound, event).await {
                                 break Err(error);
                             }
@@ -299,6 +313,26 @@ impl Connection {
                                 skipped,
                                 "event stream lagged; resyncing the client instead of dropping it"
                             );
+                            // Backpressure is never a stall, never an OOM and never a *silent*
+                            // drop: a peer that named the capability is told, per thread, the
+                            // last sequence it is known to hold, and re-opens from there. A peer
+                            // that did not keeps the sequence-gap recovery it already had.
+                            if subscriptions.contains(&EventKind::Agent)
+                                && client.supports(fleet_proto::AGENT_RESYNC_CAPABILITY)
+                            {
+                                for (thread, from_seq) in &agent_cursors {
+                                    if let Err(error) = enqueue_event(
+                                        &outbound,
+                                        Event::AgentResync { thread: *thread, from_seq: *from_seq },
+                                    ).await {
+                                        break_on_resync = Some(error);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(error) = break_on_resync.take() {
+                                break Err(error);
+                            }
                             request_full_frames(
                                 &self.services,
                                 owner_id,
@@ -631,46 +665,6 @@ fn request_changes_snapshot(body: &RequestBody) -> bool {
     )
 }
 
-fn event_visible(
-    event: &Event,
-    subscriptions: &HashSet<EventKind>,
-    attached: &HashSet<fleet_core::ids::TerminalId>,
-) -> bool {
-    if !subscriptions.contains(&event_kind(event)) {
-        return false;
-    }
-    match event {
-        Event::TerminalFrame(frame) => attached.contains(&frame.terminal),
-        Event::TerminalExited { terminal, .. } | Event::TerminalTitle { terminal, .. } => {
-            attached.contains(terminal)
-        }
-        _ => true,
-    }
-}
-
-fn event_kind(event: &Event) -> EventKind {
-    match event {
-        Event::Agent { .. } => EventKind::Agent,
-        Event::AgentSummary(_) => EventKind::AgentSummary,
-        Event::WatchStarted(_) => EventKind::WatchStarted,
-        Event::WatchOutput { .. } => EventKind::WatchOutput,
-        Event::WatchExited(_) => EventKind::WatchExited,
-        Event::WatchDismissed(_) => EventKind::WatchDismissed,
-        Event::SnapshotChanged(_) => EventKind::SnapshotChanged,
-        Event::BoardChanged { .. } => EventKind::BoardChanged,
-        Event::JobUpdated(_) => EventKind::JobUpdated,
-        Event::SessionChanged(_) => EventKind::SessionChanged,
-        Event::AgentActivityChanged { .. } => EventKind::AgentActivityChanged,
-        Event::TerminalFrame(_) => EventKind::TerminalFrame,
-        Event::TerminalExited { .. } => EventKind::TerminalExited,
-        Event::TerminalTitle { .. } => EventKind::TerminalTitle,
-        Event::HostLinkChanged { .. } => EventKind::HostLinkChanged,
-        Event::TerminalReattach { .. } => EventKind::TerminalReattach,
-        Event::Toast { .. } => EventKind::Toast,
-        Event::DaemonShuttingDown => EventKind::DaemonShuttingDown,
-    }
-}
-
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Outbound {
@@ -733,10 +727,23 @@ async fn write_response(
     let message = if matches!(&response.result, Ok(ResponseBody::Hello { .. })) {
         Outbound::Hello(HelloResponse {
             response,
-            capabilities: vec![
-                PRUNE_REVIEWED_IDS_CAPABILITY.to_owned(),
-                fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
-            ],
+            // Only what this build actually implements: a peer infers behaviour from these
+            // strings and never from a version number, so advertising an unimplemented one is
+            // worse than advertising nothing (`rust-ipc-protocol` Rule 7). Every `agent.*`
+            // capability is served by this build — the windowed open and its synchronization
+            // marker, per-thread resync on a lagged connection, paged item bodies, Fleet-owned
+            // checkpoints, and the Codex harness — so the slice goes out whole rather than as a
+            // hand-maintained subset that can drift from what dispatch answers.
+            capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
+                .chain(std::iter::once(
+                    fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
+                ))
+                .chain(
+                    fleet_proto::AGENT_CAPABILITIES
+                        .iter()
+                        .map(|capability| (*capability).to_owned()),
+                )
+                .collect(),
             daemon_id: daemon_id.to_owned(),
             build_commit: option_env!("FLEET_BUILD_COMMIT").map(str::to_owned),
         })
@@ -813,17 +820,34 @@ mod tests {
                     server: Services::version(),
                 }),
             },
-            capabilities: vec![
-                PRUNE_REVIEWED_IDS_CAPABILITY.to_owned(),
-                fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
-            ],
+            capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
+                .chain(std::iter::once(
+                    fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
+                ))
+                .chain(
+                    fleet_proto::AGENT_CAPABILITIES
+                        .iter()
+                        .map(|capability| (*capability).to_owned()),
+                )
+                .collect(),
             daemon_id: "test-daemon".to_owned(),
             build_commit: None,
         });
         let hello = serde_json::to_value(hello).expect("serialize Hello");
+        // Written out rather than derived from the slice: the point is that these exact strings
+        // reach the wire, so a rename has to be made deliberately in two places.
         assert_eq!(
             hello["capabilities"],
-            serde_json::json!(["prune.reviewed_ids", "remote-machines"])
+            serde_json::json!([
+                "prune.reviewed_ids",
+                "remote-machines",
+                "agent.window",
+                "agent.sync_marker",
+                "agent.resync",
+                "agent.item_body",
+                "agent.checkpoints",
+                "agent.codex"
+            ])
         );
 
         let identity = daemon_identity();
@@ -1054,17 +1078,6 @@ mod tests {
             .kill(session.id)
             .await
             .expect("kill test session");
-    }
-
-    #[test]
-    fn watch_events_are_global_and_require_their_subscription() {
-        let event = Event::WatchDismissed(fleet_core::watches::WatchId(1));
-        assert!(event_visible(
-            &event,
-            &HashSet::from([EventKind::WatchDismissed]),
-            &HashSet::new()
-        ));
-        assert!(!event_visible(&event, &HashSet::new(), &HashSet::new()));
     }
 
     #[test]
@@ -1528,27 +1541,5 @@ mod tests {
             .await
             .expect("connection task")
             .expect("connection ends cleanly");
-    }
-
-    #[test]
-    fn terminal_events_are_visible_only_to_attached_subscribers() {
-        let terminal = TerminalId(9);
-        let event = Event::TerminalExited {
-            terminal,
-            code: Some(0),
-        };
-        let subscriptions = HashSet::from([EventKind::TerminalExited]);
-
-        assert!(!event_visible(&event, &subscriptions, &HashSet::new()));
-        assert!(event_visible(
-            &event,
-            &subscriptions,
-            &HashSet::from([terminal])
-        ));
-        assert!(!event_visible(
-            &event,
-            &HashSet::new(),
-            &HashSet::from([terminal])
-        ));
     }
 }

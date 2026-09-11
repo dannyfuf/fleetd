@@ -114,14 +114,12 @@ impl ListRow {
                 self.provider
             )
         })?;
-        let session: SessionState =
-            serde_json::from_value(serde_json::Value::String(self.session_state.clone()))
-                .with_context(|| {
-                    format!(
-                        "thread {thread} names session state `{}`",
-                        self.session_state
-                    )
-                })?;
+        let session = decode_session_state(&self.session_state).with_context(|| {
+            format!(
+                "thread {thread} names session state `{}`",
+                self.session_state
+            )
+        })?;
         let attention: Attention = serde_json::from_str(&self.attention)
             .with_context(|| format!("decode the attention of thread {thread}"))?;
         let turn: TurnState = serde_json::from_str(&self.turn_json)
@@ -153,6 +151,19 @@ impl ListRow {
             last_nonterminal_seq: self.last_nonterminal_seq.map(seq),
             exit_code: self.exit_code.and_then(|code| i32::try_from(code).ok()),
         })
+    }
+}
+
+fn decode_session_state(encoded: &str) -> anyhow::Result<SessionState> {
+    match encoded {
+        "starting" => Ok(SessionState::Starting),
+        "ready" => Ok(SessionState::Ready),
+        "running" => Ok(SessionState::Running),
+        "stopped" => Ok(SessionState::Stopped),
+        "error" => Ok(SessionState::Error),
+        // Only `Waiting` has payload. New rows retain it as JSON while unit states remain the
+        // indexed discriminants shipped by the schema.
+        other => serde_json::from_str(other).context("decode a payload-bearing session state"),
     }
 }
 
@@ -192,7 +203,17 @@ pub(crate) struct BootWork {
     pub(crate) unprojected: Vec<ThreadId>,
     /// Threads the previous run left claiming a provider it no longer has (§6). They are settled
     /// explicitly, as appended events, when the manager hydrates them.
+    ///
+    /// Mirrored threads are excluded by the query, and that is an authority rule rather than an
+    /// optimisation: settling an orphan *appends events*, and the local daemon must never mint a
+    /// sequence for a thread it does not own (`docs/NATIVE-AGENTS.md` §9.3).
     pub(crate) orphans: Vec<ThreadId>,
+    /// Threads another host owns, as the durable mirror recorded them.
+    ///
+    /// The router's id mappings are rebuilt from a live link, so without this census a mirrored
+    /// thread would classify as *local* between a daemon start and the owner's first snapshot —
+    /// which is exactly the window in which a mutation must be refused rather than applied.
+    pub(crate) mirrored: Vec<(ThreadId, HostId)>,
 }
 
 /// Takes the census. Both queries are index-only lookups against `threads`.
@@ -210,12 +231,15 @@ pub(super) fn boot_work(conn: &Connection) -> anyhow::Result<BootWork> {
         orphans: ids(
             conn,
             "SELECT thread_id FROM threads \
-              WHERE deleted_at IS NULL \
+              WHERE deleted_at IS NULL AND owner_host IS NULL \
                 AND (session_state IN ('starting', 'ready', 'running') \
                      OR running_turn_id IS NOT NULL) \
               ORDER BY last_activity_at DESC LIMIT ?1",
             "the orphaned threads",
         )?,
+        // Served by `idx_threads_owner`, a partial index, so this costs nothing on a daemon that
+        // federates nothing.
+        mirrored: mirrored(conn)?,
     })
 }
 
@@ -225,6 +249,43 @@ pub(super) fn boot_work(conn: &Connection) -> anyhow::Result<BootWork> {
 /// repairs the most recently active ones and the next start takes the rest, which is strictly
 /// better than a start that walks an unbounded list.
 const CENSUS_LIMIT: usize = 1_000;
+
+/// The durable owner of every mirrored thread, newest first.
+fn mirrored(conn: &Connection) -> anyhow::Result<Vec<(ThreadId, HostId)>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT thread_id, owner_host FROM threads \
+              WHERE owner_host IS NOT NULL AND deleted_at IS NULL \
+              ORDER BY last_activity_at DESC LIMIT ?1",
+        )
+        .context("prepare the query for the mirrored threads")?;
+    let rows = statement
+        .query_map(
+            params![i64::try_from(CENSUS_LIMIT).unwrap_or(i64::MAX)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .context("query the mirrored threads")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read the mirrored threads")?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(thread, host)| {
+            match (thread.parse::<ThreadId>(), HostId::try_from(host.clone())) {
+                (Ok(thread), Ok(host)) => Some((thread, host)),
+                (thread_id, owner) => {
+                    tracing::warn!(
+                        %thread,
+                        %host,
+                        thread_error = thread_id.err().map(|error| error.to_string()),
+                        host_error = owner.err().map(|error| error.to_string()),
+                        "skipping an unusable mirrored thread in the boot census"
+                    );
+                    None
+                }
+            }
+        })
+        .collect())
+}
 
 fn ids(conn: &Connection, sql: &str, what: &str) -> anyhow::Result<Vec<ThreadId>> {
     let mut statement = conn

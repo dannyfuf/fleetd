@@ -105,6 +105,27 @@ pub(crate) fn strip_proto_error_prefix(kind: ErrorKind, message: String) -> Stri
     }
 }
 
+/// Maps a peer's [`ProtoError`] back onto the daemon's own error kinds.
+///
+/// One mapping, in the crate's error module, because there were already two: the remote link's
+/// and the agent dispatcher's. A third copy would be the one that drifts — a `Conflict` read as
+/// transient, or a `NotFound` widened to a string — and every surface in Fleet branches on the
+/// kind rather than on the sentence.
+pub(crate) fn from_proto_error(error: ProtoError) -> DaemonError {
+    let message = strip_proto_error_prefix(error.kind, error.message);
+    match error.kind {
+        ErrorKind::NotFound => DaemonError::NotFound(message),
+        ErrorKind::Conflict => DaemonError::Conflict(message),
+        ErrorKind::Validation => DaemonError::Validation(message),
+        ErrorKind::Cancelled => DaemonError::Cancelled,
+        ErrorKind::Unsupported => DaemonError::Unsupported(message),
+        ErrorKind::Remote => DaemonError::Remote(message),
+        ErrorKind::Git => DaemonError::Git(message),
+        ErrorKind::Github => DaemonError::Github(message),
+        ErrorKind::Fs | ErrorKind::Tmux | ErrorKind::Unknown => DaemonError::Protocol(message),
+    }
+}
+
 impl DaemonError {
     /// Constructs a filesystem error while retaining its path context.
     #[must_use]

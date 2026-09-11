@@ -15,17 +15,18 @@ use std::{
 };
 
 use async_channel::{Receiver, Sender};
-use fleet_client::{Client, ensure_daemon};
+use fleet_client::{AgentWindowRequest, Client, ensure_daemon};
 use fleet_core::{
     agents::{
-        AgentKind, AgentThreadSummary, GateAnswer, GateId, ModelSelection, PermissionMode, Seq,
-        SeqEvent, ThreadId, UserInput,
+        AgentKind, AgentThreadSummary, GateAnswer, GateId, ItemId, ModelSelection, PermissionMode,
+        Seq, SeqEvent, StreamKind, ThreadId, UserInput,
     },
     config::Config,
     ids::WorktreeId,
     paths::FleetHome,
 };
 use fleet_proto::{
+    agents::CheckpointId,
     error::{ErrorKind, ProtoError},
     event::Event,
     request::RequestBody,
@@ -166,12 +167,28 @@ pub enum BridgeCommand {
         /// Optional display title.
         title: Option<String>,
     },
-    /// Open a projection and event tail.
+    /// Open a bounded transcript window, or resume from a cursor.
+    ///
+    /// The window fields are capability-gated on the daemon side: a peer that advertises no
+    /// `agent.window` capability is sent the version-6 shape, whose meaning never changes.
     AgentThreadOpen {
         /// Target thread.
         thread: ThreadId,
-        /// Optional last-applied cursor.
-        from_seq: Option<Seq>,
+        /// What to ask for: the newest window, an older page, or everything after a cursor.
+        window: AgentWindowRequest,
+    },
+    /// Read a stored item body in offset ranges, for an output a window elided.
+    AgentItemBody {
+        /// Target thread.
+        thread: ThreadId,
+        /// Item whose body to read.
+        item: ItemId,
+        /// Which stream of that item.
+        stream: StreamKind,
+        /// Byte offset to read from.
+        offset: u64,
+        /// How many bytes to read; the daemon clamps an oversized ask rather than refusing it.
+        limit: u32,
     },
     /// Close a client thread lease.
     AgentThreadClose {
@@ -225,6 +242,18 @@ pub enum BridgeCommand {
         /// Target thread.
         thread: ThreadId,
     },
+    /// List the Fleet-owned checkpoints this thread's worktree can be reverted to.
+    AgentCheckpoints {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Restore this thread's worktree from one of its checkpoints.
+    AgentRevert {
+        /// Target thread.
+        thread: ThreadId,
+        /// Checkpoint to restore, as the listing named it.
+        checkpoint: CheckpointId,
+    },
 }
 
 impl From<BridgeCommand> for RequestBody {
@@ -246,9 +275,20 @@ impl From<BridgeCommand> for RequestBody {
                 resume_cursor,
                 title,
             },
-            BridgeCommand::AgentThreadOpen { thread, from_seq } => {
-                Self::AgentThreadOpen { thread, from_seq }
-            }
+            BridgeCommand::AgentThreadOpen { thread, window } => window.into_body(thread),
+            BridgeCommand::AgentItemBody {
+                thread,
+                item,
+                stream,
+                offset,
+                limit,
+            } => Self::AgentItemBody {
+                thread,
+                item,
+                stream,
+                offset,
+                limit,
+            },
             BridgeCommand::AgentThreadClose { thread } => Self::AgentThreadClose { thread },
             BridgeCommand::AgentSend { thread, input } => Self::AgentSend { thread, input },
             BridgeCommand::AgentInterrupt { thread } => Self::AgentInterrupt { thread },
@@ -265,6 +305,10 @@ impl From<BridgeCommand> for RequestBody {
             BridgeCommand::AgentSetModel { thread, model } => Self::AgentSetModel { thread, model },
             BridgeCommand::AgentMarkSeen { thread, seq } => Self::AgentMarkSeen { thread, seq },
             BridgeCommand::AgentStop { thread } => Self::AgentStop { thread },
+            BridgeCommand::AgentCheckpoints { thread } => Self::AgentCheckpoints { thread },
+            BridgeCommand::AgentRevert { thread, checkpoint } => {
+                Self::AgentRevert { thread, checkpoint }
+            }
         }
     }
 }

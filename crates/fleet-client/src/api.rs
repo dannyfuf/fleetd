@@ -53,7 +53,10 @@ pub struct DaemonVersion {
     pub protocol: u32,
 }
 
-pub use agents::{AgentMirror, AgentSnapshot, MirrorOutcome};
+pub use agents::{
+    AgentEvents, AgentItemBody, AgentMirror, AgentSnapshot, AgentWindowRequest, MirrorOutcome,
+    PageOutcome, WindowState, applied_seq, projection_from_window,
+};
 
 pub(crate) fn expect_ack(operation: &str, response: ResponseBody) -> Result<()> {
     match response {

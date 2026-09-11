@@ -261,6 +261,7 @@ pub fn default_terminals(config: &Config, agent: Agent, proxied: bool) -> Vec<Te
 pub fn agent_session_id(agent: Agent) -> Result<SessionId, IdError> {
     SessionId::try_from(match agent {
         Agent::Claude => "swarm-agent-claude",
+        Agent::Codex => "swarm-agent-codex",
         Agent::Opencode => "swarm-agent-opencode",
     })
 }
@@ -277,6 +278,7 @@ pub fn worktree_agent_session_id(
 ) -> Result<SessionId, IdError> {
     let name = match agent {
         Agent::Claude => "claude",
+        Agent::Codex => "codex",
         Agent::Opencode => "opencode",
     };
     SessionId::try_from(format!("{worktree_session}/agent-{name}"))

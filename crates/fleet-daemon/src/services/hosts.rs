@@ -18,6 +18,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_BINARY_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENT_BINARY_SCRIPT: &str = concat!(
     "if command -v claude >/dev/null 2>&1; then printf 'claude\\n'; fi; ",
+    "if command -v codex >/dev/null 2>&1; then printf 'codex\\n'; fi; ",
     "if command -v opencode >/dev/null 2>&1; then printf 'opencode\\n'; fi",
 );
 
@@ -384,6 +385,7 @@ async fn check_agent_binaries(provider: &dyn MachineProvider) -> Option<AgentBin
         .collect::<std::collections::BTreeSet<_>>();
     Some(AgentBinaries {
         claude: found.contains("claude"),
+        codex: found.contains("codex"),
         opencode: found.contains("opencode"),
     })
 }

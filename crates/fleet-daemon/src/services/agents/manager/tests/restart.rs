@@ -98,7 +98,7 @@ async fn restart_settles_a_ready_thread_and_lets_open_resume_it() {
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
 
     restarted
-        .open(thread, None)
+        .open(&open_body(thread))
         .await
         .expect("open resumes a recovered thread");
     assert_eq!(harness.script.starts(), 2, "open starts a resumed provider");
@@ -108,6 +108,7 @@ async fn restart_settles_a_ready_thread_and_lets_open_resume_it() {
             UserInput {
                 text: "still usable".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -140,7 +141,10 @@ async fn restart_fails_orphaned_threads_without_a_resume_cursor() {
         .find(|summary| summary.thread == thread)
         .expect("the thread survives a restart");
     assert_eq!(summary.session, SessionState::Error);
-    assert_eq!(summary.turn, TurnState::Failed(turn));
+    assert!(matches!(
+        summary.turn,
+        TurnState::Settled(failed, TurnOutcome::Error { .. }) if failed == turn
+    ));
     assert_eq!(summary.attention, Attention::Failed);
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
 }
@@ -171,11 +175,14 @@ async fn restart_stops_resumable_threads_and_resumes_them_on_open() {
         .find(|summary| summary.thread == thread)
         .expect("the thread survives a restart");
     assert_eq!(summary.session, SessionState::Stopped);
-    assert_eq!(summary.turn, TurnState::Interrupted(turn));
+    assert_eq!(
+        summary.turn,
+        TurnState::Settled(turn, TurnOutcome::Interrupted)
+    );
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
 
     let ResponseBody::AgentThreadSnapshot { projection, .. } = restarted
-        .open(thread, None)
+        .open(&open_body(thread))
         .await
         .expect("open resumes a stopped thread")
     else {

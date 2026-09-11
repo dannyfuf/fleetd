@@ -82,9 +82,9 @@ fn cycling_never_wraps_past_either_end() {
     cycle(config, &RowId::Agent, -1);
     assert_eq!(config.agent, Agent::Claude);
     cycle(config, &RowId::Agent, 1);
-    assert_eq!(config.agent, Agent::Opencode);
+    assert_eq!(config.agent, Agent::Codex);
     cycle(config, &RowId::Agent, 1);
-    assert_eq!(config.agent, Agent::Opencode);
+    assert_eq!(config.agent, Agent::Codex);
 }
 
 #[test]

@@ -47,11 +47,6 @@ impl TranscriptCursor {
         Self { thread, before_seq }
     }
 
-    /// The thread this cursor was minted against.
-    pub(crate) const fn thread(self) -> ThreadId {
-        self.thread
-    }
-
     /// The exclusive upper bound of the page this cursor opens.
     pub(crate) const fn before_seq(self) -> Seq {
         self.before_seq

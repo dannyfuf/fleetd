@@ -55,6 +55,22 @@ pub(crate) fn execute(
     Ok(())
 }
 
+/// The `session_state` column of one [`SessionState`], payload-bearing variants included.
+///
+/// Every unit variant stores its bare discriminant, which is what the partial indexes and the
+/// boot census match on; only `Waiting` carries a payload, and it stores JSON so nothing is lost.
+/// One function rather than the idiom repeated at each write site, because the list read has to
+/// decode exactly what the writes produce.
+pub(crate) fn session_state_column(
+    state: &fleet_core::agents::SessionState,
+) -> anyhow::Result<String> {
+    if matches!(state, fleet_core::agents::SessionState::Waiting(_)) {
+        json_text(state)
+    } else {
+        discriminant(state, "SessionState")
+    }
+}
+
 /// The serde discriminant of an enum, which is what every `kind`/`state` column stores.
 ///
 /// Taking it from serde rather than from a hand-written match is what keeps the columns from

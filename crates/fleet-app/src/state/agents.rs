@@ -1,12 +1,14 @@
 use super::*;
 
-use fleet_client::{AgentMirror, MirrorOutcome};
+use fleet_client::{AgentMirror, MirrorOutcome, PageOutcome};
 use fleet_core::{
     agents::{
         AgentThreadSummary, Attention, AttentionKind, Seq, SeqEvent, ThreadId, ThreadProjection,
     },
     ids::WorktreeId,
 };
+
+use fleet_proto::agents::AgentThreadWindow;
 
 use crate::screens::agent_thread::{decisions::decision_context, presentation::tab_title};
 
@@ -46,8 +48,12 @@ pub struct AgentThreads {
     resync: HashSet<ThreadId>,
     /// The last attention each thread was notified about, so an edge fires exactly once.
     notified: HashMap<ThreadId, Attention>,
-    /// Provider slash commands from `SessionStarted`, which the projection does not carry.
+    /// Harness slash commands from `SessionConfigured`, which the projection does not carry.
     commands: HashMap<ThreadId, Vec<String>>,
+    /// Harness skills, which `$` completes and the projection does not carry either.
+    skills: HashMap<ThreadId, Vec<String>>,
+    /// The cursor a daemon-declared resync must resume from, per thread.
+    resume_from: HashMap<ThreadId, Seq>,
     /// Threads whose composer is being typed into while a card is open.
     composing: HashSet<ThreadId>,
     /// Threads whose transcript has its tail frozen (`^s [`).
@@ -59,6 +65,11 @@ pub struct AgentThreads {
     /// Threads whose tab `^s x` closed. The daemon keeps listing them (§6 leaves every
     /// thread browsable), so the closed set is what actually takes the tab out of the strip.
     closed: HashSet<ThreadId>,
+    /// Threads whose transcript has a row focused inside scroll mode.
+    ///
+    /// §12 puts row focus **inside** scroll mode, which is what finally makes `⏎`/`u`/`o`/`y`/`d`
+    /// fire: the `AgentRow` context is only ever on the chain under `AgentNativeScroll`.
+    row_focus: HashSet<ThreadId>,
 }
 
 impl AgentThreads {
@@ -151,7 +162,10 @@ impl AgentThreads {
             match self.attention(summary.thread) {
                 Attention::NeedsYou(_) => counts.needs_you += 1,
                 Attention::Failed => counts.failed += 1,
-                Attention::Working => counts.working += 1,
+                // A thread parked on a usage window is working as far as the bar is concerned:
+                // §3.3 ranks `waiting` below `working` and above `failed`, and nothing about it
+                // needs the user.
+                Attention::Working | Attention::Waiting => counts.working += 1,
                 Attention::Unread | Attention::Idle => {}
             }
         }
@@ -253,6 +267,112 @@ impl AgentThreads {
         self.resync.insert(thread);
     }
 
+    /// Records a daemon-declared drop of this connection's tail for one thread.
+    ///
+    /// Backpressure is never a stall, never an OOM, and never a silent drop: the daemon names
+    /// the cursor it is sure the client received, so the re-open asks from exactly there rather
+    /// than from whatever the local projection happens to hold.
+    pub fn mark_resync_from(&mut self, thread: ThreadId, from_seq: Seq) {
+        self.resync.insert(thread);
+        // The local cursor may be ahead of the daemon's belief only if a later event already
+        // landed; taking the smaller of the two costs a replay and loses nothing.
+        let applied = self
+            .mirror
+            .projections
+            .get(&thread)
+            .map_or(from_seq, |projection| projection.last_seq.min(from_seq));
+        self.resume_from.insert(thread, applied);
+    }
+
+    /// The cursor a re-open should resume from, when the daemon named one.
+    #[must_use]
+    pub fn resume_from(&self, thread: ThreadId) -> Option<Seq> {
+        self.resume_from.get(&thread).copied().or_else(|| {
+            self.projection(thread)
+                .map(|projection| projection.last_seq)
+        })
+    }
+
+    /// Marks a thread's catch-up complete, which is the only transition into live.
+    ///
+    /// A mirror never fabricates one: a window opened against a cached mirror paints as cached
+    /// until the owner confirms it.
+    pub fn synchronize(&mut self, thread: ThreadId) {
+        if self.mirror.synchronize(thread) {
+            self.resume_from.remove(&thread);
+        }
+    }
+
+    /// Whether the owner has confirmed the content this client is showing.
+    #[must_use]
+    pub fn is_synchronized(&self, thread: ThreadId) -> bool {
+        self.mirror.is_synchronized(thread)
+    }
+
+    /// The cursor an older page of one thread's transcript reads from, when one remains.
+    #[must_use]
+    pub fn older_cursor(&self, thread: ThreadId) -> Option<String> {
+        self.mirror.older_cursor(thread).map(str::to_owned)
+    }
+
+    /// Installs a bounded transcript window as the newest content of a thread.
+    ///
+    /// A window is projection *pieces*, and the client's `last_seq` becomes the sequence the
+    /// **content** applied through — not the log head — so the mirror decides continuity from
+    /// what is in hand rather than from the newest row the daemon has.
+    pub fn install_window(&mut self, window: &AgentThreadWindow) {
+        let thread = window.summary.thread;
+        self.apply_summary(window.summary.clone());
+        self.commands
+            .insert(thread, window.session.commands.clone());
+        self.skills.insert(thread, window.session.skills.clone());
+        match self.mirror.install_window(window) {
+            MirrorOutcome::Gap { .. } => {
+                self.resync.insert(thread);
+            }
+            MirrorOutcome::Applied
+            | MirrorOutcome::Duplicate { .. }
+            | MirrorOutcome::Rejected { .. } => {
+                self.resync.remove(&thread);
+                self.resume_from.remove(&thread);
+            }
+        }
+    }
+
+    /// Merges an older page behind the window a thread already holds.
+    ///
+    /// A page is not an event: it can only add history *behind* what the mirror has, so it never
+    /// advances a cursor. A page read at a head the client has not applied yet is **parked**,
+    /// because merging it anyway replays a streaming turn's deltas on top of page content that
+    /// already contains them.
+    pub fn merge_older_page(&mut self, window: &AgentThreadWindow) -> PageOutcome {
+        self.mirror.merge_older_page(window)
+    }
+
+    /// The harness skills `$` completes in one thread.
+    #[must_use]
+    pub fn skills(&self, thread: ThreadId) -> Vec<String> {
+        self.skills.get(&thread).cloned().unwrap_or_default()
+    }
+
+    /// Records whether a thread's transcript has a row focused.
+    ///
+    /// Returns whether the answer changed: it decides the `AgentRow` key context, so a change
+    /// has to reach the next frame.
+    pub fn set_row_focus(&mut self, thread: ThreadId, focused: bool) -> bool {
+        if focused {
+            self.row_focus.insert(thread)
+        } else {
+            self.row_focus.remove(&thread)
+        }
+    }
+
+    /// Whether a thread's transcript has a row focused.
+    #[must_use]
+    pub fn has_row_focus(&self, thread: ThreadId) -> bool {
+        self.row_focus.contains(&thread)
+    }
+
     /// Clears the flag while one open request is in flight, so a frame cannot spam the daemon.
     pub fn clear_resync(&mut self, thread: ThreadId) {
         self.resync.remove(&thread);
@@ -283,7 +403,7 @@ impl AgentThreads {
 
     /// Applies one sequenced event, reporting whether the caller must resync the thread.
     pub fn apply_event(&mut self, thread: ThreadId, event: &SeqEvent) -> MirrorOutcome {
-        if let fleet_core::agents::AgentEvent::SessionStarted { commands, .. } = &event.event {
+        if let fleet_core::agents::AgentEvent::SessionConfigured { commands, .. } = &event.event {
             self.commands.insert(thread, commands.clone());
         }
         if !self.mirror.projections.contains_key(&thread) {
@@ -368,6 +488,9 @@ impl AgentThreads {
         self.resync.retain(|thread| live.contains(thread));
         self.notified.retain(|thread, _| live.contains(thread));
         self.commands.retain(|thread, _| live.contains(thread));
+        self.skills.retain(|thread, _| live.contains(thread));
+        self.resume_from.retain(|thread, _| live.contains(thread));
+        self.row_focus.retain(|thread| live.contains(thread));
         self.composing.retain(|thread| live.contains(thread));
         self.scrolling.retain(|thread| live.contains(thread));
         self.question_cursor
@@ -421,28 +544,48 @@ impl AppState {
         self.agents.summary(thread).map(|summary| summary.thread)
     }
 
-    /// The `Agent > …` key contexts an active agent tab owns (§9).
+    /// The `Agent > …` key contexts an active agent tab owns (§12).
     ///
-    /// The decision sub-context is derived from the open gate rather than from the view, so the
-    /// keyboard is routed to the card in the same frame the gate appears.
+    /// Every sub-context is derived from **daemon state** rather than from the view, which is
+    /// what makes a decision own the keyboard in the same frame the gate appears rather than one
+    /// frame later. Precedence, and each step is a rule: a frozen tail beats everything,
+    /// including an open gate; then the newest open decision; then work; then idle.
     #[must_use]
     pub fn agent_context_chain(&self) -> Option<Vec<&'static str>> {
         let thread = self.active_agent_thread()?;
-        // §9 makes `^s [` a real mode: while the tail is frozen the transcript owns `j`/`k`,
-        // half/page and `gg`/`G`, exactly as the terminal scroll mode does, and nothing the
-        // composer binds may swallow them.
+        // §12: `^s [` is a real mode. While the tail is frozen the transcript owns `j`/`k`,
+        // half/page and `gg`/`G`, and row focus lives inside it — which is what finally makes
+        // `⏎`/`u`/`o`/`y`/`d` fire instead of being bound, handled and never entered.
         if self.agents.is_scrolling(thread) {
-            return Some(vec!["Agent", "AgentNativeScroll"]);
+            let mut chain = vec!["Agent", "AgentNativeScroll"];
+            if self.agents.has_row_focus(thread) {
+                chain.push("AgentRow");
+            }
+            return Some(chain);
         }
         let projection = self.agents.projection(thread);
         let gate = projection.and_then(|projection| projection.gates.last());
-        // §9 routes the bare letters to the card — but a payload being corrected after `e`, and
-        // a plan note being written for `n`, are text. While one of those is in progress the
-        // composer keeps its own keys, or the note could not contain a `y` or an `n`.
+        // §12 routes the bare letters to the decision — but a payload being corrected after
+        // `[e]`, a refinement written for `[n]` and a question's free-text answer are all text.
+        // While one of those is in progress the composer keeps its own keys, or the draft could
+        // not start with a `y`.
         if let Some(gate) = gate
             && !self.agents.is_composing(thread)
         {
             return Some(vec!["Agent", "AgentDecision", decision_context(gate)]);
+        }
+        // A plan the harness produced as an *item* has no gate, and its verbs still live on the
+        // composer, so it owns `AgentPlan` exactly as a plan gate would.
+        if !self.agents.is_composing(thread)
+            && projection.is_some_and(|projection| {
+                crate::screens::agent_thread::decisions::plan_item(projection).is_some()
+            })
+        {
+            return Some(vec![
+                "Agent",
+                "AgentDecision",
+                crate::screens::agent_thread::decisions::PLAN_CONTEXT,
+            ]);
         }
         Some(vec![
             "Agent",

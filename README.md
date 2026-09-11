@@ -93,13 +93,13 @@ Run `fleet --help` or `fleet <command> --help` for generated help.
 | `fleet watch tail <id> [--follow]` | Print retained text on its original stdout/stderr channel; `--follow` polls every 250 ms until exit. | Raw retained stdout/stderr text |
 | `fleet exec [--watch] [--label TEXT] -- CMD [ARGS...]` | Run a child with byte-exact passthrough; optionally publish a read-only subagent watch using `FLEET_SESSION` and numeric `FLEET_TERMINAL_ID` (`FLEET_TERMINAL` remains the human name). | Raw child stdout/stderr; child exit status |
 | `fleet agent list` | List native-agent threads: id, provider, host, session, attention, worktree, title. | — |
-| `fleet agent new <WORKTREE> --provider <claude\|opencode> [--model <MODEL>] [--mode <ask\|accept-edits\|plan\|full-access>]` | Start a native-agent thread in a published worktree and print its id. Reports the typed `Unsupported` error, naming the terminal fallback, when the provider executable is missing or too old. | — |
+| `fleet agent new <WORKTREE> --provider <claude\|codex> [--model <MODEL>] [--mode <ask\|accept-edits\|plan\|full-access>]` | Start a native-agent thread in a published worktree and print its id. Reports the typed `Unsupported` error, naming the terminal fallback, when the provider executable is missing or too old. | — |
 | `fleet agent send <THREAD> <TEXT>` | Send or steer a message on a thread. | — |
 | `fleet agent respond <THREAD> <GATE> <ANSWER>` | Answer an open permission, question, or plan gate with provider-neutral words. | — |
 | `fleet agent interrupt <THREAD>` | Interrupt the active turn; the provider's terminal event stays authoritative. | — |
 | `fleet agent stop <THREAD>` | Stop the provider and retain the transcript. | — |
 | `fleet agent tail <THREAD> [--replay]` | Print one JSON `SeqEvent` per line until the provider exits; `--replay` starts from sequence 1. | One `SeqEvent` object per line |
-| `fleet agent terminal [claude\|opencode]` | Ensure a repository-level PTY agent session exists (the terminal fallback); defaults to `config.agent`. | — |
+| `fleet agent terminal [claude\|codex]` | Ensure a repository-level PTY agent session exists (the terminal fallback); defaults to `config.agent`. | — |
 | `fleet agent-status <working\|finished\|permission\|question\|plan> [--session <SESSION>] [--terminal-id <ID>] [--json]` | Report agent lifecycle or attention; target flags default to `FLEET_SESSION` and `FLEET_TERMINAL_ID`. Silent on non-JSON success. | `protocol`, `ok`, `session`, `terminalId`, `activity`, optional `attention` |
 | `fleet host list [--json]` | List configured hosts with provider, reachability, daemon link state, version, address, and known agent binaries. | `protocol`, `hosts` |
 | `fleet host doctor <ID>` | Diagnose resolution, SSH/authentication, remote `fleetd`, protocol compatibility, and agent binaries for one host. | — |
@@ -242,7 +242,7 @@ The 16 keys and key groups to learn first are:
 | `/` | Filter the current list. |
 | `:` | Open the command palette. |
 | `i` | Toggle the detail panel. |
-| `a` / `A` | In the Hub, open the floating Claude / OpenCode agent popup; in a Workspace, `ctrl-s a` / `ctrl-s A` start a native agent thread instead. |
+| `a` / `A` | In the Hub, open the floating Claude / Codex agent popup; in a Workspace, `ctrl-s a` / `ctrl-s A` start a native agent thread instead. |
 | `r` | Refresh status, pull requests, and discovery as a job. |
 | `J` | Open the Jobs panel. |
 | `?` | Open help. |
@@ -254,7 +254,7 @@ path. Soft-wrapped visual rows copy as one logical line. `ctrl-c` and `ctrl-v` r
 keys. `ctrl-s` is the only Workspace prefix:
 `ctrl-s s` returns to Hub, `ctrl-s S` sleeps then returns, `ctrl-s 1`–`9` switches tabs,
 `ctrl-s h`/`l` changes tabs, `ctrl-s w` opens the last session, `ctrl-s c`/`x` creates/closes a
-tab, `ctrl-s a`/`A` starts a native Claude/OpenCode agent thread, `ctrl-s F` opens the floating
+tab, `ctrl-s a`/`A` starts a native Claude/Codex agent thread, `ctrl-s F` opens the floating
 agent popup (the terminal fallback), `ctrl-s [` enters Scroll, `ctrl-s ]` pastes,
 and `ctrl-s J`/`?` opens Jobs/help. Inside the popup, `ctrl-q` hides it without stopping the
 agent session. Use
@@ -336,7 +336,7 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details, logs, and script
 
 ## Status
 
-Fleet supports worktrees, terminal sessions, lifecycle operations, and native Claude/OpenCode
+Fleet supports worktrees, terminal sessions, lifecycle operations, and native Claude
 threads on configured Tailscale hosts through daemon federation. The app and CLI connect only to
 the local `fleetd`; it routes work to the owning host, keeps cached remote inventory visible while
 a host is offline, and resumes routing after the link recovers. Terminal sessions survive closing

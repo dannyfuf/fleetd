@@ -10,7 +10,7 @@
 //! cursor, and it is applied over this value at read time.
 
 use anyhow::Context;
-use fleet_core::agents::{AgentEvent, Attention, AttentionKind, ThreadId};
+use fleet_core::agents::{AgentEvent, Attention, AttentionKind, GateKind, ThreadId};
 use rusqlite::{Transaction, params};
 
 use super::{
@@ -30,23 +30,39 @@ pub(super) fn recompute_attention(
 ) -> anyhow::Result<()> {
     let id = thread.to_string();
     let mut statement = transaction
-        .prepare_cached("SELECT DISTINCT kind FROM gates WHERE thread_id = ?1 AND status = 'open'")
+        .prepare_cached("SELECT kind_json FROM gates WHERE thread_id = ?1 AND status = 'open'")
         .context("prepare the open-gate kind query")?;
-    let kinds = statement
+    let encoded_gates = statement
         .query_map(params![id], |row| row.get::<_, String>(0))
         .context("query the open gate kinds")?
         .collect::<Result<Vec<_>, _>>()
         .context("decode the open gate kinds")?;
     drop(statement);
+    let gates = encoded_gates
+        .iter()
+        .map(|encoded| serde_json::from_str::<GateKind>(encoded))
+        .collect::<Result<Vec<_>, _>>()
+        .context("decode the open gate payloads")?;
 
-    let attention = if let Some(kind) = [
-        ("permission", AttentionKind::Permission),
-        ("question", AttentionKind::Question),
-        ("plan", AttentionKind::Plan),
-    ]
-    .into_iter()
-    .find_map(|(tag, kind)| kinds.iter().any(|open| open == tag).then_some(kind))
+    let gate_attention = if gates
+        .iter()
+        .any(|gate| matches!(gate, GateKind::Permission { .. }))
     {
+        Some(AttentionKind::Permission)
+    } else if gates.iter().any(|gate| {
+        matches!(gate, GateKind::Question { questions } if questions.iter().any(|question| question.blocking))
+    }) {
+        Some(AttentionKind::Question)
+    } else if gates
+        .iter()
+        .any(|gate| matches!(gate, GateKind::Plan { .. }))
+    {
+        Some(AttentionKind::Plan)
+    } else {
+        None
+    };
+
+    let attention = if let Some(kind) = gate_attention {
         Attention::NeedsYou(kind)
     } else {
         derive_attention(transaction, &id)?
@@ -109,6 +125,9 @@ fn derive_attention(transaction: &Transaction<'_>, id: &str) -> anyhow::Result<A
     if session_state == "running" || running || background > 0 || retrying {
         return Ok(Attention::Working);
     }
+    if session_state == "waiting" || session_state.starts_with("{\"type\":\"waiting\"") {
+        return Ok(Attention::Waiting);
+    }
     if session_state == "error" || latest_turn.as_deref() == Some("failed") {
         return Ok(Attention::Failed);
     }
@@ -131,10 +150,12 @@ pub(super) fn changes_attention(event: &AgentEvent) -> bool {
         event,
         AgentEvent::GateOpened { .. }
             | AgentEvent::GateResolved { .. }
+            | AgentEvent::GateWithdrawn { .. }
+            | AgentEvent::PlanProposed { .. }
             | AgentEvent::TurnStarted { .. }
-            | AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnSettled { .. }
             | AgentEvent::TurnAborted { .. }
-            | AgentEvent::SessionStarted { .. }
+            | AgentEvent::SessionConfigured { .. }
             | AgentEvent::SessionStateChanged(_)
             | AgentEvent::SessionExited { .. }
             | AgentEvent::RuntimeError { .. }

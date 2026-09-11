@@ -14,7 +14,7 @@ use fleet_core::ids::HostId;
 use fleet_proto::{
     PROTOCOL_VERSION, REMOTE_MACHINES_CAPABILITY,
     codec::{CodecError, FleetCodec},
-    error::{ErrorKind, ProtoError},
+    error::ProtoError,
     event::{Event, EventKind},
     request::{ClientKind, HelloClient, Request, RequestBody},
     response::{HelloResponse, Response, ResponseBody},
@@ -29,7 +29,7 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-use crate::{DaemonError, DaemonResult, error::strip_proto_error_prefix};
+use crate::{DaemonError, DaemonResult};
 
 use super::{AsyncDuplex, MachineProvider};
 
@@ -598,6 +598,12 @@ async fn establish_before(
                 client: HelloClient {
                     kind: ClientKind::Proxy,
                     host_id: Some(local_daemon_id.clone()),
+                    // A proxy decodes the owner's agent events before forwarding them, so it
+                    // has to name the families it can decode exactly as a direct client does.
+                    capabilities: fleet_proto::AGENT_CAPABILITIES
+                        .iter()
+                        .map(|capability| (*capability).to_owned())
+                        .collect(),
                 },
             },
         })?
@@ -747,18 +753,7 @@ fn codec_error(error: CodecError) -> DaemonError {
 }
 
 fn proto_error(error: ProtoError) -> DaemonError {
-    let message = strip_proto_error_prefix(error.kind, error.message);
-    match error.kind {
-        ErrorKind::NotFound => DaemonError::NotFound(message),
-        ErrorKind::Conflict => DaemonError::Conflict(message),
-        ErrorKind::Validation => DaemonError::Validation(message),
-        ErrorKind::Cancelled => DaemonError::Cancelled,
-        ErrorKind::Unsupported => DaemonError::Unsupported(message),
-        ErrorKind::Remote => DaemonError::Remote(message),
-        ErrorKind::Git => DaemonError::Git(message),
-        ErrorKind::Github => DaemonError::Github(message),
-        ErrorKind::Fs | ErrorKind::Tmux | ErrorKind::Unknown => DaemonError::Protocol(message),
-    }
+    crate::error::from_proto_error(error)
 }
 
 fn all_event_kinds() -> Vec<EventKind> {
@@ -835,6 +830,8 @@ fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
+
+    use fleet_proto::error::ErrorKind;
 
     use super::*;
     use crate::machines::{ExecOutput, MachineAddress, MachineError, ProbeReport};

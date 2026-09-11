@@ -8,6 +8,26 @@ end lists what moved so a reader holding the original freeze can find it. All do
 use Serde `snake_case` variant names; struct fields use `camelCase` unless a declaration says
 otherwise.
 
+> **Superseded by the native-agents rewrite, phase by phase.** This file records the public API
+> of the Claude Code + OpenCode implementation. Phase 1 replaced the `fleet-core::agents` half of
+> it: `AgentKind` is `Claude | Codex`, `Capabilities` became `HarnessCapabilities` with a
+> `ControlCost` per control, `SessionStarted`/`TurnCompleted`/`Checkpoint` became
+> `SessionConfigured`/`TurnSettled`/`Compacted`, `ItemStatus` is
+> `InProgress | Completed | Failed | Denied | Stopped`, `StreamKind` carries the two reasoning
+> channels with a part index, `Item` carries a typed per-kind `ItemKind` payload instead of seven
+> `Option<String>` slots, and `TurnState` is `None | Running | Settled`. Read
+> `docs/NATIVE-AGENTS.md` §3 for what those are now; the sections below are accurate only where
+> this notice does not contradict them.
+>
+> Phase 5a replaced the `fleet-ui-kit` half. `components/agent/decision_card.rs` is gone:
+> approvals and questions live in a `DecisionDock` docked to the composer (`decision.rs` +
+> `decision_dock.rs`), a proposed plan is a transcript row with no buttons, and `AllowDirectory`,
+> `ApprovePlan`, `AskForChanges` and `ViewPlan` were retired for `Implement` / `Refine` /
+> `Previous`. `TranscriptRow` is a struct — `{ id: TranscriptRowId, kind: TranscriptRowKind,
+> attached }` — with the eighteen kinds of §5, `ToolRowState` gained `Stopped` and `Severe` and
+> lost `Error`, and `TranscriptList` gained the three-state scroll machine, `set_thread`,
+> `set_row_body` and the row-focus verbs. `docs/DESIGN-SYSTEM.md` §6.6 is the current inventory.
+
 `docs/NATIVE-AGENTS.md` is the specification, `docs/decisions/0010-native-agents.md` records why
 the load-bearing choices are what they are, and `docs/research/harness-protocols.md` is the wire
 reference for the two harnesses.
@@ -231,14 +251,22 @@ canonical `StartRequest::worktree_path` through its worktree service.
 
 ### Adapter boundary — `crates/fleet-daemon/src/services/agents/providers/mod.rs`
 
-```rust
-/// One normalized event plus the provider's own name for the message it was mapped from.
-pub struct ProviderEvent { pub event: AgentEvent, pub raw: Option<String> }
-impl ProviderEvent { pub fn new(event: AgentEvent, raw: Option<&str>) -> Self; }
-impl From<AgentEvent> for ProviderEvent {}          // raw: None
+> **Replaced by the harness rewrite.** The real adapters live in `crates/fleet-daemon/src/agents/`
+> behind the `Harness` trait of `NATIVE-AGENTS.md` §3.1; `providers/mod.rs` is now the single
+> bridge between that trait and the verbs the manager speaks, and `providers/{claude,opencode}/**`
+> are deleted. The current shape is below; the paragraphs after it that discuss the channel and
+> `ProviderError` are still accurate.
 
-/// `128 + signal` for a signalled child, so a killed provider still names an exit code.
-pub fn exit_code(status: &std::process::ExitStatus) -> Option<i32>;
+```rust
+/// One normalized event, the provider's own name for the message it was mapped from, and how far
+/// behind the harness's own emission clock the frame was read.
+pub struct ProviderEvent {
+    pub event: AgentEvent,
+    pub raw: Option<String>,
+    pub emission_skew: Option<std::time::Duration>,
+}
+impl ProviderEvent { pub fn new(event: AgentEvent, raw: Option<&str>) -> Self; }
+impl From<AgentEvent> for ProviderEvent {}          // raw: None, emission_skew: None
 
 pub type ProviderSink = tokio::sync::mpsc::UnboundedSender<ProviderEvent>;
 pub type ProviderEvents = tokio::sync::mpsc::UnboundedReceiver<ProviderEvent>;
@@ -247,14 +275,16 @@ pub type ProviderResult<T> = Result<T, ProviderError>;
 #[async_trait]
 pub trait AgentProvider: Send {
     fn kind(&self) -> AgentKind;
-    fn capabilities(&self) -> Capabilities;
+    fn capabilities(&self) -> HarnessCapabilities;
     async fn start(&mut self, req: StartRequest) -> ProviderResult<()>;
-    async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<()>;
+    // Answers which turn the message landed in and whether it joined a running one.
+    async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted>;
     async fn interrupt(&mut self, turn: TurnId) -> ProviderResult<()>;
     async fn respond(&mut self, gate: GateId, answer: GateAnswer) -> ProviderResult<()>;
-    // Answers the mode actually honoured, not the one asked for.
-    async fn set_mode(&mut self, mode: PermissionMode) -> ProviderResult<PermissionMode>;
-    async fn set_model(&mut self, model: ModelSelection) -> ProviderResult<()>;
+    // Applies what the live process can take and *reports* what a restart would still cost.
+    async fn apply_runtime(&mut self, change: RuntimeChange) -> ProviderResult<RuntimeApplied>;
+    // Performed by the manager at a turn boundary, never by the adapter.
+    async fn restart(&mut self, plan: &RestartPlan, change: &RuntimeChange) -> ProviderResult<()>;
     async fn stop(&mut self) -> ProviderResult<()>;
     fn events(&mut self) -> ProviderEvents;
 }
@@ -275,10 +305,11 @@ terminal fallback — and it reads each provider's command line from `config.age
 `ProviderError = Unavailable { reason: String } | Protocol { message: String } |
 Exited { code: Option<i32> } | Timeout { what: String }`. `AgentSessionManager` maps
 `Unavailable` to `ErrorKind::Unsupported`, which is the error that names the terminal fallback.
-`providers/claude/mod.rs` exports `ClaudeProvider::new(impl Into<String>)` (stream-json over
-stdio; `map.rs`, `process.rs`, `wire.rs`); `providers/opencode/mod.rs` exports
-`OpenCodeProvider::new(impl Into<String>)` (one managed `opencode serve` per thread; `http.rs`,
-`map.rs`, `server.rs`, `sse.rs`).
+`spawn_provider` builds one `HarnessProvider`, which owns a `Box<dyn Harness>` from
+`crate::agents::harness::spawn` — `agents/claude/**` for stream-json over stdio, `agents/codex/**`
+for the app-server protocol — and re-frames its events onto the manager's channel. The event
+receiver is stable across a restart: the replacement process forwards into the same sink, so the
+manager's drain is never re-wired.
 
 ### Persistence — `crates/fleet-daemon/src/services/agents/store.rs`
 
@@ -525,6 +556,23 @@ above are the current truth.
 | `fleet-lazygit` | `DiffView::{for_path, expanded, set_expanded, set_actions, clear_actions}`, `MAX_ROWS` |
 | `fleet-app` | `native_agent::{HistoryNext, ScrollLineDown, ScrollLineUp, ScrollHalfPageDown, ScrollHalfPageUp, ScrollPageDown, ScrollPageUp, ScrollTop, ScrollBottom, ScrollExit, TerminalFallback}` (and no `Newline`), the `AgentNativeScroll` key context, `AgentThreadEvent`, `state/agents.rs`, `FocusTarget::AgentThread` |
 | `fleet-cli` | `fleet agent terminal` |
+
+## Additions made by the native-agents rewrite
+
+What the rewrite added on top of the sections above, in one table so a reader holding the previous
+revision can find it. Everything here is additive on the wire and defaulted where it is serialized.
+
+| Where | Added |
+| --- | --- |
+| `fleet-core` provider input | `UserInput.item: Option<ItemId>` — the identity the client already drew its optimistic bubble under; both adapters adopt it |
+| `fleet-core` items | `ItemKind::UserMessage.steered: bool` and `ItemPayloadPatch::UserMessage.steered: Option<bool>` — the harness's own answer to "did this join a running turn?" |
+| `fleet-proto` handshake | `HelloClient.capabilities: Vec<String>` + `HelloClient::supports`; `AGENT_CAPABILITIES` is published by both sides |
+| `fleet-proto` agents | `elided_stream(&ItemKind) -> Option<StreamKind>` — the one function both the daemon's narrowing pass and the client's `AgentItemBody` read agree on |
+| `fleet-proto` snapshot | `AgentBinaries.codex: bool`, defaulted |
+| `fleet-daemon` harness | `crates/fleet-daemon/src/agents/**`: the `Harness` trait, `harness::spawn`, the probe cache, `SchemaFingerprint`, and the two adapters |
+| `fleet-daemon` manager | `manager/{bodies,checkpoints,controls}.rs`; `AgentSessionManager::{item_body, set_checkpoints}`; `pending_inputs` (was `pending_claude_inputs`, now used by both harnesses) |
+| `fleet-ui-kit` transcript | `TranscriptEvent::ReachedOldest`, `OLDEST_PREFETCH_ROWS` |
+| `fleet-app` | `BridgeCommand::{AgentCheckpoints, AgentRevert}`; `AgentThreadEvent::{RefreshCheckpoints, LoadOlder}`; `AgentThreadView::install_checkpoints` |
 
 ## File ownership during implementation
 

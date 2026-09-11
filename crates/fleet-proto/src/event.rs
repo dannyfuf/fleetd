@@ -1,7 +1,7 @@
 //! Asynchronous daemon events broadcast to subscribed clients.
 
 use fleet_core::{
-    agents::{AgentThreadSummary, AttentionKind, SeqEvent, ThreadId},
+    agents::{AgentThreadSummary, AttentionKind, Seq, SeqEvent, ThreadId},
     ids::{BoardId, HostId, SessionId, TerminalId},
     sessions::{AgentActivity, Session},
     watches::{Watch, WatchChunk, WatchId},
@@ -81,6 +81,36 @@ pub enum Event {
     },
     /// A native-agent thread's compact state changed.
     AgentSummary(AgentThreadSummary),
+    /// The live-stream budget for this connection overflowed for one thread.
+    ///
+    /// Everything after `from_seq` was dropped **for this connection only**; the client re-opens
+    /// the thread with that cursor. Backpressure is never a stall, never an OOM, and never a
+    /// silent drop — this event is what makes the third impossible. Emitted only to connections
+    /// that advertised [`AGENT_RESYNC_CAPABILITY`](crate::AGENT_RESYNC_CAPABILITY), because an
+    /// adjacently tagged variant an older peer cannot decode kills its whole frame.
+    AgentResync {
+        /// Affected thread.
+        thread: ThreadId,
+        /// Last sequence this connection is known to have received.
+        from_seq: Seq,
+    },
+    /// Catch-up for one thread is complete; everything after this is live.
+    ///
+    /// Emitted only when the open asked for it and only to connections that advertised
+    /// [`AGENT_SYNC_MARKER_CAPABILITY`](crate::AGENT_SYNC_MARKER_CAPABILITY). It is the *only*
+    /// transition into live: a mirror never fabricates one.
+    AgentSynchronized {
+        /// Synchronized thread.
+        thread: ThreadId,
+    },
+    /// The local daemon refilled or extended a mirrored thread's window from its owner.
+    ///
+    /// The client re-reads the window it has open. Emitted only to connections that advertised
+    /// [`AGENT_WINDOW_CAPABILITY`](crate::AGENT_WINDOW_CAPABILITY).
+    AgentWindow {
+        /// Thread whose stored window changed.
+        thread: ThreadId,
+    },
     /// A board or its cards changed.
     BoardChanged {
         /// Changed board identifier.
@@ -164,6 +194,60 @@ pub enum Event {
     },
     /// The daemon is about to stop accepting work.
     DaemonShuttingDown,
+    /// An event family this build does not understand.
+    ///
+    /// `Event` is adjacently tagged, so without this arm one unknown `type` from a newer daemon
+    /// is a decode error that drops the frame and logs a warning on every emission. With it,
+    /// every future event family is survivable: the client ignores what it cannot read and keeps
+    /// the ones it can. Emission is still gated on capabilities — this is the decode side of the
+    /// same contract, and it is never *sent* deliberately.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A frame this build could not decode strictly, and the reason it could not.
+#[derive(Debug)]
+pub struct UnknownEvent {
+    /// The `type` tag exactly as it arrived, when the frame carried one.
+    pub tag: Option<String>,
+    /// Why the strict decoder refused the frame.
+    pub error: serde_json::Error,
+}
+
+impl std::fmt::Display for UnknownEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.tag {
+            Some(tag) => write!(formatter, "event `{tag}`: {}", self.error),
+            None => write!(formatter, "untagged event: {}", self.error),
+        }
+    }
+}
+
+impl Event {
+    /// Decodes one broadcast frame, reporting an undecodable family instead of failing the read.
+    ///
+    /// [`Event::Unknown`] and its `#[serde(other)]` cover only a *payload-free* unknown tag:
+    /// `Event` is adjacently tagged, so a newer daemon's `{"type":"…","data":{…}}` still fails
+    /// the strict decoder with `invalid type: map, expected unit variant`, and every event family
+    /// worth adding carries a payload. This is the other half of that contract — the caller keeps
+    /// its subscription and says what it skipped, rather than tearing down a connection over one
+    /// frame it was never meant to understand.
+    ///
+    /// It costs nothing extra on the paths that use it: both the client and the remote link
+    /// already decode every frame to a [`serde_json::Value`] before an `Event` is ever built.
+    ///
+    /// # Errors
+    ///
+    /// Returns the tag and the strict decoder's own error. A corrupt frame of a *known* family is
+    /// indistinguishable from a new one here, which is why the error travels with the tag: the
+    /// caller logs a known tag louder than an unknown one.
+    pub fn from_wire(value: serde_json::Value) -> Result<Self, UnknownEvent> {
+        let tag = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        serde_json::from_value(value).map_err(|error| UnknownEvent { tag, error })
+    }
 }
 
 /// Compatibility name for the asynchronous event payload enum.
@@ -236,6 +320,51 @@ mod tests {
         assert_round_trip(Event::TerminalReattach {
             terminal: TerminalId(9),
         });
+    }
+
+    #[test]
+    fn the_three_agent_stream_events_round_trip() {
+        let thread = ThreadId::new();
+        for event in [
+            Event::AgentResync {
+                thread,
+                from_seq: Seq(41),
+            },
+            Event::AgentSynchronized { thread },
+            Event::AgentWindow { thread },
+        ] {
+            assert_round_trip(event);
+        }
+    }
+
+    #[test]
+    fn an_event_family_this_build_never_heard_of_decodes_instead_of_killing_the_frame() {
+        // A payload-free unknown tag is absorbed by `#[serde(other)]` itself.
+        let bare: Event = serde_json::from_str(r#"{"type":"quantum_entangled"}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(bare, Event::Unknown);
+        assert_round_trip(Event::Unknown);
+
+        // One that carries a payload does not, and this is the reason `from_wire` exists: the
+        // adjacently tagged strict decoder refuses the content it has no variant to put it in.
+        let payload = r#"{"type":"agent_checkpointed","data":{"thread":"x"}}"#;
+        assert!(serde_json::from_str::<Event>(payload).is_err());
+        let reported = Event::from_wire(
+            serde_json::from_str(payload).unwrap_or_else(|error| panic!("{error}")),
+        )
+        .expect_err("an unknown family is reported, not decoded");
+        assert_eq!(reported.tag.as_deref(), Some("agent_checkpointed"));
+        assert!(reported.to_string().contains("agent_checkpointed"));
+
+        // A known tag still decodes to its own arm through both doors, so nothing is shadowed.
+        let known: Event = serde_json::from_str(r#"{"type":"daemon_shutting_down"}"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(known, Event::DaemonShuttingDown);
+        assert_eq!(
+            Event::from_wire(serde_json::json!({"type": "daemon_shutting_down"}))
+                .unwrap_or_else(|error| panic!("{error}")),
+            Event::DaemonShuttingDown
+        );
     }
 
     #[test]

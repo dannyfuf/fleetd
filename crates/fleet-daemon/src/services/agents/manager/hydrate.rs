@@ -24,9 +24,12 @@
 //! mistaken for an orphan of the previous run.
 
 use chrono::Utc;
-use fleet_core::agents::{
-    AbortReason, AgentEvent, GateResolver, SeqEvent, SessionState, ThreadId, ThreadProjection,
-    TurnState,
+use fleet_core::{
+    agents::{
+        AbortReason, AgentEvent, GateResolver, SeqEvent, SessionState, ThreadId, ThreadProjection,
+        TurnState,
+    },
+    ids::HostId,
 };
 use fleet_proto::error::ProtoError;
 
@@ -53,15 +56,22 @@ impl AgentSessionManager {
         if let Some(runtime) = self.hydrated(thread) {
             return Ok(runtime);
         }
-        let record = self
-            .inner
-            .store()
-            .map_err(storage_error)?
+        let store = self.inner.store().map_err(storage_error)?;
+        let record = store
             .read_record(thread)
             .await
             .map_err(storage_error)?
             .ok_or_else(|| not_found(format!("agent thread {thread}")))?;
-        let runtime = hydrate(&self.inner, record).await.map_err(storage_error)?;
+        // Ownership is read before anything else this hydration does, because it decides whether
+        // the settlement events below may be written at all (§9.3, authority rule 1).
+        let owner = store
+            .ownership(thread)
+            .await
+            .map_err(storage_error)?
+            .and_then(|ownership| ownership.owner);
+        let runtime = hydrate(&self.inner, record, owner)
+            .await
+            .map_err(storage_error)?;
         self.inner
             .threads
             .write()
@@ -114,18 +124,32 @@ impl AgentSessionManager {
 }
 
 /// Builds one thread's reducer state from its log, settling it first if the restart orphaned it.
+///
+/// A mirrored thread is never settled here. Restart recovery *appends events*, and the local
+/// daemon must never mint a sequence for a thread it does not own: the owner settles its own
+/// orphans and this daemon learns about it from the owner's stream like any other client
+/// (`docs/NATIVE-AGENTS.md` §9.3).
 async fn hydrate(
     inner: &ManagerInner,
     mut record: AgentThreadRecord,
+    owner: Option<HostId>,
 ) -> anyhow::Result<ThreadRuntime> {
     let mut projection = load_projection(inner, &record).await?;
     if orphaned(&projection) {
-        recover_orphan(inner, &mut record, &mut projection).await;
-        if let Err(error) = inner.store()?.write_record(&record).await {
-            tracing::warn!(thread = %record.thread, %error, "could not persist native-agent restart recovery");
+        if let Some(owner) = &owner {
+            tracing::debug!(
+                thread = %record.thread,
+                %owner,
+                "leaving a mirrored thread's live state to its owner instead of settling it"
+            );
+        } else {
+            recover_orphan(inner, &mut record, &mut projection).await;
+            if let Err(error) = inner.store()?.write_record(&record).await {
+                tracing::warn!(thread = %record.thread, %error, "could not persist native-agent restart recovery");
+            }
         }
     }
-    Ok(ThreadRuntime::new(projection, record))
+    Ok(ThreadRuntime::new(projection, record, owner))
 }
 
 /// Replays a thread's log as far as the reducer accepts it, quarantining anything it does not.

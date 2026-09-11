@@ -22,25 +22,61 @@
 //! are re-derived from `turns.usage_json`, and `Notice` rows, which ride along on the read path by
 //! sequence range rather than as projected rows.
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use chrono::Utc;
 use fleet_core::agents::{
-    AgentEvent, Attention, ItemKind, SeqEvent, SessionState, StreamKind, ThreadId, TurnId,
-    TurnOutcome, TurnState,
+    AgentEvent, Attention, GateKind, ItemKind, ItemPayloadPatch, ModelSelection, SeqEvent,
+    SessionState, StreamKind, ThreadId, TurnOutcome, TurnState, sticky_outcome,
 };
 use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 
 mod attention;
 mod codec;
+mod gates;
 mod items;
+mod turns;
 
 use attention::{changes_attention, clear_retrying, recompute_attention};
+use codec::seq_of;
 pub(super) use codec::{
-    OptionalRow, StagedEvent, decode_event, discriminant, json_text, ms, optional_json,
+    OptionalRow, StagedEvent, decode_event, discriminant, execute, json_text, ms, optional_json,
+    session_state_column,
 };
-use codec::{execute, seq_of};
+use gates::{resolve_gate, withdraw_gate};
 use items::{append_output, append_text, close_open_items, is_terminal, item_detail};
+use turns::fail_active_turn;
+
+fn patch_columns(
+    patch: Option<&ItemPayloadPatch>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match patch {
+        Some(ItemPayloadPatch::AssistantText { text }) | Some(ItemPayloadPatch::Plan { text }) => {
+            (Some(text.clone()), None, None)
+        }
+        Some(ItemPayloadPatch::Reasoning { summary, raw }) => {
+            let parts = summary
+                .as_ref()
+                .filter(|parts| !parts.is_empty())
+                .or(raw.as_ref());
+            let reasoning = parts.map(|parts| {
+                parts
+                    .values()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            });
+            (None, reasoning, None)
+        }
+        Some(ItemPayloadPatch::Tool(patch)) => (None, None, patch.output.clone()),
+        Some(
+            ItemPayloadPatch::UserMessage { .. }
+            | ItemPayloadPatch::Subagent { .. }
+            | ItemPayloadPatch::Error { .. },
+        )
+        | None => (None, None, None),
+    }
+}
 
 /// Appends one event to the log.
 ///
@@ -84,7 +120,7 @@ pub(super) fn project_event(
     let id = thread.to_string();
 
     match &event.event {
-        AgentEvent::SessionStarted {
+        AgentEvent::SessionConfigured {
             provider,
             resume_cursor,
             model,
@@ -141,7 +177,7 @@ pub(super) fn project_event(
             }
         }
         AgentEvent::SessionStateChanged(state) => {
-            let state = discriminant(state, "SessionState")?;
+            let state = session_state_column(state)?;
             execute(
                 transaction,
                 "UPDATE threads SET session_state = ?2, retrying_json = NULL WHERE thread_id = ?1",
@@ -155,6 +191,7 @@ pub(super) fn project_event(
                 "record a session state change on its session",
             )?;
         }
+        AgentEvent::SessionActivity { .. } => {}
         AgentEvent::SessionExited { code, expected } => {
             let state = if *expected {
                 discriminant(&SessionState::Stopped, "SessionState")?
@@ -194,7 +231,7 @@ pub(super) fn project_event(
                 "record the running turn",
             )?;
         }
-        AgentEvent::TurnCompleted {
+        AgentEvent::TurnSettled {
             turn,
             outcome,
             usage,
@@ -202,14 +239,32 @@ pub(super) fn project_event(
             files_changed,
         } => {
             close_open_items(transaction, thread, *turn, seq, at)?;
-            // §3.3: an authoritative error result is a failed turn, not a completed one. The
-            // outcome stays on the row either way, because that is what the footer reads.
-            let (state, settled) = if matches!(outcome, TurnOutcome::Error { .. }) {
-                ("failed", TurnState::Failed(*turn))
+            execute(
+                transaction,
+                "INSERT OR IGNORE INTO turns \
+                 (thread_id, turn_id, user_item_id, start_seq, state, started_at) \
+                 VALUES (?1, ?2, NULL, ?3, 'running', ?4)",
+                params![id, turn.to_string(), seq, at],
+                "recover a turn whose start was lost",
+            )?;
+            let previous = transaction
+                .query_row(
+                    "SELECT outcome FROM turns WHERE thread_id = ?1 AND turn_id = ?2",
+                    params![id, turn.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .context("read the prior turn outcome")?
+                .and_then(|value| serde_json::from_str::<TurnOutcome>(&value).ok());
+            let settled_outcome = previous
+                .as_ref()
+                .map_or_else(|| outcome.clone(), |prior| sticky_outcome(prior, outcome));
+            let state = if matches!(settled_outcome, TurnOutcome::Error { .. }) {
+                "failed"
             } else {
-                ("completed", TurnState::Completed(*turn, outcome.clone()))
+                "completed"
             };
-            let outcome_json = json_text(outcome)?;
+            let settled = TurnState::Settled(*turn, settled_outcome.clone());
+            let outcome_json = json_text(&settled_outcome)?;
             execute(
                 transaction,
                 "UPDATE turns SET end_seq = ?3, state = ?4, outcome = ?5, completed_at = ?6, \
@@ -252,10 +307,27 @@ pub(super) fn project_event(
                 transaction,
                 "UPDATE threads SET running_turn_id = NULL, last_outcome = ?2, \
                  turn_json = ?3, retrying_json = NULL WHERE thread_id = ?1",
-                params![id, outcome_json, json_text(&TurnState::Interrupted(*turn))?],
+                params![
+                    id,
+                    outcome_json,
+                    json_text(&TurnState::Settled(*turn, TurnOutcome::Interrupted))?
+                ],
                 "record an aborted turn on its thread",
             )?;
         }
+        AgentEvent::TurnDiff {
+            turn,
+            unified: _,
+            files_changed,
+        } => {
+            execute(
+                transaction,
+                "UPDATE turns SET files_changed_json = ?3 WHERE thread_id = ?1 AND turn_id = ?2",
+                params![id, turn.to_string(), json_text(files_changed)?],
+                "record a turn diff summary",
+            )?;
+        }
+        AgentEvent::PlanSteps { .. } => {}
         AgentEvent::ItemStarted {
             turn,
             item,
@@ -263,20 +335,21 @@ pub(super) fn project_event(
             parent,
         } => {
             let (tool_kind, tool_name) = match kind {
-                ItemKind::Tool {
-                    kind: tool, name, ..
-                } => (Some(discriminant(tool, "ToolKind")?), Some(name.clone())),
+                ItemKind::Tool(call) => (
+                    Some(discriminant(&call.kind, "ToolKind")?),
+                    Some(call.name.clone()),
+                ),
                 _ => (None, None),
             };
             execute(
                 transaction,
                 "INSERT INTO items (thread_id, item_id, turn_id, parent_id, kind, tool_kind, \
                  tool_name, status, start_seq, created_at, updated_at, detail_json) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?9, ?10) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'in_progress', ?8, ?9, ?9, ?10) \
                  ON CONFLICT (thread_id, item_id) DO UPDATE SET \
                  turn_id = excluded.turn_id, parent_id = excluded.parent_id, \
                  kind = excluded.kind, tool_kind = excluded.tool_kind, \
-                 tool_name = excluded.tool_name, status = 'running', end_seq = NULL, \
+                 tool_name = excluded.tool_name, status = 'in_progress', end_seq = NULL, \
                  updated_at = excluded.updated_at, detail_json = excluded.detail_json",
                 params![
                     id,
@@ -288,7 +361,7 @@ pub(super) fn project_event(
                     tool_name,
                     seq,
                     at,
-                    json_text(&json!({ "kind": serde_json::to_value(kind)? }))?,
+                    json_text(&json!({ "payload": serde_json::to_value(kind)? }))?,
                 ],
                 "open a transcript item",
             )?;
@@ -313,7 +386,7 @@ pub(super) fn project_event(
                 StreamKind::AssistantText => {
                     append_text(transaction, thread, &item.to_string(), "text", delta, at)?;
                 }
-                StreamKind::Reasoning => {
+                StreamKind::ReasoningSummary { .. } | StreamKind::ReasoningRaw { .. } => {
                     append_text(
                         transaction,
                         thread,
@@ -323,26 +396,20 @@ pub(super) fn project_event(
                         at,
                     )?;
                 }
-                StreamKind::ToolOutput => {
+                StreamKind::CommandOutput => {
                     append_output(transaction, thread, &item.to_string(), delta, at)?;
+                }
+                StreamKind::PlanText => {
+                    append_text(transaction, thread, &item.to_string(), "text", delta, at)?;
                 }
             }
             clear_retrying(transaction, thread)?;
         }
         AgentEvent::ItemUpdated { item, patch } => {
             let mut detail = item_detail(transaction, thread, *item)?;
-            for (key, value) in [
-                ("input", patch.input.clone()),
-                ("summary", patch.summary.clone().map(Value::String)),
-                ("result", patch.result.clone().map(Value::String)),
-                (
-                    "diff",
-                    patch.diff.as_ref().map(serde_json::to_value).transpose()?,
-                ),
-            ] {
-                if let Some(value) = value {
-                    detail.insert(key.to_owned(), value);
-                }
+            let (text, reasoning, output) = patch_columns(patch.payload.as_ref());
+            if let Some(payload) = &patch.payload {
+                detail.insert("payload".to_owned(), serde_json::to_value(payload)?);
             }
             let status = patch
                 .status
@@ -353,18 +420,20 @@ pub(super) fn project_event(
                 transaction,
                 "UPDATE items SET \
                  text = CASE WHEN ?3 IS NULL THEN text ELSE ?3 END, \
-                 output = CASE WHEN ?4 IS NULL THEN output ELSE ?4 END, \
-                 output_bytes = CASE WHEN ?4 IS NULL THEN output_bytes ELSE LENGTH(CAST(?4 AS BLOB)) END, \
-                 output_elided = CASE WHEN ?4 IS NULL THEN output_elided ELSE 0 END, \
-                 status = COALESCE(?5, status), \
-                 end_seq = CASE WHEN ?6 = 1 THEN ?7 ELSE end_seq END, \
-                 detail_json = ?8, updated_at = ?9 \
+                 reasoning = CASE WHEN ?4 IS NULL THEN reasoning ELSE ?4 END, \
+                 output = CASE WHEN ?5 IS NULL THEN output ELSE ?5 END, \
+                 output_bytes = CASE WHEN ?5 IS NULL THEN output_bytes ELSE LENGTH(CAST(?5 AS BLOB)) END, \
+                 output_elided = CASE WHEN ?5 IS NULL THEN output_elided ELSE 0 END, \
+                 status = COALESCE(?6, status), \
+                 end_seq = CASE WHEN ?7 = 1 THEN ?8 ELSE end_seq END, \
+                 detail_json = ?9, updated_at = ?10 \
                  WHERE thread_id = ?1 AND item_id = ?2",
                 params![
                     id,
                     item.to_string(),
-                    patch.text.as_deref(),
-                    patch.output.as_deref(),
+                    text,
+                    reasoning,
+                    output,
                     status,
                     i64::from(terminal),
                     seq,
@@ -420,6 +489,40 @@ pub(super) fn project_event(
         AgentEvent::GateResolved { gate, answer, by } => {
             resolve_gate(transaction, thread, gate, answer, by, seq, at)?;
         }
+        AgentEvent::GateWithdrawn { gate } => {
+            withdraw_gate(transaction, thread, gate, seq, at)?;
+        }
+        AgentEvent::PlanProposed {
+            gate,
+            turn,
+            markdown,
+            steps,
+        } => {
+            let kind = GateKind::Plan {
+                markdown: markdown.clone(),
+                steps: steps.clone(),
+            };
+            execute(
+                transaction,
+                "INSERT INTO gates (thread_id, gate_id, turn_id, kind, kind_json, status, \
+                 opened_seq, opened_at, blocked_since) \
+                 VALUES (?1, ?2, ?3, 'plan', ?4, 'open', ?5, ?6, ?6) \
+                 ON CONFLICT (thread_id, gate_id) DO UPDATE SET \
+                 turn_id = excluded.turn_id, kind = excluded.kind, kind_json = excluded.kind_json, \
+                 status = 'open', answer_json = NULL, resolved_by = NULL, resolved_seq = NULL, \
+                 resolved_at = NULL, opened_seq = excluded.opened_seq, \
+                 opened_at = excluded.opened_at, blocked_since = excluded.blocked_since",
+                params![
+                    id,
+                    gate.to_string(),
+                    turn.to_string(),
+                    json_text(&kind)?,
+                    seq,
+                    at
+                ],
+                "record a proposed plan gate",
+            )?;
+        }
         AgentEvent::TokenUsage {
             turn,
             usage,
@@ -437,7 +540,8 @@ pub(super) fn project_event(
             )?;
             clear_retrying(transaction, thread)?;
         }
-        AgentEvent::Checkpoint(kind) => {
+        AgentEvent::RateLimits { .. } => {}
+        AgentEvent::Compacted(kind) => {
             // A checkpoint's identity is its turn, so a second boundary inside one turn replaces
             // the first: the row records that the turn crossed a boundary, and the log keeps both.
             // A boundary before the first turn is keyed on the empty turn id, of which there can
@@ -474,6 +578,21 @@ pub(super) fn project_event(
                 "record a provider retry",
             )?;
         }
+        AgentEvent::ModelRerouted { to, .. } => {
+            execute(
+                transaction,
+                "UPDATE sessions SET model_json = ?2 WHERE thread_id = ?1",
+                params![
+                    id,
+                    json_text(&ModelSelection {
+                        model: to.clone(),
+                        effort: None,
+                        provider: None,
+                    })?
+                ],
+                "record a harness model reroute",
+            )?;
+        }
         AgentEvent::RuntimeError { fatal, message } => {
             execute(
                 transaction,
@@ -501,7 +620,7 @@ pub(super) fn project_event(
         }
         // A notice is a transcript row the read path picks up from the log by sequence range,
         // exactly as imported history is, so it projects to nothing of its own.
-        AgentEvent::Notice(_) => {}
+        AgentEvent::Notice(_) | AgentEvent::Unknown { .. } => {}
     }
 
     if changes_attention(&event.event) {
@@ -744,142 +863,12 @@ pub(super) fn fail_session(
     )
 }
 
-/// Fails the running turn, if there is one, as the reducer does on an unexpected exit or a fatal
-/// runtime error.
-fn fail_active_turn(
-    transaction: &Transaction<'_>,
-    thread: ThreadId,
-    message: &str,
-    seq: i64,
-    at: i64,
-) -> anyhow::Result<()> {
-    let id = thread.to_string();
-    let running: Option<String> = transaction
-        .query_row(
-            "SELECT running_turn_id FROM threads WHERE thread_id = ?1",
-            params![id],
-            |row| row.get(0),
-        )
-        .optional_row()
-        .with_context(|| format!("read the running turn of thread {thread}"))?
-        .flatten();
-    let Some(running) = running else {
-        return Ok(());
-    };
-    let Ok(turn) = running.parse::<TurnId>() else {
-        bail!("thread {thread} records an unparsable running turn `{running}`");
-    };
-    close_open_items(transaction, thread, turn, seq, at)?;
-    let outcome_json = json_text(&TurnOutcome::Error {
-        message: Some(message.to_owned()),
-    })?;
-    execute(
-        transaction,
-        "UPDATE turns SET end_seq = ?3, state = 'failed', outcome = ?4, completed_at = ?5, \
-         duration_ms = MAX(0, ?5 - started_at) \
-         WHERE thread_id = ?1 AND turn_id = ?2 AND end_seq IS NULL",
-        params![id, running, seq, outcome_json, at],
-        "fail the running turn",
-    )?;
-    execute(
-        transaction,
-        "UPDATE threads SET running_turn_id = NULL, last_outcome = ?2, turn_json = ?3 \
-         WHERE thread_id = ?1",
-        params![id, outcome_json, json_text(&TurnState::Failed(turn))?],
-        "clear the failed running turn",
-    )
-}
-
-/// Closes a gate and charges the wait it ends to the turn that was blocked on it.
-fn resolve_gate(
-    transaction: &Transaction<'_>,
-    thread: ThreadId,
-    gate: &fleet_core::agents::GateId,
-    answer: &fleet_core::agents::GateAnswer,
-    by: &fleet_core::agents::GateResolver,
-    seq: i64,
-    at: i64,
-) -> anyhow::Result<()> {
-    let id = thread.to_string();
-    // The thread has been blocked since the earliest gate of this window opened, so the window
-    // start is read *before* this gate leaves the open set.
-    let since: Option<i64> = transaction
-        .query_row(
-            "SELECT MIN(blocked_since) FROM gates WHERE thread_id = ?1 AND status = 'open'",
-            params![id],
-            |row| row.get(0),
-        )
-        .optional_row()
-        .with_context(|| format!("read the blocked window of thread {thread}"))?
-        .flatten();
-    let owner: Option<Option<String>> = transaction
-        .query_row(
-            "SELECT turn_id FROM gates WHERE thread_id = ?1 AND gate_id = ?2 AND status = 'open'",
-            params![id, gate.to_string()],
-            |row| row.get(0),
-        )
-        .optional_row()
-        .with_context(|| format!("read gate {gate} of thread {thread}"))?;
-    let Some(owner) = owner else {
-        bail!("resolution of unknown or already resolved gate {gate} of thread {thread}");
-    };
-    execute(
-        transaction,
-        "UPDATE gates SET status = 'resolved', answer_json = ?3, resolved_by = ?4, \
-         resolved_seq = ?5, resolved_at = ?6, blocked_since = NULL \
-         WHERE thread_id = ?1 AND gate_id = ?2",
-        params![
-            id,
-            gate.to_string(),
-            json_text(answer)?,
-            discriminant(by, "GateResolver")?,
-            seq,
-            at,
-        ],
-        "resolve a gate",
-    )?;
-
-    let still_open: i64 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM gates WHERE thread_id = ?1 AND status = 'open'",
-            params![id],
-            |row| row.get(0),
-        )
-        .with_context(|| format!("count the open gates of thread {thread}"))?;
-    let Some(since) = since else {
-        return Ok(());
-    };
-    if still_open > 0 {
-        // Answering the first gate of an overlapping run must not restart the clock for the
-        // second, so whatever stays open inherits the window's start.
-        execute(
-            transaction,
-            "UPDATE gates SET blocked_since = MIN(COALESCE(blocked_since, ?2), ?2) \
-             WHERE thread_id = ?1 AND status = 'open'",
-            params![id, since],
-            "carry a blocked window over to the gates still open",
-        )?;
-        return Ok(());
-    }
-    // The gate names its own turn when the provider supplied one; otherwise the turn that is
-    // still running owns the wait, because that is the footer the user is about to read.
-    let blocked = at.saturating_sub(since).max(0);
-    execute(
-        transaction,
-        "UPDATE turns SET gate_blocked_ms = gate_blocked_ms + ?3 \
-         WHERE thread_id = ?1 AND end_seq IS NULL AND turn_id = COALESCE( \
-             ?2, (SELECT running_turn_id FROM threads WHERE thread_id = ?1))",
-        params![id, owner, blocked],
-        "charge a blocked window to its turn",
-    )
-}
-
 /// Whether the event leaves the thread non-terminal, as `ThreadProjection` decides it.
 fn is_nonterminal(event: &AgentEvent) -> bool {
     !matches!(
         event,
         AgentEvent::SessionExited { .. }
-            | AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnSettled { .. }
             | AgentEvent::TurnAborted { .. }
             | AgentEvent::RuntimeError { fatal: true, .. }
     )

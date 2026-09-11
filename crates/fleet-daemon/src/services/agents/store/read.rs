@@ -21,7 +21,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use fleet_core::agents::{Seq, SeqEvent, ThreadId};
+use fleet_core::agents::{Seq, SeqEvent, ThreadId, TurnId};
 use rusqlite::{Connection, OpenFlags, params};
 use tokio::sync::Semaphore;
 
@@ -31,6 +31,7 @@ use super::{
     index, migrations,
     project::{self, OptionalRow as _},
 };
+use fleet_core::agents::{ModelSelection, PermissionMode};
 
 /// Read-only connections. Two, because a snapshot read and a pagination read are the two things
 /// that can legitimately be in flight at once; a third would only queue behind the same disk.
@@ -65,6 +66,179 @@ pub(crate) struct TranscriptWindow {
     /// The projector cursor. When it differs from `head_seq` this thread is mid-rebuild and the
     /// page is a prefix of the truth, which the caller must say rather than present as complete.
     pub(crate) projected_seq: Seq,
+}
+
+/// The turn keyset one bounded window covers, newest-first from `before`.
+///
+/// `(turn_id, start_seq)` and nothing else: the window's *content* comes from the reducer's
+/// projection, and all this read has to establish is which turns the window contains and where
+/// the next older page starts. It is one index-only statement against `idx_turns_keyset`, so the
+/// `LIMIT` genuinely bounds the scan instead of sorting every turn in the thread first, and no
+/// payload column is touched.
+pub(super) fn turn_keyset(
+    conn: &Connection,
+    thread: ThreadId,
+    before: Option<Seq>,
+    limit: usize,
+) -> anyhow::Result<TurnKeyset> {
+    let id = thread.to_string();
+    let before = before.map_or(i64::MAX, |seq| i64::try_from(seq.0).unwrap_or(i64::MAX));
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT turn_id, start_seq FROM turns \
+              WHERE thread_id = ?1 AND start_seq < ?2 \
+              ORDER BY start_seq DESC LIMIT ?3",
+        )
+        .context("prepare the turn keyset query")?;
+    let mut rows = statement
+        .query_map(
+            params![id, before, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .context("query a turn keyset")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read a turn keyset")?;
+    drop(statement);
+    rows.reverse();
+    let oldest = rows.first().map(|(_, start_seq)| *start_seq);
+    // An exact probe rather than fetching limit+1 and slicing: the off-by-one in the slice
+    // version only shows up on the page boundary.
+    let has_more = match oldest {
+        Some(oldest) => conn
+            .prepare_cached("SELECT 1 FROM turns WHERE thread_id = ?1 AND start_seq < ?2 LIMIT 1")
+            .context("prepare the older-turn probe")?
+            .query_row(params![id, oldest], |row| row.get::<_, i64>(0))
+            .optional_row()
+            .context("probe for an older turn page")?
+            .is_some(),
+        None => false,
+    };
+    let turns = rows
+        .into_iter()
+        .filter_map(|(turn, start_seq)| match turn.parse::<TurnId>() {
+            Ok(turn) => Some((turn, Seq(u64::try_from(start_seq).unwrap_or_default()))),
+            Err(error) => {
+                tracing::warn!(%thread, %turn, %error, "skipping an unparsable turn id in a window");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(TurnKeyset {
+        oldest_seq: turns.first().map(|(_, seq)| *seq),
+        turns,
+        has_more,
+    })
+}
+
+/// Which turns one window covers, and whether older ones exist.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TurnKeyset {
+    /// The window's turns with their start sequences, chronological.
+    pub(crate) turns: Vec<(TurnId, Seq)>,
+    /// The start sequence of the oldest turn in the window, the page's lower bound.
+    pub(crate) oldest_seq: Option<Seq>,
+    /// Whether a turn older than `oldest_seq` exists.
+    pub(crate) has_more: bool,
+}
+
+/// The harness runtime one thread's `sessions` row last recorded.
+///
+/// The composer gates its controls on these (`docs/NATIVE-AGENTS.md` §4.5), and they are *not* in
+/// the reducer's projection: the projector writes them to `sessions` from `SessionConfigured` and
+/// the projection keeps only what a transcript row needs. A windowed open that skipped this read
+/// would blank every gated control on a cold open, which reads as a bug in the control rather
+/// than as a missing read.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SessionRuntime {
+    /// Active model, when the harness has reported one.
+    pub(crate) model: Option<ModelSelection>,
+    /// Active permission policy.
+    pub(crate) mode: PermissionMode,
+    /// Harness-native tool names.
+    pub(crate) tools: Vec<String>,
+    /// Harness-native slash command names.
+    pub(crate) commands: Vec<String>,
+    /// Harness-native skill names.
+    pub(crate) skills: Vec<String>,
+}
+
+/// Reads one thread's session runtime, or `None` when no session row exists yet.
+///
+/// A column this build cannot decode degrades to its default rather than failing the read: a
+/// model selection written by a newer daemon must not make a transcript unopenable.
+pub(super) fn session_runtime(
+    conn: &Connection,
+    thread: ThreadId,
+) -> anyhow::Result<Option<SessionRuntime>> {
+    let row = conn
+        .prepare_cached(
+            "SELECT model_json, mode, tools_json, commands_json, skills_json \
+               FROM sessions WHERE thread_id = ?1",
+        )
+        .context("prepare the session runtime query")?
+        .query_row(params![thread.to_string()], |row| {
+            Ok(SessionRow {
+                model_json: row.get(0)?,
+                mode: row.get(1)?,
+                tools_json: row.get(2)?,
+                commands_json: row.get(3)?,
+                skills_json: row.get(4)?,
+            })
+        })
+        .optional_row()
+        .with_context(|| format!("read the session runtime of thread {thread}"))?;
+    Ok(row.map(|row| row.decode(thread)))
+}
+
+/// One session row, still encoded.
+struct SessionRow {
+    model_json: Option<String>,
+    mode: Option<String>,
+    tools_json: Option<String>,
+    commands_json: Option<String>,
+    skills_json: Option<String>,
+}
+
+impl SessionRow {
+    fn decode(self, thread: ThreadId) -> SessionRuntime {
+        SessionRuntime {
+            model: decode_column(self.model_json.as_deref(), thread, "model selection"),
+            // The column stores the bare discriminant, so it becomes JSON before it decodes.
+            mode: self
+                .mode
+                .as_deref()
+                .and_then(|mode| {
+                    decode_column(
+                        Some(&serde_json::Value::String(mode.to_owned()).to_string()),
+                        thread,
+                        "permission mode",
+                    )
+                })
+                .unwrap_or_default(),
+            tools: decode_column(self.tools_json.as_deref(), thread, "tool names")
+                .unwrap_or_default(),
+            commands: decode_column(self.commands_json.as_deref(), thread, "command names")
+                .unwrap_or_default(),
+            skills: decode_column(self.skills_json.as_deref(), thread, "skill names")
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Decodes one JSON column, warning and degrading rather than failing the read.
+fn decode_column<T: serde::de::DeserializeOwned>(
+    encoded: Option<&str>,
+    thread: ThreadId,
+    what: &str,
+) -> Option<T> {
+    let encoded = encoded?;
+    match serde_json::from_str(encoded) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(%thread, %error, what, "ignoring a session column this build cannot decode");
+            None
+        }
+    }
 }
 
 /// A fixed pool of read-only connections.

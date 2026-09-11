@@ -267,6 +267,18 @@ impl AppState {
                 self.notify_agent_attention(now);
             }
             Event::AgentSummary(summary) => self.apply_agent_summary(summary, now),
+            // Backpressure dropped this connection's tail for one thread. Re-opening from the
+            // cursor the daemon names is the whole repair, and it is never a silent drop.
+            Event::AgentResync { thread, from_seq } => {
+                self.agents.mark_resync_from(thread, from_seq);
+            }
+            // The only transition into live: a mirror never fabricates one.
+            Event::AgentSynchronized { thread } => self.agents.synchronize(thread),
+            // The local daemon refilled a mirrored thread's stored window, so the client
+            // re-reads the window it has open rather than trusting what it cached.
+            Event::AgentWindow { thread } => self.agents.mark_resync(thread),
+            // An event family this build does not understand is ignored, never re-broadcast.
+            Event::Unknown => {}
             Event::TerminalFrame(frame) => {
                 self.apply_frame(&frame);
             }

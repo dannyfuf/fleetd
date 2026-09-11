@@ -265,8 +265,8 @@ pub enum Command {
     UpdateFleet,
     /// Open the Claude agent session.
     OpenClaude,
-    /// Open the OpenCode agent session.
-    OpenOpencode,
+    /// Open the Codex agent session.
+    OpenCodex,
     /// Quit the app; the daemon keeps running.
     Quit,
     /// Quit and stop the daemon.
@@ -330,7 +330,7 @@ impl Command {
         Self::Refresh,
         Self::UpdateFleet,
         Self::OpenClaude,
-        Self::OpenOpencode,
+        Self::OpenCodex,
         Self::Quit,
         Self::QuitDaemon,
     ];
@@ -394,7 +394,7 @@ impl Command {
             Self::Refresh => "Refresh",
             Self::UpdateFleet => "Update Fleet",
             Self::OpenClaude => "Open Claude agent",
-            Self::OpenOpencode => "Open OpenCode agent",
+            Self::OpenCodex => "Open Codex agent",
             Self::Quit => "Quit Fleet",
             Self::QuitDaemon => "Quit and stop fleetd",
         }
@@ -456,7 +456,7 @@ impl Command {
             Self::Help => Icon::CircleQuestionMark,
             Self::Refresh => Icon::LoaderCircle,
             Self::UpdateFleet => Icon::CircleArrowUp,
-            Self::OpenClaude | Self::OpenOpencode => Icon::Bot,
+            Self::OpenClaude | Self::OpenCodex => Icon::Bot,
             Self::Quit => Icon::CircleX,
         }
     }
@@ -534,7 +534,7 @@ impl Command {
             Self::Refresh => "fleet::Refresh",
             Self::UpdateFleet => "fleet::UpdateFleet",
             Self::OpenClaude => "fleet::OpenAgentClaude",
-            Self::OpenOpencode => "fleet::OpenAgentOpencode",
+            Self::OpenCodex => "fleet::OpenAgentCodex",
             Self::Quit => "fleet::Quit",
             Self::QuitDaemon => "fleet::QuitAndStopDaemon",
         }
@@ -625,7 +625,7 @@ impl Command {
             | Self::Settings
             | Self::Refresh
             | Self::OpenClaude
-            | Self::OpenOpencode
+            | Self::OpenCodex
             | Self::QuitDaemon => connected,
             Self::JobsPanel | Self::Help | Self::Quit => true,
         }
@@ -1420,7 +1420,7 @@ fn run_command<T: SessionTransport>(
         Command::Refresh => transport.send(RequestBody::RefreshStatuses { repo: None }),
         Command::UpdateFleet => transport.send(RequestBody::Update),
         Command::OpenClaude => window.dispatch_action(Box::new(fleet::OpenAgentClaude), cx),
-        Command::OpenOpencode => window.dispatch_action(Box::new(fleet::OpenAgentOpencode), cx),
+        Command::OpenCodex => window.dispatch_action(Box::new(fleet::OpenAgentCodex), cx),
         // The shell owns the whole quit flow, and its listeners sit on the window root, which
         // is an ancestor of this overlay — so dispatching reaches them.
         Command::Quit => window.dispatch_action(Box::new(fleet::Quit), cx),

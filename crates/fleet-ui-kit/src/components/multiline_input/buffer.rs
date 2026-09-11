@@ -5,6 +5,22 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::HISTORY_LIMIT;
 
+/// A completion surface the composer asked for, and what has been typed into it.
+///
+/// The symbol is reported, never swallowed: `@`, `$` and `/` all stay in the buffer, so a
+/// picker that opens over one filters on [`Trigger::query`] and a picker that never opens
+/// leaves ordinary prose behind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trigger {
+    /// Which surface: `@` files, `$` skills, `/` commands.
+    pub symbol: char,
+    /// The byte offset of the symbol itself, so a replacement can be guarded against the text
+    /// it expects to replace.
+    pub at: usize,
+    /// Everything typed between the symbol and the caret.
+    pub query: SharedString,
+}
+
 /// A multi-line editing model: an owned string, a byte cursor and a selection anchor.
 ///
 /// This is [`super::MultilineInput`]'s half that never touches gpui, so the composer's edit set
@@ -292,24 +308,71 @@ impl MultilineBuffer {
             .map_or(self.text.len(), |index| offset + index)
     }
 
-    /// Whether inserting `text` at `offset` opens a `@` file or `/` command surface.
+    /// Whether inserting `text` at `offset` opens a completion surface, and which one.
     ///
-    /// A trigger is one bare `@` or `/` typed at the start of a word: at the very start of the
-    /// buffer, or right after whitespace. `feature/branch` and `me@host` therefore do not fire.
-    pub fn trigger_for(&self, offset: usize, text: &str) -> Option<char> {
+    /// The composer **reports** a trigger rather than consuming the key (`spec-B` §B5.8), so
+    /// all three characters stay typable and the picker filters on what follows. Where each
+    /// one fires is not symmetric:
+    ///
+    /// | Trigger | Where | Query |
+    /// | --- | --- | --- |
+    /// | `/` | **line start only** | commands |
+    /// | `$` | anywhere a token starts | skills |
+    /// | `@` | anywhere a token starts | files and folders |
+    ///
+    /// `/` is at line start only because *a harness expands a slash command only when it opens
+    /// the whole message*; anywhere else it reaches the agent as literal text, and offering it
+    /// there is a whole class of "why didn't my command run?" bugs. `feature/branch` and
+    /// `me@host` therefore do not fire either.
+    pub fn trigger_for(&self, offset: usize, text: &str) -> Option<Trigger> {
         let mut chars = text.chars();
-        let (Some(ch), None) = (chars.next(), chars.next()) else {
+        let (Some(symbol), None) = (chars.next(), chars.next()) else {
             return None;
         };
-        if ch != '@' && ch != '/' {
+        if !matches!(symbol, '@' | '/' | '$') {
             return None;
         }
-        let offset = self.floor_boundary(offset);
-        self.text[..offset]
+        let at = self.floor_boundary(offset);
+        let token_start = self.text[..at]
             .chars()
             .next_back()
-            .is_none_or(char::is_whitespace)
-            .then_some(ch)
+            .is_none_or(char::is_whitespace);
+        let allowed = if symbol == '/' {
+            self.line_start(at) == at
+        } else {
+            token_start
+        };
+        allowed.then(|| Trigger {
+            symbol,
+            at,
+            query: SharedString::default(),
+        })
+    }
+
+    /// The trigger the caret is currently inside, with everything typed after it.
+    ///
+    /// This is what lets a picker filter as the user keeps typing: the owner reads it on every
+    /// [`super::MultilineInputEvent::Changed`] rather than tracking the keystrokes itself. It
+    /// answers `None` as soon as the token gains whitespace or the caret leaves it.
+    pub fn active_trigger(&self) -> Option<Trigger> {
+        let cursor = self.cursor;
+        let line_start = self.line_start(cursor);
+        let token_start = self.text[line_start..cursor]
+            .rfind(char::is_whitespace)
+            .map_or(line_start, |index| line_start + index + 1);
+        let token = &self.text[token_start..cursor];
+        let symbol = token.chars().next()?;
+        if !matches!(symbol, '@' | '/' | '$') {
+            return None;
+        }
+        if symbol == '/' && token_start != line_start {
+            return None;
+        }
+        Some(Trigger {
+            symbol,
+            at: token_start,
+            query: SharedString::from(token[symbol.len_utf8()..].to_owned()),
+        })
     }
 
     /// Replace a byte range with `text` and leave the caret after the insertion.

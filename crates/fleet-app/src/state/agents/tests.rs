@@ -282,8 +282,8 @@ fn the_status_bar_key_set_follows_the_context_not_the_badge() {
         Some(vec!["Agent", "AgentWorking"])
     );
     assert_eq!(
-        key_hint_set(state.agents.is_working(thread.thread)).first(),
-        Some(&("esc", "stop")),
+        key_hint_set(state.agents.is_working(thread.thread), false).first(),
+        Some(&("esc", "interrupt")),
         "the bar advertised idle commands nothing in `AgentWorking` is bound to"
     );
 }

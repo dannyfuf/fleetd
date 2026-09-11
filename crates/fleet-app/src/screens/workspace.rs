@@ -133,7 +133,7 @@ impl WorkspaceScreen {
                     .copied()
             })
         });
-        let agent_word = self.agent_header_word(state.read(cx), model);
+        let agent_word = self.agent_header_word(state.read(cx), model, cx);
         let header = (!model.zoomed).then(|| self.header(model, pr, agent_word));
         let tabs = (!model.zoomed).then(|| self.tab_strip(model, bridge, state, cx));
         let terminal = if model.agent.is_some() {

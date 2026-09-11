@@ -741,7 +741,7 @@ tab, every key except `ctrl-s` → the pane; `ctrl-s` then
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
 `W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
-`a`/`A` new native Claude/OpenCode agent thread · `F` the agent PTY popup (the terminal fallback) · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
+`a`/`A` new native Claude/Codex agent thread · `F` the agent PTY popup (the terminal fallback) · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
 · `z` zoom · `!` sticky error slot (prefixed: `^s !`, KEYMAP A18) · `J` jobs · `?` help · `Esc` cancel
 prefix.
 
@@ -751,9 +751,9 @@ prefix.
 
 **Purpose:** *Show me what the agent is doing, and let me answer it, without reading a terminal.*
 
-A Claude Code or OpenCode session is a numbered tab in the **same strip** as the terminals —
-`[2] claude — rounding fix`, `[6] opencode — tz shifts` — drawn by Fleet rather than by a PTY.
-`^s a` starts Claude, `^s A` starts OpenCode, `^s x` closes the tab and keeps the transcript, and
+A Claude Code or Codex session is a numbered tab in the **same strip** as the terminals —
+`[2] claude — rounding fix`, `[6] codex — tz shifts` — drawn by Fleet rather than by a PTY.
+`^s a` starts Claude, `^s A` starts Codex, `^s x` closes the tab and keeps the transcript, and
 `^s F` opens the PTY popup below as the explicit fallback. There is no thread-list sidebar, no
 inspector and no detached diff pane. `docs/NATIVE-AGENTS.md` is the authority for the event
 model and the state machine, `docs/KEYMAP.md` for exactly which `^s` keys an agent tab binds;
@@ -801,7 +801,7 @@ side empty on purpose. The transcript is bottom-anchored and the composer is doc
 | Context-bar chips | `3 needs you · 2 working · 1 failed`, including the current tab | §2.3 | a blocked thread on another worktree is invisible otherwise | `AgentCounts` |
 | User turn | the message on `bg.panel`, radius 6, attachments as pills below | transcript | the **only** block with a background: it is the one thing the user wrote | `ItemKind::UserMessage` |
 | Assistant prose | Markdown on the ground — no bubble, no avatar, no header | transcript | the answer is the content; chrome around it is noise | `AssistantText` |
-| Thinking | one collapsed muted line, `thinking · 6s` + `[⏎] show` | transcript | reasoning is available, never dominant | `Thinking` |
+| Thinking | one collapsed muted line, `thought 6s` + `[⏎] show`; while it streams it **is** the live row | transcript | reasoning is available, never dominant | `ItemKind::Reasoning` |
 | Tool row | 30 px: state glyph · 60 px kind column · one-line summary · right-aligned result | transcript | one shape for every tool means the eye scans a column, not sentences | `ItemKind::Tool` |
 | Nested rows | children indented 16 px behind a 1 px divider | under an `Agent` row | a subagent's work belongs to the row that started it | `Item.children` |
 | Inline diff | `DiffView` under an `edit` / `write` row, red/green 14 % washes | expanded row | the review happens where the edit is announced | `ToolDiff` |
@@ -810,19 +810,22 @@ side empty on purpose. The transcript is bottom-anchored and the composer is doc
 | Checkpoint line | `context compacted · 84k → 12k tokens` · `session resumed · 2h ago` | transcript | the two moments that silently change what the agent remembers | `Checkpoint` |
 | Error card | the failure, or `rate limited · retrying in 12s` with a spinner while a backoff counts down | transcript | a backoff is progress, a failure is not; they must not look alike | `RuntimeError`, `Retrying` |
 | Notice | one muted line with an amber glyph — a config warning, a deprecation, `Stop hook error occurred` | transcript | the provider is talking to the user, not failing; an unrecognised frame is a tracing diagnostic and never a notice | `Notice`, `ThreadProjection.notices` |
-| Decision card | 760 px, `bg.panel`, radius 6, **2 px amber bar** flush left, always the last row | transcript | a modal would hide the transcript that explains *why* it is being asked | `OpenGate` |
-| Queued message | the pending text at 60 % opacity with `queued` + `[esc] unqueue` | transcript | a message that has not been sent must not look sent | view-local queue |
-| Composer | 36 px box, `❯` prompt glyph, placeholder `Message claude… (@ file · / command)`; grows one line at a time to eight | docked, bottom | no send button: `⏎` sends, `⇧⏎` inserts a newline | `MultilineInput` |
-| Metadata row | 22 px: `agent mode · claude-sonnet-5 · high · asks before edits` left, `context 34% · $0.42 · 48m` right, both zero-suppressed | under the composer | the four facts that change what the next turn will do | `ThreadProjection` |
-| Empty state | `Message claude to start · @ file · / command` | centered in an empty transcript | a new thread must say what to type | — |
+| Decision drawer | 760 px, `bg.panel`, top corners only, **2 px amber bar** flush left, docked to the composer's top edge with the shared border masked | above the composer | a card in the transcript can be scrolled out of the viewport while it still owns the keyboard, which is a modal with the chrome removed; the drawer is always on screen by construction | `OpenGate` |
+| Plan card | the plan's promoted title, its body faded out past 900 chars or 20 lines, and **no buttons** | transcript | a plan is a durable artifact the user scrolls back to and quotes; its *verbs* live on the composer, because whether you implement or refine is decided by whether you typed anything | `ItemKind::Plan` |
+| Settled gate row | one line — `allowed once · bash: git push --force`, `answered · which package manager? → pnpm`, `withdrawn · the agent stopped waiting` | transcript, where it was asked | docking the live drawer must not lose the narrative | resolved `OpenGate` |
+| Live activity row | one row, one id, present tense: `working 1m 12s` → `thought 6s` → `running cargo` | pinned in the running turn | thinking → tool A running → tool A done → tool B running is one row changing its label, not four mounts | `RowId::LiveActivity` |
+| Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
+| Composer | 36 px box, `❯` prompt glyph, placeholder `message claude… (@ files · $ skills · / commands)`; grows one line at a time to eight | docked, bottom | no send button: `⏎` sends, `⇧⏎` inserts a newline | `MultilineInput` |
+| Metadata row | 22 px: `claude-opus-5 · high · asks before edits · build` left, `34% · $0.42 · 48m` right; **every segment the harness reports is shown and none is invented**, and it collapses from the right into an overflow count while the model segment truncates instead | under the composer | losing which model is answering is worse than losing its name's tail | `ThreadProjection`, `MetadataRow` |
+| Empty state | `new claude thread · feat-x` over `ask anything · @ files · $ skills · / commands` | centered in an empty transcript | a new thread must say what to type | — |
 | Mode word | `AGENT` | status bar, center | §2.8; keys reach Fleet's composer, not a PTY | `Mode::Agent` |
 | Status-bar hints | the live key set of the current state (see **Keyboard**) | status bar, right | the card's keys are bare letters, so the bar is where they are legible | §9 of `NATIVE-AGENTS.md` |
 
-**Copy is fixed.** `allow once` · `allow for this session` (Claude) · `allow for this directory`
-(OpenCode) — the effective scope is always spelled out and the word "always" is never used.
-The permission mode reads `asks before edits` · `accepts edits` · `plans before editing` ·
-`full access`; OpenCode names its agent (`build agent` / `plan agent`) where Claude says
-`agent mode`.
+**Copy is fixed.** `allow once` · `allow for this session` — the effective scope is always spelled
+out and the word "always" is never used on a command or a file change, on either harness. The
+permission mode reads `asks before edits` · `accepts edits` · `plans before editing` ·
+`full access`, and Build ⇄ Plan is a **separate axis** shown as its own `build` / `plan` segment:
+leaving plan mode restores the base access ladder rather than a hardcoded default.
 
 **Color is semantic** (§1.4 unchanged): green = alive, amber = needs you or cannot verify, red =
 broken, gray = everything else *including progress*, blue = where you are and never a state.
@@ -833,13 +836,13 @@ Only gray spinners and the text caret animate; attention is a static amber dot o
 | State | Rendering |
 | --- | --- |
 | Empty thread | the empty-state line only; the composer is focused |
-| Working | tab spinner, header `working`; the composer stays live and `⏎` **queues** behind the turn; `esc` interrupts |
+| Working | tab spinner, header `working`; the composer stays live and `⏎` **steers** the running turn, dispatched immediately; `esc` interrupts the *active* turn and holds `stopping…` until the daemon reports liveness cleared |
 | Streaming | text grows in place with a caret after the last paragraph; tool rows keep their 30 px geometry so nothing jitters |
-| Decision open | the card is the last row, a 2 px amber bar on its left, the composer dims to 60 % and bare keys route to the card; the status bar mirrors the card's keys |
+| Decision open | the drawer is docked above the composer, a 2 px amber bar on its left, the composer dims to 60 % and bare keys route to the drawer; the status bar mirrors its keys from the same source. **`⏎` is not bound on a permission** |
 | Turn settled | successful tool rows fold; a failed row stays; the footer appears once, complete |
 | Interrupted | footer reads `stopped · 12s · 3.1k tokens`; there is no error card — stopping is not failing |
 | Failed / exited | red `exited <code>` on the tab, header `failed`, an error card at the end of the transcript |
-| Scroll mode (`^s [`) | the tail is frozen so new output cannot pull the viewport away; leaving returns to the newest row |
+| Scroll mode (`^s [`) | the tail is frozen so new output cannot pull the viewport away, and the row nearest the bottom takes the focus ring — which is what makes `⏎`/`u`/`o`/`y`/`d` fire. `G` reaches the newest row **without** leaving the mode; only `q`/`i`/`esc` re-arms the follow |
 | Unread | a neutral dot on the tab only; the header stays `idle`, because nothing is waiting on the user |
 | Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op |
 
@@ -861,10 +864,10 @@ PTY fallback. A decision card takes `y` / `a` / `n` / `e` / `esc` (permission), 
 
 ### 3.6.1 Agent popup (terminal fallback)
 
-The Claude/OpenCode agent is a window-wide `AppFrame.overlay` surface above the current Hub or
+The Claude/Codex agent is a window-wide `AppFrame.overlay` surface above the current Hub or
 Workspace, centered at **90 % of window width × 85 % of window height** with the dialog scrim.
 The base screen remains mounted and rendering: its list selection, active tab, native pane, and
-terminal attachment do not change. A 44 px header shows `claude` or `opencode`, the fixed session
+terminal attachment do not change. A 44 px header shows `claude` or `codex`, the fixed session
 id, and a status dot driven by the shared agent-activity source: amber while working, green while
 idle or otherwise live, and red when exited or unreachable. It ends with
 `^s q hide · ^s a/A switch · ctrl-q hide`. The body is the same

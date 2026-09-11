@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn remote_worktree_guard_precedes_path_provider_and_store_access() {
-    let harness = Harness::start(Capabilities::default()).await;
+    let harness = Harness::start(HarnessCapabilities::default()).await;
     let host = HostId::try_from("dev-box").expect("host");
     let guarded_worktree = harness.worktree.clone();
     harness
@@ -82,7 +82,7 @@ async fn a_turn_streams_items_and_moves_attention_to_finished() {
     let thread = harness.create(None).await.thread;
     harness
         .script
-        .emit(AgentEvent::SessionStarted {
+        .emit(AgentEvent::SessionConfigured {
             provider: AgentKind::Claude,
             resume_cursor: None,
             model: None,
@@ -110,6 +110,7 @@ async fn a_turn_streams_items_and_moves_attention_to_finished() {
             UserInput {
                 text: "ship it".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -134,7 +135,9 @@ async fn a_turn_streams_items_and_moves_attention_to_finished() {
         .emit(AgentEvent::ItemStarted {
             turn,
             item: assistant,
-            kind: ItemKind::AssistantText,
+            kind: ItemKind::AssistantText {
+                text: String::new(),
+            },
             parent: None,
         })
         .await;
@@ -152,14 +155,14 @@ async fn a_turn_streams_items_and_moves_attention_to_finished() {
         .script
         .emit(AgentEvent::ItemCompleted {
             item: assistant,
-            status: ItemStatus::Done,
+            status: ItemStatus::Completed,
         })
         .await;
     harness.script.emit(completed(turn)).await;
 
     let projection = harness
         .settle(thread, "a completed turn", |projection| {
-            matches!(projection.turn, TurnState::Completed(finished, _) if finished == turn)
+            matches!(projection.turn, TurnState::Settled(finished, _) if finished == turn)
         })
         .await;
     assert_eq!(assistant_text(&projection), Some("hello"));
@@ -235,6 +238,7 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
             UserInput {
                 text: "also update the docs".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -247,7 +251,15 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
         .find(|item| matches!(&item.kind, ItemKind::UserMessage { text, .. } if text == "also update the docs"))
         .expect("the steered message is recorded in the running turn");
     assert_eq!(steered.turn, turn);
-    assert_eq!(steered.status, ItemStatus::Done);
+    assert_eq!(steered.status, ItemStatus::Completed);
+    // The mark comes from the harness's own `Submitted::queued`, not from the projection: §7.2
+    // draws a steer with a leading `↳`, and it has to survive the reload that replaces the
+    // sending client's optimistic row.
+    assert!(
+        matches!(&steered.kind, ItemKind::UserMessage { steered, .. } if *steered),
+        "a steered message is recorded as one: {:?}",
+        steered.kind
+    );
     assert!(matches!(
         harness.script.calls().last(),
         Some(FakeCall::Send(sent, _)) if *sent == turn
@@ -351,7 +363,7 @@ async fn interrupting_a_settled_turn_acks_while_a_live_one_reaches_the_provider(
         .await;
     let projection = harness
         .settle(thread, "an interrupted turn", |projection| {
-            projection.turn == TurnState::Interrupted(turn)
+            projection.turn == TurnState::Settled(turn, TurnOutcome::Interrupted)
         })
         .await;
     assert!(projection.gates.is_empty());
@@ -379,7 +391,10 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
     assert!(harness.script.calls().contains(&FakeCall::Stop));
     let projection = harness.projection(thread).await;
     assert_eq!(projection.session, SessionState::Stopped);
-    assert_eq!(projection.turn, TurnState::Interrupted(turn));
+    assert_eq!(
+        projection.turn,
+        TurnState::Settled(turn, TurnOutcome::Interrupted)
+    );
 
     let refused = harness
         .manager
@@ -388,6 +403,7 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
             UserInput {
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -420,7 +436,7 @@ async fn open_returns_only_events_after_the_requested_cursor() {
         events_after,
     } = harness
         .manager
-        .open(thread, Some(Seq(1)))
+        .open(&resume_body(thread, Seq(1)))
         .await
         .expect("open from a cursor")
     else {
@@ -436,7 +452,7 @@ async fn open_returns_only_events_after_the_requested_cursor() {
     );
     let ahead = harness
         .manager
-        .open(thread, Some(Seq(9)))
+        .open(&resume_body(thread, Seq(9)))
         .await
         .expect_err("a cursor beyond the log is rejected");
     assert_eq!(ahead.kind, ErrorKind::Validation);
@@ -463,44 +479,10 @@ async fn a_catch_up_open_never_starts_a_provider() {
     // opening a tab, so it must not relaunch the provider (§6).
     harness
         .manager
-        .open(thread, Some(Seq(1)))
+        .open(&resume_body(thread, Seq(1)))
         .await
         .expect("catch-up open");
     assert_eq!(harness.script.starts(), starts);
-}
-
-#[tokio::test]
-async fn a_mode_change_is_a_durable_event_every_mirror_sees() {
-    let harness = Harness::start(full()).await;
-    let thread = harness.create(None).await.thread;
-    let mut events = harness.events.subscribe();
-    harness
-        .manager
-        .set_mode(thread, PermissionMode::AcceptEdits)
-        .await
-        .expect("set mode");
-
-    let broadcast = drain(&mut events);
-    assert!(
-        broadcast.iter().any(|event| matches!(
-            event,
-            Event::Agent {
-                event: SeqEvent {
-                    event: AgentEvent::MetadataChanged {
-                        mode: Some(PermissionMode::AcceptEdits),
-                        ..
-                    },
-                    ..
-                },
-                ..
-            }
-        )),
-        "a mode change reaches clients as an event: {broadcast:?}"
-    );
-    assert_eq!(
-        harness.projection(thread).await.mode,
-        PermissionMode::AcceptEdits
-    );
 }
 
 #[tokio::test]
@@ -605,6 +587,7 @@ async fn send_resumes_a_stopped_thread_rather_than_refusing_it() {
             UserInput {
                 text: "carry on".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -678,6 +661,7 @@ async fn a_crashed_provider_is_dropped_so_the_next_send_resumes_the_thread() {
             UserInput {
                 text: "carry on".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -689,7 +673,7 @@ async fn a_crashed_provider_is_dropped_so_the_next_send_resumes_the_thread() {
     );
 }
 
-/// BH: `pending_claude_inputs` was drained only while the *front* entry matched the turn that
+/// BH: `pending_inputs` was drained only while the *front* entry matched the turn that
 /// had just started, so one prompt whose `TurnStarted` never arrived blocked the queue: every
 /// later prompt was written to Claude and never recorded, and §6's log stopped being the
 /// transcript — the model answering a question the tab does not show.
@@ -709,6 +693,7 @@ async fn a_prompt_whose_turn_never_started_does_not_swallow_the_next_one() {
             UserInput {
                 text: "one".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -737,6 +722,7 @@ async fn a_prompt_whose_turn_never_started_does_not_swallow_the_next_one() {
             UserInput {
                 text: "two".to_owned(),
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await
@@ -802,7 +788,10 @@ async fn stop_settles_the_turn_even_when_the_provider_will_not_stop() {
         .expect("a provider that will not stop still settles the thread");
 
     let projection = harness.projection(thread).await;
-    assert_eq!(projection.turn, TurnState::Interrupted(turn));
+    assert_eq!(
+        projection.turn,
+        TurnState::Settled(turn, TurnOutcome::Interrupted)
+    );
     assert_eq!(projection.session, SessionState::Stopped);
 }
 
@@ -853,6 +842,7 @@ async fn the_derived_title_reaches_the_thread_list_and_not_only_the_tab() {
             kind: ItemKind::UserMessage {
                 text: "rewrite the storage docs".to_owned(),
                 attachments: Vec::new(),
+                steered: false,
             },
             parent: None,
         })

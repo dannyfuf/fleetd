@@ -11,6 +11,11 @@ workspace = true
 [dependencies]
 bitflags = { workspace = true, features = ["serde"] }
 bytes.workspace = true
+# A wire timestamp is `DateTime<Utc>` everywhere on this protocol, through the `fleet-core` types
+# the payloads embed. `agents::TurnCheckpoint` is the first payload that *names* one itself, so
+# the dependency moved from dev-only to a real edge rather than the wire growing a second
+# timestamp spelling.
+chrono.workspace = true
 fleet-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

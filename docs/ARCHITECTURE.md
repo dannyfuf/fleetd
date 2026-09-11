@@ -98,7 +98,7 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   typed and atomic with repository deletion; cancellation does not report completion until tracked
   rollback/worker cleanup finishes. Clone launch ownership is persisted beside the job log, so a
   daemon restart can recover a child launched before its in-memory PID was published.
-- **Sessions replace tmux**. `Session { id, kind: Worktree(id) | Agent(claude|opencode),
+- **Sessions replace tmux**. `Session { id, kind: Worktree(id) | Agent(claude|codex),
   cwd, terminals: Vec<Terminal>, active_terminal }`. `Terminal { id, name, command, cwd,
   shell_pid, foreground_command, status, title, keep_alive labels, kind: Pty | Native }`. A
   terminal is one PTY running the login shell with the configured command typed + Enter (so the
@@ -187,21 +187,40 @@ that should recover.
 
 ## Native agent sessions
 
-A Claude Code or OpenCode session is a **thread**, and a thread is daemon state exactly like a
+A Claude Code or Codex session is a **thread**, and a thread is daemon state exactly like a
 terminal: the app never owns one. `docs/NATIVE-AGENTS.md` is the specification and ADR 0010
 records why the load-bearing choices are what they are; this is the map.
 
 ```
 fleet-core::agents        ids (ThreadId/TurnId/ItemId/GateId/Seq), AgentEvent, items, gates,
                           state enums, ThreadProjection (the reducer) and AgentThreadSummary
+fleet-daemon agents/           the harness layer: one live process per thread (NATIVE-AGENTS §3.1)
+  harness/                the Harness trait, spawn, the probe cache, NDJSON framing, the
+                          SIGTERM->SIGKILL ladder, and SchemaFingerprint (never a payload)
+  claude/                 Claude Code over bidirectional stream-json on stdio
+  codex/                  Codex over the app-server protocol; wire/ and methods.rs are generated
+                          from the installed binary's own schema by scripts/generate-codex-wire.py
 fleet-daemon services/agents/
   manager.rs              AgentSessionManager: threads, lifecycle, sequencing, broadcast
   thread.rs               one live thread: runtime handles, serialized operation gate, coalescing
-  store.rs                append-only event log per thread + the versioned thread index
-  providers/claude/       Claude Code over bidirectional stream-json on stdio
-  providers/opencode/     OpenCode over HTTP + SSE against one managed `opencode serve` per thread
+  store/                  one SQLite database: the event log and every read model (ADR 0013);
+                          mirror.rs owns the owner_host columns of a mirrored remote thread
+  manager/window.rs       the windowed open, its page cursor and the resume admission ladder
+  manager/bodies.rs       what a window cuts to fit its budget, and AgentItemBody reading it back
+  manager/controls.rs     one runtime control: what the process takes now, what needs a restart
+  manager/checkpoints.rs  the two capture call sites, and the rule that a failure never refuses
+  manager/mirror.rs       the durable read-through mirror of the threads other hosts own
+  providers/mod.rs        the one bridge between the Harness trait and the manager's verbs
+fleet-daemon server/connection/events.rs
+                          which events one connection may see: its own subscriptions, and the
+                          capability filter that keeps an undecodable variant off its wire
+fleet-daemon services/checkpoints/
+                          Fleet-owned turn checkpoints: git refs under refs/fleet/checkpoints/
+                          and the revert that restores files from one, no database and no harness
 fleet-client api/agents/  typed commands plus AgentMirror, which replays the same reducer
-fleet-app  screens/agent_thread/   Entity<AgentThreadView> per open tab; state/agents.rs mirrors
+fleet-app  screens/agent_thread/   Entity<AgentThreadView> per open tab, owning the transcript
+                          list and the composer; rows/ is the flat row projection behind a
+                          revision key; state/agents.rs mirrors summaries, windows and cursors
 ```
 
 **Ownership boundary.** Provider IO produces normalised `AgentEvent`s; a serialised reducer
@@ -217,15 +236,24 @@ event is sequenced, appended to the log, reduced, and published as `Event::Agent
 event }`, with `Event::AgentSummary` whenever the summary changes. `ContentDelta`s are coalesced
 per item on a 16 ms tick before broadcast, so a fast model cannot schedule a render per token.
 Turn completion is the provider's authoritative primitive only (§4 of `NATIVE-AGENTS.md`);
-before a `TurnCompleted` is applied every open item of that turn is closed, so no finished turn
+before a `TurnSettled` is applied every open item of that turn is closed, so no finished turn
 shows a spinner. Gates are independent of turns and close only on `GateResolved`.
 
 For a remote worktree, the local router sends `AgentThreadCreate` to the owning daemon before the
 local agent manager can resolve a path. The returned thread UUID is registered to that host;
 open/send/respond/interrupt/mode/model/seen/stop requests use that registration, while list fans
-out and merges summaries. Agent and summary events cross the link unchanged except for any
-embedded session or terminal ids. Claude stdio and the OpenCode localhost HTTP/SSE server remain
-entirely on the remote daemon; no provider stream or OpenCode port is tunneled over the tailnet.
+out and merges summaries — and an unreachable host's summaries come from the local mirror rather
+than disappearing. Agent and summary events cross the link unchanged except for any
+embedded session or terminal ids. The harness process and its stdio remain entirely on the
+remote daemon; no provider stream is tunneled over the tailnet.
+
+**Checkpoints** are a separate service on purpose: `services/checkpoints/` takes no database
+handle, no event bus and no harness, because a checkpoint is a git ref and a revert is a file
+operation. It records the worktree before a turn and a file before its first edit under
+`refs/fleet/checkpoints/<thread>/`, restores from one without touching `HEAD`, the user's index or
+the conversation, and garbage collects per thread. The ref namespace is the whole store — the
+`checkpoints` **table** belongs to the projector and records compaction boundaries
+(`NATIVE-AGENTS.md` §5, §8).
 
 **Attention** is derived by the reducer, not by any view: permission > question > plan >
 finished > failed > working > unread > idle, carried in `AgentThreadSummary` so the tab badge,
@@ -233,13 +261,16 @@ the session header word and the context-bar counters cannot disagree. `Finished`
 clears when the client reports `AgentMarkSeen { thread, seq }`; seen state is per client and
 lives in the app.
 
-**Persistence** is `$FLEET_HOME/agents/`: one append-only `<thread_id>/events.ndjson` written
-before the event is broadcast, plus a versioned `index.json` (id, worktree, provider, title,
-created, last activity, resume cursor, model, mode, last outcome) written with the `StateStore`
-discipline — serialised mutation, atomic rename, quarantine to `index.json.broken-*` on
-corruption. It is not part of `PersistedState` version 1; it has its own file and version.
-For a remote thread, this directory is under the remote daemon's Fleet home; the local daemon
-mirrors summaries and events but writes no transcript copy.
+**Persistence** is `$FLEET_HOME/agents/state.sqlite`: one append-only `agent_events` log written,
+projected and committed in a single transaction before the event is broadcast, plus the read
+models derived from it — `threads`, `turns`, `items`, `gates`, `checkpoints`, `sessions` (ADR 0013,
+`NATIVE-AGENTS.md` §8). It is not part of `PersistedState` version 1; it has its own forward-only
+migration ledger. A remote thread's harness and its own database stay on the owning daemon, and
+the local daemon keeps a **durable read-through mirror** of what it has read: the same tables with
+one nullable `threads.owner_host` set, so an open runs the same SQL whether the thread is local or
+remote. The mirror is a cache and never a replica — only the owner's link may append to its
+sequence, no harness is started for it, every mutation routes upstream, and only the owner's
+`AgentSynchronized` means live (`NATIVE-AGENTS.md` §9.3).
 
 **Restart.** On boot the manager loads the index and replays each thread's log. A thread the
 log leaves `Starting`/`Running` is an orphan and is settled explicitly: with a resume cursor it
@@ -249,9 +280,13 @@ No PID is ever reattached, and every thread stays browsable read-only regardless
 tail the reducer refuses on replay is trimmed back to the last event that reduces
 (`AgentStore::truncate_after`), so one bad record costs the tail rather than the thread.
 
-**Clients** get `Snapshot.agent_threads` for tabs and counters, then `AgentThreadOpen { thread,
-from_seq }` for one thread's `ThreadProjection` plus the events after that cursor, then the
-event stream. A `seq` gap makes the mirror return `MirrorOutcome::Gap` and the app re-opens from
+**Clients** get `Snapshot.agent_threads` for tabs and counters, then `AgentThreadOpen` for one
+thread and then the event stream. An open that carries a window field — and only to a daemon
+advertising `agent.window` — answers `AgentThreadWindow`: a bounded slice of turns, every open
+gate whatever its turn, a keyset page cursor, and either the replay of `(after_seq, head]` or, past
+the admission ladder's 1 000 events and 8 MiB, a window instead of that replay. An open without
+one answers the unchanged `AgentThreadSnapshot`, or a typed refusal naming the capability when the
+whole projection would not survive a frame. A `seq` gap makes the mirror return `MirrorOutcome::Gap` and the app re-opens from
 its last applied `seq`, mirroring terminal frame recovery rather than inventing a rule.
 `fleet agent list|new|send|respond|interrupt|stop|tail` drives the same requests from the CLI,
 which is how a thread is exercised without the app; `fleet agent terminal` is the unchanged PTY
@@ -346,12 +381,40 @@ explicit return-to-bottom behavior.
 
 Daemon IPC is version **7**. `Hello { protocol, client }` identifies app, CLI, or proxy peers;
 the flattened Hello response adds the stable daemon id, optional build commit, and capabilities.
-Federation adds `HostStatus` provider/version/link/address/agent-binary fields,
+`HelloClient` carries the peer's own `capabilities`, defaulted and omitted when empty, so an
+older client that names nothing is treated as supporting nothing optional. Federation adds
+`HostStatus` provider/version/link/address/agent-binary fields (`AgentBinaries` gained a defaulted
+`codex`),
 `HostLinkChanged` and `TerminalReattach` events, optional host placement on PR creation, host
 ownership on `WorktreePath`, and `BootstrapHost`. These fields and events are additive, but remote
 daemon links require the same protocol version so routing never crosses incompatible builds.
 
-The board and native-agent families introduced by version 6 remain unchanged. `Snapshot`'s
+The native-agent family grew a **bounded** read without a version bump, gated on six capability
+strings: `agent.window` (windowed transcript reads and backwards pagination), `agent.sync_marker`
+(an explicit catch-up completion event), `agent.resync` (a live-budget overflow reported as a
+resumable cursor rather than a dropped subscriber), `agent.item_body` (a stored item body served in
+256 KiB ranges), `agent.checkpoints` (Fleet-owned worktree checkpoints and the revert that restores
+one), and `agent.codex` (the Codex app-server harness). `fleet_proto::AGENT_CAPABILITIES` is the
+whole slice and both sides publish it: the daemon in `HelloResponse.capabilities`, the client and
+the federation proxy in `HelloClient.capabilities`. Negotiation runs both ways because `Event` is
+adjacently tagged — a variant a peer has no arm for fails the decode of its whole frame, not just
+that event — so the three agent stream-control events are sent only to a connection that named the
+capability defining them, and `Event::Unknown` is never re-broadcast. `AgentThreadOpen` gained
+`after_seq`, `turn_limit`, `before_cursor` and `request_sync_marker`, all defaulted and omitted when
+absent; a daemon answers the bounded `AgentThreadWindow` exactly when one of them is present and the
+unbounded `AgentThreadSnapshot` otherwise, so no peer receives a payload shape it cannot decode.
+`AgentThreadSnapshot` keeps its meaning and is refused above half the frame ceiling with
+`ErrorKind::Unsupported` naming `agent.window` — past that ceiling the frame is undecodable rather
+than truncated, which made a long thread permanently unopenable. Every window response is asserted
+against `WINDOW_MAX_WIRE_BYTES` (2 MiB) and **narrowed** when it does not fit — the largest item
+bodies are cut to their head and named in `TranscriptWindow.elided` for the client to re-read with
+`AgentItemBody`, and only then are the oldest turns dropped. `Event::AgentWindow`, `Event::AgentSynchronized` and
+`Event::AgentResync` belong to the existing `Agent` event family, so `EventKind` and every client
+subscription are unchanged, and `Event` itself decodes an unknown family to `Event::Unknown`
+instead of dropping the frame. A client must never send a window field to a daemon that did not
+advertise the capability, and capabilities reset on disconnect.
+
+The board and native-agent request names introduced by version 6 remain unchanged. `Snapshot`'s
 `agent_threads` and `boards` are both `#[serde(default)]`, so an older snapshot payload still
 deserializes; new request names are rejected rather than misread. `PruneWorktrees.ids` also remains
 defaulted and omitted when `None`; `Some(ids)` is the exact reviewed allowlist, which locked

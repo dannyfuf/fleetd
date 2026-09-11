@@ -105,7 +105,9 @@ fn is_legacy_lazygit_command(command: &str) -> bool {
 pub enum Agent {
     /// Anthropic Claude Code.
     Claude,
-    /// OpenCode.
+    /// OpenAI Codex.
+    Codex,
+    /// Legacy OpenCode value retained only so existing configuration still decodes.
     Opencode,
 }
 
@@ -115,7 +117,15 @@ pub enum Agent {
 pub struct AgentCommands {
     /// Command used for Claude Code.
     pub claude: String,
-    /// Command used for OpenCode.
+    /// Command used for Codex.
+    #[serde(default = "default_codex_command")]
+    pub codex: String,
+    /// Legacy OpenCode command retained for one compatibility release (ADR 0014).
+    ///
+    /// It is still written back, because a config that decodes and then re-serializes without
+    /// the field would leave the terminal an existing `agent: "opencode"` still points at with
+    /// no command to run.
+    #[serde(default = "default_opencode_command")]
     pub opencode: String,
 }
 
@@ -125,9 +135,18 @@ impl AgentCommands {
     pub fn command(&self, agent: Agent) -> &str {
         match agent {
             Agent::Claude => &self.claude,
+            Agent::Codex => &self.codex,
             Agent::Opencode => &self.opencode,
         }
     }
+}
+
+fn default_codex_command() -> String {
+    "codex".to_owned()
+}
+
+fn default_opencode_command() -> String {
+    "opencode".to_owned()
 }
 
 /// A terminal in the default session layout.
@@ -333,6 +352,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
         agent: Agent::Claude,
         agent_commands: AgentCommands {
             claude: "claude".to_owned(),
+            codex: default_codex_command(),
             opencode: "opencode".to_owned(),
         },
         windows: vec![
@@ -538,7 +558,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             }
         }
     }
-    if config.agent_commands.claude.is_empty() || config.agent_commands.opencode.is_empty() {
+    if config.agent_commands.claude.is_empty() || config.agent_commands.codex.is_empty() {
         return Err(ConfigError::Validation(
             "agent commands must be non-empty".to_owned(),
         ));
@@ -642,7 +662,7 @@ mod tests {
             "hotFreshnessMs": 60000,
             "hotRefreshIntervalMs": 300000,
             "agent": "claude",
-            "agentCommands": {"claude": "claude", "opencode": "opencode"},
+            "agentCommands": {"claude": "claude", "codex": "codex", "opencode": "opencode"},
             "windows": [
                 {"name": "nvim", "command": "nvim ."},
                 {"name": "cc", "command": "{agent}"},
@@ -763,7 +783,7 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(config.repos_dir, "/home/me/src");
-        assert_eq!(config.agent_commands.opencode, "opencode");
+        assert_eq!(config.agent_commands.codex, "codex");
         assert_eq!(config.sleep.grace_ms, 0);
         assert_eq!(config.ui.status_refresh_ms, 500);
         assert_eq!(config.ui.remote_status_refresh_ms, 500);

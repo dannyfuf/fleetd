@@ -31,7 +31,7 @@ pub(super) async fn list(client: &Client) -> Result<CommandOutput, ProtoError> {
                 thread.thread,
                 thread.provider.executable(),
                 host,
-                session_word(thread.session),
+                session_word(&thread.session),
                 attention_word(thread.attention),
                 thread.worktree,
                 single_line(&thread.title)
@@ -48,12 +48,9 @@ pub(super) async fn new(
 ) -> Result<CommandOutput, ProtoError> {
     let provider = match arguments.provider {
         AgentChoice::Claude => AgentKind::Claude,
-        AgentChoice::Opencode => AgentKind::OpenCode,
+        AgentChoice::Codex => AgentKind::Codex,
     };
-    let model = arguments
-        .model
-        .map(|model| model_selection(provider, model))
-        .transpose()?;
+    let model = arguments.model.map(model_selection).transpose()?;
     let mode = match arguments.mode {
         AgentModeChoice::Ask => PermissionMode::Ask,
         AgentModeChoice::AcceptEdits => PermissionMode::AcceptEdits,
@@ -76,6 +73,7 @@ pub(super) async fn send(
             UserInput {
                 text: arguments.text,
                 attachments: Vec::new(),
+                item: None,
             },
         )
         .await?;
@@ -290,22 +288,9 @@ fn parse_answer(kind: &GateKind, words: &[String]) -> Result<GateAnswer, ProtoEr
     }
 }
 
-fn model_selection(provider: AgentKind, value: String) -> Result<ModelSelection, ProtoError> {
+fn model_selection(value: String) -> Result<ModelSelection, ProtoError> {
     if value.trim().is_empty() {
         return Err(validation("model cannot be empty"));
-    }
-    if provider == AgentKind::OpenCode {
-        let (provider, model) = value.split_once('/').ok_or_else(|| {
-            validation("OpenCode models use provider/model, for example anthropic/claude-sonnet-4")
-        })?;
-        if provider.is_empty() || model.is_empty() {
-            return Err(validation("OpenCode models use provider/model"));
-        }
-        return Ok(ModelSelection {
-            model: model.to_owned(),
-            effort: None,
-            provider: Some(provider.to_owned()),
-        });
     }
     Ok(ModelSelection {
         model: value,
@@ -318,14 +303,18 @@ fn terminal(projection: &ThreadProjection) -> bool {
     matches!(
         projection.session,
         SessionState::Stopped | SessionState::Error
-    ) || matches!(projection.turn, fleet_core::agents::TurnState::Failed(_))
+    ) || matches!(
+        projection.turn,
+        fleet_core::agents::TurnState::Settled(_, fleet_core::agents::TurnOutcome::Error { .. })
+    )
 }
 
-fn session_word(state: SessionState) -> &'static str {
+fn session_word(state: &SessionState) -> &'static str {
     match state {
         SessionState::Starting => "starting",
         SessionState::Ready => "ready",
         SessionState::Running => "running",
+        SessionState::Waiting(_) => "waiting",
         SessionState::Stopped => "stopped",
         SessionState::Error => "error",
     }
@@ -336,6 +325,7 @@ fn attention_word(attention: Attention) -> &'static str {
         Attention::NeedsYou(_) => "needs-you",
         Attention::Failed => "failed",
         Attention::Working => "working",
+        Attention::Waiting => "waiting",
         Attention::Unread => "unread",
         Attention::Idle => "idle",
     }
@@ -379,14 +369,18 @@ mod tests {
         );
         let question = GateKind::Question {
             questions: vec![Question {
-                text: "which?".to_owned(),
+                id: "which".to_owned(),
                 header: "choice".to_owned(),
+                prompt: "which?".to_owned(),
                 options: vec![QuestionOption {
+                    id: fleet_core::agents::ProviderOptionId("one".to_owned()),
                     label: "one".to_owned(),
                     description: String::new(),
                 }],
                 multi_select: false,
-                allow_other: true,
+                allows_other: true,
+                is_secret: false,
+                blocking: true,
             }],
         };
         assert_eq!(

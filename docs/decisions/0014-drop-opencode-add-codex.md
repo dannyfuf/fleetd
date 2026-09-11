@@ -5,7 +5,10 @@ family, and the `config.agentCommands` schema. Fleet supports exactly two harnes
 Code** and **Codex**. OpenCode is deleted, not deprecated. `docs/NATIVE-AGENTS.md` §4 is the
 specification; this file records why, and what the removal costs.
 
-**Not built.** This ADR fixes the decision so the implementation does not relitigate it.
+**Built.** `crates/fleet-daemon/src/agents/codex/**` speaks the app-server protocol against the
+installed `codex-cli` 0.147.0, with `wire/` and `methods.rs` generated from the binary's own
+schema by `scripts/generate-codex-wire.py`; `providers/opencode/**` is deleted. This ADR recorded
+the decision before the work and now records what shipped.
 
 **Amends [ADR 0010](0010-native-agents.md),** which adopted Claude Code + OpenCode. Everything in
 0010 about speaking the structured protocol, completion authority, the pure reducer in
@@ -78,10 +81,16 @@ bumping to 8 would force every remote daemon in a fleet to upgrade in lockstep �
 learned about Codex could no longer talk to a remote host that had not. That is the opposite of
 what adding a harness should cost.
 
-So Codex support is announced as an **additive capability string** on the existing handshake
-(`agents.codex`, alongside `agents.claude.interrupt_receipt` and similar), every new field is
-additive with `#[serde(default)]`, and every new enum arm has a `#[serde(other)]` fallback. A
-mixed-version fleet keeps working: a host without the capability simply does not offer Codex
-threads, and the client's picker does not draw the option. This is `rust-ipc-protocol`'s rule
-applied to a harness rather than to a wire field, and it is the same reason §4.5 gates harness
-features on declared capabilities rather than on version-string comparisons.
+So Codex support is announced as an **additive capability string** on the existing handshake —
+`agent.codex`, one of the six in `fleet_proto::AGENT_CAPABILITIES` — every new field is additive
+with `#[serde(default)]`, and every new enum arm has a `#[serde(other)]` fallback. A mixed-version
+fleet keeps working: a host without the capability simply does not offer Codex threads, and the
+client's picker does not draw the option. This is `rust-ipc-protocol`'s rule applied to a harness
+rather than to a wire field, and it is the same reason §4.5 gates harness features on declared
+capabilities rather than on version-string comparisons.
+
+`snapshot::AgentBinaries` gained a defaulted `codex` alongside `claude` and the surviving
+`opencode`, and the login-shell probe behind `fleet hosts` / `fleet doctor` looks for all three.
+The field is additive for the same reason as the capability: an older daemon answers without it,
+and `false` is the honest reading — it cannot run a Codex thread whether or not the binary is on
+its `PATH`.

@@ -181,21 +181,71 @@ fn vertical_motion_stops_at_the_first_and_last_line() {
     assert!(!b.on_first_line());
 }
 
+/// `spec-B` §B5.8: `@` and `$` fire wherever a token starts; `/` fires at line start only,
+/// because a harness expands a slash command only when it opens the whole message.
 #[test]
-fn triggers_only_fire_on_a_bare_at_or_slash_at_a_word_start() {
+fn triggers_fire_where_each_surface_can_honour_them() {
     let b = MultilineBuffer::from_text("look at ");
-    assert_eq!(b.trigger_for(b.cursor(), "@"), Some('@'));
-    assert_eq!(b.trigger_for(b.cursor(), "/"), Some('/'));
-    assert_eq!(b.trigger_for(0, "@"), Some('@'));
+    assert_eq!(symbol(b.trigger_for(b.cursor(), "@")), Some('@'));
+    assert_eq!(symbol(b.trigger_for(b.cursor(), "$")), Some('$'));
+    // A token start mid-line is not a line start, so `/` stays prose.
+    assert_eq!(b.trigger_for(b.cursor(), "/"), None);
+    assert_eq!(symbol(b.trigger_for(0, "@")), Some('@'));
     assert_eq!(b.trigger_for(b.cursor(), "x"), None);
     assert_eq!(b.trigger_for(b.cursor(), "@f"), None);
 
     let mid = MultilineBuffer::from_text("feature");
     assert_eq!(mid.trigger_for(mid.cursor(), "/"), None);
     assert_eq!(mid.trigger_for(mid.cursor(), "@"), None);
+    assert_eq!(mid.trigger_for(mid.cursor(), "$"), None);
 
     let newline = MultilineBuffer::from_text("first\n");
-    assert_eq!(newline.trigger_for(newline.cursor(), "/"), Some('/'));
+    assert_eq!(
+        symbol(newline.trigger_for(newline.cursor(), "/")),
+        Some('/')
+    );
+
+    let empty = MultilineBuffer::new();
+    assert_eq!(symbol(empty.trigger_for(0, "/")), Some('/'));
+}
+
+/// The picker filters on what follows, so the trigger keeps reporting as the token grows — and
+/// stops the moment the token gains whitespace.
+#[test]
+fn the_active_trigger_carries_the_query_the_picker_filters_on() {
+    let b = MultilineBuffer::from_text("read @src/li");
+    let trigger = b.active_trigger().expect("inside an @ token");
+    assert_eq!(trigger.symbol, '@');
+    assert_eq!(trigger.query, "src/li");
+    assert_eq!(trigger.at, "read ".len());
+
+    let b = MultilineBuffer::from_text("read @src/lib.rs and");
+    assert!(b.active_trigger().is_none(), "the caret left the token");
+
+    let b = MultilineBuffer::from_text("$rev");
+    let trigger = b.active_trigger().expect("inside a $ token");
+    assert_eq!(trigger.symbol, '$');
+    assert_eq!(trigger.query, "rev");
+
+    let b = MultilineBuffer::from_text("/mod");
+    assert_eq!(
+        b.active_trigger().map(|trigger| trigger.query),
+        Some(gpui::SharedString::from("mod"))
+    );
+    // Mid-line, a slash token is not a command.
+    let b = MultilineBuffer::from_text("cd /mod");
+    assert!(b.active_trigger().is_none());
+
+    assert!(
+        MultilineBuffer::from_text("plain")
+            .active_trigger()
+            .is_none()
+    );
+}
+
+/// The symbol of a reported trigger, for the assertions above.
+fn symbol(trigger: Option<super::Trigger>) -> Option<char> {
+    trigger.map(|trigger| trigger.symbol)
 }
 
 #[test]
@@ -281,6 +331,18 @@ fn composer(cx: &mut gpui::TestAppContext) -> (VisualTestContext, Composed) {
     (cx, (input, events))
 }
 
+/// The reported events with the per-keystroke [`MultilineInputEvent::Changed`] noise removed.
+///
+/// A picker subscribes to `Changed`; a test about submit or escape cares about the intent.
+fn intents(events: &Rc<RefCell<Vec<MultilineInputEvent>>>) -> Vec<MultilineInputEvent> {
+    events
+        .borrow()
+        .iter()
+        .filter(|event| !matches!(event, MultilineInputEvent::Changed))
+        .cloned()
+        .collect()
+}
+
 #[gpui::test]
 fn enter_submits_and_clears_while_shift_enter_breaks_the_line(cx: &mut gpui::TestAppContext) {
     let (mut cx, (input, events)) = composer(cx);
@@ -295,7 +357,7 @@ fn enter_submits_and_clears_while_shift_enter_breaks_the_line(cx: &mut gpui::Tes
         assert_eq!(input.history().entries(), ["ship it\nnow"]);
     });
     assert_eq!(
-        *events.borrow(),
+        intents(&events),
         [MultilineInputEvent::Submit("ship it\nnow".into())]
     );
 }
@@ -306,7 +368,7 @@ fn a_blank_composer_neither_submits_nor_clears(cx: &mut gpui::TestAppContext) {
     cx.simulate_input("  ");
     cx.simulate_keystrokes("enter");
     input.read_with(&cx, |input, _| assert_eq!(input.text(), "  "));
-    assert!(events.borrow().is_empty());
+    assert!(intents(&events).is_empty());
 }
 
 #[gpui::test]
@@ -315,20 +377,37 @@ fn escape_reports_intent_without_touching_the_text(cx: &mut gpui::TestAppContext
     cx.simulate_input("half a thought");
     cx.simulate_keystrokes("escape");
     input.read_with(&cx, |input, _| assert_eq!(input.text(), "half a thought"));
-    assert_eq!(*events.borrow(), [MultilineInputEvent::Escape]);
+    assert_eq!(intents(&events), [MultilineInputEvent::Escape]);
 }
 
+/// The trigger characters are **reported, never consumed**: all three stay in the buffer, so
+/// they remain typable and a picker filters on what follows.
 #[gpui::test]
-fn a_word_start_at_or_slash_inserts_and_triggers(cx: &mut gpui::TestAppContext) {
+fn a_trigger_character_is_inserted_and_reported(cx: &mut gpui::TestAppContext) {
     let (mut cx, (input, events)) = composer(cx);
     cx.simulate_input("read @");
     input.read_with(&cx, |input, _| assert_eq!(input.text(), "read @"));
-    assert_eq!(*events.borrow(), [MultilineInputEvent::Trigger('@')]);
+    assert!(events.borrow().iter().any(|event| matches!(
+        event,
+        MultilineInputEvent::Trigger(trigger) if trigger.symbol == '@' && trigger.query.is_empty()
+    )));
 
     events.borrow_mut().clear();
     cx.simulate_input("src/lib.rs");
-    input.read_with(&cx, |input, _| assert_eq!(input.text(), "read @src/lib.rs"));
-    assert!(events.borrow().is_empty());
+    input.read_with(&cx, |input, _| {
+        assert_eq!(input.text(), "read @src/lib.rs");
+        // Every keystroke reports a change, and the query is where the picker filters from.
+        let trigger = input.active_trigger().expect("still inside the token");
+        assert_eq!(trigger.query, "src/lib.rs");
+    });
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .all(|event| matches!(event, MultilineInputEvent::Changed)),
+        "typing into a token must not re-open the picker"
+    );
+    assert!(!events.borrow().is_empty(), "a change is always reported");
 }
 
 #[gpui::test]

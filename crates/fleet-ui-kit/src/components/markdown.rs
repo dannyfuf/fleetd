@@ -26,7 +26,7 @@ mod code;
 mod parser;
 mod render;
 
-pub use code::CodeHighlights;
+pub use code::{CodeHighlights, HighlightCache};
 
 #[cfg(test)]
 mod tests;
@@ -43,14 +43,22 @@ pub struct MarkdownDocument {
 pub enum MarkdownBlock {
     /// A paragraph of inline nodes.
     Paragraph(Vec<MarkdownInline>),
-    /// A fenced code block. Build one with [`MarkdownBlock::code`], which colours it.
+    /// A fenced code block. Build one with [`MarkdownBlock::code`], which colours it, or with
+    /// [`MarkdownBlock::streaming_code`], which deliberately does not.
     Code {
         /// Optional fence language.
         lang: Option<String>,
         /// Literal code contents.
         text: SharedString,
-        /// The block's colour spans, resolved here so the renderer never lexes.
+        /// The block's colour spans, resolved here so the renderer never lexes. Empty while
+        /// the fence is still open.
         highlights: CodeHighlights,
+        /// Whether the closing fence has arrived.
+        ///
+        /// An open fence is drawn as code — from its first line, so the block does not appear
+        /// as prose and then reflow — but it is **not** highlighted: a fence whose colours
+        /// changed per chunk would move the reader's eye on every token.
+        closed: bool,
     },
     /// An ordered or unordered list.
     List {
@@ -73,7 +81,7 @@ pub enum MarkdownBlock {
 }
 
 impl MarkdownBlock {
-    /// A fenced code block, lexed now rather than every time it is drawn.
+    /// A closed fenced code block, lexed now rather than every time it is drawn.
     #[must_use]
     pub fn code(lang: Option<String>, text: impl Into<SharedString>) -> Self {
         let text = text.into();
@@ -82,6 +90,35 @@ impl MarkdownBlock {
             lang,
             text,
             highlights,
+            closed: true,
+        }
+    }
+
+    /// A closed fenced code block whose colours come from `cache`, lexing only on a miss.
+    #[must_use]
+    pub fn cached_code(
+        lang: Option<String>,
+        text: impl Into<SharedString>,
+        cache: &HighlightCache,
+    ) -> Self {
+        let text = text.into();
+        let highlights = cache.highlight(lang.as_deref(), &text);
+        MarkdownBlock::Code {
+            lang,
+            text,
+            highlights,
+            closed: true,
+        }
+    }
+
+    /// A fence that has not closed yet: code, uncoloured, and never in the cache.
+    #[must_use]
+    pub fn streaming_code(lang: Option<String>, text: impl Into<SharedString>) -> Self {
+        MarkdownBlock::Code {
+            lang,
+            text: text.into(),
+            highlights: CodeHighlights::default(),
+            closed: false,
         }
     }
 }
@@ -109,10 +146,21 @@ pub enum MarkdownInline {
 /// Parses the supported streaming Markdown subset.
 ///
 /// Total: every input maps to a document, including a partial one. An unterminated fence yields
-/// the code block it has so far, and an unmatched `` ` ``, `*` or `[` stays literal text.
+/// the code block it has so far — uncoloured, because it is still growing — and an unmatched
+/// `` ` ``, `*` or `[` stays literal text.
 #[must_use]
 pub fn parse_markdown(source: &str) -> MarkdownDocument {
-    parser::parse(source)
+    parser::parse(source, None)
+}
+
+/// Parses the same subset, reusing already-lexed fences from `cache`.
+///
+/// A streaming transcript re-parses the same prose on every delta, so a settled fence would
+/// otherwise be re-lexed once per token. **A partial fence is neither read from nor written to
+/// the cache** — see [`HighlightCache`].
+#[must_use]
+pub fn parse_markdown_cached(source: &str, cache: &HighlightCache) -> MarkdownDocument {
+    parser::parse(source, Some(cache))
 }
 
 /// Renders a parsed Markdown document using design-system tokens.

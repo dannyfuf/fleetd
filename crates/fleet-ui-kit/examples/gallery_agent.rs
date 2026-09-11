@@ -1,12 +1,16 @@
 //! The visual test bench for the **native-agent** group of `fleet-ui-kit`.
 //!
-//! `ToolRow` · `DecisionCard` · `TranscriptList` and every row the transcript can draw:
-//! user block, assistant text, thinking, tool rows with nested children, worked fold, turn
-//! footer, decision cards, error cards, checkpoint lines, queued messages and the empty state.
+//! `docs/DESIGN-SYSTEM.md` §8.3: *if a state is not in a gallery, it is not implemented.* Every
+//! state of every component in §6.6 has a panel here — the six `ToolRow` states, all eighteen
+//! transcript rows, the three `DecisionDock` occupants and their queue and in-flight states,
+//! the `MetadataRow` collapse ladder, the live `MultilineInput` with its trigger reports, and
+//! the streaming `Markdown` invariants.
 //!
-//! The transcript is *live*: it is a real [`fleet_ui_kit::TranscriptList`] entity over GPUI
-//! `list`, so scrolling, the jump-to-latest affordance and the scroll thumb behave here exactly
-//! as they do in an agent tab.
+//! The transcript, the composer and the dock are *live*: a real
+//! [`fleet_ui_kit::TranscriptList`] entity over GPUI `list`, a real
+//! [`fleet_ui_kit::MultilineInput`], and a real drawer attached to the composer's top edge, so
+//! scrolling, the jump-to-latest chip, the seam and the key routing behave here exactly as they
+//! do in an agent tab.
 //!
 //! ```sh
 //! cargo run -p fleet-ui-kit --example gallery_agent
@@ -15,12 +19,14 @@
 //! | Key | What |
 //! | --- | --- |
 //! | `ctrl-t` | toggle light / dark |
-//! | `e` | expand / collapse every expandable row |
-//! | `d` | cycle the decision card: permission → question → plan |
-//! | `s` | toggle scroll mode (freezes the tail) |
-//! | `g` | jump to latest |
-//! | `t` | toggle the streaming caret after the last assistant paragraph |
-//! | `x` | toggle the empty transcript |
+//! | `ctrl-e` | expand / collapse every expandable row |
+//! | `ctrl-d` | cycle the drawer: approval → question → wizard → plan → none |
+//! | `ctrl-s` | toggle scroll mode (freezes the tail) |
+//! | `ctrl-g` | jump to latest |
+//! | `ctrl-r` | toggle the streaming caret and the shimmer |
+//! | `ctrl-x` | toggle the empty transcript |
+//! | `ctrl-w` | cycle the metadata strip's available width |
+//! | `ctrl-y` | toggle the drawer's `answering…` state |
 //! | `ctrl-q` / `cmd-q` | quit |
 
 pub mod support;
@@ -30,7 +36,10 @@ const LAYOUT: support::layout::GalleryLayout = support::layout::GalleryLayout {
     divided: false,
     compact: true,
 };
+use std::time::Instant;
+
 use fleet_ui_kit::prelude::*;
+use fleet_ui_kit::theme::ch;
 use gpui::{AnyElement, App, Context, Entity, FocusHandle, Focusable, KeyBinding, Window, actions};
 
 actions!(
@@ -43,99 +52,199 @@ actions!(
         ToggleScroll,
         JumpToLatest,
         ToggleStreaming,
-        ToggleEmpty
+        ToggleEmpty,
+        CycleWidth,
+        ToggleAnswering,
     ]
 );
 
+/// The widths `ctrl-w` walks, so the metadata strip's collapse ladder is visible.
+const WIDTHS: [f32; 4] = [520.0, 300.0, 200.0, 120.0];
+
+// ---------------------------------------------------------------------------------------------
+// The drawer
+// ---------------------------------------------------------------------------------------------
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Decision {
-    Permission,
+enum Drawer {
+    Approval,
+    ApprovalNoEdit,
     Question,
+    Wizard,
     Plan,
+    None,
 }
 
-impl Decision {
+impl Drawer {
     fn next(self) -> Self {
         match self {
-            Decision::Permission => Decision::Question,
-            Decision::Question => Decision::Plan,
-            Decision::Plan => Decision::Permission,
+            Drawer::Approval => Drawer::ApprovalNoEdit,
+            Drawer::ApprovalNoEdit => Drawer::Question,
+            Drawer::Question => Drawer::Wizard,
+            Drawer::Wizard => Drawer::Plan,
+            Drawer::Plan => Drawer::None,
+            Drawer::None => Drawer::Approval,
         }
     }
 
-    fn card(self) -> DecisionCard {
+    fn label(self) -> &'static str {
         match self {
-            Decision::Permission => DecisionCard::new(
-                "gate-permission",
-                "claude wants to run a command",
-                DecisionCardKind::Permission {
-                    tool: "bash".into(),
-                    payload: "cargo test -p fleet-core --all-features".into(),
-                    rationale: Some("verify the reducer before touching the daemon".into()),
-                },
-            )
-            .actions(permission_actions(
-                DecisionAction::AllowSession,
-                "allow for this session",
-            )),
-            Decision::Question => DecisionCard::new(
-                "gate-question",
-                "claude has a question",
-                DecisionCardKind::Question {
-                    questions: vec![DecisionQuestion {
-                        header: "scope".into(),
-                        text: "which rounding should the payroll fix use?".into(),
-                        options: vec![
-                            "half-up, like the spec".into(),
-                            "banker's rounding".into(),
-                            "keep the current behaviour".into(),
-                        ],
-                        multi_select: false,
-                        allow_other: true,
-                    }],
-                },
-            )
-            .actions(question_actions(3, false)),
-            Decision::Plan => DecisionCard::new(
-                "gate-plan",
-                "claude proposes a plan",
-                DecisionCardKind::Plan {
-                    markdown: "## plan\n\nadd the reducer test, then the projection".into(),
-                    steps: vec![
-                        "read the current reducer".into(),
-                        "add a failing test for the rounding".into(),
-                        "fix the projection and re-run".into(),
-                    ],
-                },
-            )
-            .actions(plan_actions()),
+            Drawer::Approval => "approval",
+            Drawer::ApprovalNoEdit => "approval · no [e], with a diff",
+            Drawer::Question => "question",
+            Drawer::Wizard => "wizard 2/3",
+            Drawer::Plan => "plan ready",
+            Drawer::None => "closed",
         }
     }
+
+    fn decision(self, answering: bool) -> Option<Decision> {
+        let decision = match self {
+            Drawer::None => return None,
+            Drawer::Approval => Decision::new(
+                "gate-approval",
+                "claude wants to run a command",
+                DecisionKind::Approval(
+                    ApprovalRequest::new("Bash", "git push --force origin main")
+                        .rationale("the branch diverged after the rebase")
+                        .caution("this command came from fetched web content")
+                        .allows_edit(true),
+                ),
+            )
+            .queued(0, 3),
+            // Codex accepts no amended invocation, so `[e]` is unbound *and* absent; the diff
+            // is joined by item id and drawn by the owner (here, a stand-in).
+            Drawer::ApprovalNoEdit => Decision::new(
+                "gate-approval-codex",
+                "codex wants to change a file",
+                DecisionKind::Approval(
+                    ApprovalRequest::new("apply_patch", "crates/fleet-core/src/payroll.rs")
+                        .allows_edit(false),
+                ),
+            ),
+            Drawer::Question => Decision::new(
+                "gate-question",
+                "claude has a question",
+                DecisionKind::Question(
+                    QuestionSet::new(vec![
+                        DecisionQuestion::new(
+                            "package manager",
+                            "which package manager should the project use?",
+                        )
+                        .options(vec![
+                            QuestionOption::new("pnpm").description("fast, disk-efficient"),
+                            QuestionOption::new("npm").description("the default"),
+                            QuestionOption::new("yarn"),
+                        ])
+                        .multi_select(true)
+                        .allow_other(true),
+                    ])
+                    .selected(vec![vec![0]]),
+                ),
+            ),
+            Drawer::Wizard => Decision::new(
+                "gate-wizard",
+                "claude has questions",
+                DecisionKind::Question(
+                    QuestionSet::new(vec![
+                        DecisionQuestion::new("scope", "which files?")
+                            .options(vec![QuestionOption::new("payroll")]),
+                        DecisionQuestion::new("rounding", "which rounding should the fix use?")
+                            .options(vec![
+                                QuestionOption::new("half-up").description("like the spec"),
+                                QuestionOption::new("banker's"),
+                            ]),
+                        DecisionQuestion::new("tests", "add a regression test?")
+                            .options(vec![QuestionOption::new("yes"), QuestionOption::new("no")]),
+                    ])
+                    .cursor(1),
+                ),
+            ),
+            Drawer::Plan => Decision::new(
+                "gate-plan",
+                "plan ready",
+                DecisionKind::PlanReady {
+                    title: "fix the payroll rounding".into(),
+                    markdown: None,
+                },
+            ),
+        };
+        Some(decision.answering(answering))
+    }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The gallery
+// ---------------------------------------------------------------------------------------------
 
 struct AgentGallery {
     focus_handle: FocusHandle,
     transcript: Entity<TranscriptList>,
+    composer: Entity<MultilineInput>,
+    /// The composer's two non-editing states: disabled while an approval owns the keys, and
+    /// dimmed while it still holds the focus handle but is not where the user is.
+    read_only: Entity<MultilineInput>,
+    dimmed: Entity<MultilineInput>,
+    /// The per-width memo the composer's metadata strip reads. It outlives the frame on
+    /// purpose: that is the whole point of `MetadataFit`.
+    fit: MetadataFit,
+    width: usize,
     expanded: bool,
-    decision: Decision,
+    drawer: Drawer,
+    answering: bool,
     scroll_mode: bool,
-    /// Whether the transcript draws the streaming caret (§6.6).
     streaming: bool,
-    /// Whether the transcript is showing its empty state instead of the sample turn.
     empty: bool,
+    started_at: Instant,
+    trigger: Option<SharedString>,
 }
 
 impl AgentGallery {
     fn new(cx: &mut Context<Self>) -> Self {
         let transcript = cx.new(TranscriptList::new);
+        let composer = cx.new(|cx| {
+            MultilineInput::new(
+                cx,
+                "message claude… (@ files · $ skills · / commands)".into(),
+            )
+        });
+        cx.subscribe(&composer, |this, _, event: &MultilineInputEvent, cx| {
+            if let MultilineInputEvent::Trigger(trigger) = event {
+                this.trigger = Some(SharedString::from(format!(
+                    "trigger {} at {}",
+                    trigger.symbol, trigger.at
+                )));
+                cx.notify();
+            }
+        })
+        .detach();
+        let read_only = cx.new(|cx| {
+            let mut input = MultilineInput::new(cx, "git push --force origin main".into());
+            input.set_read_only(true, cx);
+            input
+        });
+        let dimmed = cx.new(|cx| {
+            let mut input = MultilineInput::new(cx, "message claude…".into());
+            input.set_text("a draft nobody is typing into", cx);
+            input.set_focus_visible(false, cx);
+            input
+        });
         let this = Self {
             focus_handle: cx.focus_handle(),
             transcript,
+            composer,
+            read_only,
+            dimmed,
+            fit: MetadataFit::new(),
+            width: 0,
             expanded: false,
-            decision: Decision::Permission,
+            drawer: Drawer::Approval,
+            answering: false,
             scroll_mode: false,
-            streaming: false,
+            streaming: true,
             empty: false,
+            started_at: Instant::now(),
+            trigger: None,
         };
         this.publish(cx);
         this
@@ -147,102 +256,17 @@ impl AgentGallery {
             .update(cx, |transcript, cx| transcript.set_rows(rows, cx));
     }
 
+    /// Every row kind the transcript can draw, in the order a real turn emits them.
     fn rows(&self) -> Vec<TranscriptRow> {
-        // DESIGN-SYSTEM §8.3: if a state is not in a gallery, it is not implemented. The
-        // empty transcript is the whole surface, not one row among others.
-        if self.empty {
-            return vec![TranscriptRow::EmptyState {
-                message: "New claude session \u{b7} feat/payroll-fix".into(),
-            }];
-        }
-        let expanded = self.expanded;
-        vec![
-            TranscriptRow::CheckpointLine {
-                text: format_resumed(7_200_000),
-            },
-            TranscriptRow::UserBlock {
-                text: "fix the payroll rounding and add a test".into(),
-                attachments: vec!["payroll.rs".into(), "spec.md".into()],
-            },
-            TranscriptRow::Thinking {
-                text: SharedString::new_static("the spec says half-up; the reducer truncates"),
-                duration_ms: 6_000,
-                expanded,
-            },
-            TranscriptRow::AssistantText {
-                markdown: parse_markdown_document(
-                    "Reading the reducer first, then the projection it feeds.",
-                ),
-            },
-            TranscriptRow::ToolRow {
-                row: ToolRow::new("t-read", "read", "crates/fleet-core/src/payroll.rs")
-                    .state(ToolRowState::Done)
-                    .result("120 lines")
-                    .output("pub fn round(cents: i64) -> i64 { cents / 100 }")
-                    .expanded(expanded),
-                children: Vec::new(),
-            },
-            TranscriptRow::ToolRow {
-                row: ToolRow::new("t-agent", "agent", "explore · find every caller")
-                    .state(ToolRowState::Done)
-                    .result("8 tools · 24s")
-                    .expanded(expanded),
-                children: vec![
-                    TranscriptRow::ToolRow {
-                        row: ToolRow::new("t-agent-1", "grep", "round(")
-                            .state(ToolRowState::Done)
-                            .result("12 hits"),
-                        children: Vec::new(),
-                    },
-                    TranscriptRow::ToolRow {
-                        row: ToolRow::new("t-agent-2", "read", "crates/fleet-core/src/tax.rs")
-                            .state(ToolRowState::Denied)
-                            .result("denied"),
-                        children: Vec::new(),
-                    },
-                ],
-            },
-            TranscriptRow::ToolRow {
-                row: ToolRow::new("t-edit", "edit", "crates/fleet-core/src/payroll.rs")
-                    .state(ToolRowState::Done)
-                    .result("+14 −3 · [⏎] diff")
-                    .diff("@@ -1,3 +1,3 @@\n-cents / 100\n+cents.div_euclid(100)")
-                    .expanded(expanded),
-                children: Vec::new(),
-            },
-            TranscriptRow::ToolRow {
-                row: ToolRow::new("t-bash", "bash", "cargo test -p fleet-core")
-                    .state(ToolRowState::Error)
-                    .result("exit 101 · 4.2s"),
-                children: Vec::new(),
-            },
-            TranscriptRow::ToolRow {
-                row: ToolRow::new("t-run", "bash", "cargo test -p fleet-core --all-features"),
-                children: Vec::new(),
-            },
-            TranscriptRow::WorkedFold {
-                text: format_worked(12_000, 3),
-                expanded,
-            },
-            TranscriptRow::ErrorCard {
-                message: "API error 529 — overloaded".into(),
-                retrying: true,
-            },
-            TranscriptRow::TurnFooter {
-                text: format_turn_footer(48_000, 12_400, 2, 36, 3),
-            },
-            TranscriptRow::CheckpointLine {
-                text: format_compacted(84_000, Some(12_000)),
-            },
-            TranscriptRow::Notice {
-                text: "Stop hook error occurred \u{b7} ctrl+o to see".into(),
-            },
-            TranscriptRow::QueuedMessage {
-                text: "also update the CHANGELOG".into(),
-            },
-            TranscriptRow::DecisionCard(self.decision.card()),
-        ]
+        support::agent_rows::sample_thread(support::agent_rows::Thread {
+            expanded: self.expanded,
+            streaming: self.streaming,
+            empty: self.empty,
+            started_at: self.started_at,
+        })
     }
+
+    // -- actions ------------------------------------------------------------------------------
 
     fn toggle_theme(&mut self, _: &ToggleTheme, _window: &mut Window, cx: &mut Context<Self>) {
         Theme::toggle(cx);
@@ -256,8 +280,17 @@ impl AgentGallery {
     }
 
     fn cycle_decision(&mut self, _: &CycleDecision, _window: &mut Window, cx: &mut Context<Self>) {
-        self.decision = self.decision.next();
-        self.publish(cx);
+        self.drawer = self.drawer.next();
+        cx.notify();
+    }
+
+    fn toggle_answering(
+        &mut self,
+        _: &ToggleAnswering,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.answering = !self.answering;
         cx.notify();
     }
 
@@ -269,7 +302,6 @@ impl AgentGallery {
         cx.notify();
     }
 
-    /// The streaming caret §6.6 draws after the last assistant paragraph.
     fn toggle_streaming(
         &mut self,
         _: &ToggleStreaming,
@@ -277,9 +309,7 @@ impl AgentGallery {
         cx: &mut Context<Self>,
     ) {
         self.streaming = !self.streaming;
-        let streaming = self.streaming;
-        self.transcript
-            .update(cx, |transcript, cx| transcript.set_streaming(streaming, cx));
+        self.publish(cx);
         cx.notify();
     }
 
@@ -289,9 +319,14 @@ impl AgentGallery {
         cx.notify();
     }
 
+    fn cycle_width(&mut self, _: &CycleWidth, _window: &mut Window, cx: &mut Context<Self>) {
+        self.width = (self.width + 1) % WIDTHS.len();
+        cx.notify();
+    }
+
     fn jump_to_latest(&mut self, _: &JumpToLatest, _window: &mut Window, cx: &mut Context<Self>) {
         self.transcript
-            .update(cx, |transcript, cx| transcript.scroll_to_bottom(cx));
+            .update(cx, |transcript, cx| transcript.scroll_to_latest(cx));
         cx.notify();
     }
 
@@ -306,95 +341,307 @@ impl Focusable for AgentGallery {
     }
 }
 
-fn states_section(cx: &mut App) -> AnyElement {
+/// Every `ToolRow` state, plus the two geometry rules: the chevron is `invisible` rather than
+/// absent when a row cannot expand, and an expanded row keeps the same 30 px line.
+fn tool_states(cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
-    let row =
-        |id: &'static str, state: ToolRowState, summary: &'static str, result: &'static str| {
-            LAYOUT.labeled(
-                id,
-                &theme,
-                div().w_full().child(tool_row(
-                    &ToolRow::new(id, "bash", summary)
-                        .state(state)
-                        .result(result),
-                    cx,
-                )),
-            )
-        };
-    let children = vec![
-        row("running", ToolRowState::Running, "cargo build", ""),
-        row("done", ToolRowState::Done, "cargo test", "exit 0 · 1.2s"),
-        row("error", ToolRowState::Error, "cargo clippy", "exit 101"),
-        row("denied", ToolRowState::Denied, "rm -rf target", "denied"),
+    let row = |key: usize,
+               label: &'static str,
+               state: ToolRowState,
+               icon: Icon,
+               summary: &'static str,
+               result: Option<&'static str>,
+               body: bool| {
+        let mut row = ToolRow::new(label, "bash", summary).icon(icon).state(state);
+        if let Some(result) = result {
+            row = row.result(result);
+        }
+        if body {
+            row = row.body("the first meaningful line of output");
+        }
         LAYOUT.labeled(
-            "empty state",
+            label,
+            &theme,
+            div()
+                .w_full()
+                .child(ToolRowElement::new(row, key).into_any_element()),
+        )
+    };
+    let children = vec![
+        row(
+            0,
+            "running",
+            ToolRowState::Running,
+            Icon::Terminal,
+            "cargo build",
+            None,
+            false,
+        ),
+        row(
+            1,
+            "done",
+            ToolRowState::Done,
+            Icon::Terminal,
+            "cargo test",
+            Some("exit 0 · 1.2s"),
+            true,
+        ),
+        row(
+            2,
+            "failed",
+            ToolRowState::Failed,
+            Icon::Terminal,
+            "cargo clippy --workspace --all-targets --all-features -D warnings",
+            Some("exit 101"),
+            false,
+        ),
+        row(
+            3,
+            "denied",
+            ToolRowState::Denied,
+            Icon::Terminal,
+            "rm -rf target",
+            None,
+            false,
+        ),
+        row(
+            4,
+            "stopped",
+            ToolRowState::Stopped,
+            Icon::Terminal,
+            "cargo build --release",
+            None,
+            false,
+        ),
+        row(
+            5,
+            "severe",
+            ToolRowState::Severe,
+            Icon::TriangleAlert,
+            "the session process died before the turn settled",
+            None,
+            true,
+        ),
+        LAYOUT.labeled(
+            "expanded",
             &theme,
             div().w_full().child(
-                div()
-                    .w_full()
-                    .child(Text::ui_strong("New claude session · feat/payroll-fix"))
-                    .child(
-                        KeyHintRow::new()
-                            .key("⏎", "send your first message")
-                            .key("⇧⇥", "plan mode first")
-                            .key("@", "mention a file")
-                            .key("/", "commands"),
-                    ),
+                ToolRowElement::new(
+                    ToolRow::new("t-x", "edit", "crates/fleet-core/src/payroll.rs")
+                        .icon(Icon::FilePen)
+                        .state(ToolRowState::Done)
+                        .result(format_file_delta(14, 3))
+                        .body("crates/fleet-core/src/payroll.rs\ncrates/fleet-core/src/tax.rs")
+                        .expanded(true),
+                    6,
+                )
+                .into_any_element(),
             ),
         ),
     ];
-    LAYOUT.section("tool rows", &theme, children)
+    LAYOUT.section("tool rows · five states plus severe", &theme, children)
+}
+
+/// The `Markdown` streaming invariants, side by side: an open fence is code and uncoloured, the
+/// same fence closed is coloured, and every decided block above it stayed where it was.
+fn markdown_states(cx: &mut App) -> AnyElement {
+    let theme = cx.theme().clone();
+    const PREFIX: &str = "## rounding\n\nThe reducer truncates, the spec says half-up.\n\n\
+                          - read the reducer\n- add a failing test\n\n> then fix the projection\n\n\
+                          ```rust\nlet cents = cents.div_euclid(1";
+    let closed = format!("{PREFIX}00);\n```");
+    let children = vec![
+        LAYOUT.labeled(
+            "streaming prefix",
+            &theme,
+            div()
+                .w_full()
+                .child(markdown(&parse_markdown_document(PREFIX), cx)),
+        ),
+        LAYOUT.labeled(
+            "closed fence",
+            &theme,
+            div()
+                .w_full()
+                .child(markdown(&parse_markdown_document(&closed), cx)),
+        ),
+    ];
+    LAYOUT.section("markdown · a prefix parses safely", &theme, children)
+}
+
+/// The composer's states that are not "someone is typing": the gallery's live one covers empty,
+/// typing, multi-line, IME and the trigger reports.
+fn composer_states(gallery: &AgentGallery, cx: &mut App) -> AnyElement {
+    let theme = cx.theme().clone();
+    let children = vec![
+        LAYOUT.labeled(
+            "read-only",
+            &theme,
+            div().w_full().child(gallery.read_only.clone()),
+        ),
+        LAYOUT.labeled(
+            "dimmed · a decision owns the keys",
+            &theme,
+            div().w_full().child(gallery.dimmed.clone()),
+        ),
+    ];
+    LAYOUT.section("composer · non-editing states", &theme, children)
 }
 
 impl Render for AgentGallery {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let mode = if self.scroll_mode { "scroll" } else { "live" };
+        let available = px(WIDTHS[self.width]);
+        let segments = vec![
+            MetadataSegment::pinned("claude-opus-5"),
+            MetadataSegment::new("high"),
+            MetadataSegment::new("supervised"),
+            MetadataSegment::new("build"),
+        ];
+        // The memo is keyed per width; the revision never changes here because the segment list
+        // does not.
+        // The overflow chip is an ellipsis glyph plus a count: three display columns.
+        let fit = self
+            .fit
+            .fit(available, 0, &segments, theme.space.md, ch(3.0));
+        let decision = self.drawer.decision(self.answering);
+
         div()
             .key_context("AgentGallery")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_theme))
             .on_action(cx.listener(Self::toggle_expand))
             .on_action(cx.listener(Self::cycle_decision))
+            .on_action(cx.listener(Self::toggle_answering))
             .on_action(cx.listener(Self::toggle_scroll))
             .on_action(cx.listener(Self::jump_to_latest))
             .on_action(cx.listener(Self::toggle_streaming))
             .on_action(cx.listener(Self::toggle_empty))
+            .on_action(cx.listener(Self::cycle_width))
             .on_action(cx.listener(Self::quit))
             .size_full()
             .bg(theme.colors.bg)
             .flex()
-            .flex_col()
-            .gap(theme.space.lg)
+            .gap(theme.space.xl)
             .p(theme.space.xl)
-            .child(states_section(cx))
             .child(
+                // The static half: states that do not need a live entity.
                 div()
+                    .id("agent-gallery-static")
+                    .w(AGENT_CONTENT_W)
+                    .flex_none()
+                    .h_full()
+                    .overflow_y_scroll()
                     .flex()
-                    .items_center()
-                    .gap(theme.space.md)
-                    .child(Text::label("transcript"))
-                    .child(Text::hint(mode).muted())
-                    .child(
-                        KeyHintRow::new()
-                            .key("e", "expand")
-                            .key("d", "decision")
-                            .key("s", "scroll mode")
-                            .key("g", "jump to latest")
-                            .key("t", "streaming")
-                            .key("x", "empty"),
-                    ),
+                    .flex_col()
+                    .child(tool_states(cx))
+                    .child(composer_states(self, cx))
+                    .child(markdown_states(cx)),
             )
             .child(
+                // The live half: the transcript, the drawer and the composer, in their real
+                // stacking order so the attachment seam is visible.
                 div()
                     .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .rounded(theme.radii.sm)
-                    .border(theme.metrics.hairline)
-                    .border_color(theme.colors.border)
-                    .overflow_hidden()
-                    .child(self.transcript.clone()),
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space.md)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_wrap()
+                            .gap(theme.space.md)
+                            .child(Text::label("transcript"))
+                            .child(Text::hint(mode).muted())
+                            .child(Text::hint(self.drawer.label()).muted())
+                            .child(
+                                KeyHintRow::new()
+                                    .key("^e", "expand")
+                                    .key("^d", "drawer")
+                                    .key("^y", "answering")
+                                    .key("^s", "scroll")
+                                    .key("^g", "latest")
+                                    .key("^r", "stream")
+                                    .key("^x", "empty")
+                                    .key("^w", "width"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .rounded(theme.radii.sm)
+                            .border(theme.metrics.hairline)
+                            .border_color(theme.colors.border)
+                            .overflow_hidden()
+                            .child(self.transcript.clone()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(AGENT_CONTENT_W)
+                            .flex()
+                            .flex_col()
+                            .children(decision.map(|decision| {
+                                let patch = matches!(decision.kind, DecisionKind::Approval(_))
+                                    && decision.id == "gate-approval-codex";
+                                let dock = DecisionDock::new(decision)
+                                    .on_action(|_action, _window, _cx| {});
+                                // The diff slot: the real one is a `fleet_lazygit::DiffView`,
+                                // which the kit cannot reach (ADR 0010), so the owner hands one
+                                // in. This stand-in shows the bounded height it lands at.
+                                if patch {
+                                    dock.diff(
+                                        div()
+                                            .id("dock-diff")
+                                            .w_full()
+                                            .max_h(AGENT_BODY_MAX_H)
+                                            .overflow_y_scroll()
+                                            .rounded(theme.radii.sm)
+                                            .bg(theme.colors.bg)
+                                            .p(theme.space.sm)
+                                            .child(Text::data_small(
+                                                "@@ -1,3 +1,3 @@\n-cents / 100\n\
+                                                 +cents.div_euclid(100)",
+                                            )),
+                                    )
+                                } else {
+                                    dock
+                                }
+                            }))
+                            .child(
+                                // A stand-in for the composer surface the app owns: the dock
+                                // rounds only its top corners and masks the border they share,
+                                // so the two read as one panel.
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(theme.space.xs)
+                                    .rounded_b(theme.radii.md)
+                                    .border(theme.metrics.hairline)
+                                    .border_color(theme.colors.border)
+                                    .bg(theme.colors.surface)
+                                    .px(theme.space.md)
+                                    .py(theme.space.sm)
+                                    .child(self.composer.clone())
+                                    .child(MetadataRow::new(segments, fit).trailing(vec![
+                                        MetadataSegment::new("34%"),
+                                        MetadataSegment::new("$0.42"),
+                                        MetadataSegment::new("48s"),
+                                    ])),
+                            )
+                            .children(
+                                self.trigger
+                                    .clone()
+                                    .map(|trigger| Text::hint(trigger).faint()),
+                            ),
+                    ),
             )
     }
 }
@@ -402,19 +649,21 @@ impl Render for AgentGallery {
 fn main() {
     support::runtime::run(
         "fleet-ui-kit · agent gallery",
-        (1100.0, 900.0),
+        (1400.0, 900.0),
         Quit,
         |cx| {
             cx.bind_keys([
                 KeyBinding::new("ctrl-t", ToggleTheme, None),
                 KeyBinding::new("ctrl-q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("e", ToggleExpand, Some("AgentGallery")),
-                KeyBinding::new("d", CycleDecision, Some("AgentGallery")),
-                KeyBinding::new("s", ToggleScroll, Some("AgentGallery")),
-                KeyBinding::new("g", JumpToLatest, Some("AgentGallery")),
-                KeyBinding::new("t", ToggleStreaming, Some("AgentGallery")),
-                KeyBinding::new("x", ToggleEmpty, Some("AgentGallery")),
+                KeyBinding::new("ctrl-e", ToggleExpand, Some("AgentGallery")),
+                KeyBinding::new("ctrl-d", CycleDecision, Some("AgentGallery")),
+                KeyBinding::new("ctrl-y", ToggleAnswering, Some("AgentGallery")),
+                KeyBinding::new("ctrl-s", ToggleScroll, Some("AgentGallery")),
+                KeyBinding::new("ctrl-g", JumpToLatest, Some("AgentGallery")),
+                KeyBinding::new("ctrl-r", ToggleStreaming, Some("AgentGallery")),
+                KeyBinding::new("ctrl-x", ToggleEmpty, Some("AgentGallery")),
+                KeyBinding::new("ctrl-w", CycleWidth, Some("AgentGallery")),
             ]);
         },
         AgentGallery::new,

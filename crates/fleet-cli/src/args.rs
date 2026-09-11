@@ -327,8 +327,8 @@ pub struct SleepArgs {
 pub enum AgentChoice {
     /// Claude Code.
     Claude,
-    /// OpenCode.
-    Opencode,
+    /// OpenAI Codex.
+    Codex,
 }
 
 /// Arguments accepted by `fleet agent`.
@@ -544,9 +544,9 @@ mod tests {
                 "new",
                 "acme/api#feature",
                 "--provider",
-                "opencode",
+                "codex",
                 "--model",
-                "anthropic/claude-sonnet-4",
+                "gpt-5.1-codex-max",
                 "--mode",
                 "plan",
             ],
@@ -585,7 +585,7 @@ mod tests {
                 "--replay",
             ],
             vec!["fleet", "agent", "terminal"],
-            vec!["fleet", "agent", "terminal", "opencode"],
+            vec!["fleet", "agent", "terminal", "codex"],
             vec!["fleet", "agent-status", "finished", "--json"],
             vec!["fleet", "agent-status", "permission"],
             vec!["fleet", "agent-status", "question"],

@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
         AgentEvent, AgentKind, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind,
-        ItemPatch, ItemStatus, PermissionChoice, PermissionMode, PermissionOption,
-        ProviderOptionId, Seq, SeqEvent, StreamKind, ThreadId, ThreadProjection, ToolKind, TurnId,
-        TurnOutcome, TurnState, Usage,
+        ItemPatch, ItemPayloadPatch, ItemStatus, PermissionChoice, PermissionMode,
+        PermissionOption, ProviderOptionId, Seq, SeqEvent, StreamKind, ThreadId, ThreadProjection,
+        ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage,
     },
     ids::WorktreeId,
 };
@@ -98,7 +98,7 @@ fn fixture() -> Fixture {
     };
     events.push(event(
         next(),
-        AgentEvent::SessionStarted {
+        AgentEvent::SessionConfigured {
             provider: AgentKind::Claude,
             resume_cursor: Some("resume-1".to_owned()),
             model: None,
@@ -123,6 +123,7 @@ fn fixture() -> Fixture {
             kind: ItemKind::UserMessage {
                 text: "list the crates".to_owned(),
                 attachments: Vec::new(),
+                steered: false,
             },
             parent: None,
         },
@@ -131,7 +132,7 @@ fn fixture() -> Fixture {
         next(),
         AgentEvent::ItemCompleted {
             item: user,
-            status: ItemStatus::Done,
+            status: ItemStatus::Completed,
         },
     ));
     events.push(event(
@@ -139,7 +140,9 @@ fn fixture() -> Fixture {
         AgentEvent::ItemStarted {
             turn,
             item: assistant,
-            kind: ItemKind::AssistantText,
+            kind: ItemKind::AssistantText {
+                text: String::new(),
+            },
             parent: None,
         },
     ));
@@ -158,11 +161,18 @@ fn fixture() -> Fixture {
         AgentEvent::ItemStarted {
             turn,
             item: tool,
-            kind: ItemKind::Tool {
+            kind: ItemKind::Tool(Box::new(ToolCall {
                 kind: ToolKind::Bash,
                 name: "Bash".to_owned(),
                 input: serde_json::json!({ "command": "ls crates" }),
-            },
+                summary: None,
+                result: None,
+                output: String::new(),
+                diff: None,
+                exit_code: None,
+                duration_ms: None,
+                extra: Default::default(),
+            })),
             parent: None,
         },
     ));
@@ -198,7 +208,7 @@ fn fixture() -> Fixture {
         next(),
         AgentEvent::ContentDelta {
             item: tool,
-            stream: StreamKind::ToolOutput,
+            stream: StreamKind::CommandOutput,
             delta: "fleet-core\nfleet-daemon\n".to_owned(),
         },
     ));
@@ -207,8 +217,13 @@ fn fixture() -> Fixture {
         AgentEvent::ItemUpdated {
             item: tool,
             patch: ItemPatch {
-                summary: Some("2 crates".to_owned()),
-                result: Some("ok".to_owned()),
+                payload: Some(ItemPayloadPatch::Tool(Box::new(
+                    fleet_core::agents::ToolPatch {
+                        summary: Some("2 crates".to_owned()),
+                        result: Some(serde_json::json!("ok")),
+                        ..fleet_core::agents::ToolPatch::default()
+                    },
+                ))),
                 ..ItemPatch::default()
             },
         },
@@ -217,13 +232,13 @@ fn fixture() -> Fixture {
         next(),
         AgentEvent::ItemCompleted {
             item: tool,
-            status: ItemStatus::Done,
+            status: ItemStatus::Completed,
         },
     ));
     events.push(event(next(), AgentEvent::Notice("using --json".to_owned())));
     events.push(event(
         next(),
-        AgentEvent::TurnCompleted {
+        AgentEvent::TurnSettled {
             turn,
             outcome: TurnOutcome::Completed,
             usage: Usage {
@@ -555,7 +570,7 @@ async fn the_projected_counters_match_a_full_replay_of_the_log() -> anyhow::Resu
     )?;
     assert_eq!(text, "", "a tool's prose channel stays empty");
     assert_eq!(output, "fleet-core\nfleet-daemon\n");
-    assert_eq!(status, "done");
+    assert_eq!(status, "completed");
     let resolved: String = probe.query_row(
         "SELECT status FROM gates WHERE thread_id = ?1 AND gate_id = ?2",
         params![thread.to_string(), fixture.gate.to_string()],
@@ -661,7 +676,7 @@ async fn a_settled_turn_keeps_its_state_and_identity_in_the_list_row() -> anyhow
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].turn, replay.turn);
     assert!(
-        matches!(listed[0].turn, TurnState::Completed(turn, _) if turn == fixture.turn),
+        matches!(listed[0].turn, TurnState::Settled(turn, _) if turn == fixture.turn),
         "a settled turn lost its identity: {:?}",
         listed[0].turn
     );
@@ -732,11 +747,18 @@ async fn streamed_tool_output_is_elided_while_the_log_keeps_every_byte() -> anyh
             AgentEvent::ItemStarted {
                 turn,
                 item: tool,
-                kind: ItemKind::Tool {
+                kind: ItemKind::Tool(Box::new(ToolCall {
                     kind: ToolKind::Bash,
                     name: "Bash".to_owned(),
                     input: serde_json::Value::Null,
-                },
+                    summary: None,
+                    result: None,
+                    output: String::new(),
+                    diff: None,
+                    exit_code: None,
+                    duration_ms: None,
+                    extra: Default::default(),
+                })),
                 parent: None,
             },
         ),
@@ -753,7 +775,7 @@ async fn streamed_tool_output_is_elided_while_the_log_keeps_every_byte() -> anyh
             3 + chunk,
             AgentEvent::ContentDelta {
                 item: tool,
-                stream: StreamKind::ToolOutput,
+                stream: StreamKind::CommandOutput,
                 delta,
             },
         ));

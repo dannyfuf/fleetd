@@ -1,4 +1,4 @@
-//! Append-only normalized events emitted by native-agent providers.
+//! Append-only normalized events emitted by native-agent harnesses.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -7,17 +7,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    AgentKind, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ModelSelection,
-    PermissionMode, Seq, SessionState, TurnId,
+    AgentKind, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ItemPatch,
+    ModelSelection, PermissionMode, Seq, SessionState, TurnId,
 };
 
-/// Provider session metadata learned at initialization.
+/// Harness session metadata learned at initialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
-    /// Active provider.
+    /// Active harness.
     pub provider: AgentKind,
-    /// Provider-native resume identifier.
+    /// Harness-native resume identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_cursor: Option<String>,
     /// Active model, when known.
@@ -25,18 +25,18 @@ pub struct SessionInfo {
     pub model: Option<ModelSelection>,
     /// Active permission policy.
     pub mode: PermissionMode,
-    /// Provider-native available tool names.
+    /// Harness-native available tool names.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Provider-native slash command names.
+    /// Harness-native slash command names.
     #[serde(default)]
     pub commands: Vec<String>,
-    /// Provider-native skill names.
+    /// Harness-native skill names.
     #[serde(default)]
     pub skills: Vec<String>,
 }
 
-/// Normalized token usage from either provider.
+/// Normalized token usage from either harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Usage {
@@ -50,13 +50,13 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     /// Prompt-cache creation or write tokens.
     pub cache_write_tokens: u64,
-    /// Provider-reported total, or Fleet's normalized total.
+    /// Harness-reported total, or Fleet's normalized total.
     pub total_tokens: u64,
     /// Server-side web-search requests.
     pub web_search_requests: u64,
-    /// Provider or subagent tool-use count.
+    /// Harness or subagent tool-use count.
     pub tool_uses: u64,
-    /// Additive provider usage fields retained losslessly.
+    /// Additive harness usage fields retained losslessly.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -73,18 +73,18 @@ pub struct FileDelta {
     pub removed: u64,
 }
 
-/// Provider-authoritative terminal classification for a turn.
+/// Harness-authoritative terminal classification for a turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum TurnOutcome {
-    /// The provider completed normally.
+    /// The harness completed normally.
     Completed,
-    /// The provider completed with an execution error.
+    /// The harness completed with an execution error.
     Error {
-        /// Best available provider message.
+        /// Best available harness message.
         message: Option<String>,
     },
-    /// The provider settled an explicit interrupt.
+    /// The harness settled an explicit interrupt.
     Interrupted,
     /// A permission denial prevented completion.
     Denied,
@@ -92,9 +92,9 @@ pub enum TurnOutcome {
     MaxTurns,
     /// A configured cost or token budget was exhausted.
     BudgetExhausted,
-    /// The provider stopped on another named terminal reason.
+    /// The harness stopped on another named terminal reason.
     Other {
-        /// Exact provider terminal reason.
+        /// Exact harness terminal reason.
         reason: String,
     },
 }
@@ -107,53 +107,36 @@ pub enum AbortReason {
     User,
     /// The native thread was stopped.
     SessionStopped,
-    /// The provider process exited unexpectedly.
+    /// The harness process exited unexpectedly.
     ProviderExited,
-    /// A bounded provider operation timed out.
+    /// A bounded harness operation timed out.
     Timeout,
     /// A later prompt superseded this work.
     Superseded,
-    /// An additive provider-native reason.
+    /// An additive harness-native reason.
     Other(String),
 }
 
-/// Partial replacement fields for an existing projected item.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ItemPatch {
-    /// Cumulative assistant or reasoning text replacement.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Replacement structured tool input.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<Value>,
-    /// Replacement one-line tool summary.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    /// Replacement compact result.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
-    /// Replacement expanded output.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
-    /// Replacement inline diff.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub diff: Option<super::ToolDiff>,
-    /// Replacement lifecycle state.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<ItemStatus>,
-}
-
 /// Append-only content channel for [`AgentEvent::ContentDelta`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum StreamKind {
     /// Visible assistant prose.
     AssistantText,
-    /// Hidden or collapsible reasoning.
-    Reasoning,
-    /// Streaming tool output.
-    ToolOutput,
+    /// User-facing reasoning summary part.
+    ReasoningSummary {
+        /// Stable harness part index.
+        part: u32,
+    },
+    /// Raw reasoning part, retained separately from summaries.
+    ReasoningRaw {
+        /// Stable harness part index.
+        part: u32,
+    },
+    /// Streaming command or tool output.
+    CommandOutput,
+    /// Streaming plan Markdown.
+    PlanText,
 }
 
 /// Observability boundary recorded in the transcript.
@@ -164,10 +147,10 @@ pub enum CheckpointKind {
     CompactBoundary {
         /// Tokens before compaction.
         before: u64,
-        /// Tokens after compaction, when the provider reported them.
+        /// Tokens after compaction, when the harness reported them.
         after: Option<u64>,
     },
-    /// A provider session was resumed after a pause.
+    /// A harness session was resumed after a pause.
     Resumed {
         /// Milliseconds since the prior live process was active.
         age_ms: u64,
@@ -178,28 +161,28 @@ pub enum CheckpointKind {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemStatus {
-    /// Known but not yet executing.
-    #[default]
-    Pending,
     /// Streaming or executing.
-    Running,
+    #[default]
+    InProgress,
     /// Completed successfully.
-    Done,
+    Completed,
     /// Completed with an error.
-    Error,
-    /// Rejected by a permission decision.
+    Failed,
+    /// Refused by a permission decision.
     Denied,
+    /// Stopped before completion.
+    Stopped,
 }
 
-/// One normalized provider event before sequence and time stamping.
+/// One normalized harness event before sequence and time stamping.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentEvent {
-    /// Provider initialization completed.
-    SessionStarted {
-        /// Active provider.
+    /// Harness initialization completed and exposed its session metadata.
+    SessionConfigured {
+        /// Active harness.
         provider: AgentKind,
-        /// Provider-native resume cursor.
+        /// Harness-native resume cursor.
         #[serde(default)]
         resume_cursor: Option<String>,
         /// Active model, when known.
@@ -208,23 +191,19 @@ pub enum AgentEvent {
         /// Active permission policy.
         #[serde(default)]
         mode: PermissionMode,
-        /// Provider-native tool names.
+        /// Harness-native tool names.
         #[serde(default)]
         tools: Vec<String>,
-        /// Provider-native slash commands.
+        /// Harness-native slash commands.
         #[serde(default)]
         commands: Vec<String>,
-        /// Provider-native skills.
+        /// Harness-native skills.
         #[serde(default)]
         skills: Vec<String>,
     },
-    /// Session metadata changed after the session started.
-    ///
-    /// Mode, model and title are projected state a client renders, so a change to one has to
-    /// reach the log and the mirrors as an event rather than as a silent edit of the daemon's
-    /// own projection (`NATIVE-AGENTS.md` §3, §6). Only the fields that changed are carried.
+    /// Session metadata changed after initialization.
     MetadataChanged {
-        /// Provider-reported session title, when it changed.
+        /// Harness-reported session title, when it changed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         /// Permission policy now in force, when it changed.
@@ -236,7 +215,12 @@ pub enum AgentEvent {
     },
     /// Whole-session lifecycle changed.
     SessionStateChanged(SessionState),
-    /// Provider process exited.
+    /// Fine-grained non-terminal harness activity.
+    SessionActivity {
+        /// Harness-neutral phase label.
+        phase: String,
+    },
+    /// Harness process exited.
     SessionExited {
         /// Exit code when available.
         #[serde(default)]
@@ -245,15 +229,15 @@ pub enum AgentEvent {
         #[serde(default)]
         expected: bool,
     },
-    /// The provider accepted a user turn.
+    /// The harness accepted a user turn.
     TurnStarted {
         /// Turn identity.
         turn: TurnId,
         /// Projected user-message item.
         user_item: ItemId,
     },
-    /// Provider-authoritative turn completion.
-    TurnCompleted {
+    /// Harness-authoritative turn settlement.
+    TurnSettled {
         /// Settled turn.
         turn: TurnId,
         /// Terminal classification.
@@ -261,7 +245,7 @@ pub enum AgentEvent {
         /// Per-turn normalized usage.
         #[serde(default)]
         usage: Usage,
-        /// Provider-reported duration.
+        /// Harness-reported duration.
         #[serde(default)]
         duration_ms: u64,
         /// Changed-file summary.
@@ -275,13 +259,30 @@ pub enum AgentEvent {
         /// Abort cause.
         reason: AbortReason,
     },
+    /// Updated turn-level unified diff.
+    TurnDiff {
+        /// Owning turn.
+        turn: TurnId,
+        /// Complete unified diff.
+        unified: String,
+        /// Structured changed-file summary, when available.
+        #[serde(default)]
+        files_changed: Vec<FileDelta>,
+    },
+    /// Updated harness plan/todo steps for an active turn.
+    PlanSteps {
+        /// Owning turn.
+        turn: TurnId,
+        /// Ordered human-readable step labels.
+        steps: Vec<String>,
+    },
     /// A transcript item became known.
     ItemStarted {
         /// Owning turn.
         turn: TurnId,
         /// Item identity.
         item: ItemId,
-        /// Item category and provider payload.
+        /// Variant-owned item payload.
         kind: ItemKind,
         /// Optional parent item.
         #[serde(default)]
@@ -300,7 +301,7 @@ pub enum AgentEvent {
     ItemUpdated {
         /// Target item.
         item: ItemId,
-        /// Fields to replace.
+        /// Typed fields to replace.
         patch: ItemPatch,
     },
     /// An item settled.
@@ -310,17 +311,17 @@ pub enum AgentEvent {
         /// Terminal item status.
         status: ItemStatus,
     },
-    /// A provider decision became actionable.
+    /// A harness decision became actionable.
     GateOpened {
         /// Gate identity.
         gate: GateId,
         /// Associated turn, when known.
         #[serde(default)]
         turn: Option<TurnId>,
-        /// Gate presentation and provider mapping payload.
+        /// Gate presentation and harness mapping payload.
         kind: GateKind,
     },
-    /// A gate was authoritatively closed.
+    /// A gate was authoritatively answered.
     GateResolved {
         /// Gate identity.
         gate: GateId,
@@ -329,11 +330,28 @@ pub enum AgentEvent {
         /// Resolver authority.
         by: GateResolver,
     },
+    /// The harness withdrew a gate and must not be answered.
+    GateWithdrawn {
+        /// Gate identity.
+        gate: GateId,
+    },
+    /// A durable plan became available for a turn.
+    PlanProposed {
+        /// Stable gate identity used for the resulting decision.
+        gate: GateId,
+        /// Owning turn.
+        turn: TurnId,
+        /// Full Markdown proposal.
+        markdown: String,
+        /// Ordered short step summaries.
+        #[serde(default)]
+        steps: Vec<String>,
+    },
     /// Updated token, context, and cost observations.
     TokenUsage {
         /// Associated turn.
         turn: TurnId,
-        /// Latest provider usage.
+        /// Latest harness usage.
         #[serde(default)]
         usage: Usage,
         /// Context-window utilization percentage.
@@ -343,26 +361,45 @@ pub enum AgentEvent {
         #[serde(default)]
         cost_usd: Option<f64>,
     },
+    /// Updated provider rate-limit observations.
+    RateLimits {
+        /// Lossless normalized/provider fields without credentials or prompt data.
+        limits: Value,
+    },
     /// A compaction or resume boundary.
-    Checkpoint(CheckpointKind),
-    /// Provider retry backoff began.
+    Compacted(CheckpointKind),
+    /// Harness retry backoff began.
     Retrying {
         /// One-based attempt number.
         attempt: u32,
         /// Delay before the next attempt.
         retry_in_ms: u64,
-        /// Provider error text.
+        /// Harness error text.
+        reason: String,
+    },
+    /// The harness rerouted the requested model.
+    ModelRerouted {
+        /// Originally requested model.
+        from: String,
+        /// Model now serving the turn.
+        to: String,
+        /// Harness-provided reason.
         reason: String,
     },
     /// Runtime or protocol failure.
     RuntimeError {
-        /// Whether the provider session can no longer continue.
+        /// Whether the harness session can no longer continue.
         fatal: bool,
         /// Sanitized human-readable detail.
         message: String,
     },
     /// Non-fatal configuration, compatibility, or deprecation notice.
     Notice(String),
+    /// A harness method this Fleet build does not understand.
+    Unknown {
+        /// Method or frame type only; raw data never crosses this boundary.
+        method: String,
+    },
 }
 
 /// A normalized event stamped by the serialized thread reducer.
@@ -373,9 +410,9 @@ pub struct SeqEvent {
     pub seq: Seq,
     /// Reducer timestamp.
     pub at: DateTime<Utc>,
-    /// Provider message type or event name retained for diagnostics.
+    /// Harness message type or event name retained for diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
-    /// Provider-neutral payload.
+    /// Harness-neutral payload.
     pub event: AgentEvent,
 }

@@ -7,13 +7,18 @@
 //! thread's reducer state appears on first use and [`apply`] for the write path's ordering.
 
 mod apply;
+mod bodies;
+mod checkpoints;
 mod commands;
+mod controls;
 mod hydrate;
+mod mirror;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
@@ -24,9 +29,9 @@ use anyhow::anyhow;
 use chrono::Utc;
 use fleet_core::{
     agents::{
-        AgentEvent, AgentKind, AgentThreadSummary, CheckpointKind, GateResolver, ItemId,
-        ItemStatus, ModelSelection, PermissionMode, SessionState, StartRequest, ThreadId, TurnId,
-        TurnState, UserInput,
+        AgentEvent, AgentKind, AgentThreadSummary, ApprovalPolicy, CheckpointKind, GateResolver,
+        HarnessCapabilities, ItemId, ItemStatus, SandboxPolicy, SessionState, StartRequest,
+        ThreadId, TurnId, TurnState, UserInput,
     },
     config::AgentCommands,
     ids::{HostId, WorktreeId},
@@ -43,12 +48,21 @@ use super::{
     thread,
 };
 use apply::{
-    Serialized, apply_event, closed_gate_answer, ends_the_session, ends_the_turn,
-    pending_claude_turn, publish_applied, user_item_started,
+    Serialized, apply_event, closed_gate_answer, edited_paths, ends_the_session, ends_the_turn,
+    pending_input_turn, publish_applied, runtime_inflight, user_item_started,
 };
 use thread::{AppliedEvent, ThreadRuntime, coalesce_deltas};
 
 const DELTA_TICK: Duration = Duration::from_millis(16);
+
+/// Emission-to-read skew worth a log line.
+///
+/// Codex stamps `emittedAtMs` on every notification and it is the only server-side clock Fleet
+/// gets (§9.4). It is not put on the wire — `SeqEvent` has no reader for it — so the one use it
+/// has is here: a frame read this far behind its own emission means the harness, the pipe or the
+/// remote link is the source of a stall, which is precisely the question a latency budget asks.
+/// Well above the 16 ms merge tick so a normal turn logs nothing.
+const EMISSION_SKEW_FLOOR: Duration = Duration::from_millis(250);
 
 type ProviderFactory = dyn Fn(AgentKind, &StartRequest, &AgentCommands) -> anyhow::Result<Box<dyn AgentProvider>>
     + Send
@@ -83,6 +97,12 @@ struct ManagerInner {
     hydration: tokio::sync::Mutex<()>,
     provider_factory: Arc<ProviderFactory>,
     remote_host_resolver: RwLock<Option<Arc<RemoteHostResolver>>>,
+    /// Fleet-owned worktree checkpoints, or `None` on a manager built without them.
+    ///
+    /// Installed after construction, like the remote-host resolver: `Services::build` creates
+    /// both services and neither can take the other as a constructor argument. `None` means
+    /// nothing is captured, so `[u]` is simply not drawn — never that a turn is refused.
+    checkpoints: RwLock<Option<crate::services::checkpoints::Checkpoints>>,
 }
 
 impl ManagerInner {
@@ -158,6 +178,7 @@ impl AgentSessionManager {
                 hydration: tokio::sync::Mutex::new(()),
                 provider_factory,
                 remote_host_resolver: RwLock::new(None),
+                checkpoints: RwLock::new(None),
             }),
         };
         manager.spawn_repair();
@@ -193,6 +214,18 @@ impl AgentSessionManager {
             .remote_host_resolver
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
+    }
+
+    /// Installs the checkpoint service a capture runs against.
+    ///
+    /// Separate from the constructor for the same reason the remote-host resolver is: both
+    /// services are built by `Services::build`, and one cannot be an argument to the other.
+    pub(crate) fn set_checkpoints(&self, checkpoints: crate::services::checkpoints::Checkpoints) {
+        *self
+            .inner
+            .checkpoints
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checkpoints);
     }
 
     /// The configured provider command lines, falling back to the packaged defaults.
@@ -235,6 +268,18 @@ impl AgentSessionManager {
         }
     }
 
+    /// The capabilities the live harness negotiated for this thread, when one is running.
+    ///
+    /// Read off the adapter rather than a column: a capability set belongs to one *process*
+    /// (§3.1 freezes it for that process's life), and a thread with no process has no capability
+    /// set to report. `None` gates every control off, which is the safe direction — a button that
+    /// silently means something weaker than it says is worse than no button (§4.5).
+    async fn harness_capabilities(&self, thread: ThreadId) -> Option<HarnessCapabilities> {
+        let runtime = self.hydrated(thread)?;
+        let provider = runtime.provider.lock().await;
+        provider.as_ref().map(|provider| provider.capabilities())
+    }
+
     /// Handles `AgentThreadList`.
     pub async fn list(&self) -> Result<ResponseBody, ProtoError> {
         let store = self.inner.store().map_err(storage_error)?;
@@ -266,7 +311,21 @@ impl AgentSessionManager {
         Ok(())
     }
 
+    /// Starts a provider for a thread whose cursor can bring it back.
+    ///
+    /// The owner check is the enforcement point of §9.3's second authority rule: with
+    /// `create`, this is one of exactly two places in the daemon that starts a harness process,
+    /// and a mirrored thread must never be one of them. The owner is running that session; a
+    /// second process on this machine would be a second writer on the owner's sequence.
     async fn resume_runtime(&self, runtime: &ThreadRuntime) -> Result<(), ProtoError> {
+        if let Some(owner) = runtime.owner() {
+            return Err(ProtoError {
+                kind: ErrorKind::Remote,
+                message: one_line(&format!(
+                    "agent thread is owned by host {owner}; its provider runs there, not here"
+                )),
+            });
+        }
         let operation = runtime.operation.lock().await;
         if runtime.provider.lock().await.is_some() {
             return Ok(());
@@ -300,6 +359,11 @@ impl AgentSessionManager {
             model: record.model,
             mode: record.mode,
             resume_cursor: Some(cursor),
+            fork: false,
+            env: BTreeMap::new(),
+            sandbox: SandboxPolicy::default(),
+            approval_policy: ApprovalPolicy::default(),
+            permission_profile: None,
             title: Some(record.title),
         };
         let commands = self.agent_commands().await;
@@ -320,7 +384,7 @@ impl AgentSessionManager {
         self.apply_one(
             runtime,
             &operation,
-            AgentEvent::Checkpoint(CheckpointKind::Resumed { age_ms }),
+            AgentEvent::Compacted(CheckpointKind::Resumed { age_ms }),
             Some("resume".to_owned()),
         )
         .await?;
@@ -361,27 +425,41 @@ impl AgentSessionManager {
         // prompts Claude was given under it. Without this a turn whose `TurnStarted` never
         // arrived strands them, and the next turn's drain would find them ahead of its own.
         if ends_the_turn(&event)
-            && let Some(turn) = pending_claude_turn(runtime)
+            && let Some(turn) = pending_input_turn(runtime)
         {
             applied.extend(
-                self.flush_pending_claude_inputs(runtime, operation, turn, "pending_input")
+                self.flush_pending_inputs(runtime, operation, turn, "pending_input")
                     .await?,
             );
         }
+        // Before the event is applied, because this is the earliest the daemon can know an edit
+        // is coming. It is **best effort and says so**: neither harness waits for Fleet before
+        // running an auto-approved tool, so a file-scope checkpoint can land after the write and
+        // then restore what is already there. The turn-scope checkpoint taken in `send` is the
+        // guarantee; this one is the finer-grained revert when the race goes Fleet's way — which
+        // it always does for a gated edit, the case where the user is watching.
+        if let Some((turn, paths)) = edited_paths(&event) {
+            let (thread, worktree) = {
+                let state = runtime
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (state.record.thread, state.record.worktree.clone())
+            };
+            self.capture_file_checkpoint(thread, turn, &worktree, paths)
+                .await;
+        }
         applied.push(self.apply(runtime, operation, event, raw).await?);
+        // Both harnesses announce the turn on the stream rather than as the submit's return
+        // value, so this is the moment the prompt that opened it becomes a transcript row. It is
+        // not Claude-only: Codex suppresses the echo of a message Fleet itself sent (it carries
+        // Fleet's own `clientId`), so without this the user's bubble would exist in no log at
+        // all and vanish on the next open.
         if let Some((turn, user_item)) = turn_started {
-            let provider = runtime
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record
-                .provider;
-            if provider == AgentKind::Claude {
-                applied.extend(
-                    self.drain_claude_inputs_applied(runtime, operation, turn, user_item)
-                        .await?,
-                );
-            }
+            applied.extend(
+                self.drain_inputs_applied(runtime, operation, turn, user_item)
+                    .await?,
+            );
         }
         Ok(applied)
     }
@@ -394,7 +472,7 @@ impl AgentSessionManager {
     /// a question no row shows. A projection that is already running a turn drained the deque
     /// when that turn started, and the reducer refuses a second `TurnStarted` anyway, so there
     /// is nothing to do.
-    async fn flush_pending_claude_inputs(
+    async fn flush_pending_inputs(
         &self,
         runtime: &ThreadRuntime,
         operation: Serialized<'_>,
@@ -412,7 +490,17 @@ impl AgentSessionManager {
         ) {
             return Ok(Vec::new());
         }
-        let user_item = ItemId::new();
+        // The prompt already parked for this turn carries the identity the client drew its
+        // optimistic bubble under, so the synthesized announcement names that item rather than a
+        // second one the client cannot recognise.
+        let user_item = runtime
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_inputs
+            .front()
+            .and_then(|(_, input)| input.item)
+            .unwrap_or_default();
         let mut applied = vec![
             self.apply(
                 runtime,
@@ -423,13 +511,13 @@ impl AgentSessionManager {
             .await?,
         ];
         applied.extend(
-            self.drain_claude_inputs_applied(runtime, operation, turn, user_item)
+            self.drain_inputs_applied(runtime, operation, turn, user_item)
                 .await?,
         );
         Ok(applied)
     }
 
-    async fn drain_claude_inputs_applied(
+    async fn drain_inputs_applied(
         &self,
         runtime: &ThreadRuntime,
         operation: Serialized<'_>,
@@ -446,28 +534,33 @@ impl AgentSessionManager {
             // never recorded, and the deque grows for the life of the daemon.
             let mut inputs = Vec::new();
             let mut kept = VecDeque::new();
-            for (pending_turn, input) in std::mem::take(&mut state.pending_claude_inputs) {
+            for (pending_turn, input) in std::mem::take(&mut state.pending_inputs) {
                 if pending_turn == turn {
                     inputs.push(input);
                 } else {
                     kept.push_back((pending_turn, input));
                 }
             }
-            state.pending_claude_inputs = kept;
+            state.pending_inputs = kept;
             inputs
         };
         let mut applied = Vec::new();
         for (index, input) in inputs.into_iter().enumerate() {
+            // Position zero is the prompt the announcement named, so it keeps that identity —
+            // which is the client's own when it sent one, because the adapter adopts it. Every
+            // later prompt in the same turn keeps the id its own client drew it under.
             let item = if index == 0 {
                 first_item
             } else {
-                ItemId::new()
+                input.item.unwrap_or_else(ItemId::new)
             };
             applied.push(
                 self.apply(
                     runtime,
                     operation,
-                    user_item_started(turn, item, input),
+                    // Nothing parked here was a steer: a submission the harness folded into a
+                    // running turn is recorded by `send` itself and never queued.
+                    user_item_started(turn, item, input, false),
                     None,
                 )
                 .await?,
@@ -478,7 +571,7 @@ impl AgentSessionManager {
                     operation,
                     AgentEvent::ItemCompleted {
                         item,
-                        status: ItemStatus::Done,
+                        status: ItemStatus::Completed,
                     },
                     None,
                 )
@@ -495,11 +588,12 @@ impl AgentSessionManager {
         turn: TurnId,
         item: ItemId,
         input: UserInput,
+        steered: bool,
     ) -> Result<(), ProtoError> {
         self.apply_one(
             runtime,
             operation,
-            user_item_started(turn, item, input),
+            user_item_started(turn, item, input, steered),
             None,
         )
         .await?;
@@ -508,7 +602,7 @@ impl AgentSessionManager {
             operation,
             AgentEvent::ItemCompleted {
                 item,
-                status: ItemStatus::Done,
+                status: ItemStatus::Completed,
             },
             None,
         )
@@ -570,31 +664,6 @@ impl AgentSessionManager {
             .await
             .map_err(storage_error)
     }
-
-    /// Records a mode or model change as a durable event rather than a silent projection edit.
-    ///
-    /// §3 makes the reducer the only writer of projected state and §6 makes the log the
-    /// transcript, so a client mirror learns the new model from the same stream as everything
-    /// else instead of keeping the old one until its tab is re-opened.
-    async fn update_settings(
-        &self,
-        runtime: &ThreadRuntime,
-        operation: Serialized<'_>,
-        mode: Option<PermissionMode>,
-        model: Option<ModelSelection>,
-    ) -> Result<(), ProtoError> {
-        self.apply_one(
-            runtime,
-            operation,
-            AgentEvent::MetadataChanged {
-                title: None,
-                mode,
-                model,
-            },
-            None,
-        )
-        .await
-    }
 }
 
 async fn run_provider_events(
@@ -618,6 +687,16 @@ async fn run_provider_events(
         for event in coalesce_deltas(batch) {
             let operation = runtime.operation.lock().await;
             let exited = matches!(event.event, AgentEvent::SessionExited { .. });
+            if let Some(skew) = event.emission_skew
+                && skew >= EMISSION_SKEW_FLOOR
+            {
+                tracing::debug!(
+                    target: "fleet::agents",
+                    skew_ms = skew.as_millis(),
+                    frame = event.raw.as_deref().unwrap_or("unnamed"),
+                    "a harness frame was read well after the harness says it emitted it",
+                );
+            }
             match manager
                 .apply_provider_event(&runtime, &operation, event.event, event.raw)
                 .await
@@ -684,7 +763,10 @@ async fn run_provider_events(
 fn default_agent_commands() -> AgentCommands {
     AgentCommands {
         claude: AgentKind::Claude.executable().to_owned(),
-        opencode: AgentKind::OpenCode.executable().to_owned(),
+        codex: AgentKind::Codex.executable().to_owned(),
+        // ADR 0014 keeps the legacy field readable for one release, so the terminal an
+        // existing config still points at OpenCode with keeps a command to run.
+        opencode: "opencode".to_owned(),
     }
 }
 

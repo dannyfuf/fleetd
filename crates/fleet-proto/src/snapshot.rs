@@ -85,11 +85,19 @@ pub enum LinkState {
 }
 
 /// Availability of supported native-agent executables on a machine.
+///
+/// `codex` is additive and defaulted (ADR 0014): an older daemon that predates the Codex harness
+/// answers without the field, and `false` is the honest reading — it cannot run Codex threads
+/// whether or not the binary is on its `PATH`. `opencode` survives for one release for the same
+/// reason the configuration key does; it is a terminal-agent name now, not a harness.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBinaries {
     /// Whether Claude Code is resolvable.
     pub claude: bool,
+    /// Whether Codex is resolvable.
+    #[serde(default)]
+    pub codex: bool,
     /// Whether OpenCode is resolvable.
     pub opencode: bool,
 }

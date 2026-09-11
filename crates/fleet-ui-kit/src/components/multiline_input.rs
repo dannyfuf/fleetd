@@ -22,7 +22,7 @@ mod buffer;
 mod element;
 mod input;
 
-pub use buffer::{MultilineBuffer, PromptHistory};
+pub use buffer::{MultilineBuffer, PromptHistory, Trigger};
 pub use input::MultilineInput;
 
 /// How many submitted prompts a composer remembers. `NATIVE-AGENTS.md` §9's `↑` walks this.
@@ -37,13 +37,19 @@ pub const HISTORY_LIMIT: usize = 100;
 pub const MULTILINE_INPUT_KEY_CONTEXT: &str = "FleetMultilineInput";
 
 /// Events emitted by the native-agent composer.
+///
+/// The composer never acts on a thread: it reports, and the owner decides what a submit, a
+/// completion trigger, a change or an escape means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MultilineInputEvent {
     /// Enter submitted the current non-empty text.
     Submit(String),
-    /// `@` or `/` requested an attachment or command completion surface.
-    Trigger(char),
-    /// Escape requested queue cancellation or focus exit.
+    /// `@`, `$` or `/` opened a completion surface. The character stays in the buffer.
+    Trigger(Trigger),
+    /// The text changed. A picker re-filters from [`MultilineInput::active_trigger`] on this,
+    /// which is what keeps all three trigger characters typable.
+    Changed,
+    /// Escape requested a cascade step — an IME preedit and a selection cancel first.
     Escape,
 }
 

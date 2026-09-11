@@ -523,7 +523,7 @@ mod tests {
         let events = vec![
             event(
                 1,
-                AgentEvent::SessionStarted {
+                AgentEvent::SessionConfigured {
                     provider: AgentKind::Claude,
                     resume_cursor: Some("session-42".to_owned()),
                     model: None,
@@ -548,6 +548,7 @@ mod tests {
                     kind: ItemKind::UserMessage {
                         text: "ship it".to_owned(),
                         attachments: Vec::new(),
+                        steered: false,
                     },
                     parent: None,
                 },
@@ -556,7 +557,7 @@ mod tests {
                 4,
                 AgentEvent::ItemCompleted {
                     item: user,
-                    status: ItemStatus::Done,
+                    status: ItemStatus::Completed,
                 },
             ),
             event(
@@ -564,7 +565,9 @@ mod tests {
                 AgentEvent::ItemStarted {
                     turn,
                     item: assistant,
-                    kind: ItemKind::AssistantText,
+                    kind: ItemKind::AssistantText {
+                        text: String::new(),
+                    },
                     parent: None,
                 },
             ),
@@ -580,12 +583,12 @@ mod tests {
                 7,
                 AgentEvent::ItemCompleted {
                     item: assistant,
-                    status: ItemStatus::Done,
+                    status: ItemStatus::Completed,
                 },
             ),
             event(
                 8,
-                AgentEvent::TurnCompleted {
+                AgentEvent::TurnSettled {
                     turn,
                     outcome: TurnOutcome::Completed,
                     usage: Usage::default(),

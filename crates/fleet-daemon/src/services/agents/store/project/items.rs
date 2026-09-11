@@ -32,7 +32,7 @@ const OUTPUT_WINDOW: usize = 8 * 1024;
 const ELISION_MARKER: &str = "\n…\n";
 
 /// Statuses `ItemStatus::terminal()` reports as settled, as SQL sees them.
-pub(super) const TERMINAL_ITEM_STATUSES: &str = "('done', 'error', 'denied')";
+pub(super) const TERMINAL_ITEM_STATUSES: &str = "('completed', 'failed', 'denied', 'stopped')";
 
 /// Appends to one of the two unbounded text channels in SQL rather than in this process.
 ///
@@ -170,9 +170,9 @@ pub(super) fn close_open_items(
 ) -> anyhow::Result<()> {
     let statement = format!(
         "UPDATE items SET status = CASE \
-             WHEN json_extract(detail_json, '$.result') IS NOT NULL THEN 'done' \
-             WHEN kind IN ('tool', 'error') THEN 'error' \
-             ELSE 'done' END, \
+             WHEN json_extract(detail_json, '$.payload.data.result') IS NOT NULL THEN 'completed' \
+             WHEN kind IN ('tool', 'error') THEN 'failed' \
+             ELSE 'completed' END, \
          end_seq = ?3, updated_at = ?4 \
          WHERE thread_id = ?1 AND turn_id = ?2 AND status NOT IN {TERMINAL_ITEM_STATUSES}"
     );
@@ -188,6 +188,6 @@ pub(super) fn close_open_items(
 pub(super) fn is_terminal(status: ItemStatus) -> bool {
     matches!(
         status,
-        ItemStatus::Done | ItemStatus::Error | ItemStatus::Denied
+        ItemStatus::Completed | ItemStatus::Failed | ItemStatus::Denied | ItemStatus::Stopped
     )
 }

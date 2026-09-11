@@ -42,12 +42,15 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use fleet_core::agents::{AgentEvent, Seq, SeqEvent, ThreadId};
+use fleet_core::{
+    agents::{AgentEvent, AgentThreadSummary, Seq, SeqEvent, ThreadId},
+    ids::HostId,
+};
 use rusqlite::{Connection, TransactionBehavior};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AgentIndex, AgentThreadRecord, index, migrations,
+    AgentIndex, AgentThreadRecord, index, migrations, mirror,
     project::{self, StagedEvent},
 };
 
@@ -83,6 +86,21 @@ enum Work {
     WriteRecord { record: Box<AgentThreadRecord> },
     /// Mark one thread's session failed, with the reason.
     FailSession { thread: ThreadId, message: String },
+    /// Record the header of a thread another host owns.
+    MirrorClaim {
+        host: HostId,
+        summary: Box<AgentThreadSummary>,
+    },
+    /// Append owner-sequenced events to a mirrored thread's prefix.
+    MirrorAppend {
+        host: HostId,
+        thread: ThreadId,
+        staged: Vec<StagedEvent>,
+        /// The owner's head as the answer that carried these events reported it.
+        owner_head: Option<Seq>,
+    },
+    /// Throw one mirrored thread's cached transcript away, leaving its header.
+    MirrorDiscard { thread: ThreadId },
 }
 
 /// A handle on the owned writer thread.
@@ -175,6 +193,45 @@ impl Writer {
             record: Box::new(record.clone()),
         })
         .await
+    }
+
+    /// Records the header of a thread another host owns.
+    pub(super) async fn mirror_claim(
+        &self,
+        host: HostId,
+        summary: &AgentThreadSummary,
+    ) -> anyhow::Result<()> {
+        self.request(Work::MirrorClaim {
+            host,
+            summary: Box::new(summary.clone()),
+        })
+        .await
+    }
+
+    /// Appends owner-sequenced events to a mirrored thread's prefix.
+    ///
+    /// Staging runs on the caller's thread, exactly as [`Writer::append`] does, so a large tool
+    /// payload is serialized without the write lock held.
+    pub(super) async fn mirror_append(
+        &self,
+        host: HostId,
+        thread: ThreadId,
+        events: &[SeqEvent],
+        owner_head: Option<Seq>,
+    ) -> anyhow::Result<()> {
+        let staged = mirror::stage(events)?;
+        self.request(Work::MirrorAppend {
+            host,
+            thread,
+            staged,
+            owner_head,
+        })
+        .await
+    }
+
+    /// Throws one mirrored thread's cached transcript away.
+    pub(super) async fn mirror_discard(&self, thread: ThreadId) -> anyhow::Result<()> {
+        self.request(Work::MirrorDiscard { thread }).await
     }
 
     /// Marks one thread's session failed, with the reason.
@@ -341,6 +398,21 @@ fn transact<'work>(
             Work::FailSession { thread, message } => {
                 project::fail_session(&transaction, *thread, message)?;
             }
+            Work::MirrorClaim { host, summary } => mirror::claim(&transaction, host, summary)?,
+            Work::MirrorAppend {
+                host,
+                thread,
+                staged,
+                owner_head,
+            } => {
+                for event in staged {
+                    mirror::append_from_owner(&transaction, host, *thread, event)?;
+                }
+                if let Some(owner_head) = owner_head {
+                    mirror::note_owner_head(&transaction, *thread, *owner_head)?;
+                }
+            }
+            Work::MirrorDiscard { thread } => mirror::discard(&transaction, *thread)?,
         }
     }
     transaction
@@ -360,14 +432,29 @@ fn needs_durability(work: &Work) -> bool {
     match work {
         Work::Append { staged, .. } => matches!(
             staged.event.event,
-            AgentEvent::TurnCompleted { .. }
+            AgentEvent::TurnSettled { .. }
                 | AgentEvent::TurnAborted { .. }
                 | AgentEvent::GateOpened { .. }
                 | AgentEvent::GateResolved { .. }
                 | AgentEvent::SessionExited { .. }
-                | AgentEvent::Checkpoint(_)
+                | AgentEvent::Compacted(_)
         ),
         Work::TruncateAfter { .. } | Work::WriteIndex { .. } | Work::WriteRecord { .. } => true,
+        // A mirrored append is the owner's durable event reaching this daemon; it earns the same
+        // fsync policy as a local one. A claim and a discard change what the daemon believes
+        // exists, exactly as an index write does.
+        Work::MirrorAppend { staged, .. } => staged.iter().any(|event| {
+            matches!(
+                event.event.event,
+                AgentEvent::TurnSettled { .. }
+                    | AgentEvent::TurnAborted { .. }
+                    | AgentEvent::GateOpened { .. }
+                    | AgentEvent::GateResolved { .. }
+                    | AgentEvent::SessionExited { .. }
+                    | AgentEvent::Compacted(_)
+            )
+        }),
+        Work::MirrorClaim { .. } | Work::MirrorDiscard { .. } => true,
         // A rebuild derives rows that are already derivable from a durable log, and a failed
         // session is re-derived by the next start's census from the same rows.
         Work::Rebuild { .. } | Work::FailSession { .. } => false,
@@ -378,13 +465,19 @@ fn needs_durability(work: &Work) -> bool {
 fn size_of_work(work: &Work) -> usize {
     match work {
         Work::Append { staged, .. } => staged.bytes(),
+        Work::MirrorAppend { staged, .. } => staged
+            .iter()
+            .map(StagedEvent::bytes)
+            .fold(0, usize::saturating_add),
         // A truncate rebuilds one thread and an index write touches one row per thread; neither
         // is measured in payload bytes, so each counts as a whole batch's worth and flushes.
         Work::TruncateAfter { .. }
         | Work::WriteIndex { .. }
         | Work::WriteRecord { .. }
         | Work::Rebuild { .. }
-        | Work::FailSession { .. } => WRITE_BATCH_MAX_BYTES,
+        | Work::FailSession { .. }
+        | Work::MirrorClaim { .. }
+        | Work::MirrorDiscard { .. } => WRITE_BATCH_MAX_BYTES,
     }
 }
 

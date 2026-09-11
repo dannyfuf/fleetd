@@ -13,7 +13,13 @@
 //! `fleet-lazygit`'s `Bucket` resolves to, so a snippet in a transcript and the same snippet in
 //! a diff do not disagree.
 
-use std::{ops::Range, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    hash::{DefaultHasher, Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 
 use gpui::Hsla;
 
@@ -334,3 +340,78 @@ pub(super) const KEYWORDS: &[&str] = &[
     "with",
     "yield",
 ];
+
+// ---------------------------------------------------------------------------------------------
+// The highlight cache
+// ---------------------------------------------------------------------------------------------
+
+/// How many lexed blocks the cache keeps. A transcript's visible fences, plus room for the tail
+/// the reader just scrolled past.
+const CACHE_CAPACITY: usize = 16;
+
+/// A small LRU of lexed fences, keyed by content.
+///
+/// A streaming transcript re-parses the same prose on every delta, so a settled fence would be
+/// re-lexed once per token without this. The rule that matters is the one it enforces at the
+/// boundary: **a partial fence is neither read from nor written to the cache.** An unterminated
+/// fence's text changes with every chunk, so caching it would fill the cache with garbage keyed
+/// on text that no longer exists — and, worse, a lookup could hand a *closed* fence the colours
+/// of its own prefix. It must never poison it.
+#[derive(Debug, Default)]
+pub struct HighlightCache {
+    entries: RefCell<VecDeque<(u64, CodeHighlights)>>,
+}
+
+impl HighlightCache {
+    /// An empty cache. An owner holds one per transcript.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many blocks are cached. Mostly for the tests that pin the poisoning rule.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.borrow().len()
+    }
+
+    /// Whether the cache is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Forget everything, for a thread switch.
+    pub fn clear(&self) {
+        self.entries.borrow_mut().clear();
+    }
+
+    /// The colours of one **closed** fence, lexing it only on a miss.
+    pub(super) fn highlight(&self, lang: Option<&str>, text: &str) -> CodeHighlights {
+        let key = key(lang, text);
+        {
+            let mut entries = self.entries.borrow_mut();
+            if let Some(position) = entries.iter().position(|(cached, _)| *cached == key)
+                && let Some(entry) = entries.remove(position)
+            {
+                entries.push_front(entry.clone());
+                return entry.1;
+            }
+        }
+        let highlights = CodeHighlights::new(lang, text);
+        let mut entries = self.entries.borrow_mut();
+        if entries.len() == CACHE_CAPACITY {
+            entries.pop_back();
+        }
+        entries.push_front((key, highlights.clone()));
+        highlights
+    }
+}
+
+/// The cache key: the fence's language and its exact text.
+fn key(lang: Option<&str>, text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    lang.hash(&mut hasher);
+    text.hash(&mut hasher);
+    hasher.finish()
+}
