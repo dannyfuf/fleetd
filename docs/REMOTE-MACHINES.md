@@ -17,7 +17,7 @@ doubles are implemented. Unsupported operations return a typed error; production
 `HostConfigEntry` serializes a tagged provider first and falls back to the legacy untagged shape.
 
 ```json
-{"provider":"tailscale","node":"dev-box","user":"df","sshOptions":[],"fleetd":"fleetd","fleetHome":"~/.fleet"}
+{"provider":"tailscale","node":"dev-box","user":"df","sshOptions":[],"identityFile":"~/.ssh/id_ed25519","sshHost":"arch-dev","fleetd":"fleetd","fleetHome":"~/.fleet"}
 ```
 
 ```json
@@ -28,8 +28,38 @@ doubles are implemented. Unsupported operations return a typed error; production
 {"ssh":"arch-dev","swarmCommand":"swarm"}
 ```
 
-Tailscale has `node: String`, `user: Option<String>`, `ssh_options: Vec<String>`, `fleetd:
-String` (default `fleetd`), and `fleet_home: Option<String>` (default `~/.fleet`). Command has
+Tailscale has `node: String`, `user: Option<String>`, `ssh_options: Vec<String>`,
+`identity_file: Option<String>` (`identityFile`), `ssh_host: Option<String>` (`sshHost`),
+`fleetd: String` (default `fleetd`), and `fleet_home: Option<String>` (default `~/.fleet`).
+Both new fields are omitted from a serialized host that does not set them, so an existing
+config document round-trips unchanged.
+
+`identityFile` is the one private key this host authenticates with; a leading `~` is
+expanded. When it is set Fleet passes `-o IdentitiesOnly=yes -i <path>`, which stops OpenSSH
+offering every default identity and the agent's keys before the right one. When it is absent
+Fleet passes neither — forcing `IdentitiesOnly` without a key would break agent-only users.
+Set it when more than three of the `identityfile` candidates `ssh -G <destination>` prints
+actually exist on disk: sshd counts every offered key against `LoginGraceTime` and penalises
+a source address that exceeds it, which locks the local machine out for minutes.
+
+Because `identityFile` also turns on `IdentitiesOnly=yes`, a wrong path is worse than no
+path: `ssh` is left with no identity to offer and every connection to the host fails
+authentication. `fleet doctor` therefore checks the configured key rather than trusting it —
+see § 10. Nothing stats it at config load: `fleet-core` is I/O-free by contract (ADR 0008)
+and its validation only rejects an empty string.
+
+`sshHost` replaces the SSH destination. The Tailscale provider still looks the peer up for
+its online state and display name, but this string becomes the resolved
+`MachineAddress::host` — what `ssh` dials and what `HostStatus.address` reports, so status
+and doctor name the host that is actually contacted. The tailnet identity stays in
+`MachineAddress::display`. Resolution behaviour is otherwise unchanged: absent this field the
+destination is the resolved Tailscale IP.
+
+A configured `sshHost` also makes the tailnet lookup advisory rather than load-bearing. `ssh`
+is going to dial that string whatever `tailscale status` says, so a lookup that fails — the
+CLI is gone, `tailscaled` is down, the node was renamed — degrades to a provider warning and
+the dial proceeds. Without `sshHost` there is no destination to fall back to and the
+resolution failure still propagates. Command has
 `run`, `fleetd`, optional `fleet_home`, and optional `display`; it is advanced/testing transport:
 every remote argv executes locally as `run ++ argv`. Legacy is probe-only. Present string and run
 entries must be nonempty. `defaultHost` is `local` or a configured id; `Config::default_host()`
@@ -97,8 +127,29 @@ kills on drop, exposes `exit_code().await`, and maps SSH exit 255 to Unreachable
 `CommandMachine` runs `run ++ argv`; its stream argv is `run ++ [fleetd, connect, --home,
 fleet_home]`, and its probe runs `true` then `fleetd --version` without using connect.
 
-`TailscaleMachine::new(id,node,user,ssh_options,fleetd,fleet_home)` and `SshArgv` are the transport
-stage seam. `LegacyMachine` probes the existing swarm protocol and never opens a stream.
+`TailscaleMachine::new(id,node,user,ssh_options,fleetd,fleet_home)`, its
+`with_identity_file(Option<String>)` / `with_ssh_host(Option<String>)` overrides, and `SshArgv`
+are the transport stage seam.
+
+Every `ssh` Fleet builds — the link, provider `exec`, bootstrap (which runs through
+`MachineProvider::exec`), and the legacy probes in `machines/legacy.rs` and `services/hosts.rs`
+— carries `ssh::connection_defaults()`: `BatchMode=yes`, `ConnectTimeout=10`,
+`ServerAliveInterval=15`, `ServerAliveCountMax=4`. Fleet dials a resolved address rather than a
+`Host` alias, so the user's `ssh_config` never applies and the keepalive would otherwise be
+off: a link the peer dropped would stay open locally until the next write failed. `SshArgv`
+then adds `ControlMaster=auto`, `ControlPersist=300` and the `ControlPath` under the Fleet home.
+
+Argv order is precedence. OpenSSH keeps the *first* value it sees for an option, so `SshArgv`
+emits three bands: Fleet's **required** options (`BatchMode=yes`, `ControlMaster=auto`,
+`ControlPersist=300`, `ControlPath`), then the host's `sshOptions`, then the **tunables**
+(`identityFile`'s `IdentitiesOnly=yes -i`, `ConnectTimeout`, `ServerAliveInterval`,
+`ServerAliveCountMax`). A host that sets its own `ServerAliveInterval` or `ConnectTimeout`
+in `sshOptions` therefore wins; one that sets `BatchMode` or any `Control*` option does not.
+
+That asymmetry is deliberate. `BatchMode=no` would let a daemon-spawned `ssh` block forever
+on a prompt it has no terminal to show, and a host-supplied `ControlPath` would point the
+multiplexer at a directory `SshArgv::ensure_control_dir` never created and never locked to
+`0700` — multiplexing degrades silently, or the socket lands somewhere world-writable. `LegacyMachine` probes the existing swarm protocol and never opens a stream.
 `Machines::{from_config,rebuild,get,iter,endpoint,install_endpoint,endpoints}` owns providers and
 lazily creates one non-legacy `RemoteLink` per host.
 
@@ -205,7 +256,15 @@ Every step logs to the ordinary job log and cancellation stops before the next c
 
 Host status reports id, provider, reachability, checked time, resolved address, link state, daemon
 version, last error/stderr, and optional Claude/OpenCode availability. Doctor distinguishes resolve,
-SSH/auth, fleetd presence/version, protocol mismatch, and agent-binary checks. Legacy entries report
+SSH/auth, fleetd presence/version, protocol mismatch, and agent-binary checks. Every Tailscale
+host also gets a `host <id> ssh identity` check. With `identityFile` set it verifies the key
+itself and *fails* when the path does not exist, is not a regular file, or is readable by group
+or others — all three leave `ssh` unable to authenticate, and the first is silent because
+`IdentitiesOnly=yes` then offers nothing at all. Without `identityFile` it runs `ssh -G` for the
+effective destination and warns when more than three of the `identityfile` candidates exist on
+disk; the raw line count is not used, because stock OpenSSH names four to seven defaults whether
+or not any of them is present. The check is omitted when the address is unresolved or `ssh -G`
+fails, because a diagnostic that cannot be computed is not a finding. Legacy entries report
 `Legacy` plus a migration hint. An unreachable host never makes unrelated host results disappear.
 
 ## 11. CLI surface

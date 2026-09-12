@@ -264,6 +264,29 @@ pub fn resolve_home_with(
     }
 }
 
+/// Expands a leading `~` against `$HOME`, leaving every other path unchanged.
+///
+/// Configuration values reach process arguments verbatim — no shell interprets them — so a
+/// configured `~/.ssh/id_ed25519` is an unusable relative path unless it is expanded here.
+#[must_use]
+pub fn expand_tilde(path: impl Into<PathBuf>) -> PathBuf {
+    expand_tilde_with(path, std::env::var_os("HOME").map(PathBuf::from))
+}
+
+/// Expands a leading `~` against an explicit home, for callers that discover `$HOME`
+/// themselves and for tests.
+#[must_use]
+pub fn expand_tilde_with(path: impl Into<PathBuf>, environment_home: Option<PathBuf>) -> PathBuf {
+    let path = path.into();
+    let Some(home) = environment_home else {
+        return path;
+    };
+    match path.strip_prefix("~") {
+        Ok(suffix) => home.join(suffix),
+        Err(_) => path,
+    }
+}
+
 /// Returns prepared-copy slot 0 (`.hot`) or slot n (`.hot.<n>`).
 #[must_use]
 pub fn slot_path(repo_worktrees_dir: impl AsRef<Path>, slot: usize) -> PathBuf {
@@ -367,6 +390,28 @@ impl CreatingMarker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expands_only_a_leading_tilde_and_only_with_a_known_home() {
+        let home = Some(PathBuf::from("/home/df"));
+        assert_eq!(
+            expand_tilde_with("~/.ssh/id_ed25519", home.clone()),
+            PathBuf::from("/home/df/.ssh/id_ed25519")
+        );
+        assert_eq!(
+            expand_tilde_with("~", home.clone()),
+            PathBuf::from("/home/df")
+        );
+        assert_eq!(
+            expand_tilde_with("/etc/ssh/key", home),
+            PathBuf::from("/etc/ssh/key")
+        );
+        // A path that cannot be expanded is passed through rather than silently rewritten.
+        assert_eq!(
+            expand_tilde_with("~/.ssh/id_ed25519", None),
+            PathBuf::from("~/.ssh/id_ed25519")
+        );
+    }
 
     #[test]
     fn constructs_layout_paths() {

@@ -1,6 +1,6 @@
 //! Environment and installation diagnostics.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration};
 
 use fleet_core::{config::Config, ids::HostId, model::HostConfigEntry, paths::FleetHome};
 use fleet_proto::{
@@ -83,10 +83,12 @@ impl Doctor {
             .map_or_else(|| PathBuf::from("."), PathBuf::from);
         let hosts = Hosts::new(home, Arc::clone(&self.shell));
         let diagnostics = hosts.diagnose_configured(host, entry, machines).await;
-        Ok(host_checks(
-            diagnostics,
+        let mut checks = host_checks(
+            diagnostics.clone(),
             matches!(entry, HostConfigEntry::Legacy { .. }),
-        ))
+        );
+        checks.extend(ssh_identity_check(self.shell.as_ref(), entry, &diagnostics).await);
+        Ok(checks)
     }
 
     async fn check_config(
@@ -141,9 +143,15 @@ impl Doctor {
         checks.extend(
             futures_util::future::join_all(config.hosts.iter().map(|(id, entry)| {
                 let hosts = &hosts;
+                let shell = self.shell.as_ref();
                 async move {
                     let diagnostics = hosts.diagnose_configured(id, entry, machines).await;
-                    host_checks(diagnostics, matches!(entry, HostConfigEntry::Legacy { .. }))
+                    let mut checks = host_checks(
+                        diagnostics.clone(),
+                        matches!(entry, HostConfigEntry::Legacy { .. }),
+                    );
+                    checks.extend(ssh_identity_check(shell, entry, &diagnostics).await);
+                    checks
                 }
             }))
             .await
@@ -166,6 +174,129 @@ impl Doctor {
             .map_or_else(|| PathBuf::from("."), PathBuf::from);
         let hosts = Hosts::new(home, Arc::clone(&self.shell));
         host_checks(hosts.diagnose_machine(provider, endpoint).await, false)
+    }
+}
+
+/// Existing identities OpenSSH may offer before pinning one key is worth recommending.
+///
+/// sshd counts every offered key against `LoginGraceTime` and penalises the source address
+/// that exceeds it — the failure mode that locked a Mac out of its devbox for minutes at a
+/// time. Only keys that exist are ever offered, so this is compared against the candidates
+/// that survive a stat, never against the raw `ssh -G` list: stock OpenSSH names four to
+/// seven default identity files whether or not a single one of them is on disk.
+const MAX_OFFERED_IDENTITIES: usize = 3;
+
+/// Checks how this host authenticates: the configured key when there is one, and otherwise
+/// how many identities OpenSSH would walk before finding the right one.
+///
+/// Returns nothing only when the question cannot be answered — a non-Tailscale host, an
+/// unresolved address, or an `ssh -G` that fails. A diagnostic that cannot be computed is
+/// not a finding.
+async fn ssh_identity_check(
+    shell: &dyn Shell,
+    entry: &HostConfigEntry,
+    diagnostics: &HostDiagnostics,
+) -> Option<DoctorCheck> {
+    let HostConfigEntry::Tailscale {
+        user,
+        ssh_options,
+        identity_file,
+        ssh_host,
+        ..
+    } = entry
+    else {
+        return None;
+    };
+    let check = format!("host {} ssh identity", diagnostics.status.id);
+    if let Some(identity_file) = identity_file {
+        return Some(configured_identity_check(check, identity_file).await);
+    }
+    let host = ssh_host
+        .clone()
+        .or_else(|| diagnostics.status.address.clone())?;
+    let destination = user
+        .as_ref()
+        .map_or_else(|| host.clone(), |user| format!("{user}@{host}"));
+    let command = ShellCommand::new("ssh")
+        .arg("-G")
+        .args(ssh_options.clone())
+        .args(crate::machines::ssh::connection_defaults())
+        .args(["--".to_owned(), destination])
+        .timeout(CHECK_TIMEOUT);
+    let result = shell.run(command).await.ok()?;
+    if !result.success() {
+        return None;
+    }
+    let offered = existing_identity_count(&result.stdout).await;
+    (offered > MAX_OFFERED_IDENTITIES).then(|| DoctorCheck {
+        check,
+        status: DoctorStatus::Warn,
+        detail: format!(
+            "{offered} private keys exist and are offered before authentication; set this \
+             host's identityFile to the one key it uses so sshd's login grace period is not \
+             spent on the others"
+        ),
+    })
+}
+
+/// Counts the `ssh -G` identity candidates that are actually present on disk.
+///
+/// OpenSSH names every default identity path unconditionally, so the raw line count says
+/// nothing about how many keys will really be offered; only the ones that exist are.
+async fn existing_identity_count(ssh_config: &str) -> usize {
+    let candidates = ssh_config
+        .lines()
+        .filter_map(|line| line.strip_prefix("identityfile "))
+        .map(|path| fleet_core::paths::expand_tilde(path.trim()))
+        .collect::<Vec<_>>();
+    let mut existing = 0;
+    for candidate in candidates {
+        if tokio::fs::metadata(&candidate)
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
+        {
+            existing += 1;
+        }
+    }
+    existing
+}
+
+/// Verifies a configured `identityFile` is a key OpenSSH will actually use.
+///
+/// This is the one place a typo is catchable: `identityFile` also turns on
+/// `IdentitiesOnly=yes`, so a path that does not resolve leaves `ssh` with no identity to
+/// offer at all and every connection to the host fails authentication. `fleet-core` is
+/// I/O-free by contract (ADR 0008) and its config validation stats nothing, so the check
+/// belongs here rather than at config load.
+async fn configured_identity_check(check: String, identity_file: &str) -> DoctorCheck {
+    let path = fleet_core::paths::expand_tilde(identity_file);
+    let shown = path.display().to_string();
+    let failure = |detail: String| DoctorCheck {
+        check: check.clone(),
+        status: DoctorStatus::Fail,
+        detail,
+    };
+    let Ok(metadata) = tokio::fs::metadata(&path).await else {
+        return failure(format!(
+            "identityFile {shown} does not exist; with IdentitiesOnly=yes this leaves ssh no \
+             identity to offer and every connection to this host fails authentication"
+        ));
+    };
+    if !metadata.is_file() {
+        return failure(format!("identityFile {shown} is not a regular file"));
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 != 0 {
+        return failure(format!(
+            "identityFile {shown} is accessible to group or others (mode {:04o}); ssh refuses \
+             such a key — chmod 600 it",
+            mode & 0o7777
+        ));
+    }
+    DoctorCheck {
+        check,
+        status: DoctorStatus::Ok,
+        detail: format!("pinned to {shown}"),
     }
 }
 
@@ -525,11 +656,65 @@ const fn copy_detail() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::command_failure;
+    use super::{
+        DoctorStatus, command_failure, configured_identity_check, existing_identity_count,
+    };
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn command_failure_prefers_stderr() {
         assert_eq!(command_failure(2, "bad\n", "ignored\n"), "exit 2: bad");
         assert_eq!(command_failure(1, "", "usage\n"), "exit 1: usage");
+    }
+
+    /// Stock OpenSSH names four to seven default identity files whether or not any of them
+    /// exists, so counting the lines would warn at every healthy machine.
+    #[tokio::test]
+    async fn only_identity_candidates_that_exist_are_counted() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let present = temp.path().join("id_ed25519");
+        std::fs::write(&present, b"key").unwrap_or_else(|error| panic!("{error}"));
+        let ssh_config = format!(
+            "user df\nidentityfile {}\nidentityfile {}\nidentityfile {}\nhostname 100.64.0.7\n",
+            present.display(),
+            temp.path().join("id_rsa").display(),
+            temp.path().join("id_dsa").display(),
+        );
+
+        assert_eq!(existing_identity_count(&ssh_config).await, 1);
+        assert_eq!(existing_identity_count("user df\nhostname h\n").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_configured_identity_is_verified_rather_than_trusted() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let key = temp.path().join("id_ed25519");
+        std::fs::write(&key, b"key").unwrap_or_else(|error| panic!("{error}"));
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("{error}"));
+        async fn check(path: &std::path::Path) -> super::DoctorCheck {
+            configured_identity_check(
+                "host dev-box ssh identity".to_owned(),
+                &path.to_string_lossy(),
+            )
+            .await
+        }
+
+        assert_eq!(check(&key).await.status, DoctorStatus::Ok);
+
+        // A typo'd path plus IdentitiesOnly=yes leaves ssh nothing to offer, so this must be
+        // loud rather than skipped.
+        assert_eq!(
+            check(&temp.path().join("absent")).await.status,
+            DoctorStatus::Fail
+        );
+        assert_eq!(check(temp.path()).await.status, DoctorStatus::Fail);
+
+        // ssh refuses a key other users can read.
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let loose = check(&key).await;
+        assert_eq!(loose.status, DoctorStatus::Fail);
+        assert!(loose.detail.contains("0644"), "{}", loose.detail);
     }
 }
