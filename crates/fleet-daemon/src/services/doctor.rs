@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use fleet_core::{config::Config, ids::HostId, model::HostConfigEntry};
+use fleet_core::{config::Config, ids::HostId, model::HostConfigEntry, paths::FleetHome};
 use fleet_proto::{
     PROTOCOL_VERSION,
     response::{DoctorCheck, DoctorStatus},
@@ -108,12 +108,15 @@ impl Doctor {
             PathBuf::from(&config.worktrees_dir),
         );
         let writable = check_writable(Arc::clone(&self.files), home.clone());
-        let (git, github, copy, writable) = tokio::join!(git, github, copy, writable);
+        let holders = check_pty_holders(home.clone());
+        let (git, github, copy, writable, holders) =
+            tokio::join!(git, github, copy, writable, holders);
 
         let mut checks = vec![
             git,
             github,
             copy,
+            holders,
             DoctorCheck {
                 check: "runtime".to_owned(),
                 status: DoctorStatus::Ok,
@@ -424,6 +427,77 @@ fn command_failure(status: i32, stderr: &str, stdout: &str) -> String {
         stderr.trim()
     };
     format!("exit {status}: {detail}")
+}
+
+/// Reports the detached PTY holders no daemon will ever adopt.
+///
+/// A holder outlives every daemon by design, which is exactly why an unreachable one is invisible:
+/// nothing lists it, nothing cleans it up, and the login shell behind it runs until the machine
+/// reboots. Two states qualify. A record whose holder process is gone is a leftover the next start
+/// would clear anyway. A socket with no readable record is the dangerous one — a live shell with
+/// nothing left pointing at it — so this is the surface that names it.
+async fn check_pty_holders(home: PathBuf) -> DoctorCheck {
+    use crate::services::sessions::holder;
+
+    let layout = FleetHome::new(home);
+    let records = match holder::discover_sidecars(&layout).await {
+        Ok(records) => records,
+        Err(error) => return failed_check("pty holders", error),
+    };
+    let claimed = records
+        .iter()
+        .filter_map(|entry| entry.sidecar.as_ref())
+        .map(|sidecar| sidecar.socket.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let stale = records
+        .iter()
+        .filter(|entry| {
+            entry
+                .sidecar
+                .as_ref()
+                .is_none_or(|sidecar| !holder::holder_is_alive(sidecar))
+        })
+        .count();
+    let orphaned = holder::runtime_files(&layout)
+        .await
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "sock")
+                && !claimed.contains(path)
+        })
+        .collect::<Vec<_>>();
+
+    if stale == 0 && orphaned.is_empty() {
+        let live = records.len().saturating_sub(stale);
+        return DoctorCheck {
+            check: "pty holders".to_owned(),
+            status: DoctorStatus::Ok,
+            detail: format!("{live} terminal(s) held"),
+        };
+    }
+    let mut detail = String::new();
+    if stale > 0 {
+        detail.push_str(&format!(
+            "{stale} record(s) name a holder that is gone; the next daemon start removes them"
+        ));
+    }
+    if let Some(first) = orphaned.first() {
+        if !detail.is_empty() {
+            detail.push_str("; ");
+        }
+        detail.push_str(&format!(
+            "{} holder socket(s) have no record and will never be reattached, starting with {} — \
+             stop the shell behind it or delete the socket",
+            orphaned.len(),
+            first.display()
+        ));
+    }
+    DoctorCheck {
+        check: "pty holders".to_owned(),
+        status: DoctorStatus::Warn,
+        detail,
+    }
 }
 
 fn failed_check(check: &str, error: DaemonError) -> DoctorCheck {

@@ -340,6 +340,8 @@ Fleet supports worktrees, terminal sessions, lifecycle operations, and native Cl
 threads on configured Tailscale hosts through daemon federation. The app and CLI connect only to
 the local `fleetd`; it routes work to the owning host, keeps cached remote inventory visible while
 a host is offline, and resumes routing after the link recovers. Terminal sessions survive closing
-the app because their owning `fleetd` retains them, but they do not survive that daemon restarting.
-Native agent threads do: transcripts live under the owning daemon's `$FLEET_HOME/agents/`, and a
-thread with a provider resume cursor is resumed the next time it is opened.
+the app because their owning `fleetd` retains them, and they survive that daemon restarting: every
+PTY lives in a detached holder process the next daemon reattaches to (`docs/ARCHITECTURE.md`,
+"Detached PTY holders"). Native agent threads persist too: transcripts live under the owning
+daemon's `$FLEET_HOME/agents/`, and a thread with a provider resume cursor is resumed the next time
+it is opened.

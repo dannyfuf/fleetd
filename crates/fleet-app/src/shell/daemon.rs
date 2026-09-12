@@ -12,17 +12,33 @@ use crate::state::{
     SPLASH_DETAIL_DELAY, reconnect_backoff,
 };
 
-/// PTYs do not survive a daemon restart; the recovery banner must say so explicitly.
-const RESTART_SENTENCE: &str =
-    "fleetd restarted. Terminal sessions did not survive; worktrees, jobs and state are intact.";
+/// What a restart did to the user's terminals, said out loud rather than guessed at.
+///
+/// Terminals normally survive — each PTY lives in a detached holder the new daemon reattaches to —
+/// but not always: `pkill fleetd` matches `fleetd pty-hold` too, and nothing survives a reboot. The
+/// banner is the one place the app states which happened, so it is counted, never assumed.
+fn restart_sentence(reattached: usize) -> SharedString {
+    match reattached {
+        0 => SharedString::from(
+            "fleetd restarted. No terminals survived; worktrees, jobs and state are intact.",
+        ),
+        1 => SharedString::from(
+            "fleetd restarted. 1 terminal was reattached; worktrees, jobs and state are intact.",
+        ),
+        many => SharedString::from(format!(
+            "fleetd restarted. {many} terminals were reattached; worktrees, jobs and state are \
+             intact."
+        )),
+    }
+}
 /// The connected process predates the fleetd binary currently on disk.
 const OUTDATED_SENTENCE: &str = "fleetd is outdated, restart with `fleet daemon restart`";
 
 /// What the 28 px banner under the context bar says right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BannerSpec {
-    /// The sentence.
-    text: &'static str,
+    /// The sentence. Owned because the restart sentence counts what actually came back.
+    text: SharedString,
     /// The reconnect countdown, when one is running.
     countdown: Option<String>,
     /// The keys this banner owns while it is showing.
@@ -57,10 +73,10 @@ fn banner_spec(
             dismissed: false,
             reason,
         } => Some(BannerSpec {
-            text: match reason {
+            text: SharedString::from(match reason {
                 DaemonLossReason::ConnectionLost => "fleetd connection lost",
                 DaemonLossReason::Stopped => "fleetd stopped",
-            },
+            }),
             countdown: Some(countdown_label(
                 daemon_since + reconnect_backoff(*attempt),
                 now,
@@ -72,11 +88,15 @@ fn banner_spec(
             ],
         }),
         DaemonLink::Connected if outdated => Some(BannerSpec {
-            text: OUTDATED_SENTENCE,
+            text: SharedString::from(OUTDATED_SENTENCE),
             countdown: None,
             hints: &[],
         }),
-        DaemonLink::Reconnected { restarted, since } => {
+        DaemonLink::Reconnected {
+            restarted,
+            reattached,
+            since,
+        } => {
             let dwell = if *restarted {
                 RESTART_BANNER_DWELL
             } else {
@@ -87,9 +107,9 @@ fn banner_spec(
             }
             Some(BannerSpec {
                 text: if *restarted {
-                    RESTART_SENTENCE
+                    restart_sentence(*reattached)
                 } else {
-                    "reconnected"
+                    SharedString::from("reconnected")
                 },
                 countdown: None,
                 hints: &[],
@@ -241,20 +261,32 @@ mod tests {
     }
 
     #[test]
-    fn a_restart_must_say_the_sessions_are_gone() {
+    fn a_restart_must_say_what_became_of_the_terminals() {
         let now = Instant::now();
-        let restarted = DaemonLink::Reconnected {
+        let reconnected = |reattached| DaemonLink::Reconnected {
             restarted: true,
+            reattached,
             since: now,
         };
-        let spec =
-            banner_spec(&restarted, now, false, now).unwrap_or_else(|| panic!("expected a banner"));
-        assert_eq!(spec.text, RESTART_SENTENCE);
-        assert!(spec.text.contains("did not survive"));
+        let sentence = |reattached| {
+            banner_spec(&reconnected(reattached), now, false, now)
+                .unwrap_or_else(|| panic!("expected a banner"))
+                .text
+        };
+
+        // The promise is only made when it is true.
+        assert!(sentence(3).contains("3 terminals were reattached"));
+        assert!(sentence(1).contains("1 terminal was reattached"));
+        let none = sentence(0);
+        assert!(
+            none.contains("No terminals survived"),
+            "a restart that took the holders with it must not claim a reattach: {none}"
+        );
+        assert!(!none.contains("reattached"));
 
         // It stays for the full six seconds, not 800 ms.
-        assert!(banner_spec(&restarted, now, false, now + Duration::from_secs(5)).is_some());
-        assert!(banner_spec(&restarted, now, false, now + Duration::from_secs(7)).is_none());
+        assert!(banner_spec(&reconnected(3), now, false, now + Duration::from_secs(5)).is_some());
+        assert!(banner_spec(&reconnected(3), now, false, now + Duration::from_secs(7)).is_none());
     }
 
     #[test]
@@ -262,6 +294,7 @@ mod tests {
         let now = Instant::now();
         let warm = DaemonLink::Reconnected {
             restarted: false,
+            reattached: 2,
             since: now,
         };
         let spec =

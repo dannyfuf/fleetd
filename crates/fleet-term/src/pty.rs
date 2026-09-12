@@ -139,7 +139,7 @@ pub enum PtyError {
     },
 }
 
-enum ReaderMessage {
+pub(crate) enum ReaderMessage {
     Data(Vec<u8>),
     Error(String),
 }
@@ -154,7 +154,7 @@ struct OutputState {
 }
 
 #[derive(Default)]
-struct OutputQueue {
+pub(crate) struct OutputQueue {
     state: Mutex<OutputState>,
     space_available: Condvar,
     #[cfg(test)]
@@ -162,7 +162,7 @@ struct OutputQueue {
 }
 
 impl OutputQueue {
-    fn push(&self, message: ReaderMessage) -> bool {
+    pub(crate) fn push(&self, message: ReaderMessage) -> bool {
         let bytes = reader_message_bytes(&message);
         let mut state = self
             .state
@@ -191,7 +191,7 @@ impl OutputQueue {
         true
     }
 
-    fn pop(&self) -> Result<Option<Vec<u8>>, PtyError> {
+    pub(crate) fn pop(&self) -> Result<Option<Vec<u8>>, PtyError> {
         let mut state = self
             .state
             .lock()
@@ -209,7 +209,7 @@ impl OutputQueue {
         Ok(None)
     }
 
-    fn close(&self) {
+    pub(crate) fn close(&self) {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -217,7 +217,7 @@ impl OutputQueue {
         self.space_available.notify_all();
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -225,7 +225,7 @@ impl OutputQueue {
             .is_empty()
     }
 
-    fn is_closed_and_empty(&self) -> bool {
+    pub(crate) fn is_closed_and_empty(&self) -> bool {
         let state = self
             .state
             .lock()
@@ -248,7 +248,8 @@ impl OutputQueue {
     }
 }
 
-pub(super) struct PtyWritePermit {
+/// Reservation of queued-write budget released when the write completes.
+pub struct PtyWritePermit {
     queued_bytes: Arc<AtomicUsize>,
     bytes: usize,
 }
@@ -397,7 +398,6 @@ impl Pty {
         Self::spawn_inner(options, None)
     }
 
-    #[cfg(feature = "ghostty")]
     pub(crate) fn spawn_notifying(
         options: PtyOptions,
         notify: Arc<dyn Fn() + Send + Sync>,
@@ -506,6 +506,48 @@ impl Pty {
         self.child_pid
     }
 
+    /// Returns the window size the kernel currently holds for this PTY.
+    ///
+    /// The kernel, not a cached copy, is the authority: it is what the child reads with
+    /// `TIOCGWINSZ`, and it is what a reattaching daemon must build its emulator at.
+    pub fn window_size(&self) -> Result<(u16, u16), PtyError> {
+        let size = self
+            .master
+            .get_size()
+            .map_err(|error| PtyError::Setup(error.to_string()))?;
+        Ok((size.cols, size.rows))
+    }
+
+    /// Asks the terminal's foreground job to repaint, by signalling it as a resize would.
+    ///
+    /// A reattaching daemon starts with an empty screen and a replay of scrollback; a full-screen
+    /// TUI — `claude`, `nvim` — only repaints when something tells it to. Re-applying the same
+    /// window size does not, because the kernel raises `SIGWINCH` only on an actual change, so the
+    /// signal is delivered directly. It goes to the PTY's *foreground process group*, not to
+    /// `child_pid`: the login shell is the child, and the job the user is looking at is not.
+    #[cfg(unix)]
+    pub fn request_repaint(&self) -> Result<(), PtyError> {
+        let Some(master) = self.master.as_raw_fd() else {
+            return Err(PtyError::Setup(
+                "this PTY master exposes no descriptor to read its foreground group from"
+                    .to_owned(),
+            ));
+        };
+        // SAFETY: `tcgetpgrp` only reads the terminal's foreground group from a descriptor this
+        // struct owns and keeps open for its whole lifetime.
+        let group = unsafe { libc::tcgetpgrp(master) };
+        if group <= 0 {
+            return Err(PtyError::Io(io::Error::last_os_error()));
+        }
+        // SAFETY: `killpg` takes scalar arguments, and this group id came from this PTY's own
+        // kernel state a moment ago. `SIGWINCH` is ignored by default, so a job that does not
+        // repaint is unaffected.
+        if unsafe { libc::killpg(group, libc::SIGWINCH) } != 0 {
+            return Err(PtyError::Io(io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
     /// Polls the child without blocking, returning its exit code once complete.
     pub fn try_wait(&mut self) -> Result<Option<i32>, PtyError> {
         if self.exit_status.is_none() {
@@ -553,7 +595,6 @@ impl Pty {
         self.output.pop()
     }
 
-    #[cfg(feature = "ghostty")]
     pub(crate) fn has_output(&self) -> bool {
         !self.output.is_empty()
     }
@@ -568,6 +609,89 @@ impl Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         self.output.close();
+    }
+}
+
+/// The child-process side of a terminal host, owned either in-process or by a holder.
+///
+/// [`Pty`] owns the child directly; [`crate::holder::HolderPty`] relays the same operations to a
+/// detached holder process so the child outlives this one. Every method has the semantics
+/// documented on [`Pty`]'s inherent method of the same name.
+pub trait PtyBackend: Send {
+    /// Enqueues bytes for ordered delivery to the child.
+    fn write(&self, bytes: &[u8]) -> Result<(), PtyError>;
+
+    /// Enqueues bytes whose queue budget was already reserved by the caller.
+    fn write_permitted(&self, bytes: &[u8], permit: PtyWritePermit) -> Result<(), PtyError>;
+
+    /// Updates the child's kernel window size.
+    fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError>;
+
+    /// Returns the child process identifier when the platform exposes it.
+    fn child_pid(&self) -> Option<u32>;
+
+    /// Polls the child without blocking, returning its exit code once complete.
+    fn try_wait(&mut self) -> Result<Option<i32>, PtyError>;
+
+    /// Requests termination of the child process.
+    fn kill(&mut self) -> Result<(), PtyError>;
+
+    /// Releases this backend without terminating the child.
+    ///
+    /// A local PTY cannot outlive its owner, so its implementation terminates the child; a
+    /// holder-backed one closes the connection and leaves the child running.
+    fn detach(&mut self) -> Result<(), PtyError>;
+
+    /// Polls output forwarded by the backend's reader thread.
+    fn try_read(&self) -> Result<Option<Vec<u8>>, PtyError>;
+
+    /// Returns whether output is already queued for the next [`PtyBackend::try_read`].
+    fn has_output(&self) -> bool;
+
+    /// Returns whether the reader reached end of stream and all output has been drained.
+    fn output_closed(&self) -> bool;
+}
+
+impl PtyBackend for Pty {
+    fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        Pty::write(self, bytes)
+    }
+
+    fn write_permitted(&self, bytes: &[u8], permit: PtyWritePermit) -> Result<(), PtyError> {
+        Pty::write_permitted(self, bytes, permit)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
+        Pty::resize(self, cols, rows)
+    }
+
+    fn child_pid(&self) -> Option<u32> {
+        Pty::child_pid(self)
+    }
+
+    fn try_wait(&mut self) -> Result<Option<i32>, PtyError> {
+        Pty::try_wait(self)
+    }
+
+    fn kill(&mut self) -> Result<(), PtyError> {
+        Pty::kill(self)
+    }
+
+    /// A directly owned child dies with this process, so detaching it can only mean killing it.
+    fn detach(&mut self) -> Result<(), PtyError> {
+        Pty::kill(self)
+    }
+
+    fn try_read(&self) -> Result<Option<Vec<u8>>, PtyError> {
+        Pty::try_read(self)
+    }
+
+    fn has_output(&self) -> bool {
+        Pty::has_output(self)
+    }
+
+    fn output_closed(&self) -> bool {
+        Pty::output_closed(self)
     }
 }
 

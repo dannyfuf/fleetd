@@ -153,6 +153,12 @@ impl ConfigStore {
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+
+    /// Returns the Fleet home this store is rooted at.
+    #[must_use]
+    pub fn home(&self) -> &std::path::Path {
+        &self.home
+    }
 }
 
 /// Locks a store mutex, recovering the guard after a previous holder panicked.

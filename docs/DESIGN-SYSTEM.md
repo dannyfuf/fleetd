@@ -1035,10 +1035,12 @@ is false for it, so a view's hints keep their bare form.
 #### `Banner`
 **Purpose.** A 28 px full-width strip with a countdown and recovery keys.
 **API.** `Banner::{warning, danger}(text).icon(Icon).countdown(..).hints(KeyHintRow)`.
-**Usage rule.** After a daemon reconnect the banner must say, verbatim, *"fleetd restarted.
-Terminal sessions did not survive; worktrees, jobs and state are intact."* A warm "reconnected"
-banner that implies the agents came back is the single most damaging false reassurance in the
-app.
+**Usage rule.** After a daemon restart the banner must state what became of the terminals, from
+the first snapshot rather than from an assumption: *"fleetd restarted. `<n>` terminals were
+reattached; worktrees, jobs and state are intact."*, or *"fleetd restarted. No terminals survived;
+worktrees, jobs and state are intact."* A banner that leaves the user guessing whether the agent in
+each tab is still running — or that promises a reattach that did not happen — is the one thing this
+surface exists to prevent.
 
 #### `DaemonSplash`
 **Purpose.** The two **full-window** daemon surfaces of §3.12, cases A and B.

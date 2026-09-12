@@ -49,16 +49,28 @@ fleet daemon restart
 ```
 
 That command requests a graceful shutdown, falls back to `SIGTERM` when the daemon cannot answer,
-waits for its socket to disappear, and starts the newly built sibling `fleetd` binary. PTYs do not
-survive it, so an already-running `fleetd` keeps its terminal sessions only when the app is started
-without the restart: after `make build`, run the built binary directly
-(`FLEET_HOME=… FLEET_DAEMON=… ./target/debug/fleet`) or `cargo run -p fleet-app`.
+waits for its socket to disappear, and starts the newly built sibling `fleetd` binary. Terminals
+survive it: each PTY lives in a detached `fleetd pty-hold` process that the next daemon reattaches
+to (`docs/ARCHITECTURE.md`, "Detached PTY holders"), so restarting after a daemon change no longer
+kills the agents you have running. Only `ctrl-shift-q` stops them.
+
+A test that creates a PTY terminal must end its session: the terminal's child lives in a
+`fleetd pty-hold` process that deliberately outlives every daemon, so letting the test process
+exit leaves a login shell running. `crates/fleet-daemon/tests/infra` ends the holders of a Fleet
+home when its `DaemonProcess` is dropped, as a backstop rather than a substitute.
 
 `make test` and `make ci` build `fleetd` before running workspace tests because app
 integration tests launch the ordinary daemon binary. These targets set `FLEET_DAEMON`
 to that freshly built workspace binary, overriding inherited paths to other checkouts.
 `fleet-daemon`'s own tests ignore `FLEET_DAEMON` and always launch the binary Cargo built
 for them, so both halves of a loopback link are the same build.
+
+A daemon starts its PTY holders from its own executable, falling back to `FLEET_DAEMON` only when
+that executable is a test harness rather than `fleetd`. Suites that launch the real binary are
+therefore unaffected — a spawned `fleetd` resolves itself. The ones that need `FLEET_DAEMON` are
+the tests that build a `Sessions` **in process** and create a terminal from it:
+`cargo test -p fleet-daemon --lib` on its own cannot start a holder, while `make test` can because
+it exports the freshly built binary.
 `cargo test` alone builds its test
 harness and can leave an older `target/debug/fleetd` in place. Before running app tests
 directly, run `cargo build -p fleet-daemon`, then

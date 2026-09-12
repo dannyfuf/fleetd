@@ -12,6 +12,7 @@ use fleet_core::{
     agents::AttentionKind,
     config::{Agent, is_native_command},
     ids::{RepoId, SessionId, TerminalId, WorktreeId},
+    paths::FleetHome,
     sessions::{
         AgentActivity, Session, SessionKind, SessionState, Terminal, TerminalKind, TerminalStatus,
         WorktreeStatus, WorktreeWindowStatus, agent_session_id, aggregate_agent_activity,
@@ -22,7 +23,7 @@ use fleet_proto::{
     event::Event,
     terminal::{FrameUpdate, KeyEvent, MouseEvent, ScrollCommand, WheelEvent},
 };
-use fleet_term::{HostEvent, PtyOptions, TerminalHost, TerminalHostOptions};
+use fleet_term::{HolderTarget, HostEvent, PtySource, TerminalHost, TerminalHostOptions};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, broadcast};
 
 use crate::{
@@ -34,8 +35,11 @@ use crate::{
 };
 
 use super::agent_activity::AgentActivityTracker;
-use host_bridge::spawn_terminal;
+use holder::PtySidecar;
+use host_bridge::{TerminalSpawn, spawn_terminal};
 
+mod adoption;
+pub(crate) mod holder;
 mod host_bridge;
 mod lifecycle;
 mod observations;
@@ -134,6 +138,8 @@ impl Drop for EnsureLockClaim {
 pub struct Sessions {
     config: Arc<ConfigStore>,
     state: Arc<StateStore>,
+    /// Filesystem layout, for the `pty/` directory holders and their sidecars live in.
+    home: FleetHome,
     pub(super) runtime: Arc<SessionRuntime>,
 }
 
@@ -194,9 +200,12 @@ impl Sessions {
     pub fn new(config: Arc<ConfigStore>, state: Arc<StateStore>) -> Self {
         let (frames, _) = broadcast::channel(256);
         let runtime = Arc::new(SessionRuntime::new(frames));
+        // One source of truth for the layout: the store already knows the home it was rooted at.
+        let home = FleetHome::new(config.home().to_path_buf());
         Self {
             config,
             state,
+            home,
             runtime,
         }
     }

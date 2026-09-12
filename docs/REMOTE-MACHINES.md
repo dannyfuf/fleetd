@@ -179,6 +179,12 @@ mutation routes upstream, and only the owner's own `AgentSynchronized` moves a c
 `Mirror::fragment` stays the in-memory fallback for a host whose threads the database has not
 cached.
 
+Terminals are held per daemon, so a remote host's PTYs live in `fleetd pty-hold` processes on that
+host (`docs/ARCHITECTURE.md`, "Detached PTY holders"). Restarting or bootstrapping a remote daemon
+therefore keeps that host's terminals: the new daemon reattaches to them and the local daemon's
+`TerminalReattach` tells clients to attach again. A Down transition still triggers terminal-ended
+behaviour locally, because the link — not the terminal — is what ended.
+
 ## 8. Proxied degradation
 
 `fleet_core::sessions::default_terminals(config, agent, proxied)` replaces

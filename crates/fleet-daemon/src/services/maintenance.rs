@@ -120,12 +120,18 @@ impl Services {
     }
 
     /// Best-effort termination of all daemon-owned terminal sessions.
+    ///
+    /// Killing a session tells its holders to end their children; the wait afterwards is what
+    /// makes `DaemonShutdown { stop_sessions: true }` mean the terminals are actually gone rather
+    /// than merely asked to go. A plain SIGTERM, and `stop_sessions: false`, never come here: the
+    /// holders survive those, which is how `fleet daemon restart` keeps the user's terminals.
     pub async fn stop_all_sessions(&self) {
         for session in self.sessions.snapshot() {
             if let Err(error) = self.sessions.kill(session.id).await {
                 tracing::warn!(%error, "failed to stop session during daemon shutdown");
             }
         }
+        self.sessions.wait_for_holders_to_stop().await;
     }
 
     pub(super) async fn apply_agent_activity_transitions(

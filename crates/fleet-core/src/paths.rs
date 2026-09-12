@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     github::PrTab,
-    ids::{BoardId, RepoId, WorktreeId},
+    ids::{BoardId, RepoId, TerminalId, WorktreeId},
 };
 
 /// Prepared-copy freshness marker file name retained for swarm compatibility.
@@ -136,6 +136,91 @@ impl FleetHome {
     pub fn pid_path(&self) -> PathBuf {
         self.root.join("fleetd.pid")
     }
+    /// Returns the directory holding one socket and one sidecar per detached PTY holder.
+    #[must_use]
+    pub fn pty_dir(&self) -> PathBuf {
+        self.root.join("pty")
+    }
+    /// Returns a holder's sidecar path, the record a restarted daemon reattaches from.
+    #[must_use]
+    pub fn pty_sidecar_path(&self, terminal: TerminalId) -> PathBuf {
+        self.pty_dir().join(format!("{terminal}.json"))
+    }
+    /// Returns the log every detached PTY holder appends its own diagnostics to.
+    #[must_use]
+    pub fn pty_log_path(&self) -> PathBuf {
+        self.logs_dir().join("pty-hold.log")
+    }
+}
+
+/// Longest `sun_path` a Unix socket address can carry.
+///
+/// macOS caps `sockaddr_un.sun_path` at 104 bytes including the terminator and Linux at 108, so
+/// the smaller of the two is the portable budget and 100 leaves room for the terminator.
+const MAX_SOCKET_PATH_BYTES: usize = 100;
+
+/// Longest socket file name [`pty_socket_path`] produces: `<terminal>-<nonce>.sock`.
+///
+/// A `TerminalId` is a `u64`, so at most 20 digits; the nonce is 16 hexadecimal characters.
+const MAX_SOCKET_NAME_BYTES: usize = 20 + 1 + 16 + 5;
+
+/// Returns the directory a Fleet home's PTY holders bind their sockets in.
+///
+/// `<home>/pty` keeps every runtime file for a home in one place. When a name under it could
+/// exceed the platform's `sun_path` budget — a deep `TMPDIR` under test, or a Fleet home nested
+/// far down — sockets move to a private directory in the system temporary directory instead. The
+/// holder refuses to bind unless that directory is owned by this user with mode 0700, and the
+/// sidecar records the path that was chosen, so nothing downstream has to repeat this decision.
+#[must_use]
+pub fn pty_socket_dir(home: &FleetHome) -> PathBuf {
+    let preferred = home.pty_dir();
+    if preferred.as_os_str().len() + 1 + MAX_SOCKET_NAME_BYTES <= MAX_SOCKET_PATH_BYTES {
+        return preferred;
+    }
+    socket_fallback_dir(home)
+}
+
+/// Returns the private temporary directory a home's sockets fall back to.
+///
+/// `$TMPDIR` first, because that is where a user's runtime files belong; `/tmp` when even that is
+/// too deep for `sun_path`, which macOS's per-user `$TMPDIR` can be. Either way the holder binds
+/// only after checking the directory is owned by this user with mode 0700.
+fn socket_fallback_dir(home: &FleetHome) -> PathBuf {
+    let name = format!("fleet-pty-{:016x}", home_fingerprint(home.root()));
+    let preferred = std::env::temp_dir().join(&name);
+    if preferred.as_os_str().len() + 1 + MAX_SOCKET_NAME_BYTES <= MAX_SOCKET_PATH_BYTES {
+        return preferred;
+    }
+    PathBuf::from("/tmp").join(name)
+}
+
+/// Returns the socket path for one spawn of a terminal.
+///
+/// The nonce makes the name unique per spawn, not per terminal. Terminal identifiers are reused —
+/// `restart_terminal` keeps the id — and two holders must never share a pathname: a lingering
+/// predecessor would otherwise unlink its successor's socket on the way out, and a local attacker
+/// could pre-create a name it can predict.
+#[must_use]
+pub fn pty_socket_path(home: &FleetHome, terminal: TerminalId, nonce: &str) -> PathBuf {
+    pty_socket_dir(home).join(format!("{terminal}-{nonce}.sock"))
+}
+
+/// Returns the file-name prefix every socket of `terminal` shares.
+///
+/// The only way back to a holder whose sidecar is unreadable: its socket still carries its
+/// terminal identifier.
+#[must_use]
+pub fn pty_socket_prefix(terminal: TerminalId) -> String {
+    format!("{terminal}-")
+}
+
+/// Returns a stable, short digest of a Fleet home, used to keep fallback directories distinct.
+fn home_fingerprint(root: &Path) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    root.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Reason a Fleet home could not be resolved from its argument and the environment.
@@ -297,6 +382,11 @@ mod tests {
             PathBuf::from("/tmp/.fleet/agents/attachments")
         );
         assert_eq!(home.socket_path(), PathBuf::from("/tmp/.fleet/fleetd.sock"));
+        assert_eq!(home.pty_dir(), PathBuf::from("/tmp/.fleet/pty"));
+        assert_eq!(
+            home.pty_sidecar_path(TerminalId(7)),
+            PathBuf::from("/tmp/.fleet/pty/7.json")
+        );
         let repo = RepoId::try_from("acme/api").unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             home.pr_cache_path(&repo, PrTab::Review),
@@ -306,6 +396,57 @@ mod tests {
             clone_publish_marker_path("/tmp/repo"),
             PathBuf::from("/tmp/repo/.git/.fleet-clone-publish.json")
         );
+    }
+
+    #[test]
+    fn short_homes_keep_their_holder_socket_and_long_ones_fall_back() {
+        let home = FleetHome::new("/tmp/.fleet");
+        assert_eq!(pty_socket_dir(&home), PathBuf::from("/tmp/.fleet/pty"));
+        assert_eq!(
+            pty_socket_path(&home, TerminalId(7), "0123456789abcdef"),
+            PathBuf::from("/tmp/.fleet/pty/7-0123456789abcdef.sock")
+        );
+        assert!(
+            pty_socket_path(&home, TerminalId(7), "0123456789abcdef")
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&pty_socket_prefix(TerminalId(7))))
+        );
+
+        let deep = FleetHome::new(format!("/tmp/{}/fleet", "nested/".repeat(16)));
+        let fallback = pty_socket_dir(&deep);
+        assert!(
+            !fallback.starts_with(deep.root()),
+            "a home too deep for sun_path must not keep its sockets inside itself"
+        );
+        assert!(
+            fallback
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("fleet-pty-")),
+            "{} is not a private holder directory",
+            fallback.display()
+        );
+        assert_ne!(
+            fallback,
+            pty_socket_dir(&FleetHome::new("/tmp/other/fleet"))
+        );
+    }
+
+    #[test]
+    fn every_holder_socket_fits_the_portable_sun_path_budget() {
+        // The worst case a caller can reach: the longest identifier and the deepest home.
+        for home in [
+            FleetHome::new("/tmp/.fleet"),
+            FleetHome::new(format!("/tmp/{}/fleet", "nested/".repeat(16))),
+        ] {
+            let path = pty_socket_path(&home, TerminalId(u64::MAX), "0123456789abcdef");
+            assert!(
+                path.as_os_str().len() <= MAX_SOCKET_PATH_BYTES,
+                "{} exceeds the sun_path budget",
+                path.display()
+            );
+        }
     }
 
     #[test]
