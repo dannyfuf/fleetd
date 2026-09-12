@@ -252,6 +252,19 @@ fleetd binary, restarts the remote daemon, nudges the endpoint out of reconnect 
 a grown backoff, and probes until the link reports the matching build.
 Every step logs to the ordinary job log and cancellation stops before the next command.
 
+### Remote host prerequisites
+
+A remote host needs `git`, `cargo` and an OpenSSH server. `ps` is required: the daemon there
+builds its terminal process observations from it. `lsof` is **optional on Linux** and required
+nowhere: each daemon resolves its listening-port source once at first use — `lsof` when it is
+on `PATH`, otherwise Linux `/proc/net/tcp{,6}` joined to the socket inodes under
+`/proc/<pid>/fd`, which produces the same listeners without it. On a platform with neither,
+the daemon logs one warning naming the install command (`pacman -S lsof`, `apt install lsof`)
+and then observes no ports at all; it never repeats that error per tick. Degraded means only
+that keep-alive rules of kind `listeningPort` cannot match — process keep-alive rules, the
+foreground command, the recognized agent, and session sleep all keep working. macOS always
+takes the `lsof` path, because `lsof` ships with the OS.
+
 ## 10. Doctor and host status
 
 Host status reports id, provider, reachability, checked time, resolved address, link state, daemon

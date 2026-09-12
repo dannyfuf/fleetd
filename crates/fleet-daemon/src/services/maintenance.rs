@@ -170,6 +170,46 @@ fn pr_cache_retention(ttl: Duration) -> Duration {
     ttl.saturating_mul(PR_CACHE_RETENTION_MULTIPLIER)
 }
 
+/// Shortest gap between two warnings about the same unchanged failure on a periodic task.
+pub(super) const REPEATED_FAILURE_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Warns about a failure that a periodic task keeps hitting, without repeating itself.
+///
+/// The status tick runs every `ui.statusRefreshMs` — 2 s by default, 500 ms at the floor —
+/// so one permanently broken dependency, a missing `lsof` or an unreadable `ps`, becomes
+/// tens of thousands of identical lines a day. That is how a daemon log reaches tens of
+/// megabytes while saying one thing.
+///
+/// Suppression is keyed on the message, never on time alone: a *different* failure arriving
+/// inside the window is news and is warned about immediately.
+pub(super) struct RepeatedFailure {
+    message: &'static str,
+    last: Option<(String, tokio::time::Instant)>,
+}
+
+impl RepeatedFailure {
+    pub(super) const fn new(message: &'static str) -> Self {
+        Self {
+            message,
+            last: None,
+        }
+    }
+
+    pub(super) fn report(&mut self, error: &crate::DaemonError) {
+        let error = error.to_string();
+        let now = tokio::time::Instant::now();
+        let repeated = self.last.as_ref().is_some_and(|(previous, at)| {
+            previous == &error && now.duration_since(*at) < REPEATED_FAILURE_INTERVAL
+        });
+        if repeated {
+            tracing::debug!(%error, "{}", self.message);
+            return;
+        }
+        self.last = Some((error.clone(), now));
+        tracing::warn!(%error, "{}", self.message);
+    }
+}
+
 async fn run_status_refresh(
     services: Arc<Services>,
     events: BroadcastBus,
@@ -184,6 +224,8 @@ async fn run_status_refresh(
         }
     };
     let mut next = tokio::time::Instant::now();
+    let mut observation_failures =
+        RepeatedFailure::new("failed to refresh terminal process observations");
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
@@ -198,7 +240,7 @@ async fn run_status_refresh(
                 let every = duration_from_millis(config.ui.status_refresh_ms, 500);
                 next = tokio::time::Instant::now() + every;
                 if let Err(error) = services.sleep.refresh_observations().await {
-                    tracing::warn!(%error, "failed to refresh terminal process observations");
+                    observation_failures.report(&error);
                 }
                 events.request_snapshot(Arc::clone(&services));
             }
@@ -618,6 +660,32 @@ mod host_refresh_tests {
             .await
             .unwrap_or_else(|error| panic!("{error}"))
             .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    /// Regression: a devbox with no `lsof` logged the same refresh failure every two
+    /// seconds until `~/.fleet/logs` reached 39 MB.
+    #[tokio::test(start_paused = true)]
+    async fn an_unchanged_periodic_failure_warns_once_an_hour() {
+        let mut failures = RepeatedFailure::new("failed to refresh terminal process observations");
+        let missing_lsof =
+            crate::DaemonError::Process("lsof: No such file or directory".to_owned());
+
+        failures.report(&missing_lsof);
+        let first = failures.last.clone();
+        failures.report(&missing_lsof);
+        tokio::time::advance(Duration::from_secs(1_800)).await;
+        failures.report(&missing_lsof);
+        // Ticks inside the window neither warn again nor move the window.
+        assert_eq!(failures.last, first);
+
+        tokio::time::advance(REPEATED_FAILURE_INTERVAL).await;
+        failures.report(&missing_lsof);
+        assert_ne!(failures.last, first);
+
+        // A different failure is news and is reported immediately.
+        let stale = failures.last.clone();
+        failures.report(&crate::DaemonError::Process("ps exited 1".to_owned()));
+        assert_ne!(failures.last, stale);
     }
 
     #[test]

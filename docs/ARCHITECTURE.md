@@ -76,7 +76,14 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   re-read under the cross-process lock before quarantine.
 - **Adapters** (traits + real impls + fakes for tests): `Shell`, `Git`, `Github`, `Files`
   (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`, `Logs`.
-  Exact git/gh command lines are those in the inventory §7.
+  Exact git/gh command lines are those in the inventory §7. `Process` resolves its
+  listening-port source once per daemon: `lsof` when it is on `PATH`, otherwise Linux
+  `/proc/net/tcp{,6}` joined to `/proc/<pid>/fd` socket inodes, otherwise no ports at all with
+  one warning naming the install command. Ports are observed only when an enabled keep-alive
+  rule matches on them, and each pid's descriptor walk stops once that pid accounts for every
+  listening inode. A source that reports no ports is not an error:
+  observation refresh and sleep continue on the `ps` half, only port keep-alive rules go
+  unmatched, and a periodic failure is warned about at most once an hour.
 - **Machines**: `machines/` owns `MachineProvider`, provider construction, the Tailscale/OpenSSH
   transport, the advanced command transport, legacy probing, and one lazy `RemoteLink` endpoint
   per federated host. `fleetd connect` bridges stdin/stdout to the remote daemon's Unix socket;
@@ -112,7 +119,7 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   increment attachment membership. Sleep applies the
   swarm policy (keep-alive rules, `:qa` handshake, port detection), but sends editor shutdown input
   only when the candidate process group is the terminal's foreground group; "close window" = kill
-  that terminal.
+  that terminal. Sleep degrades rather than fails when ports cannot be observed.
   **Terminals survive a daemon restart**: every PTY lives in a detached holder process and is
   reattached by the next daemon (below).
 - **Native tabs (`kind: Native`)**. A `windows[].command` may be a reserved `fleet://` command

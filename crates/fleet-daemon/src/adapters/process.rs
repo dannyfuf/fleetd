@@ -1,6 +1,11 @@
 //! Process discovery, liveness, and port inspection.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 use async_trait::async_trait;
 
@@ -8,6 +13,21 @@ use crate::{
     DaemonError, DaemonResult,
     adapters::shell::{Shell, ShellCommand},
 };
+
+/// Where listening-port observations come from on this machine.
+///
+/// `lsof` ships with macOS but is not installed by default on Arch or a minimal Debian, and
+/// the observation refresh runs on every status tick — so the answer is resolved once and
+/// reused rather than rediscovered (and re-logged) a few dozen times a minute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListeningPortSource {
+    /// `lsof` is installed and reports the listeners of the requested pids.
+    Lsof,
+    /// Linux `/proc` is read directly because `lsof` is not installed.
+    ProcFs,
+    /// Neither is available, so listening ports are not observed at all.
+    Unavailable,
+}
 
 /// One row from the system process table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,18 +83,128 @@ pub trait Process: Send + Sync {
     fn is_alive(&self, pid: u32) -> bool;
 }
 
-/// Process observations from `ps` and `lsof`.
+/// Process observations from `ps`, and listening ports from `lsof` or Linux `/proc`.
 #[derive(Clone)]
 pub struct RealProcess {
     shell: Arc<dyn Shell>,
+    listening_port_source: OnceLock<ListeningPortSource>,
 }
 
 impl RealProcess {
     /// Creates a process adapter backed by `shell`.
     #[must_use]
     pub fn new(shell: Arc<dyn Shell>) -> Self {
-        Self { shell }
+        Self {
+            shell,
+            listening_port_source: OnceLock::new(),
+        }
     }
+
+    /// Creates an adapter whose port source is fixed, so a test states which path it exercises.
+    #[cfg(test)]
+    fn with_listening_port_source(shell: Arc<dyn Shell>, source: ListeningPortSource) -> Self {
+        Self {
+            shell,
+            listening_port_source: OnceLock::from(source),
+        }
+    }
+
+    /// Resolves — once per adapter — how listening ports can be observed here.
+    ///
+    /// The probe stats `PATH` and `/proc`, so it runs on the blocking pool rather than
+    /// stalling a tokio worker. A join failure is not cached: the next call retries instead
+    /// of permanently disabling port observation over one panicked task.
+    async fn listening_port_source(&self) -> ListeningPortSource {
+        if let Some(source) = self.listening_port_source.get() {
+            return *source;
+        }
+        let resolved = match tokio::task::spawn_blocking(resolve_listening_port_source).await {
+            Ok(source) => source,
+            Err(error) => {
+                tracing::warn!(%error, "listening-port source probe failed");
+                return ListeningPortSource::Unavailable;
+            }
+        };
+        // Whoever stores the value reports it, so concurrent first calls log once between them.
+        if self.listening_port_source.set(resolved).is_ok() {
+            report_listening_port_source(resolved);
+        }
+        self.listening_port_source
+            .get()
+            .copied()
+            .unwrap_or(resolved)
+    }
+
+    async fn lsof_listening_ports(&self, pids: &str) -> DaemonResult<Vec<ListeningPort>> {
+        let result = self
+            .shell
+            .run(ShellCommand::new("lsof").args([
+                "-nP",
+                "-iTCP",
+                "-sTCP:LISTEN",
+                "-a",
+                "-p",
+                pids,
+                "-F",
+                "pn",
+            ]))
+            .await?;
+        // `lsof` exits 1 when nothing matches, which is an empty answer and not a failure.
+        if !result.success() && result.status != 1 {
+            return Err(DaemonError::Process(format!(
+                "lsof exited {}: {}",
+                result.status,
+                result.stderr.trim()
+            )));
+        }
+        Ok(parse_lsof(&result.stdout))
+    }
+}
+
+/// Picks the listening-port source. Blocking: stats `PATH` entries and `/proc`.
+fn resolve_listening_port_source() -> ListeningPortSource {
+    if binary_on_path("lsof") {
+        return ListeningPortSource::Lsof;
+    }
+    if cfg!(target_os = "linux") && Path::new("/proc/net/tcp").exists() {
+        return ListeningPortSource::ProcFs;
+    }
+    ListeningPortSource::Unavailable
+}
+
+/// States the consequence of the chosen source exactly once per adapter.
+///
+/// Reporting here, at the moment the answer is stored, is what keeps a missing `lsof` to one
+/// line: letting the refresh fail and the caller log it is what filled a devbox log with the
+/// same `lsof: No such file or directory` message on every tick, around the clock.
+fn report_listening_port_source(source: ListeningPortSource) {
+    match source {
+        ListeningPortSource::Lsof => {}
+        ListeningPortSource::ProcFs => {
+            tracing::debug!("lsof is not installed; reading listening ports from /proc instead");
+        }
+        ListeningPortSource::Unavailable => tracing::warn!(
+            "lsof is not installed and /proc is unavailable; listening-port keep-alive rules \
+             are disabled while process rules keep working. Install lsof to restore them \
+             (`pacman -S lsof`, `apt install lsof`)."
+        ),
+    }
+}
+
+/// Returns whether an executable of this name exists on `PATH`.
+fn binary_on_path(binary: &str) -> bool {
+    binary_in_search_path(binary, std::env::var_os("PATH").as_deref())
+}
+
+/// Returns whether an executable of this name exists in an explicit search path.
+fn binary_in_search_path(binary: &str, search_path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(search_path) = search_path else {
+        return false;
+    };
+    std::env::split_paths(search_path).any(|directory| {
+        std::fs::metadata(directory.join(binary))
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    })
 }
 
 #[async_trait]
@@ -103,32 +233,26 @@ impl Process for RealProcess {
         if pids.is_empty() {
             return Ok(Vec::new());
         }
-        let joined = pids
-            .iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let result = self
-            .shell
-            .run(ShellCommand::new("lsof").args([
-                "-nP",
-                "-iTCP",
-                "-sTCP:LISTEN",
-                "-a",
-                "-p",
-                &joined,
-                "-F",
-                "pn",
-            ]))
-            .await?;
-        if !result.success() && result.status != 1 {
-            return Err(DaemonError::Process(format!(
-                "lsof exited {}: {}",
-                result.status,
-                result.stderr.trim()
-            )));
+        match self.listening_port_source().await {
+            ListeningPortSource::Lsof => {
+                let joined = pids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                self.lsof_listening_ports(&joined).await
+            }
+            ListeningPortSource::ProcFs => {
+                let pids = pids.to_vec();
+                // Reading a few dozen `/proc/<pid>/fd` directories is blocking filesystem work.
+                tokio::task::spawn_blocking(move || {
+                    listening_ports_from_proc(Path::new("/proc"), &pids)
+                })
+                .await
+                .map_err(|error| DaemonError::Process(format!("/proc scan failed: {error}")))
+            }
+            ListeningPortSource::Unavailable => Ok(Vec::new()),
         }
-        Ok(parse_lsof(&result.stdout))
     }
 
     async fn environment(&self, pid: u32) -> DaemonResult<Vec<(String, String)>> {
@@ -305,6 +429,90 @@ fn take_process_field<'a>(remaining: &mut &'a str) -> Option<&'a str> {
     Some(field)
 }
 
+/// Resolves the TCP listeners of `pids` from a `/proc` tree, the way `lsof` would.
+///
+/// `proc_root` is a parameter so the whole walk is exercised against a fixture tree; tests
+/// never read the machine's real `/proc`.
+fn listening_ports_from_proc(proc_root: &Path, pids: &[u32]) -> Vec<ListeningPort> {
+    let mut inode_ports = BTreeMap::new();
+    for table in ["net/tcp", "net/tcp6"] {
+        // A kernel without IPv6 has no `net/tcp6`; an unreadable table is simply no answer.
+        if let Ok(contents) = std::fs::read_to_string(proc_root.join(table)) {
+            parse_proc_net_tcp(&contents, &mut inode_ports);
+        }
+    }
+    if inode_ports.is_empty() {
+        return Vec::new();
+    }
+    let mut ports = BTreeSet::new();
+    for pid in pids {
+        // A process that exited between the snapshot and this walk has no directory left.
+        let Ok(entries) = std::fs::read_dir(proc_root.join(pid.to_string()).join("fd")) else {
+            continue;
+        };
+        let mut matched = BTreeSet::new();
+        for entry in entries.flatten() {
+            // One readlink per descriptor, and a busy process can hold thousands. A pid
+            // cannot own more listeners than the machine has, so once this one accounts for
+            // all of them the rest of its table cannot change the answer. The bound is
+            // per-pid on purpose: a socket shared with another process must still be found
+            // on that process too.
+            if matched.len() == inode_ports.len() {
+                break;
+            }
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                continue;
+            };
+            if let Some(inode) = socket_inode(&target.to_string_lossy())
+                && let Some(port) = inode_ports.get(&inode)
+            {
+                matched.insert(inode);
+                ports.insert(ListeningPort {
+                    pid: *pid,
+                    port: *port,
+                });
+            }
+        }
+    }
+    ports.into_iter().collect()
+}
+
+/// Collects the inode and local port of every listening socket in one `/proc/net/tcp` table.
+///
+/// Columns are `sl local_address rem_address st … inode`; `st` is `0A` for `TCP_LISTEN`, and
+/// the local address is `<hex address>:<hex port>`.
+fn parse_proc_net_tcp(contents: &str, ports: &mut BTreeMap<u64, u16>) {
+    for line in contents.lines().skip(1) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let (Some(local), Some(state), Some(inode)) = (fields.get(1), fields.get(3), fields.get(9))
+        else {
+            continue;
+        };
+        if *state != "0A" {
+            continue;
+        }
+        let (Some(port), Ok(inode)) = (
+            local
+                .rsplit(':')
+                .next()
+                .and_then(|port| u16::from_str_radix(port, 16).ok()),
+            inode.parse::<u64>(),
+        ) else {
+            continue;
+        };
+        ports.insert(inode, port);
+    }
+}
+
+/// Reads the inode out of a `socket:[12345]` file-descriptor link target.
+fn socket_inode(target: &str) -> Option<u64> {
+    target
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
 fn parse_lsof(output: &str) -> Vec<ListeningPort> {
     let mut pid = None;
     let mut ports = BTreeSet::new();
@@ -354,7 +562,7 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let process = RealProcess::new(shell);
+        let process = RealProcess::with_listening_port_source(shell, ListeningPortSource::Lsof);
         assert_eq!(
             process
                 .snapshot()
@@ -390,6 +598,161 @@ mod tests {
                 }
             ]
         );
+    }
+
+    /// A `/proc/net/tcp` table as Linux prints it: a header, one listener, one established
+    /// connection that must not be reported, and an IPv6-shaped row in the companion table.
+    const PROC_NET_TCP: &str = concat!(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4210 1 0000 100 0 0 10 0\n",
+        "   1: 0100007F:8080 0100007F:C1B4 01 00000000:00000000 00:00000000 00000000  1000        0 4211 1 0000 100 0 0 10 0\n",
+    );
+    const PROC_NET_TCP6: &str = concat!(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        "   0: 00000000000000000000000000000000:0FA0 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4212 1 0000 100 0 0 10 0\n",
+    );
+
+    #[test]
+    fn proc_net_tcp_yields_only_listening_sockets_with_their_inode() {
+        let mut ports = BTreeMap::new();
+        parse_proc_net_tcp(PROC_NET_TCP, &mut ports);
+        parse_proc_net_tcp(PROC_NET_TCP6, &mut ports);
+
+        assert_eq!(ports.get(&4210).copied(), Some(8080));
+        assert_eq!(ports.get(&4212).copied(), Some(4000));
+        // An established connection is not a listener, however inviting its port looks.
+        assert_eq!(ports.get(&4211), None);
+        // A truncated or header-only table contributes nothing rather than panicking.
+        let mut empty = BTreeMap::new();
+        parse_proc_net_tcp("sl local_address\n   0: 0100007F\n", &mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn socket_inodes_are_read_only_from_socket_links() {
+        assert_eq!(socket_inode("socket:[4210]"), Some(4210));
+        assert_eq!(socket_inode("/dev/pts/3"), None);
+        assert_eq!(socket_inode("socket:[not-a-number]"), None);
+    }
+
+    #[test]
+    fn proc_fallback_reports_the_same_listeners_lsof_would() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("net")).unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(root.join("net/tcp"), PROC_NET_TCP)
+            .unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(root.join("net/tcp6"), PROC_NET_TCP6)
+            .unwrap_or_else(|error| panic!("{error}"));
+        for (pid, links) in [
+            (11_u32, vec![("0", "/dev/pts/3"), ("3", "socket:[4210]")]),
+            (12_u32, vec![("4", "socket:[4212]"), ("5", "socket:[4211]")]),
+        ] {
+            let fd = root.join(pid.to_string()).join("fd");
+            std::fs::create_dir_all(&fd).unwrap_or_else(|error| panic!("{error}"));
+            for (name, target) in links {
+                std::os::unix::fs::symlink(target, fd.join(name))
+                    .unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
+
+        assert_eq!(
+            listening_ports_from_proc(root, &[11, 12, 99]),
+            vec![
+                ListeningPort {
+                    pid: 11,
+                    port: 8080
+                },
+                ListeningPort {
+                    pid: 12,
+                    port: 4000
+                }
+            ]
+        );
+    }
+
+    /// The per-pid descriptor walk stops once a pid accounts for every listening inode. That
+    /// bound must stay per-pid: a socket a server shares with its forked workers is held by
+    /// all of them, and attributing it to whichever was scanned first would silently drop a
+    /// keep-alive match for the others.
+    #[test]
+    fn a_socket_shared_between_processes_is_reported_for_each_of_them() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("net")).unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(root.join("net/tcp"), PROC_NET_TCP)
+            .unwrap_or_else(|error| panic!("{error}"));
+        for pid in [21_u32, 22] {
+            let fd = root.join(pid.to_string()).join("fd");
+            std::fs::create_dir_all(&fd).unwrap_or_else(|error| panic!("{error}"));
+            std::os::unix::fs::symlink("socket:[4210]", fd.join("3"))
+                .unwrap_or_else(|error| panic!("{error}"));
+            // Descriptors past the match exist only to be skipped by the short circuit.
+            for extra in 4..64 {
+                std::os::unix::fs::symlink("/dev/null", fd.join(extra.to_string()))
+                    .unwrap_or_else(|error| panic!("{error}"));
+            }
+        }
+
+        assert_eq!(
+            listening_ports_from_proc(root, &[21, 22]),
+            vec![
+                ListeningPort {
+                    pid: 21,
+                    port: 8080
+                },
+                ListeningPort {
+                    pid: 22,
+                    port: 8080
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_machine_without_lsof_reports_no_ports_instead_of_failing_every_tick() {
+        let shell = Arc::new(FakeShell::new());
+        let process = RealProcess::with_listening_port_source(
+            shell.clone(),
+            ListeningPortSource::Unavailable,
+        );
+
+        assert_eq!(
+            process
+                .listening_ports(&[11, 12])
+                .await
+                .unwrap_or_else(|error| panic!("{error}")),
+            Vec::new()
+        );
+        // The missing binary is reported once, when the source is resolved, and never again
+        // from the refresh path — so nothing is spawned here at all.
+        assert_eq!(shell.calls().len(), 0);
+        assert_eq!(
+            process.listening_port_source().await,
+            ListeningPortSource::Unavailable
+        );
+    }
+
+    #[test]
+    fn path_lookup_accepts_only_executable_files() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        std::fs::write(temp.path().join("fleet-not-executable"), b"")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let executable = temp.path().join("fleet-executable");
+        std::fs::write(&executable, b"").unwrap_or_else(|error| panic!("{error}"));
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let search_path = temp.path().as_os_str();
+
+        assert!(binary_in_search_path("fleet-executable", Some(search_path)));
+        // A same-named data file is not the tool; treating it as one would make the adapter
+        // shell out to something that cannot run.
+        assert!(!binary_in_search_path(
+            "fleet-not-executable",
+            Some(search_path)
+        ));
+        assert!(!binary_in_search_path("fleet-absent", Some(search_path)));
+        assert!(!binary_in_search_path("fleet-executable", None));
     }
 
     #[test]
