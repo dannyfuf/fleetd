@@ -57,11 +57,21 @@ impl FileIdentity {
     }
 }
 
+/// Number of `flock` retries while a dead daemon's descriptor is still closing.
+const STALE_LOCK_ATTEMPTS: u32 = 5;
+/// Pause between those retries.
+const STALE_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(40);
+
 /// Lifetime ownership of the daemon PID file and socket pathname.
 pub struct SingletonGuard {
     _pid_file: File,
     pid_path: PathBuf,
     pid_identity: FileIdentity,
+    /// This daemon's own process id, as written into the PID file.
+    ///
+    /// A daemon that died without unwinding leaves its successor reusing the *same* PID file
+    /// inode, so identity alone cannot tell the two apart. The recorded pid can.
+    pid: u32,
     socket_path: PathBuf,
     socket_identity: Option<FileIdentity>,
 }
@@ -82,17 +92,7 @@ impl SingletonGuard {
             .truncate(false)
             .open(&pid_path)
             .map_err(|error| DaemonError::fs(&pid_path, error))?;
-        // SAFETY: flock operates on this guard's valid, open descriptor and is released when the
-        // descriptor is dropped. LOCK_NB prevents startup from waiting behind the active daemon.
-        if unsafe { libc::flock(pid_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EWOULDBLOCK)
-                || error.raw_os_error() == Some(libc::EAGAIN)
-            {
-                return Err(already_running(&socket_path));
-            }
-            return Err(DaemonError::fs(&pid_path, error));
-        }
+        acquire_lock(&pid_file, &pid_path, &socket_path).await?;
         // The lock is authoritative for current daemons. The socket probe also protects a daemon
         // from an older release that created the PID file without holding this lock.
         if UnixStream::connect(&socket_path).await.is_ok() {
@@ -110,6 +110,7 @@ impl SingletonGuard {
             _pid_file: pid_file,
             pid_path,
             pid_identity,
+            pid: std::process::id(),
             socket_path,
             socket_identity: None,
         })
@@ -117,10 +118,76 @@ impl SingletonGuard {
 }
 
 impl Drop for SingletonGuard {
+    /// Removes only the files this daemon still owns.
+    ///
+    /// A daemon that dies without unwinding leaves its PID file behind; the next daemon opens the
+    /// *same inode*, truncates it and writes its own pid, so an inode check alone would let this
+    /// guard delete the live daemon's files. The recorded pid is the discriminator: two `fleetd
+    /// started` lines with no `fleetd stopped` between them is exactly that race.
     fn drop(&mut self) {
+        if !pid_file_records(&self.pid_path, self.pid) {
+            tracing::warn!(
+                path = %self.pid_path.display(),
+                pid = self.pid,
+                "leaving daemon runtime files that now belong to another daemon"
+            );
+            return;
+        }
         remove_if_owned(&self.socket_path, self.socket_identity);
         remove_if_owned(&self.pid_path, Some(self.pid_identity));
     }
+}
+
+/// Takes the exclusive PID-file lock, reclaiming it from a daemon that is provably gone.
+///
+/// `flock` is released by the kernel when its holder dies, so a blocked lock normally means a live
+/// daemon. The retries cover the window where the previous daemon's descriptor is still closing,
+/// and the takeover is refused unless both the recorded pid is dead and the socket answers nobody.
+async fn acquire_lock(pid_file: &File, pid_path: &Path, socket_path: &Path) -> DaemonResult<()> {
+    for attempt in 0..STALE_LOCK_ATTEMPTS {
+        // SAFETY: flock operates on this guard's valid, open descriptor and is released when the
+        // descriptor is dropped. LOCK_NB prevents startup from waiting behind the active daemon.
+        if unsafe { libc::flock(pid_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            if attempt > 0 {
+                tracing::warn!(
+                    path = %pid_path.display(),
+                    "reclaimed the lock of a daemon that stopped without cleaning up"
+                );
+            }
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // `EAGAIN` and `EWOULDBLOCK` are the same value on both supported platforms.
+        if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            return Err(DaemonError::fs(pid_path, error));
+        }
+        if !lock_looks_stale(pid_path, socket_path).await {
+            return Err(already_running(socket_path));
+        }
+        tokio::time::sleep(STALE_LOCK_RETRY).await;
+    }
+    Err(already_running(socket_path))
+}
+
+/// Whether a held lock may belong to a daemon that is already gone.
+async fn lock_looks_stale(pid_path: &Path, socket_path: &Path) -> bool {
+    if UnixStream::connect(socket_path).await.is_ok() {
+        return false;
+    }
+    match read_pid(pid_path) {
+        // No recorded pid to disprove liveness: assume the holder is real.
+        None => false,
+        Some(pid) => !crate::adapters::process::pid_is_alive(pid),
+    }
+}
+
+/// Whether the PID file still records `pid`.
+fn pid_file_records(path: &Path, pid: u32) -> bool {
+    read_pid(path) == Some(pid)
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 impl Listener {
@@ -428,6 +495,57 @@ mod tests {
         assert!(!accept_error_exhausted_resources(
             &std::io::Error::from_raw_os_error(libc::ECONNABORTED)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_guard_leaves_pid_and_socket_files_that_now_belong_to_another_daemon() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let home = temp.path().join("fleet");
+        let layout = FleetHome::new(&home);
+        let guard = SingletonGuard::acquire(&home)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(pid_file_records(&layout.pid_path(), std::process::id()));
+
+        // A successor that reused the same inode, exactly as `OpenOptions::create` does.
+        std::fs::write(layout.pid_path(), "999999\n").unwrap_or_else(|error| panic!("{error}"));
+        drop(guard);
+        assert!(
+            layout.pid_path().exists(),
+            "a retiring guard deleted the live daemon's pid file"
+        );
+
+        // The ordinary case still cleans up after itself.
+        let guard = SingletonGuard::acquire(&home)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        drop(guard);
+        assert!(!layout.pid_path().exists());
+    }
+
+    #[tokio::test]
+    async fn a_live_daemon_keeps_its_lock_and_a_dead_one_loses_it() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let home = temp.path().join("fleet");
+        let layout = FleetHome::new(&home);
+        let guard = SingletonGuard::acquire(&home)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        // A second daemon must not take a lock whose recorded pid is alive.
+        assert!(!lock_looks_stale(&layout.pid_path(), &layout.socket_path()).await);
+        assert!(matches!(
+            SingletonGuard::acquire(&home).await,
+            Err(DaemonError::Conflict(_))
+        ));
+
+        // A record naming a process that no longer exists is reclaimable.
+        std::fs::write(layout.pid_path(), "0\n").unwrap_or_else(|error| panic!("{error}"));
+        assert!(lock_looks_stale(&layout.pid_path(), &layout.socket_path()).await);
+        // An unreadable record proves nothing, so the holder is believed.
+        std::fs::write(layout.pid_path(), "not-a-pid\n").unwrap_or_else(|error| panic!("{error}"));
+        assert!(!lock_looks_stale(&layout.pid_path(), &layout.socket_path()).await);
+        drop(guard);
     }
 
     #[test]

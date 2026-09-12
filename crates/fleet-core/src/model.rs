@@ -160,8 +160,12 @@ pub enum HostConfigEntry {
         node: String,
         /// Optional remote user.
         user: Option<String>,
-        /// Additional OpenSSH options.
+        /// Additional OpenSSH options, applied ahead of Fleet's own defaults.
         ssh_options: Vec<String>,
+        /// Private key this host authenticates with; `~` is expanded.
+        identity_file: Option<String>,
+        /// SSH destination dialed instead of the resolved Tailscale address.
+        ssh_host: Option<String>,
         /// Remote Fleet daemon executable.
         fleetd: String,
         /// Remote Fleet home, defaulting to `~/.fleet`.
@@ -208,6 +212,14 @@ enum TaggedHostConfigEntry {
         user: Option<String>,
         #[serde(default, rename = "sshOptions")]
         ssh_options: Vec<String>,
+        #[serde(
+            default,
+            rename = "identityFile",
+            skip_serializing_if = "Option::is_none"
+        )]
+        identity_file: Option<String>,
+        #[serde(default, rename = "sshHost", skip_serializing_if = "Option::is_none")]
+        ssh_host: Option<String>,
         #[serde(default = "default_fleetd")]
         fleetd: String,
         #[serde(default = "default_fleet_home", rename = "fleetHome")]
@@ -249,12 +261,16 @@ impl Serialize for HostConfigEntry {
                 node,
                 user,
                 ssh_options,
+                identity_file,
+                ssh_host,
                 fleetd,
                 fleet_home,
             } => TaggedHostConfigEntry::Tailscale {
                 node: node.clone(),
                 user: user.clone(),
                 ssh_options: ssh_options.clone(),
+                identity_file: identity_file.clone(),
+                ssh_host: ssh_host.clone(),
                 fleetd: fleetd.clone(),
                 fleet_home: fleet_home.clone(),
             }
@@ -290,12 +306,16 @@ impl<'de> Deserialize<'de> for HostConfigEntry {
                 node,
                 user,
                 ssh_options,
+                identity_file,
+                ssh_host,
                 fleetd,
                 fleet_home,
             }) => Self::Tailscale {
                 node,
                 user,
                 ssh_options,
+                identity_file,
+                ssh_host,
                 fleetd,
                 fleet_home,
             },

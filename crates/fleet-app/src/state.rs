@@ -61,7 +61,7 @@ const TOAST_COALESCE_WINDOW: Duration = Duration::from_millis(fleet_ui_kit::COAL
 const MAX_TOASTS: usize = fleet_ui_kit::ToastStack::MAX;
 /// How long a `Starting fleetd…` splash waits before it appends the socket path (§3.12 A).
 pub const SPLASH_DETAIL_DELAY: Duration = Duration::from_secs(3);
-/// How long the mandatory "terminal sessions did not survive" banner stays up (§3.12).
+/// How long the mandatory "fleetd restarted" banner stays up (§3.12).
 pub const RESTART_BANNER_DWELL: Duration = Duration::from_secs(6);
 /// How long a plain "reconnected" banner stays up (§3.12).
 pub const RECONNECT_BANNER_DWELL: Duration = Duration::from_millis(800);

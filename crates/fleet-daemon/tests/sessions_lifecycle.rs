@@ -787,6 +787,9 @@ fn run_isolated_child(name: &str) -> Result<(), String> {
     )
     .args(["--exact", name, "--nocapture"])
     .env_clear()
+    // The child's own executable is this test harness, so it cannot find `fleetd` on its own;
+    // every terminal it creates needs a holder started from the binary this suite was built with.
+    .env("FLEET_DAEMON", env!("CARGO_BIN_EXE_fleetd"))
     .env("FLEET_SESSION_TEST", name)
     .env("FLEET_TEST_PTY_ENV_CHILD", "1")
     .env("SHELL", "/bin/sh")

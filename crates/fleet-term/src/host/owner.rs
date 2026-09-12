@@ -20,7 +20,7 @@ use super::{
 use crate::{
     GhosttyEngine,
     engine::{EngineError, EngineEvent, VtEngine, WheelAction},
-    pty::{Pty, PtyError},
+    pty::{PtyBackend, PtyError},
 };
 
 mod commands;
@@ -74,7 +74,7 @@ impl PtyWakeup {
 
 pub(super) struct TerminalOwner {
     terminal: TerminalId,
-    pty: Pty,
+    pty: Box<dyn PtyBackend>,
     engine: GhosttyEngine,
     inbox: mpsc::Receiver<OwnerEvent>,
     events: Sender<HostEvent>,
@@ -103,7 +103,7 @@ pub(super) struct TerminalOwner {
 impl TerminalOwner {
     pub(super) fn new(
         terminal: TerminalId,
-        pty: Pty,
+        pty: Box<dyn PtyBackend>,
         engine: GhosttyEngine,
         inbox: mpsc::Receiver<OwnerEvent>,
         events: Sender<HostEvent>,
@@ -156,7 +156,9 @@ impl TerminalOwner {
                 break;
             }
             if self.commands_closed {
-                self.kill();
+                // The daemon released this terminal. A holder-backed child must survive that —
+                // only an explicit `HostCommand::Kill` ends one.
+                self.detach();
                 break;
             }
             // A full output batch leaves work queued, even if its readiness was coalesced.
@@ -473,12 +475,19 @@ impl TerminalOwner {
             tracing::warn!(%error, terminal = %self.terminal, "failed to kill terminal child");
         }
     }
+
+    /// Releases the backend without ending a child that can outlive this daemon.
+    fn detach(&mut self) {
+        if let Err(error) = self.pty.detach() {
+            tracing::warn!(%error, terminal = %self.terminal, "failed to detach terminal child");
+        }
+    }
 }
 
 impl Drop for TerminalOwner {
     fn drop(&mut self) {
         if self.exit.is_none() {
-            self.kill();
+            self.detach();
         }
     }
 }

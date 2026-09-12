@@ -19,6 +19,7 @@ use crate::{
     DaemonError, DaemonResult,
     adapters::process::{ListeningPort, Process, ProcessInfo},
     error::remote_unsupported,
+    services::maintenance::RepeatedFailure,
     services::sessions::{SessionRuntime, Sessions},
     stores::{config::ConfigStore, state::StateStore},
 };
@@ -145,7 +146,7 @@ pub(crate) async fn apply_session(
     }
 
     let sessions = std::slice::from_ref(&session);
-    let observations = observe_sessions(sessions, process).await?;
+    let observations = observe_sessions(sessions, process, policy.ports_enabled()).await?;
     let keep_alive = publish_observations(runtime, &policy, sessions, &observations);
 
     let mut kept = Vec::new();
@@ -345,9 +346,12 @@ impl Observation {
     }
 }
 
+/// Builds one observation per terminal: the shell's descendants, their command lines, and —
+/// only when a keep-alive rule can consume them — the ports those processes listen on.
 async fn observe_sessions(
     sessions: &[Session],
     process: &dyn Process,
+    observe_ports: bool,
 ) -> DaemonResult<HashMap<TerminalId, Observation>> {
     let snapshot = process.snapshot().await?;
     let mut children = HashMap::<u32, Vec<usize>>::new();
@@ -373,8 +377,24 @@ async fn observe_sessions(
         }
         observations.insert(terminal.id, observation);
     }
+    if !observe_ports {
+        // No enabled rule matches on ports, so nothing can consume the answer and the whole
+        // query — an `lsof` process, or a readlink over every descendant's file descriptors —
+        // would be work done on every status tick for a result no one reads.
+        return Ok(observations);
+    }
     let pids = all_pids.into_iter().collect::<Vec<_>>();
-    let ports = process.listening_ports(&pids).await?;
+    // Ports are the optional half of an observation: without them the port keep-alive rules
+    // go unmatched, but the process rules, the foreground command and the editor handling all
+    // still work. Failing the whole observation instead is what made session sleep unusable
+    // on a host with no `lsof`.
+    let ports = match process.listening_ports(&pids).await {
+        Ok(ports) => ports,
+        Err(error) => {
+            warn_ports_unavailable(&error);
+            Vec::new()
+        }
+    };
     for port in ports {
         for observation in observations.values_mut() {
             if observation
@@ -388,6 +408,31 @@ async fn observe_sessions(
         }
     }
     Ok(observations)
+}
+
+/// Warns that listening ports could not be observed, without repeating itself.
+///
+/// Reuses the maintenance loop's keyed limiter rather than suppressing on time alone: a
+/// *different* failure arriving inside the hour is news and must not be demoted to debug
+/// just because an earlier one was noisy.
+///
+/// The state is module-level because the two call paths cannot share an owner —
+/// [`apply_session`] is a free function that `services/sessions/lifecycle.rs` calls without
+/// a [`Sleep`], while [`refresh_observations`] goes through one. A daemon has exactly one
+/// observation pipeline, so one limiter is the right granularity in production; the cost is
+/// that a test asserting on this warning would see another test's state, and none do.
+fn warn_ports_unavailable(error: &DaemonError) {
+    static PORTS_WARNING: std::sync::LazyLock<std::sync::Mutex<RepeatedFailure>> =
+        std::sync::LazyLock::new(|| {
+            std::sync::Mutex::new(RepeatedFailure::new(
+                "listening-port observation unavailable; port keep-alive rules cannot match \
+                 until it recovers",
+            ))
+        });
+    PORTS_WARNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .report(error);
 }
 
 fn descendants_from_snapshot(
@@ -518,7 +563,7 @@ async fn refresh_observations(
         return Ok(());
     }
     let (_, policy) = config_store.load_with_sleep_policy().await?;
-    let observations = observe_sessions(&sessions, process).await?;
+    let observations = observe_sessions(&sessions, process, policy.ports_enabled()).await?;
     publish_observations(runtime, &policy, &sessions, &observations);
     Ok(())
 }
@@ -607,6 +652,100 @@ mod tests {
             .unwrap();
         assert_eq!(result.closed.len(), 1);
         assert!(result.session_killed);
+    }
+
+    /// Regression: on a host without `lsof` every observation failed with
+    /// `failed to sleep previous session error=… lsof …` and
+    /// `failed to refresh terminal process observations`, so the session-sleep policy never
+    /// worked there and the log filled at the status-tick rate.
+    #[tokio::test]
+    async fn observation_degrades_to_no_ports_when_they_cannot_be_read() {
+        let process = FakeProcess::default();
+        process.set_snapshot(vec![ProcessInfo {
+            pid: 200,
+            parent_pid: 100,
+            process_group_id: 200,
+            terminal_foreground_process_group_id: Some(200),
+            start_identity: "shell-start".to_owned(),
+            command: "node server.js".to_owned(),
+        }]);
+        process.fail_ports("command failed: lsof: No such file or directory");
+        let sessions = [session_with_shell(100)];
+
+        let observations = observe_sessions(&sessions, &process, true)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let observation = observations
+            .get(&TerminalId(1))
+            .unwrap_or_else(|| panic!("the terminal is still observed"));
+        // The `ps` half of the observation is intact; only the ports are missing.
+        assert_eq!(observation.commands, vec!["node server.js".to_owned()]);
+        assert_eq!(
+            observation.foreground_command().as_deref(),
+            Some("node server.js")
+        );
+        assert!(observation.ports.is_empty());
+    }
+
+    /// Observing ports means an `lsof` process or a readlink over every descendant's file
+    /// descriptors. On a machine with no port keep-alive rule — the default configuration —
+    /// that is pure cost on every status tick, for an answer nothing reads.
+    #[tokio::test]
+    async fn ports_are_not_observed_when_no_enabled_rule_matches_on_them() {
+        let process = FakeProcess::default();
+        process.set_snapshot(vec![ProcessInfo {
+            pid: 200,
+            parent_pid: 100,
+            process_group_id: 200,
+            terminal_foreground_process_group_id: Some(200),
+            start_identity: "shell-start".to_owned(),
+            command: "node server.js".to_owned(),
+        }]);
+        let sessions = [session_with_shell(100)];
+
+        let observations = observe_sessions(&sessions, &process, false)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(process.port_calls(), 0);
+        // The process half of the observation is unaffected by the gate.
+        let observation = observations
+            .get(&TerminalId(1))
+            .unwrap_or_else(|| panic!("the terminal is still observed"));
+        assert_eq!(observation.commands, vec!["node server.js".to_owned()]);
+
+        // A configuration that does have a port rule still gets its query.
+        observe_sessions(&sessions, &process, true)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(process.port_calls(), 1);
+    }
+
+    fn session_with_shell(shell_pid: u32) -> Session {
+        Session {
+            id: SessionId::try_from("acme/api#feature").unwrap_or_else(|error| panic!("{error}")),
+            host: None,
+            kind: fleet_core::sessions::SessionKind::Agent(fleet_core::config::Agent::Claude),
+            cwd: "/tmp".to_owned(),
+            terminals: vec![fleet_core::sessions::Terminal {
+                id: TerminalId(1),
+                name: "shell".to_owned(),
+                command: "zsh".to_owned(),
+                cwd: "/tmp".to_owned(),
+                shell_pid: Some(shell_pid),
+                foreground_command: None,
+                status: fleet_core::sessions::TerminalStatus::Running,
+                title: None,
+                keep_alive: Vec::new(),
+                has_unseen_output: false,
+                agent_attention: None,
+                kind: fleet_core::sessions::TerminalKind::default(),
+            }],
+            active_terminal: Some(TerminalId(1)),
+            slept_at: None,
+            kept_terminals: Vec::new(),
+        }
     }
 
     #[tokio::test]

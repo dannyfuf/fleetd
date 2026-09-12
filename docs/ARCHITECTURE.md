@@ -24,12 +24,14 @@ Guiding rules:
 
 | Binary | Crate | Role |
 | --- | --- | --- |
-| `fleetd` | `fleet-daemon` | Long-lived daemon. Owns config/state, filesystem layout, jobs, GitHub cache, sessions + PTYs + VT emulation, sleep policy. Listens on a Unix socket. |
+| `fleetd` | `fleet-daemon` | Long-lived daemon. Owns config/state, filesystem layout, jobs, GitHub cache, sessions + VT emulation, sleep policy. Listens on a Unix socket. |
+| `fleetd pty-hold` | `fleet-daemon` | One detached holder process per terminal, started by `fleetd` and hidden from `--help`. Owns that terminal's PTY and child, listens on a per-terminal Unix socket, and outlives the daemon. |
 | `fleet` | `fleet-app` | GPUI app when run without a subcommand; CLI (`fleet create …`, `fleet list --json`, same JSON envelopes as swarm with `protocol: 1`) when run with one. Both talk to `fleetd` through `fleet-client`, auto-spawning it if the socket is dead. |
 
 `FLEET_HOME` (default `~/.fleet`) mirrors `~/.swarm`: `config.json`, `state.json` (+ lock),
-`repos/`, `worktrees/`, `cache/`, `logs/` (+ `logs/jobs/<job-id>.log`), `trash/`, plus
-`fleetd.sock`, `fleetd.pid`, and the stable `daemon-id`. Config and state remain version 1 and
+`repos/`, `worktrees/`, `cache/`, `logs/` (+ `logs/jobs/<job-id>.log` and `logs/pty-hold.log`),
+`trash/`, `pty/` (one `<terminal-id>.sock` and `<terminal-id>.json` per live terminal, see
+"Detached PTY holders"), plus `fleetd.sock`, `fleetd.pid`, and the stable `daemon-id`. Config and state remain version 1 and
 `fleet import --from-swarm` can copy compatible data. Fleet extends host configuration with tagged
 machine providers while retaining the old `{ssh, swarmCommand}` entry as probe-only input.
 
@@ -74,7 +76,14 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   re-read under the cross-process lock before quarantine.
 - **Adapters** (traits + real impls + fakes for tests): `Shell`, `Git`, `Github`, `Files`
   (clonefile/`cp -Rc`, atomic rename, trash), `Process` (`ps`, `lsof`, liveness), `Clock`, `Logs`.
-  Exact git/gh command lines are those in the inventory §7.
+  Exact git/gh command lines are those in the inventory §7. `Process` resolves its
+  listening-port source once per daemon: `lsof` when it is on `PATH`, otherwise Linux
+  `/proc/net/tcp{,6}` joined to `/proc/<pid>/fd` socket inodes, otherwise no ports at all with
+  one warning naming the install command. Ports are observed only when an enabled keep-alive
+  rule matches on them, and each pid's descriptor walk stops once that pid accounts for every
+  listening inode. A source that reports no ports is not an error:
+  observation refresh and sleep continue on the `ps` half, only port keep-alive rules go
+  unmatched, and a periodic failure is warned about at most once an hour.
 - **Machines**: `machines/` owns `MachineProvider`, provider construction, the Tailscale/OpenSSH
   transport, the advanced command transport, legacy probing, and one lazy `RemoteLink` endpoint
   per federated host. `fleetd connect` bridges stdin/stdout to the remote daemon's Unix socket;
@@ -110,7 +119,9 @@ system, the native git UI and the diff pipeline — are recorded in `docs/decisi
   increment attachment membership. Sleep applies the
   swarm policy (keep-alive rules, `:qa` handshake, port detection), but sends editor shutdown input
   only when the candidate process group is the terminal's foreground group; "close window" = kill
-  that terminal. PTYs do not survive a daemon restart (like a tmux server).
+  that terminal. Sleep degrades rather than fails when ports cannot be observed.
+  **Terminals survive a daemon restart**: every PTY lives in a detached holder process and is
+  reattached by the next daemon (below).
 - **Native tabs (`kind: Native`)**. A `windows[].command` may be a reserved `fleet://` command
   instead of a program. The daemon still owns the tab — same id counter, same position in
   `terminals`, same `active_terminal` and `SelectTerminal` — but spawns no PTY: `shell_pid` is
@@ -376,6 +387,107 @@ At the bottom, output follows live. While scrolled up, Ghostty preserves the his
 Real keys, raw input and paste atomically return to bottom on the host before writing to the
 PTY. Wheel input and copy-mode navigation preserve the viewport; copy-mode exit retains its
 explicit return-to-bottom behavior.
+
+### Detached PTY holders
+
+`fleetd` never owns a terminal's child process. Creating a terminal starts one
+`fleetd pty-hold` process, `setsid`-ed before `exec` so it leaves the daemon's session and process
+group; the daemon's SIGTERM, a `ctrl-c` in its terminal and its own exit therefore never reach it.
+The holder owns the PTY and the login shell and nothing else — no VT engine, no scrollback, no
+services — and it starts before any tokio runtime does. Its stdin is `/dev/null` and its stdout and
+stderr append to `logs/pty-hold.log`, which is **not** rotated: unlike `fleetd.log` it carries only
+lifecycle lines, a few per terminal, and never terminal contents. Why holders rather than tmux, and
+what the failure modes cost, are in `docs/decisions/0015-detached-pty-holders.md`.
+
+```
+shell <--pty--> holder process --socket--> daemon VtEngine --> FrameUpdate --> client
+```
+
+The daemon writes `<fleet-home>/pty/<terminal-id>.json` for each holder: schema version, terminal
+and session ids, the session's kind and cwd, the terminal's name, command and cwd, the holder pid,
+the login-shell pid, the socket path, and the creation time — everything needed to rebuild the
+registry record. A rename rewrites it; a resize does not, because window size is not recorded at
+all (the holder reports its own, below). The socket name is
+`<terminal-id>-<per-spawn-nonce>.sock`: terminal identifiers are reused by `restart_terminal`, so a
+name per terminal would let a lingering predecessor unlink its successor's socket, and a
+predictable name under a shared directory is one a local user can pre-create. Its directory is
+`<fleet-home>/pty/`, created `0700`, with the socket itself `0600`; a Fleet home deep enough that a
+socket path would exceed the portable `sun_path` budget (`MAX_SOCKET_PATH_BYTES`, 100 bytes, under
+macOS's 104 and Linux's 108) puts sockets in a private `0700` directory in the temporary directory
+instead, and a holder refuses to bind unless that directory is owned by this user with that mode.
+Because the socket is therefore not always beside the record, the record stores its path and
+nothing recomputes it (`fleet_core::paths::pty_socket_path`).
+
+The wire format is `tag: u8 | length: u32 BE | payload`, with payloads capped at `MAX_FRAME_BYTES`
+(8 MiB) so a corrupt length header cannot make either peer allocate without bound. Daemon to
+holder: `Input(bytes)`, `Resize{cols,rows}`, `Kill`, `Detach`. Holder to daemon:
+`Hello{version,child_pid,cols,rows}` — always the first frame of a connection — then
+`Output(bytes)`, and finally `Exited{code}`. The two peers are different `fleetd` builds by design,
+because a holder started before an upgrade is still running the old binary when the new daemon
+reattaches: `HOLDER_PROTOCOL_VERSION` is the first payload byte of every greeting, a mismatch is
+reported and that holder is stopped rather than silently mis-parsed, and the byte layout of every
+frame is pinned by a golden test in `fleet-term`.
+
+`Hello`'s size is the kernel's current window size and is **authoritative**: the child has been
+resized since the terminal was created, and the replay tail was produced for the grid it is living
+at now, so the reattaching daemon builds its emulator at that size rather than at any recorded one.
+One daemon connection at a time; a new connection replaces the old one and shuts it down. Each
+holder keeps a bounded **1 MiB replay buffer** of raw child output. On attach it sends `Hello`,
+then the whole buffer as output, then live output, all under one lock, so a reattaching daemon sees
+the tail and the live stream in order with nothing lost or duplicated; then it signals the PTY's
+foreground process group as a resize would, because a full-screen TUI repaints on `SIGWINCH` and on
+nothing else, and re-applying an unchanged size raises none. The buffer holds bytes, not parsed
+state: a truncated escape sequence costs at most the first sequence of a replay, and the emulator
+resynchronises at the next one. Writes to a connection are never timed out — a daemon behind on
+reads is applying backpressure exactly as a directly owned PTY does, and mistaking that for a dead
+peer would end a terminal the user is still using.
+
+**On startup** the daemon binds its socket, then adopts before it serves anyone: a client's
+connection waits in the backlog while the holders come back, so the first snapshot anyone sees
+already lists the surviving sessions and no client waits on a socket that does not exist yet.
+Holders are attached concurrently under one overall deadline, then inserted in terminal-id order so
+tab numbering does not depend on which answered first. Terminals keep their original identifiers,
+which is what lets the app's tabs reconnect without noticing; the shared terminal-id allocator is
+advanced past every adopted id; and a reattach never retypes the terminal's configured command,
+because that shell already ran it.
+
+The failure paths all turn on one rule: **a live holder's socket is never unlinked**, because it is
+the only way back to the user's shell. A record whose holder pid is dead is deleted with its
+socket. A record this build cannot read is resolved back to its socket through the terminal
+identifier in the socket's name, and that holder is stopped before the record goes. A holder that
+answers with an incompatible protocol version is stopped deliberately. A holder that is alive but
+does not answer in time keeps everything it has, and the next daemon start tries again. Creating a
+terminal whose record cannot be written stops the holder and fails the open, rather than leaving a
+shell nothing will ever adopt. What is left over — a record naming a dead holder, or a socket with
+no record — is reported by `fleet doctor`'s **pty holders** check.
+
+**On shutdown** the holders keep running. Releasing a terminal host detaches rather than kills, so
+a plain SIGTERM, an unclean daemon exit and `DaemonShutdown { stop_sessions: false }` (the
+`fleet daemon restart` path) all leave every child alive.
+`DaemonShutdown { stop_sessions: true }` — `ctrl-shift-q` — sends `Kill` to every holder and waits
+up to two seconds for them to go; any still running is then killed outright and its record removed,
+so the next daemon cannot reattach the sessions the user asked to destroy. A holder exits when its
+child does: it reports `Exited`, then removes its record and unlinks its socket only if that path
+still names the socket it bound. A child that exits *unasked* while no daemon is connected leaves
+the holder holding its socket open for up to 30 s, so a daemon restarting at that instant still
+learns the exit status; the wait ends the moment the report is delivered, and never happens at all
+after a `Kill`.
+
+What does **not** survive is the daemon's own emulator state. Frame sequences restart at one and
+each grid is repainted from the replay buffer, so the first screen after a restart can be shorter
+than the scrollback that preceded it. The client clears its mirror grids on a restarted reconnect
+and rebuilds them from the attachment frame (`docs/UX-SPEC.md` §3.12 [D-17]).
+
+The daemon's singleton guard is part of the same contract. `SingletonGuard` holds an exclusive
+`flock` on `fleetd.pid`; its `Drop` removes the pid and socket files only while the pid file still
+records **this** process, because a daemon that died without unwinding leaves its successor reusing
+the same inode. Acquisition reclaims a lock only when the recorded pid is dead *and* the socket
+answers nobody, after a short retry covering the window in which a dying daemon's descriptor is
+still closing.
+
+Holders are per daemon, not per machine: a remote host's terminals are held by processes on that
+host and survive restarts of *its* `fleetd` (`docs/REMOTE-MACHINES.md`). They do not survive a
+machine reboot — nothing does — and the next daemon clears their records as stale.
 
 ## Protocol compatibility
 

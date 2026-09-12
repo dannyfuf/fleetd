@@ -42,3 +42,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0012](decisions/0012-terminal-agent-attention.md) | Terminal agent attention: explicit hooks are the only notification source |
 | [0013](decisions/0013-sqlite-agent-transcripts.md) | SQLite for agent transcripts: one event log, synchronous projections, one owned writer |
 | [0014](decisions/0014-drop-opencode-add-codex.md) | Drop OpenCode, add Codex, and gate it on a capability string rather than a protocol bump |
+| [0015](decisions/0015-detached-pty-holders.md) | Terminals live in detached holder processes, not in `fleetd` |

@@ -1924,6 +1924,7 @@ dependencies = [
  "async-channel",
  "fleet-core",
  "fleet-proto",
+ "libc",
  "libghostty-vt",
  "portable-pty",
  "serde_json",

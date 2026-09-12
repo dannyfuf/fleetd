@@ -52,7 +52,8 @@ impl MachineProvider for LegacyMachine {
         let result = tokio::time::timeout(
             timeout,
             Command::new("ssh")
-                .args(["-o", "BatchMode=yes", "--"])
+                .args(super::ssh::connection_defaults())
+                .arg("--")
                 .arg(&self.ssh)
                 .arg(&self.swarm_command)
                 .args(["list", "--json"])

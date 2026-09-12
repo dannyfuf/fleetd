@@ -1332,7 +1332,7 @@ the app:
 
 > **What keeps running.** Jobs and sessions live in fleetd. Closing a dialog, leaving a screen or
 > quitting Fleet (`ctrl-q`) never stops them. Only `c` in the Jobs panel, `K`, and `ctrl-shift-q`
-> stop things. Terminals do not survive a **daemon** restart.
+> stop things. Terminals survive a **daemon** restart and reattach on their own.
 
 Footer: `Fleet <version> · protocol 4 · fleetd up 3h`.
 **Omitted:** prose explanations, links, a search field (the palette *is* the searchable surface).
@@ -1500,13 +1500,22 @@ of them is about reconnecting.
 **On reconnect after C**, the banner turns amber for 6 s (not green, not 800 ms) and reads,
 verbatim:
 
-> `fleetd restarted. Terminal sessions did not survive; worktrees, jobs and state are intact.`
+> `fleetd restarted. <n> terminals were reattached; worktrees, jobs and state are intact.`
 
-**[D-17]** This sentence is mandatory. `ARCHITECTURE.md` §Sessions is explicit — *"PTYs do not
-survive a daemon restart (like a tmux server)"* — and a warm banner that implies the agents came
-back is the single most damaging false reassurance in the app. If the daemon merely dropped the
-*connection* without dying (the PTYs are still alive), the banner instead reads `reconnected` and
-leaves after 800 ms.
+or, when none did:
+
+> `fleetd restarted. No terminals survived; worktrees, jobs and state are intact.`
+
+**[D-17]** This sentence is mandatory, it is the one place the app states what a restart did to
+the user's terminals, and the count is **read from the first snapshot, never assumed**. Terminals
+normally survive: every PTY lives in a detached holder process (`ARCHITECTURE.md`, "Detached PTY
+holders"). They do not always — `pkill fleetd` matches `fleetd pty-hold` too, and nothing survives
+a reboot — and a banner that promised a reattach over an empty session list would be the false
+reassurance this rule exists to prevent. The daemon's emulator state never survives either way, so
+each grid is repainted from its holder's replay buffer and the first screen after a restart can be
+shorter than the scrollback that preceded it. The banner still dwells the full six seconds: a
+restart means the `fleetd` binary changed, which is worth noticing. If the daemon merely dropped
+the *connection* without dying, the banner instead reads `reconnected` and leaves after 800 ms.
 
 **While disconnected (case C):** the lists stay at 100 % opacity and remain navigable — they are
 true, just frozen — every pane header gains `· stale · <age>`, **every** session glyph is forced

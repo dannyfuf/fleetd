@@ -206,59 +206,159 @@ impl SessionRuntime {
     }
 }
 
+/// Everything needed to create one terminal's holder, host and sidecar.
+pub(super) struct TerminalSpawn {
+    pub(super) terminal: TerminalId,
+    pub(super) session: SessionId,
+    pub(super) session_kind: SessionKind,
+    pub(super) session_cwd: String,
+    pub(super) name: String,
+    pub(super) command: String,
+    pub(super) cwd: String,
+    pub(super) scrollback_bytes: usize,
+    pub(super) starting_sequence: u64,
+}
+
+/// A terminal and the host that drives it, once its holder is running and recorded.
+pub(super) struct SpawnedTerminal {
+    pub(super) terminal: Terminal,
+    pub(super) host: TerminalHost,
+}
+
+/// Where a terminal host attaches, and how its emulator starts.
+pub(super) struct HolderAttachment {
+    pub(super) terminal: TerminalId,
+    pub(super) socket: PathBuf,
+    pub(super) scrollback_bytes: usize,
+    pub(super) starting_sequence: u64,
+    /// Typed into the login shell once its prompt looks ready; always `None` on a reattach,
+    /// because that shell already ran its command.
+    pub(super) initial_command: Option<String>,
+}
+
+/// Why a holder this daemon knows about could not be driven.
+pub(super) enum HolderAttachFailure {
+    /// The holder speaks a protocol this build cannot drive, and never will.
+    Incompatible(DaemonError),
+    /// The holder did not answer. It may simply be slow, and may answer a later daemon.
+    Unreachable(DaemonError),
+}
+
+impl HolderAttachFailure {
+    pub(super) fn into_error(self) -> DaemonError {
+        match self {
+            Self::Incompatible(error) | Self::Unreachable(error) => error,
+        }
+    }
+}
+
+/// Starts a detached holder for one terminal and builds the host that drives it.
+///
+/// The daemon opens no PTY of its own: the holder owns the child, this host owns the emulator,
+/// and the sidecar written at the end is what lets the next daemon rebuild both.
 pub(super) async fn spawn_terminal(
-    terminal: TerminalId,
-    session: SessionId,
-    name: String,
-    command: String,
-    cwd: String,
-    scrollback_bytes: usize,
-    starting_sequence: u64,
-) -> DaemonResult<(Terminal, TerminalHost)> {
-    tokio::task::spawn_blocking(move || {
-        let pty = PtyOptions::shell(
-            PathBuf::from(&cwd),
-            session.as_str(),
-            &name,
+    home: &FleetHome,
+    spawn: TerminalSpawn,
+) -> DaemonResult<SpawnedTerminal> {
+    let terminal = spawn.terminal;
+    let started = holder::start_holder(
+        home,
+        terminal,
+        &spawn.session,
+        &spawn.name,
+        &spawn.cwd,
+        INITIAL_COLS,
+        INITIAL_ROWS,
+    )
+    .await?;
+    let host = attach_holder(HolderAttachment {
+        terminal,
+        socket: started.socket.clone(),
+        scrollback_bytes: spawn.scrollback_bytes,
+        starting_sequence: spawn.starting_sequence,
+        initial_command: Some(spawn.command.clone()),
+    })
+    .await;
+    let host = match host {
+        Ok(host) => host,
+        Err(failure) => {
+            stop_unusable_holder(terminal, &started.socket);
+            return Err(failure.into_error());
+        }
+    };
+    let Some(shell_pid) = host.child_pid() else {
+        drop(host);
+        stop_unusable_holder(terminal, &started.socket);
+        return Err(DaemonError::Process(format!(
+            "terminal `{terminal}` did not report its login-shell pid"
+        )));
+    };
+    let sidecar = PtySidecar {
+        version: holder::SIDECAR_VERSION,
+        terminal,
+        session: spawn.session,
+        session_kind: spawn.session_kind,
+        session_cwd: spawn.session_cwd,
+        name: spawn.name,
+        command: spawn.command,
+        cwd: spawn.cwd,
+        holder_pid: started.pid,
+        shell_pid: Some(shell_pid),
+        socket: started.socket,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    // A holder with no record is invisible to every later daemon: nothing would adopt it, nothing
+    // would clean it up, and its shell would run forever. Stop it and fail the open instead.
+    if let Err(error) = holder::write_sidecar(home, &sidecar).await {
+        drop(host);
+        stop_unusable_holder(terminal, &sidecar.socket);
+        return Err(error);
+    }
+    Ok(SpawnedTerminal {
+        terminal: sidecar.terminal(),
+        host,
+    })
+}
+
+/// Builds a terminal host around an already listening holder.
+///
+/// The emulator's size comes from the holder's greeting, not from this daemon: the child has been
+/// resized since the terminal was created, and the replay about to arrive was produced for the
+/// grid the holder is holding now.
+pub(super) async fn attach_holder(
+    attachment: HolderAttachment,
+) -> Result<TerminalHost, HolderAttachFailure> {
+    let terminal = attachment.terminal;
+    let spawned = tokio::task::spawn_blocking(move || {
+        TerminalHost::spawn(TerminalHostOptions {
             terminal,
-            INITIAL_COLS,
-            INITIAL_ROWS,
-        );
-        let host = TerminalHost::spawn(TerminalHostOptions {
-            terminal,
-            pty,
-            scrollback_bytes,
-            starting_sequence,
-            initial_command: Some(command.clone()),
+            source: PtySource::Holder(HolderTarget {
+                socket: attachment.socket,
+                fallback_cols: holder::FALLBACK_COLS,
+                fallback_rows: holder::FALLBACK_ROWS,
+            }),
+            scrollback_bytes: attachment.scrollback_bytes,
+            starting_sequence: attachment.starting_sequence,
+            initial_command: attachment.initial_command,
         })
-        .map_err(|error| terminal_error(terminal, error))?;
-        let shell_pid = host.child_pid();
-        let Some(shell_pid) = shell_pid else {
-            let _ = host.kill();
-            return Err(DaemonError::Process(format!(
-                "terminal `{terminal}` did not report its login-shell pid"
-            )));
-        };
-        Ok((
-            Terminal {
-                id: terminal,
-                name,
-                command,
-                cwd,
-                shell_pid: Some(shell_pid),
-                foreground_command: None,
-                status: TerminalStatus::Running,
-                title: None,
-                keep_alive: Vec::new(),
-                has_unseen_output: false,
-                agent_attention: None,
-                kind: TerminalKind::Pty,
-            },
-            host,
-        ))
     })
     .await
-    .map_err(|error| DaemonError::Join(error.to_string()))?
+    .map_err(|error| HolderAttachFailure::Unreachable(DaemonError::Join(error.to_string())))?;
+    spawned.map_err(|error| {
+        let reported = terminal_error(terminal, &error);
+        if matches!(error, fleet_term::HostError::HolderVersion(_)) {
+            HolderAttachFailure::Incompatible(reported)
+        } else {
+            HolderAttachFailure::Unreachable(reported)
+        }
+    })
+}
+
+/// Stops a holder this daemon started but cannot drive, so its shell does not outlive the failure.
+fn stop_unusable_holder(terminal: TerminalId, socket: &std::path::Path) {
+    if let Err(error) = fleet_term::HolderPty::stop(socket) {
+        tracing::warn!(%error, %terminal, "failed to stop a pty holder this daemon could not drive");
+    }
 }
 
 pub(super) struct HostEventForwarder {
