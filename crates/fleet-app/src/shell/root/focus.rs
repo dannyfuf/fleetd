@@ -197,6 +197,14 @@ pub(super) fn install_input_gates(
             // raw capture path, where the root retains the full KeyDownEvent.
             keys.await_capture();
             drop(keys);
+            // The key is parked until the frame this refresh asks for, which is precisely the
+            // "pending frame" `idle` reports (`docs/TESTING-HARNESS.md` §2). Without it `await
+            // idle` returns while a keystroke is still queued and the scenario asserts on the
+            // state before its own key landed.
+            key_state.update(cx, |state, cx| {
+                state.harness.set_pending_frame(true);
+                cx.notify();
+            });
             window.refresh();
             cx.stop_propagation();
             return;
@@ -224,7 +232,14 @@ impl Shell {
     ) -> (Vec<KeyDownEvent>, bool) {
         let mut keys = self.focus_owner_keys.borrow_mut();
         let (_, changed) = keys.sync_owner(focus_owner(self.state.read(cx)));
-        (keys.finish_render(rendered_generation), changed)
+        let drained = keys.finish_render(rendered_generation);
+        let still_queued = keys.should_queue();
+        drop(keys);
+        self.state.update(cx, |state, cx| {
+            state.harness.set_pending_frame(still_queued);
+            cx.notify();
+        });
+        (drained, changed)
     }
 
     fn register_pointer_gate<Event: MouseEvent>(
@@ -444,23 +459,46 @@ impl Shell {
         }
         if self.focus_owner_keys.borrow().should_queue() {
             let shell = cx.entity().downgrade();
-            window.on_next_frame(move |window, cx| {
-                let Ok((queued, owner_changed)) = shell.update(cx, |shell, cx| {
-                    shell.drain_stale_keys_after_render(generation, cx)
-                }) else {
-                    return;
-                };
-                if owner_changed {
-                    window.refresh();
-                }
-                // Release the Shell lease before dispatch; an owner-changing replay makes later
-                // events re-enter the bounded FIFO through the application interceptor.
-                for event in queued {
-                    window.dispatch_event(PlatformInput::KeyDown(event), cx);
-                }
-            });
+            window
+                .on_next_frame(move |window, cx| replay_stale_keys(&shell, generation, window, cx));
+            // GPUI's headless platform accepts a next-frame callback and never calls it, so in
+            // that lane the line above would park every keystroke forever: the queue would never
+            // drain, `replayed_generation` would never catch up, and `is_stale` would stay true
+            // for the life of the process. `Window::defer` runs at the end of this effect cycle,
+            // which is after the draw that is producing this render has swapped in its dispatch
+            // tree — the same guarantee the frame callback gives, from the only other hook a
+            // frame-starved process has. `finish_render` is idempotent, so the two paths cannot
+            // replay one key twice; this one simply never runs where a compositor exists.
+            if crate::drive::no_frame_loop() {
+                let shell = cx.entity().downgrade();
+                window.defer(cx, move |window, cx| {
+                    replay_stale_keys(&shell, generation, window, cx);
+                });
+            }
         }
         generation
+    }
+}
+
+/// Drains one completed render's queued keystrokes and dispatches them in order.
+fn replay_stale_keys(
+    shell: &gpui::WeakEntity<Shell>,
+    generation: u64,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    let Ok((queued, owner_changed)) = shell.update(cx, |shell, cx| {
+        shell.drain_stale_keys_after_render(generation, cx)
+    }) else {
+        return;
+    };
+    if owner_changed {
+        window.refresh();
+    }
+    // Release the Shell lease before dispatch; an owner-changing replay makes later events
+    // re-enter the bounded FIFO through the application interceptor.
+    for event in queued {
+        window.dispatch_event(PlatformInput::KeyDown(event), cx);
     }
 }
 

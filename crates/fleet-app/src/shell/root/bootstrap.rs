@@ -2,7 +2,8 @@ use super::Shell;
 use crate::{actions::fleet, drive, keymap};
 use fleet_ui_kit::{ActiveTheme, KitAssets, Theme, ThemeMode};
 use gpui::{
-    App, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size,
+    App, Bounds, Menu, MenuItem, SharedString, TitlebarOptions, WindowBounds, WindowOptions,
+    prelude::*, px, size,
 };
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
@@ -63,20 +64,13 @@ pub fn run() -> anyhow::Result<()> {
             })
             .detach();
 
-            let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Fleet".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(gpui::point(
-                        cx.theme().space.md,
-                        cx.theme().space.md,
-                    )),
-                }),
-                ..Default::default()
-            };
+            // Developer-only end-to-end harness (docs/TESTING-HARNESS.md). `None` in every
+            // normal launch, and nothing below this line runs again after startup.
+            let harness = drive::harness();
+            if let Some(harness) = &harness {
+                harness.prepare(cx);
+            }
+            let options = window_options(harness.as_ref(), cx);
             match cx.open_window(options, |window, cx| {
                 cx.new(|cx| {
                     let mut shell = Shell::new(home, cx);
@@ -87,10 +81,13 @@ pub fn run() -> anyhow::Result<()> {
                 Ok(window) => {
                     let _ignored = window.update(cx, |_, window, _| window.activate_window());
                     cx.activate(true);
-                    // Developer-only: drive the GUI from a script file (docs/DEVELOPMENT.md).
-                    if let Some(script) = drive::script_path() {
-                        let _ignored = window.update(cx, |_, window, cx| {
-                            drive::spawn(script, window, cx).detach();
+                    if let Some(harness) = harness {
+                        let _ignored = window.update(cx, |shell, window, cx| {
+                            // Infallible, and cancelled by its own window-close subscription.
+                            let state = shell.state.clone();
+                            if let Some(driver) = drive::spawn(harness, state, window, cx) {
+                                driver.detach();
+                            }
                         });
                     }
                 }
@@ -103,7 +100,45 @@ pub fn run() -> anyhow::Result<()> {
             }
         });
     let error = window_error.borrow_mut().take();
+    // The GPU driver tears its EGL context down in a thread-local destructor after `main`
+    // returns, and logs while it does: `wgpu_hal`'s EGL debug callback emits a `log` record,
+    // `tracing-log` forwards it, and `tracing_subscriber`'s formatter reaches for a
+    // thread-local buffer of its own that has already been destroyed. The access panics, a
+    // panic raised during thread-local destruction cannot unwind, and the process aborts with
+    // "fatal runtime error: failed to initiate panic" instead of exiting 0 — on every quit, in
+    // every Wayland session. Closing the bridge here is the whole fix: nothing after this line
+    // has anything left to say, and `tracing` events from Fleet's own code are already done.
+    log::set_max_level(log::LevelFilter::Off);
     finish_run(error)
+}
+
+/// Builds the one window's options.
+///
+/// In harness mode the size and the title are pinned, so two runs of the same scenario lay out
+/// identically and the compositor can find this window by name. The production minimum size still
+/// applies — the harness drives the real app — and `meta` reports the bounds the window actually
+/// got rather than the ones that were asked for.
+fn window_options(harness: Option<&drive::Harness>, cx: &mut App) -> WindowOptions {
+    let window_size = harness
+        .and_then(drive::Harness::window_size)
+        .unwrap_or_else(|| size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)));
+    let title = harness
+        .and_then(drive::Harness::window_title)
+        .unwrap_or_else(|| SharedString::new_static("Fleet"));
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            window_size,
+            cx,
+        ))),
+        window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
+        titlebar: Some(TitlebarOptions {
+            title: Some(title),
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(cx.theme().space.md, cx.theme().space.md)),
+        }),
+        ..Default::default()
+    }
 }
 
 fn finish_run(window_error: Option<String>) -> anyhow::Result<()> {

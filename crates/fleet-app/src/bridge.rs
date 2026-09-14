@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
     time::Duration,
@@ -314,11 +314,46 @@ impl From<BridgeCommand> for RequestBody {
 }
 
 /// A command sent to the background thread.
+/// One request's claim on the bridge's in-flight counter.
+///
+/// `docs/TESTING-HARNESS.md` §2 defines `idle` as "no in-flight app requests, …", and the only
+/// place that knows when a request really leaves the system is the runtime thread that answers
+/// it. The claim is taken on the UI thread, rides the command through the queue, and is released
+/// by `Drop` wherever the request ends — answered, rejected while opening, shed under
+/// backpressure, or dropped because the runtime stopped. A guard rather than a matching
+/// decrement, because every one of those paths is an early return somewhere.
+#[derive(Debug)]
+struct InFlight(Arc<AtomicU32>);
+
+impl InFlight {
+    fn claim(counter: &Arc<AtomicU32>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(Arc::clone(counter))
+    }
+}
+
+#[cfg(test)]
+impl InFlight {
+    /// A claim on a counter nobody reads, for tests that build a command by hand.
+    fn untracked() -> Self {
+        Self::claim(&Arc::new(AtomicU32::new(0)))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        // Every claim increments exactly once, so this can never wrap.
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 enum Command {
     /// Send a request; the answer is forwarded when a channel was supplied.
     Request {
         body: Box<RequestBody>,
         reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
+        /// Released when this request is answered, rejected or abandoned.
+        in_flight: InFlight,
     },
     /// Retry `ensure_daemon` now (`r` on either daemon surface).
     Reconnect,
@@ -345,6 +380,8 @@ pub struct Bridge {
     commands: Sender<Command>,
     events: Receiver<BridgeEvent>,
     event_tx: Sender<BridgeEvent>,
+    /// How many requests the runtime has not finished with, shared with `AppState::harness`.
+    in_flight: Arc<AtomicU32>,
     resync_pending: Arc<AtomicBool>,
 }
 
@@ -377,7 +414,18 @@ impl Bridge {
             events,
             event_tx,
             resync_pending,
+            in_flight: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// The in-flight request counter, for `AppState::harness` to report through `idle`.
+    ///
+    /// Shared rather than mirrored: the increment happens here and the decrement happens on the
+    /// runtime thread, so a snapshot taken on the UI thread has to read the same cell both
+    /// touch.
+    #[must_use]
+    pub fn in_flight_requests(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.in_flight)
     }
 
     #[cfg(test)]
@@ -392,6 +440,7 @@ impl Bridge {
             events,
             event_tx,
             resync_pending,
+            in_flight: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -408,6 +457,7 @@ impl Bridge {
         let command = Command::Request {
             body: Box::new(body),
             reply: None,
+            in_flight: InFlight::claim(&self.in_flight),
         };
         match self.commands.try_send(command) {
             Ok(()) => {}
@@ -455,6 +505,7 @@ impl Bridge {
         match self.commands.try_send(Command::Request {
             body: Box::new(body),
             reply: Some(reply.clone()),
+            in_flight: InFlight::claim(&self.in_flight),
         }) {
             Ok(()) => {}
             Err(async_channel::TrySendError::Full(_)) => {

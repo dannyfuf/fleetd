@@ -157,6 +157,42 @@ impl MirrorGrid {
                     .collect()
             })
     }
+
+    /// One row as the harness reports it (`docs/TESTING-HARNESS.md` §3).
+    ///
+    /// Three rules, all about alignment. A spacer is dropped, because the wide grapheme in the
+    /// cell before it already occupies both columns in a monospace grid. An unset cell carries
+    /// no grapheme at all and becomes one space, so a gap between two words survives as a gap
+    /// rather than closing up. Trailing spaces then go, because a terminal pads every row to
+    /// its full width and a predicate should not have to know that.
+    #[must_use]
+    pub fn harness_row(&self, row: u16) -> String {
+        let mut text = String::new();
+        if let Some(line) = self.lines.get(row as usize) {
+            for cell in line {
+                if cell.width == CellWidth::Spacer {
+                    continue;
+                }
+                if cell.text.is_empty() {
+                    text.push(' ');
+                } else {
+                    text.push_str(cell.text.as_str());
+                }
+            }
+        }
+        text.truncate(text.trim_end_matches(' ').len());
+        text
+    }
+
+    /// Every row as the harness reports it, with trailing blank rows removed.
+    #[must_use]
+    pub fn harness_rows(&self) -> Vec<String> {
+        let mut rows: Vec<String> = (0..self.rows).map(|row| self.harness_row(row)).collect();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        rows
+    }
 }
 
 impl AppState {
@@ -200,6 +236,23 @@ impl AppState {
     pub fn active_grid(&self) -> Option<&MirrorGrid> {
         let terminal = self.active_session()?.active_terminal?;
         self.grids.get(&terminal)
+    }
+
+    /// The mirror grid the harness reports, when a terminal is actually on screen.
+    ///
+    /// The floating agent popup covers whatever is behind it, so it wins; otherwise the
+    /// Workspace's active tab answers, and the Hub has no terminal at all.
+    #[must_use]
+    pub fn harness_grid(&self) -> Option<(TerminalId, &MirrorGrid)> {
+        let terminal = self
+            .agent_popup_session()
+            .and_then(|session| session.terminals.first())
+            .map(|terminal| terminal.id)
+            .or_else(|| {
+                self.active_session()
+                    .and_then(|session| session.active_terminal)
+            })?;
+        self.grids.get(&terminal).map(|grid| (terminal, grid))
     }
 
     /// Marks every mirror as having missed frames.

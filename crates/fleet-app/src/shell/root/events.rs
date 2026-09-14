@@ -108,6 +108,14 @@ fn apply_batch(
         }
         if damage.state {
             cx.notify();
+        } else if fleet_ui_kit::harness::is_recording() && damage.affects_visible_terminal(state) {
+            // Plain PTY output deliberately does not wake AppState's chrome observers — that is
+            // the optimisation the branch above exists for. The harness is the one observer that
+            // needs it anyway: `await terminal.text ~= "…"` waits on exactly this signal, and
+            // without it a scenario waits for the next unrelated notification instead of for the
+            // output it asked about. `is_recording` is a thread-local `bool` that is false in
+            // every launch that did not ask for harness mode, so production pays one branch.
+            cx.notify();
         }
     });
     damage

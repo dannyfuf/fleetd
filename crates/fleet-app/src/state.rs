@@ -1,6 +1,7 @@
 //! Daemon mirrors and local interaction state, reduced without foreground I/O.
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -33,6 +34,7 @@ use crate::{
 mod agents;
 mod board;
 mod connection;
+mod harness;
 mod navigation;
 mod notifications;
 mod snapshot;
@@ -43,6 +45,13 @@ mod test_support;
 pub use agents::{AgentCounts, AgentThreads};
 pub use board::{BoardFocus, BoardState, GroupBy};
 pub use connection::{DaemonLink, DaemonLossReason, daemon_log_path, reconnect_backoff};
+use harness::HarnessCache;
+pub use harness::{
+    AgentThreadSnapshot, AgentsSnapshot, BoundsSnapshot, CursorSnapshot, DialogSnapshot,
+    FieldSnapshot, HarnessProjection, HarnessState, IdleSnapshot, JobSnapshot, ListSnapshot,
+    RowSnapshot, SNAPSHOT_VERSION, TargetSnapshot, TerminalSnapshot, ToastSnapshot, UiSnapshot,
+    ViewportSnapshot, WindowSnapshot,
+};
 use navigation::clamp_cursor;
 pub use navigation::{
     AgentPopupMode, AgentPopupState, AgentPopupTransition, Cursors, FilterEscape, FilterState,
@@ -197,6 +206,17 @@ pub struct AppState {
     pub reattach_pending: HashSet<TerminalId>,
     /// Diagnostic results shared by the daemon splash and Settings.
     pub doctor: Option<Vec<fleet_proto::response::DoctorCheck>>,
+    /// What only the external test harness needs and nothing else in the app keeps: window
+    /// metrics, recorded target rectangles and the pending-work counters `idle` is derived
+    /// from (`docs/TESTING-HARNESS.md` §3).
+    pub harness: HarnessState,
+    /// The memoised harness projection, keyed on every input its builder reads.
+    ///
+    /// `RefCell` for the same reason the Hub's projection cache uses one: a memo is an
+    /// implementation detail of a `&self` read, not observable state, and nothing subscribes to
+    /// it. It stays `None` until the harness socket asks for the first snapshot, so an app
+    /// running without the harness never allocates it.
+    harness_cache: RefCell<Option<Box<HarnessCache>>>,
 }
 
 impl AppState {
@@ -256,6 +276,8 @@ impl AppState {
             link_generation: 0,
             reattach_pending: HashSet::new(),
             doctor: None,
+            harness: HarnessState::default(),
+            harness_cache: RefCell::new(None),
         }
     }
 }

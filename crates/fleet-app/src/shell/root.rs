@@ -77,6 +77,12 @@ impl Shell {
     pub fn new(home: PathBuf, cx: &mut Context<Self>) -> Self {
         let bridge = Bridge::start(home.clone());
         let state = cx.new(|_| AppState::new(home, Instant::now()));
+        // `idle` reports in-flight requests (`docs/TESTING-HARNESS.md` §2), and only the bridge
+        // knows when one ends: it claims a slot on admission and releases it on the runtime
+        // thread. Handing the counter to the projection is what makes `await idle` wait for a
+        // daemon round trip instead of returning while one is outstanding.
+        let in_flight = bridge.in_flight_requests();
+        state.update(cx, |state, _| state.harness.track_requests(in_flight));
         crate::views::watch_pane::sync(&state, &bridge, cx);
         let workspace = WorkspaceScreen::new(cx);
         let agent_popup = AgentPopup::new(cx);

@@ -46,6 +46,30 @@ pub fn expire_toasts(toasts: &mut Vec<LiveToast>, now: Instant) -> bool {
     toasts.len() != before
 }
 
+/// Moves one stored instant `by` further into the past.
+///
+/// The monotonic clock starts at boot, so an advance can only outrun it on a machine that came
+/// up less than `by` ago. When it does, the instant goes as far back as the clock can represent
+/// rather than to a fixed landmark: clamping to `now` would be right for `expires_at`, where it
+/// reads as "elapsed", and exactly backwards for `shown_at`, where it reads as "shown this
+/// instant" — the most *recent* answer available, from a call that asked for the oldest.
+fn rewind(instant: Instant, by: Duration) -> Instant {
+    if let Some(moved) = instant.checked_sub(by) {
+        return moved;
+    }
+    // Halving converges on the earliest representable instant in about as many steps as `by`
+    // has bits, and only ever runs on a machine whose uptime is shorter than the advance.
+    let mut moved = instant;
+    let mut step = by / 2;
+    while step > Duration::ZERO {
+        if let Some(earlier) = moved.checked_sub(step) {
+            moved = earlier;
+        }
+        step /= 2;
+    }
+    moved
+}
+
 /// The status bar's sticky error slot: the last failed job, addressable with `!` (§1.8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickyError {
@@ -185,6 +209,51 @@ impl AppState {
             .get(session)
             .copied()
             .unwrap_or(AgentActivity::Unknown)
+    }
+
+    /// Moves the app's own time-dependent state forward by `by`, without sleeping.
+    ///
+    /// This is the whole of the harness `advance <ms>` command (`docs/TESTING-HARNESS.md` §1).
+    /// Every dwell Fleet measures is a stored [`Instant`] compared against `now`, so moving time
+    /// forward means rewinding those instants: no timer is shortened, no task is woken early, and
+    /// a scenario that would have waited four seconds for a toast waits for nothing at all.
+    ///
+    /// # What it moves
+    ///
+    /// * Toast dwell, expiry and the coalescing window — [`LiveToast::shown_at`] and
+    ///   [`LiveToast::expires_at`]. A toast whose dwell is now behind us is removed here.
+    /// * `daemon_since`, which times the cold-start splash detail and the reconnect countdown.
+    /// * The reconnect banner's own `since`, which [`AppState::tick`] turns back into
+    ///   [`DaemonLink::Connected`] once its dwell is over.
+    ///
+    /// # What it does not move
+    ///
+    /// * **The daemon's clock.** `fleetd` keeps its own wall clock, its own job timings and its
+    ///   own watchers; nothing here reaches across the bridge. A scenario that needs the daemon
+    ///   to believe in another time needs a daemon-side fixture, not this command.
+    /// * **Executor-backed timers.** The 250 ms shell tick, the clone-repo and auto-inspect
+    ///   debounce windows, the terminal attach retry and the Hub pull-request cache deadlines are
+    ///   all `BackgroundExecutor::timer` futures on the real monotonic clock. GPUI can only
+    ///   rewind that clock through a test dispatcher — `BackgroundExecutor::advance_clock` is
+    ///   `test-support`-only and unwraps one — so a shipped Fleet cannot. Those windows are
+    ///   150–400 ms and a scenario waits them out with `await`; moving them would mean the app
+    ///   owning a clock rather than reading one, which is a follow-up, not a drive-by.
+    /// * **Anything a screen entity times for itself**, such as the confirm dialog's
+    ///   `checked_at`: this method reaches `AppState` only.
+    ///
+    /// Returns whether the frame has to be repainted, exactly as [`AppState::tick`] does.
+    pub fn advance_clock(&mut self, by: Duration, now: Instant) -> bool {
+        for live in &mut self.toasts {
+            live.shown_at = rewind(live.shown_at, by);
+            live.expires_at = rewind(live.expires_at, by);
+        }
+        self.daemon_since = rewind(self.daemon_since, by);
+        if let DaemonLink::Reconnected { since, .. } = &mut self.daemon {
+            *since = rewind(*since, by);
+        }
+        // `tick` is the one consumer of these instants: it drops the toasts whose dwell is over
+        // and retires the reconnect banner. Running it is what makes the advance observable.
+        self.tick(now)
     }
 
     /// Records a toast under the §2.7 law.

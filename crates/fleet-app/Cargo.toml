@@ -19,16 +19,21 @@ chrono.workspace = true
 fleet-cli.workspace = true
 fleet-client.workspace = true
 fleet-core.workspace = true
+fleet-drive = { workspace = true, features = ["socket"] }
 fleet-lazygit.workspace = true
 fleet-proto.workspace = true
 fleet-ui-kit.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+# Only to silence the `log`→`tracing` bridge at shutdown; see `shell::root::bootstrap::run`.
+log.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [dev-dependencies]
+fleet-harness.workspace = true
 tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
