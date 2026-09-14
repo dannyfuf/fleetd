@@ -11,21 +11,21 @@ key <
 wait 400
 key j j j j
 wait 900
-wheel 25
+scroll 0 -25
 wait 300
-wheel 25
+scroll 0 -25
 wait 300
 key 0
 wait 500
-wheel -40
+scroll 0 40
 wait 300
 key L L L
 wait 400
 key H H H H
 wait 400
-hwheel 12
+scroll -12 0
 wait 300
-hwheel -12
+scroll 12 0
 wait 300
 key G
 wait 500

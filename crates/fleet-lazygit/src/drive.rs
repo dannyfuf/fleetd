@@ -1,7 +1,5 @@
 //! Opt-in GUI scripts from `FLEET_LAZYGIT_DRIVE`, with timestamped `<script>.log` replies.
-//! Commands: `key`, `type`, `wheel`, `hwheel`, `wait`, `shot`, and `quit`.
-
-pub mod support;
+//! Commands: `key`, `type`, `scroll`, `wait`, `shot`, and `quit`.
 
 use gpui::{App, Task, Window};
 use std::{
@@ -18,7 +16,7 @@ pub fn script_path() -> Option<PathBuf> {
 
 /// Runs the standalone driver until quit or window closure.
 pub fn spawn(script: PathBuf, window: &Window, cx: &App) -> Task<()> {
-    support::spawn(script, window, cx, support::Dialect::Lazygit, || {
+    fleet_drive::legacy::spawn(script, window, cx, || {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis())

@@ -357,18 +357,21 @@ printf 'wait 500\nkey 2\nkey enter\nkey space\nshot /tmp/staged.png\nquit\n' \
   >> /tmp/lazygit-drive.txt
 ```
 
-`key`, `type`, `wait`, `shot` and `quit` behave exactly as `docs/DEVELOPMENT.md` documents for
-`FLEET_DRIVE`; every line is echoed to `$FLEET_LAZYGIT_DRIVE.log` with a `run` and a `done` entry,
-so a runner can wait on `done <line>` instead of sleeping. One step is local to this crate:
+`key`, `type`, `wait`, `shot` and `quit` are the legacy file-polling grammar this binary keeps;
+every line is echoed to `$FLEET_LAZYGIT_DRIVE.log` with a `run` and a `done` entry, so a runner can
+wait on `done <line>` instead of sleeping. `fleet` itself no longer polls a file — it is driven
+over a socket by `fleet-harness` (`docs/TESTING-HARNESS.md`). One step is local to this crate:
 
 ```text
-wheel 5               scroll the pointer wheel five rows down (negative scrolls up)
-wheel 5 0.75 0.5      the same, aimed at 75 % across and 50 % down the window
-hwheel 4              scroll four cells to the right (a sideways trackpad swipe)
+scroll 0 -5           scroll the pointer wheel five rows down (a positive dy scrolls up)
+scroll 0 -5 0.75 0.5  the same, aimed at 75 % across and 50 % down the window
+scroll -4 0           scroll four cells to the right (a sideways trackpad swipe)
 ```
 
-Both dispatch a real `ScrollWheelEvent` through the window's hit test, so they exercise the
-element's own listener rather than a test-only shortcut.
+The spelling, the sign and the 18 px unit are the harness's `scroll <dx> <dy>`
+(`docs/TESTING-HARNESS.md` §2), so one vocabulary serves both drivers; the older `wheel N` and
+`hwheel N` are `scroll 0 -N` and `scroll -N 0`. It dispatches a real `ScrollWheelEvent` through the
+window's hit test, so it exercises the element's own listener rather than a test-only shortcut.
 
 ### The `drive/` regression scripts
 

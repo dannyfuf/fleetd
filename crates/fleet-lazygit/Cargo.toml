@@ -16,6 +16,9 @@ path = "src/main.rs"
 unicode-segmentation.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
+# Only the legacy file-script driver: the harness socket, its predicate evaluator and `regex`
+# have no consumer here.
+fleet-drive = { workspace = true, features = ["legacy"] }
 fleet-git.workspace = true
 fleet-ui-kit.workspace = true
 gpui.workspace = true
