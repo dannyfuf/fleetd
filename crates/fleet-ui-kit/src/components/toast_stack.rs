@@ -26,6 +26,7 @@ use gpui::{App, SharedString, Window, deferred, div, prelude::*};
 
 use crate::{
     components::OverlayLayer,
+    harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::Text,
     theme::ActiveTheme,
@@ -235,7 +236,7 @@ impl RenderOnce for ToastStack {
                 .p(theme.metrics.toast_inset)
                 .pb(self.bottom_inset.unwrap_or(theme.metrics.toast_inset))
                 .gap(theme.space.sm)
-                .children(visible.into_iter().map(|toast| {
+                .children(visible.into_iter().enumerate().map(|(index, toast)| {
                     let tone = allowed_tone(toast.tone);
                     let color = tone.color(theme);
                     let text = ToastStack::resolved_text(&toast);
@@ -259,6 +260,9 @@ impl RenderOnce for ToastStack {
                                 .map(|icon| icon.el().size(IconSize::Medium).color(color)),
                         )
                         .child(Text::ui(text).ellipsize())
+                        // `toasts.toast[0]` is the oldest live toast, which is the order
+                        // `docs/TESTING-HARNESS.md` §3 gives the `toasts` array as well.
+                        .harness_target_indexed("toasts.toast", index)
                 })),
         )
         .with_priority(OverlayLayer::Toast.priority())

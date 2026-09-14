@@ -107,7 +107,11 @@ impl Default for AppFrame {
 }
 
 impl RenderOnce for AppFrame {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // The window root is the one place that runs exactly once per frame, so it is where
+        // the harness target table's frame boundary lives. It is a no-op unless the external
+        // test harness turned recording on; see `crate::harness`.
+        crate::harness::begin_frame(window);
         let theme = cx.theme();
         div()
             .relative()

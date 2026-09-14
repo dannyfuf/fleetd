@@ -105,6 +105,10 @@ fn await_job_mutation(
 pub(super) fn acknowledge_dismissal(app: &mut AppState, dismissed: &[JobId]) {
     if let Some(snapshot) = app.snapshot.as_mut() {
         snapshot.jobs.retain(|job| !dismissed.contains(&job.id));
+        // Every other writer of the daemon mirror bumps the revision; this one edits
+        // `snapshot.jobs`, which `lists.jobs`, `jobs[]` and `idle.running_jobs` are all built
+        // from, so without it the harness projection keeps serving the dismissed row.
+        app.bump_snapshot_revision();
     }
     app.seen_failed.extend(dismissed.iter().cloned());
     if app

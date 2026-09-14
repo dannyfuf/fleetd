@@ -13,6 +13,7 @@ use gpui::{App, ElementId, SharedString, Window, div, prelude::*};
 
 use crate::{
     components::{Spinner, StatusDot, StatusGlyph, StatusKind},
+    harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::Text,
     theme::{ActiveTheme, Theme},
@@ -216,6 +217,7 @@ pub struct TerminalTabStrip {
     tabs: Vec<TerminalTab>,
     active: usize,
     show_plus: bool,
+    agents_from: Option<usize>,
     on_select: Option<SelectHandler>,
     on_new: Option<NewHandler>,
 }
@@ -228,6 +230,7 @@ impl TerminalTabStrip {
             tabs: tabs.into_iter().collect(),
             active: 0,
             show_plus: true,
+            agents_from: None,
             on_select: None,
             on_new: None,
         }
@@ -248,6 +251,18 @@ impl TerminalTabStrip {
     /// Hide the trailing `+` tab.
     pub fn show_plus(mut self, show: bool) -> Self {
         self.show_plus = show;
+        self
+    }
+
+    /// The position at which tabs stop addressing a process and start addressing a
+    /// conversation.
+    ///
+    /// The strip draws both the same way, but they are not the same thing to anything reading
+    /// the window from outside: the harness names a process tab `tabs.tab[N]` and a
+    /// conversation tab `agents.tabs.tab[N]`, which is the same split the snapshot's `focused`
+    /// field reports (`docs/TESTING-HARNESS.md` §3). Left unset, every tab is a process tab.
+    pub fn agents_from(mut self, position: usize) -> Self {
+        self.agents_from = Some(position);
         self
     }
 
@@ -272,9 +287,11 @@ impl RenderOnce for TerminalTabStrip {
             tabs,
             active,
             show_plus,
+            agents_from,
             on_select,
             on_new,
         } = self;
+        let agents_from = agents_from.unwrap_or(usize::MAX);
 
         let state = window.use_keyed_state(
             ElementId::NamedChild(std::sync::Arc::new(strip_id.clone()), "scroll-state".into()),
@@ -286,7 +303,13 @@ impl RenderOnce for TerminalTabStrip {
 
         let tab_theme = theme.clone();
         let tabs = tabs.into_iter().enumerate().map(move |(pos, tab)| {
+            let part = if pos >= agents_from {
+                "agents.tabs.tab"
+            } else {
+                "tabs.tab"
+            };
             tab_element(tab, pos, pos == active, &tab_theme, on_select.clone())
+                .harness_target_indexed(part, pos)
         });
 
         div()

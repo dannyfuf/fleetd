@@ -242,7 +242,11 @@ pub(super) fn list_body(
     gpui::list(scroll.clone(), move |index, _, _| {
         rows.get(index).map_or_else(
             || div().into_any_element(),
-            |job| jobs_panel::prepared_job_row(job, index == cursor, now),
+            |job| {
+                jobs_panel::prepared_job_row(job, index == cursor, now)
+                    .harness_target_indexed("jobs.row", index)
+                    .into_any_element()
+            },
         )
     })
     .size_full()

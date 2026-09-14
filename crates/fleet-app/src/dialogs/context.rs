@@ -195,13 +195,14 @@ pub(crate) fn render(
         .flex()
         .flex_col()
         .gap(gap)
-        .child(name_field(draft, duplicate.as_deref()))
+        .child(name_field(draft, duplicate.as_deref()).harness_target_indexed("dialog.field", 0))
         .child(
             field(&draft.owners)
                 .label("Owners")
                 .placeholder("bukhr, dannyfuf")
                 .focused(draft.field == Field::Owners)
-                .preview("GitHub orgs/users used to scope PRs"),
+                .preview("GitHub orgs/users used to scope PRs")
+                .harness_target_indexed("dialog.field", 1),
         );
 
     let mut hints = KeyHintRow::new()

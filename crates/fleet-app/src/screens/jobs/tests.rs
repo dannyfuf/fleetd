@@ -300,7 +300,34 @@ fn dismiss_updates_only_acknowledged_jobs() {
     assert_eq!(app.snapshot.as_ref().expect("snapshot").jobs.len(), 2);
     assert!(app.seen_failed.is_empty());
 
+    // The harness projection is memoised behind `snapshot_revision`, so a dismissal that edits
+    // `snapshot.jobs` without moving it serves the dismissed row to every later `dump` and
+    // `await` (`docs/TESTING-HARNESS.md` §3).
+    let before = app.harness_projection();
+    assert!(
+        before
+            .snapshot
+            .jobs
+            .iter()
+            .any(|job| job.id == dismissed.id.as_str()),
+        "the job is in the projection before it is dismissed"
+    );
+
     actions::acknowledge_dismissal(&mut app, &gone);
+
+    let after = app.harness_projection();
+    assert!(
+        !after
+            .snapshot
+            .jobs
+            .iter()
+            .any(|job| job.id == dismissed.id.as_str()),
+        "the dismissed job must leave the projection, not just the mirror"
+    );
+    assert_ne!(
+        before.revision, after.revision,
+        "a changed projection has to move the revision or `await` never wakes"
+    );
     assert_eq!(
         app.snapshot
             .as_ref()
@@ -630,5 +657,62 @@ impl JobListHarness {
             gpui::size(gpui::px(440.0), gpui::px(140.0)),
             |_, _| view.into_any_element(),
         );
+    }
+}
+
+/// `jobs.row[N]` is what a Phase 5 degraded-state scenario clicks to open a failed job's log
+/// (`docs/TESTING-HARNESS.md` §3), so the panel's virtualized rows carry their index.
+#[gpui::test]
+fn the_jobs_panel_names_its_rows_for_the_harness(cx: &mut gpui::TestAppContext) {
+    fleet_ui_kit::harness::set_recording(true);
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let jobs: Vec<_> = (0..3)
+        .map(|index| job(&format!("job-{index}"), JobStatus::Succeeded, false, false))
+        .collect();
+    let scroll = ListState::new(0, ListAlignment::Top, gpui::px(0.0));
+    let mut prepared = presentation::PreparedJobs::default();
+    assert!(prepared.update(&jobs, JobFilter::All, None, &scroll));
+    let cx = cx.add_empty_window();
+    let harness = cx.new(|_| FramedJobList {
+        rows: prepared.rows.clone(),
+        scroll,
+    });
+    let element = harness.clone();
+    cx.draw(
+        gpui::Point::default(),
+        gpui::size(gpui::px(440.0), gpui::px(140.0)),
+        |_, _| element.into_any_element(),
+    );
+
+    let names: Vec<String> = cx
+        .update(|window, _| fleet_ui_kit::harness::painted(window))
+        .into_iter()
+        .map(|target| target.name.to_string())
+        .collect();
+    fleet_ui_kit::harness::set_recording(false);
+
+    assert_eq!(
+        names,
+        vec!["jobs.row[0]", "jobs.row[1]", "jobs.row[2]"],
+        "every visible job row is addressable by its visual index"
+    );
+}
+
+/// The same list inside the chrome that begins a frame: `fleet_ui_kit::AppFrame` is the only
+/// frame boundary the target table has, so a tree drawn without it records nothing at all.
+struct FramedJobList {
+    rows: Rc<[Rc<crate::presentation::JobDisplay>]>,
+    scroll: ListState,
+}
+
+impl gpui::Render for FramedJobList {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        fleet_ui_kit::AppFrame::new().body(presentation::list_body(
+            self.rows.clone(),
+            0,
+            JobFilter::All,
+            &self.scroll,
+            1_788_523_230,
+        ))
     }
 }

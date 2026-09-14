@@ -18,7 +18,9 @@ use fleet_proto::{
     request::RequestBody,
     response::{PrSlice, ResponseBody},
 };
-use fleet_ui_kit::{ActiveTheme, Icon, SplitLayout, StatusKind, Toast, ToastDuration};
+use fleet_ui_kit::{
+    ActiveTheme, HarnessTargetExt, Icon, SplitLayout, StatusKind, Toast, ToastDuration,
+};
 use gpui::{
     AnyElement, App, ClipboardItem, Entity, FocusHandle, IntoElement, ScrollHandle, SharedString,
     Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
@@ -443,6 +445,7 @@ fn hub_tabs(state: &AppState) -> fleet_ui_kit::SegmentedTabs {
     ])
     .active(active)
     .underlined(false)
+    .harness_tabs("hub.tab")
     .on_select(|index, window, cx| {
         let action: Box<dyn gpui::Action> = match index {
             1 => Box::new(hub::GoPrs),

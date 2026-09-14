@@ -155,8 +155,13 @@ impl HubScreen {
 
         let rail = repos_rail::render(
             RailProps {
-                header_override: (state.filter.editing && state.hub_pane == HubPane::Repos)
-                    .then(|| dialogs::filter::bar(state).into_any_element()),
+                header_override: (state.filter.editing && state.hub_pane == HubPane::Repos).then(
+                    || {
+                        dialogs::filter::bar(state)
+                            .harness_target("filter.input")
+                            .into_any_element()
+                    },
+                ),
                 rows: model.rail.clone(),
                 cursor: state.cursors.repos,
                 focused: state.hub_pane == HubPane::Repos,
@@ -186,7 +191,11 @@ impl HubScreen {
             } => worktrees_list::render(
                 ListProps {
                     header_override: (state.filter.editing && state.hub_pane == HubPane::List)
-                        .then(|| dialogs::filter::bar(state).into_any_element()),
+                        .then(|| {
+                            dialogs::filter::bar(state)
+                                .harness_target("filter.input")
+                                .into_any_element()
+                        }),
                     rows: model.worktrees.clone(),
                     cursor: state.cursors.worktrees,
                     focused: state.hub_pane == HubPane::List,
@@ -209,7 +218,11 @@ impl HubScreen {
                 prs_screen::render(
                     PrScreenProps {
                         header_override: (state.filter.editing && state.hub_pane == HubPane::List)
-                            .then(|| dialogs::filter::bar(state).into_any_element()),
+                            .then(|| {
+                                dialogs::filter::bar(state)
+                                    .harness_target("filter.input")
+                                    .into_any_element()
+                            }),
                         rows: model.prs.clone(),
                         cursor: pr_cursor(state),
                         focused: state.hub_pane == HubPane::List,

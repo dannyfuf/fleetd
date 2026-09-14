@@ -58,6 +58,31 @@ pub enum DecisionAction {
     Refine,
 }
 
+impl DecisionAction {
+    /// The harness target name for the approval controls, or `None` for an action a scenario
+    /// reaches by the question or plan rows instead.
+    ///
+    /// Only the five approval actions are named: `docs/TESTING-HARNESS.md` §3 freezes
+    /// `agents.approval.allow_once`, and the rest of the drawer is answered with the keys the
+    /// hints already advertise.
+    #[must_use]
+    pub const fn harness_target(&self) -> Option<&'static str> {
+        match self {
+            Self::AllowOnce => Some("agents.approval.allow_once"),
+            Self::AllowSession => Some("agents.approval.allow_always"),
+            Self::Deny => Some("agents.approval.deny"),
+            Self::DenyAndStop => Some("agents.approval.deny_and_stop"),
+            Self::Edit => Some("agents.approval.edit"),
+            Self::Choose(_)
+            | Self::Toggle
+            | Self::Answer
+            | Self::Previous
+            | Self::Implement
+            | Self::Refine => None,
+        }
+    }
+}
+
 /// One labelled action a decision advertises.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionOption {

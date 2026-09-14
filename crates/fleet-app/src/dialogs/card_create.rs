@@ -140,7 +140,8 @@ pub(crate) fn render(
                 .label("Title")
                 .placeholder("Fix the login redirect")
                 .caret(draft.title_caret)
-                .focused(draft.field == Field::Title),
+                .focused(draft.field == Field::Title)
+                .harness_target_indexed("dialog.field", 0),
         )
         .child(
             TextArea::new(draft.draft.description.clone())
@@ -154,7 +155,8 @@ pub(crate) fn render(
                     draft.description_scroll.clone(),
                 )
                 .cursor(draft.description_area.cursor())
-                .focused(draft.field == Field::Description),
+                .focused(draft.field == Field::Description)
+                .harness_target_indexed("dialog.field", 1),
         );
 
     let mut card = Dialog::new("New card")

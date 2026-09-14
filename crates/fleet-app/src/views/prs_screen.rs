@@ -10,9 +10,9 @@ use fleet_core::{
 use fleet_proto::response::PrSlice;
 use fleet_proto::snapshot::LinkState;
 use fleet_ui_kit::{
-    ActiveTheme, AgeLabel, ColumnLadder, Icon, IconSize, ListView, Pane, PaneBorder, PrBadge,
-    PrBadgeState, ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs, SkeletonRows,
-    StatusGlyph, StatusKind, Text, Tone, Truncate, format_age, truncate,
+    ActiveTheme, AgeLabel, ColumnLadder, HarnessTargetExt, Icon, IconSize, ListView, Pane,
+    PaneBorder, PrBadge, PrBadgeState, ResolvedColumn, Row, RowColumn, SegmentedTab, SegmentedTabs,
+    SkeletonRows, StatusGlyph, StatusKind, Text, Tone, Truncate, format_age, truncate,
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
@@ -255,7 +255,8 @@ pub fn render(
     } = props;
 
     let tabs = SegmentedTabs::new([tab_of("Mine", mine_count), tab_of("Review", review_count)])
-        .active(usize::from(tab == PrTab::Review));
+        .active(usize::from(tab == PrTab::Review))
+        .harness_tabs("prs.tab");
 
     let stamp = Text::ui(fetch_stamp_text(loading, fetched_age));
     let stamp = if !loading && fetched_age.is_some() && error.is_some() {
@@ -289,6 +290,8 @@ pub fn render(
             return div().into_any_element();
         };
         pr_row(row, is_cursor, focused, &columns, age_offset, cx)
+            .harness_target_indexed("prs.row", index)
+            .into_any_element()
     })
     .cursor(cursor)
     .track_scroll(scroll)

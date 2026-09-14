@@ -19,6 +19,7 @@ use gpui::{AnyElement, App, FontWeight, Pixels, SharedString, Window, div, prelu
 
 use crate::{
     components::{ColumnAlign, Row, RowColumn},
+    harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::{Text, TextRole},
     theme::{ActiveTheme, Theme, ch},
@@ -230,6 +231,7 @@ pub struct FuzzyList {
     under_text_field: bool,
     row_height: Option<Pixels>,
     empty: Option<AnyElement>,
+    harness_rows: Option<(&'static str, usize)>,
 }
 
 impl FuzzyList {
@@ -242,6 +244,7 @@ impl FuzzyList {
             under_text_field: true,
             row_height: None,
             empty: None,
+            harness_rows: None,
         }
     }
 
@@ -273,6 +276,18 @@ impl FuzzyList {
     /// What to show when there are no results.
     pub fn empty(mut self, empty: impl IntoElement) -> Self {
         self.empty = Some(empty.into_any_element());
+        self
+    }
+
+    /// Name each rendered row `<part>[<index>]` for the harness target recorder, counting from
+    /// `first`.
+    ///
+    /// The same rows are `palette.row[N]` under the palette and `dialog.row[N]` inside a
+    /// dialog, so the name belongs to the caller, not to the list. `first` is what a sectioned
+    /// surface such as [`super::Palette`] uses to keep one flat numbering across its sections.
+    /// A list that is never addressed by a scenario leaves this unset and records nothing.
+    pub fn harness_rows(mut self, part: &'static str, first: usize) -> Self {
+        self.harness_rows = Some((part, first));
         self
     }
 
@@ -315,6 +330,7 @@ impl RenderOnce for FuzzyList {
         }
 
         let cursor = self.cursor;
+        let harness_rows = self.harness_rows;
         let one_line_h = self.row_height.unwrap_or(theme.metrics.row_h);
         let two_line_h = self.row_height.unwrap_or(theme.metrics.job_row_h);
 
@@ -379,7 +395,9 @@ impl RenderOnce for FuzzyList {
                         if let Some(secondary) = item.secondary {
                             row = row.second_line(Text::ui(secondary).muted().ellipsize());
                         }
-                        row
+                        row.harness_target_optional(
+                            harness_rows.map(|(part, first)| (part, first + ix)),
+                        )
                     }),
             )
             .into_any_element()
