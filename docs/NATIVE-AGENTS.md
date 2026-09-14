@@ -783,6 +783,24 @@ composer: `[y] implement`, `[n] refine`. One plan per turn, upserted, keyed `(th
 Claude's arrives as an always-denied `ExitPlanMode`; Codex's as an `item/completed` of type
 `plan`.
 
+### 6.5 Testing a gate without a vendor CLI
+
+`fleet-harness agent --provider <claude|codex> --transcript <file>` speaks either wire protocol
+from a scripted document (`docs/TESTING-HARNESS.md` §5), so a gate can be exercised with no vendor
+binary, no network and no token. It emits exactly the two frames this section describes —
+`control_request { subtype: "can_use_tool" }` for Claude, and
+`item/commandExecution/requestApproval` or `item/fileChange/requestApproval` for Codex — and waits
+for the answer Fleet sends back, so a declined gate and an accepted one are both reachable from a
+scenario. The `agents` fixture installs it on `PATH` under the vendor's own name.
+
+A scenario therefore exercises a gate entirely through this document's own surfaces: open the
+worktree, `key ctrl-s A` for a native thread, `click agents.composer` and `type` a prompt, then
+`await agents.threads[0].pending_gate == "permission"`, `click agents.approval.allow_once`, and
+`await agents.threads[0].pending_gate absent`. The approval controls carry the frozen target names
+`agents.approval.{allow_once,allow_always,deny,deny_and_stop,edit}` (§6.2); a model question's
+options are deliberately unnamed, because §6.3's options are answered by number and a name would
+imply a stable identity they do not have.
+
 ## 7. Controls
 
 ### 7.1 The model of a control

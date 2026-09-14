@@ -106,6 +106,13 @@ request initiation, expensive projection and focus or lifecycle reconciliation b
 `synchronize`, in an observation, or in a background task — never in `render`. Drafts are entities
 released with the window; there is no global draft store.
 
+The harness snapshot obeys this rule like any other projection. `AppState::harness_projection`
+builds the versioned `UiSnapshot` that `docs/TESTING-HARNESS.md` §3 freezes, memoised behind a key
+naming every input it reads, and its only callers are the harness socket's `dump`, `await` and
+`assert` commands in `crates/fleet-app/src/drive.rs`. No render path may reach it, and the
+per-element target recorder in `fleet_ui_kit::harness` is one branch on a thread-local flag that is
+false in every launch that did not ask for harness mode.
+
 Rules that come with those signatures:
 
 1. **The returned root element must call `.track_focus(focus)`.** That is what puts your

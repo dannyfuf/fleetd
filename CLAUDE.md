@@ -20,6 +20,7 @@ editing, and load `zed-quality-review` before declaring a change done.
 | Add a crate, module, dependency, lint, error type, log line, migration, or split a large file | `rust-workspace-architecture` |
 | Write or change any test, fake, fixture, or regression test | `rust-gpui-testing` |
 | Add an action, keybinding, focus handle, dialog, modal, palette command, notification, window | `gpui-app-shell` |
+| Touch the GUI harness — `fleet-drive`, `fleet-harness`, `fleet-app/src/drive*`, a `harness_target` name, or `scenarios/` | `rust-gpui-testing`, then `docs/TESTING-HARNESS.md` (frozen: read it before changing a command, a target name or the grammar) |
 | Review a diff or PR, or finish a task | `zed-quality-review` |
 
 ## Non-negotiables
@@ -43,9 +44,16 @@ editing, and load `zed-quality-review` before declaring a change done.
 ```sh
 make lint    # cargo fmt --check + clippy --workspace --all-targets --all-features -D warnings
 make test    # builds fleetd first, then cargo test --workspace
+make harness # drives the real GUI end to end; run it for any change a human would see
 ```
 
 Run `make restart` after changing daemon code so the running `fleetd` matches the build.
+
+`make harness` boots a private `fleetd` and a harness-mode `fleet`, runs `scenarios/` and writes a
+run directory of dumps, screenshots and a report; `make harness-headless` is the subset of that
+corpus needing no pixels, which every scenario taking a `shot` excludes itself from — today that
+is all of them. A change to a screen, a dialog, the keymap or a token is not verified by `make test`
+alone. `docs/TESTING-HARNESS.md` is the frozen contract.
 
 ## Commits
 

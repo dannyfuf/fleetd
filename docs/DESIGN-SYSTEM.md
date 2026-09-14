@@ -364,6 +364,24 @@ under background updates impossible to reason about.
 Legend for the "states" rows: **default · focused · selected · disabled · loading · error**.
 A component that cannot be in a state says so rather than pretending.
 
+**Harness targets.** `fleet_ui_kit::harness` records where a named element painted, so an
+end-to-end scenario can click a row by name. `HarnessTargetExt` is blanket-implemented for every
+`IntoElement`, which is how `fleet-app` names the surfaces it builds itself; the whole cost with
+harness mode off is one flag read and one branch. Four components take typed items rather than
+elements, so their names live here instead of at the call site: `ToastStack` records
+`toasts.toast[N]`, `Palette` records `palette.input` and `palette.row[N]`,
+`TerminalTabStrip` records `tabs.tab[N]` and — past `TerminalTabStrip::agents_from` —
+`agents.tabs.tab[N]`, and the decision drawer records the approval controls. Two more take the
+name from the caller, because the same component appears under different surfaces:
+`SegmentedTabs::harness_tabs` and `FuzzyList::harness_rows`. A name is never invented here;
+`docs/TESTING-HARNESS.md` §3 is authoritative for the vocabulary.
+
+The wrapper's contract is a frame stamp, not a cache: a recorded rectangle carries the frame it
+painted on, and the snapshot reports it beside `window.frame`. A scenario that clicks a target
+whose stamp is older than the current frame is clicking a rectangle that is no longer there, so
+the driver refuses it and names both frame numbers instead of dispatching at stale coordinates.
+That is why a component records on every paint and never keeps last frame's bounds.
+
 ### 6.1 Foundation
 
 #### `Theme` / tokens

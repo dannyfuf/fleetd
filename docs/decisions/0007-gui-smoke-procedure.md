@@ -1,5 +1,11 @@
 # 0007 — Reproducible GUI smoke procedure
 
+**Superseded by [0016 — The end-to-end GUI harness](0016-e2e-harness.md).** The `FLEET_DRIVE`
+file-polling driver described below no longer exists in `fleet`; it was replaced by a
+request/response Unix socket and the `fleet-harness` runner. `docs/TESTING-HARNESS.md` is the
+authority, and `docs/DEVELOPMENT.md` documents how to run it. The rest of this record is kept for
+the reasoning it captured about why the GUI is driven in-process at all, which 0016 retains.
+
 **Adopted.** The GUI is exercised through the scripted-input driver built into `fleet`, not
 through `osascript` keystrokes (which need macOS Accessibility permission) and not through a
 separate GPUI probe crate.
