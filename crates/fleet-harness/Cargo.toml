@@ -1,0 +1,29 @@
+[package]
+name = "fleet-harness"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fleet-harness"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fleet-client.workspace = true
+fleet-core.workspace = true
+fleet-drive = { workspace = true, features = ["socket"] }
+fleet-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+
+[dev-dependencies]
+# `start_paused` lets the response-timeout test reach a 30 s budget without waiting 30 s.
+tokio = { workspace = true, features = ["test-util"] }

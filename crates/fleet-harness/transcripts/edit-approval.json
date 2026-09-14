@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "model": "scripted-sonnet",
+  "session_id": "6b8fc1c4-2f4e-4c4a-9f1a-6b7f0e2c1d40",
+  "thread_id": "01999c4a-7f00-7000-8000-0000000000a2",
+  "steps": [
+    {
+      "type": "text",
+      "text": "The README is missing a trailing newline. I will add one.",
+      "pace_ms": 10
+    },
+    {
+      "type": "file_change",
+      "path": "README.md",
+      "diff": "--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,3 @@\n # demo\n-A crate with no trailing newline.\n+A crate with a trailing newline.\n+\n"
+    },
+    { "type": "approval", "id": "gate-edit-1", "summary": "apply the edit to README.md" },
+    { "type": "text", "text": "Done. README.md now ends with a newline.", "pace_ms": 10 },
+    { "type": "end_turn" }
+  ]
+}
