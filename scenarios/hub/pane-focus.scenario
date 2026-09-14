@@ -1,0 +1,48 @@
+# KEYMAP.md §Global (Normal mode, all Hub screens) [A1] — focus previous / next pane
+#
+# [A1] is a rule about what is *not* there: `h`/`l`, `Tab`/`S-Tab` and the arrows cycle
+# repos ⇄ list and nothing else, and the detail panel is never in the cycle. So the panel is
+# opened first (`i`), and then every affordance that moves focus is exercised with it showing:
+# `focused` only ever answers `repos.row[N]` or `worktrees.row[N]`, and the ends of the cycle
+# clamp instead of wrapping onto a third pane.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
+
+# Open the detail panel. It mirrors the cursor row and takes no focus of its own.
+key i
+await idle
+assert focused == worktrees.row[0] && hub_pane == List
+
+# `h` leaves the list for the rail, `l` comes back.
+key h
+await hub_pane == Repos
+assert focused == repos.row[0] && key_contexts[1] == Repos
+shot rail-focused
+dump rail-focused
+key l
+await hub_pane == List
+assert focused == worktrees.row[0] && key_contexts[1] == Worktrees
+
+# `S-Tab` and `Tab` are the same cycle.
+key shift-tab
+await hub_pane == Repos
+key tab
+await hub_pane == List
+
+# The arrows say it once more, and the ends clamp: a second `Tab` from the list has nowhere
+# further to go, because the detail panel is not a pane.
+key left
+await hub_pane == Repos
+key right
+await hub_pane == List
+key tab
+await idle
+assert hub_pane == List && focused == worktrees.row[0]
+key shift-tab
+await hub_pane == Repos
+key shift-tab
+await idle
+assert hub_pane == Repos && focused == repos.row[0]
+dump clamped
+quit

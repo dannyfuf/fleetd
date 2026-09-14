@@ -1,0 +1,35 @@
+# KEYMAP.md §Global (Normal mode, all Hub screens) — `i` toggles the detail panel,
+# "never focusable; it mirrors the cursor row"
+#
+# The panel is a pane of pixels with no state of its own, so the snapshot can only say what it
+# must *not* change: the mode, the focused row and the selection are identical either side of
+# the toggle, and moving the cursor with the panel open is still an ordinary list move. What
+# the panel itself looks like is the screenshot's job. The panel's real width oracle —
+# `worktrees.row[0]`'s own `w`, which drops from 1196 to 856 when the panel opens — is in the
+# snapshot's `targets` table but is not reachable from a predicate, because a target name
+# contains the `.` a dotted path splits on.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
+assert lists.worktrees.selected.label == spike
+
+# `i` opens the panel without taking focus or changing the mode.
+key i
+await idle
+assert mode == Normal && hub_pane == List && focused == worktrees.row[0] && overlay absent
+assert lists.worktrees.selected.label == spike
+shot detail-open
+dump detail-open
+
+# The panel mirrors the cursor, so moving the cursor is still an ordinary list move.
+key j
+await focused == worktrees.row[1]
+assert lists.worktrees.selected.label == broken && hub_pane == List
+
+# `i` closes it again, and the cursor stays exactly where the panel left it.
+key i
+await idle
+assert mode == Normal && hub_pane == List && focused == worktrees.row[1] && overlay absent
+assert lists.worktrees.selected.label == broken
+dump detail-closed
+quit

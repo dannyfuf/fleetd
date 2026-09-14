@@ -1,0 +1,38 @@
+# KEYMAP.md §Daemon-down surfaces (Doctor report) · UX-SPEC.md §3.12 Doctor — `D` in Settings
+# raises the doctor table, and the report owns the whole window while it is up.
+#
+# The report has no snapshot field of its own, so it is proved by what it *takes*: raising it
+# closes the Settings dialog it was raised from (`dialogs/settings/persistence.rs` — "the doctor
+# table is a full surface; it replaces the dialog it was raised from"), and while it is up the
+# context chain is `Daemon > Doctor`, so a key with no Doctor binding is dead. `J` is that key —
+# it is bound in `Hub` and nowhere on the report — and it opens the Jobs panel again the moment
+# `Esc` dismisses the report. This is the §3.8.6 About entry point, where the daemon is healthy,
+# which is why the table has real checks in it rather than one failed row.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: busy
+await idle 20000
+assert overlay absent
+
+key ,
+await overlay == Dialog 5000
+assert dialog.name == "Settings"
+
+# `D` runs doctor. The answer replaces the dialog, which is the only overlay-visible proof that
+# the full-window report took the surface.
+key D
+await overlay absent 30000
+shot doctor
+
+# `J` is `Hub`'s, and `Hub` is not on the chain while the report is up. `key` answers only after
+# the frame it caused has painted, so an overlay that was going to open has already opened.
+key J
+assert overlay absent
+
+# `Esc` dismisses the report and hands the Hub its keys back.
+key escape
+key J
+await overlay == Jobs 5000
+dump jobs-after-doctor
+quit

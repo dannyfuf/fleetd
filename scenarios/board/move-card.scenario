@@ -1,0 +1,37 @@
+# KEYMAP.md §Board and card detail (`[` / `]`) · UX-SPEC.md §Board — `]` moves the focused card
+# to the next column and the cursor follows it there.
+#
+# Moving a card is the board's only destructive-ish key that has no confirm, so what it does has
+# to be exactly what it says: one card changes status, the counts on both columns change by one,
+# and the cursor stays on the card the user was holding rather than on the slot it left. `[`
+# undoes it by the same rule, which is the property that makes a mis-keyed `]` recoverable.
+#
+# The per-column counts in `lists.board.rows[N].badges[0]` are the oracle, and the card list
+# itself is `lists["board.cards"]` — the name carries a dot, so it needs the quoted path step
+# the predicate grammar spells `["…"]` (TESTING-HARNESS.md §2).
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert lists.board.rows[0].badges[0] == "2" && lists.board.rows[1].badges[0] == "2"
+assert focused == "board.column[0].card[0]"
+assert lists["board.cards"].rows[0] exists
+
+# `]` moves `FLT-1` from Backlog to Todo. The counts are the proof it really changed status.
+key ]
+await lists.board.rows[0].badges[0] == "1" 10000
+assert lists.board.rows[1].badges[0] == "3"
+
+# The cursor followed the card into its new column instead of staying behind.
+assert lists.board.selected.label == "Todo" && focused == "board.column[1].card[2]"
+shot moved
+
+# `[` puts it back, so a mis-keyed move costs one keystroke.
+key [
+await lists.board.rows[0].badges[0] == "2" 10000
+assert lists.board.rows[1].badges[0] == "2" && lists.board.selected.label == "Backlog"
+dump moved-back
+quit

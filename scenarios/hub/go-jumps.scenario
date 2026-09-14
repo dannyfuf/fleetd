@@ -1,0 +1,60 @@
+# KEYMAP.md §Global (Normal mode, all Hub screens) [A7] — `gr`/`gw`/`gp`/`gj`/`ga`, and [A14] `q`
+#
+# The five `g*` jumps are absolute: each one names where it lands, so none of them depends on
+# where the cursor was. `ga` is the one that is not a pane at all — it scopes the rail back to
+# the `All` pseudo-repo, which is why it is checked from a rail scoped to a real repository.
+# `q` closes the PR screen and is unbound in the Hub lists [A14]; both halves are here because
+# `gp` is the only way this corpus reaches the screen `q` can close.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_tab == Worktrees && focused == worktrees.row[0]
+
+# `gr` is the repos rail, `gw` the worktrees list, wherever the cursor starts.
+key g r
+await hub_pane == Repos
+assert focused == repos.row[0] && key_contexts[1] == Repos
+key g w
+await hub_pane == List
+assert focused == worktrees.row[0] && hub_tab == Worktrees
+
+# `gp` is the pull-request screen: a different Hub tab, its own list and its own key context.
+key g p
+await hub_tab == Prs 15000
+assert focused == prs.row[0] && key_contexts[1] == Prs && lists.prs.rows[0] exists
+shot pr-screen
+dump pr-screen
+
+# `q` on the PR screen with nothing open goes back to the worktrees [A14] ...
+key q
+await hub_tab == Worktrees
+assert overlay absent && focused == worktrees.row[0]
+
+# ... and in the Hub lists the same key is unbound, so nothing at all happens to it.
+key q
+await idle
+assert screen == Hub && hub_tab == Worktrees && overlay absent && focused == worktrees.row[0]
+
+# `gj` is the jobs panel, which is an overlay rather than a pane.
+key g j
+await overlay == Jobs
+assert mode == Jobs && key_contexts[0] == Jobs && focused == jobs.row[0]
+key escape
+await overlay absent
+
+# `ga` is the odd one out: the `All` pseudo-repo is a rail row rather than a pane, so `ga`
+# moves the *scope* and leaves the keyboard where it found it. It is checked by the `scope`
+# mark the projection puts on the scoped row, and by the list widening back to every worktree
+# in the context. Scoping to one repository first is what gives it something to undo.
+key g r
+await hub_pane == Repos
+key j
+await focused == repos.row[1]
+assert lists.repos.selected.label == "acme/api"
+key enter
+await lists.repos.rows[1].marks[0] == scope 15000
+assert hub_pane == List && lists.worktrees.rows[3] absent
+key g a
+await lists.repos.rows[0].marks[0] == scope 15000
+assert hub_pane == List && lists.repos.selected.label == All && lists.worktrees.rows[3] exists
+dump all-repos
+quit

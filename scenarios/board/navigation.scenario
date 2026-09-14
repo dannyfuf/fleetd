@@ -1,0 +1,47 @@
+# KEYMAP.md §Board and card detail — `h` / `l` move between columns and `j` / `k` between cards,
+# and the board's shortcuts override the Hub's inherited ones.
+#
+# This is the adjacency the board risks most: `j` / `k` keep their global nvim meaning, but `h`
+# and `l` do *not* keep the Hub's pane cycle — on the board they are columns. `focused` names
+# the exact cell, so the whole walk is checked with one path.
+#
+# A column with no cards still takes the cursor: `Done` holds nothing, and `focused` keeps
+# naming a cell — `board.column[3].card[0]` — rather than dropping to null. The target of that
+# name is not painted, which is the rule that stops a scenario clicking a card that is not there.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert focused == "board.column[0].card[0]"
+
+# `j` moves down the column, and stops at its last card rather than wrapping into the next one.
+key j
+await focused == "board.column[0].card[1]" 5000
+key j
+assert focused == "board.column[0].card[1]"
+
+# `k` comes back up.
+key k
+await focused == "board.column[0].card[0]" 5000
+
+# `l` is the next column, not the Hub's next pane, and the card list under it is the new
+# column's own.
+key l
+await lists.board.selected.label == "Todo" 5000
+assert focused == "board.column[1].card[0]"
+shot todo-column
+
+# An empty column keeps the cursor and names itself.
+key l l
+await lists.board.selected.label == "Done" 5000
+assert focused == "board.column[3].card[0]" && lists.board.rows[3].badges[0] == "0"
+
+# `h` walks back, and the board is still the board: the Hub's pane cycle never ran.
+key h h h
+await lists.board.selected.label == "Backlog" 5000
+assert key_contexts[1] == "Board" && hub_pane == "List"
+dump walked
+quit

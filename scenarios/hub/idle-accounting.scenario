@@ -1,0 +1,41 @@
+# TESTING-HARNESS.md §2 — "`idle` is true exactly when … no in-flight app requests, running
+# jobs, pending frame, live toast timer, or armed debounce."
+#
+# This is the scenario that would have caught three of those five counters being written by
+# nothing: with `in_flight_requests`, `pending_frame` and `armed_debounces` structurally zero,
+# `await idle` returned in under a millisecond on a cold start and every later line raced the
+# work it was supposed to wait for. Each clause below reads one constituent *by name*, so a
+# counter that stops being fed fails here rather than silently making every `await idle` a
+# no-op.
+#
+# No screenshot: the whole subject is a JSON object, and this scenario is part of the slice
+# that rides `make test` in the headless lane (§7).
+fixture: one-repo
+await idle 30000
+assert idle.idle == true && idle.in_flight_requests == 0 && idle.running_jobs == 0
+assert idle.pending_frame == false && idle.live_toast_timers == 0 && idle.armed_debounces == 0
+
+# A real daemon job through the run's own client: `idle` is false while it runs, and the bare
+# word `idle` and the counter it is derived from must never disagree.
+job long
+await idle.running_jobs > 0 20000
+assert idle.idle == false
+dump busy
+
+# `job long` is stopped at teardown, so the run does not depend on it finishing. What it does
+# have to show is the job reaching a terminal state in `jobs[]` once it is cancelled — which
+# `daemon kill` would confound, so the accounting below uses a job that ends on its own.
+job success
+await jobs[1].status == succeeded 30000
+assert screen == Hub && sticky_error absent
+
+# A toast is the fourth counter, and it is the one the app's own clock owns: `advance` moves
+# the stored dwell rather than sleeping it out (§1).
+key y
+await toasts[0] exists 15000
+assert idle.live_toast_timers > 0 && idle.idle == false
+advance 20000
+await toasts[0] absent 15000
+assert idle.live_toast_timers == 0
+dump settled
+quit

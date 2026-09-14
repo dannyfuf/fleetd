@@ -1,0 +1,30 @@
+# KEYMAP.md §Dialogs and text inputs — Help (`?`): "`Esc` / `?` close"
+#
+# Help is the discoverability promise of a modal app, and it is the one dialog with two ways
+# out. Both are checked, because `?` closing is the half a refactor drops: `?` is still bound
+# under `Hub`, and a Help overlay that does not bind it for itself simply re-opens.
+fixture: one-repo
+await idle 30000
+assert screen == Hub && overlay absent
+
+key ?
+await overlay == Dialog 10000
+assert mode == Dialog && dialog.name == Help
+assert key_contexts[0] == Dialog && key_contexts[1] == Help
+shot help
+dump help
+
+# `?` closes it ...
+key ?
+await overlay absent
+assert screen == Hub && mode == Normal && focused == worktrees.row[0]
+
+# ... and so does `Esc`, from the same place.
+key ?
+await overlay == Dialog 10000
+assert dialog.name == Help
+key escape
+await overlay absent
+assert screen == Hub && mode == Normal && dialog absent
+dump closed
+quit

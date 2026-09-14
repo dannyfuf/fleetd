@@ -1,0 +1,38 @@
+# KEYMAP.md §Global [A18] · UX-SPEC.md §1.8 — a failed job fills the sticky error slot, and `!`
+# focuses it by opening the Jobs panel on the failure.
+#
+# The sticky error is the one notification that never expires, so it is the only one a user can
+# still act on minutes later — which is what [A18] gives `!` to do. `job failure` submits a real
+# `Clone` of a repository with no origin through the run's own client (§2): the job registry
+# lives in the daemon, so nothing a preset writes could have produced this row.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: busy
+await idle 20000
+assert sticky_error absent
+
+# The clone of `/nonexistent/fleet-harness/unreachable.git` fails where the daemon first runs
+# `git` in a directory that is not there, so the slot reads `command failed: git rev-parse: No
+# such file or directory`. The regex is the stable half of that: the prefix `command failed` is
+# what `fleetd` puts on every failed command, and which command it was is `git`'s to change.
+job failure
+await sticky_error exists 30000
+assert sticky_error ~= "^command failed: git"
+
+shot sticky-error
+
+# [A18]: `!` focuses the slot, which Fleet implements as opening the Jobs panel
+# (`shell/root/actions.rs::focus_sticky_error`). It opens on row 0 rather than on the failed
+# row, so the cursor is asserted where Fleet actually leaves it, not where [A18] reads.
+key !
+await overlay == Jobs 5000
+assert key_contexts[0] == "Jobs" && focused == "jobs.row[0]"
+
+# The panel lists the injected clone next to Fleet's own startup `Inspect worktrees`, and the
+# slot keeps the error while the panel is open: a sticky error is dismissed by fixing the job,
+# never by looking at it. `jobs` is not indexed here — its order is the daemon's, not submission
+# order, and it has been observed both ways around.
+assert lists.jobs.rows[1] exists && lists.jobs.selected exists && sticky_error exists
+dump jobs
+quit

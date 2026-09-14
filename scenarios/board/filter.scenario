@@ -1,0 +1,37 @@
+# KEYMAP.md §Board and card detail (`/`) — the board's `/` is its own filter, not the Hub's
+# filter overlay, and while it has the keyboard the board's bare letters type instead of acting.
+#
+# This is the one place in the app where `/` does not open `Overlay::Filter`: the board owns
+# `BoardState.filter` and publishes the `Filter > BoardFilter` context, so `overlay` stays null
+# while `mode` reads `Filter`. Without that, typing a card title containing `j`, `l` or `c`
+# would navigate, move and create instead of filtering.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: board
+await idle 20000
+key g b
+await hub_tab == Board 10000
+assert overlay absent && mode == "Normal"
+
+# `/` takes the keyboard without opening an overlay.
+key /
+await focused == "board.filter" 5000
+assert mode == "Filter" && key_contexts[0] == "Filter" && key_contexts[1] == "BoardFilter"
+assert overlay absent
+
+# `acli` contains an `a`, a `c` and an `l` — three bound board letters — and types anyway.
+type acli
+await lists.board.filter == "acli" 5000
+shot filtered
+
+# Two-stage `Esc` (KEYMAP §Filter mode [A13]): the first press leaves the input keeping the
+# filter, the second clears it. Neither ever quits.
+key escape
+await focused != "board.filter" 5000
+assert lists.board.filter == "acli" && key_contexts[1] == "Board"
+key escape
+await lists.board.filter == "" 5000
+assert key_contexts[0] == "Hub" && key_contexts[1] == "Board"
+dump cleared
+quit

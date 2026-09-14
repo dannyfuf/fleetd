@@ -1,0 +1,65 @@
+# KEYMAP.md §Workspace (Terminal mode) — the `ctrl-s` prefix table — and §Modes and key
+# contexts, where `Workspace > Prefix` is "(one-shot)", entered by `ctrl-s` inside Terminal
+# or Native and left by "any key (consumed) or `Esc`". UX-SPEC.md §3.7 (jobs panel) and
+# §3.9 (command palette) for two of the overlays this table opens.
+#
+# Only the rows that change something the snapshot can see are checked here; tab motion is
+# `tab-switching.scenario` and the grid itself is `terminal-text.scenario`.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+assert mode == Terminal
+
+# `ctrl-s` on its own arms the one-shot Prefix context and nothing else.
+key ctrl-s
+await mode == Prefix 10000
+assert key_contexts[0] == Workspace && key_contexts[1] == Prefix && overlay absent
+shot prefix
+
+# `Esc` cancels the prefix ("Esc | cancel prefix"), leaving the terminal exactly as it was.
+key escape
+await mode == Terminal 10000
+assert overlay absent
+
+# `?` opens the help overlay listing this very table.
+key ctrl-s ?
+await overlay == Dialog 10000
+assert dialog.name == Help && mode == Dialog
+key escape
+await overlay absent 10000
+assert mode == Terminal
+
+# `J` opens the jobs panel from inside a terminal, where bare `J` is PTY input.
+key ctrl-s J
+await overlay == Jobs 10000
+assert mode == Jobs && key_contexts[0] == Jobs
+key escape
+await overlay absent 10000
+
+# `,` renames the current terminal; the dialog reports itself as `Rename`.
+key ctrl-s ,
+await overlay == Dialog 10000
+assert dialog.name == Rename && mode == Dialog
+key escape
+await overlay absent 10000
+
+# `W` is the session switcher: the palette, pre-filtered.
+key ctrl-s W
+await overlay == Palette 10000
+assert mode == Palette
+key escape
+await overlay absent 10000
+
+# An unbound key still leaves Prefix — that is what "one-shot" means — and opens nothing.
+key ctrl-s b
+await mode == Terminal 10000
+assert overlay absent && screen == Workspace
+
+# `ctrl-s ctrl-s` sends a literal `ctrl-s` to the PTY. It is last in this file on purpose:
+# a literal `ctrl-s` is XOFF, so the tty it lands on stops printing until XON.
+key ctrl-s ctrl-s
+await mode == Terminal 10000
+assert screen == Workspace && overlay absent
+dump prefix-table
+quit

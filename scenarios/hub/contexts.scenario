@@ -1,0 +1,40 @@
+# KEYMAP.md §Global (Normal mode, all Hub screens) — `1`-`9`, `gt` / `gT`
+#
+# A context switch is only visible through what the context *holds*, so this scenario makes a
+# second one to switch to: `N` opens the new-context dialog (§3.8.4), and the context it creates
+# claims no repositories at all. The fixture's own context has two repositories and four
+# worktrees; the new one has neither, which is what tells the two apart in every assertion below.
+fixture: busy
+await idle 30000
+assert screen == Hub && lists.repos.rows[1].label == "acme/api" && lists.worktrees.rows[3] exists
+
+# `N` is the new-context dialog. It keeps its own key context while it is up.
+key N
+await overlay == Dialog 10000
+assert mode == Dialog && dialog.name == Context && key_contexts[0] == Dialog && key_contexts[1] == Context
+type Beta
+key enter
+await overlay absent 20000
+
+# Creating a context does not switch to it: context 1 is still the fixture's.
+assert lists.repos.rows[1].label == "acme/api"
+
+# `2` is the second context, which is empty — no repositories, no worktrees.
+key 2
+await lists.repos.rows[1] absent 20000
+assert screen == Hub && hub_pane == List && lists.worktrees.rows[0] absent && overlay absent
+shot second-context
+dump second-context
+
+# `gT` and `gt` step through the same two contexts, wrapping.
+key g shift-t
+await lists.repos.rows[1].label == "acme/api" 20000
+key g t
+await lists.repos.rows[1] absent 20000
+
+# `1` comes back to the fixture's own context, with its four worktrees.
+key 1
+await lists.worktrees.rows[3] exists 20000
+assert lists.repos.rows[1].label == "acme/api" && mode == Normal
+dump first-context
+quit

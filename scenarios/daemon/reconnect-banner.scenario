@@ -1,0 +1,55 @@
+# UX-SPEC.md §3.12 C and [D-17] · KEYMAP.md §Daemon-down surfaces — fleetd dies while Fleet is
+# attached, the 28 px amber banner says so, and the restart says the sessions did not survive.
+#
+# This is the degraded state the app spends the least time in and the most credibility on: [D-17]
+# calls a warm "reconnected" after a real restart "the single most damaging false reassurance in
+# the app", so the oracle here is `daemon.restarted`, not the pixels.
+#
+# `daemon kill` is a runner-side fault on the run's own private fleetd (§2); nothing on the
+# developer's machine is signalled. The daemon's clock is out of `advance`'s reach, so the
+# reconnect is waited out with `await`; the banner's own 6 s dwell is app-owned and `advance`
+# does move that.
+#
+# Two things P5-T05 asked for are absent from this directory on purpose, because no scenario
+# can reach them today:
+#
+#   * **§3.12 B, "fleetd could not start"** is unreachable once Fleet has attached. `daemon kill`
+#     seals the home so fleetd cannot come back, but the bridge answers a failed *reconnect* with
+#     `Disconnected`, never `ConnectFailed`: `bridge/runtime.rs::manual_opening_reason` turns even
+#     a manual `r` into `OpeningReason::Retry` while a backoff is armed, so the link stays `lost`
+#     and the banner stays up. Verified: `daemon kill` then `key r` leaves `daemon.link == "lost"`
+#     with `attempt == 8` after 45 s. Reaching B needs a fault that starts Fleet with no daemon.
+#   * **`ctrl-q` on a degraded surface** cannot be asserted: Fleet exits while answering the `key`
+#     command, so the runner fails that line with `Fleet closed the harness socket while
+#     answering key`. No scenario can survive its own quit; `quit` is the orderly line every
+#     scenario here ends on instead.
+#
+# Headless: the `shot` fails in the headless lane ("no pixels"), so the file as written is
+# virtual-only — but nothing else in it touches the keyboard, so this is the first scenario the
+# headless subset can adopt once a shot-free variant is wanted there.
+fixture: one-repo
+await idle 20000
+assert screen == Hub && daemon.link == connected && daemon.dismissed == false
+
+# SIGKILL the private fleetd. The banner is appended innermost, behind the Hub's own chain, so
+# its `r` / `l` / `Esc` outrank the Hub's while it is up (§3.12 C).
+daemon kill
+await daemon.link == lost 30000
+assert key_contexts[2] == "Daemon" && key_contexts[3] == "Banner"
+shot banner
+
+# The lists stay at 100 % and stay true while disconnected — they are frozen, not emptied.
+assert lists.worktrees.rows[0].id == "acme/api#feature" && lists.repos.rows[1].label == "acme/api"
+
+# Bring fleetd back. A daemon that really restarted must say so: `restarted` is what makes the
+# banner read "Terminal sessions did not survive" rather than a bare "reconnected".
+daemon restart
+await daemon.link == reconnected 60000
+assert daemon.restarted == true
+dump recovered
+
+# The restart banner is a 6 s dwell the app stores itself, so `advance` retires it (§1).
+advance 7000
+await daemon.link == connected 5000
+assert key_contexts[0] == "Hub" && daemon.dismissed == false
+quit

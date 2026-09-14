@@ -1,0 +1,78 @@
+# KEYMAP.md §Scroll mode (inside a terminal) — `ctrl-s [` enters; `j`/`k`, `ctrl-d`/`ctrl-u`
+# and `gg`/`G` move the viewport; `q`, `i` and `Esc` return to Terminal mode with the
+# viewport snapped back to the bottom. §Modes and key contexts for `Workspace > Scroll`.
+#
+# `terminal.viewport.top` is the distance scrolled up from the live bottom, so bottom is 0
+# and the oldest line is `history`. The grid is 42 rows at the harness's pinned 1440x900.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+
+# A shell tab of our own, with a prompt we recognise. The `wait` is the tab's own `clear`
+# being waited out, once, as setup; terminal-text.scenario explains why it is the only
+# synchronisation available and why 1500 ms is enough. Nothing below is asserted after it.
+key ctrl-s c
+await lists.tabs.rows[3] exists 20000
+await lists.tabs.selected.id == 4 20000
+wait 1500
+await terminal.text ~= \S 20000
+type PS1="fleet-$((6*7))-ready> "
+key enter
+await terminal.text ~= fleet-42-ready 20000
+
+# 300 lines against a 42-row grid is 260 lines of history to move through.
+type seq 1 300
+key enter
+await terminal.viewport.history > 200 20000
+assert terminal.viewport.top == 0
+
+# `ctrl-s [` is the only way in, and it changes the mode word and the key context.
+key ctrl-s [
+await mode == Scroll 10000
+assert key_contexts[0] == Workspace && key_contexts[1] == Scroll && overlay absent
+shot scroll
+
+# `gg` is the oldest line, which is far enough back to show the command that produced the
+# scrollback — that command is 300 lines above the live bottom and invisible until now.
+key g g
+await terminal.viewport.top > 200 10000
+assert terminal.text ~= "fleet-42-ready> seq 1 300"
+dump scroll-top
+
+# `G` returns to the live bottom, where the last row is the prompt again.
+key G
+await terminal.viewport.top == 0 10000
+assert terminal.rows[41] ~= fleet-42-ready
+
+# `ctrl-u` moves half a page up, `ctrl-d` half a page back down.
+key ctrl-u
+await terminal.viewport.top == 21 10000
+key ctrl-d
+await terminal.viewport.top == 0 10000
+
+# `k` moves one line at a time. Its partner `j` is not asserted here: `j` and `k` move a
+# caret *inside* the viewport first and only scroll once that caret is against an edge
+# (`screens/workspace/actions.rs` `step_line`), and the caret is not in the snapshot, so a
+# lone `j` after a `k` legitimately leaves the viewport where it is.
+key k
+await terminal.viewport.top == 1 10000
+key k
+await terminal.viewport.top == 2 10000
+key G
+await terminal.viewport.top == 0 10000
+
+# `Esc` leaves Scroll mode, and so does `q`.
+key ctrl-u
+await terminal.viewport.top == 21 10000
+key escape
+await mode == Terminal 10000
+assert terminal.viewport.top == 0
+
+key ctrl-s [
+await mode == Scroll 10000
+key q
+await mode == Terminal 10000
+assert key_contexts[1] == Terminal && screen == Workspace
+dump scroll-exit
+quit

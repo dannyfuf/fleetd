@@ -1,0 +1,50 @@
+# KEYMAP.md, opening principles: "Over a terminal grid no bare key is ever an app
+# affordance", and §Workspace (Terminal mode): "All keys go to the PTY except these direct
+# terminal affordances" (`cmd-c`, `cmd-v`, `ctrl-s`). `ctrl-c` is named there too — it
+# "remains the PTY interrupt" and is never a Fleet clipboard or quit binding.
+#
+# Every key pressed below is a Hub affordance: `j`/`k` move a cursor, `J` opens the jobs
+# panel, `?` help, `:` the palette, `/` the filter, `!` the sticky error [A18], `i` the
+# detail panel, `H` the rail [A22], `a`/`A` the agent popup [A21], `p` the PR screen, `1` a
+# context, `y` copy, `N` a new context. Over a grid they are all just characters, and the
+# proof is that they come back in `terminal.text` in the order they were typed.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+
+# Our own shell tab; see terminal-text.scenario for why the `wait` is here and why it is
+# the only one.
+key ctrl-s c
+await lists.tabs.rows[3] exists 20000
+await lists.tabs.selected.id == 4 20000
+wait 1500
+await terminal.text ~= \S 20000
+type PS1="fleet-$((6*7))-ready> "
+key enter
+await terminal.text ~= fleet-42-ready 20000
+assert focused == tabs.tab[3]
+
+# Sixteen app affordances, pressed bare. Nothing may open and nothing may move.
+key j k J ? : / q ! i H a A p n 1 y N
+await terminal.text ~= "jkJ\?:/q!iHaApn1yN" 20000
+assert screen == Workspace && mode == Terminal && overlay absent
+assert agents.popup absent && dialog absent && focused == tabs.tab[3]
+shot terminal-owns-keys
+dump terminal-owns-keys
+
+# The prefix is the exception, and it is one-shot: `b` is bound to nothing in the table, so
+# it is swallowed rather than forwarded. The `Z` that follows lands directly after the `N`,
+# which is only true if no `b` reached the PTY.
+key ctrl-s b
+await mode == Terminal 10000
+key Z
+await terminal.text ~= "jkJ\?:/q!iHaApn1yNZ" 20000
+
+# `ctrl-c` is the PTY's interrupt, not a Fleet key: the shell abandons the line it was
+# given and prompts again, and Fleet is exactly where it was. The line is never submitted,
+# so bash never tries to history-expand the `!` in it.
+key ctrl-c
+await terminal.text ~= "\^C\nfleet-42-ready>" 20000
+assert screen == Workspace && mode == Terminal && overlay absent
+quit

@@ -1,0 +1,37 @@
+# docs/KEYMAP.md §Workspace prefix — `^s a` starts a native Claude thread in this worktree
+# docs/KEYMAP.md §Native agent thread — `Agent > AgentIdle` ⇄ `Agent > AgentWorking`
+# docs/NATIVE-AGENTS.md §3.3 — the attention vocabulary a row and a tab mark carry
+# docs/TESTING-HARNESS.md §5 — the scripted `two-turns.json` the `agents` preset gives Claude
+#
+# One streaming turn, start to finish: the thread is created, streams, settles, and says so.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+assert mode == Terminal && lists.tabs.rows[3] absent
+
+# A native tab joins the process tabs in one numbering, and carries its provider as a badge.
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert mode == Agent && key_contexts[0] == Agent && key_contexts[1] == AgentIdle
+assert lists.tabs.selected.badges[0] == claude && lists.tabs.selected.label == Claude
+
+# A new thread hands focus to its *tab*, not its composer, so the pointer opens the composer
+# first — a `type` sent straight after `^s a` is accepted and dropped.
+click agents.composer
+type what does this crate do
+key enter
+
+# The turn streams: the derived context follows daemon state, and the tab mark follows with it.
+await agents.threads[0].state == working 20000
+assert key_contexts[1] == AgentWorking && lists.tabs.selected.marks[0] == working
+shot streaming
+dump streaming
+
+# `end_turn` is the transcript's turn terminal; Fleet settles the thread and toasts once.
+await agents.threads[0].state == idle 40000
+assert key_contexts[1] == AgentIdle && agents.threads[0].pending_gate absent
+assert lists.tabs.selected.marks[0] == idle && lists.tabs.selected.label == "what does this crate do"
+assert toasts[0].level == warning && toasts[0].text ~= "agent finished"
+dump finished
+quit

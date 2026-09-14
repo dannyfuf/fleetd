@@ -1,0 +1,41 @@
+# KEYMAP.md §Workspace (Terminal mode): `ctrl-s s` — go to Hub, session keeps running — and
+# §Modes and key contexts, where Normal is entered by `ctrl-s s` from a terminal.
+#
+# Its uppercase neighbour `ctrl-s S` (sleep this session *and* return to the Hub, [A5]) is
+# deliberately not here: sleeping asks the daemon for the session's keep-alive facts, which
+# it reads with `lsof`, and the hermetic fixture PATH has no `lsof` — the request comes back
+# `command failed: lsof: No such file or directory`, Fleet stays in the Workspace and shows
+# the failure in the sticky error slot. Add the `ctrl-s S` half of [A5] to this file once
+# `crates/fleet-harness/src/env.rs` installs an `lsof` shim.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+
+# A fourth tab makes this session recognisable when we come back to it. Selecting a new
+# tab is a beat behind creating it, so the selection is what to wait for.
+key ctrl-s c
+await lists.tabs.rows[3] exists 20000
+await lists.tabs.selected.id == 4 20000
+
+# `ctrl-s s` returns to the Hub. The Workspace is gone, so no grid is mirrored any more.
+key ctrl-s s
+await screen == Hub 10000
+assert mode == Normal && key_contexts[0] == Hub && hub_tab == Worktrees
+assert terminal absent && focused == worktrees.row[0]
+shot hub-again
+dump hub-again
+
+# The session kept running, so reopening the same worktree finds all four tabs still there.
+key o
+await screen == Workspace 20000
+await lists.tabs.rows[3] exists 20000
+assert lists.tabs.rows[3].badges[0] == pty && mode == Terminal
+
+# And `ctrl-s s` again from the reopened session, to show the round trip is repeatable.
+key ctrl-s s
+await screen == Hub 10000
+assert mode == Normal && terminal absent && hub_tab == Worktrees
+await idle
+dump hub-again-again
+quit

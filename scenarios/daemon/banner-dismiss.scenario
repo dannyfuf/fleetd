@@ -1,0 +1,24 @@
+# KEYMAP.md §Daemon-down surfaces (C) · UX-SPEC.md §3.12 C — `Esc` dismisses the reconnect
+# banner and the daemon dot stays red.
+#
+# The banner is the only surface whose `Esc` hides a *problem* rather than an overlay, so the
+# thing worth pinning is that dismissing it changes the banner and nothing else: the link is
+# still lost, `daemon.dismissed` records the dismissal, and the Hub gets its own `Esc` back
+# because `Daemon > Banner` has left the context chain.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: one-repo
+await idle 20000
+daemon kill
+await daemon.link == lost 30000
+assert key_contexts[2] == "Daemon" && key_contexts[3] == "Banner" && daemon.dismissed == false
+shot banner
+
+# `Esc` here is the banner's, not the Hub's: it dismisses, and the red dot stays red.
+key escape
+await daemon.dismissed == true 5000
+assert daemon.link == "lost" && key_contexts[0] == "Hub" && key_contexts[1] == "Worktrees"
+assert key_contexts[2] absent
+dump dismissed
+quit

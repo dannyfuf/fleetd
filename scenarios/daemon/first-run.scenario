@@ -1,0 +1,29 @@
+# UX-SPEC.md §3.13 and [D-18] · KEYMAP.md §First run — the first-run card on a Fleet that has
+# never been run, and the four keys it still answers.
+#
+# `FirstRun` is full-window and shadows everything except `ctrl-q` (KEYMAP §Modes), so the two
+# things worth pinning are that a fresh `empty` home reaches it at all — every other preset must
+# never show it — and that shadowing the Hub does not cost the card its own documented keys.
+# `?` is the safe one of the four: `N` and `n` open dialogs that write, and `i` is only drawn
+# when `~/.swarm/state.json` exists, which a hermetic home never has.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: empty
+await idle 20000
+assert key_contexts[0] == "FirstRun" && key_contexts[1] absent
+assert lists.worktrees.rows[0] absent && lists.prs.rows[0] absent && lists.jobs.rows[0] absent
+assert daemon.link == connected && sticky_error absent
+shot first-run
+
+# The card shadows the Hub, and still answers `?`.
+key ?
+await overlay == Dialog 5000
+assert dialog.name == "Help"
+
+# Closing it returns to the card rather than to a Hub that has nothing in it.
+key escape
+await overlay absent 5000
+assert key_contexts[0] == "FirstRun"
+dump first-run
+quit

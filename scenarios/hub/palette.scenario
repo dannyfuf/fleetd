@@ -1,0 +1,34 @@
+# KEYMAP.md §Palette mode (`:`) — open, type, run the highlighted row, `Esc` closes
+#
+# The palette's rows are drawn from the key table itself, so a row that runs is a claim about
+# the whole `GO` section: typing `Pull` leaves exactly one row standing, and `Enter` runs it.
+# The rows are painted targets rather than snapshot rows, so what the query narrowed to is
+# recorded in the dump (`palette.row[N]`) rather than asserted; the assertion is where it went.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_tab == Worktrees
+
+# `:` opens the palette. It shadows the Hub: one key context, one focus owner.
+key :
+await overlay == Palette
+assert mode == Palette && key_contexts[0] == Palette && focused == palette.input
+shot palette
+dump palette
+
+# `Esc` closes it and gives the Hub its keys back, with nothing run.
+key escape
+await overlay absent
+assert screen == Hub && hub_tab == Worktrees && mode == Normal && focused == worktrees.row[0]
+
+# Re-opened and narrowed to one row, `Enter` runs it: `Go: Pull requests` is the same screen
+# `gp` reaches, which is what makes the palette checkable at all.
+key :
+await overlay == Palette
+type Pull
+await idle
+dump palette-narrowed
+key enter
+await hub_tab == Prs 15000
+assert overlay absent && mode == Normal && focused == prs.row[0]
+dump ran
+quit

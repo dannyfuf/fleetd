@@ -1,0 +1,33 @@
+# UX-SPEC.md §3.5.1 and §Board · KEYMAP.md §Board and card detail — `g b` reaches the board and
+# every status is a column carrying its own card count.
+#
+# The `board` preset seeds five cards through the daemon's own board API against Fleet's local
+# board backend; the fake `acli` on the hermetic PATH exists to keep a Jira-backed board off the
+# network, not to serve these cards (§4). The columns are `fleet_core::board::default_statuses`,
+# so a board with no cards in `Done` still draws `Done` — a board that hid its empty columns
+# would make `]` unpredictable.
+#
+# Headless: virtual-lane only, because of its `shot`. The keyboard does reach the focused view
+# in the headless lane (§7), so everything else here would run there.
+fixture: board
+await idle 20000
+assert screen == Hub && hub_tab == Worktrees
+
+# `g b` is the Hub-wide jump; the board then publishes its own key context.
+key g b
+await hub_tab == Board 10000
+assert key_contexts[0] == "Hub" && key_contexts[1] == "Board"
+
+# Five default statuses, each badged with the number of cards in it.
+assert lists.board.rows[0].label == "Backlog" && lists.board.rows[0].badges[0] == "2"
+assert lists.board.rows[1].label == "Todo" && lists.board.rows[1].badges[0] == "2"
+assert lists.board.rows[2].label == "In Progress" && lists.board.rows[2].badges[0] == "1"
+assert lists.board.rows[3].label == "Done" && lists.board.rows[3].badges[0] == "0"
+assert lists.board.rows[4].label == "Canceled" && lists.board.rows[4].badges[0] == "0"
+
+# The cursor opens on the first card of the first column, and `focused` names it the way the
+# board's targets do.
+assert lists.board.selected.label == "Backlog" && focused == "board.column[0].card[0]"
+shot board
+dump board
+quit
