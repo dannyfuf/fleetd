@@ -95,7 +95,12 @@ impl AppState {
     }
 
     /// Records that the snapshot mirror changed, invalidating every projection keyed on it.
-    pub(super) fn bump_snapshot_revision(&mut self) {
+    ///
+    /// `pub(crate)` because the daemon mirror is edited from outside `state` too — the jobs
+    /// panel drops dismissed rows from `snapshot.jobs` — and a mutation that skips this leaves
+    /// the harness projection memoised on content that no longer exists, which is an `await`
+    /// that hangs until its timeout (`docs/TESTING-HARNESS.md` §3).
+    pub(crate) fn bump_snapshot_revision(&mut self) {
         self.snapshot_revision = self.snapshot_revision.wrapping_add(1);
     }
 

@@ -33,6 +33,7 @@ async fn offline_requests_finish_without_waiting_for_connection_work() {
             client: None,
             body: Box::new(RequestBody::GetSnapshot),
             reply: Some(reply),
+            in_flight: InFlight::untracked(),
         })
         .await
         .unwrap();
@@ -240,6 +241,7 @@ async fn stalled_health_check_does_not_delay_fifo_input_or_shutdown() {
                     bytes: vec![index],
                 }),
                 reply: None,
+                in_flight: InFlight::untracked(),
             })
             .await
             .unwrap();
@@ -344,6 +346,7 @@ async fn a_stalled_mutation_does_not_delay_shutdown() {
                     bytes: vec![index as u8],
                 }),
                 reply: None,
+                in_flight: InFlight::untracked(),
             })
             .await
             .unwrap();
@@ -683,4 +686,70 @@ async fn bounded_queues_coalesce_and_resynchronize() {
     assert!(!resync_pending.load(std::sync::atomic::Ordering::Acquire));
     bridge.shutdown();
     task.await.unwrap();
+}
+
+/// `docs/TESTING-HARNESS.md` §2 defines `idle` as "no in-flight app requests, …", and the app
+/// cannot see the end of a request: it is answered on the runtime thread. The counter the
+/// projection reports therefore has to be the bridge's own, claimed on admission and released
+/// wherever the request ends — including the paths that never answer at all.
+#[tokio::test]
+async fn the_in_flight_counter_covers_a_request_from_admission_to_its_answer() {
+    let (commands, command_rx) = async_channel::unbounded();
+    let (event_tx, events) = async_channel::unbounded();
+    let bridge = Bridge::with_channels(
+        commands,
+        events,
+        event_tx.clone(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let counter = bridge.in_flight_requests();
+    assert_eq!(counter.load(Ordering::Acquire), 0);
+
+    let answer = bridge.request(RequestBody::GetSnapshot);
+    bridge.send(RequestBody::SetActiveContext { id: None });
+    assert_eq!(
+        counter.load(Ordering::Acquire),
+        2,
+        "both the answered and the fire-and-forget shape are in flight"
+    );
+
+    // The runtime is what releases them: it is the only end of the bridge that knows a request
+    // has been dealt with. Draining the queue here stands in for it.
+    let (requests, request_rx) = async_channel::unbounded();
+    let task = tokio::spawn(requests::run(
+        request_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+    ));
+    while let Ok(command) = command_rx.try_recv() {
+        let Command::Request {
+            body,
+            reply,
+            in_flight,
+        } = command
+        else {
+            continue;
+        };
+        requests
+            .send(requests::Request::Command {
+                client: None,
+                body,
+                reply,
+                in_flight,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+    drop(requests);
+    task.await.unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(
+        counter.load(Ordering::Acquire),
+        0,
+        "an offline answer and a shed mutation both release their claim"
+    );
+    assert!(
+        answer.try_recv().is_ok(),
+        "the waiting caller was answered rather than left hanging"
+    );
 }

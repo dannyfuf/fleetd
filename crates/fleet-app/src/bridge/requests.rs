@@ -5,6 +5,8 @@ pub(super) enum Request {
         client: Option<Client>,
         body: Box<RequestBody>,
         reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
+        /// Released once this request has been answered or shed.
+        in_flight: InFlight,
     },
     Resynchronize {
         client: Client,
@@ -14,6 +16,8 @@ pub(super) enum Request {
 struct Mutation {
     client: Option<Client>,
     body: Box<RequestBody>,
+    /// Released when the mutation worker is done with this body.
+    _in_flight: InFlight,
 }
 
 /// A single owner enqueues event-backed mutations in arrival order. Response waiters remain
@@ -34,14 +38,19 @@ pub(super) async fn run(
                 client,
                 body,
                 reply,
+                in_flight,
             } => match reply {
-                Some(reply) => dispatch(client, *body, reply, events.clone()),
+                Some(reply) => dispatch(client, *body, reply, events.clone(), in_flight),
                 // Admission never waits on the mutation worker: parking here backs pressure up
                 // into the command loop, which also serves shutdown, reconnect and health. A
                 // full lane sheds with the same policy `Bridge::send` uses at the outermost
                 // hop — flag a resync so the dropped mutation is repaired from a snapshot, and
                 // tell the user the write did not land.
-                None => match mutations.try_send(Mutation { client, body }) {
+                None => match mutations.try_send(Mutation {
+                    client,
+                    body,
+                    _in_flight: in_flight,
+                }) {
                     Ok(()) => {}
                     Err(async_channel::TrySendError::Full(_)) => {
                         resync_pending.store(true, Ordering::Release);
@@ -65,7 +74,12 @@ pub(super) async fn run(
 }
 
 async fn run_mutations(mutations: Receiver<Mutation>, events: Sender<BridgeEvent>) {
-    while let Ok(Mutation { client, body }) = mutations.recv().await {
+    while let Ok(Mutation {
+        client,
+        body,
+        _in_flight,
+    }) = mutations.recv().await
+    {
         if let Some(client) = client {
             if let Err(error) = client.request(*body).await {
                 publish_mutation_failure(&events, &error.message);
@@ -99,12 +113,15 @@ fn dispatch(
     body: RequestBody,
     reply: Sender<Result<ResponseBody, ProtoError>>,
     events: Sender<BridgeEvent>,
+    in_flight: InFlight,
 ) {
     let Some(client) = client else {
         let _ignored = reply.try_send(Err(offline("the Fleet daemon is not connected")));
         return;
     };
     tokio::spawn(async move {
+        // Moved into the task so the claim outlives admission and is released with the answer.
+        let _in_flight = in_flight;
         let result = client.request(body).await;
         if let Ok(ResponseBody::Config(config)) = &result {
             let _ = events
@@ -230,6 +247,7 @@ mod regression_tests {
                 client: None,
                 body: Box::new(RequestBody::SetActiveContext { id: None }),
                 reply: None,
+                in_flight: InFlight::untracked(),
             })
             .await
             .unwrap_or_else(|error| panic!("{error}"));
@@ -261,6 +279,7 @@ mod regression_tests {
                 client: Some(client),
                 body: Box::new(RequestBody::SetActiveContext { id: None }),
                 reply: None,
+                in_flight: InFlight::untracked(),
             })
             .await
             .unwrap_or_else(|error| panic!("{error}"));

@@ -99,13 +99,13 @@ pub(super) async fn run_with_intervals(
         let retry_at = opening.is_none().then(|| retry_deadline(backoff)).flatten();
         tokio::select! {
             command = commands.recv() => match command {
-                Ok(Command::Request { body, reply }) => {
+                Ok(Command::Request { body, reply, in_flight }) => {
                     // Opening previously held the command loop. Keep requests in that same
                     // admission window while allowing shutdown and connection progress.
                     if opening.is_some() {
-                        queue_while_opening(&mut waiting, body, reply, resync_pending);
+                        queue_while_opening(&mut waiting, body, reply, in_flight, resync_pending);
                     } else if requests.send(requests::Request::Command {
-                        client: link.as_ref().map(|link| link.client.clone()), body, reply,
+                        client: link.as_ref().map(|link| link.client.clone()), body, reply, in_flight,
                     }).await.is_err() {
                         return;
                     }
@@ -152,9 +152,9 @@ pub(super) async fn run_with_intervals(
                         if events.send(event).await.is_err() { return; }
                     }
                 }
-                for (body, reply) in waiting.drain(..) {
+                for (body, reply, in_flight) in waiting.drain(..) {
                     if requests.send(requests::Request::Command {
-                        client: link.as_ref().map(|link| link.client.clone()), body, reply,
+                        client: link.as_ref().map(|link| link.client.clone()), body, reply, in_flight,
                     }).await.is_err() { return; }
                 }
                 if !dispatch_resync(&link, &requests, resync_pending) {
@@ -221,16 +221,19 @@ pub(super) async fn run_with_intervals(
 type WaitingRequest = (
     Box<RequestBody>,
     Option<Sender<Result<ResponseBody, ProtoError>>>,
+    InFlight,
 );
 
 fn queue_while_opening(
     waiting: &mut VecDeque<WaitingRequest>,
     body: Box<RequestBody>,
     reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
+    in_flight: InFlight,
     resync_pending: &AtomicBool,
 ) {
     let displaced = waiting.len() == COMMAND_CAPACITY;
-    if displaced && let Some((_, displaced_reply)) = waiting.pop_front() {
+    // Dropping the displaced entry releases its in-flight claim with it.
+    if displaced && let Some((_, displaced_reply, _)) = waiting.pop_front() {
         if let Some(displaced_reply) = displaced_reply {
             let _ignored = displaced_reply
                 .try_send(Err(offline("the Fleet daemon bridge queue was saturated")));
@@ -238,7 +241,7 @@ fn queue_while_opening(
             resync_pending.store(true, Ordering::Release);
         }
     }
-    waiting.push_back((body, reply));
+    waiting.push_back((body, reply, in_flight));
 }
 
 fn dispatch_resync(
