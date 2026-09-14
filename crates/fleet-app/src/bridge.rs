@@ -121,7 +121,8 @@ pub enum BridgeEvent {
     },
     /// The daemon answered again.
     Reconnected {
-        /// True when the PID changed, so fleetd restarted and the PTYs did not survive.
+        /// True when the PID changed, so fleetd restarted and rebuilt every terminal grid
+        /// from its holder's replay.
         restarted: bool,
         /// The fresh snapshot.
         snapshot: Box<Snapshot>,

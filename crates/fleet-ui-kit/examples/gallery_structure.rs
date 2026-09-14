@@ -54,10 +54,10 @@ actions!(
     ]
 );
 
-/// The verbatim §3.12 [D-17] sentence. A warm "reconnected" banner is the single most
-/// damaging false reassurance in the app, so the copy is pinned here rather than improvised.
+/// One §3.12 [D-17] sentence, for the gallery's fixed sample. The app counts what actually came
+/// back (`fleet-app`'s `restart_sentence`); a restart banner must never improvise the claim.
 const RECONNECT_TEXT: &str =
-    "fleetd restarted. Terminal sessions did not survive; worktrees, jobs and state are intact.";
+    "fleetd restarted. 3 terminals were reattached; worktrees, jobs and state are intact.";
 
 struct StructureGallery {
     focus_handle: FocusHandle,

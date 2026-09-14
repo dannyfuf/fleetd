@@ -73,7 +73,8 @@ fn scroll_by(scroll: &ScrollHandle, delta: f32) {
 /// backticks is backticked here, so the four key names in the sentence are styled alike.
 const WHAT_KEEPS_RUNNING: &str = "What keeps running. Jobs and sessions live in fleetd. \
 Closing a dialog, leaving a screen or quitting Fleet (`ctrl-q`) never stops them. Only `c` in \
-the Jobs panel, `K`, and `ctrl-shift-q` stop things. Terminals do not survive a daemon restart.";
+the Jobs panel, `K`, and `ctrl-shift-q` stop things. Terminals survive a daemon restart and \
+reattach on their own.";
 
 /// The terminal clipboard behaviour that is not expressible as a keymap row.
 const TERMINAL_CLIPBOARD: &str = "Terminal clipboard. Drag selects, double-click selects a \
@@ -679,7 +680,7 @@ mod tests {
         let named: Vec<&str> = keys.iter().map(|range| &text[range.clone()]).collect();
         assert_eq!(named, vec!["ctrl-q", "c", "K", "ctrl-shift-q"]);
         assert!(text.starts_with("What keeps running."));
-        assert!(text.ends_with("Terminals do not survive a daemon restart."));
+        assert!(text.ends_with("Terminals survive a daemon restart and reattach on their own."));
 
         // Degenerate inputs stay printable rather than panicking or eating text.
         assert_eq!(key_paragraph("plain"), ("plain".to_owned(), Vec::new()));

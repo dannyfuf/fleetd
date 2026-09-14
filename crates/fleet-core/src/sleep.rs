@@ -115,6 +115,16 @@ impl CompiledSleepPolicy {
         true
     }
 
+    /// Whether any enabled keep-alive rule matches on listening ports.
+    ///
+    /// Observing ports means a `lsof` process or a `/proc` walk over every descendant's file
+    /// descriptors, on every status tick. When no enabled rule can consume the answer, the
+    /// only correct amount of that work is none.
+    #[must_use]
+    pub const fn ports_enabled(&self) -> bool {
+        self.ports_enabled
+    }
+
     /// Invalid enabled process rules, in configuration order. Disabled and port rules
     /// are not parsed, matching the keep-alive policy's treatment of their patterns.
     #[must_use]

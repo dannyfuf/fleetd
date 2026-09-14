@@ -236,18 +236,11 @@ impl Hosts {
                 stderr: None,
             })?;
         let command = ShellCommand::new("ssh")
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ControlMaster=auto",
-                "-o",
-                "ControlPersist=300",
-                "-o",
-            ])
+            .args(crate::machines::ssh::connection_defaults())
+            .args(["-o", "ControlMaster=auto", "-o", "ControlPersist=300", "-o"])
             .arg(format!("ControlPath={}/%C", self.ssh_cache_dir.display()))
+            // `--` so a destination that starts with `-` is a destination, never an option.
+            .arg("--")
             .arg(ssh)
             .arg(swarm_command)
             .args(["list", "--json"])
@@ -534,19 +527,10 @@ mod tests {
             shell.calls(),
             vec![FakeShellCall::Run(
                 ShellCommand::new("ssh")
-                    .args([
-                        "-o",
-                        "BatchMode=yes",
-                        "-o",
-                        "ConnectTimeout=10",
-                        "-o",
-                        "ControlMaster=auto",
-                        "-o",
-                        "ControlPersist=300",
-                        "-o"
-                    ])
+                    .args(crate::machines::ssh::connection_defaults())
+                    .args(["-o", "ControlMaster=auto", "-o", "ControlPersist=300", "-o"])
                     .arg(format!("ControlPath={}/%C", hosts.ssh_cache_dir.display()))
-                    .args(["arch-dev", "swarm", "list", "--json"])
+                    .args(["--", "arch-dev", "swarm", "list", "--json"])
                     .timeout(Duration::from_secs(30))
             )]
         );

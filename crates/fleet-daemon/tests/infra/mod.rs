@@ -1,7 +1,7 @@
 //! Shared RAII fixtures for daemon integration tests.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::Duration,
 };
@@ -13,6 +13,8 @@ const DEADLINE: Duration = Duration::from_secs(5);
 
 pub struct DaemonProcess {
     child: Child,
+    /// Fleet home, so teardown can also end the PTY holders this daemon started.
+    home: PathBuf,
 }
 
 impl DaemonProcess {
@@ -25,7 +27,10 @@ impl DaemonProcess {
             .stderr(Stdio::null())
             .spawn()
             .expect("start fleetd");
-        Self { child }
+        Self {
+            child,
+            home: home.to_path_buf(),
+        }
     }
 
     pub async fn wait(&mut self) {
@@ -48,6 +53,44 @@ impl Drop for DaemonProcess {
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+        stop_holders(&self.home);
+    }
+}
+
+/// Ends every PTY holder this Fleet home recorded.
+///
+/// Holders outlive their daemon on purpose, so killing the daemon process is not teardown: a test
+/// that ensures a session would otherwise leave a login shell running for the life of the machine.
+/// Closing the holder closes the PTY master, which hangs up the shell exactly as a lost daemon used
+/// to. A test that means to exercise the shutdown path should still kill its sessions explicitly.
+fn stop_holders(home: &Path) {
+    let directory = fleet_core::paths::FleetHome::new(home).pty_dir();
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(pid) = record["holderPid"]
+            .as_u64()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+        else {
+            continue;
+        };
+        // SAFETY: `kill` takes scalar arguments; this pid came from a record this test's own
+        // daemon wrote under its own temporary Fleet home.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
         }
     }
 }

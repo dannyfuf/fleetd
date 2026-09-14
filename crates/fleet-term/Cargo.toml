@@ -16,6 +16,7 @@ ghostty = ["dep:libghostty-vt"]
 async-channel.workspace = true
 fleet-core.workspace = true
 fleet-proto.workspace = true
+libc.workspace = true
 libghostty-vt = { workspace = true, optional = true }
 portable-pty.workspace = true
 thiserror.workspace = true

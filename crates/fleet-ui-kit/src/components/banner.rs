@@ -4,10 +4,11 @@
 //! and B are chrome-less full-window surfaces ([`super::DaemonSplash`]), because a 28 px strip
 //! cannot carry a spinner plus a socket path, or a mono tail of the daemon log.
 //!
-//! The banner never claims more than it knows. After a reconnect it must say, verbatim, that
-//! terminal sessions did **not** survive [D-17] — `ARCHITECTURE.md` is explicit that PTYs die
-//! with the daemon, and a warm "reconnected" banner that implies the agents came back is the
-//! single most damaging false reassurance in the app.
+//! The banner never claims more than it knows. After a restart it must state what became of the
+//! user's terminals [D-17] — how many were reattached, or that none survived. Terminals normally
+//! do survive, because each PTY lives in a detached holder process (`ARCHITECTURE.md`, "Detached
+//! PTY holders"), but a banner that assumes it would be the single most damaging false
+//! reassurance in the app the one time it is wrong.
 //!
 //! ## Anatomy
 //!

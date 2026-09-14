@@ -149,6 +149,8 @@ pub use super::files::{FakeFiles, FakeFilesCall};
 pub struct FakeProcess {
     snapshot: Mutex<Vec<ProcessInfo>>,
     ports: Mutex<Vec<ListeningPort>>,
+    ports_error: Mutex<Option<String>>,
+    port_calls: Mutex<usize>,
     alive: Mutex<BTreeSet<u32>>,
     environments: Mutex<BTreeMap<u32, Vec<(String, String)>>>,
     environment_calls: Mutex<Vec<u32>>,
@@ -164,6 +166,17 @@ impl FakeProcess {
     /// Replaces listening-port observations.
     pub fn set_ports(&self, ports: Vec<ListeningPort>) {
         *lock(&self.ports) = ports;
+    }
+
+    /// Makes listening-port observation fail the way a machine without `lsof` does.
+    pub fn fail_ports(&self, error: impl Into<String>) {
+        *lock(&self.ports_error) = Some(error.into());
+    }
+
+    /// Counts listening-port queries, so a test can prove one was never made.
+    #[must_use]
+    pub fn port_calls(&self) -> usize {
+        *lock(&self.port_calls)
     }
 
     /// Replaces one process's environment.
@@ -194,6 +207,10 @@ impl Process for FakeProcess {
         Ok(lock(&self.snapshot).clone())
     }
     async fn listening_ports(&self, pids: &[u32]) -> DaemonResult<Vec<ListeningPort>> {
+        *lock(&self.port_calls) += 1;
+        if let Some(error) = lock(&self.ports_error).clone() {
+            return Err(DaemonError::Process(error));
+        }
         Ok(lock(&self.ports)
             .iter()
             .filter(|port| pids.contains(&port.pid))

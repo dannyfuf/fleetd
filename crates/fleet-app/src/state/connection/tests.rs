@@ -86,6 +86,7 @@ fn the_reconnect_banner_expires_on_a_tick() {
     let mut state = AppState::new("/tmp/fleet", now);
     state.daemon = DaemonLink::Reconnected {
         restarted: false,
+        reattached: 0,
         since: now,
     };
     assert!(state.tick(now));

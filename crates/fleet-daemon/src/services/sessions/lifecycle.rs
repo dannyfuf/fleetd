@@ -286,17 +286,28 @@ impl Sessions {
             TerminalId(id)
         };
 
-        let (terminal, host) = spawn_terminal(
-            terminal_id,
-            session.clone(),
-            name,
-            command,
-            cwd,
-            self.config.load().await?.terminal.scrollback_bytes,
-            1,
+        let (session_kind, session_cwd) = self
+            .runtime
+            .session(&session)
+            .map(|parent| (parent.kind, parent.cwd))
+            .ok_or_else(|| DaemonError::NotFound(session.to_string()))?;
+        let spawned = spawn_terminal(
+            &self.home,
+            TerminalSpawn {
+                terminal: terminal_id,
+                session: session.clone(),
+                session_kind,
+                session_cwd,
+                name,
+                command,
+                cwd,
+                scrollback_bytes: self.config.load().await?.terminal.scrollback_bytes,
+                starting_sequence: 1,
+            },
         )
         .await?;
-        let host = Arc::new(host);
+        let terminal = spawned.terminal;
+        let host = Arc::new(spawned.host);
         let forwarder = host_bridge::prepare_host_events(
             Arc::clone(&self.runtime),
             terminal_id,
@@ -441,17 +452,28 @@ impl Sessions {
                 registry.next_sequences.get(&terminal).copied().unwrap_or(1),
             )
         };
-        let (replacement, host) = spawn_terminal(
-            terminal,
-            session_id.clone(),
-            old.name,
-            old.command,
-            old.cwd,
-            self.config.load().await?.terminal.scrollback_bytes,
-            starting_sequence,
+        let (session_kind, session_cwd) = self
+            .runtime
+            .session(&session_id)
+            .map(|parent| (parent.kind, parent.cwd))
+            .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))?;
+        let spawned = spawn_terminal(
+            &self.home,
+            TerminalSpawn {
+                terminal,
+                session: session_id.clone(),
+                session_kind,
+                session_cwd,
+                name: old.name,
+                command: old.command,
+                cwd: old.cwd,
+                scrollback_bytes: self.config.load().await?.terminal.scrollback_bytes,
+                starting_sequence,
+            },
         )
         .await?;
-        let host = Arc::new(host);
+        let replacement = spawned.terminal;
+        let host = Arc::new(spawned.host);
         let forwarder = host_bridge::prepare_host_events(
             Arc::clone(&self.runtime),
             terminal,
@@ -502,37 +524,43 @@ impl Sessions {
             .cloned()
             .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
         let _transition = self.runtime.claim_terminal_transition(owning_session).await;
-        let mut registry = self
-            .runtime
-            .registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let session_id = registry
-            .terminal_sessions
-            .get(&terminal)
-            .cloned()
-            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
-        let session = registry
-            .sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))?;
-        if session
-            .terminals
-            .iter()
-            .any(|entry| entry.id != terminal && entry.name == name)
-        {
-            return Err(DaemonError::Conflict(format!(
-                "terminal name `{name}` already exists in session `{session_id}`"
-            )));
-        }
-        let entry = session
-            .terminals
-            .iter_mut()
-            .find(|entry| entry.id == terminal)
-            .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
-        entry.name = name;
-        let terminal = entry.clone();
-        drop(registry);
+        // The registry guard is not `Send`, so the rename is applied and the lock released inside
+        // this block before the record below is rewritten.
+        let (session_id, terminal) = {
+            let mut registry = self
+                .runtime
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session_id = registry
+                .terminal_sessions
+                .get(&terminal)
+                .cloned()
+                .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+            let session = registry
+                .sessions
+                .get_mut(&session_id)
+                .ok_or_else(|| DaemonError::NotFound(session_id.to_string()))?;
+            if session
+                .terminals
+                .iter()
+                .any(|entry| entry.id != terminal && entry.name == name)
+            {
+                return Err(DaemonError::Conflict(format!(
+                    "terminal name `{name}` already exists in session `{session_id}`"
+                )));
+            }
+            let entry = session
+                .terminals
+                .iter_mut()
+                .find(|entry| entry.id == terminal)
+                .ok_or_else(|| DaemonError::NotFound(terminal.to_string()))?;
+            entry.name = name;
+            (session_id, entry.clone())
+        };
+        // The holder's record is what the next daemon rebuilds this terminal from, so a rename it
+        // never hears about is a rename the user loses at the next restart.
+        holder::rename_in_sidecar(&self.home, terminal.id, &terminal.name).await;
         self.runtime.notify_session(&session_id);
         Ok(terminal)
     }

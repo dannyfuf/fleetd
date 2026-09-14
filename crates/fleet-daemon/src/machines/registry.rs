@@ -171,6 +171,8 @@ fn build_providers(
                     node,
                     user,
                     ssh_options,
+                    identity_file,
+                    ssh_host,
                     fleetd,
                     fleet_home,
                 } => Arc::new(
@@ -182,6 +184,8 @@ fn build_providers(
                         fleetd.clone(),
                         fleet_home.clone(),
                     )
+                    .with_identity_file(identity_file.clone())
+                    .with_ssh_host(ssh_host.clone())
                     .with_runtime(
                         local_home.to_path_buf(),
                         Duration::from_millis(

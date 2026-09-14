@@ -109,13 +109,13 @@ async fn attach_timeout_does_not_block_executor() {
     let observed_progress = Arc::clone(&progressed_before_attach_completed);
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal: TerminalId(9),
-        pty: PtyOptions::command(
+        source: PtySource::Local(fleet_term::PtyOptions::command(
             "/bin/cat",
             std::iter::empty::<&str>(),
             PathBuf::from("/tmp"),
             80,
             24,
-        ),
+        )),
         scrollback_bytes: 1024,
         initial_command: None,
         starting_sequence: 1,

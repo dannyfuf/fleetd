@@ -518,12 +518,16 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
                 node,
                 user,
                 ssh_options,
+                identity_file,
+                ssh_host,
                 fleetd,
                 fleet_home,
             } => {
                 if node.is_empty()
                     || user.as_ref().is_some_and(String::is_empty)
                     || ssh_options.iter().any(String::is_empty)
+                    || identity_file.as_ref().is_some_and(String::is_empty)
+                    || ssh_host.as_ref().is_some_and(String::is_empty)
                     || fleetd.is_empty()
                     || fleet_home.as_ref().is_some_and(String::is_empty)
                 {
@@ -855,11 +859,52 @@ mod tests {
     }
 
     #[test]
+    fn optional_ssh_identity_and_host_overrides_survive_a_round_trip() {
+        let config = merge_config(
+            "/home/me/.fleet",
+            json!({
+                "hosts": {
+                    "dev-box": {
+                        "provider": "tailscale",
+                        "node": "dev-box",
+                        "user": "df",
+                        "identityFile": "~/.ssh/id_ed25519",
+                        "sshHost": "arch-dev"
+                    }
+                }
+            }),
+        )
+        .expect("host config");
+        assert!(matches!(
+            config.hosts.values().next(),
+            Some(HostConfigEntry::Tailscale { identity_file, ssh_host, .. })
+                if identity_file.as_deref() == Some("~/.ssh/id_ed25519")
+                    && ssh_host.as_deref() == Some("arch-dev")
+        ));
+        let value = serde_json::to_value(&config).expect("serialize hosts");
+        // Absent overrides must not appear on the wire; a host that never set them keeps
+        // the old document shape.
+        let plain = merge_config(
+            "/home/me/.fleet",
+            json!({"hosts": {"dev-box": {"provider":"tailscale","node":"dev-box"}}}),
+        )
+        .expect("host config");
+        let plain = serde_json::to_value(&plain).expect("serialize hosts");
+        assert!(!plain.to_string().contains("identityFile"), "{plain}");
+        assert_eq!(
+            merge_config("/home/me/.fleet", value).expect("round trip hosts"),
+            config
+        );
+    }
+
+    #[test]
     fn every_host_nonempty_constraint_is_validated() {
         let invalid_hosts = [
             json!({"provider":"tailscale","node":""}),
             json!({"provider":"tailscale","node":"node","user":""}),
             json!({"provider":"tailscale","node":"node","sshOptions":[""]}),
+            json!({"provider":"tailscale","node":"node","identityFile":""}),
+            json!({"provider":"tailscale","node":"node","sshHost":""}),
             json!({"provider":"tailscale","node":"node","fleetd":""}),
             json!({"provider":"tailscale","node":"node","fleetHome":""}),
             json!({"provider":"command","run":[]}),

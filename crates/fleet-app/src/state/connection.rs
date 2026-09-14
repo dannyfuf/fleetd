@@ -36,13 +36,33 @@ pub enum DaemonLink {
         /// Whether the daemon stopped or only the client connection was lost.
         reason: DaemonLossReason,
     },
-    /// The daemon came back. The wording depends on whether the PTYs died with it (§3.12 D-17).
+    /// The daemon came back. The wording depends on what happened to the terminals (§3.12 D-17).
     Reconnected {
-        /// True when fleetd restarted, so terminal sessions did **not** survive.
+        /// True when fleetd restarted, so its emulator state was rebuilt from scratch.
         restarted: bool,
+        /// PTY terminals the restarted daemon reattached to.
+        ///
+        /// Counted from the first snapshot rather than assumed: holders normally survive a
+        /// restart, but `pkill fleetd` matches `fleetd pty-hold` too, and a machine that rebooted
+        /// has none left. The banner says which of those happened.
+        reattached: usize,
         /// When the banner appeared.
         since: Instant,
     },
+}
+
+/// Counts the process-backed terminals a snapshot still lists.
+///
+/// Native tabs are excluded: they have no process to survive anything, so counting them would
+/// promise the user their agents came back when none did.
+#[must_use]
+fn reattached_terminals(snapshot: &fleet_proto::snapshot::Snapshot) -> usize {
+    snapshot
+        .sessions
+        .iter()
+        .flat_map(|session| &session.terminals)
+        .filter(|terminal| !terminal.is_native())
+        .count()
 }
 
 impl DaemonLink {
@@ -99,7 +119,9 @@ impl AppState {
                 .active_session()
                 .is_some_and(|s| self.watches.running_visible(&s.id));
         match self.daemon {
-            DaemonLink::Reconnected { restarted, since } => {
+            DaemonLink::Reconnected {
+                restarted, since, ..
+            } => {
                 let dwell = if restarted {
                     RESTART_BANNER_DWELL
                 } else {
@@ -186,7 +208,9 @@ impl AppState {
                 snapshot,
             } => {
                 if restarted {
-                    // PTYs do not survive a daemon restart.
+                    // The PTYs survive the restart, but the daemon's emulator state does not: the
+                    // new daemon rebuilds each grid from its holder's replay and restarts frame
+                    // sequences at one, so every mirror here is stale and is rebuilt on reattach.
                     self.grids.clear();
                     self.watches = crate::watches::Watches::default();
                     self.renamed_terminals.clear();
@@ -194,6 +218,7 @@ impl AppState {
                 }
                 self.daemon = DaemonLink::Reconnected {
                     restarted,
+                    reattached: reattached_terminals(&snapshot),
                     since: now,
                 };
                 self.daemon_since = now;

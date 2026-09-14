@@ -18,7 +18,8 @@ use thiserror::Error;
 use crate::{
     GhosttyEngine,
     engine::EngineError,
-    pty::{Pty, PtyError, PtyOptions, PtyWritePermit},
+    holder::{AttachError, HolderPty},
+    pty::{Pty, PtyBackend, PtyError, PtyOptions, PtyWritePermit},
 };
 
 mod owner;
@@ -34,6 +35,29 @@ const COMMAND_OVERHEAD: usize = 64;
 pub(super) const HOST_EVENT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const HOST_EVENT_QUEUE_BYTES: usize = 2 * HOST_EVENT_MAX_BYTES;
 
+/// Where a terminal host's child process lives.
+#[derive(Debug, Clone)]
+pub enum PtySource {
+    /// Spawn and own the child inside this process; it dies with the daemon.
+    Local(PtyOptions),
+    /// Attach to a detached holder process that already owns the child.
+    Holder(HolderTarget),
+}
+
+/// A detached holder's socket, and the grid to fall back to if it cannot report its own.
+#[derive(Debug, Clone)]
+pub struct HolderTarget {
+    /// Per-terminal holder socket path.
+    pub socket: std::path::PathBuf,
+    /// Columns to use only when the holder's greeting reports no size.
+    ///
+    /// The holder is the authority: its child has been resized since the terminal was created, and
+    /// its replay tail was produced for whatever grid it holds now. This is the last resort.
+    pub fallback_cols: u16,
+    /// Rows to use only when the holder's greeting reports no size.
+    pub fallback_rows: u16,
+}
+
 /// Construction settings for one daemon-owned terminal host.
 #[derive(Debug, Clone)]
 pub struct TerminalHostOptions {
@@ -41,11 +65,13 @@ pub struct TerminalHostOptions {
     pub terminal: TerminalId,
     /// Sequence carried by the first frame, including after restart.
     pub starting_sequence: u64,
-    /// PTY child-process settings.
-    pub pty: PtyOptions,
+    /// Where the child process lives.
+    pub source: PtySource,
     /// Maximum retained scrollback bytes.
     pub scrollback_bytes: usize,
     /// Command typed into the login shell after its prompt is likely ready.
+    ///
+    /// Always `None` when reattaching to a holder: that shell already ran its command.
     pub initial_command: Option<String>,
 }
 
@@ -155,6 +181,12 @@ pub enum HostError {
     /// The terminal thread stopped before answering an attachment request.
     #[error("terminal host did not return an attachment frame: {0}")]
     AttachFailed(String),
+    /// A detached holder answered with a protocol version this build cannot drive.
+    ///
+    /// Distinct from every other failure because the remedy is: stop that holder. It will never
+    /// become reachable, and the shell behind it would otherwise run unreachable forever.
+    #[error("{0}")]
+    HolderVersion(#[source] crate::holder::ProtocolError),
     /// The operating system could not create the terminal host thread.
     #[error("failed to spawn terminal host thread: {0}")]
     Thread(#[from] std::io::Error),
@@ -173,19 +205,53 @@ pub struct TerminalHost {
 impl TerminalHost {
     /// Starts a PTY and Ghostty engine on a dedicated terminal thread.
     pub fn spawn(options: TerminalHostOptions) -> Result<Self, HostError> {
-        let engine =
-            GhosttyEngine::new(options.pty.cols, options.pty.rows, options.scrollback_bytes)?;
+        let TerminalHostOptions {
+            terminal,
+            starting_sequence,
+            source,
+            scrollback_bytes,
+            initial_command,
+        } = options;
         let (commands, inbox) = mpsc::channel();
         let command_bytes = Arc::new(AtomicUsize::new(0));
         let wakeup = owner::PtyWakeup::new(commands.clone());
         let notify = Arc::clone(&wakeup);
-        let pty = Pty::spawn_notifying(options.pty, Arc::new(move || notify.notify()))?;
+        let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || notify.notify());
+        // The backend decides the grid, so it is built first. A holder's child has been living at
+        // a size this process never chose, and its replay was produced for that size.
+        let (pty, cols, rows): (Box<dyn PtyBackend>, u16, u16) = match source {
+            PtySource::Local(options) => {
+                let (cols, rows) = (options.cols, options.rows);
+                (Box::new(Pty::spawn_notifying(options, notify)?), cols, rows)
+            }
+            PtySource::Holder(target) => {
+                let holder = match HolderPty::attach(&target.socket, terminal, notify) {
+                    Ok(holder) => holder,
+                    Err(AttachError::IncompatibleVersion(error)) => {
+                        return Err(HostError::HolderVersion(error));
+                    }
+                    Err(AttachError::Unreachable(error)) => return Err(error.into()),
+                };
+                let (cols, rows) = holder.grid();
+                let cols = if cols == 0 {
+                    target.fallback_cols
+                } else {
+                    cols
+                };
+                let rows = if rows == 0 {
+                    target.fallback_rows
+                } else {
+                    rows
+                };
+                (Box::new(holder), cols, rows)
+            }
+        };
+        let engine = GhosttyEngine::new(cols, rows, scrollback_bytes)?;
         let child_pid = pty.child_pid();
         // Every event is capped at the IPC frame limit, so two slots give this queue an
         // exact 32 MiB ceiling. The owner coalesces rejected frames into full snapshots.
         let event_slots = HOST_EVENT_QUEUE_BYTES / HOST_EVENT_MAX_BYTES;
         let (event_sender, event_receiver) = async_channel::bounded(event_slots);
-        let terminal = options.terminal;
         let started_at = Instant::now();
         let activity = Arc::new(Mutex::new(TerminalActivity {
             last_output_at: started_at,
@@ -203,7 +269,7 @@ impl TerminalHost {
         );
         let join = thread::Builder::new()
             .name(format!("fleet-terminal-{terminal}"))
-            .spawn(move || owner.run(options.initial_command, options.starting_sequence))?;
+            .spawn(move || owner.run(initial_command, starting_sequence))?;
         Ok(Self {
             child_pid,
             commands,

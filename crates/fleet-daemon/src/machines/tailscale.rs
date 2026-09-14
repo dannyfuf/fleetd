@@ -65,6 +65,8 @@ pub struct TailscaleMachine {
     node: String,
     user: Option<String>,
     ssh_options: Vec<String>,
+    identity_file: Option<String>,
+    ssh_host: Option<String>,
     fleetd: String,
     fleet_home: Option<String>,
     shell: Arc<dyn Shell>,
@@ -92,6 +94,8 @@ impl TailscaleMachine {
             node,
             user,
             ssh_options,
+            identity_file: None,
+            ssh_host: None,
             fleetd,
             fleet_home,
             shell: Arc::new(RealShell),
@@ -117,6 +121,28 @@ impl TailscaleMachine {
         self.control_path = FleetHome::new(local_fleet_home).ssh_cache_dir().join("%C");
         self.resolve_cache_ttl = resolve_cache_ttl;
         self.shell = shell;
+        self
+    }
+
+    /// Pins SSH authentication for this host to one private key.
+    ///
+    /// Kept off [`TailscaleMachine::new`] so the documented transport seam keeps its
+    /// signature and so an absent key stays the default agent-and-every-identity behaviour.
+    #[must_use]
+    pub fn with_identity_file(mut self, identity_file: Option<String>) -> Self {
+        self.identity_file = identity_file;
+        self
+    }
+
+    /// Overrides the SSH destination host, leaving Tailscale peer lookup in place.
+    ///
+    /// The peer is still looked up for its online state and display name, but this string
+    /// becomes the resolved `host` — what `ssh` dials and what host status reports — so a
+    /// user whose `ssh_config` has a `Host` block for this machine can make that block apply
+    /// instead of dialing the resolved IP.
+    #[must_use]
+    pub fn with_ssh_host(mut self, ssh_host: Option<String>) -> Self {
+        self.ssh_host = ssh_host;
         self
     }
 
@@ -180,7 +206,10 @@ impl TailscaleMachine {
         };
         *lock(&self.warning) = None;
         Ok(MachineAddress {
-            host,
+            // `sshHost` is the destination, so it is also the address: every reader of
+            // `MachineAddress::host` — the SSH argv, `HostStatus.address`, doctor — must
+            // name what is really dialed. The tailnet identity survives in `display`.
+            host: self.ssh_host.clone().unwrap_or(host),
             user: self.user.clone(),
             display,
             online: peer.online,
@@ -188,15 +217,49 @@ impl TailscaleMachine {
     }
 
     fn missing_cli_fallback(&self) -> MachineAddress {
+        let host = self.dial_host();
         *lock(&self.warning) = Some(format!(
-            "tailscale CLI unavailable; using configured SSH host {}",
-            self.node
+            "tailscale CLI unavailable; using configured SSH host {host}"
         ));
         MachineAddress {
-            host: self.node.clone(),
+            host: host.clone(),
             user: self.user.clone(),
-            display: self.node.clone(),
+            display: host,
             online: None,
+        }
+    }
+
+    /// The string `ssh` dials for this host when resolution has nothing better to offer.
+    ///
+    /// `sshHost` is what the user's `ssh_config` matches, so it is also the right answer when
+    /// resolution is unavailable — reporting `node` there would name a host nothing dials.
+    fn dial_host(&self) -> String {
+        self.ssh_host.clone().unwrap_or_else(|| self.node.clone())
+    }
+
+    /// Resolves the peer, or falls back to the configured `sshHost` when it cannot.
+    ///
+    /// A configured `sshHost` makes the tailnet lookup advisory rather than load-bearing:
+    /// `ssh` is going to dial that string whatever the lookup says, so a peer that is absent
+    /// from `tailscale status` — the CLI is gone, the daemon is down, the node was renamed —
+    /// must not take the transport down with it. Without `sshHost` there is no destination
+    /// to fall back to and the failure still propagates.
+    async fn resolve_for_dial(&self) -> Result<MachineAddress, MachineError> {
+        match self.resolve().await {
+            Ok(address) => Ok(address),
+            Err(error) if self.ssh_host.is_some() => {
+                let host = self.dial_host();
+                *lock(&self.warning) = Some(format!(
+                    "Tailscale resolution failed ({error}); dialing configured sshHost {host}"
+                ));
+                Ok(MachineAddress {
+                    host: host.clone(),
+                    user: self.user.clone(),
+                    display: host,
+                    online: None,
+                })
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -205,7 +268,9 @@ impl TailscaleMachine {
             Some(user) => format!("{user}@{}", address.host),
             None => address.host.clone(),
         };
-        SshArgv::new(destination, self.control_path.clone()).options(self.ssh_options.clone())
+        SshArgv::new(destination, self.control_path.clone())
+            .identity_file(self.identity_file.clone())
+            .options(self.ssh_options.clone())
     }
 
     async fn run_remote(
@@ -213,7 +278,7 @@ impl TailscaleMachine {
         remote: &[String],
         timeout: Duration,
     ) -> Result<ExecOutput, MachineError> {
-        let address = self.resolve().await?;
+        let address = self.resolve_for_dial().await?;
         let ssh = self.ssh_argv(&address);
         ssh.ensure_control_dir().await?;
         let argv = ssh.build(remote);
@@ -306,7 +371,7 @@ impl MachineProvider for TailscaleMachine {
     }
 
     async fn open_stream(&self) -> Result<Box<dyn AsyncDuplex>, MachineError> {
-        let address = self.resolve().await?;
+        let address = self.resolve_for_dial().await?;
         let ssh = self.ssh_argv(&address);
         ssh.ensure_control_dir().await?;
         let mut remote = vec![self.fleetd.clone(), "connect".to_owned()];
@@ -437,8 +502,6 @@ mod tests {
                 "-o".to_owned(),
                 "BatchMode=yes".to_owned(),
                 "-o".to_owned(),
-                "ConnectTimeout=10".to_owned(),
-                "-o".to_owned(),
                 "ControlMaster=auto".to_owned(),
                 "-o".to_owned(),
                 "ControlPersist=300".to_owned(),
@@ -452,6 +515,12 @@ mod tests {
                 ),
                 "-o".to_owned(),
                 "StrictHostKeyChecking=accept-new".to_owned(),
+                "-o".to_owned(),
+                "ConnectTimeout=10".to_owned(),
+                "-o".to_owned(),
+                "ServerAliveInterval=15".to_owned(),
+                "-o".to_owned(),
+                "ServerAliveCountMax=4".to_owned(),
                 "--".to_owned(),
                 "df@100.64.0.7".to_owned(),
                 remote.to_owned(),
@@ -664,6 +733,94 @@ mod tests {
 
         assert!(
             matches!(error, MachineError::Unreachable(message) if message == "No route to host")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ssh_host_override_is_the_dialed_address_and_keeps_the_peer_identity() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let shell = Arc::new(FakeShell::new());
+        shell.when(
+            |command| command == &resolve_command(),
+            shell_result(0, status_json(), ""),
+        );
+        let provider = machine(temp.path(), shell, Duration::from_secs(10))
+            .with_ssh_host(Some("arch-dev".to_owned()))
+            .with_identity_file(Some("/keys/id_ed25519".to_owned()));
+
+        let address = provider
+            .resolve()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        // Host status reports what is actually dialed; the tailnet identity and online state
+        // still come from the peer.
+        assert_eq!(address.host, "arch-dev");
+        assert_eq!(address.display, "Dev-Box.tailnet.ts.net");
+        assert_eq!(address.online, Some(true));
+        let argv = provider.ssh_argv(&address).build(&["true".to_owned()]);
+        assert_eq!(
+            argv.iter().rev().nth(1).map(String::as_str),
+            Some("df@arch-dev")
+        );
+        assert!(argv.contains(&"/keys/id_ed25519".to_owned()), "{argv:?}");
+    }
+
+    /// A configured `sshHost` is what ssh dials whatever the tailnet says, so a lookup that
+    /// fails must not take the transport down with it.
+    #[tokio::test]
+    async fn a_configured_ssh_host_survives_a_failed_tailscale_lookup() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let shell = Arc::new(FakeShell::new());
+        shell.when(
+            |command| command == &resolve_command(),
+            shell_result(1, "", "tailscaled is not running"),
+        );
+        let shell: Arc<dyn Shell> = shell;
+        let provider = machine(temp.path(), Arc::clone(&shell), Duration::from_secs(10))
+            .with_ssh_host(Some("arch-dev".to_owned()));
+
+        let address = provider
+            .resolve_for_dial()
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert_eq!(address.host, "arch-dev");
+        assert!(
+            provider
+                .warning()
+                .is_some_and(|warning| warning.contains("arch-dev")),
+            "{:?}",
+            provider.warning()
+        );
+
+        // Without a destination to fall back to, the same failure still propagates.
+        let bare = machine(temp.path(), shell, Duration::from_secs(10));
+        assert!(bare.resolve_for_dial().await.is_err());
+    }
+
+    /// The missing-CLI fallback must name the destination, not the tailnet node: with
+    /// `sshHost` set they are different strings and only one of them is ever dialed.
+    #[test]
+    fn the_missing_cli_fallback_reports_the_dialed_destination() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+        let provider = machine(
+            temp.path(),
+            Arc::new(FakeShell::new()),
+            Duration::from_secs(10),
+        )
+        .with_ssh_host(Some("arch-dev".to_owned()));
+
+        let address = provider.missing_cli_fallback();
+
+        assert_eq!(address.host, "arch-dev");
+        assert_eq!(address.display, "arch-dev");
+        assert!(
+            provider
+                .warning()
+                .is_some_and(|warning| warning.contains("arch-dev")),
+            "{:?}",
+            provider.warning()
         );
     }
 

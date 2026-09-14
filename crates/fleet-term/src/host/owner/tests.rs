@@ -3,9 +3,10 @@ use std::{path::PathBuf, time::SystemTime};
 use super::commands::{PendingViewport, flush_viewport};
 use super::*;
 use crate::host::{
-    COMMAND_OVERHEAD, HostError, TerminalHost, TerminalHostOptions, command_bytes, send_command,
+    COMMAND_OVERHEAD, HostError, PtySource, TerminalHost, TerminalHostOptions, command_bytes,
+    send_command,
 };
-use crate::pty::{PTY_WRITE_QUEUE_BYTES, PtyOptions};
+use crate::pty::{PTY_WRITE_QUEUE_BYTES, Pty, PtyOptions};
 use fleet_proto::terminal::{KeyEvent, WheelEvent};
 
 fn test_activity() -> Arc<Mutex<TerminalActivity>> {
@@ -81,13 +82,13 @@ fn scroll_or_key_reserves_encoded_input_bytes() {
 fn writer_saturation_is_rejected_at_host_boundary() {
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal: TerminalId(30),
-        pty: PtyOptions::command(
+        source: PtySource::Local(PtyOptions::command(
             "/bin/sh",
             ["-c", "stty raw -echo; printf READY; trap '' HUP; sleep 60"],
             PathBuf::from("/tmp"),
             80,
             24,
-        ),
+        )),
         scrollback_bytes: 1024,
         initial_command: None,
         starting_sequence: 1,
@@ -203,13 +204,13 @@ fn pending_side_effects_coalesce_by_kind() {
 fn blocked_write_does_not_block_owner() {
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal: TerminalId(29),
-        pty: PtyOptions::command(
+        source: PtySource::Local(PtyOptions::command(
             "/bin/sh",
             ["-c", "trap '' HUP; sleep 60"],
             PathBuf::from("/tmp"),
             80,
             24,
-        ),
+        )),
         scrollback_bytes: 1024,
         initial_command: None,
         starting_sequence: 1,
@@ -286,13 +287,13 @@ fn snapshot_failure_forces_recovery() {
 fn large_paste_into_echoing_cat_does_not_block_frames_or_commands() {
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal: TerminalId(21),
-        pty: PtyOptions::command(
+        source: PtySource::Local(PtyOptions::command(
             "/bin/cat",
             std::iter::empty::<&str>(),
             PathBuf::from("/tmp"),
             80,
             24,
-        ),
+        )),
         scrollback_bytes: 1024 * 1024,
         initial_command: None,
         starting_sequence: 1,
@@ -370,7 +371,7 @@ fn scroll_or_key_uses_live_screen_modes() {
     let wakeup = PtyWakeup::new(sender.clone());
     let mut owner = TerminalOwner::new(
         TerminalId(22),
-        pty,
+        Box::new(pty),
         engine,
         receiver,
         events,
@@ -468,7 +469,7 @@ fn queued_wheels_coalesce_and_input_returns_to_bottom() {
     let wakeup = PtyWakeup::new(sender.clone());
     let mut owner = TerminalOwner::new(
         TerminalId(1),
-        pty,
+        Box::new(pty),
         engine,
         receiver,
         events,
@@ -513,7 +514,13 @@ fn queued_wheels_coalesce_and_input_returns_to_bottom() {
 fn continuous_output_does_not_starve_viewport_commands() {
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal: TerminalId(20),
-        pty: PtyOptions::command("/usr/bin/yes", ["output"], PathBuf::from("/tmp"), 80, 24),
+        source: PtySource::Local(PtyOptions::command(
+            "/usr/bin/yes",
+            ["output"],
+            PathBuf::from("/tmp"),
+            80,
+            24,
+        )),
         scrollback_bytes: 1024 * 1024,
         initial_command: None,
         starting_sequence: 1,
@@ -553,13 +560,13 @@ fn continuous_output_does_not_starve_viewport_commands() {
 fn host_emits_command_output_before_exit() {
     let options = TerminalHostOptions {
         terminal: TerminalId(17),
-        pty: PtyOptions::command(
+        source: PtySource::Local(PtyOptions::command(
             "/bin/sh",
             ["-c", "printf OK"],
             PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             20,
             4,
-        ),
+        )),
         scrollback_bytes: 100,
         initial_command: None,
         starting_sequence: 1,
@@ -599,7 +606,7 @@ fn host_emits_command_output_before_exit() {
 fn terminal_query_reply_reaches_the_pty_child() {
     let options = TerminalHostOptions {
         terminal: TerminalId(18),
-        pty: PtyOptions::command(
+        source: PtySource::Local(PtyOptions::command(
             "/bin/sh",
             [
                 "-c",
@@ -608,7 +615,7 @@ fn terminal_query_reply_reaches_the_pty_child() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             20,
             4,
-        ),
+        )),
         scrollback_bytes: 100,
         initial_command: None,
         starting_sequence: 1,
@@ -661,7 +668,7 @@ fn nvim_can_enter_insert_escape_and_quit() {
     let path = directory.join("buffer.txt");
     let options = TerminalHostOptions {
         terminal: TerminalId(19),
-        pty: PtyOptions::command(
+        source: PtySource::Local(PtyOptions::command(
             "nvim",
             [
                 "--clean".into(),
@@ -675,7 +682,7 @@ fn nvim_can_enter_insert_escape_and_quit() {
             directory.clone(),
             80,
             24,
-        ),
+        )),
         scrollback_bytes: 100,
         initial_command: None,
         starting_sequence: 1,
@@ -790,7 +797,7 @@ fn owner_fixture(
     let (events, receiver) = async_channel::unbounded();
     let owner = TerminalOwner::new(
         TerminalId(25),
-        pty,
+        Box::new(pty),
         GhosttyEngine::new(40, 10, 1024 * 1024).unwrap(),
         inbox,
         events,
@@ -819,7 +826,7 @@ fn owner_fixture_with_event_capacity(
     let (events, receiver) = async_channel::bounded(event_capacity);
     let owner = TerminalOwner::new(
         TerminalId(26),
-        pty,
+        Box::new(pty),
         GhosttyEngine::new(40, 10, 1024 * 1024).unwrap(),
         inbox,
         events,
@@ -970,13 +977,13 @@ fn prompt_deadline_wakes_without_pty_output() {
 fn kill_still_terminates_a_child_that_ignores_sighup() {
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal: TerminalId(27),
-        pty: PtyOptions::command(
+        source: PtySource::Local(PtyOptions::command(
             "/bin/sh",
             ["-c", "trap '' HUP; printf READY; exec /bin/cat"],
             "/tmp",
             40,
             10,
-        ),
+        )),
         scrollback_bytes: 1024,
         initial_command: None,
         starting_sequence: 1,
@@ -1000,7 +1007,13 @@ fn flood_frames_reconstruct_the_complete_terminal() {
     assert!(output.len() > OUTPUT_BATCH_BYTES);
     let host = TerminalHost::spawn(TerminalHostOptions {
         terminal: TerminalId(28),
-        pty: PtyOptions::command("/bin/sh", ["-c", script], "/tmp", 80, 24),
+        source: PtySource::Local(PtyOptions::command(
+            "/bin/sh",
+            ["-c", script],
+            "/tmp",
+            80,
+            24,
+        )),
         scrollback_bytes: 16 * 1024 * 1024,
         initial_command: None,
         starting_sequence: 1,
@@ -1089,4 +1102,130 @@ fn dropping_unstarted_owner_reaps_its_child() {
         .status()
         .unwrap();
     assert!(!status.success(), "startup rollback left its child alive");
+}
+
+/// A backend that records what the owner asked of it, without a real child to ask it of.
+#[derive(Default)]
+struct RecordingBackend {
+    killed: Arc<std::sync::atomic::AtomicUsize>,
+    detached: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::pty::PtyBackend for RecordingBackend {
+    fn write(&self, _bytes: &[u8]) -> Result<(), PtyError> {
+        Ok(())
+    }
+
+    fn write_permitted(
+        &self,
+        _bytes: &[u8],
+        _permit: crate::pty::PtyWritePermit,
+    ) -> Result<(), PtyError> {
+        Ok(())
+    }
+
+    fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+        Ok(())
+    }
+
+    fn child_pid(&self) -> Option<u32> {
+        None
+    }
+
+    fn try_wait(&mut self) -> Result<Option<i32>, PtyError> {
+        Ok(None)
+    }
+
+    fn kill(&mut self) -> Result<(), PtyError> {
+        self.killed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn detach(&mut self) -> Result<(), PtyError> {
+        self.detached.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn try_read(&self) -> Result<Option<Vec<u8>>, PtyError> {
+        Ok(None)
+    }
+
+    fn has_output(&self) -> bool {
+        false
+    }
+
+    fn output_closed(&self) -> bool {
+        false
+    }
+}
+
+/// The whole point of holders: releasing a terminal must not end the child behind it.
+#[test]
+fn releasing_an_owner_detaches_its_backend_and_never_kills_it() {
+    let killed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let detached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend = RecordingBackend {
+        killed: Arc::clone(&killed),
+        detached: Arc::clone(&detached),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let (events, _events) = async_channel::unbounded();
+    let wakeup = PtyWakeup::new(sender.clone());
+    let owner = TerminalOwner::new(
+        TerminalId(77),
+        Box::new(backend),
+        GhosttyEngine::new(80, 24, 1024).unwrap_or_else(|error| panic!("{error}")),
+        receiver,
+        events,
+        test_activity(),
+        wakeup,
+    );
+
+    // Exactly what the last `TerminalHost`'s `Drop` sends: a daemon letting go of the terminal,
+    // not a request to stop it.
+    sender
+        .send(OwnerEvent::CommandsClosed)
+        .unwrap_or_else(|error| panic!("{error}"));
+    drop(sender);
+    owner.run(None, 1);
+
+    assert_eq!(
+        killed.load(Ordering::Relaxed),
+        0,
+        "a released terminal must never kill the child a holder is keeping alive"
+    );
+    assert!(
+        detached.load(Ordering::Relaxed) >= 1,
+        "a released terminal must detach from its backend"
+    );
+}
+
+/// An explicit `Kill` is the one thing that does end the child.
+#[test]
+fn an_explicit_kill_command_still_ends_the_child() {
+    let killed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let detached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend = RecordingBackend {
+        killed: Arc::clone(&killed),
+        detached: Arc::clone(&detached),
+    };
+    let (sender, receiver) = mpsc::channel();
+    let (events, _events) = async_channel::unbounded();
+    let wakeup = PtyWakeup::new(sender.clone());
+    let mut owner = TerminalOwner::new(
+        TerminalId(78),
+        Box::new(backend),
+        GhosttyEngine::new(80, 24, 1024).unwrap_or_else(|error| panic!("{error}")),
+        receiver,
+        events,
+        test_activity(),
+        wakeup,
+    );
+    sender
+        .send(OwnerEvent::Command(HostCommand::Kill))
+        .unwrap_or_else(|error| panic!("{error}"));
+    owner.drain_commands(None);
+
+    assert_eq!(killed.load(Ordering::Relaxed), 1);
+    assert_eq!(detached.load(Ordering::Relaxed), 0);
 }

@@ -1597,6 +1597,8 @@ mod tests {
             node: node.to_owned(),
             user: Some("df".to_owned()),
             ssh_options: Vec::new(),
+            identity_file: None,
+            ssh_host: None,
             fleetd: "fleetd".to_owned(),
             fleet_home: Some("~/.fleet".to_owned()),
         }

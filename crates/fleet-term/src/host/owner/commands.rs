@@ -64,7 +64,12 @@ fn follow_input(engine: &mut dyn VtEngine, viewport_moved: &mut bool) {
     }
 }
 
-fn resize(pty: &Pty, engine: &mut dyn VtEngine, cols: u16, rows: u16) -> Result<(), String> {
+fn resize(
+    pty: &dyn PtyBackend,
+    engine: &mut dyn VtEngine,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     pty.resize(cols, rows).map_err(|error| error.to_string())?;
     engine.resize(cols, rows).map_err(|error| error.to_string())
 }
@@ -166,7 +171,7 @@ impl TerminalOwner {
                 }
             }
             HostCommand::Resize { cols, rows } => {
-                match resize(&self.pty, &mut self.engine, cols, rows) {
+                match resize(self.pty.as_ref(), &mut self.engine, cols, rows) {
                     Ok(()) => {
                         self.force_full = true;
                         self.compression_at
@@ -219,7 +224,7 @@ impl TerminalOwner {
             self.refuse_attach(&reply, "attachment deadline elapsed".to_owned());
             return;
         }
-        if let Err(error) = resize(&self.pty, &mut self.engine, cols, rows) {
+        if let Err(error) = resize(self.pty.as_ref(), &mut self.engine, cols, rows) {
             self.refuse_attach(&reply, error);
             return;
         }

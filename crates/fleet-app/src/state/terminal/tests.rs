@@ -181,7 +181,10 @@ fn a_daemon_restart_drops_the_mirror_grids_and_says_so() {
         },
         now + Duration::from_secs(2),
     );
-    assert!(state.grids.is_empty(), "PTYs do not survive fleetd");
+    assert!(
+        state.grids.is_empty(),
+        "a restarted daemon rebuilds every grid from its holder's replay, so the mirrors are stale"
+    );
     assert!(matches!(
         state.daemon,
         DaemonLink::Reconnected {

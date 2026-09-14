@@ -108,6 +108,18 @@ async fn remote_terminal_frames_arrive_under_the_local_terminal_id() {
     })
     .await
     .expect("remote echo frame");
+
+    // The remote terminal's PTY lives in a holder that outlives its daemon on purpose, so the
+    // test has to end it: killing the daemon process alone would leave a shell behind.
+    router
+        .forward(
+            &host,
+            RequestBody::KillSession {
+                session: session.id,
+            },
+        )
+        .await
+        .expect("stop the remote session");
 }
 
 async fn prepare_remote_worktree(home: &std::path::Path) -> WorktreeId {
