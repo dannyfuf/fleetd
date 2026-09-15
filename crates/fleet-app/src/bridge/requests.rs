@@ -5,7 +5,7 @@ pub(super) enum Request {
         client: Option<Client>,
         body: Box<RequestBody>,
         reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
-        /// Released once this request has been answered or shed.
+        /// Released once a reply receiver closes, or transferred after a mutation answer.
         in_flight: InFlight,
     },
     Resynchronize {
@@ -16,8 +16,8 @@ pub(super) enum Request {
 struct Mutation {
     client: Option<Client>,
     body: Box<RequestBody>,
-    /// Released when the mutation worker is done with this body.
-    _in_flight: InFlight,
+    /// Transferred to the settle counter once the daemon answers successfully.
+    in_flight: InFlight,
 }
 
 /// A single owner enqueues event-backed mutations in arrival order. Response waiters remain
@@ -26,11 +26,13 @@ pub(super) async fn run(
     requests: Receiver<Request>,
     events: Sender<BridgeEvent>,
     resync_pending: Arc<AtomicBool>,
+    settle: Arc<SettleCounter>,
 ) {
     let (mutations, mutation_rx) = async_channel::bounded(COMMAND_CAPACITY);
     let mutation_events = events.clone();
+    let mutation_wake = idle_wake(events.clone());
     let mutation_task = tokio::spawn(async move {
-        run_mutations(mutation_rx, mutation_events).await;
+        run_mutations(mutation_rx, mutation_events, settle, mutation_wake).await;
     });
     while let Ok(request) = requests.recv().await {
         match request {
@@ -49,7 +51,7 @@ pub(super) async fn run(
                 None => match mutations.try_send(Mutation {
                     client,
                     body,
-                    _in_flight: in_flight,
+                    in_flight,
                 }) {
                     Ok(()) => {}
                     Err(async_channel::TrySendError::Full(_)) => {
@@ -73,20 +75,50 @@ pub(super) async fn run(
     }
 }
 
-async fn run_mutations(mutations: Receiver<Mutation>, events: Sender<BridgeEvent>) {
+async fn run_mutations(
+    mutations: Receiver<Mutation>,
+    events: Sender<BridgeEvent>,
+    settle: Arc<SettleCounter>,
+    wake: IdleWake,
+) {
     while let Ok(Mutation {
         client,
         body,
-        _in_flight,
+        in_flight,
     }) = mutations.recv().await
     {
         if let Some(client) = client {
-            if let Err(error) = client.request(*body).await {
-                publish_mutation_failure(&events, &error.message);
+            match client.request(*body).await {
+                Ok(_) => {
+                    let generation = settle.begin();
+                    drop(in_flight);
+                    let settle = Arc::clone(&settle);
+                    let wake = wake.clone();
+                    // The bounded grace task must outlive this mutation-worker iteration.
+                    let _settle_task = tokio::spawn(expire_settle_after(
+                        settle,
+                        wake,
+                        generation,
+                        MUTATION_SETTLE_GRACE,
+                    ));
+                }
+                Err(error) => publish_mutation_failure(&events, &error.message),
             }
         } else {
             publish_mutation_failure(&events, "the Fleet daemon is not connected");
         }
+    }
+}
+
+pub(super) async fn expire_settle_after(
+    settle: Arc<SettleCounter>,
+    wake: IdleWake,
+    generation: u64,
+    grace: Duration,
+) {
+    tokio::time::sleep(grace).await;
+    if settle.expire(generation) {
+        wake.wake();
     }
 }
 
@@ -115,22 +147,29 @@ fn dispatch(
     events: Sender<BridgeEvent>,
     in_flight: InFlight,
 ) {
-    let Some(client) = client else {
-        let _ignored = reply.try_send(Err(offline("the Fleet daemon is not connected")));
-        return;
-    };
     tokio::spawn(async move {
-        // Moved into the task so the claim outlives admission and is released with the answer.
-        let _in_flight = in_flight;
-        let result = client.request(body).await;
-        if let Ok(ResponseBody::Config(config)) = &result {
-            let _ = events
+        let result = match client {
+            Some(client) => client.request(body).await,
+            None => Err(offline("the Fleet daemon is not connected")),
+        };
+        if let Ok(ResponseBody::Config(config)) = &result
+            && let Err(error) = events
                 .send(BridgeEvent::EffectiveConfig(EffectiveConfig::from_config(
                     config,
                 )))
-                .await;
+                .await
+        {
+            // The event receiver is gone only during shutdown; the caller still gets its reply.
+            tracing::debug!(%error, "bridge event receiver closed during shutdown");
         }
-        let _ignored = reply.send(result).await;
+        match reply.try_send(result) {
+            Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
+            Err(async_channel::TrySendError::Full(_)) => {
+                tracing::warn!("bridge reply channel was unexpectedly full");
+            }
+        }
+        reply.closed().await;
+        drop(in_flight);
     });
 }
 
@@ -252,7 +291,13 @@ mod regression_tests {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
         drop(request_tx);
-        run(request_rx, event_tx, Arc::new(AtomicBool::new(false))).await;
+        run(
+            request_rx,
+            event_tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(SettleCounter::default()),
+        )
+        .await;
 
         let event = event_rx
             .recv()
@@ -285,7 +330,13 @@ mod regression_tests {
             .unwrap_or_else(|error| panic!("{error}"));
         drop(request_tx);
 
-        run(request_rx, event_tx, Arc::new(AtomicBool::new(false))).await;
+        run(
+            request_rx,
+            event_tx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(SettleCounter::default()),
+        )
+        .await;
 
         let event = event_rx
             .recv()

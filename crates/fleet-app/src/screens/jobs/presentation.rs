@@ -202,12 +202,12 @@ pub(super) fn synchronize(
     cx: &mut App,
 ) {
     let changed = panel.update(cx, |panel, cx| {
-        let state = state.read(cx);
-        if !matches!(state.overlay, Some(Overlay::Jobs)) {
+        let app = state.read(cx);
+        if !matches!(app.overlay, Some(Overlay::Jobs)) {
             panel.close();
             return false;
         }
-        let jobs = state
+        let jobs = app
             .snapshot
             .as_ref()
             .map_or(&[][..], |snapshot| snapshot.jobs.as_slice());
@@ -215,10 +215,13 @@ pub(super) fn synchronize(
         panel.clamp(panel.prepared.rows.len());
         if !panel.opened {
             panel.opened = true;
-            if let Some(job) = &state.jobs_focus {
+            if let Some(job) = &app.jobs_focus {
                 panel.focus_job(jobs, job);
             }
         }
+        // Publish even when opening did not focus a sticky-error job: the first harness
+        // projection must see the panel's seeded cursor and filter.
+        mirror_panel(panel, state, cx);
         changed
     });
     if changed {

@@ -1,6 +1,12 @@
 use super::*;
 use crate::screens::hub::PrFreshness;
 
+async fn receive_reply<T>(
+    reply: async_channel::Receiver<T>,
+) -> Result<T, async_channel::RecvError> {
+    reply.recv().await
+}
+
 fn pr_lookup_pending(requested: &[RepoId], repo: &RepoId) -> bool {
     requested.contains(repo)
 }
@@ -232,7 +238,7 @@ impl WorkspaceScreen {
         let local = Rc::clone(&self.local);
         let task_repo = repo.clone();
         let task = cx.spawn(async move |cx| {
-            let freshness = match config_reply.recv().await {
+            let freshness = match receive_reply(config_reply).await {
                 Ok(Ok(ResponseBody::Config(config))) => {
                     let effective = crate::bridge::EffectiveConfig::from_config(&config);
                     crate::screens::hub::PrFreshness::from_effective(&effective)
@@ -245,7 +251,7 @@ impl WorkspaceScreen {
                 tab: PrTab::Mine,
                 force: false,
             });
-            let result = reply.recv().await;
+            let result = receive_reply(reply).await;
             let completed_at = Instant::now();
             let outcome = match result {
                 Ok(result) => state
@@ -264,7 +270,7 @@ impl WorkspaceScreen {
                 .timer(retry_at.saturating_duration_since(Instant::now()))
                 .await;
             expire_pr_lookup(&mut local.borrow_mut().state.pr_requested, &task_repo);
-            let _ = state.update(cx, |_, cx| cx.notify());
+            state.update(cx, |_, cx| cx.notify()).ok();
         });
         self.local.borrow_mut().state.pr_tasks.insert(repo, task);
     }
@@ -380,6 +386,19 @@ pub(super) fn invalidate_history_epoch(local: &mut Local, current_epoch: Option<
 mod regression_tests {
     use super::*;
     use std::time::Duration;
+
+    #[gpui::test]
+    async fn taking_one_reply_closes_the_channel_before_later_work(cx: &mut gpui::TestAppContext) {
+        let (sender, receiver) = async_channel::bounded(1);
+        sender.send(17).await.expect("send reply");
+
+        assert_eq!(receive_reply(receiver).await.expect("receive reply"), 17);
+        cx.run_until_parked();
+        assert!(
+            sender.is_closed(),
+            "the in-flight guard may now be released"
+        );
+    }
 
     #[test]
     fn failed_and_stale_pr_lookup_retries() {

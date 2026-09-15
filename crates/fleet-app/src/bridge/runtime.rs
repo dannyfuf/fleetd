@@ -54,12 +54,14 @@ pub(super) async fn run(
     commands: &Receiver<Command>,
     events: &Sender<BridgeEvent>,
     resync_pending: &Arc<AtomicBool>,
+    settle: Arc<SettleCounter>,
 ) {
     run_with_intervals(
         home,
         commands,
         events,
         resync_pending,
+        settle,
         HEALTH_INTERVAL,
         IDENTITY_INTERVAL,
     )
@@ -71,6 +73,7 @@ pub(super) async fn run_with_intervals(
     commands: &Receiver<Command>,
     events: &Sender<BridgeEvent>,
     resync_pending: &Arc<AtomicBool>,
+    settle: Arc<SettleCounter>,
     health_interval: Duration,
     identity_interval: Duration,
 ) {
@@ -79,6 +82,7 @@ pub(super) async fn run_with_intervals(
         request_rx,
         events.clone(),
         Arc::clone(resync_pending),
+        settle,
     ));
     let mut link: Option<Link> = None;
     let mut opening: Option<Opening<'_>> = Some(Box::pin(open(home, events)));

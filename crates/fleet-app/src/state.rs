@@ -35,6 +35,7 @@ mod agents;
 mod board;
 mod connection;
 mod harness;
+mod jobs_filter;
 mod navigation;
 mod notifications;
 mod snapshot;
@@ -48,10 +49,11 @@ pub use connection::{DaemonLink, DaemonLossReason, daemon_log_path, reconnect_ba
 use harness::HarnessCache;
 pub use harness::{
     AgentThreadSnapshot, AgentsSnapshot, BoundsSnapshot, CursorSnapshot, DialogSnapshot,
-    FieldSnapshot, HarnessProjection, HarnessState, IdleSnapshot, JobSnapshot, ListSnapshot,
-    RowSnapshot, SNAPSHOT_VERSION, TargetSnapshot, TerminalSnapshot, ToastSnapshot, UiSnapshot,
-    ViewportSnapshot, WindowSnapshot,
+    FieldSnapshot, HarnessProjection, HarnessState, IdleSnapshot, IdleWake, JobSnapshot,
+    ListSnapshot, MUTATION_SETTLE_GRACE, RowSnapshot, SNAPSHOT_VERSION, SettleCounter,
+    TargetSnapshot, TerminalSnapshot, ToastSnapshot, UiSnapshot, ViewportSnapshot, WindowSnapshot,
 };
+pub use jobs_filter::JobFilter;
 use navigation::clamp_cursor;
 pub use navigation::{
     AgentPopupMode, AgentPopupState, AgentPopupTransition, Cursors, FilterEscape, FilterState,
@@ -82,6 +84,16 @@ pub const NO_ACTIVE_CONTEXT: &str =
     "No active context \u{2014} pick one with 1\u{2013}9 or gt / gT";
 /// How many entries an MRU list keeps.
 const MRU_CAPACITY: usize = 32;
+
+/// The Jobs panel's own selection and filter, mirrored for non-render projections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobsPanelMirror {
+    /// Selected row in the panel's filtered rows.
+    pub cursor: usize,
+    /// Filter currently applied by the panel.
+    pub filter: JobFilter,
+}
+
 /// The whole client-side state of the app.
 #[derive(Debug)]
 pub struct AppState {
@@ -138,6 +150,8 @@ pub struct AppState {
     pub scope: RepoScope,
     /// One cursor per list.
     pub cursors: Cursors,
+    /// The Jobs panel's own cursor and filter.
+    pub jobs_panel: JobsPanelMirror,
     /// Stable identities from the rows currently prepared for the Hub.
     pub displayed_hub: crate::presentation::DisplayedHub,
     /// The Workspace sub-mode.
@@ -245,6 +259,7 @@ impl AppState {
             pr_tab: PrTab::Mine,
             scope: RepoScope::All,
             cursors: Cursors::default(),
+            jobs_panel: JobsPanelMirror::default(),
             displayed_hub: crate::presentation::DisplayedHub::default(),
             terminal_mode: TerminalMode::Terminal,
             agent_popup: None,
@@ -279,5 +294,33 @@ impl AppState {
             harness: HarnessState::default(),
             harness_cache: RefCell::new(None),
         }
+    }
+
+    /// Mirrors the Jobs panel's own cursor and filter. Returns true if anything changed.
+    pub fn set_jobs_panel(&mut self, mirror: JobsPanelMirror) -> bool {
+        if self.jobs_panel == mirror {
+            return false;
+        }
+        self.jobs_panel = mirror;
+        true
+    }
+}
+
+#[cfg(test)]
+mod jobs_panel_mirror_tests {
+    use super::*;
+
+    #[test]
+    fn jobs_panel_setter_reports_only_real_changes() {
+        let mut state = AppState::new("/tmp/fleet-jobs-panel-mirror", Instant::now());
+        assert!(!state.set_jobs_panel(JobsPanelMirror::default()));
+
+        let mirror = JobsPanelMirror {
+            cursor: 2,
+            filter: JobFilter::Failed,
+        };
+        assert!(state.set_jobs_panel(mirror));
+        assert_eq!(state.jobs_panel, mirror);
+        assert!(!state.set_jobs_panel(mirror));
     }
 }

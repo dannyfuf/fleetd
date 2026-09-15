@@ -3,9 +3,11 @@
 //! The builder lives beside the types it produces rather than inside them because it is the
 //! half that has to stay honest about *inputs*: [`ProjectionKey`] is the list of every piece of
 //! [`AppState`] the projection touches, and the memo is only as fresh as that list is complete.
+//! The Jobs panel remains authoritative for its cursor and filter; this projection reads their
+//! explicitly synchronized [`crate::state::JobsPanelMirror`] rather than owning another copy.
 //! Nothing here is reachable from a `render` body (`docs/APP-CONTRACTS.md`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use fleet_core::{
@@ -23,7 +25,7 @@ use super::{
 use crate::presentation::DisplayedHub;
 use crate::state::{
     AgentPopupMode, AppState, BoardFocus, Cursors, DaemonLink, FilterState, HubPane, HubTab,
-    LiveToast, Mode, Overlay, RepoScope, Screen, StickyError, running_jobs,
+    JobsPanelMirror, LiveToast, Mode, Overlay, RepoScope, Screen, StickyError, running_jobs,
 };
 
 /// Every input the builder reads, as cheap comparable values.
@@ -42,6 +44,7 @@ struct ProjectionKey {
     pr_tab: fleet_core::github::PrTab,
     filter: FilterState,
     cursors: Cursors,
+    jobs_panel: JobsPanelMirror,
     board_focus: BoardFocus,
     board_filter: String,
     board_filter_editing: bool,
@@ -54,6 +57,9 @@ struct ProjectionKey {
     in_flight_requests: u32,
     pending_frame: bool,
     armed_debounces: u32,
+    settling_mutations: u32,
+    link_opening: bool,
+    renamed_terminals: HashSet<TerminalId>,
 }
 
 /// The identity and generation of the mirror grid the snapshot reports.
@@ -169,6 +175,7 @@ impl AppState {
             pr_tab: self.pr_tab,
             filter: self.filter.clone(),
             cursors: self.cursors.clone(),
+            jobs_panel: self.jobs_panel,
             board_focus: self.board.focus,
             board_filter: self.board.filter.clone(),
             board_filter_editing: self.board.filter_editing,
@@ -186,6 +193,9 @@ impl AppState {
             in_flight_requests: self.harness.in_flight_requests(),
             pending_frame: self.harness.pending_frame,
             armed_debounces: self.harness.armed_debounces(),
+            settling_mutations: self.harness.settling_mutations(),
+            link_opening: matches!(self.daemon, DaemonLink::Starting),
+            renamed_terminals: self.renamed_terminals.clone(),
         }
     }
 
@@ -298,6 +308,8 @@ impl AppState {
                 self.harness.pending_frame,
                 saturating_u32(self.toasts.len()),
                 self.harness.armed_debounces(),
+                key.settling_mutations,
+                key.link_opening,
             ),
             window: self.harness.window.clone(),
         }
@@ -316,7 +328,7 @@ impl AppState {
             return Some(match overlay {
                 Overlay::Filter => "filter.input".to_owned(),
                 Overlay::Palette => "palette.input".to_owned(),
-                Overlay::Jobs => format!("jobs.row[{}]", self.cursors.jobs),
+                Overlay::Jobs => format!("jobs.row[{}]", self.jobs_panel.cursor),
                 // Which field or button holds focus lives in the dialog host entity, not in
                 // `AppState`; the dialog itself is as precise as this projection can be.
                 Overlay::Dialog(_) => "dialog".to_owned(),
@@ -430,7 +442,11 @@ impl AppState {
         );
         lists.insert(
             "jobs".to_owned(),
-            list(self.job_rows(snapshot), self.cursors.jobs, String::new()),
+            list(
+                self.job_rows(snapshot),
+                self.jobs_panel.cursor,
+                String::new(),
+            ),
         );
         if let Some(view) = self.board.view.as_ref() {
             let columns: Vec<RowSnapshot> = view
@@ -577,11 +593,12 @@ impl AppState {
             .collect()
     }
 
-    /// Every daemon job, in snapshot order.
+    /// Every job the panel shows, in its filtered snapshot order.
     fn job_rows(&self, snapshot: &fleet_proto::snapshot::Snapshot) -> Vec<RowSnapshot> {
         snapshot
             .jobs
             .iter()
+            .filter(|job| self.jobs_panel.filter.matches(job))
             .map(|job| {
                 let mut marks = Vec::new();
                 if job.cancellable {
@@ -850,5 +867,174 @@ fn cursor_shape_name(cursor: fleet_proto::terminal::CursorState) -> &'static str
         CursorShape::Block => "block",
         CursorShape::Bar => "bar",
         CursorShape::Underline => "underline",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use fleet_core::ids::TerminalId;
+    use fleet_proto::job::JobStatus;
+
+    use super::super::tests::{job, state};
+    use crate::dialogs::Dialogs;
+    use crate::state::{JobFilter, JobsPanelMirror, Overlay, Screen, test_support};
+
+    #[test]
+    fn jobs_panel_cursor_changes_focus_and_selected_row() {
+        let now = Instant::now();
+        let mut state = state();
+        let mut snapshot = test_support::snapshot();
+        snapshot.jobs.push(job("job-1", JobStatus::Running));
+        snapshot.jobs.push(job("job-2", JobStatus::Succeeded));
+        state.apply_snapshot(snapshot, now);
+        state.open_overlay(Overlay::Jobs);
+
+        let before = state.harness_projection();
+        assert_eq!(before.snapshot.focused.as_deref(), Some("jobs.row[0]"));
+        assert_eq!(
+            before
+                .snapshot
+                .lists
+                .get("jobs")
+                .and_then(|jobs| jobs.selected.as_ref())
+                .map(|row| row.id.as_str()),
+            Some("job-1")
+        );
+
+        assert!(state.set_jobs_panel(JobsPanelMirror {
+            cursor: 1,
+            filter: JobFilter::All,
+        }));
+        let after = state.harness_projection();
+
+        assert_eq!(after.snapshot.focused.as_deref(), Some("jobs.row[1]"));
+        assert_eq!(
+            after
+                .snapshot
+                .lists
+                .get("jobs")
+                .and_then(|jobs| jobs.selected.as_ref())
+                .map(|row| row.id.as_str()),
+            Some("job-2")
+        );
+        assert!(after.revision > before.revision);
+    }
+
+    #[test]
+    fn jobs_panel_filter_rebases_the_projected_rows() {
+        let now = Instant::now();
+        let mut state = state();
+        let mut snapshot = test_support::snapshot();
+        snapshot.jobs.push(job("job-1", JobStatus::Running));
+        snapshot.jobs.push(job(
+            "job-2",
+            JobStatus::Failed {
+                error: "boom".to_owned(),
+            },
+        ));
+        snapshot.jobs.push(job("job-3", JobStatus::Succeeded));
+        state.apply_snapshot(snapshot, now);
+        state.open_overlay(Overlay::Jobs);
+        assert_eq!(
+            state
+                .harness_projection()
+                .snapshot
+                .lists
+                .get("jobs")
+                .map(|jobs| jobs.rows.len()),
+            Some(3)
+        );
+
+        assert!(state.set_jobs_panel(JobsPanelMirror {
+            cursor: 0,
+            filter: JobFilter::Failed,
+        }));
+        let dump = state.harness_projection().snapshot;
+        let jobs = dump.lists.get("jobs").expect("jobs list");
+
+        assert_eq!(dump.focused.as_deref(), Some("jobs.row[0]"));
+        assert_eq!(
+            jobs.rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["job-2"]
+        );
+        assert_eq!(
+            jobs.selected.as_ref().map(|row| row.id.as_str()),
+            jobs.rows.first().map(|row| row.id.as_str()),
+            "jobs.row[0] and lists.jobs.rows[0] address the same filtered job"
+        );
+    }
+
+    #[test]
+    fn rename_only_change_rebuilds_the_projection() {
+        let now = Instant::now();
+        let mut state = state();
+        let session_id = "buk/payroll#feat";
+        let mut snapshot = test_support::snapshot();
+        let mut session = test_support::session_with(session_id, &[1]);
+        session.terminals[0].title = Some("shell title".to_owned());
+        snapshot.sessions.push(session);
+        state.apply_snapshot(snapshot, now);
+        state.screen = Screen::Workspace {
+            session: session_id.parse().unwrap_or_else(|error| panic!("{error}")),
+        };
+
+        let before = state.harness_projection();
+        assert_eq!(
+            before
+                .snapshot
+                .lists
+                .get("tabs")
+                .and_then(|tabs| tabs.rows.first())
+                .map(|row| row.label.as_str()),
+            Some("shell title")
+        );
+        state.renamed_terminals.insert(TerminalId(1));
+        let after = state.harness_projection();
+
+        assert_eq!(state.harness_builds(), 2);
+        assert_eq!(
+            after
+                .snapshot
+                .lists
+                .get("tabs")
+                .and_then(|tabs| tabs.rows.first())
+                .map(|row| row.label.as_str()),
+            Some("t1")
+        );
+        assert!(after.revision > before.revision);
+    }
+
+    #[test]
+    fn settle_expiry_rebuilds_a_cached_busy_projection() {
+        let state = state();
+        let generation = state.harness.settle().begin();
+        let busy = state.harness_projection();
+
+        assert_eq!(busy.snapshot.idle.settling_mutations, 1);
+        assert!(!busy.snapshot.idle.idle);
+        assert!(state.harness.settle().expire(generation));
+
+        let idle = state.harness_projection();
+        assert_eq!(state.harness_builds(), 2);
+        assert_eq!(idle.snapshot.idle.settling_mutations, 0);
+        assert!(idle.snapshot.idle.link_opening);
+        assert!(idle.revision > busy.revision);
+    }
+
+    #[test]
+    fn open_dialog_keeps_unmirrored_fields_and_message_empty() {
+        let mut state = state();
+        state.open_overlay(Overlay::Dialog(Dialogs::CreateWorktree));
+
+        let dump = state.harness_projection().snapshot;
+        let dialog = dump.dialog.as_ref().expect("open dialog snapshot");
+
+        assert!(dialog.fields.is_empty());
+        assert!(dialog.message.is_none());
     }
 }

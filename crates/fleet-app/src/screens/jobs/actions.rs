@@ -98,8 +98,9 @@ fn await_job_mutation(
                 cx.notify();
             });
         }
+        anyhow::Ok(())
     })
-    .detach();
+    .detach_and_log_err(cx);
 }
 
 pub(super) fn acknowledge_dismissal(app: &mut AppState, dismissed: &[JobId]) {
@@ -232,14 +233,14 @@ pub(super) fn request_dismissal(
     let state = state.clone();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
-        cx.update(|cx| {
+        cx.update(|cx| -> anyhow::Result<()> {
             if let Some(error) = mutation_failure(answer, ExpectedMutation::Dismiss, "dismiss jobs")
             {
                 state.update(cx, |app, cx| {
                     record_mutation_failure(app, error, None, false);
                     cx.notify();
                 });
-                return;
+                return Ok(());
             }
             state.update(cx, |app, cx| {
                 acknowledge_dismissal(app, &gone);
@@ -247,10 +248,13 @@ pub(super) fn request_dismissal(
             });
             panel.update(cx, |panel, cx| {
                 reconcile_dismissed_panel(panel, snapshot_jobs(&state, cx), &gone);
+                mirror_panel(panel, &state, cx);
             });
-        });
+            Ok(())
+        })?;
+        anyhow::Ok(())
     })
-    .detach();
+    .detach_and_log_err(cx);
 }
 
 impl JobsPanel {
@@ -276,6 +280,7 @@ impl JobsPanel {
                     let len = panel.visible_len(jobs);
                     panel.cursor = (panel.cursor + 1).min(len.saturating_sub(1));
                     scroll.scroll_to_reveal_item(panel.cursor);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);
@@ -291,7 +296,7 @@ impl JobsPanel {
         let scroll = self.list_scroll.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, _| {
+            panel.update(cx, |panel, cx| {
                 if panel.expanded.is_some() {
                     panel.following = false;
                     panel.log_offset = panel.log_offset.saturating_sub(1);
@@ -299,6 +304,7 @@ impl JobsPanel {
                 } else {
                     panel.cursor = panel.cursor.saturating_sub(1);
                     scroll.scroll_to_reveal_item(panel.cursor);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);
@@ -314,7 +320,7 @@ impl JobsPanel {
         let scroll = self.list_scroll.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, _| {
+            panel.update(cx, |panel, cx| {
                 if panel.expanded.is_some() {
                     panel.following = false;
                     panel.log_offset = 0;
@@ -322,6 +328,7 @@ impl JobsPanel {
                 } else {
                     panel.cursor = 0;
                     scroll.scroll_to_reveal_item(0);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);
@@ -347,6 +354,7 @@ impl JobsPanel {
                 } else {
                     panel.cursor = panel.visible_len(jobs).saturating_sub(1);
                     scroll.scroll_to_reveal_item(panel.cursor);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);
@@ -370,6 +378,7 @@ impl JobsPanel {
                     panel.filter = panel.filter.next();
                     let len = panel.visible_len(jobs);
                     panel.clamp(len);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);

@@ -116,6 +116,74 @@ impl gpui::Render for ActionHarness {
     }
 }
 
+#[gpui::test]
+fn moving_the_cursor_updates_the_app_state_mirror(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| {
+        app_with_jobs(
+            "/tmp/fleet-jobs-move-mirror",
+            vec![
+                job("job-a", JobStatus::Running, true, false),
+                job("job-b", JobStatus::Running, true, false),
+            ],
+        )
+    });
+    let jobs = cx.update(JobsPanel::new);
+    let handler = jobs.on_move_down(&state);
+    let window = cx.add_window(|_, _| ActionHarness);
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+    window
+        .update(&mut visual, |_, window, cx| {
+            handler(&jobs_actions::MoveDown, window, cx)
+        })
+        .unwrap_or_else(|error| panic!("move jobs cursor: {error}"));
+
+    visual.update(|_, cx| {
+        assert_eq!(
+            state.read(cx).jobs_panel,
+            JobsPanelMirror {
+                cursor: 1,
+                filter: JobFilter::All,
+            }
+        );
+    });
+}
+
+#[gpui::test]
+fn cycling_the_filter_updates_the_app_state_mirror(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| {
+        app_with_jobs(
+            "/tmp/fleet-jobs-filter-mirror",
+            vec![
+                job("job-a", JobStatus::Succeeded, false, false),
+                job("job-b", JobStatus::Running, true, false),
+                job("job-c", JobStatus::Running, true, false),
+            ],
+        )
+    });
+    let jobs = cx.update(JobsPanel::new);
+    cx.update(|cx| jobs.state.update(cx, |panel, _| panel.cursor = 2));
+    let handler = jobs.on_cycle_filter(&state);
+    let window = cx.add_window(|_, _| ActionHarness);
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+    window
+        .update(&mut visual, |_, window, cx| {
+            handler(&jobs_actions::CycleFilter, window, cx)
+        })
+        .unwrap_or_else(|error| panic!("cycle jobs filter: {error}"));
+
+    visual.update(|_, cx| {
+        assert_eq!(
+            state.read(cx).jobs_panel,
+            JobsPanelMirror {
+                cursor: 1,
+                filter: JobFilter::Running,
+            }
+        );
+    });
+}
+
 #[test]
 fn the_cursor_indexes_the_visible_rows_not_the_daemons_list() {
     let jobs = vec![
@@ -139,18 +207,42 @@ fn the_cursor_indexes_the_visible_rows_not_the_daemons_list() {
     assert_eq!(panel.visible_len(&jobs), 1);
 }
 
-#[test]
-fn the_cursor_is_clamped_when_the_filter_shrinks_the_list() {
-    let jobs = [
-        job("job-a", JobStatus::Running, true, false),
-        job("job-b", JobStatus::Running, true, false),
-        job("job-c", JobStatus::Succeeded, false, false),
-    ];
-    let mut panel = panel(JobFilter::All);
-    panel.cursor = 2;
-    panel.filter = JobFilter::Running;
-    panel.clamp(panel.visible_len(&jobs));
-    assert_eq!(panel.cursor, 1);
+#[gpui::test]
+fn the_cursor_is_clamped_and_mirrored_when_the_filter_shrinks_the_list(
+    cx: &mut gpui::TestAppContext,
+) {
+    let state = cx.new(|_| {
+        let mut state = app_with_jobs(
+            "/tmp/fleet-jobs-clamp",
+            vec![
+                job("job-a", JobStatus::Running, true, false),
+                job("job-b", JobStatus::Running, true, false),
+                job("job-c", JobStatus::Succeeded, false, false),
+            ],
+        );
+        state.overlay = Some(Overlay::Jobs);
+        state
+    });
+    let jobs = cx.update(JobsPanel::new);
+
+    cx.update(|cx| {
+        jobs.state.update(cx, |panel, _| {
+            panel.cursor = 2;
+            panel.filter = JobFilter::Running;
+        });
+        presentation::synchronize(&jobs.state, &state, &jobs.list_scroll, None, cx);
+    });
+
+    cx.read(|cx| {
+        assert_eq!(jobs.state.read(cx).cursor, 1);
+        assert_eq!(
+            state.read(cx).jobs_panel,
+            JobsPanelMirror {
+                cursor: 1,
+                filter: JobFilter::Running,
+            }
+        );
+    });
 }
 
 #[test]

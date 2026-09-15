@@ -162,8 +162,12 @@ pub(crate) fn spawn(
     let (closed_tx, closed_rx) = async_channel::bounded(1);
     let subscription = cx.on_window_closed(move |_, closed| {
         if closed == window_id {
-            // The receiver is gone only after the window-scoped driver has shut down.
-            let _ = closed_tx.try_send(());
+            // Full means the stop is already queued; closed means the driver is already gone.
+            match closed_tx.try_send(()) {
+                Ok(())
+                | Err(async_channel::TrySendError::Full(()))
+                | Err(async_channel::TrySendError::Closed(())) => {}
+            }
         }
     });
     Some(window.spawn(cx, async move |cx| {
@@ -329,14 +333,12 @@ async fn apply(
             Ok(json!({}).into())
         }
         Command::Shot(args) => {
-            anyhow::ensure!(
-                !harness.headless,
-                "no pixels in the headless lane: this Fleet has no compositor surface"
-            );
-            cx.update(|window, cx| {
-                window.activate_window();
-                cx.activate(true);
-            })?;
+            if !harness.headless {
+                cx.update(|window, cx| {
+                    window.activate_window();
+                    cx.activate(true);
+                })?;
+            }
             harness.settle(cx).await?;
             let mut geometry = harness.geometry(cx)?;
             if let Some(object) = geometry.as_object_mut() {
@@ -489,8 +491,12 @@ impl Harness {
         let (painted_tx, painted_rx) = async_channel::bounded(1);
         cx.update(|window, _| {
             window.on_next_frame(move |_, _| {
-                // The receiver is gone only when the driver task was cancelled mid-command.
-                let _ = painted_tx.try_send(());
+                // Full means the frame is already queued; closed means the command was cancelled.
+                match painted_tx.try_send(()) {
+                    Ok(())
+                    | Err(async_channel::TrySendError::Full(()))
+                    | Err(async_channel::TrySendError::Closed(())) => {}
+                }
             });
         })?;
         tokio::select! {
@@ -638,8 +644,10 @@ impl Harness {
     /// Two snapshot fields are not woken by this signal, and a scenario should reach for them
     /// with `dump` or `assert`, which project on demand:
     ///
-    /// * `window` and `targets` are copied in by [`Harness::project`] rather than by an update
-    ///   path, so they are read as of the moment this call projects them.
+    /// * `window.frame` and `targets` are copied in by [`Harness::project`] rather than by an
+    ///   update path. In a headless run nothing repaints during this await, so they remain at the
+    ///   geometry captured by the paint before the await. Use `assert` or `dump`, which paint
+    ///   before projecting, when a scenario needs current geometry.
     /// * `terminal` moves on a terminal-only bridge batch, which
     ///   `crate::shell::root::events::apply_batch` applies *without* notifying `AppState` in a
     ///   normal launch — plain PTY output must not wake every chrome observer. In harness mode
@@ -662,8 +670,12 @@ impl Harness {
         // The subscription is held by this command and unregisters when it answers.
         let _observation = cx.update(|_, cx| {
             cx.observe(state, move |_, _| {
-                // The receiver is gone only once this command has answered.
-                let _ = changed_tx.try_send(());
+                // Full coalesces another change; closed means this command has answered.
+                match changed_tx.try_send(()) {
+                    Ok(())
+                    | Err(async_channel::TrySendError::Full(()))
+                    | Err(async_channel::TrySendError::Closed(())) => {}
+                }
             })
         })?;
         let mut expiry = cx
@@ -721,7 +733,7 @@ fn verdict(
     let Some(summary) = evaluation.failure_summary() else {
         return Outcome::ok(data);
     };
-    // `idle` reports one JSON object of five counters, so the clause's own account of itself is
+    // `idle` reports one JSON object of seven counters, so the clause's own account of itself is
     // that whole object. A scenario that waited on the bare word is owed the shorter answer:
     // which constituent is still pending.
     let summary = if evaluation
@@ -747,13 +759,15 @@ fn verdict(
     }
 }
 
-/// The five constituents of `idle`, in the order `docs/TESTING-HARNESS.md` §3 lists them.
-const IDLE_COUNTERS: [&str; 5] = [
+/// The seven constituents of `idle`, in the order `docs/TESTING-HARNESS.md` §3 lists them.
+const IDLE_COUNTERS: [&str; 7] = [
     "in_flight_requests",
+    "settling_mutations",
     "running_jobs",
     "pending_frame",
     "live_toast_timers",
     "armed_debounces",
+    "link_opening",
 ];
 
 /// Names the constituents of `idle` that still report pending work, as `name=value` pairs.
@@ -764,7 +778,7 @@ fn busy_counters(idle: &Value) -> String {
         .map(|counter| format!("{counter}={}", idle[*counter]))
         .collect();
     if busy.is_empty() {
-        // `idle` is derived from the five counters, never reported beside them, so this pair
+        // `idle` is derived from the seven counters, never reported beside them, so this pair
         // cannot disagree unless the projection the predicate read was stale.
         return "nothing, which means the projection is stale".to_owned();
     }
@@ -842,7 +856,9 @@ fn non_empty_var_os(name: &str) -> Option<std::ffi::OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_drive::protocol::{AdvanceArgs, AssertArgs, AwaitArgs, DumpArgs, EmptyArgs, KeyArgs};
+    use fleet_drive::protocol::{
+        AdvanceArgs, AssertArgs, AwaitArgs, DumpArgs, EmptyArgs, KeyArgs, ShotArgs,
+    };
     use fleet_ui_kit::{Icon, Toast};
     use gpui::{Context, IntoElement, Render, TestAppContext, div};
     use std::os::unix::net::UnixStream;
@@ -922,6 +938,35 @@ mod tests {
         assert_eq!(id, "abc123");
         assert_eq!(format!("Fleet [harness:{id}]"), "Fleet [harness:abc123]");
         assert!(!run_id(None).is_empty());
+    }
+
+    #[test]
+    fn settling_and_link_opening_are_named_as_sole_idle_blockers() {
+        for (counter, value) in [
+            ("settling_mutations", json!(1)),
+            ("link_opening", json!(true)),
+        ] {
+            let mut idle = json!({
+                "in_flight_requests": 0,
+                "settling_mutations": 0,
+                "running_jobs": 0,
+                "pending_frame": false,
+                "live_toast_timers": 0,
+                "armed_debounces": 0,
+                "link_opening": false,
+            });
+            idle[counter] = value.clone();
+            assert_eq!(busy_counters(&idle), format!("{counter}={value}"));
+        }
+    }
+
+    #[test]
+    fn docs_pin_the_headless_window_frame_restriction() {
+        let docs = include_str!("../../../docs/TESTING-HARNESS.md");
+        assert!(
+            docs.contains("A headless `await` does not repaint, so `window.frame` freezes"),
+            "keep the documented headless frame-freezing restriction"
+        );
     }
 
     #[gpui::test]
@@ -1229,6 +1274,25 @@ mod tests {
         let (second, _) = answer(&harness, &state, &meta, &mut async_cx).await;
         assert_eq!(first.data["bounds"], second.data["bounds"]);
         assert_eq!(first.data["scale_factor"], second.data["scale_factor"]);
+    }
+
+    #[gpui::test]
+    async fn a_headless_shot_returns_geometry_for_the_runner_to_classify(cx: &mut TestAppContext) {
+        let harness = harness_for(None);
+        let (state, mut async_cx) = driver(cx);
+        let shot = Request::new(
+            1,
+            &Command::Shot(ShotArgs {
+                name: "headless-update".to_owned(),
+            }),
+        )
+        .expect("encode shot");
+
+        let (response, _) = answer(&harness, &state, &shot, &mut async_cx).await;
+
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(response.data["name"], json!("headless-update"));
+        assert_eq!(response.data["lane"], json!("headless"));
     }
 
     #[gpui::test]

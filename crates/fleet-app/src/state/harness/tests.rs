@@ -16,11 +16,11 @@ use crate::state::{
     AppState, DaemonLink, DaemonLossReason, Overlay, Screen, dwell_for, test_support,
 };
 
-fn state() -> AppState {
+pub(super) fn state() -> AppState {
     AppState::new("/tmp/fleet-harness", Instant::now())
 }
 
-fn job(id: &str, status: JobStatus) -> JobRecord {
+pub(super) fn job(id: &str, status: JobStatus) -> JobRecord {
     JobRecord {
         id: id.parse().unwrap_or_else(|error| panic!("{error}")),
         kind: JobKind::Prune,
@@ -36,7 +36,7 @@ fn job(id: &str, status: JobStatus) -> JobRecord {
     }
 }
 
-fn cell(text: &str, width: CellWidth) -> Cell {
+pub(super) fn cell(text: &str, width: CellWidth) -> Cell {
     Cell {
         text: text.into(),
         fg: Color::Default,
@@ -58,7 +58,7 @@ fn serialized_shape_is_pinned() {
             "sticky_error":null,"jobs":[],
             "agents":{"popup":null,"threads":[]},"terminal":null,"targets":{},
             "daemon":{"link":"starting","attempt":0,"dismissed":false,"restarted":false},
-            "idle":{"idle":true,"in_flight_requests":0,"running_jobs":0,"pending_frame":false,"live_toast_timers":0,"armed_debounces":0},
+            "idle":{"idle":false,"in_flight_requests":0,"running_jobs":0,"pending_frame":false,"live_toast_timers":0,"armed_debounces":0,"settling_mutations":0,"link_opening":true},
             "window":{"bounds":{"x":0.0,"y":0.0,"w":0.0,"h":0.0},"scale_factor":0.0,"title":"","frame":0}
         })
     );
@@ -68,6 +68,7 @@ fn serialized_shape_is_pinned() {
 fn populated_state_projects_every_collection() {
     let now = Instant::now();
     let mut state = state();
+    state.daemon = DaemonLink::Connected;
     let mut snapshot = test_support::snapshot();
     let worktree: fleet_core::ids::WorktreeId = "acme/api#login"
         .parse()
@@ -115,6 +116,7 @@ fn populated_state_projects_every_collection() {
 fn a_running_job_keeps_idle_false_until_it_finishes() {
     let now = Instant::now();
     let mut state = state();
+    state.daemon = DaemonLink::Connected;
     let mut snapshot = test_support::snapshot();
     snapshot.jobs.push(job("job-1", JobStatus::Running));
     state.apply_snapshot(snapshot, now);
@@ -137,9 +139,15 @@ fn a_running_job_keeps_idle_false_until_it_finishes() {
 fn every_pending_source_alone_defeats_idle() {
     let now = Instant::now();
     let mut state = state();
-    state.harness.begin_request();
+    state.daemon = DaemonLink::Connected;
+    let in_flight = Arc::new(AtomicU32::new(1));
+    state.harness.attach_bridge(
+        Arc::clone(&in_flight),
+        Arc::new(SettleCounter::default()),
+        IdleWake::new(|| {}),
+    );
     assert!(!state.harness_projection().snapshot.idle.idle);
-    state.harness.finish_request();
+    in_flight.fetch_sub(1, Ordering::AcqRel);
     assert!(state.harness_projection().snapshot.idle.idle);
 
     state.harness.set_pending_frame(true);
@@ -164,6 +172,56 @@ fn every_pending_source_alone_defeats_idle() {
     let toasting = state.harness_projection().snapshot;
     assert_eq!(toasting.idle.live_toast_timers, 1);
     assert!(!toasting.idle.idle, "a live toast timer is pending work");
+}
+
+#[test]
+fn settle_counter_expires_only_the_unsettled_generation() {
+    let settle = SettleCounter::default();
+    let expired = settle.begin();
+    assert_eq!(settle.pending(), 1);
+    assert!(settle.expire(expired));
+    assert_eq!(settle.pending(), 0);
+    assert!(!settle.expire(expired), "one mutation is released once");
+
+    let settled = settle.begin();
+    settle.settled();
+    assert_eq!(settle.pending(), 0);
+    assert!(
+        !settle.expire(settled),
+        "a snapshot invalidates its mutation's grace expiry"
+    );
+
+    let next = settle.begin();
+    assert_ne!(next, settled);
+    assert!(settle.expire(next));
+    assert_eq!(MUTATION_SETTLE_GRACE, std::time::Duration::from_millis(250));
+}
+
+#[test]
+fn settling_mutations_and_an_opening_link_each_defeat_idle() {
+    assert!(!IdleSnapshot::new(0, 0, false, 0, 0, 1, false).idle);
+    assert!(!IdleSnapshot::new(0, 0, false, 0, 0, 0, true).idle);
+    assert!(IdleSnapshot::new(0, 0, false, 0, 0, 0, false).idle);
+}
+
+#[test]
+fn dropping_an_armed_debounce_wakes_after_decrementing() {
+    let wakes = Arc::new(AtomicU32::new(0));
+    let callback_wakes = Arc::clone(&wakes);
+    let mut harness = HarnessState::default();
+    harness.attach_bridge(
+        Arc::new(AtomicU32::new(0)),
+        Arc::new(SettleCounter::default()),
+        IdleWake::new(move || {
+            callback_wakes.fetch_add(1, Ordering::AcqRel);
+        }),
+    );
+
+    let debounce = harness.arm_debounce();
+    assert_eq!(harness.armed_debounces(), 1);
+    drop(debounce);
+    assert_eq!(harness.armed_debounces(), 0);
+    assert_eq!(wakes.load(Ordering::Acquire), 1);
 }
 
 #[test]

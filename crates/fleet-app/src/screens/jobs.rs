@@ -16,7 +16,7 @@ use crate::{
     actions::jobs as jobs_actions,
     bridge::Bridge,
     presentation::{is_active, is_dismissable, now_unix},
-    state::{AppState, Overlay, StickyError},
+    state::{AppState, JobsPanelMirror, Overlay, StickyError},
     views::jobs_panel::{self, JobFilter},
 };
 
@@ -199,6 +199,18 @@ fn snapshot_jobs<'a>(state: &Entity<AppState>, cx: &'a App) -> &'a [JobRecord] {
 /// has to say so through that entity.
 fn notify(state: &Entity<AppState>, cx: &mut App) {
     state.update(cx, |_, cx| cx.notify());
+}
+
+/// Publishes the panel-owned selection state for consumers that cannot read the panel entity.
+fn mirror_panel(panel: &PanelState, state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |state, cx| {
+        if state.set_jobs_panel(JobsPanelMirror {
+            cursor: panel.cursor,
+            filter: panel.filter,
+        }) {
+            cx.notify();
+        }
+    });
 }
 
 /// A refused action, with its reason (§2.7 "Action refused, with the reason").

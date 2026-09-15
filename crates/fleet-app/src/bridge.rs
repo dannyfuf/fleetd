@@ -34,7 +34,9 @@ use fleet_proto::{
     snapshot::Snapshot,
 };
 
-use crate::state::{daemon_log_path, reconnect_backoff};
+use crate::state::{
+    IdleWake, MUTATION_SETTLE_GRACE, SettleCounter, daemon_log_path, reconnect_backoff,
+};
 
 mod connection;
 mod requests;
@@ -87,6 +89,8 @@ impl EffectiveConfig {
 /// Everything the background thread tells the UI.
 #[derive(Debug, Clone)]
 pub enum BridgeEvent {
+    /// A busy-to-idle edge off the foreground; wakes the harness waiter.
+    Nudge,
     /// A sequenced native-agent event ready for the foreground mirror.
     Agent {
         /// Owning thread.
@@ -318,18 +322,23 @@ impl From<BridgeCommand> for RequestBody {
 /// One request's claim on the bridge's in-flight counter.
 ///
 /// `docs/TESTING-HARNESS.md` §2 defines `idle` as "no in-flight app requests, …", and the only
-/// place that knows when a request really leaves the system is the runtime thread that answers
-/// it. The claim is taken on the UI thread, rides the command through the queue, and is released
-/// by `Drop` wherever the request ends — answered, rejected while opening, shed under
-/// backpressure, or dropped because the runtime stopped. A guard rather than a matching
-/// decrement, because every one of those paths is an early return somewhere.
+/// place that knows when a request really leaves the system is the runtime handling its answer.
+/// The claim is taken on the UI thread and rides the command through the queue. Mutation replies
+/// transfer it to the settle counter; reply-lane requests retain it until their receiver closes.
+/// A guard covers rejection, backpressure and shutdown paths without matched decrements.
 #[derive(Debug)]
-struct InFlight(Arc<AtomicU32>);
+struct InFlight {
+    counter: Arc<AtomicU32>,
+    wake: Option<IdleWake>,
+}
 
 impl InFlight {
-    fn claim(counter: &Arc<AtomicU32>) -> Self {
+    fn claim(counter: &Arc<AtomicU32>, wake: IdleWake) -> Self {
         counter.fetch_add(1, Ordering::AcqRel);
-        Self(Arc::clone(counter))
+        Self {
+            counter: Arc::clone(counter),
+            wake: Some(wake),
+        }
     }
 }
 
@@ -337,14 +346,20 @@ impl InFlight {
 impl InFlight {
     /// A claim on a counter nobody reads, for tests that build a command by hand.
     fn untracked() -> Self {
-        Self::claim(&Arc::new(AtomicU32::new(0)))
+        Self {
+            counter: Arc::new(AtomicU32::new(1)),
+            wake: None,
+        }
     }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
         // Every claim increments exactly once, so this can never wrap.
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+        if let Some(wake) = self.wake.take() {
+            wake.wake();
+        }
     }
 }
 
@@ -353,7 +368,7 @@ enum Command {
     Request {
         body: Box<RequestBody>,
         reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
-        /// Released when this request is answered, rejected or abandoned.
+        /// Released when the reply receiver closes, or transferred after a mutation answer.
         in_flight: InFlight,
     },
     /// Retry `ensure_daemon` now (`r` on either daemon surface).
@@ -381,8 +396,9 @@ pub struct Bridge {
     commands: Sender<Command>,
     events: Receiver<BridgeEvent>,
     event_tx: Sender<BridgeEvent>,
-    /// How many requests the runtime has not finished with, shared with `AppState::harness`.
+    /// Requests not yet answered and handed off, shared with `AppState::harness`.
     in_flight: Arc<AtomicU32>,
+    settle: Arc<SettleCounter>,
     resync_pending: Arc<AtomicBool>,
 }
 
@@ -398,11 +414,21 @@ impl Bridge {
         let (commands, command_rx) = async_channel::bounded(COMMAND_CAPACITY);
         let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
         let resync_pending = Arc::new(AtomicBool::new(false));
+        let settle = Arc::new(SettleCounter::default());
         let thread_events = event_tx.clone();
         let thread_resync = resync_pending.clone();
+        let thread_settle = Arc::clone(&settle);
         if let Err(error) = thread::Builder::new()
             .name("fleet-daemon-bridge".to_owned())
-            .spawn(move || run_thread(home, command_rx, thread_events, thread_resync))
+            .spawn(move || {
+                run_thread(
+                    home,
+                    command_rx,
+                    thread_events,
+                    thread_resync,
+                    thread_settle,
+                )
+            })
         {
             let _ignored = event_tx.try_send(BridgeEvent::ConnectFailed {
                 message: format!("could not start the daemon bridge thread: {error}"),
@@ -416,6 +442,7 @@ impl Bridge {
             event_tx,
             resync_pending,
             in_flight: Arc::new(AtomicU32::new(0)),
+            settle,
         }
     }
 
@@ -427,6 +454,18 @@ impl Bridge {
     #[must_use]
     pub fn in_flight_requests(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.in_flight)
+    }
+
+    /// Mutations whose replies arrived before their snapshots were applied.
+    #[must_use]
+    pub fn settle_counter(&self) -> Arc<SettleCounter> {
+        Arc::clone(&self.settle)
+    }
+
+    /// Builds the best-effort wake used by off-foreground idle guards.
+    #[must_use]
+    pub fn idle_wake(&self) -> IdleWake {
+        idle_wake(self.event_tx.clone())
     }
 
     #[cfg(test)]
@@ -442,6 +481,7 @@ impl Bridge {
             event_tx,
             resync_pending,
             in_flight: Arc::new(AtomicU32::new(0)),
+            settle: Arc::new(SettleCounter::default()),
         }
     }
 
@@ -458,7 +498,7 @@ impl Bridge {
         let command = Command::Request {
             body: Box::new(body),
             reply: None,
-            in_flight: InFlight::claim(&self.in_flight),
+            in_flight: InFlight::claim(&self.in_flight, self.idle_wake()),
         };
         match self.commands.try_send(command) {
             Ok(()) => {}
@@ -506,7 +546,7 @@ impl Bridge {
         match self.commands.try_send(Command::Request {
             body: Box::new(body),
             reply: Some(reply.clone()),
-            in_flight: InFlight::claim(&self.in_flight),
+            in_flight: InFlight::claim(&self.in_flight, self.idle_wake()),
         }) {
             Ok(()) => {}
             Err(async_channel::TrySendError::Full(_)) => {
@@ -566,11 +606,22 @@ fn publish_mutation_failure(events: &Sender<BridgeEvent>, message: &str) {
     });
 }
 
+fn idle_wake(events: Sender<BridgeEvent>) -> IdleWake {
+    IdleWake::new(move || match events.try_send(BridgeEvent::Nudge) {
+        Ok(()) => {}
+        // A full event channel already means the shell drain loop will wake.
+        Err(async_channel::TrySendError::Full(_)) => {}
+        // The receiver is gone only during shutdown.
+        Err(async_channel::TrySendError::Closed(_)) => {}
+    })
+}
+
 fn run_thread(
     home: PathBuf,
     commands: Receiver<Command>,
     events: Sender<BridgeEvent>,
     resync_pending: Arc<AtomicBool>,
+    settle: Arc<SettleCounter>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -586,5 +637,11 @@ fn run_thread(
             return;
         }
     };
-    runtime.block_on(runtime::run(&home, &commands, &events, &resync_pending));
+    runtime.block_on(runtime::run(
+        &home,
+        &commands,
+        &events,
+        &resync_pending,
+        settle,
+    ));
 }
