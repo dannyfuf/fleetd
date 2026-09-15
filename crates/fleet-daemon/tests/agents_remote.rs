@@ -517,6 +517,7 @@ fn snapshot(
     Snapshot {
         boards: Vec::new(),
         generated_at: Utc::now().to_rfc3339(),
+        revision: None,
         contexts: Vec::new(),
         repos: Vec::new(),
         clones: Vec::new(),

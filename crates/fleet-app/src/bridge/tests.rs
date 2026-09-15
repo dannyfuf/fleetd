@@ -60,12 +60,27 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start(respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static) -> Self {
-        Self::start_with_pong_identity(respond, || None)
+        Self::start_with_metadata(respond, || None, None)
     }
 
     fn start_with_pong_identity(
+        respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static,
+        pong_identity: impl FnMut() -> Option<(u32, String)> + Send + 'static,
+    ) -> Self {
+        Self::start_with_metadata(respond, pong_identity, None)
+    }
+
+    fn start_with_snapshot_revision(
+        respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static,
+        snapshot_revision: u64,
+    ) -> Self {
+        Self::start_with_metadata(respond, || None, Some(snapshot_revision))
+    }
+
+    fn start_with_metadata(
         mut respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static,
         mut pong_identity: impl FnMut() -> Option<(u32, String)> + Send + 'static,
+        snapshot_revision: Option<u64>,
     ) -> Self {
         use std::{
             io::{Read, Write},
@@ -99,6 +114,7 @@ impl TestDaemon {
                     }
                     let request: fleet_proto::request::Request =
                         serde_json::from_slice(&body).unwrap();
+                    let is_hello = matches!(&request.body, RequestBody::Hello { .. });
                     let result = match request.body {
                         RequestBody::Hello { .. } => Some(ResponseBody::Hello {
                             protocol: fleet_proto::PROTOCOL_VERSION,
@@ -122,6 +138,18 @@ impl TestDaemon {
                                 "daemon".to_owned(),
                                 serde_json::json!({"pid": pid, "bootId": boot_id}),
                             );
+                        }
+                        if let Some(snapshot_revision) = snapshot_revision
+                            && let Some(envelope) = response.as_object_mut()
+                        {
+                            envelope
+                                .insert("snapshotRevision".to_owned(), snapshot_revision.into());
+                            if is_hello {
+                                envelope.insert(
+                                    "capabilities".to_owned(),
+                                    serde_json::json!(["snapshot.revision"]),
+                                );
+                            }
                         }
                         let bytes = serde_json::to_vec(&response).unwrap();
                         if stream
@@ -167,6 +195,7 @@ fn empty_snapshot() -> Snapshot {
     Snapshot {
         boards: Vec::new(),
         generated_at: String::new(),
+        revision: None,
         contexts: vec![],
         repos: vec![],
         clones: vec![],
@@ -723,8 +752,8 @@ async fn bounded_queues_coalesce_and_resynchronize() {
 }
 
 #[tokio::test]
-async fn a_mutation_reply_transfers_from_in_flight_to_settling() {
-    let daemon = TestDaemon::start(|_| Some(ResponseBody::Ack));
+async fn a_stamped_mutation_reply_waits_for_a_covering_snapshot() {
+    let daemon = TestDaemon::start_with_snapshot_revision(|_| Some(ResponseBody::Ack), 12);
     let client = Client::connect(daemon.home.path()).await.unwrap();
 
     let (commands, command_rx) = async_channel::unbounded();
@@ -769,16 +798,19 @@ async fn a_mutation_reply_transfers_from_in_flight_to_settling() {
     assert_eq!(counter.load(Ordering::Acquire), 0);
     assert_eq!(settle.pending(), 1);
 
-    settle.settled();
+    settle.applied(Some(11));
+    assert_eq!(settle.pending(), 1);
+    settle.applied(Some(12));
+    assert_eq!(settle.pending(), 0);
     drop(request_tx);
     worker.await.unwrap();
 }
 
 #[tokio::test]
-async fn mutation_settle_grace_expiry_sends_a_nudge() {
+async fn legacy_mutation_settle_grace_expiry_sends_a_nudge() {
     let (event_tx, event_rx) = async_channel::bounded(1);
     let settle = Arc::new(SettleCounter::default());
-    let generation = settle.begin();
+    let generation = settle.begin(None);
     requests::expire_settle_after(
         Arc::clone(&settle),
         idle_wake(event_tx),
@@ -789,6 +821,23 @@ async fn mutation_settle_grace_expiry_sends_a_nudge() {
 
     assert!(matches!(event_rx.recv().await.unwrap(), BridgeEvent::Nudge));
     assert_eq!(settle.pending(), 0);
+}
+
+#[tokio::test]
+async fn stamped_mutation_settle_grace_expiry_retains_the_claim_without_a_nudge() {
+    let (event_tx, event_rx) = async_channel::bounded(1);
+    let settle = Arc::new(SettleCounter::default());
+    let generation = settle.begin(Some(12));
+    requests::expire_settle_after(
+        Arc::clone(&settle),
+        idle_wake(event_tx),
+        generation,
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(event_rx.try_recv().is_err());
+    assert_eq!(settle.pending(), 1);
 }
 
 /// `docs/TESTING-HARNESS.md` §2 defines `idle` as "no in-flight app requests, …". A reply-lane

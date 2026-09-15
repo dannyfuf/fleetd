@@ -111,6 +111,9 @@ pub struct Snapshot {
     pub boards: Vec<fleet_core::board::BoardSummary>,
     /// ISO-8601 time at which this snapshot was assembled.
     pub generated_at: String,
+    /// Daemon revision whose state this snapshot covers, when the peer supports correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
     /// Registered contexts.
     pub contexts: Vec<Context>,
     /// Registered repositories.

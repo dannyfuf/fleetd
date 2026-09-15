@@ -500,6 +500,10 @@ older client that names nothing is treated as supporting nothing optional. Feder
 `HostLinkChanged` and `TerminalReattach` events, optional host placement on PR creation, host
 ownership on `WorktreePath`, and `BootstrapHost`. These fields and events are additive, but remote
 daemon links require the same protocol version so routing never crosses incompatible builds.
+The `snapshot.revision` capability advertises two additive, defaulted fields: every response
+envelope may carry `snapshotRevision`, sampled after dispatch, and every `Snapshot` may carry
+`revision`, sampled before assembly. The first snapshot revision greater than or equal to a
+response stamp causally covers that request; peers that omit either field retain IPC-v7 behavior.
 
 The native-agent family grew a **bounded** read without a version bump, gated on six capability
 strings: `agent.window` (windowed transcript reads and backwards pagination), `agent.sync_marker`

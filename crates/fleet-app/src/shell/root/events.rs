@@ -49,17 +49,23 @@ impl BatchDamage {
         let terminal = damage.and_then(|damage| damage.terminal);
         let lagged = matches!(event, BridgeEvent::EventsLagged { .. });
         let terminal_only = damage.is_some_and(is_terminal_only);
-        let settles_mutations = match &event {
-            BridgeEvent::Connected(_) => true,
-            BridgeEvent::Daemon(event) => matches!(
-                event.as_ref(),
-                fleet_proto::event::Event::SnapshotChanged(_)
-            ),
-            _ => false,
+        let connected_snapshot_revision = match &event {
+            BridgeEvent::Connected(snapshot) => Some(snapshot.revision),
+            _ => None,
+        };
+        let applied_snapshot_revision = match &event {
+            BridgeEvent::Daemon(event) => match event.as_ref() {
+                fleet_proto::event::Event::SnapshotChanged(snapshot) => Some(snapshot.revision),
+                _ => None,
+            },
+            _ => None,
         };
         state.apply_bridge_event(event, now);
-        if settles_mutations {
-            state.harness.settle().settled();
+        if let Some(revision) = connected_snapshot_revision {
+            state.harness.settle().connected();
+            state.harness.settle().applied(revision);
+        } else if let Some(revision) = applied_snapshot_revision {
+            state.harness.settle().applied(revision);
         }
         self.state |= !terminal_only;
         if let Some(terminal) = terminal {
@@ -255,6 +261,7 @@ mod tests {
         Snapshot {
             boards: Vec::new(),
             generated_at: String::new(),
+            revision: None,
             contexts: Vec::new(),
             repos: Vec::new(),
             clones: Vec::new(),
@@ -403,24 +410,44 @@ mod tests {
     }
 
     #[gpui::test]
-    fn snapshot_changed_settles_pending_mutations(cx: &mut gpui::TestAppContext) {
+    fn snapshot_changed_settles_only_mutations_covered_by_its_revision(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let state = cx.new(|_| AppState::new("/tmp/fleet", Instant::now()));
         let settle = cx.update(|cx| Arc::clone(state.read(cx).harness.settle()));
-        settle.begin();
-        settle.begin();
+        settle.begin(Some(3));
+        let pending = settle.begin(Some(5));
         assert_eq!(settle.pending(), 2);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.revision = Some(4);
 
         let damage = cx.update(|cx| {
             apply_batch(
                 &state,
                 [BridgeEvent::Daemon(Box::new(Event::SnapshotChanged(
-                    empty_snapshot(),
+                    snapshot,
                 )))],
                 cx,
             )
         });
 
         assert!(damage.state);
+        assert_eq!(settle.pending(), 1);
+        assert!(!settle.expire(pending));
+        assert_eq!(settle.pending(), 1);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.revision = Some(5);
+        cx.update(|cx| {
+            apply_batch(
+                &state,
+                [BridgeEvent::Daemon(Box::new(Event::SnapshotChanged(
+                    snapshot,
+                )))],
+                cx,
+            )
+        });
         assert_eq!(settle.pending(), 0);
     }
 
@@ -428,16 +455,18 @@ mod tests {
     fn connected_settles_pending_mutations() {
         let now = Instant::now();
         let mut state = AppState::new("/tmp/fleet", now);
-        state.harness.settle().begin();
+        state.harness.settle().begin(Some(99));
+        let pending = state.harness.settle().begin(Some(100));
+        assert!(!state.harness.settle().expire(pending));
         let mut damage = BatchDamage::default();
+        let mut snapshot = empty_snapshot();
+        snapshot.revision = Some(2);
 
-        damage.apply(
-            &mut state,
-            BridgeEvent::Connected(Box::new(empty_snapshot())),
-            now,
-        );
+        damage.apply(&mut state, BridgeEvent::Connected(Box::new(snapshot)), now);
 
         assert!(damage.state);
+        assert_eq!(state.harness.settle().pending(), 0);
+        state.harness.settle().begin(Some(2));
         assert_eq!(state.harness.settle().pending(), 0);
     }
 }

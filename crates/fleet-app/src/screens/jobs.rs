@@ -25,7 +25,7 @@ mod log_follow;
 mod presentation;
 #[cfg(test)]
 mod tests;
-use log_follow::spawn_tail;
+use log_follow::start_tail;
 
 /// How often an expanded log re-asks the daemon for its tail while following.
 ///

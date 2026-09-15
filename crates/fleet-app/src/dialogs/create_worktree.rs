@@ -1176,6 +1176,7 @@ mod tests {
         fleet_proto::snapshot::Snapshot {
             boards: Vec::new(),
             generated_at: String::new(),
+            revision: None,
             contexts: Vec::new(),
             repos: Vec::new(),
             clones: Vec::new(),

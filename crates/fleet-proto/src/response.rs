@@ -30,6 +30,26 @@ pub struct Response {
     pub result: Result<ResponseBody, ProtoError>,
 }
 
+/// Additive metadata carried by every response envelope.
+///
+/// An older IPC-v7 client deserializes this as an ordinary [`Response`] and ignores
+/// `snapshot_revision`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StampedResponse {
+    /// The ordinary correlated response.
+    #[serde(flatten)]
+    pub response: Response,
+    /// The daemon's snapshot revision when this response was written: every state change this
+    /// request made is visible in the first published snapshot whose `revision` is greater than
+    /// or equal to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision: Option<u64>,
+}
+
+/// Capability name for revision-correlated response and snapshot envelopes.
+pub const SNAPSHOT_REVISION_CAPABILITY: &str = "snapshot.revision";
+
 /// Capability name for committing only the worktree IDs reviewed by a prune dry run.
 pub const PRUNE_REVIEWED_IDS_CAPABILITY: &str = "prune.reviewed_ids";
 
@@ -43,6 +63,9 @@ pub struct HelloResponse {
     /// The ordinary correlated Hello response.
     #[serde(flatten)]
     pub response: Response,
+    /// Snapshot revision sampled after the Hello was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision: Option<u64>,
     /// Optional behaviors implemented by this daemon build.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
@@ -73,6 +96,9 @@ pub struct PongResponse {
     /// The ordinary correlated Pong response.
     #[serde(flatten)]
     pub response: Response,
+    /// Snapshot revision sampled after the ping was handled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision: Option<u64>,
     /// Daemon identity when the peer supports identity-bearing pings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon: Option<DaemonIdentity>,
@@ -394,6 +420,7 @@ mod tests {
                     server: "fleetd test".to_owned(),
                 }),
             },
+            snapshot_revision: Some(12),
             capabilities: vec![crate::REMOTE_MACHINES_CAPABILITY.to_owned()],
             daemon_id: "daemon-test".to_owned(),
             build_commit: Some("abc123".to_owned()),
@@ -405,8 +432,15 @@ mod tests {
                 protocol: PROTOCOL_VERSION,
             }),
         });
+        assert_round_trip(StampedResponse {
+            response: Response {
+                id: 10,
+                result: Ok(ResponseBody::Ack),
+            },
+            snapshot_revision: Some(17),
+        });
         assert_round_trip(Response {
-            id: 10,
+            id: 11,
             result: Err(ProtoError {
                 kind: ErrorKind::Validation,
                 message: "bad input".to_owned(),

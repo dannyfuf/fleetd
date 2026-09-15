@@ -1012,7 +1012,7 @@ mod tests {
     #[test]
     fn settle_expiry_rebuilds_a_cached_busy_projection() {
         let state = state();
-        let generation = state.harness.settle().begin();
+        let generation = state.harness.settle().begin(None);
         let busy = state.harness_projection();
 
         assert_eq!(busy.snapshot.idle.settling_mutations, 1);

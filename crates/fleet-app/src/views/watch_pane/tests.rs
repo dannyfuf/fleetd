@@ -90,6 +90,7 @@ fn failed_list_synchronization_retries(cx: &mut TestAppContext) {
         app.snapshot = Some(fleet_proto::snapshot::Snapshot {
             boards: Vec::new(),
             generated_at: "2026-09-04T12:00:00Z".into(),
+            revision: None,
             contexts: Vec::new(),
             repos: Vec::new(),
             clones: Vec::new(),

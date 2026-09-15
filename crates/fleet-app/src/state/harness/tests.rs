@@ -175,25 +175,28 @@ fn every_pending_source_alone_defeats_idle() {
 }
 
 #[test]
-fn settle_counter_expires_only_the_unsettled_generation() {
+fn settle_counter_expires_only_legacy_unsettled_claims() {
     let settle = SettleCounter::default();
-    let expired = settle.begin();
+    let expired = settle.begin(None);
     assert_eq!(settle.pending(), 1);
     assert!(settle.expire(expired));
     assert_eq!(settle.pending(), 0);
     assert!(!settle.expire(expired), "one mutation is released once");
 
-    let settled = settle.begin();
-    settle.settled();
+    let settled = settle.begin(Some(4));
+    settle.applied(Some(4));
     assert_eq!(settle.pending(), 0);
     assert!(
         !settle.expire(settled),
         "a snapshot invalidates its mutation's grace expiry"
     );
 
-    let next = settle.begin();
+    let next = settle.begin(Some(5));
     assert_ne!(next, settled);
-    assert!(settle.expire(next));
+    assert!(!settle.expire(next));
+    assert_eq!(settle.pending(), 1);
+    settle.applied(Some(5));
+    assert_eq!(settle.pending(), 0);
     assert_eq!(MUTATION_SETTLE_GRACE, std::time::Duration::from_millis(250));
 }
 

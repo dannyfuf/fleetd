@@ -267,6 +267,7 @@ mod tests {
         fleet_proto::snapshot::Snapshot {
             boards: Vec::new(),
             generated_at: "2026-09-04T12:00:00Z".to_owned(),
+            revision: None,
             contexts: vec![Context {
                 id: id.clone(),
                 name: "acme".to_owned(),

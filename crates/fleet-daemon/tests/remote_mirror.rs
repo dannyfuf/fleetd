@@ -385,6 +385,7 @@ fn remote_snapshot(session: SessionState) -> Snapshot {
     Snapshot {
         boards: Vec::new(),
         generated_at: "2026-09-08T00:00:00Z".into(),
+        revision: None,
         contexts: Vec::new(),
         repos: Vec::new(),
         clones: Vec::new(),

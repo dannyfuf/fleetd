@@ -179,9 +179,11 @@ not just the first — and each one reports the value it actually saw.
 
 `idle` is true exactly when `idle.idle` is true: no in-flight app requests, running jobs, pending
 frame, live toast timer, or armed debounce; no mutation still awaiting its snapshot; and a daemon
-link past its first connection. On an await timeout the response contains the last snapshot and
-all eight idle fields: `idle`, `in_flight_requests`, `running_jobs`, `pending_frame`,
-`live_toast_timers`, `armed_debounces`, `settling_mutations`, and `link_opening`.
+link past its first connection. A mutation settles on the first snapshot whose daemon revision
+covers the revision stamped on its reply. Against a daemon without the `snapshot.revision`
+capability, the next snapshot or the grace backstop releases it. On an await timeout the response
+contains the last snapshot and all eight idle fields: `idle`, `in_flight_requests`, `running_jobs`,
+`pending_frame`, `live_toast_timers`, `armed_debounces`, `settling_mutations`, and `link_opening`.
 
 ## 3. `UiSnapshot`, version 1
 

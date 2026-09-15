@@ -18,7 +18,9 @@ use fleet_proto::{
     error::{ErrorKind, ProtoError},
     event::{Event, EventKind, ToastLevel},
     request::{Request, RequestBody},
-    response::{DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody},
+    response::{
+        DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, StampedResponse,
+    },
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
 use serde_json::Value;
@@ -102,17 +104,28 @@ pub(crate) struct ClientInner {
     metadata: Arc<RwLock<ConnectionMetadata>>,
 }
 
+type StampedResult = Result<Stamped<ResponseBody>, ProtoError>;
+
 #[derive(Debug)]
 struct Command {
     request: Request,
-    response: Option<oneshot::Sender<Result<ResponseBody, ProtoError>>>,
+    response: Option<oneshot::Sender<StampedResult>>,
     expires_at: Option<Instant>,
 }
 
 #[derive(Debug)]
 struct Pending {
     effect: ConnectionEffect,
-    response: Option<oneshot::Sender<Result<ResponseBody, ProtoError>>>,
+    response: Option<oneshot::Sender<StampedResult>>,
+}
+
+/// A response payload paired with the daemon snapshot revision sampled after dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamped<T> {
+    /// Correlated response payload.
+    pub body: T,
+    /// Revision of the first daemon snapshot guaranteed to cover the request's state changes.
+    pub snapshot_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,6 +192,14 @@ impl Client {
 
     /// Sends a raw protocol request and returns its correlated response payload.
     pub async fn request(&self, body: RequestBody) -> Result<ResponseBody, ProtoError> {
+        self.request_stamped(body).await.map(|stamped| stamped.body)
+    }
+
+    /// Sends a raw request and returns its payload with additive snapshot-correlation metadata.
+    pub async fn request_stamped(
+        &self,
+        body: RequestBody,
+    ) -> Result<Stamped<ResponseBody>, ProtoError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel();
         let enqueue_deadline = Instant::now() + REQUEST_TIMEOUT;
@@ -473,8 +494,12 @@ fn handle_incoming(
         let pong_identity = serde_json::from_value::<PongResponse>(value.clone())
             .ok()
             .and_then(|pong| pong.daemon);
-        match serde_json::from_value::<Response>(value) {
-            Ok(response) => {
+        match serde_json::from_value::<StampedResponse>(value) {
+            Ok(stamped_response) => {
+                let StampedResponse {
+                    response,
+                    snapshot_revision,
+                } = stamped_response;
                 if let Some(request) = pending.remove(&response.id) {
                     if response.result.is_ok() {
                         request.effect.apply(state);
@@ -488,7 +513,16 @@ fn handle_incoming(
                     let shutting_down = matches!(&response.result, Ok(ResponseBody::ShuttingDown));
                     match request.response {
                         Some(sender) => {
-                            let _ = sender.send(response.result);
+                            let result = response.result.map(|body| Stamped {
+                                body,
+                                snapshot_revision,
+                            });
+                            if sender.send(result).is_err() {
+                                tracing::debug!(
+                                    request_id = response.id,
+                                    "request caller dropped before its response arrived"
+                                );
+                            }
                         }
                         None => {
                             if let Err(error) = response.result {
@@ -1246,10 +1280,7 @@ mod tests {
         terminal: u64,
         cols: u16,
         awaited: bool,
-    ) -> (
-        Command,
-        Option<oneshot::Receiver<Result<ResponseBody, ProtoError>>>,
-    ) {
+    ) -> (Command, Option<oneshot::Receiver<StampedResult>>) {
         let (response, receiver) = if awaited {
             let (sender, receiver) = oneshot::channel();
             (Some(sender), Some(receiver))
@@ -1503,5 +1534,39 @@ mod tests {
         ));
         assert!(client.supports_capability("prune.reviewed_ids"));
         assert_eq!(client.daemon_pid(), Some(42));
+    }
+
+    #[test]
+    fn stamped_response_metadata_reaches_the_correlated_waiter() {
+        let (reply, mut answer) = oneshot::channel();
+        let mut pending = HashMap::from([(
+            7,
+            Pending {
+                effect: ConnectionEffect::None,
+                response: Some(reply),
+            },
+        )]);
+        let mut state = ConnectionState::default();
+        let events = broadcast::Sender::new(1);
+        let metadata = RwLock::new(ConnectionMetadata::default());
+
+        assert!(!handle_incoming(
+            serde_json::json!({
+                "id": 7,
+                "result": {"Ok": {"type": "ack"}},
+                "snapshotRevision": 12
+            }),
+            &mut pending,
+            &mut state,
+            &events,
+            &metadata,
+        ));
+
+        let stamped = answer
+            .try_recv()
+            .expect("correlated response is delivered")
+            .expect("response succeeds");
+        assert_eq!(stamped.body, ResponseBody::Ack);
+        assert_eq!(stamped.snapshot_revision, Some(12));
     }
 }

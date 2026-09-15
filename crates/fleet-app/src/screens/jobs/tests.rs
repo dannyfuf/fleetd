@@ -37,6 +37,7 @@ fn app_with_jobs(home: &str, jobs: Vec<JobRecord>) -> AppState {
     app.snapshot = Some(Snapshot {
         boards: Vec::new(),
         generated_at: String::new(),
+        revision: None,
         contexts: vec![],
         repos: vec![],
         clones: vec![],

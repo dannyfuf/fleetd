@@ -50,6 +50,7 @@ fn create_thread_without_an_active_worktree_records_the_specific_refusal_and_fal
         app.snapshot = Some(fleet_proto::snapshot::Snapshot {
             boards: Vec::new(),
             generated_at: String::new(),
+            revision: None,
             contexts: Vec::new(),
             repos: Vec::new(),
             clones: Vec::new(),

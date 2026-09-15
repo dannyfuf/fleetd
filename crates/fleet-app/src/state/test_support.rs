@@ -40,6 +40,7 @@ pub(super) fn snapshot() -> Snapshot {
     Snapshot {
         boards: Vec::new(),
         generated_at: "2026-09-04T12:00:00Z".to_owned(),
+        revision: None,
         contexts: Vec::new(),
         repos: Vec::new(),
         clones: Vec::new(),

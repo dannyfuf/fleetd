@@ -88,9 +88,9 @@ async fn run_mutations(
     }) = mutations.recv().await
     {
         if let Some(client) = client {
-            match client.request(*body).await {
-                Ok(_) => {
-                    let generation = settle.begin();
+            match client.request_stamped(*body).await {
+                Ok(response) => {
+                    let generation = settle.begin(response.snapshot_revision);
                     drop(in_flight);
                     let settle = Arc::clone(&settle);
                     let wake = wake.clone();

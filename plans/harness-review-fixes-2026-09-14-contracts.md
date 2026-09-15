@@ -66,6 +66,7 @@
 | I13 | `env.rs` exposes `APP_SOCKET_NAME` and `DAEMON_SOCKET_RELATIVE`; `rundir.rs` derives its guard from the longer one. |
 | I19 | Per-run ordinal counter threaded through `inject`; no filesystem-derived ordinal; no new corpus scenario (follow-up). |
 | I33 | Doc sentence only. `Cargo.toml` untouched. |
+| I3 (superseded by D1, 2026-09-15) | `Bridge::send` claims are causally tied to additive daemon revisions: responses carry the post-dispatch `snapshotRevision`, snapshots carry the pre-assembly `revision`, and the shell releases only claims covered by the applied snapshot. Legacy unstamped peers retain next-snapshot-or-250 ms grace behavior; a stamped claim never expires; the grace warns and waits. `snapshot.revision` advertises the extension without a protocol-version bump. |
 
 ## 2. `fleet-app` contracts
 

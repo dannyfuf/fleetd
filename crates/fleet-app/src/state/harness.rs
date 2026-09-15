@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -241,100 +241,137 @@ impl fmt::Debug for IdleWake {
 #[derive(Debug, Default)]
 pub struct SettleCounter {
     pending: AtomicU32,
-    generation: AtomicU64,
+    state: Mutex<SettleState>,
+}
+
+#[derive(Debug, Default)]
+struct SettleState {
+    claims: BTreeMap<u64, SettleClaim>,
+    next_generation: u64,
+    highest_applied_revision: Option<u64>,
+}
+
+#[derive(Debug)]
+struct SettleClaim {
+    revision: Option<u64>,
+    grace_warned: bool,
 }
 
 impl SettleCounter {
-    const LOCKED: u64 = 1 << 63;
-
-    /// The daemon answered one mutation. Returns the generation to hand to `expire`.
-    pub fn begin(&self) -> u64 {
-        let generation = self.lock_generation();
-        self.pending.fetch_add(1, Ordering::AcqRel);
-        self.unlock_generation(generation);
+    /// Records one answered mutation and returns the generation to hand to [`Self::expire`].
+    ///
+    /// A stamped mutation whose revision was already applied needs no claim: this covers daemon
+    /// requests that intentionally produce no snapshot without forcing every caller to wait for
+    /// the grace backstop.
+    pub fn begin(&self, revision: Option<u64>) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = state.next_generation;
+        state.next_generation = state.next_generation.wrapping_add(1);
+        if !revision.is_some_and(|revision| {
+            state
+                .highest_applied_revision
+                .is_some_and(|applied| applied >= revision)
+        }) {
+            state.claims.insert(
+                generation,
+                SettleClaim {
+                    revision,
+                    grace_warned: false,
+                },
+            );
+            self.store_pending(state.claims.len());
+        }
         generation
     }
 
-    /// The shell applied a snapshot: every pending mutation is covered.
-    pub fn settled(&self) {
-        let generation = self.lock_generation();
-        self.pending.store(0, Ordering::Release);
-        self.unlock_generation(generation.wrapping_add(1) & !Self::LOCKED);
+    /// Releases claims covered by a snapshot the shell applied.
+    ///
+    /// A stamped snapshot releases stamped claims at or below its revision and all legacy claims.
+    /// An unstamped snapshot releases only legacy claims.
+    pub fn applied(&self, revision: Option<u64>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(applied) = revision {
+            state.highest_applied_revision = Some(
+                state
+                    .highest_applied_revision
+                    .map_or(applied, |current| current.max(applied)),
+            );
+            state
+                .claims
+                .retain(|_, claim| claim.revision.is_some_and(|required| required > applied));
+        } else {
+            state.claims.retain(|_, claim| claim.revision.is_some());
+        }
+        self.store_pending(state.claims.len());
     }
 
-    /// Releases one mutation only when no snapshot has been applied since it began.
+    /// Clears every claim because a new daemon link starts a new revision sequence.
+    pub fn connected(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.claims.clear();
+        state.highest_applied_revision = None;
+        self.pending.store(0, Ordering::Release);
+    }
+
+    /// Handles the grace backstop for one mutation claim.
+    ///
+    /// An unstamped claim belongs to a daemon without the `snapshot.revision` capability and is
+    /// released. A stamped claim never expires: its first grace expiry warns and it remains
+    /// pending until a covering [`Self::applied`] call or [`Self::connected`] clears it.
     pub fn expire(&self, generation: u64) -> bool {
-        if !self.lock_generation_if(generation) {
-            return false;
+        let (warning, released) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let applied = state.highest_applied_revision.unwrap_or(0);
+            let (warning, released) = match state.claims.get_mut(&generation) {
+                Some(claim) if claim.revision.is_none() => (None, true),
+                Some(claim) if !claim.grace_warned => {
+                    claim.grace_warned = true;
+                    (claim.revision.map(|revision| (revision, applied)), false)
+                }
+                Some(_) | None => (None, false),
+            };
+            if released {
+                state.claims.remove(&generation);
+            }
+            self.store_pending(state.claims.len());
+            (warning, released)
+        };
+        if let Some((revision, applied)) = warning {
+            tracing::warn!(
+                revision,
+                applied,
+                "a mutation's snapshot has not arrived within the settle grace; still waiting"
+            );
         }
-        let released = self
-            .pending
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                pending.checked_sub(1)
-            })
-            .is_ok();
-        self.unlock_generation(generation);
         released
     }
 
-    /// Mutations still waiting for their snapshot or grace expiry.
+    /// Mutations still waiting for their snapshot; only unstamped claims may grace-expire.
     pub fn pending(&self) -> u32 {
         self.pending.load(Ordering::Acquire)
     }
 
-    fn lock_generation(&self) -> u64 {
-        loop {
-            let generation = self.generation.load(Ordering::Acquire);
-            if generation & Self::LOCKED != 0 {
-                std::hint::spin_loop();
-                continue;
-            }
-            if self
-                .generation
-                .compare_exchange_weak(
-                    generation,
-                    generation | Self::LOCKED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return generation;
-            }
-        }
-    }
-
-    fn lock_generation_if(&self, expected: u64) -> bool {
-        loop {
-            let generation = self.generation.load(Ordering::Acquire);
-            if generation & Self::LOCKED != 0 {
-                std::hint::spin_loop();
-                continue;
-            }
-            if generation != expected {
-                return false;
-            }
-            if self
-                .generation
-                .compare_exchange_weak(
-                    generation,
-                    generation | Self::LOCKED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return true;
-            }
-        }
-    }
-
-    fn unlock_generation(&self, generation: u64) {
-        self.generation.store(generation, Ordering::Release);
+    fn store_pending(&self, pending: usize) {
+        self.pending.store(
+            u32::try_from(pending).unwrap_or(u32::MAX),
+            Ordering::Release,
+        );
     }
 }
 
-/// Maximum time a replied mutation waits for a following snapshot before settling itself.
+/// Grace before releasing a legacy unstamped claim or warning that a stamped claim still waits.
 pub const MUTATION_SETTLE_GRACE: Duration = Duration::from_millis(250);
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct WindowSnapshot {
@@ -364,8 +401,9 @@ pub struct HarnessState {
     targets: BTreeMap<String, TargetSnapshot>,
     targets_revision: u64,
     /// Shared with [`crate::bridge::Bridge`], which claims a slot when a request is admitted.
-    /// Mutation replies transfer their claim to `settle` until the following snapshot or grace
-    /// expiry; reply-lane claims remain until their receiver closes. Rejected and shed requests
+    /// Mutation replies transfer their claim to `settle` until a causally covering snapshot.
+    /// Only legacy unstamped claims use the grace expiry; stamped claims warn and keep waiting.
+    /// Reply-lane claims remain until their receiver closes, while rejected and shed requests
     /// release directly. A cell rather than a mirrored count, because the two ends live on
     /// different threads.
     in_flight_requests: Arc<AtomicU32>,
@@ -549,6 +587,34 @@ pub struct HarnessProjection {
 mod contract_tests {
     use super::tests::state;
     use super::*;
+    use std::io::Write;
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogBuffer {
+        type Writer = LogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            LogWriter(Arc::clone(&self.0))
+        }
+    }
 
     fn idle_snapshot(harness: &HarnessState, link_opening: bool) -> IdleSnapshot {
         IdleSnapshot::new(
@@ -571,11 +637,11 @@ mod contract_tests {
             IdleWake::new(|| {}),
         );
 
-        let generation = app.harness.settle().begin();
+        let generation = app.harness.settle().begin(Some(7));
         assert_eq!(app.harness.settling_mutations(), 1);
         assert!(!idle_snapshot(&app.harness, false).idle);
 
-        app.harness.settle().settled();
+        app.harness.settle().applied(Some(7));
         assert_eq!(app.harness.settling_mutations(), 0);
         assert!(idle_snapshot(&app.harness, false).idle);
         assert!(!app.harness.settle().expire(generation));
@@ -585,11 +651,110 @@ mod contract_tests {
     #[test]
     fn expiry_before_any_settlement_releases_its_mutation() {
         let settle = SettleCounter::default();
-        let generation = settle.begin();
+        let generation = settle.begin(None);
 
         assert!(settle.expire(generation));
         assert_eq!(settle.pending(), 0);
         assert!(!settle.expire(generation));
+    }
+
+    #[test]
+    fn snapshots_release_only_claims_their_revision_covers() {
+        let settle = SettleCounter::default();
+        let older = settle.begin(Some(4));
+        let newer = settle.begin(Some(6));
+
+        settle.applied(Some(5));
+
+        assert_eq!(settle.pending(), 1);
+        assert!(!settle.expire(older));
+        assert!(!settle.expire(newer));
+        assert_eq!(settle.pending(), 1);
+        settle.applied(Some(6));
+        assert_eq!(settle.pending(), 0);
+    }
+
+    #[test]
+    fn an_unstamped_snapshot_releases_only_unstamped_claims() {
+        let settle = SettleCounter::default();
+        let legacy = settle.begin(None);
+        let stamped = settle.begin(Some(3));
+
+        settle.applied(None);
+
+        assert_eq!(settle.pending(), 1);
+        assert!(!settle.expire(legacy));
+        assert!(!settle.expire(stamped));
+        assert_eq!(settle.pending(), 1);
+    }
+
+    #[test]
+    fn a_revision_already_applied_never_creates_a_claim() {
+        let settle = SettleCounter::default();
+        settle.applied(Some(7));
+
+        let covered = settle.begin(Some(7));
+        assert_eq!(settle.pending(), 0);
+        assert!(!settle.expire(covered));
+
+        settle.begin(Some(8));
+        assert_eq!(settle.pending(), 1);
+    }
+
+    #[test]
+    fn a_new_connection_clears_claims_and_restarts_revision_tracking() {
+        let settle = SettleCounter::default();
+        settle.applied(Some(20));
+        settle.begin(Some(21));
+
+        settle.connected();
+        settle.begin(Some(1));
+
+        assert_eq!(settle.pending(), 1);
+    }
+
+    #[test]
+    fn a_stamped_expiry_warns_once_and_retains_the_claim() {
+        let settle = SettleCounter::default();
+        settle.applied(Some(4));
+        let generation = settle.begin(Some(9));
+        let logs = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!settle.expire(generation));
+            assert!(!settle.expire(generation));
+        });
+
+        assert_eq!(settle.pending(), 1);
+        let output = String::from_utf8(
+            logs.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("tracing output is UTF-8");
+        assert!(
+            output.contains(
+                "a mutation's snapshot has not arrived within the settle grace; still waiting"
+            ),
+            "warning was not emitted: {output}"
+        );
+        assert_eq!(
+            output
+                .matches(
+                    "a mutation's snapshot has not arrived within the settle grace; still waiting"
+                )
+                .count(),
+            1,
+            "warning was emitted more than once: {output}"
+        );
+        assert!(output.contains("revision=9"), "missing revision: {output}");
+        assert!(output.contains("applied=4"), "missing applied: {output}");
     }
 
     #[test]

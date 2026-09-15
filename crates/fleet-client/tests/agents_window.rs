@@ -364,6 +364,7 @@ async fn handshake(transport: &mut ServerTransport, capabilities: &[&str]) {
                 server: "test-daemon".to_owned(),
             }),
         },
+        snapshot_revision: None,
         capabilities: capabilities.iter().map(|name| (*name).to_owned()).collect(),
         daemon_id: "daemon-test".to_owned(),
         build_commit: None,
