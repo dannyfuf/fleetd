@@ -19,7 +19,11 @@ use super::{
 };
 
 /// Runs one conversation and returns the frames the player wrote plus its exit status.
-fn drive(provider: Provider, transcript: &Transcript, client: &[Value]) -> (Vec<Value>, i32) {
+pub(super) fn drive(
+    provider: Provider,
+    transcript: &Transcript,
+    client: &[Value],
+) -> (Vec<Value>, i32) {
     let mut input = String::new();
     for frame in client {
         input.push_str(&frame.to_string());
@@ -51,12 +55,12 @@ fn drive(provider: Provider, transcript: &Transcript, client: &[Value]) -> (Vec<
 }
 
 /// The directory holding the starter transcripts.
-fn transcripts() -> PathBuf {
+pub(super) fn transcripts() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("transcripts")
 }
 
 /// Loads a starter transcript synchronously, so a test needs no runtime to read a fixture.
-fn starter(name: &str) -> Transcript {
+pub(super) fn starter(name: &str) -> Transcript {
     let path = transcripts().join(name);
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
@@ -67,12 +71,12 @@ fn starter(name: &str) -> Transcript {
 }
 
 /// The client frame Fleet writes to start a Claude turn.
-fn claude_prompt(text: &str) -> Value {
+pub(super) fn claude_prompt(text: &str) -> Value {
     json!({"type": "user", "message": {"role": "user", "content": text}})
 }
 
 /// Every frame of `kind`, by its `type` tag.
-fn of_type<'a>(frames: &'a [Value], kind: &str) -> Vec<&'a Value> {
+pub(super) fn of_type<'a>(frames: &'a [Value], kind: &str) -> Vec<&'a Value> {
     frames
         .iter()
         .filter(|frame| frame.get("type").and_then(Value::as_str) == Some(kind))
@@ -80,7 +84,7 @@ fn of_type<'a>(frames: &'a [Value], kind: &str) -> Vec<&'a Value> {
 }
 
 /// Every notification of `method`.
-fn of_method<'a>(frames: &'a [Value], method: &str) -> Vec<&'a Value> {
+pub(super) fn of_method<'a>(frames: &'a [Value], method: &str) -> Vec<&'a Value> {
     frames
         .iter()
         .filter(|frame| frame.get("method").and_then(Value::as_str) == Some(method))
@@ -88,7 +92,7 @@ fn of_method<'a>(frames: &'a [Value], method: &str) -> Vec<&'a Value> {
 }
 
 /// The concatenation of every Claude `text_delta`.
-fn claude_streamed_text(frames: &[Value]) -> String {
+pub(super) fn claude_streamed_text(frames: &[Value]) -> String {
     frames
         .iter()
         .filter_map(|frame| frame.pointer("/event/delta"))

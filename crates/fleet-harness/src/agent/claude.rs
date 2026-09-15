@@ -18,18 +18,27 @@
 //!   stream, so the player emits the stream events *and* the snapshot, exactly as the CLI does.
 
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 use super::{
-    Transcript, TranscriptStep,
+    GATE_BUDGET, Transcript, TranscriptStep,
     ids::Ids,
     peer::Peer,
     transcript::{Catalogue, Playback, Settlement, diff_counts, diff_sides, text_chunks},
 };
 
 /// Plays one transcript as Claude Code.
-pub(crate) fn play<R: std::io::BufRead, W: std::io::Write>(
+pub(crate) fn play<R: std::io::BufRead + Send + 'static, W: std::io::Write>(
     transcript: &Transcript,
     peer: &mut Peer<R, W>,
+) -> anyhow::Result<i32> {
+    play_with_gate_budget(transcript, peer, GATE_BUDGET)
+}
+
+fn play_with_gate_budget<R: std::io::BufRead + Send + 'static, W: std::io::Write>(
+    transcript: &Transcript,
+    peer: &mut Peer<R, W>,
+    gate_budget: Duration,
 ) -> anyhow::Result<i32> {
     let mut session = Session {
         transcript,
@@ -37,6 +46,7 @@ pub(crate) fn play<R: std::io::BufRead, W: std::io::Write>(
         playback: Playback::new(transcript),
         ids: Ids::new(),
         interrupted: false,
+        gate_budget,
         peer,
     };
     session.greet()?;
@@ -80,10 +90,12 @@ struct Session<'a, R, W> {
     ids: Ids,
     /// Set by an `interrupt` control request; consumed by the running turn.
     interrupted: bool,
+    /// One absolute budget per open approval gate.
+    gate_budget: Duration,
     peer: &'a mut Peer<R, W>,
 }
 
-impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
+impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> {
     /// The `system/init` frame, emitted once as the process starts.
     ///
     /// The real CLI re-emits it every turn; once is enough for Fleet, whose `initialized` latch is
@@ -124,7 +136,11 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
     /// `Some(code)` means the transcript asked the process to exit rather than settle.
     fn run_turn(&mut self) -> anyhow::Result<Option<i32>> {
         let script = self.playback.next_turn();
-        let mut settlement = script.settlement;
+        let mut settlement = if std::mem::take(&mut self.interrupted) {
+            Settlement::Interrupted
+        } else {
+            script.settlement
+        };
         let mut failure: Option<String> = None;
         let mut final_text = String::new();
         // The `tool_use` a file change opened and an approval is about to gate.
@@ -160,7 +176,13 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                 TranscriptStep::Permission { id, command } => {
                     let input = json!({ "command": command });
                     let tool_use = self.tool_use("Bash", input.clone(), None)?;
-                    let decision = self.ask(id, "Bash", command, &input, &tool_use)?;
+                    let decision = match self.ask(id, "Bash", command, &input, &tool_use) {
+                        Ok(decision) => decision,
+                        Err(error) => {
+                            self.settle(Settlement::Interrupted, failure.as_deref(), &final_text)?;
+                            return Err(error);
+                        }
+                    };
                     match decision {
                         Decision::Allow => self.tool_result(&tool_use, "", None)?,
                         Decision::Deny { interrupt } => {
@@ -169,6 +191,10 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                                 settlement = Settlement::Interrupted;
                                 break;
                             }
+                        }
+                        Decision::Withdrawn if std::mem::take(&mut self.interrupted) => {
+                            settlement = Settlement::Interrupted;
+                            break;
                         }
                         Decision::Withdrawn => {}
                     }
@@ -186,7 +212,17 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                         );
                     };
                     let decision =
-                        self.ask(id, "Edit", summary, &edit_input(path, diff), &tool_use)?;
+                        match self.ask(id, "Edit", summary, &edit_input(path, diff), &tool_use) {
+                            Ok(decision) => decision,
+                            Err(error) => {
+                                self.settle(
+                                    Settlement::Interrupted,
+                                    failure.as_deref(),
+                                    &final_text,
+                                )?;
+                                return Err(error);
+                            }
+                        };
                     match decision {
                         Decision::Allow => self.finish_edit(&tool_use, path, diff)?,
                         Decision::Deny { interrupt } => {
@@ -195,6 +231,10 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                                 settlement = Settlement::Interrupted;
                                 break;
                             }
+                        }
+                        Decision::Withdrawn if std::mem::take(&mut self.interrupted) => {
+                            settlement = Settlement::Interrupted;
+                            break;
                         }
                         Decision::Withdrawn => {}
                     }
@@ -495,8 +535,11 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                 "requires_user_interaction": true,
             },
         }))?;
+        let deadline = Instant::now()
+            .checked_add(self.gate_budget)
+            .ok_or_else(|| anyhow::anyhow!("the gate deadline overflows Instant"))?;
         loop {
-            let Some(frame) = self.peer.read_frame()? else {
+            let Some(frame) = self.peer.read_frame_before(deadline, self.gate_budget)? else {
                 anyhow::bail!("the client closed the connection with gate {gate:?} open");
             };
             match frame.get("type").and_then(Value::as_str) {
@@ -513,7 +556,12 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                         return Ok(Decision::Withdrawn);
                     }
                 }
-                Some("control_request") => self.answer_control(&frame)?,
+                Some("control_request") => {
+                    self.answer_control(&frame)?;
+                    if self.interrupted {
+                        return Ok(Decision::Withdrawn);
+                    }
+                }
                 // A second prompt during a running turn is coalesced by the real CLI.
                 _ => {}
             }
@@ -624,4 +672,169 @@ fn decision_of(response: &Value) -> Decision {
 fn edit_input(path: &str, diff: &str) -> Value {
     let (before, after) = diff_sides(diff);
     json!({ "file_path": path, "old_string": before, "new_string": after })
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::{
+        io::{BufReader, Write},
+        time::Duration,
+    };
+
+    use serde_json::{Value, json};
+
+    #[cfg(unix)]
+    use super::super::peer::{Pace, Peer};
+    use super::super::{
+        Provider,
+        tests::{claude_prompt, claude_streamed_text, drive, of_type, starter},
+    };
+
+    #[test]
+    fn an_interrupt_during_an_open_claude_gate_emits_an_aborted_result() {
+        let interrupt = json!({
+            "type": "control_request",
+            "request_id": "int-open-gate",
+            "request": {"subtype": "interrupt", "cancel_queued": true},
+        });
+        let (frames, code) = drive(
+            Provider::Claude,
+            &starter("edit-approval.json"),
+            &[claude_prompt("fix the readme"), interrupt],
+        );
+
+        assert_eq!(code, 0);
+        let results = of_type(&frames, "result");
+        assert_eq!(
+            results.len(),
+            1,
+            "the interrupted turn settles exactly once"
+        );
+        assert_eq!(
+            results[0].get("terminal_reason").and_then(Value::as_str),
+            Some("aborted_streaming")
+        );
+    }
+
+    #[test]
+    fn a_stale_interrupt_between_claude_prompts_marks_but_does_not_truncate_the_next_turn() {
+        let interrupt = json!({
+            "type": "control_request",
+            "request_id": "int-between-turns",
+            "request": {"subtype": "interrupt", "cancel_queued": true},
+        });
+        let (frames, code) = drive(
+            Provider::Claude,
+            &starter("two-turns.json"),
+            &[
+                claude_prompt("what is this crate?"),
+                interrupt,
+                claude_prompt("and its binary?"),
+            ],
+        );
+
+        assert_eq!(code, 0);
+        let results = of_type(&frames, "result");
+        assert_eq!(results.len(), 2, "each prompt settles exactly once");
+        assert_eq!(
+            results[1].get("terminal_reason").and_then(Value::as_str),
+            Some("aborted_streaming"),
+            "the between-turn interrupt is consumed by the next turn's settlement"
+        );
+        assert!(
+            claude_streamed_text(&frames).contains("The binary name is demo"),
+            "the second turn streams through its final text"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unanswered_claude_gate_fails_within_budget_after_emitting_an_aborted_result() {
+        let (server, mut client) = std::os::unix::net::UnixStream::pair()
+            .unwrap_or_else(|error| panic!("create the agent socket pair: {error}"));
+        writeln!(client, "{}", claude_prompt("fix the readme"))
+            .unwrap_or_else(|error| panic!("write the prompt to the agent: {error}"));
+        client
+            .flush()
+            .unwrap_or_else(|error| panic!("flush the prompt to the agent: {error}"));
+
+        let transcript = starter("edit-approval.json");
+        let mut output = Vec::new();
+        let error = {
+            let mut peer = Peer::new(BufReader::new(server), &mut output, Pace::Instant);
+            super::play_with_gate_budget(&transcript, &mut peer, Duration::ZERO)
+                .err()
+                .unwrap_or_else(|| panic!("an unanswered gate must fail"))
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("no frame from the client within 0ns"),
+            "the failure names the gate deadline: {error}"
+        );
+
+        let rendered = String::from_utf8(output)
+            .unwrap_or_else(|error| panic!("the player wrote UTF-8: {error}"));
+        let frames: Vec<Value> = rendered
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|error| panic!("the player wrote JSON: {error}: {line}"))
+            })
+            .collect();
+        let results = of_type(&frames, "result");
+        assert_eq!(results.len(), 1, "the timed-out turn settles exactly once");
+        assert_eq!(
+            results[0].get("terminal_reason").and_then(Value::as_str),
+            Some("aborted_streaming")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_claude_frames_cannot_renew_an_open_gate_deadline() {
+        let (server, mut client) = std::os::unix::net::UnixStream::pair()
+            .unwrap_or_else(|error| panic!("create the agent socket pair: {error}"));
+        writeln!(client, "{}", claude_prompt("fix the readme"))
+            .unwrap_or_else(|error| panic!("write the prompt to the agent: {error}"));
+        client
+            .flush()
+            .unwrap_or_else(|error| panic!("flush the prompt to the agent: {error}"));
+        let traffic = std::thread::spawn(move || {
+            for index in 0..12 {
+                let frame = json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": format!("wrong-gate-{index}"),
+                        "response": {"behavior": "allow"},
+                    },
+                });
+                if writeln!(client, "{frame}").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let transcript = starter("edit-approval.json");
+        let mut output = Vec::new();
+        let error = {
+            let mut peer = Peer::new(BufReader::new(server), &mut output, Pace::Instant);
+            super::play_with_gate_budget(&transcript, &mut peer, Duration::from_millis(20))
+                .expect_err("unrelated frames cannot keep the gate open")
+        };
+        traffic
+            .join()
+            .unwrap_or_else(|_| panic!("the unrelated-frame writer panicked"));
+
+        assert!(
+            error
+                .to_string()
+                .contains("no frame from the client within 20ms"),
+            "{error}"
+        );
+    }
 }

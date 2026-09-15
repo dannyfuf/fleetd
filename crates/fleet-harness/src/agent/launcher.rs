@@ -28,8 +28,8 @@ const BINARY_SEARCH_DEPTH: usize = 4;
 ///
 /// # Errors
 ///
-/// Fails when this build's own executable cannot be located, when a path would have to be quoted
-/// (a `'` in a run directory), or when the script cannot be written or made executable.
+/// Fails when this build's own executable cannot be located, or when the script cannot be written
+/// or made executable.
 pub fn write_launcher(
     directory: &Path,
     provider: Provider,
@@ -53,8 +53,7 @@ pub fn write_launcher(
 ///
 /// # Errors
 ///
-/// Fails when this build's own executable cannot be located, or when a path would have to be
-/// quoted (a `'` in a run directory).
+/// Fails when this build's own executable cannot be located.
 pub fn launcher_script(provider: Provider, transcript: &Path) -> anyhow::Result<String> {
     let binary = shell_word(&harness_binary()?)?;
     let transcript = shell_word(transcript)?;
@@ -112,20 +111,14 @@ fn harness_binary() -> anyhow::Result<PathBuf> {
     )
 }
 
-/// Renders a path as one single-quoted shell word.
+/// Renders a path as one POSIX single-quoted shell word.
 ///
-/// A path carrying a `'` is refused rather than escaped: the adapter tokenizes the configured
-/// command line itself (`agents::harness::process::command_parts`), so a cleverly quoted word
-/// would survive this script and then be re-split there.
-fn shell_word(path: &Path) -> anyhow::Result<String> {
+/// An embedded apostrophe is written as `'\''`: close the quoted word, write an escaped quote,
+/// and reopen it. The fixture's fake-tool templates reuse this helper so every generated script
+/// has one policy. This is robustness for operator-chosen paths, not a security boundary.
+pub(crate) fn shell_word(path: &Path) -> anyhow::Result<String> {
     let rendered = path.to_string_lossy();
-    if rendered.contains('\'') {
-        anyhow::bail!(
-            "{} cannot be launched from a scripted agent: the path contains a single quote",
-            path.display()
-        );
-    }
-    Ok(format!("'{rendered}'"))
+    Ok(format!("'{}'", rendered.replace('\'', "'\\''")))
 }
 
 #[cfg(unix)]
@@ -141,4 +134,33 @@ fn make_executable(path: &Path) -> anyhow::Result<()> {
         "the scripted agent launcher needs a POSIX shell; {} cannot be made executable here",
         path.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_word_quotes_a_normal_path() {
+        assert_eq!(
+            shell_word(Path::new("/tmp/fleet harness/run"))
+                .unwrap_or_else(|error| panic!("render a normal path: {error}")),
+            "'/tmp/fleet harness/run'"
+        );
+    }
+
+    #[test]
+    fn shell_word_executes_an_apostrophe_as_one_posix_word() {
+        let path = Path::new("/tmp/operator's-run");
+        let word = shell_word(path).expect("quote a path containing an apostrophe");
+
+        assert_eq!(word, "'/tmp/operator'\\''s-run'");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s' {word}"))
+            .output()
+            .expect("execute the quoted word with sh -c");
+        assert!(output.status.success(), "sh must accept the rendered word");
+        assert_eq!(output.stdout, path.as_os_str().as_encoded_bytes());
+    }
 }

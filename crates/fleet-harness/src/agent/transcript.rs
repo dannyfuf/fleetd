@@ -11,10 +11,12 @@
 //!   where one turn stops and the next begins. A transcript that never uses it is one turn.
 //!
 //! Validation happens once, at load, and is deliberately strict: an approval with nothing to
-//! approve, a duplicate gate id, or a step after `exit` is a transcript bug that would otherwise
-//! surface as a scenario that hangs on a gate answer nobody can send.
+//! approve, a duplicate id, or a step after `exit` is a transcript bug. Gate and tool-call ids
+//! share one namespace because the daemon merges a repeated id into the existing row and swallows
+//! the second completion, causing data loss rather than displaying the second call.
 
 use super::{Transcript, TranscriptStep};
+use std::collections::HashSet;
 
 /// The frozen document version.
 pub(crate) const VERSION: u32 = 1;
@@ -156,6 +158,9 @@ impl Catalogue {
 }
 
 /// Rejects a document this player cannot faithfully play.
+///
+/// Permission, approval and tool-call ids share one namespace. If any id is repeated, the daemon
+/// patches the existing row and loses the second call and its completion.
 pub(crate) fn validate(transcript: &Transcript) -> anyhow::Result<()> {
     if transcript.version != VERSION {
         anyhow::bail!(
@@ -163,7 +168,7 @@ pub(crate) fn validate(transcript: &Transcript) -> anyhow::Result<()> {
             transcript.version
         );
     }
-    let mut gates: Vec<&str> = Vec::new();
+    let mut ids = HashSet::new();
     let mut exited = false;
     for (index, step) in transcript.steps.iter().enumerate() {
         if exited {
@@ -199,11 +204,10 @@ pub(crate) fn validate(transcript: &Transcript) -> anyhow::Result<()> {
             TranscriptStep::Exit { .. } => exited = true,
             _ => {}
         }
-        if let Some(gate) = gate_id(step) {
-            if gates.contains(&gate) {
-                anyhow::bail!("gate id {gate:?} is used twice; a client answer would be ambiguous");
-            }
-            gates.push(gate);
+        if let Some(id) = shared_id(step)
+            && !ids.insert(id)
+        {
+            anyhow::bail!("duplicate id {id:?}: ids are shared between gates and tool calls");
         }
     }
     Ok(())
@@ -215,12 +219,12 @@ pub(crate) fn validate(transcript: &Transcript) -> anyhow::Result<()> {
 /// delta longer than that can only ever be a typo, and it would present as a hung scenario.
 const MAX_PACE_MS: u64 = 5_000;
 
-/// The gate id a step introduces, if it introduces one.
-const fn gate_id(step: &TranscriptStep) -> Option<&str> {
+/// The id a gate or tool call introduces in their shared namespace.
+const fn shared_id(step: &TranscriptStep) -> Option<&str> {
     match step {
-        TranscriptStep::Permission { id, .. } | TranscriptStep::Approval { id, .. } => {
-            Some(id.as_str())
-        }
+        TranscriptStep::Permission { id, .. }
+        | TranscriptStep::Approval { id, .. }
+        | TranscriptStep::ToolCall { id, .. } => Some(id.as_str()),
         _ => None,
     }
 }
@@ -280,4 +284,86 @@ pub(crate) fn text_chunks(text: &str) -> Vec<&str> {
         return Vec::new();
     }
     text.split_inclusive(char::is_whitespace).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transcript(steps: Vec<TranscriptStep>) -> Transcript {
+        Transcript {
+            version: VERSION,
+            steps,
+            session_id: "session".to_owned(),
+            thread_id: "thread".to_owned(),
+            model: "model".to_owned(),
+            context_window: 1,
+        }
+    }
+
+    fn tool_call(id: &str) -> TranscriptStep {
+        TranscriptStep::ToolCall {
+            id: id.to_owned(),
+            name: "Read".to_owned(),
+            arguments: serde_json::json!({"file_path": "Cargo.toml"}),
+            output: String::new(),
+        }
+    }
+
+    #[test]
+    fn two_tool_calls_may_not_share_an_id() {
+        let transcript = transcript(vec![tool_call("tool-1"), tool_call("tool-1")]);
+
+        let error = validate(&transcript)
+            .expect_err("two tool calls sharing an id must be rejected")
+            .to_string();
+
+        assert_eq!(
+            error,
+            "duplicate id \"tool-1\": ids are shared between gates and tool calls"
+        );
+    }
+
+    #[test]
+    fn a_tool_call_may_not_share_an_id_with_a_permission() {
+        let transcript = transcript(vec![
+            TranscriptStep::Permission {
+                id: "shared-1".to_owned(),
+                command: "cargo check".to_owned(),
+            },
+            tool_call("shared-1"),
+        ]);
+
+        let error = validate(&transcript)
+            .expect_err("gate and tool-call ids share one namespace")
+            .to_string();
+
+        assert_eq!(
+            error,
+            "duplicate id \"shared-1\": ids are shared between gates and tool calls"
+        );
+    }
+
+    #[test]
+    fn shipped_transcripts_use_unique_ids() {
+        for (name, raw) in [
+            (
+                "two-turns.json",
+                include_str!("../../transcripts/two-turns.json"),
+            ),
+            (
+                "edit-approval.json",
+                include_str!("../../transcripts/edit-approval.json"),
+            ),
+            (
+                "error-mid-stream.json",
+                include_str!("../../transcripts/error-mid-stream.json"),
+            ),
+        ] {
+            let transcript: Transcript = serde_json::from_str(raw)
+                .unwrap_or_else(|error| panic!("parse shipped transcript {name}: {error}"));
+            validate(&transcript)
+                .unwrap_or_else(|error| panic!("validate shipped transcript {name}: {error}"));
+        }
+    }
 }

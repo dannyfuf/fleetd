@@ -17,9 +17,10 @@
 //!   row would show a `bash -lc` wrapper where Claude shows a clean `Read`.
 
 use serde_json::{Map, Value, json};
+use std::time::{Duration, Instant};
 
 use super::{
-    Transcript, TranscriptStep,
+    GATE_BUDGET, Transcript, TranscriptStep,
     ids::Ids,
     peer::Peer,
     transcript::{Catalogue, Playback, Settlement, text_chunks},
@@ -31,9 +32,17 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const SERVER_BUSY: i64 = -32001;
 
 /// Plays one transcript as `codex app-server`.
-pub(crate) fn play<R: std::io::BufRead, W: std::io::Write>(
+pub(crate) fn play<R: std::io::BufRead + Send + 'static, W: std::io::Write>(
     transcript: &Transcript,
     peer: &mut Peer<R, W>,
+) -> anyhow::Result<i32> {
+    play_with_gate_budget(transcript, peer, GATE_BUDGET)
+}
+
+fn play_with_gate_budget<R: std::io::BufRead + Send + 'static, W: std::io::Write>(
+    transcript: &Transcript,
+    peer: &mut Peer<R, W>,
+    gate_budget: Duration,
 ) -> anyhow::Result<i32> {
     let mut session = Session {
         transcript,
@@ -42,6 +51,7 @@ pub(crate) fn play<R: std::io::BufRead, W: std::io::Write>(
         ids: Ids::new(),
         interrupted: false,
         turn_diff: String::new(),
+        gate_budget,
         peer,
     };
     loop {
@@ -93,10 +103,12 @@ struct Session<'a, R, W> {
     interrupted: bool,
     /// The turn-level unified diff Codex publishes for free.
     turn_diff: String,
+    /// One absolute budget per open approval gate.
+    gate_budget: Duration,
     peer: &'a mut Peer<R, W>,
 }
 
-impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
+impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> {
     /// Answers one client request, playing a whole turn when the request is `turn/start`.
     fn handle_request(
         &mut self,
@@ -212,7 +224,11 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
     /// Plays one turn's steps and settles it.
     fn run_turn(&mut self, turn: &str) -> anyhow::Result<Option<i32>> {
         let script = self.playback.next_turn();
-        let mut settlement = script.settlement;
+        let mut settlement = if std::mem::take(&mut self.interrupted) {
+            Settlement::Interrupted
+        } else {
+            script.settlement
+        };
         let mut failure: Option<String> = None;
         let mut pending_change: Option<String> = None;
         self.turn_diff.clear();
@@ -268,6 +284,7 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                     };
                     self.complete_command(turn, &item, command, "", status, code)?;
                     if decision == Decision::Cancel {
+                        self.interrupted = false;
                         settlement = Settlement::Interrupted;
                         break;
                     }
@@ -299,6 +316,7 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                     };
                     self.complete_file_change(turn, &item, path, diff, status)?;
                     if decision == Decision::Cancel {
+                        self.interrupted = false;
                         settlement = Settlement::Interrupted;
                         break;
                     }
@@ -559,9 +577,19 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
             "method": method,
             "params": Value::Object(params),
         }))?;
+        let deadline = Instant::now()
+            .checked_add(self.gate_budget)
+            .ok_or_else(|| anyhow::anyhow!("the gate deadline overflows Instant"))?;
         loop {
-            let Some(frame) = self.peer.read_frame()? else {
-                anyhow::bail!("the client closed the connection with gate {gate:?} open");
+            let frame = match self.peer.read_frame_before(deadline, self.gate_budget) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    anyhow::bail!("the client closed the connection with gate {gate:?} open");
+                }
+                Err(error) => {
+                    self.settle(turn, Settlement::Interrupted, None)?;
+                    return Err(error);
+                }
             };
             let id = frame.get("id").cloned().unwrap_or(Value::Null);
             match frame.get("method").and_then(Value::as_str) {
@@ -570,6 +598,9 @@ impl<R: std::io::BufRead, W: std::io::Write> Session<'_, R, W> {
                         self.error(&id, SERVER_BUSY, "a gate is open on the running turn")?;
                     } else {
                         self.answer_simple(&id, method, &Value::Null)?;
+                        if self.interrupted {
+                            return Ok(Decision::Cancel);
+                        }
                     }
                 }
                 // A notification from the client; nothing to correlate.
@@ -758,19 +789,272 @@ fn command_line(name: &str, arguments: &Value) -> String {
 /// command describes, and `unknown` when it describes nothing in particular, which is exactly the
 /// case Fleet must degrade to the raw command line for.
 fn command_actions(command: &str) -> Value {
-    let mut words = command.split_whitespace();
-    let program = words.next().unwrap_or_default();
-    let argument = words.next_back().unwrap_or_default();
-    let action = match program {
-        "cat" | "head" | "tail" | "sed" | "read_file" | "Read" if !argument.is_empty() => json!({
+    let words: Vec<_> = command.split_whitespace().collect();
+    let program = words.first().copied();
+    let argument = words.get(1).copied();
+    let action = match (program, argument) {
+        (Some("cat" | "head" | "tail" | "sed" | "read_file" | "Read"), Some(argument)) => json!({
             "type": "read",
             "command": command,
             "name": argument.rsplit('/').next().unwrap_or(argument),
             "path": argument,
         }),
-        "ls" | "find" => json!({"type": "listFiles", "command": command, "path": argument}),
-        "rg" | "grep" => json!({"type": "search", "command": command, "query": argument}),
+        (Some("ls" | "find"), Some(argument)) => {
+            json!({"type": "listFiles", "command": command, "path": argument})
+        }
+        (Some("rg" | "grep"), Some(argument)) => {
+            json!({"type": "search", "command": command, "query": argument})
+        }
         _ => json!({"type": "unknown", "command": command}),
     };
     json!([action])
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::command_actions;
+    use crate::agent::{
+        Provider,
+        tests::{drive, of_method, starter},
+    };
+
+    fn handshake() -> Vec<Value> {
+        vec![
+            json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "fleet"}}}),
+            json!({"method": "initialized"}),
+            json!({"id": 2, "method": "thread/start", "params": {"cwd": "/tmp"}}),
+        ]
+    }
+
+    fn prompt(id: i64, text: &str, client_item: &str) -> Value {
+        json!({
+            "id": id,
+            "method": "turn/start",
+            "params": {
+                "threadId": "01999c4a-7f00-7000-8000-0000000000a1",
+                "input": [{"type": "text", "text": text}],
+                "clientUserMessageId": client_item,
+            },
+        })
+    }
+
+    fn interrupt(id: i64) -> Value {
+        json!({
+            "id": id,
+            "method": "turn/interrupt",
+            "params": {"threadId": "01999c4a-7f00-7000-8000-0000000000a1"},
+        })
+    }
+
+    #[test]
+    fn an_interrupt_while_a_gate_is_open_emits_the_turn_terminal() {
+        let mut client = handshake();
+        client.push(prompt(3, "fix the readme", "client-1"));
+        client.push(interrupt(4));
+
+        let (frames, code) = drive(Provider::Codex, &starter("edit-approval.json"), &client);
+
+        assert_eq!(code, 0);
+        let completed = of_method(&frames, "turn/completed");
+        assert_eq!(
+            completed.len(),
+            1,
+            "the interrupted gate settles exactly once"
+        );
+        assert_eq!(
+            completed[0]
+                .pointer("/params/turn/status")
+                .and_then(Value::as_str),
+            Some("interrupted")
+        );
+    }
+
+    #[test]
+    fn an_interrupt_between_prompts_does_not_truncate_the_second_turn() {
+        let mut client = handshake();
+        client.push(prompt(3, "what is this crate?", "client-1"));
+        client.push(interrupt(4));
+        client.push(prompt(5, "and its binary?", "client-2"));
+
+        let (frames, code) = drive(Provider::Codex, &starter("two-turns.json"), &client);
+
+        assert_eq!(code, 0);
+        let completed = of_method(&frames, "turn/completed");
+        assert_eq!(completed.len(), 2, "both turns reach a terminal frame");
+        assert_eq!(
+            completed[1]
+                .pointer("/params/turn/status")
+                .and_then(Value::as_str),
+            Some("interrupted"),
+            "the between-turn interrupt is consumed by the next turn's settlement"
+        );
+        let streamed: String = of_method(&frames, "item/agentMessage/delta")
+            .into_iter()
+            .filter_map(|frame| frame.pointer("/params/delta").and_then(Value::as_str))
+            .collect();
+        assert!(
+            streamed.contains("The binary name is demo"),
+            "turn two plays all of its scripted text: {streamed:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_action(command: &str, kind: &str, field: &str, value: &str) {
+        let actions = command_actions(command);
+        let action = actions
+            .as_array()
+            .and_then(|actions| actions.first())
+            .unwrap_or_else(|| panic!("{command:?} produced no command action"));
+        assert_eq!(
+            action.get("type").and_then(Value::as_str),
+            Some(kind),
+            "{command:?} action kind"
+        );
+        assert_eq!(
+            action.get(field).and_then(Value::as_str),
+            Some(value),
+            "{command:?} {field}"
+        );
+    }
+
+    #[test]
+    fn command_actions_require_an_argument_and_use_the_first_one() {
+        for program in ["ls", "find", "rg", "grep", "cat", "head", "tail", "sed"] {
+            let actions = command_actions(program);
+            assert_eq!(
+                actions.pointer("/0/type").and_then(Value::as_str),
+                Some("unknown"),
+                "{program} with no argument"
+            );
+        }
+
+        assert_action("ls src", "listFiles", "path", "src");
+        for (command, kind, field, value) in [
+            ("ls src ignored", "listFiles", "path", "src"),
+            ("find src ignored", "listFiles", "path", "src"),
+            ("rg foo src", "search", "query", "foo"),
+            ("grep foo src", "search", "query", "foo"),
+            ("cat a b", "read", "path", "a"),
+            ("head a b", "read", "path", "a"),
+            ("tail a b", "read", "path", "a"),
+            ("sed a b", "read", "path", "a"),
+        ] {
+            assert_action(command, kind, field, value);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unanswered_gate_times_out_and_emits_the_turn_terminal() {
+        use std::{
+            io::{BufReader, Write},
+            os::unix::net::UnixStream,
+            time::Duration,
+        };
+
+        use crate::agent::peer::{Pace, Peer};
+
+        let transcript = starter("edit-approval.json");
+        let (server, mut client) =
+            UnixStream::pair().unwrap_or_else(|error| panic!("create socket pair: {error}"));
+        let mut client_frames = handshake();
+        client_frames.push(prompt(3, "fix the readme", "client-1"));
+        for frame in client_frames {
+            writeln!(client, "{frame}")
+                .unwrap_or_else(|error| panic!("write client frame: {error}"));
+        }
+
+        let mut output = Vec::new();
+        let error = {
+            let mut peer = Peer::new(BufReader::new(server), &mut output, Pace::Instant);
+            super::play_with_gate_budget(&transcript, &mut peer, Duration::ZERO)
+                .err()
+                .unwrap_or_else(|| panic!("an unanswered gate must fail"))
+        };
+        drop(client);
+
+        assert!(
+            error
+                .to_string()
+                .contains("no frame from the client within 0ns"),
+            "{error}"
+        );
+
+        let rendered = String::from_utf8(output)
+            .unwrap_or_else(|error| panic!("the player wrote UTF-8: {error}"));
+        let frames: Vec<Value> = rendered
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|error| panic!("the player wrote JSON: {error}: {line}"))
+            })
+            .collect();
+        let completed = of_method(&frames, "turn/completed");
+        assert_eq!(
+            completed.len(),
+            1,
+            "the timed-out gate settles exactly once"
+        );
+        assert_eq!(
+            completed[0]
+                .pointer("/params/turn/status")
+                .and_then(Value::as_str),
+            Some("interrupted")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_codex_requests_cannot_renew_an_open_gate_deadline() {
+        use std::{
+            io::{BufReader, Write},
+            os::unix::net::UnixStream,
+            thread,
+            time::Duration,
+        };
+
+        use crate::agent::peer::{Pace, Peer};
+
+        let transcript = starter("edit-approval.json");
+        let (server, mut client) =
+            UnixStream::pair().unwrap_or_else(|error| panic!("create socket pair: {error}"));
+        let mut client_frames = handshake();
+        client_frames.push(prompt(3, "fix the readme", "client-1"));
+        for frame in client_frames {
+            writeln!(client, "{frame}")
+                .unwrap_or_else(|error| panic!("write client frame: {error}"));
+        }
+        let traffic = thread::spawn(move || {
+            for index in 0..12 {
+                let frame = json!({
+                    "id": format!("noise-{index}"),
+                    "method": "model/list",
+                    "params": {},
+                });
+                if writeln!(client, "{frame}").is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let mut output = Vec::new();
+        let error = {
+            let mut peer = Peer::new(BufReader::new(server), &mut output, Pace::Instant);
+            super::play_with_gate_budget(&transcript, &mut peer, Duration::from_millis(20))
+                .expect_err("unrelated requests cannot keep the gate open")
+        };
+        traffic
+            .join()
+            .unwrap_or_else(|_| panic!("the unrelated-request writer panicked"));
+
+        assert!(
+            error
+                .to_string()
+                .contains("no frame from the client within 20ms"),
+            "{error}"
+        );
+    }
 }

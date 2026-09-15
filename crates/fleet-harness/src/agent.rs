@@ -35,10 +35,14 @@ mod transcript;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use launcher::shell_word;
 pub use launcher::{launcher_script, write_launcher};
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{path::Path, time::Duration};
+
+/// Gate waits are sized against `DEFAULT_AWAIT_TIMEOUT_MS`, the scenario await default.
+pub(crate) const GATE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Which native agent protocol a scripted run imitates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,12 +215,13 @@ pub async fn load(path: &Path) -> anyhow::Result<Transcript> {
 /// # Errors
 ///
 /// Fails when the transcript cannot be loaded, or when the client's half of the conversation
-/// breaks — a closed pipe mid-turn, or a gate the client never answers and never withdraws.
+/// breaks — a closed pipe mid-turn, or a gate the client does not answer or withdraw within
+/// [`GATE_BUDGET`].
 pub async fn run_transcript(provider: Provider, path: &Path) -> anyhow::Result<()> {
     let transcript = load(path).await?;
     let code = tokio::task::spawn_blocking(move || {
         let mut peer = peer::Peer::new(
-            std::io::BufReader::new(std::io::stdin().lock()),
+            std::io::BufReader::new(std::io::stdin()),
             std::io::stdout().lock(),
             peer::Pace::Real,
         );
@@ -234,7 +239,7 @@ pub async fn run_transcript(provider: Provider, path: &Path) -> anyhow::Result<(
 }
 
 /// Runs one scripted conversation over an already-built peer, returning the exit status.
-fn play<R: std::io::BufRead, W: std::io::Write>(
+fn play<R: std::io::BufRead + Send + 'static, W: std::io::Write>(
     provider: Provider,
     transcript: &Transcript,
     peer: &mut peer::Peer<R, W>,

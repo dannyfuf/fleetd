@@ -444,17 +444,31 @@ fn agents() -> Fixture {
     }
 }
 
-/// The two-turn conversation the `agents` preset gives Claude.
+/// The three-turn conversation the `agents` preset gives Claude.
 ///
-/// The document is the shipped starter itself rather than a second copy of it: a transcript
-/// written here would drift from the one `crate::agent::tests` validates, and the one bug that
-/// costs a whole run is a transcript whose last turn never ends — `exit` fires *inside* turn
-/// one, so Fleet sees a dead harness where it was waiting for a settled turn.
+/// The first two turns and the failing third turn come from the shipped starters rather than
+/// copies written here. That keeps this preset tied to the same documents
+/// `crate::agent::tests::all_three_starter_transcripts_load_and_validate` checks.
 fn conversation() -> serde_json::Value {
-    starter(
+    let mut conversation = starter(
         include_str!("../../transcripts/two-turns.json"),
         "two-turns.json",
-    )
+    );
+    let mut failure = starter(
+        include_str!("../../transcripts/error-mid-stream.json"),
+        "error-mid-stream.json",
+    );
+    let failure_steps = failure
+        .get_mut("steps")
+        .and_then(serde_json::Value::as_array_mut)
+        .map(std::mem::take)
+        .expect("the embedded error-mid-stream transcript has a steps array");
+    conversation
+        .get_mut("steps")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("the embedded two-turns transcript has a steps array")
+        .extend(failure_steps);
+    conversation
 }
 
 /// The conversation that stops at an edit approval, so the decision surface is reachable.
@@ -472,4 +486,45 @@ fn approval() -> serde_json::Value {
 fn starter(document: &str, name: &str) -> serde_json::Value {
     serde_json::from_str(document)
         .unwrap_or_else(|error| panic!("the embedded transcript {name} is not valid JSON: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agents_preset_serves_the_error_starter_as_claudes_third_turn() {
+        let fixture = agents();
+        let claude = fixture
+            .agents
+            .iter()
+            .find(|agent| agent.provider == Provider::Claude)
+            .unwrap_or_else(|| panic!("the agents preset must configure Claude"));
+        let steps = claude
+            .transcript
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("Claude's embedded transcript must have a steps array"));
+        let terminals: Vec<&serde_json::Value> = steps
+            .iter()
+            .filter(|step| step.get("type").and_then(serde_json::Value::as_str) == Some("end_turn"))
+            .collect();
+
+        assert_eq!(terminals.len(), 3, "Claude must expose all three turns");
+        assert_eq!(
+            terminals[2]
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("failed"),
+            "the third turn must preserve error-mid-stream's failed settlement"
+        );
+        assert!(
+            steps.iter().any(|step| {
+                step.get("type").and_then(serde_json::Value::as_str) == Some("error")
+                    && step.get("message").and_then(serde_json::Value::as_str)
+                        == Some("Selected model is at capacity. Please try a different model.")
+            }),
+            "the third turn must preserve error-mid-stream's provider error"
+        );
+    }
 }
