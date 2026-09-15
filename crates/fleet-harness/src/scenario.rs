@@ -661,7 +661,7 @@ fn spawn_app(
 ) -> anyhow::Result<Child> {
     let executable = binary("FLEET_APP", "fleet")?;
     let mut command = Process::new(&executable);
-    environment.apply(&mut command);
+    environment.apply_to_app(&mut command);
     command
         .env("FLEET_HARNESS", "1")
         .env("FLEET_HARNESS_RUN_ID", run_id)

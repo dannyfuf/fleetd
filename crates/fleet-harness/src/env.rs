@@ -43,6 +43,8 @@ const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const REAP_INTERVAL: Duration = Duration::from_millis(5);
 /// The `RUST_LOG` both children inherit when the run does not choose one.
 const DEFAULT_RUST_LOG: &str = "info";
+/// Records Fleet's PID before replacing the wrapper with the real application process.
+const APP_PID_WRAPPER: &str = "printf '%s\\n' \"$$\" > \"$1\" || exit 70\nshift\nexec \"$@\"\n";
 
 /// The event families the app subscribes to, which a fixture client mirrors so a test sees
 /// exactly what the app would see.
@@ -83,6 +85,8 @@ pub struct HarnessEnv {
     pub daemon: PathBuf,
     /// `RUST_LOG` for both children.
     pub rust_log: String,
+    /// The PID of the hermetic Fleet process, written before its binary executes.
+    app_pid: PathBuf,
 }
 
 impl HarnessEnv {
@@ -98,6 +102,7 @@ impl HarnessEnv {
 
     fn lay_out(root: &Path, fleet_home: PathBuf) -> anyhow::Result<Self> {
         let child_home = root.join("child-home");
+        let app_pid = child_home.join("fleet-harness-app.pid");
         let fake_bin = root.join("bin");
         let directories = [
             fleet_home.clone(),
@@ -127,6 +132,7 @@ impl HarnessEnv {
             rust_log: std::env::var("FLEET_HARNESS_RUST_LOG")
                 .or_else(|_| std::env::var("RUST_LOG"))
                 .unwrap_or_else(|_| DEFAULT_RUST_LOG.to_owned()),
+            app_pid,
         };
         environment.install_fake("gh", FAKE_GH)?;
         Ok(environment)
@@ -163,7 +169,7 @@ impl HarnessEnv {
         FleetHome::new(self.fleet_home.clone()).socket_path()
     }
 
-    /// Points one child at this environment and at nothing outside it.
+    /// Points one child at this environment and at nothing outside it, without wrapping it.
     pub fn apply(&self, command: &mut Command) {
         command
             .env("FLEET_HOME", &self.fleet_home)
@@ -182,6 +188,35 @@ impl HarnessEnv {
                 self.child_home.join(".local").join("state"),
             )
             .env("XDG_CACHE_HOME", self.child_home.join(".cache"));
+    }
+
+    /// Points Fleet at this environment through an `exec` wrapper that records its PID.
+    ///
+    /// The wrapper is the process the runner owns and `exec` preserves its PID, so daemon fault
+    /// injection can stop exactly this run's Fleet during a singleton hand-off without inspecting
+    /// other processes.
+    pub fn apply_to_app(&self, command: &mut Command) {
+        let (program, arguments) = {
+            let command = command.as_std();
+            (
+                command.get_program().to_owned(),
+                command.get_args().map(OsString::from).collect::<Vec<_>>(),
+            )
+        };
+        *command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(APP_PID_WRAPPER)
+            .arg("fleet-harness-app")
+            .arg(&self.app_pid)
+            .arg(program)
+            .args(arguments);
+        self.apply(command);
+    }
+
+    /// Reads the PID recorded by Fleet's launch wrapper.
+    pub fn app_pid(&self) -> anyhow::Result<u32> {
+        read_pid_file(&self.app_pid, "Fleet")
     }
 }
 
@@ -292,11 +327,17 @@ impl Daemon {
     ///
     /// Probes instead of sleeping: a run is never timed against the wall clock.
     pub async fn client(&self) -> anyhow::Result<Client> {
+        let adopted_pid = self
+            .pid()
+            .context("the harness-owned fleetd has no process id")?;
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if let Ok(client) = Client::connect(self.home()).await
                 && client.daemon_ping().await.is_ok()
             {
+                let recorded_pid =
+                    read_pid_file(&FleetHome::new(self.home().to_owned()).pid_path(), "fleetd")?;
+                ensure_owned_daemon(adopted_pid, recorded_pid, self.home())?;
                 client
                     .subscribe(APP_EVENTS.to_vec())
                     .await
@@ -525,6 +566,24 @@ pub fn fleetd_path() -> Option<PathBuf> {
     None
 }
 
+fn read_pid_file(path: &Path, process: &str) -> anyhow::Result<u32> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("read the {process} PID from {}", path.display()))?;
+    contents
+        .trim()
+        .parse()
+        .with_context(|| format!("parse the {process} PID from {}", path.display()))
+}
+
+fn ensure_owned_daemon(adopted_pid: u32, recorded_pid: u32, home: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        adopted_pid == recorded_pid,
+        "fleetd answered from {} as PID {recorded_pid}, but the harness adopted PID {adopted_pid}",
+        home.display()
+    );
+    Ok(())
+}
+
 fn remove_if_present(path: &Path) -> anyhow::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -567,6 +626,47 @@ mod tests {
             Some(environment.child_home.clone()),
             std::env::var_os("HOME").map(PathBuf::from),
             "HOME must not be the developer's"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fleet_launch_wrapper_records_the_execed_process_pid() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let environment = HarnessEnv::rooted(root.path()).expect("lay the environment out");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("printf launched");
+        environment.apply_to_app(&mut command);
+        command.stdout(Stdio::piped());
+
+        let child = command.spawn().expect("spawn wrapped Fleet");
+        let child_pid = child.id().expect("wrapped Fleet has a process id");
+        let output = child
+            .wait_with_output()
+            .await
+            .expect("wait for wrapped Fleet");
+
+        assert!(
+            output.status.success(),
+            "wrapped Fleet exited with {}",
+            output.status
+        );
+        assert_eq!(output.stdout, b"launched");
+        assert_eq!(environment.app_pid().expect("read Fleet PID"), child_pid);
+    }
+
+    #[test]
+    fn readiness_rejects_a_daemon_the_harness_did_not_adopt() {
+        let home = Path::new("/tmp/fleet-harness-readiness");
+        let error = ensure_owned_daemon(41, 42, home).expect_err("the PIDs differ");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("PID 42"),
+            "the serving PID is named: {message}"
+        );
+        assert!(
+            message.contains("PID 41"),
+            "the adopted PID is named: {message}"
         );
     }
 

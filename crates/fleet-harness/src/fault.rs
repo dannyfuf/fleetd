@@ -47,6 +47,8 @@ const OBSERVE_INTERVAL: Duration = Duration::from_millis(50);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the process table is checked while waiting for that exit.
 const EXIT_INTERVAL: Duration = Duration::from_millis(5);
+/// How long Fleet is given to enter the stopped state during a daemon hand-off.
+const SUSPEND_TIMEOUT: Duration = Duration::from_secs(2);
 /// The name `dump` is given while a fault watches the link; it never reaches `dumps/`.
 const OBSERVE_DUMP: &str = "daemon-fault";
 /// The replacement shell blocks here until the runner has adopted it and removed the PID seal.
@@ -116,6 +118,47 @@ enum Expectation {
     Attached,
 }
 
+/// Keeps a Fleet process recoverable across cancellation while its daemon is handed off.
+struct SuspendedFleet {
+    pid: u32,
+    resumed: bool,
+}
+
+impl SuspendedFleet {
+    fn new(pid: u32) -> Self {
+        Self {
+            pid,
+            resumed: false,
+        }
+    }
+
+    async fn resume(mut self) -> anyhow::Result<()> {
+        signal(self.pid, "CONT").await?;
+        self.resumed = true;
+        Ok(())
+    }
+}
+
+impl Drop for SuspendedFleet {
+    fn drop(&mut self) {
+        if self.resumed {
+            return;
+        }
+        // This is the one acceptable blocking process call: Drop runs here only when the async
+        // restart is cancelled or panics, and the alternative is a Fleet frozen until the 30 s
+        // teardown kill. The best-effort signal's exit status cannot be reported from Drop.
+        drop(
+            std::process::Command::new("kill")
+                .arg("-CONT")
+                .arg(self.pid.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status(),
+        );
+    }
+}
+
 impl Expectation {
     const fn satisfied_by(self, link: Link) -> bool {
         match self {
@@ -141,7 +184,11 @@ pub async fn inject(
     process: &mut Daemon,
     fault: DaemonFault,
 ) -> anyhow::Result<()> {
-    daemon(process, fault).await?;
+    if fault == DaemonFault::Restart {
+        restart_with_fleet_suspended(process).await?;
+    } else {
+        daemon(process, fault).await?;
+    }
     if fault.expects() == Expectation::Attached {
         // Recovery is proved from both ends. A context chain that cannot show a daemon surface
         // at all — first run, or an open overlay — reports `Attached` even while the daemon is
@@ -162,7 +209,9 @@ pub async fn daemon(process: &mut Daemon, fault: DaemonFault) -> anyhow::Result<
         DaemonFault::Kill => kill(process).await,
         DaemonFault::Stop => signal(running_pid(process, "stop").await?, "STOP").await,
         DaemonFault::Continue => resume(process).await,
-        DaemonFault::Restart => restart(process).await,
+        // A caller with no application has no detached spawn to race. The scenario path above
+        // uses `restart_with_fleet_suspended` because its Fleet process is live.
+        DaemonFault::Restart => restart_without_fleet(process).await,
     }
 }
 
@@ -224,10 +273,83 @@ async fn kill(process: &mut Daemon) -> anyhow::Result<()> {
 }
 
 /// An orderly stop followed by a fresh hermetic fleetd.
-async fn restart(process: &mut Daemon) -> anyhow::Result<()> {
+async fn restart_with_fleet_suspended(process: &mut Daemon) -> anyhow::Result<()> {
     // A frozen daemon cannot answer a shutdown request; continuing it first is what makes the
     // orderly path available instead of a second kill.
     resume(process).await?;
+    let fleet_pid = process
+        .environment()
+        .app_pid()
+        .context("identify Fleet before restarting its daemon")?;
+    signal(fleet_pid, "STOP")
+        .await
+        .context("suspend Fleet during the daemon hand-off")?;
+    let suspended = SuspendedFleet::new(fleet_pid);
+    if let Err(error) = await_stopped(fleet_pid).await {
+        let resumed = suspended
+            .resume()
+            .await
+            .context("resume Fleet after its suspension could not be confirmed");
+        return Err(with_secondary(error, resumed, "resume Fleet"));
+    }
+
+    let restart = restart_while_fleet_is_stopped(process).await;
+    let cleanup = if restart.is_err() {
+        Some(cleanup_failed_restart(process).await)
+    } else {
+        None
+    };
+    let resumed = suspended
+        .resume()
+        .await
+        .context("resume Fleet after the daemon hand-off");
+
+    if let Err(error) = restart {
+        let error = with_secondary(
+            error,
+            cleanup.unwrap_or(Ok(())),
+            "clean up and re-seal the replacement",
+        );
+        return Err(with_secondary(error, resumed, "resume Fleet"));
+    }
+    if let Err(error) = resumed {
+        let cleanup = cleanup_failed_restart(process).await;
+        return Err(with_secondary(
+            error,
+            cleanup,
+            "clean up and re-seal the replacement",
+        ));
+    }
+    Ok(())
+}
+
+fn with_secondary(
+    error: anyhow::Error,
+    secondary: anyhow::Result<()>,
+    operation: &str,
+) -> anyhow::Error {
+    match secondary {
+        Ok(()) => error,
+        Err(secondary) => error.context(format!("also failed to {operation}: {secondary:#}")),
+    }
+}
+
+/// Restarts fleetd for a caller that owns no Fleet process and therefore has no spawn race.
+async fn restart_without_fleet(process: &mut Daemon) -> anyhow::Result<()> {
+    resume(process).await?;
+    match restart_while_fleet_is_stopped(process).await {
+        Ok(()) => Ok(()),
+        Err(error) => match cleanup_failed_restart(process).await {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(error.context(format!(
+                "also failed to clean up and re-seal the replacement: {cleanup_error:#}"
+            ))),
+        },
+    }
+}
+
+/// Replaces fleetd while Fleet cannot enter its detached-spawn path.
+async fn restart_while_fleet_is_stopped(process: &mut Daemon) -> anyhow::Result<()> {
     // `Daemon::shutdown` is also how the runner's handle learns its process is gone. Only a
     // handle that knows it has been reaped leaves the socket path alone when it is dropped,
     // and the replacement below binds that same path — so the restart stops here if the
@@ -237,28 +359,53 @@ async fn restart(process: &mut Daemon) -> anyhow::Result<()> {
         .await
         .context("stop fleetd before restarting it")?;
     seal(process)?;
-    // Ordering is deliberate: spawn and adopt while the home is still sealed, then unseal.
-    // Fleet therefore cannot start an unowned daemon before the runner owns its replacement.
+    // Spawn and adopt while the home is still sealed. Fleet remains stopped until the
+    // replacement has both acquired the singleton and answered through its socket.
     let mut gate = spawn_replacement(process)?;
     unseal(process)?;
-    if let Err(error) = async {
+    async {
         gate.write_all(b"start\n").await?;
         gate.shutdown().await
     }
     .await
-    .context("release the adopted replacement fleetd")
-    {
-        seal(process).context("re-seal the home after the replacement gate failed")?;
-        return Err(error);
-    }
-    let ready = process
+    .context("release the adopted replacement fleetd")?;
+    process
         .wait_until_ready()
         .await
-        .context("the restarted fleetd never became ready");
-    if ready.is_err() {
-        seal(process).context("re-seal the home after the replacement failed to start")?;
+        .context("the restarted fleetd never became ready")
+}
+
+/// Leaves a failed hand-off sealed and without any daemon the runner does not own.
+async fn cleanup_failed_restart(process: &mut Daemon) -> anyhow::Result<()> {
+    let mut problems = Vec::new();
+    if let Err(error) = terminate_live_daemon(process).await {
+        problems.push(format!("stop the failed replacement: {error:#}"));
     }
-    ready
+    if let Err(error) = seal(process) {
+        problems.push(format!("re-seal the home: {error:#}"));
+    }
+    if let Err(error) = remove_if_present(&process.socket) {
+        problems.push(format!("remove the failed replacement socket: {error:#}"));
+    }
+    anyhow::ensure!(problems.is_empty(), "{}", problems.join("; "));
+    Ok(())
+}
+
+/// Stops whichever daemon owns the hermetic home, including an unexpected singleton winner.
+async fn terminate_live_daemon(process: &mut Daemon) -> anyhow::Result<()> {
+    let Some(pid) = live_pid(process).await? else {
+        return Ok(());
+    };
+    if process.pid() == Some(pid) {
+        process
+            .child_mut()
+            .kill()
+            .await
+            .context("SIGKILL the harness-owned replacement")
+    } else {
+        signal(pid, "KILL").await?;
+        await_exit(pid).await
+    }
 }
 
 /// Spawns the replacement daemon and hands it to the runner's handle.
@@ -501,6 +648,41 @@ async fn signal(pid: u32, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Waits until `ps` reports that every thread in Fleet is stopped.
+async fn await_stopped(pid: u32) -> anyhow::Result<()> {
+    let deadline = Instant::now() + SUSPEND_TIMEOUT;
+    loop {
+        let output = Process::new("ps")
+            .arg("-o")
+            .arg("state=")
+            .arg("-p")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .with_context(|| format!("inspect Fleet process {pid} with ps(1)"))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "ps(1) could not inspect Fleet process {pid}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        if output
+            .stdout
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(b'T')
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Fleet process {pid} did not stop within {SUSPEND_TIMEOUT:?}"
+        );
+        sleep(EXIT_INTERVAL).await;
+    }
+}
+
 /// Runs `kill(1)`.
 ///
 /// `fleet-harness` does not depend on `libc` and its manifest belongs to another stage, so
@@ -541,6 +723,10 @@ fn remove_if_present(path: &Path) -> anyhow::Result<()> {
         Err(error) => Err(anyhow::Error::new(error).context(format!("remove {}", path.display()))),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "fault/hand_off_tests.rs"]
+mod hand_off_tests;
 
 #[cfg(test)]
 mod tests {
@@ -749,5 +935,47 @@ mod tests {
             signal(pid, "CONT").await.is_err(),
             "signalling a process that is gone is a failure, not a silent success"
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_suspended_fleet_guard_resumes_the_process() {
+        let mut child = Process::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn a process to suspend");
+        let pid = child.id().expect("a freshly spawned process has an id");
+
+        signal(pid, "STOP").await.expect("stop it");
+        let suspended = SuspendedFleet::new(pid);
+        await_stopped(pid).await.expect("confirm it stopped");
+        drop(suspended);
+
+        let output = Process::new("ps")
+            .arg("-o")
+            .arg("state=")
+            .arg("-p")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .expect("inspect the resumed process with ps(1)");
+        assert!(output.status.success(), "ps(1) failed: {output:?}");
+        assert_ne!(
+            output
+                .stdout
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace()),
+            Some(b'T'),
+            "the guard left the process stopped: {}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+
+        child.kill().await.expect("kill it");
+        await_exit(pid).await.expect("it left the process table");
     }
 }
