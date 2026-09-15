@@ -91,6 +91,44 @@ pub struct ExecutionContext<'a> {
     pub artifact: Option<PathBuf>,
 }
 
+/// One dispatched line, including an app answer that arrived before runner-side work failed.
+#[derive(Debug)]
+enum DispatchOutcome {
+    Completed(Option<Response>),
+    RunnerFailed {
+        response: Option<Response>,
+        error: anyhow::Error,
+    },
+}
+
+impl DispatchOutcome {
+    fn from_result(result: anyhow::Result<Option<Response>>) -> Self {
+        match result {
+            Ok(response) => Self::Completed(response),
+            Err(error) => Self::RunnerFailed {
+                response: None,
+                error,
+            },
+        }
+    }
+
+    fn into_result(self) -> anyhow::Result<Option<Response>> {
+        match self {
+            Self::Completed(response) => Ok(response),
+            Self::RunnerFailed { error, .. } => Err(error),
+        }
+    }
+}
+
+/// Runner-owned inputs needed after Fleet has answered a `shot` command.
+struct ShotContext<'a> {
+    lane: &'a dyn LaneBackend,
+    run_dir: &'a RunDirectory,
+    scenario: &'a Path,
+    update_baselines: bool,
+    artifact: &'a mut Option<PathBuf>,
+}
+
 /// Runs one scenario file, or every scenario under a directory in lexical order.
 ///
 /// The run directory is created and printed before anything starts, the scenario is parsed
@@ -104,10 +142,7 @@ pub async fn run_path(path: &Path, options: RunOptions) -> anyhow::Result<()> {
     if path.is_file() {
         return run_one(path, options.run_dir.as_deref(), &options, &interrupted).await;
     }
-    let suite = match options.run_dir.as_deref() {
-        Some(directory) => directory.to_owned(),
-        None => RunDirectory::create(None, path)?.root,
-    };
+    let suite = RunDirectory::create_suite(options.run_dir.as_deref(), path)?;
     println!(
         "harness suite: {} ({} scenarios, requested lane {})",
         suite.display(),
@@ -347,7 +382,7 @@ async fn run_one(
 
     let mut stage = Stage::default();
     let mut steps = Vec::new();
-    let outcome = if interrupted.load(Ordering::Acquire) {
+    let execution_outcome = if interrupted.load(Ordering::Acquire) {
         Err(anyhow::anyhow!("interrupted before this scenario started"))
     } else {
         tokio::select! {
@@ -386,24 +421,57 @@ async fn run_one(
         }
     }
 
+    finish_run(
+        &run_dir,
+        options,
+        effective_lane,
+        &steps,
+        execution_outcome,
+        problems,
+    )
+    .await
+}
+
+/// Records and reports the definitive result after teardown has had its say.
+async fn finish_run(
+    run_dir: &RunDirectory,
+    options: &RunOptions,
+    effective_lane: Lane,
+    steps: &[StepReport],
+    execution_outcome: anyhow::Result<()>,
+    problems: Vec<String>,
+) -> anyhow::Result<()> {
+    let teardown_only = execution_outcome.is_ok() && !problems.is_empty();
+    let outcome = match execution_outcome {
+        Err(error) => Err(error),
+        Ok(()) => match problems.first() {
+            Some(problem) => Err(anyhow::anyhow!(
+                "the scenario passed but teardown failed: {problem}"
+            )),
+            None => Ok(()),
+        },
+    };
+
     // Journalled before the report is rendered, not after: a run that died before its first
     // line has no failed *step*, so this `failed` entry is the only account of it the report
     // can show, and the report reads the journal exactly once.
     if let Err(problem) = match &outcome {
         Err(error) => {
-            run_dir
-                .record_event(
-                    "failed",
-                    serde_json::json!({ "error": format!("{error:#}") }),
-                )
-                .await
+            let mut failure = serde_json::json!({ "error": format!("{error:#}") });
+            if teardown_only {
+                failure["stage"] = serde_json::json!("teardown");
+            }
+            if !problems.is_empty() {
+                failure["teardown"] = serde_json::json!(problems);
+            }
+            run_dir.record_event("failed", failure).await
         }
         Ok(()) => Ok(()),
     } {
         eprintln!("warning: the failure was not journalled: {problem:#}");
     }
 
-    match report::write_report(&run_dir, effective_lane, &steps).await {
+    match report::write_report(run_dir, effective_lane, steps).await {
         Ok(_path) => {}
         Err(error) => eprintln!("warning: no report was written: {error:#}"),
     }
@@ -423,12 +491,7 @@ async fn run_one(
                 steps.len(),
                 run_dir.root.display()
             );
-            match problems.first() {
-                Some(problem) => {
-                    anyhow::bail!("the scenario passed but teardown failed: {problem}")
-                }
-                None => Ok(()),
-            }
+            Ok(())
         }
         // The hermetic home is evidence for a failed run, so it survives regardless of --keep.
         Err(error) => Err(error.context(format!("run directory: {}", run_dir.root.display()))),
@@ -523,9 +586,9 @@ async fn execute(
         }
 
         let started = Instant::now();
-        let outcome = dispatch(line, &mut context).await;
+        let outcome = dispatch_outcome(line, &mut context).await;
         let quit = matches!(line.instruction, Instruction::App(Command::Quit(_)));
-        let quit_problem = if quit && matches!(outcome, Ok(Some(_))) {
+        let quit_problem = if quit && matches!(outcome, DispatchOutcome::Completed(Some(_))) {
             await_fleet_exit_after_quit(app)
                 .await
                 .err()
@@ -587,11 +650,11 @@ async fn execute(
 async fn journal_outcome(
     run_dir: &RunDirectory,
     line: &ScenarioLine,
-    outcome: &anyhow::Result<Option<Response>>,
+    outcome: &DispatchOutcome,
     quit_problem: Option<String>,
 ) -> anyhow::Result<(bool, Option<String>)> {
     Ok(match (outcome, &line.instruction) {
-        (Ok(Some(response)), Instruction::App(command)) => {
+        (DispatchOutcome::Completed(Some(response)), Instruction::App(command)) => {
             run_dir
                 .record(line.number, &Request::new(response.id, command)?, response)
                 .await?;
@@ -600,7 +663,19 @@ async fn journal_outcome(
                 None => (response.ok, response.error.clone()),
             }
         }
-        (Ok(_), _) => {
+        (
+            DispatchOutcome::RunnerFailed {
+                response: Some(response),
+                error,
+            },
+            Instruction::App(command),
+        ) => {
+            run_dir
+                .record(line.number, &Request::new(response.id, command)?, response)
+                .await?;
+            (false, Some(format!("{error:#}")))
+        }
+        (DispatchOutcome::Completed(_), _) => {
             run_dir
                 .record_event(
                     "runner",
@@ -609,7 +684,7 @@ async fn journal_outcome(
                 .await?;
             (true, None)
         }
-        (Err(error), _) => {
+        (DispatchOutcome::RunnerFailed { error, .. }, _) => {
             let message = format!("{error:#}");
             run_dir
                 .record_event(
@@ -833,6 +908,83 @@ pub async fn dispatch(
     line: &ScenarioLine,
     context: &mut ExecutionContext<'_>,
 ) -> anyhow::Result<Option<Response>> {
+    dispatch_outcome(line, context).await.into_result()
+}
+
+/// Dispatches one line while retaining an app response across later runner-side failures.
+async fn dispatch_outcome(
+    line: &ScenarioLine,
+    context: &mut ExecutionContext<'_>,
+) -> DispatchOutcome {
+    if let Instruction::App(Command::Shot(args)) = &line.instruction {
+        let response = match context.client.send(Command::Shot(args.clone())).await {
+            Ok(response) => response,
+            Err(error) => {
+                return DispatchOutcome::RunnerFailed {
+                    response: None,
+                    error,
+                };
+            }
+        };
+        return finish_shot_response(
+            response,
+            line.number,
+            args,
+            ShotContext {
+                lane: context.lane,
+                run_dir: context.run_dir,
+                scenario: context.scenario,
+                update_baselines: context.update_baselines,
+                artifact: &mut context.artifact,
+            },
+        )
+        .await;
+    }
+    DispatchOutcome::from_result(dispatch_non_shot(line, context).await)
+}
+
+/// Finishes the runner-owned half of a successful `shot` exchange.
+async fn finish_shot_response(
+    mut response: Response,
+    sequence: usize,
+    args: &ShotArgs,
+    shot: ShotContext<'_>,
+) -> DispatchOutcome {
+    if !response.ok {
+        return DispatchOutcome::Completed(Some(response));
+    }
+    let result = async {
+        // A headless update is a deliberate non-recording outcome, so it is classified without
+        // asking its pixel-free backend to capture. Attach still captures its screenshot and
+        // declines only the baseline write.
+        let path = if shot.update_baselines && shot.lane.lane() == Lane::Headless {
+            capture::command_path(shot.run_dir, sequence, &args.name)
+        } else {
+            capture::capture_command(shot.lane, shot.run_dir, sequence, &args.name)?
+        };
+        let outcome = crate::baseline::Baselines::for_scenario(shot.scenario).check(
+            shot.lane.lane(),
+            &path,
+            shot.update_baselines,
+            crate::baseline::Tolerance::default(),
+        )?;
+        finish_shot(shot.run_dir, shot.artifact, path, &outcome, &mut response).await
+    }
+    .await;
+    match result {
+        Ok(()) => DispatchOutcome::Completed(Some(response)),
+        Err(error) => DispatchOutcome::RunnerFailed {
+            response: Some(response),
+            error,
+        },
+    }
+}
+
+/// Dispatches every instruction whose response needs no runner-side post-processing.
+async fn dispatch_non_shot(
+    line: &ScenarioLine,
+    context: &mut ExecutionContext<'_>,
+) -> anyhow::Result<Option<Response>> {
     match &line.instruction {
         // `execute` applies the preset before the daemon starts and skips this line, so reaching
         // it means a direct caller drove `dispatch` itself. Seeding starts a private fleetd
@@ -857,39 +1009,8 @@ pub async fn dispatch(
             fault::remove_socket(context.daemon).await?;
             Ok(None)
         }
-        Instruction::App(Command::Shot(args)) => {
-            let mut response = context.client.send(Command::Shot(args.clone())).await?;
-            if response.ok {
-                // An update outside the virtual lane is a deliberate non-recording outcome.
-                // Classify it before capture so a headless lane can report `not-recorded`
-                // without first failing for its intentional lack of pixels. Ordinary headless
-                // shots still reach `capture_command` and fail clearly.
-                let path = if context.update_baselines && context.lane.lane() != Lane::Virtual {
-                    capture::command_path(context.run_dir, line.number, &args.name)
-                } else {
-                    capture::capture_command(
-                        context.lane,
-                        context.run_dir,
-                        line.number,
-                        &args.name,
-                    )?
-                };
-                let outcome = crate::baseline::Baselines::for_scenario(context.scenario).check(
-                    context.lane.lane(),
-                    &path,
-                    context.update_baselines,
-                    crate::baseline::Tolerance::default(),
-                )?;
-                finish_shot(
-                    context.run_dir,
-                    &mut context.artifact,
-                    path,
-                    &outcome,
-                    &mut response,
-                )
-                .await?;
-            }
-            Ok(Some(response))
+        Instruction::App(Command::Shot(_)) => {
+            anyhow::bail!("a shot must retain its app response during runner-side processing")
         }
         Instruction::App(Command::Dump(args)) => {
             let response = context.client.send(Command::Dump(args.clone())).await?;
@@ -1287,6 +1408,60 @@ mod tests {
     };
 
     const FAKE_FLEET_EXIT_134: &str = "FLEET_HARNESS_FAKE_FLEET_EXIT_134";
+
+    #[derive(Debug, Clone, Copy)]
+    enum ShotCapture {
+        Write,
+        Fail,
+    }
+
+    struct ShotBackend {
+        lane: Lane,
+        capture: ShotCapture,
+    }
+
+    impl LaneBackend for ShotBackend {
+        fn lane(&self) -> Lane {
+            self.lane
+        }
+
+        fn prepare(&mut self, _command: &mut std::process::Command) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn bind_window(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn capture(&self, output: &Path) -> anyhow::Result<()> {
+            match self.capture {
+                ShotCapture::Write => {
+                    std::fs::write(output, b"captured screenshot")
+                        .with_context(|| format!("write {}", output.display()))?;
+                    Ok(())
+                }
+                ShotCapture::Fail => anyhow::bail!("the test capture failed after the app answer"),
+            }
+        }
+
+        fn teardown(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn fallback(&self) -> Option<crate::lane::LaneFallback> {
+            None
+        }
+    }
+
+    fn options(lane: Lane) -> RunOptions {
+        RunOptions {
+            lane,
+            keep: false,
+            run_dir: None,
+            continue_on_failure: false,
+            update_baselines: false,
+        }
+    }
 
     /// Builds a throwaway corpus directory; the caller removes it.
     fn corpus(name: &str) -> PathBuf {
@@ -1697,7 +1872,7 @@ quit
             source: "shot hub".to_owned(),
             instruction: Instruction::App(Command::Shot(args)),
         };
-        let shot_outcome = Ok(Some(response.clone()));
+        let shot_outcome = DispatchOutcome::Completed(Some(response.clone()));
         let (ok, error) = journal_outcome(&run_dir, &shot_line, &shot_outcome, None)
             .await
             .expect("journal failed shot");
@@ -1712,9 +1887,14 @@ quit
             })),
         };
         let dump_response = Response::ok(8, serde_json::json!({ "screen": "Hub" }));
-        journal_outcome(&run_dir, &dump_line, &Ok(Some(dump_response)), None)
-            .await
-            .expect("journal the next executed line");
+        journal_outcome(
+            &run_dir,
+            &dump_line,
+            &DispatchOutcome::Completed(Some(dump_response)),
+            None,
+        )
+        .await
+        .expect("journal the next executed line");
 
         let journal = std::fs::read_to_string(&run_dir.journal).expect("read journal");
         let exchanges = journal
@@ -1762,5 +1942,240 @@ quit
         let journal = std::fs::read_to_string(&run_dir.journal).expect("read journal");
         assert!(journal.contains("not recorded (lane: headless)"));
         assert!(journal.contains("not-recorded"));
+    }
+
+    #[tokio::test]
+    async fn a_teardown_only_failure_is_journalled_reported_and_keeps_home() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let run_dir = RunDirectory::create(
+            Some(&directory.path().join("run")),
+            Path::new("teardown.scenario"),
+        )
+        .expect("create run directory");
+        let steps = vec![StepReport {
+            line: 1,
+            source: "wait 0".to_owned(),
+            ok: true,
+            duration_ms: 0,
+            artifact: None,
+            error: None,
+        }];
+
+        let error = finish_run(
+            &run_dir,
+            &options(Lane::Headless),
+            Lane::Headless,
+            &steps,
+            Ok(()),
+            vec!["tear down the display lane: injected failure".to_owned()],
+        )
+        .await
+        .expect_err("a teardown problem fails an otherwise passing run");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("the scenario passed but teardown failed"));
+        assert!(
+            run_dir.home.is_dir(),
+            "a failed run keeps its hermetic home"
+        );
+        let journal = std::fs::read_to_string(&run_dir.journal).expect("read journal");
+        let failed = journal
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("decode journal"))
+            .find(|entry| entry["kind"] == "failed")
+            .expect("the teardown failure is journalled");
+        assert_eq!(failed["data"]["stage"], "teardown");
+        assert!(
+            failed["data"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("tear down the display lane"))
+        );
+        let report = std::fs::read_to_string(run_dir.root.join("report.md")).expect("read report");
+        assert!(report.contains("**FAILED**"), "{report}");
+        assert!(
+            report.contains("the scenario lines passed, but teardown failed"),
+            "{report}"
+        );
+        assert!(!report.contains("**Passed**"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn a_line_failure_stays_primary_when_teardown_also_fails() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let run_dir = RunDirectory::create(
+            Some(&directory.path().join("run")),
+            Path::new("line.scenario"),
+        )
+        .expect("create run directory");
+
+        let error = finish_run(
+            &run_dir,
+            &options(Lane::Headless),
+            Lane::Headless,
+            &[],
+            Err(anyhow::anyhow!("line 2 failed first")),
+            vec![
+                "teardown failed second".to_owned(),
+                "teardown failed third".to_owned(),
+            ],
+        )
+        .await
+        .expect_err("the run remains failed");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("line 2 failed first"), "{message}");
+        assert!(!message.contains("teardown failed second"), "{message}");
+        let journal = std::fs::read_to_string(&run_dir.journal).expect("read journal");
+        let failed: serde_json::Value = serde_json::from_str(
+            journal
+                .lines()
+                .find(|line| line.contains("\"kind\":\"failed\""))
+                .expect("failed event"),
+        )
+        .expect("decode failed event");
+        assert!(failed["data"]["stage"].is_null());
+        assert_eq!(
+            failed["data"]["teardown"],
+            serde_json::json!(["teardown failed second", "teardown failed third"])
+        );
+        let report = std::fs::read_to_string(run_dir.root.join("report.md")).expect("read report");
+        let primary = report.find("line 2 failed first").expect("primary error");
+        let second = report
+            .find("teardown failed second")
+            .expect("first teardown problem");
+        let third = report
+            .find("teardown failed third")
+            .expect("second teardown problem");
+        assert!(primary < second && second < third, "{report}");
+    }
+
+    #[tokio::test]
+    async fn an_attach_baseline_update_captures_without_recording_a_baseline() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let run_dir = RunDirectory::create(
+            Some(&directory.path().join("run")),
+            Path::new("shot.scenario"),
+        )
+        .expect("create run directory");
+        let scenario = directory.path().join("shot.scenario");
+        let backend = ShotBackend {
+            lane: Lane::Attach,
+            capture: ShotCapture::Write,
+        };
+        let args = ShotArgs {
+            name: "help".to_owned(),
+        };
+        let response = Response::ok(4, serde_json::json!({ "window": { "width": 800 } }));
+        let mut artifact = None;
+
+        let outcome = finish_shot_response(
+            response,
+            2,
+            &args,
+            ShotContext {
+                lane: &backend,
+                run_dir: &run_dir,
+                scenario: &scenario,
+                update_baselines: true,
+                artifact: &mut artifact,
+            },
+        )
+        .await;
+        let line = ScenarioLine {
+            number: 2,
+            source: "shot help".to_owned(),
+            instruction: Instruction::App(Command::Shot(args)),
+        };
+        let (ok, error) = journal_outcome(&run_dir, &line, &outcome, None)
+            .await
+            .expect("journal attach shot");
+
+        assert!(ok, "the refused baseline update is not a shot failure");
+        assert!(error.is_none());
+        let shot = run_dir.shots.join("002-help.png");
+        assert_eq!(artifact.as_deref(), Some(shot.as_path()));
+        assert!(shot.is_file(), "attach still captures its screenshot");
+        assert!(
+            !directory.path().join("baselines").exists(),
+            "attach never writes a baseline"
+        );
+        let steps = [StepReport {
+            line: 2,
+            source: line.source,
+            ok,
+            duration_ms: 0,
+            artifact,
+            error,
+        }];
+        let report = report::write_report(&run_dir, Lane::Attach, &steps)
+            .await
+            .expect("write report");
+        let report = std::fs::read_to_string(report).expect("read report");
+        assert!(report.contains("## Screenshots"), "{report}");
+        assert!(report.contains("![shots/002-help.png]"), "{report}");
+        assert!(report.contains("not recorded (lane: attach)"), "{report}");
+    }
+
+    #[tokio::test]
+    async fn a_capture_failure_after_a_shot_response_keeps_the_exchange() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let run_dir = RunDirectory::create(
+            Some(&directory.path().join("run")),
+            Path::new("shot.scenario"),
+        )
+        .expect("create run directory");
+        let backend = ShotBackend {
+            lane: Lane::Attach,
+            capture: ShotCapture::Fail,
+        };
+        let args = ShotArgs {
+            name: "help".to_owned(),
+        };
+        let geometry = serde_json::json!({
+            "window": { "x": 11, "y": 22, "width": 1440, "height": 900 }
+        });
+        let response = Response::ok(9, geometry.clone());
+        let mut artifact = None;
+        let outcome = finish_shot_response(
+            response,
+            3,
+            &args,
+            ShotContext {
+                lane: &backend,
+                run_dir: &run_dir,
+                scenario: &directory.path().join("shot.scenario"),
+                update_baselines: false,
+                artifact: &mut artifact,
+            },
+        )
+        .await;
+        let line = ScenarioLine {
+            number: 3,
+            source: "shot help".to_owned(),
+            instruction: Instruction::App(Command::Shot(args)),
+        };
+
+        let (ok, error) = journal_outcome(&run_dir, &line, &outcome, None)
+            .await
+            .expect("journal the answered shot");
+
+        assert!(!ok);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("test capture failed"))
+        );
+        assert!(artifact.is_none());
+        let journal = std::fs::read_to_string(&run_dir.journal).expect("read journal");
+        let entries = journal
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("decode journal"))
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1, "the line has exactly one exchange entry");
+        assert_eq!(entries[0]["kind"], "command");
+        assert_eq!(entries[0]["data"]["line"], 3);
+        assert_eq!(entries[0]["request"]["cmd"], "shot");
+        assert_eq!(entries[0]["response"]["data"], geometry);
+        assert_eq!(entries[0]["response"]["ok"], true);
     }
 }

@@ -70,49 +70,35 @@ impl RunDirectory {
         )
     }
 
+    /// Atomically claims the root of a directory run without populating single-run artifacts.
+    ///
+    /// An explicit root must not already exist. A default root follows the same timestamp and
+    /// collision-suffix policy as a single run.
+    pub fn create_suite(requested: Option<&Path>, directory: &Path) -> anyhow::Result<PathBuf> {
+        Self::create_suite_at(
+            requested,
+            directory,
+            SystemTime::now(),
+            Path::new(DEFAULT_ROOT),
+        )
+    }
+
+    fn create_suite_at(
+        requested: Option<&Path>,
+        directory: &Path,
+        now: SystemTime,
+        default_root: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        claim_root(requested, directory, now, default_root)
+    }
+
     fn create_at(
         requested: Option<&Path>,
         scenario: &Path,
         now: SystemTime,
         default_root: &Path,
     ) -> anyhow::Result<Self> {
-        let root = match requested {
-            Some(path) => {
-                ensure_socket_path_fits(path)?;
-                anyhow::ensure!(
-                    claim(path)?,
-                    "the run directory {} already exists; refusing to use a directory this run did not create",
-                    path.display()
-                );
-                path.to_owned()
-            }
-            None => {
-                std::fs::create_dir_all(default_root).with_context(|| {
-                    format!("create default run root {}", default_root.display())
-                })?;
-                let stem = format!(
-                    "{}-{}",
-                    stamp(utc(now)),
-                    sanitize(&scenario.file_stem().unwrap_or_default().to_string_lossy())
-                );
-                let mut suffix = 1_u64;
-                loop {
-                    let name = if suffix == 1 {
-                        stem.clone()
-                    } else {
-                        format!("{stem}-{suffix}")
-                    };
-                    let candidate = default_root.join(name);
-                    ensure_socket_path_fits(&candidate)?;
-                    if claim(&candidate)? {
-                        break candidate;
-                    }
-                    suffix = suffix
-                        .checked_add(1)
-                        .context("exhausted run-directory collision suffixes")?;
-                }
-            }
-        };
+        let root = claim_root(requested, scenario, now, default_root)?;
         let shots = root.join("shots");
         let dumps = root.join("dumps");
         let home = root.join("home");
@@ -248,6 +234,51 @@ impl RunDirectory {
         file.flush()
             .await
             .with_context(|| format!("flush {}", self.journal.display()))
+    }
+}
+
+/// Claims an explicit root or the first free timestamped default candidate.
+fn claim_root(
+    requested: Option<&Path>,
+    subject: &Path,
+    now: SystemTime,
+    default_root: &Path,
+) -> anyhow::Result<PathBuf> {
+    match requested {
+        Some(path) => {
+            ensure_socket_path_fits(path)?;
+            anyhow::ensure!(
+                claim(path)?,
+                "the run directory {} already exists; refusing to use a directory this run did not create",
+                path.display()
+            );
+            Ok(path.to_owned())
+        }
+        None => {
+            std::fs::create_dir_all(default_root)
+                .with_context(|| format!("create default run root {}", default_root.display()))?;
+            let stem = format!(
+                "{}-{}",
+                stamp(utc(now)),
+                sanitize(&subject.file_stem().unwrap_or_default().to_string_lossy())
+            );
+            let mut suffix = 1_u64;
+            loop {
+                let name = if suffix == 1 {
+                    stem.clone()
+                } else {
+                    format!("{stem}-{suffix}")
+                };
+                let candidate = default_root.join(name);
+                ensure_socket_path_fits(&candidate)?;
+                if claim(&candidate)? {
+                    return Ok(candidate);
+                }
+                suffix = suffix
+                    .checked_add(1)
+                    .context("exhausted run-directory collision suffixes")?;
+            }
+        }
     }
 }
 
@@ -464,6 +495,72 @@ mod tests {
             Some("20231114-221320-help-2")
         );
         assert!(first.root.is_dir() && second.root.is_dir());
+    }
+
+    #[test]
+    fn an_explicit_suite_root_is_claimed_without_single_run_artifacts() {
+        let temporary = tempfile::tempdir().expect("temporary parent");
+        let root = temporary.path().join("suite");
+
+        let suite = RunDirectory::create_suite(Some(&root), Path::new("scenarios"))
+            .expect("claim the suite root");
+
+        assert_eq!(suite, root);
+        let entries = std::fs::read_dir(&suite)
+            .expect("read suite root")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect suite entries");
+        assert!(entries.is_empty(), "a new suite root starts empty");
+    }
+
+    #[test]
+    fn an_existing_explicit_suite_root_is_left_to_its_owner() {
+        let temporary = tempfile::tempdir().expect("temporary parent");
+        let root = temporary.path().join("suite");
+        std::fs::create_dir(&root).expect("create an existing suite root");
+        let marker = root.join("report.md");
+        std::fs::write(&marker, b"another suite").expect("write ownership marker");
+
+        RunDirectory::create_suite(Some(&root), Path::new("scenarios"))
+            .expect_err("an existing suite root belongs to another run");
+
+        assert_eq!(
+            std::fs::read(&marker).expect("read ownership marker"),
+            b"another suite"
+        );
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .expect("read existing suite root")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn default_suite_roots_use_collision_suffixes_and_stay_empty() {
+        let temporary = tempfile::tempdir().expect("temporary default root");
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let directory = Path::new("scenarios");
+        let first = RunDirectory::create_suite_at(None, directory, now, temporary.path())
+            .expect("claim the unsuffixed suite root");
+        let second = RunDirectory::create_suite_at(None, directory, now, temporary.path())
+            .expect("claim a suffixed suite root");
+
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("20231114-221320-scenarios")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("20231114-221320-scenarios-2")
+        );
+        for suite in [first, second] {
+            assert_eq!(
+                std::fs::read_dir(&suite).expect("read suite root").count(),
+                0,
+                "a suite root holds no single-run artifacts"
+            );
+        }
     }
 
     #[test]

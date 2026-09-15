@@ -260,6 +260,8 @@ struct Failure {
     busy: Vec<String>,
     /// A one-line reading of the snapshot the app answered with.
     state: Option<String>,
+    /// Teardown problems retained below the primary execution error.
+    teardown: Vec<String>,
     shot: Option<PathBuf>,
     dump: Option<PathBuf>,
 }
@@ -300,11 +302,25 @@ async fn failures(
         && let Some(entry) = journal.of_kind("failed").next()
         && let Some(error) = entry.event("error").map(scalar)
     {
+        let source = if entry.event("stage").and_then(Value::as_str) == Some("teardown") {
+            "the scenario lines passed, but teardown failed"
+        } else {
+            "the run failed outside any scenario line"
+        };
         failures.push(Failure {
             error,
-            source: "the run failed outside any scenario line".to_owned(),
+            source: source.to_owned(),
             ..Failure::default()
         });
+    }
+    if let Some(failure) = failures.first_mut()
+        && let Some(teardown) = journal
+            .of_kind("failed")
+            .next()
+            .and_then(|entry| entry.event("teardown"))
+            .and_then(Value::as_array)
+    {
+        failure.teardown = teardown.iter().map(scalar).collect();
     }
     failures
 }
@@ -720,6 +736,9 @@ fn failure_section(out: &mut String, root: &Path, failures: &[Failure]) {
     for failure in failures {
         out.push_str(&format!("### {}\n\n", failure.headline()));
         out.push_str(&format!("- error: {}\n", failure.error));
+        for problem in &failure.teardown {
+            out.push_str(&format!("  - teardown: {problem}\n"));
+        }
         for actual in &failure.actuals {
             out.push_str(&format!("- {actual}\n"));
         }
