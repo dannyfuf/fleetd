@@ -23,7 +23,7 @@ impl JobsRequests {
         Self(request)
     }
 
-    fn request(&self, body: RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> {
+    pub(super) fn request(&self, body: RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> {
         (self.0)(body)
     }
 }
@@ -338,25 +338,39 @@ impl JobsPanel {
     pub(super) fn on_bottom(
         &self,
         state: &Entity<AppState>,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::Bottom, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
         let scroll = self.list_scroll.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, cx| {
+            let resume = panel.update(cx, |panel, cx| {
                 let jobs = snapshot_jobs(&state, cx);
                 if panel.expanded.is_some() {
                     // `G` re-enables follow (§3.7), it does not merely scroll.
+                    let resume = !panel.following;
                     panel.following = true;
                     panel.log_offset = panel.log.len().saturating_sub(1);
                     log_scroll.scroll_to_item(panel.log_offset, ScrollStrategy::Bottom);
+                    resume.then(|| panel.expanded.clone()).flatten()
                 } else {
                     panel.cursor = panel.visible_len(jobs).saturating_sub(1);
                     scroll.scroll_to_reveal_item(panel.cursor);
                     mirror_panel(panel, &state, cx);
+                    None
                 }
             });
+            if let Some(job) = resume {
+                start_tail(
+                    panel.clone(),
+                    state.clone(),
+                    requests.clone(),
+                    log_scroll.clone(),
+                    job,
+                    cx,
+                );
+            }
             notify(&state, cx);
         }
     }
@@ -364,23 +378,37 @@ impl JobsPanel {
     pub(super) fn on_cycle_filter(
         &self,
         state: &Entity<AppState>,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::CycleFilter, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
+        let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, cx| {
+            let resume = panel.update(cx, |panel, cx| {
                 let jobs = snapshot_jobs(&state, cx);
                 // One binding, two meanings: `f` follows inside an expanded log and cycles the
                 // filter in the list (`docs/APP-CONTRACTS.md` §3).
                 if panel.expanded.is_some() {
                     panel.following = !panel.following;
+                    panel.following.then(|| panel.expanded.clone()).flatten()
                 } else {
                     panel.filter = panel.filter.next();
                     let len = panel.visible_len(jobs);
                     panel.clamp(len);
                     mirror_panel(panel, &state, cx);
+                    None
                 }
             });
+            if let Some(job) = resume {
+                start_tail(
+                    panel.clone(),
+                    state.clone(),
+                    requests.clone(),
+                    log_scroll.clone(),
+                    job,
+                    cx,
+                );
+            }
             notify(&state, cx);
         }
     }
@@ -433,11 +461,10 @@ impl JobsPanel {
     pub(super) fn on_toggle_log(
         &self,
         state: &Entity<AppState>,
-        bridge: &Bridge,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::ToggleLog, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
-        let bridge = bridge.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
             let Some(job) = selected_job(&panel, &state, cx).map(|job| job.id) else {
@@ -456,15 +483,14 @@ impl JobsPanel {
                 panel.expanded = Some(job.clone());
                 panel.following = true;
             });
-            let task = spawn_tail(
+            start_tail(
                 panel.clone(),
                 state.clone(),
-                bridge.clone(),
+                requests.clone(),
                 log_scroll.clone(),
                 job,
                 cx,
             );
-            panel.update(cx, |panel, _| panel.tail = Some(task));
             notify(&state, cx);
         }
     }

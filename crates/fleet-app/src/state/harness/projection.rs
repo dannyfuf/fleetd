@@ -445,7 +445,11 @@ impl AppState {
             list(
                 self.job_rows(snapshot),
                 self.jobs_panel.cursor,
-                String::new(),
+                self.jobs_panel
+                    .filter
+                    .label()
+                    .unwrap_or_default()
+                    .to_owned(),
             ),
         );
         if let Some(view) = self.board.view.as_ref() {
@@ -937,15 +941,10 @@ mod tests {
         snapshot.jobs.push(job("job-3", JobStatus::Succeeded));
         state.apply_snapshot(snapshot, now);
         state.open_overlay(Overlay::Jobs);
-        assert_eq!(
-            state
-                .harness_projection()
-                .snapshot
-                .lists
-                .get("jobs")
-                .map(|jobs| jobs.rows.len()),
-            Some(3)
-        );
+        let all = state.harness_projection().snapshot;
+        let all_jobs = all.lists.get("jobs").expect("jobs list");
+        assert_eq!(all_jobs.rows.len(), 3);
+        assert_eq!(all_jobs.filter, "");
 
         assert!(state.set_jobs_panel(JobsPanelMirror {
             cursor: 0,
@@ -955,6 +954,7 @@ mod tests {
         let jobs = dump.lists.get("jobs").expect("jobs list");
 
         assert_eq!(dump.focused.as_deref(), Some("jobs.row[0]"));
+        assert_eq!(jobs.filter, "failed");
         assert_eq!(
             jobs.rows
                 .iter()

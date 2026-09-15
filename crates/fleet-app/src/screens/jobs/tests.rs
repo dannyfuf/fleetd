@@ -164,7 +164,7 @@ fn cycling_the_filter_updates_the_app_state_mirror(cx: &mut gpui::TestAppContext
     });
     let jobs = cx.update(JobsPanel::new);
     cx.update(|cx| jobs.state.update(cx, |panel, _| panel.cursor = 2));
-    let handler = jobs.on_cycle_filter(&state);
+    let handler = jobs.on_cycle_filter(&state, RequestHarness::default().requests());
     let window = cx.add_window(|_, _| ActionHarness);
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
 

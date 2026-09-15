@@ -29,6 +29,7 @@ assert lists.jobs.selected.label ~= "^Create acme/api#injected-[01]$"
 
 # `Enter` expands the selected job's log; the panel stays open ...
 key enter
+await idle
 assert overlay == Jobs && mode == Jobs && key_contexts[0] == Jobs
 dump expanded
 
@@ -41,6 +42,7 @@ assert lists.jobs.selected.label ~= "^Create acme/api#injected-[01]$"
 # All injected jobs are finished, so the running filter leaves no projected rows.
 key f
 await lists.jobs.rows[0] absent
+assert lists.jobs.filter == "running"
 assert lists.jobs.selected absent && overlay == Jobs
 
 # ... and `q` closes it, restoring the pane, row and mode the Hub had before.
