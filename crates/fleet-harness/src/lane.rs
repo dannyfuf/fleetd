@@ -272,6 +272,8 @@ impl LaneBackend for HeadlessBackend {
 struct HyprlandBackend {
     /// The unique title the window is found by.
     title: String,
+    /// The command syntax this compositor accepts, set only for a backend created as `virtual`.
+    provider: Option<ConfigProvider>,
     /// Everything a `&self` method may still change after a fallback.
     inner: Mutex<Inner>,
 }
@@ -298,6 +300,15 @@ struct VirtualOutput {
 enum ConfigProvider {
     Legacy,
     Lua,
+}
+
+impl ConfigProvider {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Lua => "lua",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +338,7 @@ impl HyprlandBackend {
         monitors().map_err(|error| error.context("the attach lane needs a running compositor"))?;
         Ok(Self {
             title: window_title(run_id),
+            provider: None,
             inner: Mutex::new(Inner {
                 lane: Lane::Attach,
                 output: None,
@@ -343,11 +355,13 @@ impl HyprlandBackend {
     /// the output.
     fn isolated(run_id: &str) -> anyhow::Result<Self> {
         monitors().map_err(|error| error.context("the virtual lane needs a running compositor"))?;
+        let provider = config_provider()?;
         let name = output_name(run_id);
         hyprctl(&["output", "create", "headless", &name])?;
         let watchdog = spawn_watchdog(&name);
         let backend = Self {
             title: window_title(run_id),
+            provider: Some(provider),
             inner: Mutex::new(Inner {
                 lane: Lane::Virtual,
                 output: Some(VirtualOutput {
@@ -569,20 +583,17 @@ impl HyprlandBackend {
 
     /// Pins the created output's mode and scale, then asserts the compositor applied them.
     ///
-    /// `hyprctl keyword monitor …` is refused by Hyprland's non-legacy config parser, so the rule
-    /// goes through the Lua config API; and because a rule that is accepted is not a rule that
-    /// took effect, the result is read back from `hyprctl monitors -j` rather than assumed.
+    /// Each config provider accepts only its own rule syntax; and because a rule that is accepted
+    /// is not a rule that took effect, the result is read back from `hyprctl monitors -j` rather
+    /// than assumed.
     fn pin_geometry(&self) -> anyhow::Result<()> {
         let Some(name) = self.output_name()? else {
             return Ok(());
         };
-        hyprctl(&[
-            "eval",
-            &format!(
-                "hl.monitor({{ output = \"{name}\", mode = \"{VIRTUAL_MODE}\", \
-                 position = \"auto\", scale = {VIRTUAL_SCALE} }})"
-            ),
-        ])?;
+        let provider = self.provider.ok_or_else(|| {
+            anyhow::anyhow!("the isolated output has no Hyprland config provider")
+        })?;
+        apply_geometry_rule(provider, &name, hyprctl)?;
         let deadline = Instant::now() + GEOMETRY_TIMEOUT;
         loop {
             let monitor = monitors()?.into_iter().find(|monitor| monitor.name == name);
@@ -625,7 +636,9 @@ impl HyprlandBackend {
             .ok_or_else(|| anyhow::anyhow!("output {name} disappeared before the window moved"))?;
         let empty = Self::record_empty_output(name, window, monitor.id);
         let address = &window.address;
-        let provider = config_provider()?;
+        let provider = self.provider.ok_or_else(|| {
+            anyhow::anyhow!("the isolated output has no Hyprland config provider")
+        })?;
         // Hyprland 0.55 made `dispatch` a shorthand for a Lua expression when the session uses
         // the Lua config provider, while classic configs still require dispatcher verb + argument.
         // Build the form reported by `hyprctl status`; either way the placement below is read back
@@ -973,7 +986,7 @@ struct Status {
     config_provider: String,
 }
 
-/// Detects which of Hyprland's two dispatcher syntaxes this session accepts.
+/// Detects which of Hyprland's two config and dispatcher syntaxes this session accepts.
 fn config_provider() -> anyhow::Result<ConfigProvider> {
     let raw = hyprctl(&["status", "-j"])?;
     let status: Status =
@@ -985,6 +998,59 @@ fn config_provider() -> anyhow::Result<ConfigProvider> {
     }
 }
 
+/// Applies the output rule in the syntax selected before the output was created.
+fn apply_geometry_rule(
+    provider: ConfigProvider,
+    name: &str,
+    run: impl FnOnce(&[&str]) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    let call = geometry_rule_call(provider, name);
+    run_provider_command(provider, &call, run)
+}
+
+fn geometry_rule_call(provider: ConfigProvider, name: &str) -> Vec<String> {
+    match provider {
+        ConfigProvider::Legacy => {
+            // Hyprland v0.56.2's `src/config/legacy/ConfigManager.cpp:1196-1282`
+            // parses monitor values in this exact name, mode, position, scale order.
+            vec![
+                "keyword".to_owned(),
+                "monitor".to_owned(),
+                format!("{name},{VIRTUAL_MODE},auto,{VIRTUAL_SCALE}"),
+            ]
+        }
+        ConfigProvider::Lua => vec![
+            "eval".to_owned(),
+            format!(
+                "hl.monitor({{ output = \"{name}\", mode = \"{VIRTUAL_MODE}\", \
+                 position = \"auto\", scale = {VIRTUAL_SCALE} }})"
+            ),
+        ],
+    }
+}
+
+/// Runs a provider-specific command and rejects Hyprland's exit-zero refusal responses.
+fn run_provider_command(
+    provider: ConfigProvider,
+    call: &[String],
+    run: impl FnOnce(&[&str]) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    let arguments = call.iter().map(String::as_str).collect::<Vec<_>>();
+    let answer = run(&arguments)?;
+    let answer = answer.trim();
+    // Hyprland v0.56.2 `src/debug/HyprCtl.cpp:1029-1041,1073-1160` returns exactly
+    // `ok` for successful eval and keyword requests; parser/provider errors are response text.
+    if answer != "ok" {
+        anyhow::bail!(
+            "Hyprland {} provider refused `hyprctl {}`: {}",
+            provider.as_str(),
+            arguments.join(" "),
+            if answer.is_empty() { "<empty>" } else { answer },
+        );
+    }
+    Ok(())
+}
+
 /// Runs one window dispatcher in the syntax selected by the session's config provider.
 ///
 /// A dispatcher that Hyprland refuses still exits zero: an unknown verb, a window that no longer
@@ -992,16 +1058,7 @@ fn config_provider() -> anyhow::Result<ConfigProvider> {
 /// *stdout*. Reading the answer and then validating placement is what prevents a silent fallback.
 fn dispatch_window(provider: ConfigProvider, action: WindowDispatch<'_>) -> anyhow::Result<()> {
     let call = window_dispatch_call(provider, action)?;
-    let arguments = call.iter().map(String::as_str).collect::<Vec<_>>();
-    let answer = hyprctl(&arguments)?;
-    if answer.trim() != "ok" {
-        anyhow::bail!(
-            "hyprctl {} was refused: {}",
-            arguments.join(" "),
-            answer.trim(),
-        );
-    }
-    Ok(())
+    run_provider_command(provider, &call, hyprctl)
 }
 
 fn window_dispatch_call(
@@ -1129,6 +1186,56 @@ mod tests {
                 "{rejected:?} must fall back to the default rather than vary the geometry"
             );
         }
+    }
+
+    #[test]
+    fn legacy_geometry_pinning_uses_the_monitor_keyword() {
+        apply_geometry_rule(ConfigProvider::Legacy, "fleet-harness-abc", |arguments| {
+            assert_eq!(
+                arguments,
+                [
+                    "keyword",
+                    "monitor",
+                    "fleet-harness-abc,1920x1080@60,auto,1",
+                ]
+            );
+            Ok("ok\n".to_owned())
+        })
+        .expect("legacy geometry rule");
+    }
+
+    #[test]
+    fn lua_geometry_pinning_uses_the_monitor_api() {
+        apply_geometry_rule(ConfigProvider::Lua, "fleet-harness-abc", |arguments| {
+            assert_eq!(
+                arguments,
+                [
+                    "eval",
+                    "hl.monitor({ output = \"fleet-harness-abc\", mode = \"1920x1080@60\", position = \"auto\", scale = 1 })",
+                ]
+            );
+            Ok("ok".to_owned())
+        })
+        .expect("Lua geometry rule");
+    }
+
+    #[test]
+    fn geometry_pinning_reports_an_exit_zero_textual_refusal() {
+        let refusal = "eval is only supported with the lua config manager";
+        let error = apply_geometry_rule(ConfigProvider::Lua, "fleet-harness-abc", |_| {
+            Ok(refusal.to_owned())
+        })
+        .expect_err("a textual refusal is not success");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("lua provider"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("hyprctl eval hl.monitor"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains(refusal), "unexpected message: {message}");
     }
 
     #[test]
