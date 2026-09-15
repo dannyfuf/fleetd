@@ -81,9 +81,20 @@ pub struct TargetRect {
 }
 
 impl TargetRect {
-    /// The point a click on this target lands on.
-    fn centre(self) -> Point<Pixels> {
-        point(px(self.x + self.w * 0.5), px(self.y + self.h * 0.5))
+    /// The point a named input lands on, centered in the part visible inside `viewport`.
+    fn actionable_centre(self, viewport: gpui::Size<Pixels>) -> Option<Point<Pixels>> {
+        let width = f32::from(viewport.width);
+        let height = f32::from(viewport.height);
+        let left = self.x.max(0.0);
+        let top = self.y.max(0.0);
+        let right = (self.x + self.w).min(width);
+        let bottom = (self.y + self.h).min(height);
+        (left < right && top < bottom).then(|| {
+            point(
+                px(left + (right - left) * 0.5),
+                px(top + (bottom - top) * 0.5),
+            )
+        })
     }
 }
 
@@ -427,8 +438,13 @@ fn resolve(
     let installed = target_frame(window).with_context(|| {
         format!("target {name:?} cannot be resolved: this Fleet installed no harness target reader")
     })?;
+    let viewport = window.viewport_size();
     let fresh = match installed.get(name) {
-        Some(rect) if rect.frame == installed.frame => return Ok(rect.centre()),
+        Some(rect) if rect.frame == installed.frame => {
+            return rect.actionable_centre(viewport).with_context(|| {
+                format!("target {name:?} is painted entirely outside the window")
+            });
+        }
         _ => {
             settle_frame(window, cx);
             target_frame(window).with_context(|| {
@@ -446,7 +462,8 @@ fn resolve(
         rect.frame,
         fresh.frame
     );
-    Ok(rect.centre())
+    rect.actionable_centre(window.viewport_size())
+        .with_context(|| format!("target {name:?} is painted entirely outside the window"))
 }
 
 /// Explains an unresolvable name, listing the painted names closest to it.
@@ -766,6 +783,73 @@ mod tests {
             ],
             "a click moves first, so hover and the hit test are current when the button goes down"
         );
+    }
+
+    #[gpui::test]
+    fn a_partially_off_window_target_uses_the_visible_intersection(cx: &mut TestAppContext) {
+        const PARTIAL: [(&str, TargetRect); 1] = [(
+            "probe.partial",
+            TargetRect {
+                x: -112.0,
+                y: 50.0,
+                w: 200.0,
+                h: 20.0,
+                frame: 4,
+            },
+        )];
+        let _reader = reader(4, &PARTIAL);
+        let (seen, mut cx) = probe(cx);
+
+        cx.update(|window, cx| {
+            dispatch_move(
+                window,
+                cx,
+                &MoveArgs {
+                    to: Location::Target {
+                        target: "probe.partial".to_owned(),
+                    },
+                },
+            )
+        })
+        .expect("move to the visible part of the target");
+
+        assert_eq!(*seen.borrow(), vec![Seen::Move(44.0, 60.0)]);
+    }
+
+    #[gpui::test]
+    fn a_fully_off_window_target_is_refused(cx: &mut TestAppContext) {
+        const OUTSIDE: [(&str, TargetRect); 1] = [(
+            "probe.outside",
+            TargetRect {
+                x: -240.0,
+                y: 50.0,
+                w: 100.0,
+                h: 20.0,
+                frame: 4,
+            },
+        )];
+        let _reader = reader(4, &OUTSIDE);
+        let (seen, mut cx) = probe(cx);
+
+        let error = cx
+            .update(|window, cx| {
+                dispatch_move(
+                    window,
+                    cx,
+                    &MoveArgs {
+                        to: Location::Target {
+                            target: "probe.outside".to_owned(),
+                        },
+                    },
+                )
+            })
+            .expect_err("a target with no visible area must fail");
+
+        assert!(
+            format!("{error:#}").contains("entirely outside the window"),
+            "{error:#}"
+        );
+        assert!(seen.borrow().is_empty());
     }
 
     #[gpui::test]
