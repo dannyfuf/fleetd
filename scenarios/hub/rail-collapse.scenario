@@ -1,13 +1,9 @@
 # KEYMAP.md §Global (Normal mode, all Hub screens) [A22] — `H` collapses / expands the repos
 # rail (240 ↔ 44 px icon rail)
 #
-# `H` is the one Hub affordance whose whole effect is geometry: `docs/TESTING-HARNESS.md` §3
-# makes the rail's own width the collapse oracle, because the rail has no control to name and
-# nothing else in the snapshot moves. That width is in the snapshot — `repos.rail` drops from
-# 240 to 44 in `targets` — but no predicate can read it, because a target name contains the `.`
-# a dotted path splits on. So the collapse is evidenced by the screenshot, and asserted here as
-# what a collapse must *preserve*: the rail keeps its rows, its selection and its focus on both
-# sides of the toggle, and still navigates while it is an icon strip.
+# The rail width is the collapse oracle: its quoted target path is 240 px expanded and 44 px
+# collapsed. The rail also keeps its rows, selection and focus, and still navigates as an icon
+# strip.
 fixture: busy
 await idle 30000
 key g r
@@ -19,7 +15,7 @@ dump expanded
 
 # Collapsed, the rail is an icon strip: same rows, same cursor, same key context.
 key H
-await idle
+await targets["repos.rail"].w == 44
 assert hub_pane == Repos && focused == repos.row[1] && key_contexts[1] == Repos
 assert lists.repos.rows[2] exists && lists.repos.selected.label == "acme/api"
 shot collapsed
@@ -32,7 +28,7 @@ assert lists.repos.selected.label == "acme/web"
 
 # ... and `H` expands it again with the cursor untouched.
 key H
-await idle
+await targets["repos.rail"].w == 240
 assert hub_pane == Repos && focused == repos.row[2] && lists.repos.selected.label == "acme/web"
 dump expanded-again
 quit

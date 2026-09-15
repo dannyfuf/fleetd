@@ -1,0 +1,19 @@
+# TESTING-HARNESS.md §2 — a daemon mutation remains busy until its UI mirror has applied it.
+#
+# The fixture context owns repositories. Creating and selecting an empty second context mutates
+# daemon state; the assertion after the bare `await idle` must therefore see the new snapshot.
+fixture: busy
+await idle 30000
+assert lists.repos.rows[1].label == "acme/api" && lists.worktrees.rows[3] exists
+
+key N
+await overlay == Dialog 10000
+type Settlement
+key enter
+await idle 30000
+assert overlay absent && lists.repos.rows[1].label == "acme/api"
+
+key 2
+await idle 30000
+assert lists.repos.rows[1] absent && lists.worktrees.rows[0] absent && overlay absent
+quit

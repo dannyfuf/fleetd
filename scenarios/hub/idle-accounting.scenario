@@ -1,19 +1,16 @@
 # TESTING-HARNESS.md §2 — "`idle` is true exactly when … no in-flight app requests, running
-# jobs, pending frame, live toast timer, or armed debounce."
+# jobs, pending frame, live toast timer, armed debounce, mutation awaiting its snapshot, or
+# opening daemon link."
 #
-# This is the scenario that would have caught three of those five counters being written by
-# nothing: with `in_flight_requests`, `pending_frame` and `armed_debounces` structurally zero,
-# `await idle` returned in under a millisecond on a cold start and every later line raced the
-# work it was supposed to wait for. Each clause below reads one constituent *by name*, so a
-# counter that stops being fed fails here rather than silently making every `await idle` a
-# no-op.
+# Each clause below reads all seven constituents *by name*, so a counter or flag that stops being
+# fed fails here rather than silently making every `await idle` a no-op.
 #
 # No screenshot: the whole subject is a JSON object, and this scenario is part of the slice
 # that rides `make test` in the headless lane (§7).
 fixture: one-repo
 await idle 30000
-assert idle.idle == true && idle.in_flight_requests == 0 && idle.running_jobs == 0
-assert idle.pending_frame == false && idle.live_toast_timers == 0 && idle.armed_debounces == 0
+assert idle.idle == true && idle.in_flight_requests == 0 && idle.running_jobs == 0 && idle.settling_mutations == 0
+assert idle.pending_frame == false && idle.live_toast_timers == 0 && idle.armed_debounces == 0 && idle.link_opening == false
 
 # A real daemon job through the run's own client: `idle` is false while it runs, and the bare
 # word `idle` and the counter it is derived from must never disagree.

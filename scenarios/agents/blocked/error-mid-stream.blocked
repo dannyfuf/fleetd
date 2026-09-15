@@ -1,25 +1,12 @@
-# BLOCKED — no fixture serves an erroring transcript
+# BLOCKED — failed-thread transition reproduced only 4/5 times
 #
-# docs/TESTING-HARNESS.md §5 lists `error-mid-stream.json` among the starter transcripts, and
-# `crates/fleet-harness/transcripts/error-mid-stream.json` exists, but the `agents` preset
-# embeds exactly two documents — `two-turns.json` for Claude and `edit-approval.json` for Codex
-# (`crates/fleet-harness/src/fixture/plan.rs::agents`) — and neither ever errors. There are only
-# two providers, so a third transcript has nowhere to live, and the frozen `fixture:` vocabulary
-# has no sixth preset. A scenario cannot reach a mid-stream error today.
+# Five isolated virtual-lane runs on 2026-09-15 produced four passes and one timeout at:
 #
-# The cheapest fix, for the `scripted-agent` stage that owns the transcripts: give Claude's
-# `two-turns.json` a third turn that fails, so the third message a scenario sends errors:
+#     await agents.threads[0].state == failed 40000
 #
-#     { "type": "text",  "text": "Checking the lockfile now.", "pace_ms": 10 },
-#     { "type": "error", "message": "Selected model is at capacity. Please try a different model." },
-#     { "type": "end_turn", "status": "failed" }
-#
-# A transcript's exhausted turns answer with an empty, cleanly completed turn
-# (`agent/transcript.rs::next_turn`), so the two existing turns keep their meaning and only the
-# third one changes. `Settlement::Failed` is Claude's `result/error_during_execution`.
-#
-# The assertions below are written against `Attention::Failed`, which the projection reports as
-# the thread state `failed`; they have never been run, because nothing can produce that state.
+# The failed run remained `idle` at that line. Evidence:
+# `/tmp/fleet-harness/20260915-170728-error-mid-stream/report.md`.
+# Keep this scenario out of the collected corpus until the transition is deterministic.
 fixture: agents
 await idle
 key o
@@ -30,13 +17,11 @@ await agents.threads[0].provider == claude 20000
 click agents.composer
 type what does this crate do
 key enter
-await agents.threads[0].state == working 20000
 await agents.threads[0].state == idle 40000
 
 click agents.composer
 type and what is the binary called
 key enter
-await agents.threads[0].state == working 20000
 await agents.threads[0].state == idle 40000
 
 # The third turn streams one line and then the provider fails mid-stream.

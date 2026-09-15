@@ -13,8 +13,6 @@ await agents.threads[0].provider == claude 20000
 click agents.composer
 type what does this crate do
 key enter
-# Both edges of the turn, in order: awaiting `idle` alone would hold before the turn had even
-# started and leave every line below racing a stream.
 await agents.threads[0].state == working 20000
 await agents.threads[0].state == idle 40000
 
