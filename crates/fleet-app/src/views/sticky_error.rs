@@ -1,6 +1,6 @@
 //! Bounded sticky-error text and screen-specific focus hints.
 
-use fleet_ui_kit::StickyErrorSlot;
+use fleet_ui_kit::{HarnessTargetExt, StickyErrorSlot};
 use gpui::{AnyElement, IntoElement, SharedString};
 
 use crate::state::{Screen, StickyError};
@@ -40,8 +40,12 @@ fn one_line(text: &str, budget: usize) -> String {
 /// The status-bar slot itself.
 #[must_use]
 pub(crate) fn render(error: &StickyError, screen: &Screen) -> AnyElement {
+    // `docs/TESTING-HARNESS.md` §3 names this `sticky_error.retry`, and the whole slot is what
+    // the name stands for: the status bar draws no separate retry button, so the slot's rect is
+    // where a scenario points after `!` and what it reads to prove the error is still up.
     StickyErrorSlot::new(SharedString::from(one_line(&error.text, MAX_LINE)))
         .key(focus_key(screen))
+        .harness_target("sticky_error.retry")
         .into_any_element()
 }
 

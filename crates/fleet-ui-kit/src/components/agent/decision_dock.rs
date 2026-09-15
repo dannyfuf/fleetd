@@ -26,6 +26,7 @@ use super::{
 };
 use crate::{
     components::{KeyHint, markdown},
+    harness::HarnessTargetExt as _,
     icons::{Icon, IconSize},
     text::Text,
     theme::{ActiveTheme, Theme},
@@ -178,6 +179,7 @@ impl RenderOnce for DecisionDock {
                     .filter(|_| !matches!(option.action, DecisionAction::Choose(_)))
                     .filter(|_| !decision.answering);
                 let action = option.action.clone();
+                let target = option.action.harness_target();
                 div()
                     .id(("decision-hint", ix))
                     .flex_none()
@@ -187,6 +189,9 @@ impl RenderOnce for DecisionDock {
                             .on_click(move |_, window, cx| dispatch(action.clone(), window, cx))
                     })
                     .child(KeyHint::labeled(option.key, option.label))
+                    // The approval controls are the one part of the drawer a scenario clicks
+                    // rather than types, so they are the part §3 gives frozen names to.
+                    .harness_target_named(target)
             });
 
         div()

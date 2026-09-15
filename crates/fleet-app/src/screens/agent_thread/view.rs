@@ -8,7 +8,8 @@
 
 use fleet_core::agents::ItemKind;
 use fleet_ui_kit::{
-    AGENT_CONTENT_W, ActiveTheme, Decision, DecisionDock, Icon, IconSize, MetadataRow, Text, Tone,
+    AGENT_CONTENT_W, ActiveTheme, Decision, DecisionDock, HarnessTargetExt, Icon, IconSize,
+    MetadataRow, Text, Tone,
 };
 use gpui::{Context, SharedString, Window, div, prelude::*};
 
@@ -84,10 +85,16 @@ impl Render for AgentThreadView {
                             .w_full()
                             .max_w(AGENT_CONTENT_W)
                             .px(theme.space.lg)
-                            .child(div().flex_1().min_h_0().child(self.transcript.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(self.transcript.clone())
+                                    .harness_target("agents.transcript"),
+                            )
                             .children(self.picker_element(&theme))
                             .children(self.dock_element(cx))
-                            .child(composer),
+                            .child(composer.harness_target("agents.composer")),
                     ),
             )
     }
@@ -108,7 +115,10 @@ impl AgentThreadView {
         if let Some(diff) = diff {
             dock = dock.diff(diff);
         }
-        Some(dock.into_any_element())
+        // The drawer is one slot with one occupant, so one name covers an approval, a question
+        // and a ready plan alike; the individual `[a]`/`[o]`/`[d]` buttons inside it are the
+        // kit's, and are named there.
+        Some(dock.harness_target("agents.decision").into_any_element())
     }
 
     /// The diff of an edit approval, joined to its item **by id**, which is the only join the

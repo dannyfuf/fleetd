@@ -1,0 +1,49 @@
+# BLOCKED — TODO.md §1, "A Codex file-change approval shows paths, not the diff"
+#
+# This is TODO §1's expected-to-fail scenario, parked rather than shipped, because the frozen
+# `UiSnapshot` has no observable for what the decision drawer is showing. Running it today would
+# fail on a missing path rather than on the bug, and fixing the bug would not flip it green, so
+# it would be a scenario that lies twice. It is kept here so the assertion is written once the
+# observable exists.
+#
+# docs/NATIVE-AGENTS.md §6.2 — "For an edit approval Fleet shows what t3code cannot: **the
+#   diff**, joined by `itemId` and rendered by `DiffView` at bounded height"
+#
+# What today's run actually shows, from `dumps/` and `fleetd.log` of a real run:
+#   - `agents.threads[0].pending_gate` is `permission`, and the four Codex approval controls
+#     paint (`agents.approval.allow_once|allow_always|deny|deny_and_stop`, no `edit`);
+#   - `DecisionDock::diff` is never called by `crates/fleet-app/src/screens/agent_thread/
+#     decisions.rs`, because `GateKind::Permission` carries no `item` to join on;
+#   - the drawer's payload is the approval's own text, so the card is 239 px of path list.
+#
+# What it needs, exactly one additive version-1 snapshot field (`docs/TESTING-HARNESS.md` §3 and
+# `crates/fleet-app/src/state/harness/projection.rs`), which `snapshot` and `docs` own:
+#
+#     agents.decision : {kind: "approval"|"question"|"plan", item: string|null, diff: bool} | null
+#
+# `item` is the `ItemId` the gate joined onto, `diff` is whether the drawer is rendering one.
+# That is enough for both halves of TODO §1's done-when: `diff == true` for the joined card, and
+# `item absent && diff == false` for the approval that arrived before its item and must show a
+# loading state rather than an empty card.
+#
+# A target would not do: every harness target name contains a `.`, and the predicate path splits
+# on `.`, so no clause can read `targets`.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+click agents.composer
+type apply the README fix
+key enter
+
+await agents.threads[0].pending_gate == permission 30000
+assert key_contexts[2] == AgentPermission
+shot approval
+
+# The assertion this file exists for.
+assert agents.decision.kind == approval && agents.decision.item exists && agents.decision.diff == true
+dump approval-with-diff
+quit

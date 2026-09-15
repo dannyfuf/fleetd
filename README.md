@@ -322,17 +322,31 @@ cargo run -p fleet-ui-kit --example gallery_terminal
 cargo run -p fleet-ui-kit --example gallery_agent
 ```
 
-For UI automation, set `FLEET_DRIVE` to an append-only script. The debug app polls it every 100 ms;
-commands include `key`, `type`, `wait`, `shot`, and `quit`, and results go to `$FLEET_DRIVE.log`:
+### Testing
+
+`make test` is the workspace suite. The GUI itself is tested end to end by `fleet-harness`, which
+boots a private `fleetd` and a harness-mode `fleet` against a temporary `FLEET_HOME`, drives them
+over a Unix socket, and leaves a run directory of screenshots, `UiSnapshot` dumps, logs and a
+report:
 
 ```sh
-mkdir -p /tmp/fleet-drive
-touch /tmp/fleet-drive/script.txt
-FLEET_HOME=/tmp/fleet-drive FLEET_DRIVE=/tmp/fleet-drive/script.txt ./target/debug/fleet &
-printf 'wait 500\nkey ?\nshot /tmp/fleet-drive/help.png\nkey escape\nquit\n' >> /tmp/fleet-drive/script.txt
+make harness            # the whole scenario corpus, on an isolated compositor output
+make harness-headless   # the scenarios that need no pixels
+make harness-one SCENARIO=scenarios/pointer-basics.scenario
+make harness-prune      # delete run directories older than SWEEP_DAYS
 ```
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details, logs, and scripted-input semantics.
+`make harness-headless` selects the scenarios that name no `shot` and no `clipboard`, because
+neither works without a compositor; the same slice rides `make test`. Everything else — the
+keyboard, the pointer, fixtures and daemon faults — works in that lane, so a scenario written to
+run in both drives the app, asserts on the snapshot and takes no shot.
+
+A scenario is a line-oriented text file — `key`, `type`, `click`, `await`, `assert`, `shot`,
+`dump`, `quit` — and the structured dump, not the screenshot, is what says whether Fleet behaved.
+[docs/TESTING-HARNESS.md](docs/TESTING-HARNESS.md) is the authority for the protocol, the snapshot,
+the grammar and the fixtures, and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) is how you run one.
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for Zig details and logs.
 
 ## Status
 

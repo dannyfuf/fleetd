@@ -265,3 +265,25 @@ fn the_newest_failure_owns_the_sticky_slot() {
     assert_eq!(failed.id.as_str(), "j-3");
     assert_eq!(running_jobs(&jobs).len(), 1);
 }
+
+/// `advance` moves a stored dwell into the past. On a machine whose uptime is shorter than the
+/// advance the subtraction cannot land, and the fallback has to stay in that direction: an
+/// instant clamped to `now` would say "shown this instant", which is the most recent answer
+/// there is, from the one call that asked for the oldest.
+#[test]
+fn an_advance_longer_than_the_clock_still_moves_every_instant_backwards() {
+    let now = Instant::now();
+    // Far longer than any real uptime, so `checked_sub` cannot land and the fallback runs.
+    let beyond = Duration::from_secs(60 * 60 * 24 * 365 * 200);
+    let moved = super::rewind(now, beyond);
+    assert!(moved <= now, "an advance never moves an instant forwards");
+    assert!(
+        moved < now,
+        "an advance of {beyond:?} has to leave the instant strictly in the past"
+    );
+    // And the ordinary case is exact.
+    assert_eq!(
+        super::rewind(now, Duration::from_secs(1)),
+        now - Duration::from_secs(1)
+    );
+}

@@ -1,0 +1,23 @@
+# Phase 4 acceptance — kill the daemon, see the banner, restart it, recover.
+#
+# `daemon …` is a runner-side operation on the run's own private fleetd, so nothing on the
+# developer's machine is signalled. The daemon's own clock is out of `advance`'s reach, so the
+# reconnect is waited out with `await`.
+fixture: one-repo
+await idle
+assert screen == Hub && daemon.link == connected
+
+# SIGKILL the private fleetd: the link is lost and the banner surfaces it.
+daemon kill
+await daemon.link == lost 30000
+shot banner
+dump banner
+
+# Bring it back and let the app reattach on its own.
+daemon restart
+await daemon.link == reconnected 60000
+assert daemon.restarted == true
+shot recovered
+dump recovered
+await idle
+quit

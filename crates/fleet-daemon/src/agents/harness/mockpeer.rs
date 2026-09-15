@@ -9,12 +9,26 @@
 //! environment, and a test suite that needs an interpreter the machine may not have is a test
 //! suite that silently skips. The script greets, then reads one frame at a time, records it, and
 //! answers by method — the replies come from real captures, so schema validation passes.
+//!
+//! The default `make test` run spawns neither `claude` nor `codex` — every other agent test
+//! drives this peer — because a test suite that needs two vendor CLIs installed is a test suite
+//! that silently skips on the machine that most needs it. The opt-in `real-agents` feature is the
+//! only thing that touches a vendor binary.
+//!
+//! The API is deliberately two verbs wide — describe a transcript, then [`MockPeer::build`] it
+//! into a [`BuiltPeer::command`] line a [`super::HarnessConfig`] can spawn. It is `#[cfg(test)]`
+//! and `pub(crate)`: the GUI harness in `crates/fleet-harness` scripts *providers* from the
+//! outside with its own `agent` subcommand and never links this crate, so nothing outside these
+//! tests has a use for it.
 
 use std::{fs, path::PathBuf};
 
 use tempfile::TempDir;
 
 /// A mock peer's on-disk script and sidecar files.
+///
+/// Build one with [`MockPeer::new`], describe the transcript with [`MockPeer::greeting`] and
+/// [`MockPeer::on`], then [`MockPeer::build`] it.
 pub(crate) struct MockPeer {
     directory: TempDir,
     /// Lines printed before Fleet writes anything (a Claude `system/init`, say).
@@ -28,7 +42,13 @@ pub(crate) struct MockPeer {
 }
 
 impl MockPeer {
-    /// A peer that greets with `greeting` and then answers nothing.
+    /// A peer that greets with nothing and answers nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a temporary directory cannot be created. The builder is test scaffolding with an
+    /// infallible-looking API, so it fails loudly at the call site rather than making every
+    /// caller thread a `Result` through a fixture.
     pub(crate) fn new() -> Self {
         Self {
             directory: tempfile::tempdir().unwrap_or_else(|error| panic!("mock peer dir: {error}")),
@@ -40,6 +60,7 @@ impl MockPeer {
     }
 
     /// Lines the peer prints as soon as it starts.
+    #[must_use]
     pub(crate) fn greeting(mut self, lines: &[&str]) -> Self {
         self.greeting = lines.iter().map(|line| (*line).to_owned()).collect();
         self
@@ -47,6 +68,7 @@ impl MockPeer {
 
     /// Answers `method` with `response` (its `__ID__` replaced by the request's id) and then
     /// prints `notifications`.
+    #[must_use]
     pub(crate) fn on(
         mut self,
         method: &str,
@@ -65,6 +87,7 @@ impl MockPeer {
     }
 
     /// Makes the peer ignore SIGTERM, so only SIGKILL ends it.
+    #[must_use]
     pub(crate) fn ignoring_sigterm(mut self) -> Self {
         self.ignore_term = true;
         self.linger = true;
@@ -72,12 +95,18 @@ impl MockPeer {
     }
 
     /// Keeps the peer alive after its stdin closes.
+    #[must_use]
     pub(crate) fn lingering(mut self) -> Self {
         self.linger = true;
         self
     }
 
     /// Writes the script and returns the command line to spawn it with.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the script or its sidecar files cannot be written, for the reason given on
+    /// [`MockPeer::new`].
     pub(crate) fn build(self) -> BuiltPeer {
         let root = self.directory.path().to_path_buf();
         let write = |name: &str, contents: &str| {
@@ -147,6 +176,12 @@ impl MockPeer {
     }
 }
 
+impl Default for MockPeer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A written mock peer, ready to spawn.
 pub(crate) struct BuiltPeer {
     _directory: TempDir,
@@ -184,5 +219,33 @@ impl BuiltPeer {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MockPeer;
+
+    /// The narrow contract the adapter suites build on: a transcript in, a spawnable command
+    /// out.
+    ///
+    /// Those suites prove the *protocol* the peer speaks; this pins the shape of the builder
+    /// itself, so a change to what `build` writes fails here rather than in every suite at once.
+    #[test]
+    fn a_built_peer_names_a_shell_script_that_exists_and_has_recorded_nothing_yet() {
+        let peer = MockPeer::new()
+            .greeting(&["{\"type\":\"system\",\"subtype\":\"init\"}"])
+            .on("thread/start", Some("{\"id\":__ID__,\"result\":{}}"), &[])
+            .build();
+
+        let command = peer.command();
+        let script = command
+            .strip_prefix("/bin/sh ")
+            .unwrap_or_else(|| panic!("the command line spawns a POSIX shell: {command}"));
+        assert!(
+            std::path::Path::new(script).is_file(),
+            "the script was written: {script}"
+        );
+        assert!(peer.recorded().is_empty(), "nothing has been written to it");
     }
 }

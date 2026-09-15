@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gpui::{App, MouseButton, SharedString, Window, div, prelude::*};
 
-use crate::{text::Text, theme::ActiveTheme, tone::Tone};
+use crate::{harness::HarnessTargetExt as _, text::Text, theme::ActiveTheme, tone::Tone};
 
 /// One tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +67,7 @@ pub struct SegmentedTabs {
     tabs: Vec<SegmentedTab>,
     active: usize,
     underlined: bool,
+    harness_tabs: Option<&'static str>,
     on_select: Option<Rc<TabSelect>>,
 }
 
@@ -79,6 +80,7 @@ impl SegmentedTabs {
             tabs: tabs.into_iter().collect(),
             active: 0,
             underlined: true,
+            harness_tabs: None,
             on_select: None,
         }
     }
@@ -98,6 +100,16 @@ impl SegmentedTabs {
     /// Which tab is active.
     pub fn active(mut self, active: usize) -> Self {
         self.active = active;
+        self
+    }
+
+    /// Name each tab `<part>[<index>]` for the harness target recorder.
+    ///
+    /// A bar has no name of its own — the same component is the Hub's level and the pull
+    /// requests screen's — so the surface the bar belongs to supplies one (`hub.tab`,
+    /// `prs.tab`). A bar no scenario addresses leaves this unset and records nothing.
+    pub fn harness_tabs(mut self, part: &'static str) -> Self {
+        self.harness_tabs = Some(part);
         self
     }
 
@@ -128,6 +140,7 @@ impl RenderOnce for SegmentedTabs {
         let active = self.active;
         let underline_h = theme.metrics.focus_ring_w;
         let accent = theme.colors.accent;
+        let harness_tabs = self.harness_tabs;
 
         div()
             .flex()
@@ -198,6 +211,7 @@ impl RenderOnce for SegmentedTabs {
                                 gpui::transparent_black()
                             }),
                     )
+                    .harness_target_optional(harness_tabs.map(|part| (part, ix)))
             }))
     }
 }

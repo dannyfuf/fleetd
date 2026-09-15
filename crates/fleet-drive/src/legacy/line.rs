@@ -1,4 +1,3 @@
-use super::Dialect;
 use gpui::{Keystroke, Modifiers};
 use std::{path::PathBuf, time::Duration};
 
@@ -6,10 +5,14 @@ use std::{path::PathBuf, time::Duration};
 pub(super) enum Step {
     Keys(Vec<Keystroke>),
     Type(String),
-    Wheel {
-        rows: f32,
-        horizontal: bool,
+    Scroll {
+        /// Sideways wheel units, GPUI-signed: positive scrolls the content right.
+        dx: f32,
+        /// Vertical wheel units, GPUI-signed: negative scrolls the content down.
+        dy: f32,
+        /// Where the pointer sits, as a fraction of the window's width.
         x: f32,
+        /// Where the pointer sits, as a fraction of the window's height.
         y: f32,
     },
     Wait(Duration),
@@ -17,7 +20,7 @@ pub(super) enum Step {
     Quit,
 }
 
-pub(super) fn parse(line: &str, dialect: Dialect) -> Result<Option<Step>, String> {
+pub(super) fn parse(line: &str) -> Result<Option<Step>, String> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Ok(None);
@@ -48,14 +51,21 @@ pub(super) fn parse(line: &str, dialect: Dialect) -> Result<Option<Step>, String
             }
             Ok(Some(Step::Type(text.to_owned())))
         }
-        // `wheel <rows> [x-fraction] [y-fraction]`, or `hwheel <cells> …` for the sideways
-        // axis. The default position is the main panel: three quarters across, half way down.
-        "wheel" | "hwheel" if dialect == Dialect::Lazygit => {
+        // `scroll <dx> <dy> [x-fraction] [y-fraction]`, spelled and signed exactly as the
+        // harness `scroll` line in `docs/TESTING-HARNESS.md` §2 — the old `wheel N` is
+        // `scroll 0 -N` and `hwheel N` is `scroll -N 0`. The default position is the main
+        // panel: three quarters across, half way down.
+        "scroll" => {
             let mut parts = rest.split_whitespace();
-            let rows = parts
-                .next()
-                .and_then(|token| token.parse::<f32>().ok())
-                .ok_or_else(|| format!("wheel needs a row count, got {rest:?}"))?;
+            let mut axis = |what: &str| -> Result<f32, String> {
+                parts
+                    .next()
+                    .and_then(|token| token.parse::<f32>().ok())
+                    .filter(|value: &f32| value.is_finite())
+                    .ok_or_else(|| format!("scroll needs a finite {what}, got {rest:?}"))
+            };
+            let dx = axis("dx")?;
+            let dy = axis("dy")?;
             let x = parts
                 .next()
                 .and_then(|token| token.parse::<f32>().ok())
@@ -64,12 +74,7 @@ pub(super) fn parse(line: &str, dialect: Dialect) -> Result<Option<Step>, String
                 .next()
                 .and_then(|token| token.parse::<f32>().ok())
                 .unwrap_or(0.5);
-            Ok(Some(Step::Wheel {
-                rows,
-                horizontal: command == "hwheel",
-                x,
-                y,
-            }))
+            Ok(Some(Step::Scroll { dx, dy, x, y }))
         }
         "wait" => rest
             .parse::<u64>()
@@ -86,7 +91,7 @@ pub(super) fn parse(line: &str, dialect: Dialect) -> Result<Option<Step>, String
     }
 }
 
-pub(super) fn keystroke_for(character: char) -> Keystroke {
+pub(crate) fn keystroke_for(character: char) -> Keystroke {
     let (key, shift) = match character {
         ' ' => ("space".to_owned(), false),
         '\t' => ("tab".to_owned(), false),
@@ -108,7 +113,7 @@ pub(super) fn keystroke_for(character: char) -> Keystroke {
 
 // Synthetic dispatch bypasses platform keyboard-layout translation. Supply the composed
 // printable character while leaving control/option/command chords untouched.
-pub(super) fn with_simulated_key_char(mut keystroke: Keystroke) -> Keystroke {
+pub(crate) fn with_simulated_key_char(mut keystroke: Keystroke) -> Keystroke {
     if keystroke.key_char.is_some()
         || keystroke.modifiers.control
         || keystroke.modifiers.alt
@@ -158,91 +163,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn malformed_commands_keep_the_existing_dialect_policy() {
-        for dialect in [Dialect::Fleet, Dialect::Lazygit] {
-            assert_eq!(parse("", dialect), Ok(None));
-            assert_eq!(parse("   ", dialect), Ok(None));
-            assert_eq!(parse("# a note", dialect), Ok(None));
-            assert_eq!(
-                parse("key", dialect),
-                Err("key needs at least one keystroke".into())
-            );
-            assert_eq!(parse("type", dialect), Err("type needs some text".into()));
-            assert_eq!(parse("shot", dialect), Err("shot needs a path".into()));
-            assert_eq!(
-                parse("wait soon", dialect),
-                Err("wait needs a millisecond count, got \"soon\"".into())
-            );
-            assert_eq!(
-                parse("nope", dialect),
-                Err("unknown command \"nope\"".into())
-            );
-        }
+    fn malformed_commands_are_reported_rather_than_guessed() {
+        assert_eq!(parse(""), Ok(None));
+        assert_eq!(parse("   "), Ok(None));
+        assert_eq!(parse("# a note"), Ok(None));
+        assert_eq!(parse("key"), Err("key needs at least one keystroke".into()));
+        assert_eq!(parse("type"), Err("type needs some text".into()));
+        assert_eq!(parse("shot"), Err("shot needs a path".into()));
         assert_eq!(
-            parse("wheel 5", Dialect::Fleet),
-            Err("unknown command \"wheel\"".into())
+            parse("wait soon"),
+            Err("wait needs a millisecond count, got \"soon\"".into())
         );
-        assert!(parse("wheel", Dialect::Lazygit).is_err());
-        assert!(parse("hwheel", Dialect::Lazygit).is_err());
+        assert_eq!(parse("nope"), Err("unknown command \"nope\"".into()));
+        // The old spellings are gone rather than quietly aliased, so a stale script says so.
+        assert_eq!(parse("wheel 5"), Err("unknown command \"wheel\"".into()));
+        assert_eq!(parse("hwheel 5"), Err("unknown command \"hwheel\"".into()));
+        assert!(parse("scroll").is_err());
+        assert!(parse("scroll 0").is_err());
+        assert!(parse("scroll 0 nope").is_err());
     }
 
     #[test]
     fn parses_every_command() {
-        for dialect in [Dialect::Fleet, Dialect::Lazygit] {
-            assert_eq!(
-                parse("wait 250", dialect),
-                Ok(Some(Step::Wait(Duration::from_millis(250))))
-            );
-            assert_eq!(
-                parse("shot /tmp/a.png", dialect),
-                Ok(Some(Step::Shot(PathBuf::from("/tmp/a.png"))))
-            );
-            assert_eq!(parse("quit", dialect), Ok(Some(Step::Quit)));
-            // `type` keeps every space after the first separator.
-            assert_eq!(
-                parse("type hello  world  ", dialect),
-                Ok(Some(Step::Type("hello  world  ".into())))
-            );
-            assert_eq!(
-                parse("type  hello  ", dialect),
-                Ok(Some(Step::Type(" hello  ".into())))
-            );
-            let Ok(Some(Step::Keys(keys))) = parse("key ctrl-s ?", dialect) else {
-                panic!("expected keystrokes");
-            };
-            assert_eq!(keys.len(), 2);
-            assert!(keys[0].modifiers.control);
-            assert_eq!(keys[0].key, "s");
-            assert_eq!(keys[1].key, "?");
-        }
+        assert_eq!(
+            parse("wait 250"),
+            Ok(Some(Step::Wait(Duration::from_millis(250))))
+        );
+        assert_eq!(
+            parse("shot /tmp/a.png"),
+            Ok(Some(Step::Shot(PathBuf::from("/tmp/a.png"))))
+        );
+        assert_eq!(parse("quit"), Ok(Some(Step::Quit)));
+        // `type` keeps every space after the first separator.
+        assert_eq!(
+            parse("type hello  world  "),
+            Ok(Some(Step::Type("hello  world  ".into())))
+        );
+        assert_eq!(
+            parse("type  hello  "),
+            Ok(Some(Step::Type(" hello  ".into())))
+        );
+        let Ok(Some(Step::Keys(keys))) = parse("key ctrl-s ?") else {
+            panic!("expected keystrokes");
+        };
+        assert_eq!(keys.len(), 2);
+        assert!(keys[0].modifiers.control);
+        assert_eq!(keys[0].key, "s");
+        assert_eq!(keys[1].key, "?");
     }
 
     #[test]
-    fn wheel_defaults_to_the_main_panel_and_reads_both_axes() {
-        let wheel = |line| parse(line, Dialect::Lazygit);
+    fn scroll_defaults_to_the_main_panel_and_reads_both_axes() {
+        // `wheel 5` used to mean "five rows down"; its translation is `scroll 0 -5`.
         assert_eq!(
-            wheel("wheel 5 nope nope"),
-            Ok(Some(Step::Wheel {
-                rows: 5.0,
-                horizontal: false,
+            parse("scroll 0 -5 nope nope"),
+            Ok(Some(Step::Scroll {
+                dx: 0.0,
+                dy: -5.0,
                 x: 0.75,
                 y: 0.5
             }))
         );
         assert_eq!(
-            wheel("wheel -2 0.5 0.25"),
-            Ok(Some(Step::Wheel {
-                rows: -2.0,
-                horizontal: false,
+            parse("scroll 0 2 0.5 0.25"),
+            Ok(Some(Step::Scroll {
+                dx: 0.0,
+                dy: 2.0,
                 x: 0.5,
                 y: 0.25
             }))
         );
+        // `hwheel 3` used to mean "three cells right"; its translation is `scroll -3 0`.
         assert_eq!(
-            wheel("hwheel 3"),
-            Ok(Some(Step::Wheel {
-                rows: 3.0,
-                horizontal: true,
+            parse("scroll -3 0"),
+            Ok(Some(Step::Scroll {
+                dx: -3.0,
+                dy: 0.0,
                 x: 0.75,
                 y: 0.5
             }))

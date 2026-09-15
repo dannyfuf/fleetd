@@ -1,0 +1,34 @@
+# KEYMAP.md §Global (Normal mode, all Hub screens) [A22] — `H` collapses / expands the repos
+# rail (240 ↔ 44 px icon rail)
+#
+# The rail width is the collapse oracle: its quoted target path is 240 px expanded and 44 px
+# collapsed. The rail also keeps its rows, selection and focus, and still navigates as an icon
+# strip.
+fixture: busy
+await idle 30000
+key g r
+await hub_pane == Repos
+assert focused == repos.row[0] && lists.repos.rows[2] exists
+key j
+await focused == repos.row[1]
+dump expanded
+
+# Collapsed, the rail is an icon strip: same rows, same cursor, same key context.
+key H
+await targets["repos.rail"].w == 44
+assert hub_pane == Repos && focused == repos.row[1] && key_contexts[1] == Repos
+assert lists.repos.rows[2] exists && lists.repos.selected.label == "acme/api"
+shot collapsed
+dump collapsed
+
+# A collapsed rail still navigates ...
+key j
+await focused == repos.row[2]
+assert lists.repos.selected.label == "acme/web"
+
+# ... and `H` expands it again with the cursor untouched.
+key H
+await targets["repos.rail"].w == 240
+assert hub_pane == Repos && focused == repos.row[2] && lists.repos.selected.label == "acme/web"
+dump expanded-again
+quit

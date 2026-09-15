@@ -176,6 +176,7 @@ pub(crate) fn render(
                         field(command)
                             .label(format!("Prepare command {}", index + 1))
                             .focused(draft.field == index)
+                            .harness_target_indexed("dialog.field", index)
                     }))
                     .children(
                         draft
@@ -183,9 +184,11 @@ pub(crate) fn render(
                             .iter()
                             .enumerate()
                             .map(|(index, command)| {
+                                let field_index = draft.prepare.len() + index;
                                 field(command)
                                     .label(format!("Post-create command {}", index + 1))
-                                    .focused(draft.field == draft.prepare.len() + index)
+                                    .focused(draft.field == field_index)
+                                    .harness_target_indexed("dialog.field", field_index)
                             }),
                     ),
             )

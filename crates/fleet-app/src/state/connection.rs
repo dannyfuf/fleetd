@@ -142,6 +142,7 @@ impl AppState {
     /// Applies one message from the daemon bridge.
     pub fn apply_bridge_event(&mut self, event: BridgeEvent, now: Instant) {
         match event {
+            BridgeEvent::Nudge => {}
             BridgeEvent::Capabilities(capabilities) => {
                 self.daemon_capabilities = capabilities.into_iter().collect();
             }

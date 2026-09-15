@@ -1,0 +1,38 @@
+# TESTING-HARNESS.md §3 target names and §7 "A scenario meant to run in both lanes drives the
+# app with the pointer, asserts on the snapshot, and takes no screenshot."
+#
+# The pointer half of `pointer-basics.scenario` without its pixels, so that target resolution,
+# the click/hover/scroll dispatch path and the `targets[*].frame == window.frame` staleness
+# rule are all covered by `make test` on a machine with no compositor at all.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_tab == Worktrees && hub_pane == List
+
+# Every named target the Hub paints carries the current frame, which is what makes a click
+# resolve rather than fail stale.
+assert targets["hub.tab[0]"] exists && targets["repos.rail"].w == 240
+dump targets
+
+# The segmented tab strip is the one Hub control with an `on_select`, so it is the click path.
+click hub.tab[1]
+await hub_tab == Prs 15000
+assert screen == Hub && overlay absent
+click hub.tab[2]
+await hub_tab == Board 15000
+click hub.tab[0]
+await hub_tab == Worktrees 15000
+
+# `move` and `hover` resolve a named target and answer only once the frame has painted; the
+# dwell is the app's, so it is bounded rather than slept through.
+move repos.row[1]
+await idle 15000
+hover worktrees.row[0] 100
+await idle 15000
+assert screen == Hub && hub_tab == Worktrees && sticky_error absent
+
+# The wheel is GPUI-signed: negative `dy` scrolls the content down, 18 logical pixels a unit.
+scroll 0 -2 at worktrees.row[0]
+await idle 15000
+assert lists.worktrees.rows[0] exists && overlay absent
+dump after-pointer
+quit

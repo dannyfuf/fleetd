@@ -199,6 +199,7 @@ fn sample_snapshot(
     fleet_proto::snapshot::Snapshot {
         boards: Vec::new(),
         generated_at: "now".into(),
+        revision: None,
         contexts: Vec::new(),
         repos,
         clones: Vec::new(),
@@ -1068,6 +1069,7 @@ async fn create_waits_for_clone_snapshot_without_polling_and_preserves_the_envel
         let mut snapshot = Snapshot {
             boards: Vec::new(),
             generated_at: "now".into(),
+            revision: None,
             contexts: vec![context],
             repos: Vec::new(),
             clones: Vec::new(),

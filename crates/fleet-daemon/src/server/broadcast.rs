@@ -21,6 +21,10 @@ struct BroadcastInner {
 }
 
 /// Cloneable daemon-wide event fan-out bus.
+///
+/// Every call to [`Self::request_snapshot`] or [`Self::request_snapshot_current`] must happen
+/// after the announced state change is visible to [`Services::snapshot`]. This ordering makes a
+/// response revision a causal lower bound for the snapshot that covers its request.
 #[derive(Clone)]
 pub struct BroadcastBus {
     inner: Arc<BroadcastInner>,
@@ -54,6 +58,12 @@ impl BroadcastBus {
     /// Creates an independent event receiver.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.inner.sender.subscribe()
+    }
+
+    /// Returns the latest requested snapshot revision.
+    #[must_use]
+    pub fn snapshot_revision(&self) -> u64 {
+        self.inner.snapshot_revision.load(Ordering::Acquire)
     }
 
     /// Connects the bus to the authoritative snapshot assembler.
@@ -112,9 +122,10 @@ impl BroadcastBus {
         let events = self.clone();
         runtime.spawn(async move {
             tokio::time::sleep(SNAPSHOT_COALESCE_WINDOW).await;
-            let assembled_revision = events.inner.snapshot_revision.load(Ordering::Acquire);
+            let assembled_revision = events.snapshot_revision();
             match services.snapshot().await {
-                Ok(snapshot) => {
+                Ok(mut snapshot) => {
+                    snapshot.revision = Some(assembled_revision);
                     events.publish(Event::SnapshotChanged(snapshot));
                 }
                 Err(error) => tracing::warn!(%error, "failed to assemble snapshot event"),
@@ -123,7 +134,7 @@ impl BroadcastBus {
                 .inner
                 .snapshot_pending
                 .store(false, Ordering::Release);
-            if events.inner.snapshot_revision.load(Ordering::Acquire) != assembled_revision {
+            if events.snapshot_revision() != assembled_revision {
                 events.request_snapshot(services);
             }
         });

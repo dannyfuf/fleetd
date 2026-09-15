@@ -1,0 +1,20 @@
+# KEYMAP.md §Hub › Worktrees pane [A17] — `y` copies the worktree path
+#
+# `y` asks the daemon for the worktree's path, writes it to the clipboard and says so with a
+# toast, which is the only half of it the snapshot can see: `clipboard get` needs a platform
+# clipboard (`docs/TESTING-HARNESS.md` §1), and a window that never took the compositor's
+# keyboard focus cannot read its own write back — so the toast is the oracle here and the
+# read-back belongs to a lane that can hold focus. The copy is a real daemon round trip, so
+# the toast is awaited rather than asserted.
+fixture: one-repo
+await idle 30000
+assert screen == Hub && hub_pane == List && focused == worktrees.row[0]
+assert lists.worktrees.selected.label == feature && toasts[0] absent
+
+key y
+await toasts[0].text == "Path copied" 15000
+assert toasts[0].level == info && toasts[0].count == 1
+assert screen == Hub && mode == Normal && overlay absent && focused == worktrees.row[0]
+shot copied
+dump copied
+quit

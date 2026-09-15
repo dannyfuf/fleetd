@@ -1,0 +1,39 @@
+# KEYMAP.md §Global (Normal mode, all Hub screens) — `j`/`k`, `gg`/`G`, `ctrl-d`/`ctrl-u`
+#
+# The `busy` preset publishes four worktrees across two repositories, which is the smallest
+# list where "move one row", "jump to an end" and "jump half a page" have three different
+# answers. The oracle is `focused`, which names the cursor's own row index, plus the row count
+# the list is being moved through — a movement scenario that did not pin the list length would
+# pass just as happily against a list of one.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_pane == List && hub_tab == Worktrees
+assert lists.worktrees.rows[3] exists && lists.worktrees.rows[4] absent
+assert focused == worktrees.row[0]
+
+# `j` and `k` move one row and stop at the ends rather than wrapping.
+key j
+await focused == worktrees.row[1]
+key j
+await focused == worktrees.row[2]
+key k
+await focused == worktrees.row[1]
+
+# `G` is the last row; `gg` is the first. Both are two-keystroke gpui sequences.
+key G
+await focused == worktrees.row[3]
+assert mode == Normal && key_contexts[0] == Hub && key_contexts[1] == Worktrees
+shot last-row
+dump last-row
+key g g
+await focused == worktrees.row[0]
+
+# A half page of a four-row list is the rest of it, so `ctrl-d` lands on the last row and
+# `ctrl-u` comes back to the first. Neither leaves the list or changes the pane.
+key ctrl-d
+await focused == worktrees.row[3]
+key ctrl-u
+await focused == worktrees.row[0]
+assert hub_pane == List && overlay absent
+dump settled
+quit

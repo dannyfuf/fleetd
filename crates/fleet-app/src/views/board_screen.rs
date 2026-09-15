@@ -16,9 +16,9 @@ use fleet_core::board::{
 };
 use fleet_core::ids::StatusId;
 use fleet_ui_kit::{
-    ActiveTheme, Badge, CardTile, Chip, EmptyState, FilterBar, Icon, IconSize, KanbanBoard,
-    KanbanColumn, Pane, PaneBorder, PaneHeader, PriorityLevel, SkeletonRows, SpinnerWithLabel,
-    Text, Theme, Tone,
+    ActiveTheme, Badge, CardTile, Chip, EmptyState, FilterBar, HarnessTargetExt, Icon, IconSize,
+    KanbanBoard, KanbanColumn, Pane, PaneBorder, PaneHeader, PriorityLevel, SkeletonRows,
+    SpinnerWithLabel, Text, Theme, Tone,
 };
 use gpui::{
     AnyElement, App, Hsla, ListState, MouseButton, ScrollHandle, SharedString, div, prelude::*,
@@ -243,7 +243,8 @@ fn header(props: &BoardProps<'_>, model: &BoardModel, cx: &App) -> AnyElement {
         header = header.query_slot(
             FilterBar::new(props.filter.to_owned(), shown, total)
                 .focused(true)
-                .query_slot(),
+                .query_slot()
+                .harness_target("board.filter"),
         );
     } else if !props.filter.is_empty() {
         header = header.filter_chip(props.filter.to_owned());
@@ -292,6 +293,10 @@ fn columns(
                         return div().into_any_element();
                     };
                     tile(card, focused && row == focus_row, index, row, click.clone())
+                        .harness_target(crate::views::harness::name(|| {
+                            format!("board.column[{index}].card[{row}]")
+                        }))
+                        .into_any_element()
                 });
             }
 
@@ -305,6 +310,7 @@ fn columns(
                     click(BoardClick::Column(index), cx);
                 })
                 .child(kanban)
+                .harness_target_indexed("board.column", index)
                 .into_any_element()
         })
         .collect();

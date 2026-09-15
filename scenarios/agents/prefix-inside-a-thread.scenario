@@ -1,0 +1,54 @@
+# docs/KEYMAP.md §Native agent thread — the `^s` combinations bound inside an agent tab:
+#   `^s m` · `^s e` · `^s t` · `^s [` · `^s x` · `^s a`/`A` · `^s F`
+# docs/KEYMAP.md §Shadowing — "the prefix table below does not apply inside an agent tab — only
+#   the `^s` combinations listed under *Native agent thread* are bound there, and the rest
+#   (`^s s`, `^s 1`–`9`, `^s h`/`l`, …) are a follow-up"
+# docs/DESIGN-SYSTEM.md §4 — a picker with nothing to offer draws nothing
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+click agents.composer
+type what does this crate do
+key enter
+await agents.threads[0].state == working 20000
+await agents.threads[0].state == idle 40000
+
+# `^s [` freezes the tail and enters scroll mode; `q` leaves it and re-arms the follow.
+key ctrl-s [
+await mode == Scroll 10000
+assert key_contexts[0] == Agent && key_contexts[1] == AgentNativeScroll
+shot scroll-mode
+key q
+await mode == Agent 10000
+assert key_contexts[1] == AgentIdle
+
+# `^s m` opens the model picker. It paints no target and no snapshot field, so the oracle is
+# the one a user feels: an open picker takes `Enter`, so the composer's draft is *not* sent.
+click agents.composer
+type a draft that must survive
+key ctrl-s m
+key enter
+assert agents.threads[0].state == idle && lists.tabs.selected.label == "what does this crate do"
+
+# `^s s` is a Workspace prefix combination, and is not bound inside an agent tab: it must not
+# take the user back to the Hub.
+key ctrl-s s
+assert screen == Workspace && mode == Agent && key_contexts[0] == Agent
+
+# `^s F` is the terminal fallback: the floating PTY popup over the same worktree.
+key ctrl-s F
+await agents.popup == Terminal 15000
+assert key_contexts[0] == Agent && key_contexts[1] == Terminal
+key ctrl-s q
+await agents.popup absent 10000
+assert mode == Agent && key_contexts[1] == AgentIdle
+
+# `^s x` closes the tab and hands the Workspace back to the process tab beside it.
+key ctrl-s x
+await mode == Terminal 15000
+assert lists.tabs.rows[3] absent && screen == Workspace
+dump closed
+quit

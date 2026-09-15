@@ -117,6 +117,7 @@ pub(crate) fn render(
                         RowColumn::auto(Text::ui("current").faint()).align(ColumnAlign::Right),
                     )
                 })
+                .harness_target_indexed("dialog.row", index)
                 .into_any_element()
         },
     )

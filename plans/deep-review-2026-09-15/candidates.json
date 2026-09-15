@@ -1,0 +1,68 @@
+[
+ {
+  "id": "C1",
+  "sources": [
+   "R1-1",
+   "R2-6"
+  ],
+  "claim": "Mutation settlement is not causally tied to the mutation: any SnapshotChanged clears every pending settle claim, and the 250 ms grace expiry releases a claim regardless, so await idle can return on stale daemon-derived state."
+ },
+ {
+  "id": "C2",
+  "sources": [
+   "R1-2",
+   "R2-2"
+  ],
+  "claim": "Teardown failures are collected after the scenario outcome is fixed: the failed journal entry and report are written from the pre-teardown outcome, home/ is deleted on the success branch, and only afterwards is the teardown problem turned into an error."
+ },
+ {
+  "id": "C3",
+  "sources": [
+   "R1-3",
+   "R2-1"
+  ],
+  "claim": "A directory run with an explicit --run-dir uses it as the suite root without creating or atomically claiming it (first child fails with NotFound, or a pre-created dir bypasses collision protection); the default suite root is created with the single-run layout, leaving stray home/, shots/, dumps/."
+ },
+ {
+  "id": "C4",
+  "sources": [
+   "R1-4"
+  ],
+  "claim": "A shot whose app response succeeded but whose capture/baseline step later fails loses the app exchange from the journal: the later error propagates with ? and journal_outcome records only a runner error."
+ },
+ {
+  "id": "C5",
+  "sources": [
+   "R2-3"
+  ],
+  "claim": "daemon restart: the adopted replacement is a shell gated on stdin when the PID seal is removed; Fleet (which auto-starts daemons) can win the race and acquire the singleton, so readiness succeeds against an unowned daemon and the adopted child exits."
+ },
+ {
+  "id": "C6",
+  "sources": [
+   "R2-4"
+  ],
+  "claim": "The virtual lane pins output geometry through the Lua-only hyprctl eval hl.monitor(...) path before config-provider detection runs, so on a legacy/hyprlang-configured Hyprland the lane cannot pin geometry and falls back, contrary to the documented dual-provider support."
+ },
+ {
+  "id": "C7",
+  "sources": [
+   "R2-5"
+  ],
+  "claim": "With --update-baselines every non-virtual lane skips capture entirely; in the attach lane (which has pixels) a shot succeeds and journals not-recorded against a PNG that was never written, so no screenshot artifact exists."
+ },
+ {
+  "id": "C8",
+  "sources": [
+   "R2-7"
+  ],
+  "claim": "The Jobs log-follow loop keeps its reply receiver alive across the 250 ms TAIL_INTERVAL timer; because the bridge now holds the in-flight claim until the receiver closes, in_flight_requests never reaches zero while a log is followed and await idle times out."
+ },
+ {
+  "id": "C9",
+  "sources": [
+   "R2-8"
+  ],
+  "claim": "lists.jobs is filtered by jobs_panel.filter but its filter field is always serialized as an empty string, so a scenario cannot observe the active filter and an empty filtered list is indistinguishable from an empty registry."
+ }
+]

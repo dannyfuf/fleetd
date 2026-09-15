@@ -23,7 +23,7 @@ impl JobsRequests {
         Self(request)
     }
 
-    fn request(&self, body: RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> {
+    pub(super) fn request(&self, body: RequestBody) -> Receiver<Result<ResponseBody, ProtoError>> {
         (self.0)(body)
     }
 }
@@ -98,13 +98,18 @@ fn await_job_mutation(
                 cx.notify();
             });
         }
+        anyhow::Ok(())
     })
-    .detach();
+    .detach_and_log_err(cx);
 }
 
 pub(super) fn acknowledge_dismissal(app: &mut AppState, dismissed: &[JobId]) {
     if let Some(snapshot) = app.snapshot.as_mut() {
         snapshot.jobs.retain(|job| !dismissed.contains(&job.id));
+        // Every other writer of the daemon mirror bumps the revision; this one edits
+        // `snapshot.jobs`, which `lists.jobs`, `jobs[]` and `idle.running_jobs` are all built
+        // from, so without it the harness projection keeps serving the dismissed row.
+        app.bump_snapshot_revision();
     }
     app.seen_failed.extend(dismissed.iter().cloned());
     if app
@@ -228,14 +233,14 @@ pub(super) fn request_dismissal(
     let state = state.clone();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
-        cx.update(|cx| {
+        cx.update(|cx| -> anyhow::Result<()> {
             if let Some(error) = mutation_failure(answer, ExpectedMutation::Dismiss, "dismiss jobs")
             {
                 state.update(cx, |app, cx| {
                     record_mutation_failure(app, error, None, false);
                     cx.notify();
                 });
-                return;
+                return Ok(());
             }
             state.update(cx, |app, cx| {
                 acknowledge_dismissal(app, &gone);
@@ -243,10 +248,13 @@ pub(super) fn request_dismissal(
             });
             panel.update(cx, |panel, cx| {
                 reconcile_dismissed_panel(panel, snapshot_jobs(&state, cx), &gone);
+                mirror_panel(panel, &state, cx);
             });
-        });
+            Ok(())
+        })?;
+        anyhow::Ok(())
     })
-    .detach();
+    .detach_and_log_err(cx);
 }
 
 impl JobsPanel {
@@ -272,6 +280,7 @@ impl JobsPanel {
                     let len = panel.visible_len(jobs);
                     panel.cursor = (panel.cursor + 1).min(len.saturating_sub(1));
                     scroll.scroll_to_reveal_item(panel.cursor);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);
@@ -287,7 +296,7 @@ impl JobsPanel {
         let scroll = self.list_scroll.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, _| {
+            panel.update(cx, |panel, cx| {
                 if panel.expanded.is_some() {
                     panel.following = false;
                     panel.log_offset = panel.log_offset.saturating_sub(1);
@@ -295,6 +304,7 @@ impl JobsPanel {
                 } else {
                     panel.cursor = panel.cursor.saturating_sub(1);
                     scroll.scroll_to_reveal_item(panel.cursor);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);
@@ -310,7 +320,7 @@ impl JobsPanel {
         let scroll = self.list_scroll.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, _| {
+            panel.update(cx, |panel, cx| {
                 if panel.expanded.is_some() {
                     panel.following = false;
                     panel.log_offset = 0;
@@ -318,6 +328,7 @@ impl JobsPanel {
                 } else {
                     panel.cursor = 0;
                     scroll.scroll_to_reveal_item(0);
+                    mirror_panel(panel, &state, cx);
                 }
             });
             notify(&state, cx);
@@ -327,24 +338,39 @@ impl JobsPanel {
     pub(super) fn on_bottom(
         &self,
         state: &Entity<AppState>,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::Bottom, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
         let scroll = self.list_scroll.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, cx| {
+            let resume = panel.update(cx, |panel, cx| {
                 let jobs = snapshot_jobs(&state, cx);
                 if panel.expanded.is_some() {
                     // `G` re-enables follow (§3.7), it does not merely scroll.
+                    let resume = !panel.following;
                     panel.following = true;
                     panel.log_offset = panel.log.len().saturating_sub(1);
                     log_scroll.scroll_to_item(panel.log_offset, ScrollStrategy::Bottom);
+                    resume.then(|| panel.expanded.clone()).flatten()
                 } else {
                     panel.cursor = panel.visible_len(jobs).saturating_sub(1);
                     scroll.scroll_to_reveal_item(panel.cursor);
+                    mirror_panel(panel, &state, cx);
+                    None
                 }
             });
+            if let Some(job) = resume {
+                start_tail(
+                    panel.clone(),
+                    state.clone(),
+                    requests.clone(),
+                    log_scroll.clone(),
+                    job,
+                    cx,
+                );
+            }
             notify(&state, cx);
         }
     }
@@ -352,22 +378,37 @@ impl JobsPanel {
     pub(super) fn on_cycle_filter(
         &self,
         state: &Entity<AppState>,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::CycleFilter, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
+        let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
-            panel.update(cx, |panel, cx| {
+            let resume = panel.update(cx, |panel, cx| {
                 let jobs = snapshot_jobs(&state, cx);
                 // One binding, two meanings: `f` follows inside an expanded log and cycles the
                 // filter in the list (`docs/APP-CONTRACTS.md` §3).
                 if panel.expanded.is_some() {
                     panel.following = !panel.following;
+                    panel.following.then(|| panel.expanded.clone()).flatten()
                 } else {
                     panel.filter = panel.filter.next();
                     let len = panel.visible_len(jobs);
                     panel.clamp(len);
+                    mirror_panel(panel, &state, cx);
+                    None
                 }
             });
+            if let Some(job) = resume {
+                start_tail(
+                    panel.clone(),
+                    state.clone(),
+                    requests.clone(),
+                    log_scroll.clone(),
+                    job,
+                    cx,
+                );
+            }
             notify(&state, cx);
         }
     }
@@ -420,11 +461,10 @@ impl JobsPanel {
     pub(super) fn on_toggle_log(
         &self,
         state: &Entity<AppState>,
-        bridge: &Bridge,
+        requests: JobsRequests,
     ) -> impl Fn(&jobs_actions::ToggleLog, &mut Window, &mut App) + 'static {
         let panel = self.state.clone();
         let state = state.clone();
-        let bridge = bridge.clone();
         let log_scroll = self.log_scroll.clone();
         move |_, _, cx| {
             let Some(job) = selected_job(&panel, &state, cx).map(|job| job.id) else {
@@ -443,15 +483,14 @@ impl JobsPanel {
                 panel.expanded = Some(job.clone());
                 panel.following = true;
             });
-            let task = spawn_tail(
+            start_tail(
                 panel.clone(),
                 state.clone(),
-                bridge.clone(),
+                requests.clone(),
                 log_scroll.clone(),
                 job,
                 cx,
             );
-            panel.update(cx, |panel, _| panel.tail = Some(task));
             notify(&state, cx);
         }
     }

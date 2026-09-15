@@ -1,0 +1,46 @@
+# docs/NATIVE-AGENTS.md §6.1 — the decision drawer is docked to the composer, never a modal
+# docs/NATIVE-AGENTS.md §6.2 — `[y] allow once` · `[a] allow for this session` · `[n] deny` ·
+#   `[esc] deny and stop`, and `[e] edit` is offered by Claude and **never** by Codex
+# docs/KEYMAP.md §Native agent thread — `Agent > AgentDecision > AgentPermission`
+# docs/TESTING-HARNESS.md §5 — the scripted `edit-approval.json` the preset gives Codex
+#
+# The gate is answered with the pointer, which is what the frozen approval targets are for.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+assert lists.tabs.selected.badges[0] == codex
+click agents.composer
+type apply the README fix
+key enter
+
+# The turn stops at the file-change approval. A gate owns the keyboard in the frame it appears.
+await agents.threads[0].pending_gate == permission 30000
+assert agents.threads[0].state == needs_you && lists.tabs.selected.marks[0] == needs_you
+assert key_contexts[1] == AgentDecision && key_contexts[2] == AgentPermission
+assert toasts[0].text ~= "needs permission"
+shot approval
+# The dump is the evidence that Codex is offered no `[e] edit`: its `targets` map holds
+# `agents.approval.allow_once`, `allow_always`, `deny` and `deny_and_stop` and no `edit`. A
+# predicate cannot read it — every target name contains a `.`, and the predicate path splits on
+# `.` — so the assertion lives in the dump a reviewer opens, not in a clause.
+dump approval
+
+# `[y] allow once` — the drawer's own control, clicked. The gate closes and the thread stops
+# needing you, which is the whole of what the answer promises.
+click agents.approval.allow_once
+await agents.threads[0].pending_gate absent 30000
+assert agents.threads[0].state != needs_you && lists.tabs.selected.marks[0] != needs_you
+dump allowed
+
+# What this scenario deliberately does not assert: that the turn then *settles*. An answered
+# Codex approval loses its settlement under load — `fleetd.log` reads `dropping a Codex
+# settlement for a turn that is not the running one`, the sticky error reads `native-agent
+# storage failed: … event targets the wrong turn`, and the thread stays `working` for ever.
+# Measured: settled on three unloaded runs, did not settle on a suite run sharing the box.
+# The defect is not in TODO.md, so it gets no expected-to-fail scenario; add
+# `await agents.threads[0].state == idle 30000` here when it is fixed.
+quit

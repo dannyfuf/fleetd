@@ -1,0 +1,53 @@
+# KEYMAP.md §Jobs panel (`J`) — open, expand a log, collapse it, close restoring prior focus
+#
+# Two successful runner-side injections deterministically fill the live daemon's in-memory job
+# registry; preset startup work is deliberately not part of this scenario's precondition.
+# `Esc` is the interesting key here — it collapses an expanded log and only closes the panel on
+# the second press, which is checked by asserting the panel is *still* open in between.
+fixture: busy
+job success
+job success
+await idle 30000
+await lists.jobs.rows[0] exists 30000
+# Injecting jobs creates worktrees and follows the newest row. Pin the prior focus explicitly.
+key g g
+await focused == worktrees.row[0]
+assert screen == Hub && overlay absent && focused == worktrees.row[0]
+
+# `J` opens the panel. It is an overlay: its own key context, its own focus owner.
+key J
+await overlay == Jobs
+assert mode == Jobs && key_contexts[0] == Jobs && focused == jobs.row[0]
+assert lists.jobs.selected exists && lists.jobs.rows[0].id ~= "^job-"
+shot jobs
+dump jobs
+
+# Moving the panel cursor must move both the focus target and the selected projected row.
+key j
+await focused == jobs.row[1]
+assert lists.jobs.selected.label ~= "^Create acme/api#injected-[01]$"
+
+# `Enter` expands the selected job's log; the panel stays open ...
+key enter
+await idle
+assert overlay == Jobs && mode == Jobs && key_contexts[0] == Jobs
+dump expanded
+
+# ... `Esc` collapses the log and the panel is *still* open ...
+key escape
+await idle
+assert overlay == Jobs && mode == Jobs && focused == jobs.row[1]
+assert lists.jobs.selected.label ~= "^Create acme/api#injected-[01]$"
+
+# All injected jobs are finished, so the running filter leaves no projected rows.
+key f
+await lists.jobs.rows[0] absent
+assert lists.jobs.filter == "running"
+assert lists.jobs.selected absent && overlay == Jobs
+
+# ... and `q` closes it, restoring the pane, row and mode the Hub had before.
+key q
+await overlay absent
+assert screen == Hub && mode == Normal && hub_pane == List && focused == worktrees.row[0]
+dump closed
+quit

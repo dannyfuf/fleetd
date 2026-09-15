@@ -1,0 +1,29 @@
+# Phase 4 acceptance — a scripted Codex edit approval, with no vendor CLI, no network, no token.
+#
+# The `agents` preset points fleetd's Codex command at `fleet-harness agent --provider codex`
+# and hands it `transcripts/edit-approval.json`, so everything below is Codex's real wire
+# protocol spoken by the harness binary.
+fixture: agents
+await idle
+
+# Open the worktree, then start a native Codex thread from the Workspace prefix.
+key o
+await screen == Workspace 20000
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+
+# A new thread hands focus to its tab, not its composer, so click the composer before typing.
+click agents.composer
+type apply the README fix
+key enter
+
+# The transcript streams its text, then stops at the edit approval.
+await agents.threads[0].pending_gate exists 30000
+shot approval
+dump approval
+
+# Answer the gate from the pointer: the decision dock paints one target per option.
+click agents.approval.allow_once
+await agents.threads[0].pending_gate absent 30000
+dump approved
+quit

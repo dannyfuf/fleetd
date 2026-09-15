@@ -1,0 +1,52 @@
+# KEYMAP.md §Workspace (Terminal mode) — "All keys go to the PTY except these direct
+# terminal affordances" — and its `ctrl-s c` row, "new terminal tab (shell in worktree
+# path)". TESTING-HARNESS.md §3 for `terminal.text`, which is what proves the keys arrived.
+#
+# Every assertion here is an `await` on the mirrored grid — no assertion is given a
+# duration to settle in instead of a predicate. The single `wait` below is tab setup, and
+# the comment above it says what makes it a bound rather than a guess.
+#
+# The tab runs `$SHELL -l`, so the `PS1` line assumes an sh-family login shell: sh, bash,
+# zsh and dash all take it, and `PtyOptions::shell` falls back to zsh when `SHELL` is unset.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+
+# A fourth tab, a plain login shell in the worktree.
+key ctrl-s c
+await lists.tabs.rows[3] exists 20000
+
+# Selecting the new tab is a beat behind creating it, and everything below types into
+# whichever tab is selected, so wait for the selection rather than for the row.
+await lists.tabs.selected.id == 4 20000
+assert lists.tabs.selected.badges[0] == pty
+assert mode == Terminal && screen == Workspace
+
+# The one `wait` in this file, and it is setup rather than an assertion. Fleet types
+# `clear` into a new shell tab once its prompt looks ready — at the latest 500 ms after the
+# PTY spawned, and 150 ms after its first output (`fleet-term` `host/owner.rs`,
+# PROMPT_FALLBACK and PROMPT_AFTER_OUTPUT). Until that has happened the tab has a second
+# writer: text typed here can be submitted by `clear`'s newline, and output printed here can
+# be wiped by `clear` itself. No snapshot field reports it — the state before the wipe and
+# the state after it are the same bare prompt — so the bound in the code is the only
+# synchronisation available, and 1500 ms clears it three times over.
+wait 1500
+await terminal.text ~= \S 20000
+
+# The marker is computed by the shell, not echoed from the keystrokes: `$((6*7))` reaches
+# the grid as `42` only if the PTY ran the line.
+type PS1="fleet-$((6*7))-ready> "
+key enter
+await terminal.text ~= fleet-42-ready 20000
+shot terminal
+dump terminal
+
+# Ordinary command output lands in the grid too. `terminal.text` joins the rows with "\n",
+# so a regex that spans two lines says where the output stopped and the next prompt began,
+# without this file having to know which row number either landed on.
+type echo fleet-harness-was-here
+key enter
+await terminal.text ~= "\nfleet-harness-was-here\nfleet-42-ready>" 20000
+assert screen == Workspace && mode == Terminal && overlay absent
+quit

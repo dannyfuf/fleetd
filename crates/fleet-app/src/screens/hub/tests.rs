@@ -207,6 +207,7 @@ fn snapshot(count: usize) -> Snapshot {
     Snapshot {
         boards: Vec::new(),
         generated_at: String::new(),
+        revision: None,
         contexts: vec![],
         repos: vec![],
         clones: vec![],

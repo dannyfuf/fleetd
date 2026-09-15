@@ -270,3 +270,29 @@ fn a_custom_answer_suppresses_the_checkmarks() {
     set.custom = true;
     assert!(!set.is_selected(0, 0));
 }
+
+#[test]
+fn every_approval_control_carries_its_frozen_harness_name() {
+    assert_eq!(
+        approval(true)
+            .options()
+            .iter()
+            .map(|option| option.action.harness_target())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("agents.approval.allow_once"),
+            Some("agents.approval.allow_always"),
+            Some("agents.approval.deny"),
+            Some("agents.approval.edit"),
+            Some("agents.approval.deny_and_stop"),
+        ],
+        "docs/TESTING-HARNESS.md §3 names the approval controls; a scenario clicks these"
+    );
+    // A question is answered by its rows and by `⏎`, so its options are deliberately unnamed.
+    assert!(
+        question(false, 2)
+            .options()
+            .iter()
+            .all(|option| option.action.harness_target().is_none())
+    );
+}

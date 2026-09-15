@@ -37,6 +37,7 @@ fn app_with_jobs(home: &str, jobs: Vec<JobRecord>) -> AppState {
     app.snapshot = Some(Snapshot {
         boards: Vec::new(),
         generated_at: String::new(),
+        revision: None,
         contexts: vec![],
         repos: vec![],
         clones: vec![],
@@ -116,6 +117,74 @@ impl gpui::Render for ActionHarness {
     }
 }
 
+#[gpui::test]
+fn moving_the_cursor_updates_the_app_state_mirror(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| {
+        app_with_jobs(
+            "/tmp/fleet-jobs-move-mirror",
+            vec![
+                job("job-a", JobStatus::Running, true, false),
+                job("job-b", JobStatus::Running, true, false),
+            ],
+        )
+    });
+    let jobs = cx.update(JobsPanel::new);
+    let handler = jobs.on_move_down(&state);
+    let window = cx.add_window(|_, _| ActionHarness);
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+    window
+        .update(&mut visual, |_, window, cx| {
+            handler(&jobs_actions::MoveDown, window, cx)
+        })
+        .unwrap_or_else(|error| panic!("move jobs cursor: {error}"));
+
+    visual.update(|_, cx| {
+        assert_eq!(
+            state.read(cx).jobs_panel,
+            JobsPanelMirror {
+                cursor: 1,
+                filter: JobFilter::All,
+            }
+        );
+    });
+}
+
+#[gpui::test]
+fn cycling_the_filter_updates_the_app_state_mirror(cx: &mut gpui::TestAppContext) {
+    let state = cx.new(|_| {
+        app_with_jobs(
+            "/tmp/fleet-jobs-filter-mirror",
+            vec![
+                job("job-a", JobStatus::Succeeded, false, false),
+                job("job-b", JobStatus::Running, true, false),
+                job("job-c", JobStatus::Running, true, false),
+            ],
+        )
+    });
+    let jobs = cx.update(JobsPanel::new);
+    cx.update(|cx| jobs.state.update(cx, |panel, _| panel.cursor = 2));
+    let handler = jobs.on_cycle_filter(&state, RequestHarness::default().requests());
+    let window = cx.add_window(|_, _| ActionHarness);
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+    window
+        .update(&mut visual, |_, window, cx| {
+            handler(&jobs_actions::CycleFilter, window, cx)
+        })
+        .unwrap_or_else(|error| panic!("cycle jobs filter: {error}"));
+
+    visual.update(|_, cx| {
+        assert_eq!(
+            state.read(cx).jobs_panel,
+            JobsPanelMirror {
+                cursor: 1,
+                filter: JobFilter::Running,
+            }
+        );
+    });
+}
+
 #[test]
 fn the_cursor_indexes_the_visible_rows_not_the_daemons_list() {
     let jobs = vec![
@@ -139,18 +208,42 @@ fn the_cursor_indexes_the_visible_rows_not_the_daemons_list() {
     assert_eq!(panel.visible_len(&jobs), 1);
 }
 
-#[test]
-fn the_cursor_is_clamped_when_the_filter_shrinks_the_list() {
-    let jobs = [
-        job("job-a", JobStatus::Running, true, false),
-        job("job-b", JobStatus::Running, true, false),
-        job("job-c", JobStatus::Succeeded, false, false),
-    ];
-    let mut panel = panel(JobFilter::All);
-    panel.cursor = 2;
-    panel.filter = JobFilter::Running;
-    panel.clamp(panel.visible_len(&jobs));
-    assert_eq!(panel.cursor, 1);
+#[gpui::test]
+fn the_cursor_is_clamped_and_mirrored_when_the_filter_shrinks_the_list(
+    cx: &mut gpui::TestAppContext,
+) {
+    let state = cx.new(|_| {
+        let mut state = app_with_jobs(
+            "/tmp/fleet-jobs-clamp",
+            vec![
+                job("job-a", JobStatus::Running, true, false),
+                job("job-b", JobStatus::Running, true, false),
+                job("job-c", JobStatus::Succeeded, false, false),
+            ],
+        );
+        state.overlay = Some(Overlay::Jobs);
+        state
+    });
+    let jobs = cx.update(JobsPanel::new);
+
+    cx.update(|cx| {
+        jobs.state.update(cx, |panel, _| {
+            panel.cursor = 2;
+            panel.filter = JobFilter::Running;
+        });
+        presentation::synchronize(&jobs.state, &state, &jobs.list_scroll, None, cx);
+    });
+
+    cx.read(|cx| {
+        assert_eq!(jobs.state.read(cx).cursor, 1);
+        assert_eq!(
+            state.read(cx).jobs_panel,
+            JobsPanelMirror {
+                cursor: 1,
+                filter: JobFilter::Running,
+            }
+        );
+    });
 }
 
 #[test]
@@ -300,7 +393,34 @@ fn dismiss_updates_only_acknowledged_jobs() {
     assert_eq!(app.snapshot.as_ref().expect("snapshot").jobs.len(), 2);
     assert!(app.seen_failed.is_empty());
 
+    // The harness projection is memoised behind `snapshot_revision`, so a dismissal that edits
+    // `snapshot.jobs` without moving it serves the dismissed row to every later `dump` and
+    // `await` (`docs/TESTING-HARNESS.md` §3).
+    let before = app.harness_projection();
+    assert!(
+        before
+            .snapshot
+            .jobs
+            .iter()
+            .any(|job| job.id == dismissed.id.as_str()),
+        "the job is in the projection before it is dismissed"
+    );
+
     actions::acknowledge_dismissal(&mut app, &gone);
+
+    let after = app.harness_projection();
+    assert!(
+        !after
+            .snapshot
+            .jobs
+            .iter()
+            .any(|job| job.id == dismissed.id.as_str()),
+        "the dismissed job must leave the projection, not just the mirror"
+    );
+    assert_ne!(
+        before.revision, after.revision,
+        "a changed projection has to move the revision or `await` never wakes"
+    );
     assert_eq!(
         app.snapshot
             .as_ref()
@@ -630,5 +750,62 @@ impl JobListHarness {
             gpui::size(gpui::px(440.0), gpui::px(140.0)),
             |_, _| view.into_any_element(),
         );
+    }
+}
+
+/// `jobs.row[N]` is what a Phase 5 degraded-state scenario clicks to open a failed job's log
+/// (`docs/TESTING-HARNESS.md` §3), so the panel's virtualized rows carry their index.
+#[gpui::test]
+fn the_jobs_panel_names_its_rows_for_the_harness(cx: &mut gpui::TestAppContext) {
+    fleet_ui_kit::harness::set_recording(true);
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let jobs: Vec<_> = (0..3)
+        .map(|index| job(&format!("job-{index}"), JobStatus::Succeeded, false, false))
+        .collect();
+    let scroll = ListState::new(0, ListAlignment::Top, gpui::px(0.0));
+    let mut prepared = presentation::PreparedJobs::default();
+    assert!(prepared.update(&jobs, JobFilter::All, None, &scroll));
+    let cx = cx.add_empty_window();
+    let harness = cx.new(|_| FramedJobList {
+        rows: prepared.rows.clone(),
+        scroll,
+    });
+    let element = harness.clone();
+    cx.draw(
+        gpui::Point::default(),
+        gpui::size(gpui::px(440.0), gpui::px(140.0)),
+        |_, _| element.into_any_element(),
+    );
+
+    let names: Vec<String> = cx
+        .update(|window, _| fleet_ui_kit::harness::painted(window))
+        .into_iter()
+        .map(|target| target.name.to_string())
+        .collect();
+    fleet_ui_kit::harness::set_recording(false);
+
+    assert_eq!(
+        names,
+        vec!["jobs.row[0]", "jobs.row[1]", "jobs.row[2]"],
+        "every visible job row is addressable by its visual index"
+    );
+}
+
+/// The same list inside the chrome that begins a frame: `fleet_ui_kit::AppFrame` is the only
+/// frame boundary the target table has, so a tree drawn without it records nothing at all.
+struct FramedJobList {
+    rows: Rc<[Rc<crate::presentation::JobDisplay>]>,
+    scroll: ListState,
+}
+
+impl gpui::Render for FramedJobList {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        fleet_ui_kit::AppFrame::new().body(presentation::list_body(
+            self.rows.clone(),
+            0,
+            JobFilter::All,
+            &self.scroll,
+            1_788_523_230,
+        ))
     }
 }

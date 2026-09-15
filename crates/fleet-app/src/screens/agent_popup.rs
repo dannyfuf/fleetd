@@ -32,8 +32,8 @@ use fleet_proto::{
     terminal::{Key, KeyAction, KeyEvent, Modifiers, ScrollCommand},
 };
 use fleet_ui_kit::{
-    ActiveTheme, ExitStrip, KeyHintRow, Overlay as FloatingOverlay, OverlayLayer, PrefixHint,
-    ScrollPill, StatusDot, Text, Tone, Veil,
+    ActiveTheme, ExitStrip, HarnessTargetExt, KeyHintRow, Overlay as FloatingOverlay, OverlayLayer,
+    PrefixHint, ScrollPill, StatusDot, Text, Tone, Veil,
 };
 use gpui::{
     AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, Keystroke, MouseButton,
@@ -174,7 +174,10 @@ impl AgentPopup {
             .width(width)
             .scrim(true)
             .layer(OverlayLayer::Dialog)
-            .content(self.with_keys(card, state, bridge))
+            .content(
+                self.with_keys(card, state, bridge)
+                    .harness_target("agents.popup"),
+            )
             .into_any_element()
     }
 }

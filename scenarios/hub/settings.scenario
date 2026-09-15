@@ -1,0 +1,25 @@
+# KEYMAP.md §Dialogs and text inputs — Settings (`,`): "`Enter` saves · `Esc` discards"
+#
+# Settings is a dialog like any other as far as the key table is concerned: it takes the whole
+# keyboard under `Dialog > Settings` and gives it back on `Esc`. This scenario checks the frame
+# around it rather than the switches inside it — the dialog host owns the field list, and the
+# projection reports `dialog.fields` empty rather than guessing at it
+# (`docs/TESTING-HARNESS.md` §3).
+fixture: one-repo
+await idle 30000
+assert screen == Hub && mode == Normal && overlay absent
+
+key ,
+await overlay == Dialog 10000
+assert mode == Dialog && dialog.name == Settings
+assert key_contexts[0] == Dialog && key_contexts[1] == Settings
+assert focused == dialog
+shot settings
+dump settings
+
+# `Esc` discards and restores the Hub exactly as it was.
+key escape
+await overlay absent
+assert screen == Hub && mode == Normal && focused == worktrees.row[0] && dialog absent
+dump discarded
+quit

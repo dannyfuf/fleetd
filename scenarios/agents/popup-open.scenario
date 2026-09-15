@@ -1,0 +1,31 @@
+# docs/KEYMAP.md §Hub — `a` / `A` open the floating Claude / Codex agent popup [A21]
+# docs/KEYMAP.md §Agent popup — `^s` is the popup's one-shot prefix and `^s q` hides it
+# docs/NATIVE-AGENTS.md §10 — the popup is the *terminal* fallback: a PTY, not a native thread
+#
+# The `agents` preset installs `fleet-harness agent` under the vendor's own name, so the popup
+# starts a scripted process with no vendor CLI, no network and no token.
+fixture: agents
+await idle
+assert screen == Hub && agents.popup absent
+
+# `a` opens the Claude popup. It shadows the Hub, owns the keyboard, and reports its sub-mode.
+key a
+await agents.popup == Terminal 10000
+assert screen == Hub && mode == Terminal && key_contexts[0] == Agent && key_contexts[1] == Terminal && focused == agents.popup
+shot claude-popup
+dump claude-popup
+
+# `^s q` hides it and hands the Hub back its own selection. The Hub underneath never moved.
+key ctrl-s q
+await agents.popup absent 10000
+assert screen == Hub && mode == Normal && focused == worktrees.row[0] && hub_tab == Worktrees
+
+# `A` opens the same floating surface on Codex.
+#
+# It is hidden with `quit` rather than with `^s q`: on Codex that key is inert today, and the
+# corpus README records the defect rather than asserting the broken half.
+key A
+await agents.popup == Terminal 10000
+assert key_contexts[0] == Agent && focused == agents.popup && screen == Hub
+dump codex-popup
+quit

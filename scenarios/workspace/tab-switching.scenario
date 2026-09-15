@@ -1,0 +1,51 @@
+# KEYMAP.md §Workspace (Terminal mode) — `ctrl-s 1`-`9`, `ctrl-s h`/`l`, `ctrl-s p`/`n`,
+# `ctrl-s Tab` (last tab, MRU within this session) [A2], and §Workspace (Native mode) for
+# what selecting the `lg` tab does to the key context.
+#
+# The three tabs come from config.json's default windows, so the numbering is the strip's
+# visual order: 1 and 2 are PTYs, 3 is Fleet's own git pane.
+fixture: one-repo
+await idle
+key o
+await screen == Workspace 20000
+await lists.tabs.rows[2] exists 20000
+await lists.tabs.selected.id == 1 20000
+assert mode == Terminal
+
+# A number selects that tab directly. The third is a `fleet://` pane, so the mode word and
+# the key context change with it: `Workspace > Native` binds `ctrl-s` and nothing else.
+key ctrl-s 3
+await lists.tabs.selected.id == 3 10000
+assert mode == Native && key_contexts[1] == Native && focused == tabs.tab[2]
+shot native-tab
+
+# `ctrl-s [` over a native tab has no scrollback to enter and says so instead.
+key ctrl-s [
+await toasts[0].text == "no scrollback in this tab" 10000
+assert mode == Native
+
+key ctrl-s 1
+await lists.tabs.selected.id == 1 10000
+assert mode == Terminal && key_contexts[1] == Terminal
+
+# `l`/`n` move to the next tab, `h`/`p` to the previous one.
+key ctrl-s l
+await lists.tabs.selected.id == 2 10000
+key ctrl-s n
+await lists.tabs.selected.id == 3 10000
+key ctrl-s h
+await lists.tabs.selected.id == 2 10000
+key ctrl-s p
+await lists.tabs.selected.id == 1 10000
+
+# `Tab` returns to the most recently used tab, which is the one we just left.
+key ctrl-s tab
+await lists.tabs.selected.id == 2 10000
+assert focused == tabs.tab[1]
+
+# The strip is also a pointer target: its tabs carry an `on_select` handler.
+click tabs.tab[0]
+await lists.tabs.selected.id == 1 10000
+assert screen == Workspace && overlay absent
+dump tabs
+quit

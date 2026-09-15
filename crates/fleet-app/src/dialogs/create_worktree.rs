@@ -616,6 +616,7 @@ fn base_section(draft: &CreateState, tight: gpui::Pixels) -> Div {
     .cursor(draft.base_cursor)
     .cap(BASE_ROWS)
     .under_text_field(true)
+    .harness_rows("dialog.row", 0)
     .empty(Text::ui("No base refs yet.").muted());
 
     div()
@@ -732,13 +733,19 @@ pub(crate) fn render(
         .preview_id()
         .filter(|id| existing_worktree(state.read(cx), id).is_some());
 
+    // `dialog.field[N]` counts the tab cycle, so the indices are exactly [`Field`]'s order:
+    // branch, base, host. The host cycler is absent on a single-host daemon, and its index is
+    // simply absent from the dump with it.
     let body = div()
         .flex()
         .flex_col()
         .gap(gap)
-        .child(branch_field(draft, duplicate.as_deref()))
-        .child(base_section(draft, tight))
-        .children(host_section(draft, tight, cx))
+        .child(branch_field(draft, duplicate.as_deref()).harness_target_indexed("dialog.field", 0))
+        .child(base_section(draft, tight).harness_target_indexed("dialog.field", 1))
+        .children(
+            host_section(draft, tight, cx)
+                .map(|section| section.harness_target_indexed("dialog.field", 2)),
+        )
         .child(expectation(draft, cx));
 
     let mut card = Dialog::new("New worktree")
@@ -1169,6 +1176,7 @@ mod tests {
         fleet_proto::snapshot::Snapshot {
             boards: Vec::new(),
             generated_at: String::new(),
+            revision: None,
             contexts: Vec::new(),
             repos: Vec::new(),
             clones: Vec::new(),

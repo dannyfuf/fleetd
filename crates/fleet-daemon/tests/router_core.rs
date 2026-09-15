@@ -862,6 +862,7 @@ fn context_sync_snapshot(
     fleet_proto::snapshot::Snapshot {
         boards: Vec::new(),
         generated_at: "2026-09-09T12:00:00Z".to_owned(),
+        revision: None,
         contexts: context.into_iter().collect(),
         repos: Vec::new(),
         clones: Vec::new(),

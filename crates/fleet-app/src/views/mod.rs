@@ -5,6 +5,7 @@ pub mod board_screen;
 pub mod detail;
 pub mod doctor_view;
 pub mod first_run;
+pub(crate) mod harness;
 pub mod hub_context_bar;
 pub mod job_ticker;
 pub mod jobs_panel;

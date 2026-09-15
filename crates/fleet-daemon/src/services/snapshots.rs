@@ -149,6 +149,7 @@ impl Services {
         Ok(Snapshot {
             boards: self.boards.summaries().await,
             generated_at,
+            revision: None,
             contexts: state.contexts.clone(),
             repos: state.repos.clone(),
             clones: state.clones.clone(),

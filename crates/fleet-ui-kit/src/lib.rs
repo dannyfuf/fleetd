@@ -43,6 +43,7 @@
 pub mod assets;
 pub mod components;
 pub mod focus;
+pub mod harness;
 pub mod icons;
 mod paint_error;
 pub mod text;
@@ -52,6 +53,7 @@ pub mod truncate;
 
 pub use assets::{KitAssets, kit_asset, kit_asset_paths};
 pub use components::*;
+pub use harness::{HarnessTarget, HarnessTargetExt, RecordedTarget, TargetRect};
 pub use icons::{Icon, IconElement, IconSize};
 pub use text::{Text, TextRole, styled_with};
 pub use theme::{ActiveTheme, Theme, ThemeMode};
@@ -61,6 +63,7 @@ pub use truncate::{ELLIPSIS, Truncate, truncate, truncate_shared};
 /// Everything a view needs in one `use`.
 pub mod prelude {
     pub use crate::components::*;
+    pub use crate::harness::HarnessTargetExt;
     pub use crate::icons::{Icon, IconElement, IconSize};
     pub use crate::text::{Text, TextRole};
     pub use crate::theme::{ActiveTheme, Theme, ThemeMode};

@@ -44,13 +44,29 @@ async fn server_snapshot_requests_are_coalesced() {
         .await
         .unwrap_or_else(|_| panic!("snapshot event timed out"))
         .unwrap_or_else(|error| panic!("snapshot bus closed: {error}"));
-    assert!(matches!(event, Event::SnapshotChanged(_)));
+    let Event::SnapshotChanged(snapshot) = event else {
+        panic!("expected coalesced snapshot event");
+    };
+    assert_eq!(snapshot.revision, Some(3));
     assert!(
         tokio::time::timeout(Duration::from_millis(80), receiver.recv())
             .await
             .is_err(),
         "burst emitted more than one snapshot"
     );
+}
+
+#[tokio::test]
+async fn services_leave_snapshot_revision_for_the_broadcast_bus_to_stamp() {
+    let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let services = services(&temp.path().join("fleet"));
+
+    let snapshot = services
+        .snapshot()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(snapshot.revision.is_none());
 }
 
 #[tokio::test]

@@ -16,7 +16,10 @@ use fleet_proto::event::{BoardChangeReason, Event};
 async fn board_mutations_refresh_the_app_through_default_subscriptions() {
     let daemon = common::Daemon::start("board-flow")
         .expect("build fleet-daemon before running the board socket integration test");
-    let writer = daemon.connect().await;
+    let writer = daemon
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("connect to the isolated daemon: {error:#}"));
     // A separate client retains Client::connect's default subscriptions, as the app does.
     let observer = Client::connect(daemon.home()).await.unwrap();
     let context = writer.create_context("Board test", vec![]).await.unwrap();

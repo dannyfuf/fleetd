@@ -9,9 +9,10 @@ use fleet_core::{
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_proto::snapshot::LinkState;
 use fleet_ui_kit::{
-    ActiveTheme, AgeLabel, ColumnLadder, DegradedChip, EmptyState, Freshness, Icon, IconSize,
-    KeepAliveChips, KeepAliveLabel, ListView, Pane, PaneBorder, PaneHeader, PrBadge, PrBadgeState,
-    ResolvedColumn, Row, RowColumn, StatusGlyph, StatusKind, Text, Tone, Truncate, truncate,
+    ActiveTheme, AgeLabel, ColumnLadder, DegradedChip, EmptyState, Freshness, HarnessTargetExt,
+    Icon, IconSize, KeepAliveChips, KeepAliveLabel, ListView, Pane, PaneBorder, PaneHeader,
+    PrBadge, PrBadgeState, ResolvedColumn, Row, RowColumn, StatusGlyph, StatusKind, Text, Tone,
+    Truncate, truncate,
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, div, prelude::*};
 
@@ -344,6 +345,8 @@ pub fn render(
                 return div().into_any_element();
             };
             worktree_row(row, is_cursor, focused, pane_ch, &columns, age_offset, cx)
+                .harness_target_indexed("worktrees.row", index)
+                .into_any_element()
         },
     )
     .cursor(cursor)
@@ -651,6 +654,7 @@ mod tests {
         Snapshot {
             boards: Vec::new(),
             generated_at: String::new(),
+            revision: None,
             contexts: Vec::new(),
             repos: Vec::new(),
             clones: Vec::new(),

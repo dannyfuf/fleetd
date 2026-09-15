@@ -140,6 +140,7 @@ mod tests {
         let snapshot = Snapshot {
             boards: Vec::new(),
             generated_at: String::new(),
+            revision: None,
             contexts: vec![context],
             repos: vec![repo],
             clones: vec![],
@@ -184,6 +185,7 @@ mod tests {
         let snapshot = Snapshot {
             boards: Vec::new(),
             generated_at: String::new(),
+            revision: None,
             contexts: vec![],
             repos: vec![],
             clones: vec![],

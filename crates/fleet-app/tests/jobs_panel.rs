@@ -23,7 +23,10 @@ use common::Daemon;
 #[tokio::test]
 async fn a_fresh_daemon_answers_with_a_snapshot_the_panel_can_render() {
     let daemon = Daemon::start("snapshot").expect("start isolated fleetd");
-    let client = daemon.connect().await;
+    let client = daemon
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("connect to the isolated daemon: {error:#}"));
 
     let snapshot = client
         .get_snapshot()
@@ -76,7 +79,10 @@ async fn a_fresh_daemon_answers_with_a_snapshot_the_panel_can_render() {
 #[tokio::test]
 async fn the_job_list_round_trips_and_the_event_stream_is_live() {
     let daemon = Daemon::start("jobs").expect("start isolated fleetd");
-    let client = daemon.connect().await;
+    let client = daemon
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("connect to the isolated daemon: {error:#}"));
 
     let jobs = client
         .list_jobs()
@@ -137,7 +143,10 @@ async fn the_job_list_round_trips_and_the_event_stream_is_live() {
 #[tokio::test]
 async fn tailing_and_cancelling_an_unknown_job_fail_cleanly() {
     let daemon = Daemon::start("tail").expect("start isolated fleetd");
-    let client = daemon.connect().await;
+    let client = daemon
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("connect to the isolated daemon: {error:#}"));
 
     let ghost = "job-does-not-exist"
         .parse()
@@ -169,7 +178,10 @@ async fn tailing_and_cancelling_an_unknown_job_fail_cleanly() {
 #[tokio::test]
 async fn doctor_and_the_version_handshake_answer_the_daemon_state_surfaces() {
     let daemon = Daemon::start("doctor").expect("start isolated fleetd");
-    let client = daemon.connect().await;
+    let client = daemon
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("connect to the isolated daemon: {error:#}"));
 
     let version = client
         .daemon_version()
@@ -214,7 +226,10 @@ async fn doctor_and_the_version_handshake_answer_the_daemon_state_surfaces() {
 #[tokio::test]
 async fn a_shutdown_reads_as_a_lost_daemon_not_as_a_crash() {
     let daemon = Daemon::start("shutdown").expect("start isolated fleetd");
-    let client = daemon.connect().await;
+    let client = daemon
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("connect to the isolated daemon: {error:#}"));
     let mut events = client.events();
 
     client

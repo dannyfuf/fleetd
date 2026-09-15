@@ -13,6 +13,8 @@ name = "fleetd"
 path = "src/main.rs"
 
 [features]
+# The deterministic fakes in `testing`, used by this crate's own tests and by the workspace
+# crates that drive a daemon without spawning one. Never in the default set.
 test-support = []
 # Opt-in tests that spawn the **real** `claude` and `codex` binaries. The default `make test`
 # run spawns neither: every other agent test drives a scripted `/bin/sh` mock peer, so a machine

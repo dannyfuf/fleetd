@@ -1,0 +1,36 @@
+# KEYMAP.md §Filter mode (`/`) [A13] — "first press leaves the input keeping the filter,
+# second press clears it — never quits"
+#
+# The two-stage escape is the binding most likely to be broken by a well-meaning refactor,
+# because both stages look like "close the filter". They are told apart by `lists.*.filter`,
+# which still carries the query after the first `Esc` and is empty after the second, while
+# `screen` proves that neither press quit anything.
+fixture: busy
+await idle 30000
+assert screen == Hub && hub_pane == List && lists.worktrees.rows[3] exists
+
+# `/` filters the focused list: the overlay owns the keyboard and the query is empty.
+key /
+await overlay == Filter
+assert mode == Filter && key_contexts[0] == Filter && focused == filter.input
+assert lists.worktrees.filter == ""
+
+# Typing narrows the list under the still-open input.
+type hot
+await lists.worktrees.filter == hot 10000
+assert overlay == Filter && focused == filter.input
+shot filtering
+dump filtering
+
+# First `Esc`: the input closes, the filter stays, and the app is still running.
+key escape
+await overlay absent
+assert screen == Hub && mode == Normal && lists.worktrees.filter == hot && focused == worktrees.row[0]
+dump filter-kept
+
+# Second `Esc`: the filter clears and the whole list is back.
+key escape
+await lists.worktrees.filter == "" 10000
+assert screen == Hub && mode == Normal && overlay absent && lists.worktrees.rows[3] exists
+dump filter-cleared
+quit

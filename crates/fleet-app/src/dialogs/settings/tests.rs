@@ -228,6 +228,7 @@ fn about_reports_app_version_and_live_link() {
     app.snapshot = Some(fleet_proto::snapshot::Snapshot {
         boards: Vec::new(),
         generated_at: String::new(),
+        revision: None,
         contexts: Vec::new(),
         repos: Vec::new(),
         clones: Vec::new(),
@@ -441,6 +442,7 @@ fn app_with_host_status(status: fleet_proto::snapshot::HostStatus) -> AppState {
     app.snapshot = Some(fleet_proto::snapshot::Snapshot {
         boards: Vec::new(),
         generated_at: String::new(),
+        revision: None,
         contexts: Vec::new(),
         repos: Vec::new(),
         clones: Vec::new(),

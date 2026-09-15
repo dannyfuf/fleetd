@@ -276,8 +276,12 @@ fn schedule_search<T: CloneTransport>(state: &Entity<AppState>, transport: &T, c
     notify(state, cx);
     let weak_state = state.downgrade();
     let transport = transport.clone();
+    // `idle` counts armed debounces (`docs/TESTING-HARNESS.md` §2), and the guard is what makes
+    // a window a newer keystroke replaces count down as well as one that fires.
+    let mut armed = state.read(cx).harness.arm_debounce();
     let task = cx.spawn(async move |cx| {
         cx.background_executor().timer(DEBOUNCE).await;
+        armed.disarm();
         if cx.update(|cx| {
             weak_state.upgrade().is_none_or(|state| {
                 with_host(&state, cx, |host| {
@@ -423,6 +427,7 @@ fn results_list(draft: &CloneState, rows: &[RemoteRepo], now: i64) -> FuzzyList 
     .cursor(draft.cursor)
     .cap(RESULT_ROWS)
     .under_text_field(true)
+    .harness_rows("dialog.row", 0)
     .empty(no_results(draft))
 }
 
@@ -450,7 +455,8 @@ pub(crate) fn render(
         } else {
             Icon::Search
         })
-        .focused(true);
+        .focused(true)
+        .harness_target_indexed("dialog.field", 0);
 
     let list = results_list(draft, &rows, now);
 

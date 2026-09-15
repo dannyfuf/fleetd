@@ -2,7 +2,7 @@
 
 use fleet_core::ids::TerminalId;
 use fleet_proto::{request::RequestBody, response::ResponseBody};
-use fleet_ui_kit::{Dialog, Icon, KeyHintRow, TextFieldState};
+use fleet_ui_kit::{Dialog, HarnessTargetExt, Icon, KeyHintRow, TextFieldState};
 use gpui::{
     AnyElement, App, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Window,
 };
@@ -148,7 +148,8 @@ fn render_with_request(
                 field(&input)
                     .label("Name")
                     .focused(true)
-                    .hide_status_line(true),
+                    .hide_status_line(true)
+                    .harness_target_indexed("dialog.field", 0),
             )
             .hint_row(KeyHintRow::new().key("esc", "cancel"))
             .primary(if in_flight {
@@ -195,12 +196,16 @@ mod tests {
 
     impl Render for RenameFixture {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().key_context("Dialog").child(render_with_request(
-                &self.state,
-                self.request.clone(),
-                &self.focus,
-                &self.host,
-                cx,
+            // `AppFrame` is the harness target table's frame boundary, and it is what the shell
+            // puts above every dialog, so the fixture wears it too.
+            fleet_ui_kit::AppFrame::new().body(div().key_context("Dialog").child(
+                render_with_request(
+                    &self.state,
+                    self.request.clone(),
+                    &self.focus,
+                    &self.host,
+                    cx,
+                ),
             ))
         }
     }
@@ -317,5 +322,64 @@ mod tests {
             assert!(state.read(cx).overlay.is_none());
         });
         assert_eq!(seen.borrow().len(), 3);
+    }
+
+    /// `docs/TESTING-HARNESS.md` §3 names a dialog's inputs `dialog.field[N]`, counted in the
+    /// order the tab cycle visits them. A single-field dialog therefore publishes exactly
+    /// `dialog.field[0]`, and a Phase 5 scenario clicks it rather than guessing a pixel.
+    #[gpui::test]
+    fn the_rename_dialog_names_its_one_field(cx: &mut gpui::TestAppContext) {
+        fleet_ui_kit::harness::set_recording(true);
+        let terminal = TerminalId(7);
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet", Instant::now());
+            state.overlay = Some(crate::state::Overlay::Dialog(
+                super::super::Dialogs::RenameTerminal,
+            ));
+            state
+        });
+        let host = cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.rename_terminal = RenameState {
+                    terminal: Some(terminal),
+                    input: TextFieldState::from_text("renamed"),
+                    error: None,
+                    in_flight: false,
+                };
+            });
+            super::super::host::host_for(&state, cx)
+        });
+        let request: RenameRequest = Rc::new(|_body| async_channel::bounded(1).1);
+
+        cx.update(|cx| {
+            cx.set_global(fleet_ui_kit::Theme::dark());
+            crate::keymap::init(cx);
+        });
+        let window = cx.add_window(|_, cx| RenameFixture {
+            state,
+            host,
+            focus: cx.focus_handle(),
+            request,
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(&mut visual, |view, window, cx| {
+                window.focus(&view.focus, cx)
+            })
+            .unwrap_or_else(|error| panic!("focus rename: {error}"));
+        visual.run_until_parked();
+
+        let names: Vec<String> = visual
+            .update(|window, _| fleet_ui_kit::harness::painted(window))
+            .into_iter()
+            .map(|target| target.name.to_string())
+            .collect();
+        fleet_ui_kit::harness::set_recording(false);
+
+        assert_eq!(
+            names,
+            vec!["dialog.field[0]"],
+            "the rename dialog's only input is `dialog.field[0]`"
+        );
     }
 }

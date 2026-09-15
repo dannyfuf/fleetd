@@ -565,8 +565,12 @@ impl HubCtx {
         let rail_scroll = self.rail_scroll.clone();
         let list_scroll = self.list_scroll.clone();
         let pr_scroll = self.pr_scroll.clone();
+        // `idle` counts armed debounces (`docs/TESTING-HARNESS.md` §2). The guard is dropped with
+        // the task, so a cursor move that supersedes this window counts it down too.
+        let mut armed = self.state.read(cx).harness.arm_debounce();
         let task = cx.spawn(async move |cx| {
             cx.background_executor().timer(AUTO_INSPECT_DEBOUNCE).await;
+            armed.disarm();
             cx.update(|cx| {
                 let (Some(state), Some(hub)) = (state.upgrade(), hub.upgrade()) else {
                     return;

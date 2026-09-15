@@ -232,8 +232,6 @@ pub struct Cursors {
     pub prs_mine: usize,
     /// The `Review` PR tab.
     pub prs_review: usize,
-    /// The jobs panel.
-    pub jobs: usize,
 }
 
 /// Moves a cursor by `delta` rows, clamped to the list. Background events never move it (§5.11).

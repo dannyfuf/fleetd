@@ -1,0 +1,32 @@
+# docs/NATIVE-AGENTS.md §6.2 — "The decline/cancel distinction is not cosmetic and both must be
+#   reachable": `[n] deny` lets the turn continue, `[esc] deny and stop` interrupts it
+# docs/KEYMAP.md §Native agent thread — `y` · `a` · `n` · `e` · `Esc` on `AgentPermission`
+#
+# The other answer to the same gate, from the keyboard this time. `Enter` is deliberately not
+# bound on a permission, so the only way to answer is the bare letter this scenario presses.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+click agents.composer
+type apply the README fix
+key enter
+await agents.threads[0].pending_gate == permission 30000
+assert key_contexts[2] == AgentPermission && agents.threads[0].state == needs_you
+shot approval
+
+# `n` denies. The gate closes, the thread stops needing you, and the turn carries on with the
+# change declined — Codex's `decline` does not interrupt the turn.
+key n
+await agents.threads[0].pending_gate absent 20000
+assert agents.threads[0].state != needs_you && lists.tabs.selected.marks[0] != needs_you
+dump denied
+
+# The scenario deliberately stops short of asserting that the thread settles. A declined Codex
+# turn does not settle today: `fleetd.log` shows `dropping a Codex settlement for a turn that is
+# not the running one`, and the thread stays `working` for ever. That defect is not in TODO.md,
+# so it gets no expected-to-fail scenario; tighten this to `state == idle` when it is fixed.
+quit

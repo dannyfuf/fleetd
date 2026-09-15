@@ -14,8 +14,10 @@ use fleet_proto::{
     event::{BoardChangeReason, Event},
     request::{Request, RequestBody},
     response::{
-        DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, WorktreeDeleteResult,
+        DaemonIdentity, HelloResponse, PongResponse, Response, ResponseBody, StampedResponse,
+        WorktreeDeleteResult,
     },
+    snapshot::{DaemonInfo, Snapshot},
 };
 use support::assert_frame;
 
@@ -227,6 +229,79 @@ fn response_wire_goldens() {
         },
         r#"{"id":7,"result":{"Ok":{"type":"card","data":{"id":"card-12","boardId":"work","number":12,"title":"Fix login","description":"","statusId":"todo","priority":"none","labels":[],"assignee":null,"estimate":null,"dueDate":null,"parentId":null,"repoId":null,"worktreeId":null,"properties":{},"comments":[],"activity":[],"remote":null,"conflict":null,"dirty":false,"archived":false,"position":0,"createdAt":"2026-09-06T12:00:00Z","updatedAt":"2026-09-06T12:00:00Z"}}}}"#,
     );
+    assert_frame(
+        StampedResponse {
+            response: Response {
+                id: 8,
+                result: Ok(ResponseBody::Ack),
+            },
+            snapshot_revision: Some(42),
+        },
+        r#"{"id":8,"result":{"Ok":{"type":"ack"}},"snapshotRevision":42}"#,
+    );
+}
+
+#[test]
+fn stamped_hello_and_pong_wire_goldens() {
+    assert_frame(
+        HelloResponse {
+            response: Response {
+                id: 9,
+                result: Ok(ResponseBody::Hello {
+                    protocol: PROTOCOL_VERSION,
+                    server: "fleet-test".to_owned(),
+                }),
+            },
+            snapshot_revision: Some(42),
+            capabilities: vec!["snapshot.revision".to_owned()],
+            daemon_id: "daemon-test".to_owned(),
+            build_commit: None,
+        },
+        r#"{"id":9,"result":{"Ok":{"type":"hello","data":{"protocol":7,"server":"fleet-test"}}},"snapshotRevision":42,"capabilities":["snapshot.revision"],"daemonId":"daemon-test"}"#,
+    );
+    assert_frame(
+        PongResponse {
+            response: Response {
+                id: 10,
+                result: Ok(ResponseBody::Pong),
+            },
+            snapshot_revision: Some(43),
+            daemon: Some(DaemonIdentity {
+                pid: 42,
+                boot_id: "boot-42".to_owned(),
+            }),
+        },
+        r#"{"id":10,"result":{"Ok":{"type":"pong"}},"snapshotRevision":43,"daemon":{"pid":42,"bootId":"boot-42"}}"#,
+    );
+}
+
+#[test]
+fn stamped_snapshot_wire_golden() {
+    assert_frame(
+        Snapshot {
+            boards: Vec::new(),
+            generated_at: "2026-09-15T12:00:00Z".to_owned(),
+            revision: Some(42),
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: Vec::new(),
+            active_context: None,
+            sessions: Vec::new(),
+            agent_threads: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: DaemonInfo {
+                version: "fleetd test".to_owned(),
+                pid: 42,
+                started_at: "2026-09-15T11:00:00Z".to_owned(),
+                home: "/tmp/fleet".to_owned(),
+            },
+        },
+        r#"{"boards":[],"generatedAt":"2026-09-15T12:00:00Z","revision":42,"contexts":[],"repos":[],"clones":[],"worktrees":[],"activeContext":null,"sessions":[],"agentThreads":[],"statuses":[],"pools":[],"hosts":[],"jobs":[],"daemon":{"version":"fleetd test","pid":42,"startedAt":"2026-09-15T11:00:00Z","home":"/tmp/fleet"}}"#,
+    );
 }
 
 /// A remote-backed board and the one card the `board` and `card` response goldens pin.
@@ -282,6 +357,7 @@ fn pong_identity_accepts_old_and_new_ipc_v4_envelopes() {
             id: 2,
             result: Ok(ResponseBody::Pong),
         },
+        snapshot_revision: None,
         daemon: Some(DaemonIdentity {
             pid: 42,
             boot_id: "boot-42".to_owned(),
@@ -296,6 +372,22 @@ fn pong_identity_accepts_old_and_new_ipc_v4_envelopes() {
     assert_eq!(decoded, new);
     let legacy: Response = serde_json::from_str(&encoded).expect("legacy Pong decoder");
     assert_eq!(legacy.result, Ok(ResponseBody::Pong));
+}
+
+#[test]
+fn snapshot_revision_metadata_defaults_for_legacy_peers() {
+    let response = r#"{"id":4,"result":{"Ok":{"type":"ack"}}}"#;
+    let response: StampedResponse =
+        serde_json::from_str(response).expect("legacy response envelope");
+    assert!(response.snapshot_revision.is_none());
+
+    let stamped = r#"{"id":4,"result":{"Ok":{"type":"ack"}},"snapshotRevision":12}"#;
+    let legacy: Response = serde_json::from_str(stamped).expect("legacy response decoder");
+    assert_eq!(legacy.result, Ok(ResponseBody::Ack));
+
+    let snapshot = r#"{"boards":[],"generatedAt":"2026-09-15T12:00:00Z","contexts":[],"repos":[],"clones":[],"worktrees":[],"activeContext":null,"sessions":[],"agentThreads":[],"statuses":[],"pools":[],"hosts":[],"jobs":[],"daemon":{"version":"fleetd test","pid":42,"startedAt":"2026-09-15T11:00:00Z","home":"/tmp/fleet"}}"#;
+    let snapshot: Snapshot = serde_json::from_str(snapshot).expect("legacy snapshot");
+    assert!(snapshot.revision.is_none());
 }
 
 #[test]

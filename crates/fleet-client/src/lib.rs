@@ -11,6 +11,6 @@ pub use api::{
     CreateWorktreeResult, DaemonVersion, HelloResult, MirrorOutcome, PageOutcome, Result,
     WindowState, applied_seq, projection_from_window,
 };
-pub use connection::{Client, ConnectError, ProtocolTransport, protocol_transport};
+pub use connection::{Client, ConnectError, ProtocolTransport, Stamped, protocol_transport};
 pub use spawn::{SpawnError, ensure_daemon, resolve_daemon_path, restart_daemon};
 pub use terminal::{TerminalHandle, TerminalUpdate};

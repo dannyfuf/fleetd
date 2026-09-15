@@ -20,6 +20,7 @@ use gpui::{AnyElement, App, SharedString, Window, div, prelude::*};
 
 use crate::{
     components::{FuzzyItem, FuzzyList, KeyHintRow, TextField},
+    harness::HarnessTargetExt as _,
     icons::Icon,
     text::Text,
     theme::ActiveTheme,
@@ -273,6 +274,10 @@ impl RenderOnce for Palette {
                             .cap(take)
                             .cursor(local_cursor)
                             .under_text_field(true)
+                            // One flat numbering across every section, so `palette.row[0]` is
+                            // the top match whichever section it came from — the same counting
+                            // the flat cursor above uses.
+                            .harness_rows("palette.row", consumed)
                             .row_height(theme.metrics.palette_row_h),
                     )
                     .into_any_element(),
@@ -322,7 +327,8 @@ impl RenderOnce for Palette {
                             .focused(true)
                             .height(theme.metrics.palette_input_h)
                             .hide_status_line(true)
-                            .when_some(self.caret, TextField::caret),
+                            .when_some(self.caret, TextField::caret)
+                            .harness_target("palette.input"),
                     ),
             )
             .child(body)

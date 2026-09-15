@@ -8,8 +8,8 @@ use fleet_core::{
 };
 use fleet_proto::job::{JobKind, JobRecord, JobStatus};
 use fleet_ui_kit::{
-    ActiveTheme, ColumnAlign, ListView, Pane, PaneBorder, PaneHeader, Row, RowColumn, StatusGlyph,
-    StatusKind, Text, Truncate, truncate,
+    ActiveTheme, ColumnAlign, HarnessTargetExt, ListView, Pane, PaneBorder, PaneHeader, Row,
+    RowColumn, StatusGlyph, StatusKind, Text, Truncate, truncate,
 };
 use gpui::{AnyElement, App, IntoElement, SharedString, UniformListScrollHandle, px};
 
@@ -315,6 +315,8 @@ pub fn render(
                 return gpui::div().into_any_element();
             };
             rail_row(row, is_cursor, focused, collapsed)
+                .harness_target_indexed("repos.row", index)
+                .into_any_element()
         },
     )
     .cursor(cursor)
@@ -333,7 +335,10 @@ pub fn render(
     if !collapsed {
         pane = pane.header(header_override.unwrap_or_else(|| header.into_any_element()));
     }
-    pane.into_any_element()
+    // `H` (KEYMAP A22) is the rail's only collapse affordance — Fleet draws no collapse button
+    // — so the rail's own rect is what a scenario reads to tell 44 px collapsed from the full
+    // rail, and what it clicks to give the rail the pointer.
+    pane.harness_target("repos.rail").into_any_element()
 }
 
 /// One rail row: `[glyph][name][count]`, or just the glyph when collapsed.

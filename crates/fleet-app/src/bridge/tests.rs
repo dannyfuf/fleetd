@@ -26,6 +26,7 @@ async fn offline_requests_finish_without_waiting_for_connection_work() {
         receiver,
         events,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(SettleCounter::default()),
     ));
     let (reply, response) = async_channel::bounded(1);
     requests
@@ -33,6 +34,7 @@ async fn offline_requests_finish_without_waiting_for_connection_work() {
             client: None,
             body: Box::new(RequestBody::GetSnapshot),
             reply: Some(reply),
+            in_flight: InFlight::untracked(),
         })
         .await
         .unwrap();
@@ -58,12 +60,27 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start(respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static) -> Self {
-        Self::start_with_pong_identity(respond, || None)
+        Self::start_with_metadata(respond, || None, None)
     }
 
     fn start_with_pong_identity(
+        respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static,
+        pong_identity: impl FnMut() -> Option<(u32, String)> + Send + 'static,
+    ) -> Self {
+        Self::start_with_metadata(respond, pong_identity, None)
+    }
+
+    fn start_with_snapshot_revision(
+        respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static,
+        snapshot_revision: u64,
+    ) -> Self {
+        Self::start_with_metadata(respond, || None, Some(snapshot_revision))
+    }
+
+    fn start_with_metadata(
         mut respond: impl FnMut(RequestBody) -> Option<ResponseBody> + Send + 'static,
         mut pong_identity: impl FnMut() -> Option<(u32, String)> + Send + 'static,
+        snapshot_revision: Option<u64>,
     ) -> Self {
         use std::{
             io::{Read, Write},
@@ -97,6 +114,7 @@ impl TestDaemon {
                     }
                     let request: fleet_proto::request::Request =
                         serde_json::from_slice(&body).unwrap();
+                    let is_hello = matches!(&request.body, RequestBody::Hello { .. });
                     let result = match request.body {
                         RequestBody::Hello { .. } => Some(ResponseBody::Hello {
                             protocol: fleet_proto::PROTOCOL_VERSION,
@@ -120,6 +138,18 @@ impl TestDaemon {
                                 "daemon".to_owned(),
                                 serde_json::json!({"pid": pid, "bootId": boot_id}),
                             );
+                        }
+                        if let Some(snapshot_revision) = snapshot_revision
+                            && let Some(envelope) = response.as_object_mut()
+                        {
+                            envelope
+                                .insert("snapshotRevision".to_owned(), snapshot_revision.into());
+                            if is_hello {
+                                envelope.insert(
+                                    "capabilities".to_owned(),
+                                    serde_json::json!(["snapshot.revision"]),
+                                );
+                            }
                         }
                         let bytes = serde_json::to_vec(&response).unwrap();
                         if stream
@@ -165,6 +195,7 @@ fn empty_snapshot() -> Snapshot {
     Snapshot {
         boards: Vec::new(),
         generated_at: String::new(),
+        revision: None,
         contexts: vec![],
         repos: vec![],
         clones: vec![],
@@ -215,10 +246,16 @@ async fn stalled_health_check_does_not_delay_fifo_input_or_shutdown() {
     let resync_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let home = daemon.home.path().to_owned();
     let runtime_resync = resync_pending.clone();
-    let task =
-        tokio::spawn(
-            async move { runtime::run(&home, &command_rx, &events, &runtime_resync).await },
-        );
+    let task = tokio::spawn(async move {
+        runtime::run(
+            &home,
+            &command_rx,
+            &events,
+            &runtime_resync,
+            Arc::new(SettleCounter::default()),
+        )
+        .await
+    });
     loop {
         let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
@@ -240,6 +277,7 @@ async fn stalled_health_check_does_not_delay_fifo_input_or_shutdown() {
                     bytes: vec![index],
                 }),
                 reply: None,
+                in_flight: InFlight::untracked(),
             })
             .await
             .unwrap();
@@ -273,10 +311,16 @@ async fn a_manual_reconnect_reopens_a_link_that_is_still_alive() {
     let resync_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let home = daemon.home.path().to_owned();
     let runtime_resync = resync_pending.clone();
-    let task =
-        tokio::spawn(
-            async move { runtime::run(&home, &command_rx, &events, &runtime_resync).await },
-        );
+    let task = tokio::spawn(async move {
+        runtime::run(
+            &home,
+            &command_rx,
+            &events,
+            &runtime_resync,
+            Arc::new(SettleCounter::default()),
+        )
+        .await
+    });
     loop {
         let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
@@ -320,10 +364,16 @@ async fn a_stalled_mutation_does_not_delay_shutdown() {
     let resync_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let home = daemon.home.path().to_owned();
     let runtime_resync = resync_pending.clone();
-    let task =
-        tokio::spawn(
-            async move { runtime::run(&home, &command_rx, &events, &runtime_resync).await },
-        );
+    let task = tokio::spawn(async move {
+        runtime::run(
+            &home,
+            &command_rx,
+            &events,
+            &runtime_resync,
+            Arc::new(SettleCounter::default()),
+        )
+        .await
+    });
     loop {
         let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
@@ -344,6 +394,7 @@ async fn a_stalled_mutation_does_not_delay_shutdown() {
                     bytes: vec![index as u8],
                 }),
                 reply: None,
+                in_flight: InFlight::untracked(),
             })
             .await
             .unwrap();
@@ -372,10 +423,16 @@ async fn shutdown_is_observed_while_initial_connection_is_waiting() {
     let resync_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let home = daemon.home.path().to_owned();
     let runtime_resync = resync_pending.clone();
-    let task =
-        tokio::spawn(
-            async move { runtime::run(&home, &command_rx, &events, &runtime_resync).await },
-        );
+    let task = tokio::spawn(async move {
+        runtime::run(
+            &home,
+            &command_rx,
+            &events,
+            &runtime_resync,
+            Arc::new(SettleCounter::default()),
+        )
+        .await
+    });
     tokio::time::timeout(Duration::from_secs(5), opening.recv())
         .await
         .unwrap()
@@ -416,6 +473,7 @@ async fn failed_health_ping_recovers_on_a_fresh_connection_without_disconnect() 
             &command_rx,
             &events,
             &runtime_resync,
+            Arc::new(SettleCounter::default()),
             Duration::from_millis(10),
             IDENTITY_INTERVAL,
         )
@@ -470,6 +528,7 @@ async fn failed_recovery_probe_enters_normal_backoff() {
             &command_rx,
             &events,
             &runtime_resync,
+            Arc::new(SettleCounter::default()),
             Duration::from_millis(10),
             IDENTITY_INTERVAL,
         )
@@ -579,6 +638,7 @@ async fn transparent_reconnect_detects_new_daemon_pid() {
             &command_rx,
             &events,
             &runtime_resync,
+            Arc::new(SettleCounter::default()),
             Duration::from_secs(1),
             Duration::from_millis(10),
         )
@@ -661,10 +721,16 @@ async fn bounded_queues_coalesce_and_resynchronize() {
     });
     let home = daemon.home.path().to_owned();
     let runtime_resync = resync_pending.clone();
-    let task =
-        tokio::spawn(
-            async move { runtime::run(&home, &command_rx, &event_tx, &runtime_resync).await },
-        );
+    let task = tokio::spawn(async move {
+        runtime::run(
+            &home,
+            &command_rx,
+            &event_tx,
+            &runtime_resync,
+            Arc::new(SettleCounter::default()),
+        )
+        .await
+    });
     let mut saw_lag = false;
     let mut saw_snapshot = false;
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -683,4 +749,201 @@ async fn bounded_queues_coalesce_and_resynchronize() {
     assert!(!resync_pending.load(std::sync::atomic::Ordering::Acquire));
     bridge.shutdown();
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stamped_mutation_reply_waits_for_a_covering_snapshot() {
+    let daemon = TestDaemon::start_with_snapshot_revision(|_| Some(ResponseBody::Ack), 12);
+    let client = Client::connect(daemon.home.path()).await.unwrap();
+
+    let (commands, command_rx) = async_channel::unbounded();
+    let (event_tx, events) = async_channel::unbounded();
+    let bridge = Bridge::with_channels(
+        commands,
+        events,
+        event_tx.clone(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let event_rx = bridge.events();
+    let counter = bridge.in_flight_requests();
+    let settle = bridge.settle_counter();
+    bridge.send(RequestBody::SetActiveContext { id: None });
+
+    let Command::Request {
+        body,
+        reply,
+        in_flight,
+    } = command_rx.recv().await.unwrap()
+    else {
+        panic!("mutation admission produced a control command");
+    };
+    let (request_tx, request_rx) = async_channel::unbounded();
+    let worker = tokio::spawn(requests::run(
+        request_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&settle),
+    ));
+    request_tx
+        .send(requests::Request::Command {
+            client: Some(client),
+            body,
+            reply,
+            in_flight,
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(event_rx.recv().await.unwrap(), BridgeEvent::Nudge));
+    assert_eq!(counter.load(Ordering::Acquire), 0);
+    assert_eq!(settle.pending(), 1);
+
+    settle.applied(Some(11));
+    assert_eq!(settle.pending(), 1);
+    settle.applied(Some(12));
+    assert_eq!(settle.pending(), 0);
+    drop(request_tx);
+    worker.await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_mutation_settle_grace_expiry_sends_a_nudge() {
+    let (event_tx, event_rx) = async_channel::bounded(1);
+    let settle = Arc::new(SettleCounter::default());
+    let generation = settle.begin(None);
+    requests::expire_settle_after(
+        Arc::clone(&settle),
+        idle_wake(event_tx),
+        generation,
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(matches!(event_rx.recv().await.unwrap(), BridgeEvent::Nudge));
+    assert_eq!(settle.pending(), 0);
+}
+
+#[tokio::test]
+async fn stamped_mutation_settle_grace_expiry_retains_the_claim_without_a_nudge() {
+    let (event_tx, event_rx) = async_channel::bounded(1);
+    let settle = Arc::new(SettleCounter::default());
+    let generation = settle.begin(Some(12));
+    requests::expire_settle_after(
+        Arc::clone(&settle),
+        idle_wake(event_tx),
+        generation,
+        Duration::ZERO,
+    )
+    .await;
+
+    assert!(event_rx.try_recv().is_err());
+    assert_eq!(settle.pending(), 1);
+}
+
+/// `docs/TESTING-HARNESS.md` §2 defines `idle` as "no in-flight app requests, …". A reply-lane
+/// claim remains live until the receiver that owns the answer is finished with it.
+#[tokio::test]
+async fn the_in_flight_counter_covers_a_request_until_its_receiver_is_finished() {
+    let (commands, command_rx) = async_channel::unbounded();
+    let (event_tx, events) = async_channel::unbounded();
+    let bridge = Bridge::with_channels(
+        commands,
+        events,
+        event_tx.clone(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let event_rx = bridge.events();
+    let counter = bridge.in_flight_requests();
+    assert_eq!(counter.load(Ordering::Acquire), 0);
+
+    let answer = bridge.request(RequestBody::GetSnapshot);
+    assert_eq!(
+        counter.load(Ordering::Acquire),
+        1,
+        "the reply-lane request is claimed on admission"
+    );
+
+    // The runtime delivers the answer, then waits for this test's receiver to finish with it.
+    // Draining the queue here stands in for the runtime admission loop.
+    let (requests, request_rx) = async_channel::unbounded();
+    let task = tokio::spawn(requests::run(
+        request_rx,
+        event_tx,
+        Arc::new(AtomicBool::new(false)),
+        bridge.settle_counter(),
+    ));
+    while let Ok(command) = command_rx.try_recv() {
+        let Command::Request {
+            body,
+            reply,
+            in_flight,
+        } = command
+        else {
+            continue;
+        };
+        requests
+            .send(requests::Request::Command {
+                client: None,
+                body,
+                reply,
+                in_flight,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+    drop(requests);
+    task.await.unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(
+        counter.load(Ordering::Acquire),
+        1,
+        "the reply-lane claim remains until its waiting receiver is finished"
+    );
+    assert!(
+        answer.recv().await.is_ok(),
+        "the waiting caller was answered"
+    );
+    drop(answer);
+    while counter.load(Ordering::Acquire) != 0 {
+        assert!(matches!(event_rx.recv().await.unwrap(), BridgeEvent::Nudge));
+    }
+    assert_eq!(counter.load(Ordering::Acquire), 0);
+
+    let unread = bridge.request(RequestBody::GetSnapshot);
+    let Command::Request {
+        body,
+        reply,
+        in_flight,
+    } = command_rx.recv().await.unwrap()
+    else {
+        panic!("request admission produced a control command");
+    };
+    let (requests, request_rx) = async_channel::unbounded();
+    let task = tokio::spawn(requests::run(
+        request_rx,
+        bridge.event_tx.clone(),
+        Arc::new(AtomicBool::new(false)),
+        bridge.settle_counter(),
+    ));
+    requests
+        .send(requests::Request::Command {
+            client: None,
+            body,
+            reply,
+            in_flight,
+        })
+        .await
+        .unwrap();
+    drop(requests);
+    task.await.unwrap();
+    assert_eq!(
+        counter.load(Ordering::Acquire),
+        1,
+        "an unread answer remains in flight"
+    );
+    drop(unread);
+    while counter.load(Ordering::Acquire) != 0 {
+        assert!(matches!(event_rx.recv().await.unwrap(), BridgeEvent::Nudge));
+    }
+    assert_eq!(counter.load(Ordering::Acquire), 0);
 }

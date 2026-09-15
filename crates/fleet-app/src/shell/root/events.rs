@@ -31,12 +31,17 @@ fn is_terminal_only(damage: EventDamage) -> bool {
 #[derive(Default)]
 struct BatchDamage {
     state: bool,
+    nudged: bool,
     terminals: HashSet<TerminalId>,
     recover: HashSet<TerminalId>,
 }
 
 impl BatchDamage {
     fn apply(&mut self, state: &mut AppState, event: BridgeEvent, now: Instant) {
+        if matches!(event, BridgeEvent::Nudge) {
+            self.nudged = true;
+            return;
+        }
         let damage = match &event {
             BridgeEvent::Daemon(event) => Some(crate::presentation::event_damage(event)),
             _ => None,
@@ -44,7 +49,24 @@ impl BatchDamage {
         let terminal = damage.and_then(|damage| damage.terminal);
         let lagged = matches!(event, BridgeEvent::EventsLagged { .. });
         let terminal_only = damage.is_some_and(is_terminal_only);
+        let connected_snapshot_revision = match &event {
+            BridgeEvent::Connected(snapshot) => Some(snapshot.revision),
+            _ => None,
+        };
+        let applied_snapshot_revision = match &event {
+            BridgeEvent::Daemon(event) => match event.as_ref() {
+                fleet_proto::event::Event::SnapshotChanged(snapshot) => Some(snapshot.revision),
+                _ => None,
+            },
+            _ => None,
+        };
         state.apply_bridge_event(event, now);
+        if let Some(revision) = connected_snapshot_revision {
+            state.harness.settle().connected();
+            state.harness.settle().applied(revision);
+        } else if let Some(revision) = applied_snapshot_revision {
+            state.harness.settle().applied(revision);
+        }
         self.state |= !terminal_only;
         if let Some(terminal) = terminal {
             self.terminals.insert(terminal);
@@ -108,6 +130,16 @@ fn apply_batch(
         }
         if damage.state {
             cx.notify();
+        } else if fleet_ui_kit::harness::is_recording()
+            && (damage.nudged || damage.affects_visible_terminal(state))
+        {
+            // Plain PTY output deliberately does not wake AppState's chrome observers — that is
+            // the optimisation the branch above exists for. The harness is the one observer that
+            // needs it anyway: `await terminal.text ~= "…"` waits on exactly this signal, and
+            // without it a scenario waits for the next unrelated notification instead of for the
+            // output it asked about. `is_recording` is a thread-local `bool` that is false in
+            // every launch that did not ask for harness mode, so production pays one branch.
+            cx.notify();
         }
     });
     damage
@@ -151,12 +183,16 @@ impl Shell {
                 if let Some(window) = window {
                     // Release the shell lease before entering its window. Plain terminal output
                     // updates prepared surfaces without waking AppState/chrome observers.
-                    let _ = window.update(cx, |_, window, cx| {
-                        let _ = shell.update(cx, |shell, cx| {
-                            shell.synchronize_surfaces(window, cx);
-                            cx.notify();
-                        });
-                    });
+                    window
+                        .update(cx, |_, window, cx| {
+                            shell
+                                .update(cx, |shell, cx| {
+                                    shell.synchronize_surfaces(window, cx);
+                                    cx.notify();
+                                })
+                                .ok();
+                        })
+                        .ok();
                 }
                 // A busy producer cannot keep the UI executor inside an always-ready receive loop.
                 cx.background_executor()
@@ -190,10 +226,11 @@ mod tests {
     use super::*;
     use fleet_proto::{
         event::Event,
+        snapshot::{DaemonInfo, Snapshot},
         terminal::{CursorShape, CursorState, FrameUpdate, TerminalModes, ViewportInfo},
     };
     use gpui::AppContext;
-    use std::rc::Rc;
+    use std::{rc::Rc, sync::Arc};
 
     fn frame(terminal: u64, seq: u64, full: bool) -> BridgeEvent {
         BridgeEvent::Daemon(Box::new(Event::TerminalFrame(FrameUpdate {
@@ -218,6 +255,31 @@ mod tests {
             modes: TerminalModes::default(),
             title: None,
         })))
+    }
+
+    fn empty_snapshot() -> Snapshot {
+        Snapshot {
+            boards: Vec::new(),
+            generated_at: String::new(),
+            revision: None,
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: Vec::new(),
+            active_context: None,
+            sessions: Vec::new(),
+            agent_threads: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: DaemonInfo {
+                version: "test".to_owned(),
+                pid: 1,
+                started_at: String::new(),
+                home: String::new(),
+            },
+        }
     }
 
     #[test]
@@ -319,5 +381,92 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(notifications.get(), 1);
+    }
+
+    #[gpui::test]
+    fn a_nudge_notifies_only_while_the_harness_is_recording(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new("/tmp/fleet", Instant::now()));
+        let notifications = Rc::new(std::cell::Cell::new(0));
+        let count = Rc::clone(&notifications);
+        let _subscription =
+            cx.update(|cx| cx.observe(&state, move |_, _| count.set(count.get() + 1)));
+
+        fleet_ui_kit::harness::set_recording(false);
+        let production_damage = cx.update(|cx| apply_batch(&state, [BridgeEvent::Nudge], cx));
+        cx.run_until_parked();
+        assert!(production_damage.nudged);
+        assert!(!production_damage.state);
+        assert!(production_damage.terminals.is_empty());
+        assert!(production_damage.recover.is_empty());
+        assert_eq!(notifications.get(), 0);
+
+        fleet_ui_kit::harness::set_recording(true);
+        let recorded_damage = cx.update(|cx| apply_batch(&state, [BridgeEvent::Nudge], cx));
+        fleet_ui_kit::harness::set_recording(false);
+        cx.run_until_parked();
+        assert!(recorded_damage.nudged);
+        assert!(!recorded_damage.state);
+        assert_eq!(notifications.get(), 1);
+    }
+
+    #[gpui::test]
+    fn snapshot_changed_settles_only_mutations_covered_by_its_revision(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new("/tmp/fleet", Instant::now()));
+        let settle = cx.update(|cx| Arc::clone(state.read(cx).harness.settle()));
+        settle.begin(Some(3));
+        let pending = settle.begin(Some(5));
+        assert_eq!(settle.pending(), 2);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.revision = Some(4);
+
+        let damage = cx.update(|cx| {
+            apply_batch(
+                &state,
+                [BridgeEvent::Daemon(Box::new(Event::SnapshotChanged(
+                    snapshot,
+                )))],
+                cx,
+            )
+        });
+
+        assert!(damage.state);
+        assert_eq!(settle.pending(), 1);
+        assert!(!settle.expire(pending));
+        assert_eq!(settle.pending(), 1);
+
+        let mut snapshot = empty_snapshot();
+        snapshot.revision = Some(5);
+        cx.update(|cx| {
+            apply_batch(
+                &state,
+                [BridgeEvent::Daemon(Box::new(Event::SnapshotChanged(
+                    snapshot,
+                )))],
+                cx,
+            )
+        });
+        assert_eq!(settle.pending(), 0);
+    }
+
+    #[test]
+    fn connected_settles_pending_mutations() {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.harness.settle().begin(Some(99));
+        let pending = state.harness.settle().begin(Some(100));
+        assert!(!state.harness.settle().expire(pending));
+        let mut damage = BatchDamage::default();
+        let mut snapshot = empty_snapshot();
+        snapshot.revision = Some(2);
+
+        damage.apply(&mut state, BridgeEvent::Connected(Box::new(snapshot)), now);
+
+        assert!(damage.state);
+        assert_eq!(state.harness.settle().pending(), 0);
+        state.harness.settle().begin(Some(2));
+        assert_eq!(state.harness.settle().pending(), 0);
     }
 }

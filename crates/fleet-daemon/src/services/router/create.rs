@@ -466,6 +466,7 @@ mod tests {
         Snapshot {
             boards: Vec::new(),
             generated_at: "2026-09-08T12:00:00Z".to_owned(),
+            revision: None,
             contexts: vec![context()],
             repos,
             clones: Vec::new(),

@@ -95,6 +95,7 @@ fn app_with_session(session: Session) -> AppState {
     app.snapshot = Some(fleet_proto::snapshot::Snapshot {
         boards: Vec::new(),
         generated_at: "2026-09-04T12:00:00Z".to_owned(),
+        revision: None,
         contexts: Vec::new(),
         repos: Vec::new(),
         clones: Vec::new(),

@@ -184,3 +184,94 @@ fn the_filter_folds_case_beyond_ascii() {
     assert_eq!(shown("añadir SESIÓN"), 1);
     assert_eq!(shown("sesion"), 0, "folding case is not stripping accents");
 }
+
+/// A root view for the board target test: the columns use `gpui::list`, which only lays out
+/// inside a rendered entity, so `VisualTestContext::draw` has to go through a view.
+struct BoardHarness {
+    model: BoardModel,
+    lists: Vec<ListState>,
+    scroll: ScrollHandle,
+}
+
+impl gpui::Render for BoardHarness {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fleet_ui_kit::AppFrame::new().body(render(
+            &BoardProps {
+                model: Some(&self.model),
+                loading: false,
+                error: None,
+                filter: "",
+                filter_editing: false,
+                focus: (0, 0),
+                syncing: false,
+            },
+            &self.scroll,
+            &self.lists,
+            |_click, _cx| {},
+            cx,
+        ))
+    }
+}
+
+fn draw_board(cx: &mut gpui::TestAppContext) -> Vec<String> {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let cx = cx.add_empty_window();
+    let view = view();
+    let model = build(&view, "", None, 1_788_523_200);
+    let lists = model
+        .columns
+        .iter()
+        .map(|column| ListState::new(column.rows.len(), gpui::ListAlignment::Top, gpui::px(0.0)))
+        .collect();
+    let harness = cx.new(|_| BoardHarness {
+        model,
+        lists,
+        scroll: ScrollHandle::new(),
+    });
+    let element = harness.clone();
+    cx.draw(
+        gpui::Point::default(),
+        gpui::size(gpui::px(1200.0), gpui::px(800.0)),
+        |_, _| element.into_any_element(),
+    );
+    cx.update(|window, _| {
+        fleet_ui_kit::harness::painted(window)
+            .into_iter()
+            .map(|target| target.name.to_string())
+            .collect()
+    })
+}
+
+/// `docs/TESTING-HARNESS.md` §3 fixes `board.column[C]` and `board.column[C].card[R]`, and a
+/// Phase 5 board scenario drags a card between two of those rects. The card name is composed
+/// from a column index *and* a row index, which no kit builder produces, so this pins the
+/// spelling [`crate::views::harness::name`] builds.
+#[gpui::test]
+fn the_board_names_every_column_and_card_for_the_harness(cx: &mut gpui::TestAppContext) {
+    fleet_ui_kit::harness::set_recording(true);
+    let names = draw_board(cx);
+    fleet_ui_kit::harness::set_recording(false);
+
+    assert!(
+        names.contains(&"board.column[0]".to_owned()),
+        "every column carries its index: {names:?}"
+    );
+    // The fixture's three cards all land in the second status column.
+    assert!(
+        (0..3).all(|row| names.contains(&format!("board.column[1].card[{row}]"))),
+        "a card is named by its column *and* its row: {names:?}"
+    );
+    assert!(
+        names.iter().all(|name| !name.is_empty()),
+        "an empty recorded name means a composite name was built with recording off: {names:?}"
+    );
+}
+
+/// The other half of the contract: naming a surface costs one flag read in production.
+#[gpui::test]
+fn the_board_records_no_target_with_the_harness_off(cx: &mut gpui::TestAppContext) {
+    assert!(
+        draw_board(cx).is_empty(),
+        "the paint path must record nothing while recording is off"
+    );
+}

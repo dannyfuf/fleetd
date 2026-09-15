@@ -1,14 +1,20 @@
-//! Shared scripted-input mechanics. Each caller selects its existing wire dialect.
+//! The legacy file-polling scripted-input driver, kept for `fleet-lazygit`.
+//!
+//! `fleet` itself is driven over a socket now (`crate::server`, `docs/TESTING-HARNESS.md`), so
+//! this is one grammar with one consumer: the dialect split that used to separate the two apps
+//! is gone, and `wheel`/`hwheel` are spelled `scroll <dx> <dy>` here exactly as they are in a
+//! harness scenario.
 
 mod files;
-mod protocol;
+mod line;
 
 use files::{Tail, log_path, shot_paths};
 use gpui::{
     App, AppContext, AsyncWindowContext, Modifiers, PlatformInput, ScrollDelta, ScrollWheelEvent,
     Task, TouchPhase, Window, point, px,
 };
-use protocol::{Step, keystroke_for, parse, with_simulated_key_char};
+use line::{Step, parse};
+pub(crate) use line::{keystroke_for, with_simulated_key_char};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -21,28 +27,14 @@ const SETTLE: Duration = Duration::from_millis(250);
 const WHEEL_UNIT: f32 = 18.0;
 const SCREENCAPTURE: &str = "/usr/sbin/screencapture";
 
-/// Command and acknowledgement policy retained by each application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dialect {
-    /// Keys, text, waits, all-display screenshots, and quit; no per-line completion.
-    Fleet,
-    /// Also accepts wheel input and acknowledges every executable line.
-    Lazygit,
-}
-
 /// Starts a driver cancelled on window close, even during an idle poll or script wait.
 /// `timestamp` runs on the background executor and preserves the caller's log prefix.
-pub fn spawn(
-    script: PathBuf,
-    window: &Window,
-    cx: &App,
-    dialect: Dialect,
-    timestamp: fn() -> String,
-) -> Task<()> {
+pub fn spawn(script: PathBuf, window: &Window, cx: &App, timestamp: fn() -> String) -> Task<()> {
     let window_id = window.window_handle().window_id();
     let (closed_tx, closed_rx) = async_channel::bounded(1);
     let subscription = cx.on_window_closed(move |_, closed| {
         if closed == window_id {
+            // The receiver is gone only after the window-scoped driver has shut down.
             let _ = closed_tx.try_send(());
         }
     });
@@ -50,7 +42,7 @@ pub fn spawn(
         let _subscription = subscription;
         tokio::select! {
             _ = closed_rx.recv() => {},
-            _ = run(script, dialect, timestamp, cx) => {},
+            _ = run(script, timestamp, cx) => {},
         }
     })
 }
@@ -72,12 +64,7 @@ impl Log {
     }
 }
 
-async fn run(
-    script: PathBuf,
-    dialect: Dialect,
-    timestamp: fn() -> String,
-    cx: &mut AsyncWindowContext,
-) {
+async fn run(script: PathBuf, timestamp: fn() -> String, cx: &mut AsyncWindowContext) {
     let log = Log {
         path: log_path(&script),
         timestamp,
@@ -95,7 +82,7 @@ async fn run(
             .await;
         tail = returned_tail;
         for line in lines {
-            let step = match parse(&line, dialect) {
+            let step = match parse(&line) {
                 Ok(None) => continue,
                 Ok(Some(step)) => step,
                 Err(error) => {
@@ -105,12 +92,10 @@ async fn run(
                 }
             };
             log.write(format!("run {line}"), cx).await;
-            match perform(step, dialect, &log, cx).await {
+            match perform(step, &log, cx).await {
                 Flow::Stop => return,
-                Flow::Continue if dialect == Dialect::Lazygit => {
-                    log.write(format!("done {line}"), cx).await;
-                }
-                Flow::Continue | Flow::Failed => {}
+                Flow::Continue => log.write(format!("done {line}"), cx).await,
+                Flow::Failed => {}
             }
         }
     }
@@ -125,7 +110,7 @@ enum Flow {
 
 /// Applies one parsed step. `Stop` means the window is gone or the script asked to quit;
 /// the caller must not acknowledge the line afterwards.
-async fn perform(step: Step, dialect: Dialect, log: &Log, cx: &mut AsyncWindowContext) -> Flow {
+async fn perform(step: Step, log: &Log, cx: &mut AsyncWindowContext) -> Flow {
     match step {
         Step::Keys(keys) => {
             for key in keys {
@@ -155,23 +140,14 @@ async fn perform(step: Step, dialect: Dialect, log: &Log, cx: &mut AsyncWindowCo
             }
             Flow::Continue
         }
-        Step::Wheel {
-            rows,
-            horizontal,
-            x,
-            y,
-        } => {
+        Step::Scroll { dx, dy, x, y } => {
             let scrolled = cx.update(|window, cx| {
                 let size = window.viewport_size();
                 let position = point(
                     px(f32::from(size.width) * x),
                     px(f32::from(size.height) * y),
                 );
-                let delta = if horizontal {
-                    point(px(-rows * WHEEL_UNIT), px(0.0))
-                } else {
-                    point(px(0.0), px(-rows * WHEEL_UNIT))
-                };
+                let delta = point(px(dx * WHEEL_UNIT), px(dy * WHEEL_UNIT));
                 window.dispatch_event(
                     PlatformInput::ScrollWheel(ScrollWheelEvent {
                         position,
@@ -192,30 +168,28 @@ async fn perform(step: Step, dialect: Dialect, log: &Log, cx: &mut AsyncWindowCo
             cx.background_executor().timer(duration).await;
             Flow::Continue
         }
-        Step::Shot(path) => capture(&path, dialect, log, cx).await,
+        Step::Shot(path) => capture(&path, log, cx).await,
         Step::Quit => {
             log.write("done quit", cx).await;
-            let _ = cx.update(|_, cx| cx.quit());
+            if let Err(error) = cx.update(|_, cx| cx.quit()) {
+                log.write(format!("window gone: {error}"), cx).await;
+            }
             Flow::Stop
         }
     }
 }
 
-/// Raises the window, lets it settle, then captures every display the dialect asks for.
-async fn capture(path: &Path, dialect: Dialect, log: &Log, cx: &mut AsyncWindowContext) -> Flow {
-    let displays = cx.update(|window, cx| {
+/// Raises the window, lets it settle, then captures the display it is on.
+async fn capture(path: &Path, log: &Log, cx: &mut AsyncWindowContext) -> Flow {
+    let raised = cx.update(|window, cx| {
         window.activate_window();
         cx.activate(true);
-        if dialect == Dialect::Fleet {
-            cx.displays().len()
-        } else {
-            1
-        }
     });
-    let Ok(displays) = displays else {
+    if raised.is_err() {
         log.write("window gone", cx).await;
         return Flow::Stop;
-    };
+    }
+    let displays = 1;
     cx.background_executor().timer(SETTLE).await;
     let targets = shot_paths(path, displays);
     let path = path.to_path_buf();
@@ -225,7 +199,7 @@ async fn capture(path: &Path, dialect: Dialect, log: &Log, cx: &mut AsyncWindowC
                 .arg("-x")
                 .args(&targets)
                 .status();
-            screenshot_messages(dialect, &path, &targets, status)
+            screenshot_messages(&path, &targets, status)
         })
         .await;
     for message in result.messages {
@@ -244,7 +218,6 @@ struct ScreenshotResult {
 }
 
 fn screenshot_messages(
-    _dialect: Dialect,
     path: &Path,
     targets: &[PathBuf],
     status: std::io::Result<std::process::ExitStatus>,
@@ -299,9 +272,7 @@ mod tests {
         let window = cx.add_window(|_, _| DriverWindow);
         let task = window
             .update(cx, |_, window, cx| {
-                spawn(script.0.clone(), window, cx, Dialect::Lazygit, || {
-                    "0".into()
-                })
+                spawn(script.0.clone(), window, cx, || "0".into())
             })
             .expect("start driver");
         cx.run_until_parked();
@@ -331,7 +302,7 @@ mod tests {
         let window = cx.add_window(|_, _| DriverWindow);
         let task = window
             .update(cx, |_, window, cx| {
-                spawn(script.0.clone(), window, cx, Dialect::Fleet, || "0".into())
+                spawn(script.0.clone(), window, cx, || "0".into())
             })
             .expect("start driver");
         cx.run_until_parked();
@@ -347,31 +318,19 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         let path = Path::new("/tmp/help.png");
         let targets = shot_paths(path, 2);
-        let success = screenshot_messages(
-            Dialect::Fleet,
-            path,
-            &targets,
-            Ok(std::process::ExitStatus::from_raw(0)),
-        );
+        let success =
+            screenshot_messages(path, &targets, Ok(std::process::ExitStatus::from_raw(0)));
         assert!(success.succeeded);
         assert_eq!(
             success.messages,
             ["done shot /tmp/help.png", "done shot /tmp/help-2.png"]
         );
 
-        for dialect in [Dialect::Fleet, Dialect::Lazygit] {
-            let failure = screenshot_messages(
-                dialect,
-                path,
-                &targets,
-                Err(std::io::Error::other("failed")),
-            );
-            assert!(!failure.succeeded);
-            assert_eq!(failure.messages, ["error shot /tmp/help.png: failed"]);
-        }
+        let failure = screenshot_messages(path, &targets, Err(std::io::Error::other("failed")));
+        assert!(!failure.succeeded);
+        assert_eq!(failure.messages, ["error shot /tmp/help.png: failed"]);
 
         let failure = screenshot_messages(
-            Dialect::Lazygit,
             path,
             &targets[..1],
             Ok(std::process::ExitStatus::from_raw(256)),

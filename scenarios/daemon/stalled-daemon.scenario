@@ -1,0 +1,29 @@
+# UX-SPEC.md §3.12 C and [D-17] — a fleetd that stalls rather than dies comes back *reconnected*,
+# not *restarted*, and the banner must not claim the terminals died.
+#
+# `daemon stop` is SIGSTOP: the process keeps its PID lock, so nothing restarts it and nothing
+# takes its socket — it simply stops answering the health probe, which is the stalled daemon of
+# §3.12 C. `daemon cont` lets it answer again. Because the same process comes back with the same
+# pid and boot id, the app must report `restarted == false`; that is the difference between the
+# 800 ms "reconnected" banner and the 6 s sentence that says the sessions are gone.
+#
+# Headless: the `shot` fails in the headless lane ("no pixels"), so the file as written is
+# virtual-only — but nothing else in it touches the keyboard, so this is the first scenario the
+# headless subset can adopt once a shot-free variant is wanted there.
+fixture: one-repo
+await idle 20000
+assert daemon.link == connected
+
+daemon stop
+await daemon.link == lost 45000
+shot stalled
+
+daemon cont
+await daemon.link == reconnected 60000
+assert daemon.restarted == false
+dump reconnected
+
+# The 800 ms dwell is the app's own, so `advance` retires it without a wall-clock sleep.
+advance 1000
+await daemon.link == connected 5000
+quit

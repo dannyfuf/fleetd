@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "model": "scripted-sonnet",
+  "session_id": "6b8fc1c4-2f4e-4c4a-9f1a-6b7f0e2c1d41",
+  "thread_id": "01999c4a-7f00-7000-8000-0000000000a3",
+  "steps": [
+    { "type": "text", "text": "Reading the workspace manifest now.", "pace_ms": 10 },
+    {
+      "type": "error",
+      "message": "Selected model is at capacity. Please try a different model."
+    },
+    { "type": "end_turn", "status": "failed" }
+  ]
+}

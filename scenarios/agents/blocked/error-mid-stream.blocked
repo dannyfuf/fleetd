@@ -1,0 +1,35 @@
+# BLOCKED — failed-thread transition reproduced only 4/5 times
+#
+# Five isolated virtual-lane runs on 2026-09-15 produced four passes and one timeout at:
+#
+#     await agents.threads[0].state == failed 40000
+#
+# The failed run remained `idle` at that line. Evidence:
+# `/tmp/fleet-harness/20260915-170728-error-mid-stream/report.md`.
+# Keep this scenario out of the collected corpus until the transition is deterministic.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+click agents.composer
+type what does this crate do
+key enter
+await agents.threads[0].state == idle 40000
+
+click agents.composer
+type and what is the binary called
+key enter
+await agents.threads[0].state == idle 40000
+
+# The third turn streams one line and then the provider fails mid-stream.
+click agents.composer
+type and what does it depend on
+key enter
+await agents.threads[0].state == failed 40000
+assert lists.tabs.selected.marks[0] == failed && agents.threads[0].pending_gate absent
+shot failed
+dump failed
+quit

@@ -20,7 +20,7 @@ use fleet_proto::{
     request::{HelloClient, Request, RequestBody},
     response::{
         DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response,
-        ResponseBody,
+        ResponseBody, SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
     },
 };
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
@@ -123,8 +123,13 @@ impl Connection {
         #[cfg(test)]
         let mut last_request_read = self.last_request_read;
         let mut framed = Framed::new(self.stream, FleetCodec::<Outbound, Request>::new());
-        let Some(client) =
-            negotiate_hello_with_timeout(&mut framed, HANDSHAKE_TIMEOUT, &self.services).await?
+        let Some(client) = negotiate_hello_with_timeout(
+            &mut framed,
+            HANDSHAKE_TIMEOUT,
+            &self.services,
+            &self.events,
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -188,6 +193,8 @@ impl Connection {
                         Err(error) => break Err(DaemonError::Protocol(error.to_string())),
                     };
                     let id = request.id;
+                    let assembled_snapshot_revision = matches!(&request.body, RequestBody::GetSnapshot)
+                        .then(|| self.events.snapshot_revision());
                     let shutdown_request = match &request.body {
                         RequestBody::DaemonShutdown { stop_sessions } => Some(*stop_sessions),
                         _ => None,
@@ -240,7 +247,13 @@ impl Connection {
                                 let result = services
                                     .dispatch_routed_with_owner(body, owner_id, context)
                                     .await;
-                                CompletedRequest { id, result, snapshot_changed, shutdown_request }
+                                CompletedRequest {
+                                    id,
+                                    result,
+                                    snapshot_changed,
+                                    shutdown_request,
+                                    assembled_snapshot_revision,
+                                }
                             }));
                             #[cfg(test)]
                             if let Some(high_water) = &pending_high_water {
@@ -264,13 +277,28 @@ impl Connection {
                         let _ignored = ready.send(());
                     }
                     if let Some(result) = answered
-                        && let Err(error) = enqueue_response(&outbound, Response { id, result: result.map_err(Into::into) }).await
+                        && let Err(error) = enqueue_response(
+                            &outbound,
+                            stamped_response(
+                                &self.events,
+                                id,
+                                result.map_err(Into::into),
+                                assembled_snapshot_revision,
+                            ),
+                        )
+                        .await
                     {
                         break Err(error);
                     }
                 }
                 Some(completed) = pending.next(), if !pending.is_empty() => {
-                    let CompletedRequest { id, result, snapshot_changed, shutdown_request } = completed;
+                    let CompletedRequest {
+                        id,
+                        result,
+                        snapshot_changed,
+                        shutdown_request,
+                        assembled_snapshot_revision,
+                    } = completed;
                     let succeeded = result.is_ok();
                     if succeeded && snapshot_changed {
                         self.events.request_snapshot(Arc::clone(&self.services));
@@ -278,7 +306,17 @@ impl Connection {
                     if shutdown_request == Some(true) && succeeded {
                         self.services.stop_all_sessions().await;
                     }
-                    if let Err(error) = enqueue_response(&outbound, Response { id, result: result.map_err(Into::into) }).await {
+                    if let Err(error) = enqueue_response(
+                        &outbound,
+                        stamped_response(
+                            &self.events,
+                            id,
+                            result.map_err(Into::into),
+                            assembled_snapshot_revision,
+                        ),
+                    )
+                    .await
+                    {
                         break Err(error);
                     }
                     if shutdown_request.is_some() && succeeded {
@@ -454,11 +492,13 @@ async fn detach_attached_terminals(
 async fn negotiate_hello(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     services: &Services,
+    events: &BroadcastBus,
 ) -> DaemonResult<Option<HelloClient>> {
     let Some(first) = framed.next().await else {
         return Ok(None);
     };
     let first = first.map_err(|error| DaemonError::Protocol(error.to_string()))?;
+    let assembled_snapshot_revision = events.snapshot_revision();
     let (result, client) = match first.body {
         RequestBody::Hello {
             protocol: fleet_proto::PROTOCOL_VERSION,
@@ -487,10 +527,12 @@ async fn negotiate_hello(
     let accepted = result.is_ok();
     write_response(
         framed,
-        Response {
-            id: first.id,
-            result: result.map_err(Into::into),
-        },
+        stamped_response(
+            events,
+            first.id,
+            result.map_err(Into::into),
+            Some(assembled_snapshot_revision),
+        ),
         services.daemon_id(),
     )
     .await?;
@@ -501,8 +543,9 @@ async fn negotiate_hello_with_timeout(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
     timeout: Duration,
     services: &Services,
+    events: &BroadcastBus,
 ) -> DaemonResult<Option<HelloClient>> {
-    tokio::time::timeout(timeout, negotiate_hello(framed, services))
+    tokio::time::timeout(timeout, negotiate_hello(framed, services, events))
         .await
         .map_err(|_| DaemonError::Timeout("client Hello handshake".to_owned()))?
 }
@@ -625,6 +668,7 @@ struct CompletedRequest {
     result: DaemonResult<ResponseBody>,
     snapshot_changed: bool,
     shutdown_request: Option<bool>,
+    assembled_snapshot_revision: Option<u64>,
 }
 
 fn request_changes_snapshot(body: &RequestBody) -> bool {
@@ -668,7 +712,7 @@ fn request_changes_snapshot(body: &RequestBody) -> bool {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Outbound {
-    Response(Response),
+    Response(StampedResponse),
     Hello(HelloResponse),
     Pong(PongResponse),
     Event(Event),
@@ -692,11 +736,12 @@ async fn run_writer(
 
 async fn enqueue_response(
     outbound: &mpsc::Sender<Outbound>,
-    response: Response,
+    response: StampedResponse,
 ) -> DaemonResult<()> {
-    let message = if matches!(&response.result, Ok(ResponseBody::Pong)) {
+    let message = if matches!(&response.response.result, Ok(ResponseBody::Pong)) {
         Outbound::Pong(PongResponse {
-            response,
+            response: response.response,
+            snapshot_revision: response.snapshot_revision,
             daemon: Some(daemon_identity()),
         })
     } else {
@@ -721,12 +766,13 @@ async fn enqueue_outbound(
 
 async fn write_response(
     framed: &mut Framed<UnixStream, FleetCodec<Outbound, Request>>,
-    response: Response,
+    response: StampedResponse,
     daemon_id: &str,
 ) -> DaemonResult<()> {
-    let message = if matches!(&response.result, Ok(ResponseBody::Hello { .. })) {
+    let message = if matches!(&response.response.result, Ok(ResponseBody::Hello { .. })) {
         Outbound::Hello(HelloResponse {
-            response,
+            response: response.response,
+            snapshot_revision: response.snapshot_revision,
             // Only what this build actually implements: a peer infers behaviour from these
             // strings and never from a version number, so advertising an unimplemented one is
             // worse than advertising nothing (`rust-ipc-protocol` Rule 7). Every `agent.*`
@@ -735,6 +781,7 @@ async fn write_response(
             // checkpoints, and the Codex harness — so the slice goes out whole rather than as a
             // hand-maintained subset that can drift from what dispatch answers.
             capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
+                .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -754,6 +801,22 @@ async fn write_response(
         .send(message)
         .await
         .map_err(|error| DaemonError::Protocol(error.to_string()))
+}
+
+fn stamped_response(
+    events: &BroadcastBus,
+    id: u64,
+    mut result: Result<ResponseBody, fleet_proto::error::ProtoError>,
+    assembled_snapshot_revision: Option<u64>,
+) -> StampedResponse {
+    let snapshot_revision = events.snapshot_revision();
+    if let Ok(ResponseBody::Snapshot(snapshot)) = &mut result {
+        snapshot.revision = Some(assembled_snapshot_revision.unwrap_or(snapshot_revision));
+    }
+    StampedResponse {
+        response: Response { id, result },
+        snapshot_revision: Some(snapshot_revision),
+    }
 }
 
 fn daemon_identity() -> DaemonIdentity {
@@ -820,7 +883,9 @@ mod tests {
                     server: Services::version(),
                 }),
             },
+            snapshot_revision: Some(3),
             capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
+                .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
                 .chain(std::iter::once(
                     fleet_proto::REMOTE_MACHINES_CAPABILITY.to_owned(),
                 ))
@@ -840,6 +905,7 @@ mod tests {
             hello["capabilities"],
             serde_json::json!([
                 "prune.reviewed_ids",
+                "snapshot.revision",
                 "remote-machines",
                 "agent.window",
                 "agent.sync_marker",
@@ -856,6 +922,7 @@ mod tests {
                 id: 2,
                 result: Ok(ResponseBody::Pong),
             },
+            snapshot_revision: Some(3),
             daemon: Some(identity.clone()),
         });
         let pong = serde_json::to_value(pong).expect("serialize Pong");
@@ -869,12 +936,13 @@ mod tests {
         let mut server = Framed::new(server, FleetCodec::<Outbound, Request>::new());
         let mut client = Framed::new(client, FleetCodec::<Request, serde_json::Value>::new());
         for golden in [
-            r#"{"id":7,"result":{"Ok":{"type":"pong"}}}"#,
-            r#"{"id":8,"result":{"Err":{"kind":"unsupported","message":"unsupported protocol"}}}"#,
+            r#"{"id":7,"result":{"Ok":{"type":"pong"}},"snapshotRevision":3}"#,
+            r#"{"id":8,"result":{"Err":{"kind":"unsupported","message":"unsupported protocol"}},"snapshotRevision":3}"#,
         ] {
             let expected: serde_json::Value =
                 serde_json::from_str(golden).expect("response golden");
-            let response = serde_json::from_value(expected.clone()).expect("response shape");
+            let response: StampedResponse =
+                serde_json::from_value(expected.clone()).expect("response shape");
             write_response(&mut server, response, "test-daemon")
                 .await
                 .expect("send response");
@@ -903,13 +971,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mutation_response_stamp_covers_the_revision_bumped_by_its_request() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let services = test_services(temp.path()).await;
+        let events = services.events.clone();
+        let shutdown = CancellationToken::new();
+        let (server, client) = UnixStream::pair().expect("socket pair");
+        let actor = tokio::spawn(
+            Connection::new(
+                server,
+                Arc::clone(&services),
+                events.clone(),
+                shutdown.clone(),
+            )
+            .run(),
+        );
+        let mut client = Framed::new(client, FleetCodec::<Request, serde_json::Value>::new());
+        let hello_assembled_revision = events.snapshot_revision();
+        client
+            .send(Request {
+                id: 1,
+                body: RequestBody::Hello {
+                    protocol: fleet_proto::PROTOCOL_VERSION,
+                    client: "revision-test".into(),
+                },
+            })
+            .await
+            .expect("send hello");
+        let hello = client
+            .next()
+            .await
+            .expect("hello response")
+            .expect("decode hello response");
+        let hello: HelloResponse = serde_json::from_value(hello).expect("stamped Hello");
+        assert_eq!(hello.snapshot_revision, Some(hello_assembled_revision));
+        assert!(
+            Some(hello_assembled_revision) <= hello.snapshot_revision,
+            "the Hello envelope must not precede the revision sampled before negotiation"
+        );
+
+        client
+            .send(Request {
+                id: 2,
+                body: RequestBody::SetActiveContext { id: None },
+            })
+            .await
+            .expect("send mutation");
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let value = client
+                    .next()
+                    .await
+                    .expect("connection stays open")
+                    .expect("decode frame");
+                if value.get("id").and_then(serde_json::Value::as_u64) == Some(2) {
+                    return serde_json::from_value::<StampedResponse>(value)
+                        .expect("stamped mutation response");
+                }
+            }
+        })
+        .await
+        .expect("mutation response deadline");
+        let revision = response
+            .snapshot_revision
+            .expect("new daemon stamps every response");
+        assert!(revision >= 1);
+        assert!(events.snapshot_revision() <= revision);
+
+        let assembled_revision = events.snapshot_revision();
+        client
+            .send(Request {
+                id: 3,
+                body: RequestBody::GetSnapshot,
+            })
+            .await
+            .expect("request direct snapshot");
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let value = client
+                    .next()
+                    .await
+                    .expect("connection stays open")
+                    .expect("decode frame");
+                if value.get("id").and_then(serde_json::Value::as_u64) == Some(3) {
+                    return serde_json::from_value::<StampedResponse>(value)
+                        .expect("stamped snapshot response");
+                }
+            }
+        })
+        .await
+        .expect("snapshot response deadline");
+        let ResponseBody::Snapshot(snapshot) = response
+            .response
+            .result
+            .expect("GetSnapshot request succeeds")
+        else {
+            panic!("GetSnapshot returned a different response");
+        };
+        assert_eq!(snapshot.revision, Some(assembled_revision));
+        assert!(response.snapshot_revision >= snapshot.revision);
+
+        shutdown.cancel();
+        actor
+            .await
+            .expect("connection task")
+            .expect("connection stops cleanly");
+    }
+
+    #[tokio::test]
     async fn silent_client_handshake_has_deadline() {
         let temp = tempfile::tempdir().expect("temp home");
         let services = test_services(temp.path()).await;
         let (server, _client) = UnixStream::pair().expect("socket pair");
         let mut framed = Framed::new(server, FleetCodec::<Outbound, Request>::new());
-        let result =
-            negotiate_hello_with_timeout(&mut framed, Duration::from_millis(10), &services).await;
+        let result = negotiate_hello_with_timeout(
+            &mut framed,
+            Duration::from_millis(10),
+            &services,
+            &services.events,
+        )
+        .await;
         assert!(matches!(result, Err(DaemonError::Timeout(_))));
     }
 

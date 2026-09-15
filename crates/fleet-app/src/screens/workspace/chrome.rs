@@ -81,6 +81,9 @@ impl WorkspaceScreen {
             (Rc::clone(&self.local), bridge.clone(), state.clone());
         TerminalTabStrip::new(tabs)
             .active(active)
+            // Terminals first, then one tab per agent thread — the same split
+            // `state/harness/projection.rs` reports, so `focused` and a click name the same tab.
+            .agents_from(first_agent)
             // Mouse parity for `ctrl-s 1`-`9` (§3.6). It is also the only way a mouse-first
             // user reaches a Fleet-drawn tab, which is why the strip is finally wired.
             .on_select(move |position, _window, cx| {

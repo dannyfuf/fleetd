@@ -1,5 +1,12 @@
 use super::*;
 
+struct ExpandedLog {
+    lines: Arc<[SharedString]>,
+    following: bool,
+    offset: usize,
+    job: JobId,
+}
+
 impl JobsPanel {
     /// Renders the panel into the frame's overlay layer.
     pub fn render(
@@ -33,12 +40,22 @@ impl JobsPanel {
         let counts = prepared.counts;
         let cancellable = prepared.cancellable;
         let log_path = prepared.log_paths.get(cursor).cloned();
-        let body = if expanded.is_some() {
-            self.log_body(log, following, log_offset, state, cx)
+        let requests = actions::JobsRequests::bridge(bridge.clone());
+        let body = if let Some(job) = expanded.clone() {
+            self.log_body(
+                ExpandedLog {
+                    lines: log,
+                    following,
+                    offset: log_offset,
+                    job,
+                },
+                state,
+                requests.clone(),
+                cx,
+            )
         } else {
             presentation::list_body(visible, cursor, filter, &self.list_scroll, now_unix())
         };
-        let requests = actions::JobsRequests::bridge(bridge.clone());
 
         let header = div()
             .flex()
@@ -61,14 +78,14 @@ impl JobsPanel {
             .on_action(self.on_move_down(state))
             .on_action(self.on_move_up(state))
             .on_action(self.on_top(state))
-            .on_action(self.on_bottom(state))
-            .on_action(self.on_toggle_log(state, bridge))
+            .on_action(self.on_bottom(state, requests.clone()))
+            .on_action(self.on_toggle_log(state, requests.clone()))
             .on_action(self.on_cancel(state, requests.clone()))
             .on_action(self.on_cancel_all(state, requests.clone()))
             .on_action(self.on_retry(state, requests.clone()))
             .on_action(self.on_copy_log_path(state))
-            .on_action(self.on_dismiss(state, requests))
-            .on_action(self.on_cycle_filter(state))
+            .on_action(self.on_dismiss(state, requests.clone()))
+            .on_action(self.on_cycle_filter(state, requests))
             .on_action(self.on_collapse_log(state))
             .on_action(self.on_close(state))
             .when(expanded.is_some(), |el| el.key_context("Log"))
@@ -85,13 +102,12 @@ impl JobsPanel {
     /// The expanded log: the last [`LOG_TAIL_LINES`] lines of `logs/jobs/<id>.log`.
     fn log_body(
         &self,
-        log: Arc<[SharedString]>,
-        following: bool,
-        log_offset: usize,
+        log: ExpandedLog,
         state: &Entity<AppState>,
+        requests: actions::JobsRequests,
         cx: &App,
     ) -> AnyElement {
-        if log.is_empty() {
+        if log.lines.is_empty() {
             let theme = cx.theme();
             return div()
                 .flex()
@@ -104,12 +120,27 @@ impl JobsPanel {
         }
         let panel = self.state.clone();
         let state = state.clone();
-        LogView::from_shared("jobs-panel-log", log)
-            .following(following)
-            .top(log_offset)
+        let log_scroll = self.log_scroll.clone();
+        LogView::from_shared("jobs-panel-log", log.lines)
+            .following(log.following)
+            .top(log.offset)
             .track_scroll(&self.log_scroll)
             .on_command(move |command, _, cx| {
-                panel.update(cx, |panel, _| panel.apply_log_command(command));
+                let resume = panel.update(cx, |panel, _| {
+                    let was_following = panel.following;
+                    panel.apply_log_command(command);
+                    !was_following && panel.following
+                });
+                if resume {
+                    start_tail(
+                        panel.clone(),
+                        state.clone(),
+                        requests.clone(),
+                        log_scroll.clone(),
+                        log.job.clone(),
+                        cx,
+                    );
+                }
                 notify(&state, cx);
             })
             .into_any_element()
@@ -202,12 +233,12 @@ pub(super) fn synchronize(
     cx: &mut App,
 ) {
     let changed = panel.update(cx, |panel, cx| {
-        let state = state.read(cx);
-        if !matches!(state.overlay, Some(Overlay::Jobs)) {
+        let app = state.read(cx);
+        if !matches!(app.overlay, Some(Overlay::Jobs)) {
             panel.close();
             return false;
         }
-        let jobs = state
+        let jobs = app
             .snapshot
             .as_ref()
             .map_or(&[][..], |snapshot| snapshot.jobs.as_slice());
@@ -215,10 +246,13 @@ pub(super) fn synchronize(
         panel.clamp(panel.prepared.rows.len());
         if !panel.opened {
             panel.opened = true;
-            if let Some(job) = &state.jobs_focus {
+            if let Some(job) = &app.jobs_focus {
                 panel.focus_job(jobs, job);
             }
         }
+        // Publish even when opening did not focus a sticky-error job: the first harness
+        // projection must see the panel's seeded cursor and filter.
+        mirror_panel(panel, state, cx);
         changed
     });
     if changed {
@@ -242,7 +276,11 @@ pub(super) fn list_body(
     gpui::list(scroll.clone(), move |index, _, _| {
         rows.get(index).map_or_else(
             || div().into_any_element(),
-            |job| jobs_panel::prepared_job_row(job, index == cursor, now),
+            |job| {
+                jobs_panel::prepared_job_row(job, index == cursor, now)
+                    .harness_target_indexed("jobs.row", index)
+                    .into_any_element()
+            },
         )
     })
     .size_full()
