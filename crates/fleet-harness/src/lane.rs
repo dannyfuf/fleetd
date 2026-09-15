@@ -294,6 +294,33 @@ struct VirtualOutput {
     empty: Option<NamedTempFile>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigProvider {
+    Legacy,
+    Lua,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowDispatch<'a> {
+    MoveToWorkspace {
+        workspace: i64,
+        address: &'a str,
+    },
+    Float {
+        address: &'a str,
+    },
+    Resize {
+        width: u32,
+        height: u32,
+        address: &'a str,
+    },
+    Move {
+        x: i32,
+        y: i32,
+        address: &'a str,
+    },
+}
+
 impl HyprlandBackend {
     /// Attaches to the developer's session without creating or changing anything.
     fn attach(run_id: &str) -> anyhow::Result<Self> {
@@ -598,32 +625,43 @@ impl HyprlandBackend {
             .ok_or_else(|| anyhow::anyhow!("output {name} disappeared before the window moved"))?;
         let empty = Self::record_empty_output(name, window, monitor.id);
         let address = &window.address;
-        // These are the classic `hyprctl dispatch` verbs, not the `hl.dispatch(hl.dsp.…)` Lua
-        // form. `hyprctl eval` answers "eval is only supported with the lua config manager" on a
-        // Hyprland driven by a classic `.conf` — and it answers it on *stdout with exit status
-        // zero*, so every placement silently did nothing and the window stayed where it was. See
-        // `hyprctl_dispatch`, which is why that can no longer pass unnoticed.
+        let provider = config_provider()?;
+        // Hyprland 0.55 made `dispatch` a shorthand for a Lua expression when the session uses
+        // the Lua config provider, while classic configs still require dispatcher verb + argument.
+        // Build the form reported by `hyprctl status`; either way the placement below is read back
+        // from compositor state rather than trusted from an `ok` response.
         //
         // Tiling would size the window from the developer's gaps and reserved areas, so the
         // window is floated at the size the app asked for and pinned to the output's origin.
-        hyprctl_dispatch(&[
-            "movetoworkspacesilent",
-            &format!("{},address:{address}", monitor.active_workspace.id),
-        ])?;
-        hyprctl_dispatch(&["setfloating", &format!("address:{address}")])?;
+        dispatch_window(
+            provider,
+            WindowDispatch::MoveToWorkspace {
+                workspace: monitor.active_workspace.id,
+                address,
+            },
+        )?;
+        dispatch_window(provider, WindowDispatch::Float { address })?;
         // Floating restores the size the window had before the session's layout rules resized it,
         // which is the size that window last floated at rather than the one the harness asked
         // for. Pin it explicitly, or the same scenario is captured at a different size on every
         // box and no baseline survives (`docs/TESTING-HARNESS.md` §1 and §6).
         let (width, height) = pinned_window_size();
-        hyprctl_dispatch(&[
-            "resizewindowpixel",
-            &format!("exact {width} {height},address:{address}"),
-        ])?;
-        hyprctl_dispatch(&[
-            "movewindowpixel",
-            &format!("exact {} {},address:{address}", monitor.x, monitor.y),
-        ])?;
+        dispatch_window(
+            provider,
+            WindowDispatch::Resize {
+                width,
+                height,
+                address,
+            },
+        )?;
+        dispatch_window(
+            provider,
+            WindowDispatch::Move {
+                x: monitor.x,
+                y: monitor.y,
+                address,
+            },
+        )?;
         let deadline = Instant::now() + PLACEMENT_TIMEOUT;
         loop {
             let placed = clients()?
@@ -929,25 +967,102 @@ pub(crate) fn hyprctl(arguments: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Runs one `hyprctl dispatch` verb and insists the compositor answered `ok`.
+#[derive(Deserialize)]
+struct Status {
+    #[serde(rename = "configProvider")]
+    config_provider: String,
+}
+
+/// Detects which of Hyprland's two dispatcher syntaxes this session accepts.
+fn config_provider() -> anyhow::Result<ConfigProvider> {
+    let raw = hyprctl(&["status", "-j"])?;
+    let status: Status =
+        serde_json::from_str(&raw).map_err(|error| anyhow::anyhow!("hyprctl status: {error}"))?;
+    match status.config_provider.as_str() {
+        "lua" => Ok(ConfigProvider::Lua),
+        "hyprlang" | "legacy" => Ok(ConfigProvider::Legacy),
+        other => anyhow::bail!("unsupported Hyprland config provider {other:?}"),
+    }
+}
+
+/// Runs one window dispatcher in the syntax selected by the session's config provider.
 ///
 /// A dispatcher that Hyprland refuses still exits zero: an unknown verb, a window that no longer
-/// exists, and the `hl.dispatch(…)` Lua form on a classic-config session all come back as exit
-/// status zero with the complaint on *stdout*. Checking only the exit status therefore reports a
-/// successful placement for a window that never moved, and the run goes on to photograph whatever
-/// was already on the screen. Reading the answer is the whole point of this wrapper.
-pub(crate) fn hyprctl_dispatch(arguments: &[&str]) -> anyhow::Result<()> {
-    let mut call = vec!["dispatch"];
-    call.extend(arguments.iter().copied());
-    let answer = hyprctl(&call)?;
+/// exists, and a syntax/provider mismatch all come back as exit status zero with the complaint on
+/// *stdout*. Reading the answer and then validating placement is what prevents a silent fallback.
+fn dispatch_window(provider: ConfigProvider, action: WindowDispatch<'_>) -> anyhow::Result<()> {
+    let call = window_dispatch_call(provider, action)?;
+    let arguments = call.iter().map(String::as_str).collect::<Vec<_>>();
+    let answer = hyprctl(&arguments)?;
     if answer.trim() != "ok" {
         anyhow::bail!(
-            "hyprctl dispatch {} was refused: {}",
+            "hyprctl {} was refused: {}",
             arguments.join(" "),
             answer.trim(),
         );
     }
     Ok(())
+}
+
+fn window_dispatch_call(
+    provider: ConfigProvider,
+    action: WindowDispatch<'_>,
+) -> anyhow::Result<Vec<String>> {
+    let address = match action {
+        WindowDispatch::MoveToWorkspace { address, .. }
+        | WindowDispatch::Float { address }
+        | WindowDispatch::Resize { address, .. }
+        | WindowDispatch::Move { address, .. } => address,
+    };
+    anyhow::ensure!(
+        address.strip_prefix("0x").is_some_and(
+            |hex| !hex.is_empty() && hex.chars().all(|character| character.is_ascii_hexdigit())
+        ),
+        "Hyprland returned an invalid window address {address:?}"
+    );
+    let selector = format!("address:{address}");
+    Ok(match (provider, action) {
+        (ConfigProvider::Lua, WindowDispatch::MoveToWorkspace { workspace, .. }) => vec![
+            "dispatch".to_owned(),
+            format!(
+                "hl.dsp.window.move({{ workspace = {workspace}, window = \"{selector}\", follow = false }})"
+            ),
+        ],
+        (ConfigProvider::Lua, WindowDispatch::Float { .. }) => vec![
+            "dispatch".to_owned(),
+            format!("hl.dsp.window.float({{ window = \"{selector}\", action = \"set\" }})"),
+        ],
+        (ConfigProvider::Lua, WindowDispatch::Resize { width, height, .. }) => vec![
+            "dispatch".to_owned(),
+            format!(
+                "hl.dsp.window.resize({{ window = \"{selector}\", x = {width}, y = {height}, relative = false }})"
+            ),
+        ],
+        (ConfigProvider::Lua, WindowDispatch::Move { x, y, .. }) => vec![
+            "dispatch".to_owned(),
+            format!(
+                "hl.dsp.window.move({{ window = \"{selector}\", x = {x}, y = {y}, relative = false }})"
+            ),
+        ],
+        (ConfigProvider::Legacy, WindowDispatch::MoveToWorkspace { workspace, .. }) => vec![
+            "dispatch".to_owned(),
+            "movetoworkspacesilent".to_owned(),
+            format!("{workspace},{selector}"),
+        ],
+        (ConfigProvider::Legacy, WindowDispatch::Float { .. }) => {
+            vec!["dispatch".to_owned(), "setfloating".to_owned(), selector]
+        }
+        (ConfigProvider::Legacy, WindowDispatch::Resize { width, height, .. }) => vec![
+            "dispatch".to_owned(),
+            "resizewindowpixel".to_owned(),
+            format!("exact {width} {height},{selector}"),
+        ],
+        (ConfigProvider::Legacy, WindowDispatch::Move { x, y, .. }) => vec![
+            "dispatch".to_owned(),
+            "movewindowpixel".to_owned(),
+            format!("exact {x} {y},{selector}"),
+        ],
+    })
 }
 
 #[cfg(test)]
@@ -1014,6 +1129,78 @@ mod tests {
                 "{rejected:?} must fall back to the default rather than vary the geometry"
             );
         }
+    }
+
+    #[test]
+    fn window_dispatches_follow_the_config_provider_syntax() {
+        let cases = [
+            (
+                WindowDispatch::MoveToWorkspace {
+                    workspace: 2,
+                    address: "0x55",
+                },
+                vec!["dispatch", "movetoworkspacesilent", "2,address:0x55"],
+                vec![
+                    "dispatch",
+                    "hl.dsp.window.move({ workspace = 2, window = \"address:0x55\", follow = false })",
+                ],
+            ),
+            (
+                WindowDispatch::Float { address: "0x55" },
+                vec!["dispatch", "setfloating", "address:0x55"],
+                vec![
+                    "dispatch",
+                    "hl.dsp.window.float({ window = \"address:0x55\", action = \"set\" })",
+                ],
+            ),
+            (
+                WindowDispatch::Resize {
+                    width: 1440,
+                    height: 900,
+                    address: "0x55",
+                },
+                vec![
+                    "dispatch",
+                    "resizewindowpixel",
+                    "exact 1440 900,address:0x55",
+                ],
+                vec![
+                    "dispatch",
+                    "hl.dsp.window.resize({ window = \"address:0x55\", x = 1440, y = 900, relative = false })",
+                ],
+            ),
+            (
+                WindowDispatch::Move {
+                    x: 1920,
+                    y: 0,
+                    address: "0x55",
+                },
+                vec!["dispatch", "movewindowpixel", "exact 1920 0,address:0x55"],
+                vec![
+                    "dispatch",
+                    "hl.dsp.window.move({ window = \"address:0x55\", x = 1920, y = 0, relative = false })",
+                ],
+            ),
+        ];
+        for (action, legacy, lua) in cases {
+            assert_eq!(
+                window_dispatch_call(ConfigProvider::Legacy, action).expect("legacy call"),
+                legacy
+            );
+            assert_eq!(
+                window_dispatch_call(ConfigProvider::Lua, action).expect("Lua call"),
+                lua
+            );
+        }
+        assert!(
+            window_dispatch_call(
+                ConfigProvider::Lua,
+                WindowDispatch::Float {
+                    address: "not-an-address",
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

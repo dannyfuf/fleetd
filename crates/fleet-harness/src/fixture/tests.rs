@@ -15,7 +15,7 @@ use fleet_proto::snapshot::Snapshot;
 use std::{path::Path, process::Stdio};
 
 /// A preset built into its own temporary world, and what a fresh daemon makes of it.
-struct Booted {
+pub(super) struct Booted {
     /// Kept alive: dropping it deletes the home the assertions are about.
     _root: tempfile::TempDir,
     snapshot: Snapshot,
@@ -24,7 +24,7 @@ struct Booted {
 }
 
 impl Booted {
-    fn context(&self) -> ContextId {
+    pub(super) fn context(&self) -> ContextId {
         self.snapshot
             .active_context
             .clone()
@@ -32,7 +32,7 @@ impl Booted {
     }
 
     #[track_caller]
-    fn worktree_slugs(&self) -> Vec<String> {
+    pub(super) fn worktree_slugs(&self) -> Vec<String> {
         let mut slugs: Vec<String> = self
             .snapshot
             .worktrees
@@ -44,7 +44,7 @@ impl Booted {
     }
 
     #[track_caller]
-    fn repo_slugs(&self) -> Vec<String> {
+    pub(super) fn repo_slugs(&self) -> Vec<String> {
         let mut slugs: Vec<String> = self
             .snapshot
             .repos
@@ -57,7 +57,7 @@ impl Booted {
 }
 
 /// Builds one preset and reads it back through a daemon that did not seed it.
-async fn boot(preset: Preset) -> (Booted, Daemon, HarnessEnv) {
+pub(super) async fn boot(preset: Preset) -> (Booted, Daemon, HarnessEnv) {
     let root = tempfile::Builder::new()
         .prefix(&format!("fleet-fixture-{preset}-"))
         .tempdir()
@@ -108,7 +108,7 @@ async fn boot(preset: Preset) -> (Booted, Daemon, HarnessEnv) {
 /// root the run happens to occupy. Ids that Fleet derives — `acme/api`, `acme/api#feature`,
 /// the context — are deliberately *not* redacted, because their stability is part of the
 /// claim. Ids the daemon generates are UUIDs, and are matched by shape.
-fn redact(value: serde_json::Value, root: &Path) -> serde_json::Value {
+pub(super) fn redact(value: serde_json::Value, root: &Path) -> serde_json::Value {
     match value {
         serde_json::Value::Object(object) => serde_json::Value::Object(
             object
@@ -135,7 +135,7 @@ fn redact(value: serde_json::Value, root: &Path) -> serde_json::Value {
 }
 
 /// Replaces every `8-4-4-4-12` hexadecimal group with `<uuid>`.
-fn mask_uuids(text: &str) -> String {
+pub(super) fn mask_uuids(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let characters: Vec<char> = text.chars().collect();
     let mut index = 0;
@@ -151,7 +151,7 @@ fn mask_uuids(text: &str) -> String {
     out
 }
 
-fn is_uuid(window: &[char]) -> bool {
+pub(super) fn is_uuid(window: &[char]) -> bool {
     const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
     if window.len() < 36 {
         return false;
@@ -488,10 +488,17 @@ async fn each_injected_shape_is_a_real_daemon_job_of_the_kind_it_claims() {
         .await
         .unwrap_or_else(|error| panic!("connect for job injection: {error:#}"));
     let fixture = plan::describe(Preset::OneRepo);
+    let mut success_ordinal = 0;
 
-    let success = inject(&client, &fixture, &context, Injected::Success)
-        .await
-        .unwrap_or_else(|error| panic!("inject a successful job: {error:#}"));
+    let success = inject(
+        &client,
+        &fixture,
+        &context,
+        &mut success_ordinal,
+        Injected::Success,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("inject a successful job: {error:#}"));
     assert_eq!(success.jobs.len(), 1);
     assert_eq!(success.jobs[0].kind, JobKind::CreateWorktree);
     assert_eq!(
@@ -500,9 +507,15 @@ async fn each_injected_shape_is_a_real_daemon_job_of_the_kind_it_claims() {
         "the toast the app shows is the one a succeeded CreateWorktree emits"
     );
 
-    let failure = inject(&client, &fixture, &context, Injected::Failure)
-        .await
-        .unwrap_or_else(|error| panic!("inject a failing job: {error:#}"));
+    let failure = inject(
+        &client,
+        &fixture,
+        &context,
+        &mut success_ordinal,
+        Injected::Failure,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("inject a failing job: {error:#}"));
     assert_eq!(failure.jobs[0].kind, JobKind::Clone);
     let JobStatus::Failed { error } = &failure.jobs[0].status else {
         panic!(
@@ -515,9 +528,15 @@ async fn each_injected_shape_is_a_real_daemon_job_of_the_kind_it_claims() {
         "the sticky error slot shows this text, so it may not be empty"
     );
 
-    let repeated = inject(&client, &fixture, &context, Injected::Repeated { count: 2 })
-        .await
-        .unwrap_or_else(|error| panic!("inject repeated jobs: {error:#}"));
+    let repeated = inject(
+        &client,
+        &fixture,
+        &context,
+        &mut success_ordinal,
+        Injected::Repeated { count: 2 },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("inject repeated jobs: {error:#}"));
     assert_eq!(
         repeated.jobs.len(),
         2,
@@ -534,9 +553,15 @@ async fn each_injected_shape_is_a_real_daemon_job_of_the_kind_it_claims() {
         "the toasts only coalesce because every repetition names the same worktree"
     );
 
-    let long = inject(&client, &fixture, &context, Injected::LongRunning)
-        .await
-        .unwrap_or_else(|error| panic!("inject a long-running job: {error:#}"));
+    let long = inject(
+        &client,
+        &fixture,
+        &context,
+        &mut success_ordinal,
+        Injected::LongRunning,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("inject a long-running job: {error:#}"));
     assert_eq!(long.jobs[0].kind, JobKind::PostCreateHooks);
     assert!(
         matches!(long.jobs[0].status, JobStatus::Queued | JobStatus::Running),

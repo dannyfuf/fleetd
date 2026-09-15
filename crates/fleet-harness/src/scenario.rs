@@ -14,7 +14,7 @@ use anyhow::Context as _;
 use fleet_drive::protocol::*;
 use std::{
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -84,6 +84,8 @@ pub struct ExecutionContext<'a> {
     pub fixture: &'a fixture::Fixture,
     /// Injections still running, so teardown can end a long-running one it started.
     pub injections: &'a mut Vec<Injection>,
+    /// Per-run suffix for successful fixture jobs, advanced before submission.
+    pub success_ordinal: u8,
     pub update_baselines: bool,
     /// The artifact the last dispatched line wrote, taken by the runner for its report.
     pub artifact: Option<PathBuf>,
@@ -223,10 +225,14 @@ impl Stage {
                 Err(_) => {}
             }
         }
-        if let Some(mut app) = self.app.take()
-            && let Err(problem) = stop(&mut app, "Fleet", QUIT_GRACE).await
-        {
-            problems.push(problem);
+        if let Some(mut app) = self.app.take() {
+            match stop(&mut app, "Fleet", QUIT_GRACE).await {
+                Ok(Some(status)) if !status.success() => problems.push(format!(
+                    "Fleet exited with {status} during teardown; see app.log"
+                )),
+                Ok(_) => {}
+                Err(problem) => problems.push(problem),
+            }
         }
         if let Some(mut daemon) = self.daemon.take() {
             // The orderly path asks fleetd to exit and then verifies its socket is gone; a kill
@@ -248,9 +254,13 @@ impl Stage {
 }
 
 /// Waits out a grace period for a child that was asked to exit, then kills it.
-async fn stop(child: &mut Child, what: &str, grace: Duration) -> Result<(), String> {
+async fn stop(
+    child: &mut Child,
+    what: &str,
+    grace: Duration,
+) -> Result<Option<ExitStatus>, String> {
     match child.try_wait() {
-        Ok(Some(_status)) => return Ok(()),
+        Ok(Some(status)) => return Ok(Some(status)),
         Ok(None) => {}
         Err(error) => return Err(format!("poll {what}: {error}")),
     }
@@ -258,13 +268,31 @@ async fn stop(child: &mut Child, what: &str, grace: Duration) -> Result<(), Stri
         && let Ok(waited) = tokio::time::timeout(grace, child.wait()).await
     {
         return waited
-            .map(|_status| ())
+            .map(Some)
             .map_err(|error| format!("wait for {what}: {error}"));
     }
     child
         .kill()
         .await
-        .map_err(|error| format!("kill {what}: {error}"))
+        .map_err(|error| format!("kill {what}: {error}"))?;
+    Ok(None)
+}
+
+/// Awaits the orderly exit promised by a successful `quit` exchange.
+async fn await_fleet_exit_after_quit(app: &mut Child) -> anyhow::Result<ExitStatus> {
+    let status = match tokio::time::timeout(QUIT_GRACE, app.wait()).await {
+        Ok(waited) => waited.context("wait for Fleet after `quit`")?,
+        Err(_elapsed) => anyhow::bail!(
+            "Fleet answered `quit` but its exit status was still pending after {QUIT_GRACE:?}; \
+             the shutdown timed out — see app.log"
+        ),
+    };
+    anyhow::ensure!(
+        status.success(),
+        "Fleet answered `quit` and then exited with {status}; \
+         the shutdown is not orderly — see app.log"
+    );
+    Ok(status)
 }
 
 /// Runs one scenario end to end into its own run directory.
@@ -476,6 +504,7 @@ async fn execute(
         scenario: scenario_path,
         fixture: &fixture,
         injections,
+        success_ordinal: 0,
         update_baselines: options.update_baselines,
         artifact: None,
     };
@@ -495,40 +524,19 @@ async fn execute(
 
         let started = Instant::now();
         let outcome = dispatch(line, &mut context).await;
+        let quit = matches!(line.instruction, Instruction::App(Command::Quit(_)));
+        let quit_problem = if quit && matches!(outcome, Ok(Some(_))) {
+            await_fleet_exit_after_quit(app)
+                .await
+                .err()
+                .map(|error| format!("{error:#}"))
+        } else {
+            None
+        };
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let artifact = context.artifact.take();
 
-        let (ok, error) = match (&outcome, &line.instruction) {
-            (Ok(Some(response)), Instruction::App(command)) => {
-                run_dir
-                    .record(&Request::new(response.id, command)?, response)
-                    .await?;
-                (response.ok, response.error.clone())
-            }
-            (Ok(_), _) => {
-                run_dir
-                    .record_event(
-                        "runner",
-                        serde_json::json!({ "line": line.number, "source": line.source }),
-                    )
-                    .await?;
-                (true, None)
-            }
-            (Err(error), _) => {
-                let message = format!("{error:#}");
-                run_dir
-                    .record_event(
-                        "error",
-                        serde_json::json!({
-                            "line": line.number,
-                            "source": line.source,
-                            "error": message,
-                        }),
-                    )
-                    .await?;
-                (false, Some(message))
-            }
-        };
+        let (ok, error) = journal_outcome(run_dir, line, &outcome, quit_problem).await?;
         steps.push(StepReport {
             line: line.number,
             source: line.source.clone(),
@@ -558,33 +566,64 @@ async fn execute(
             }
         }
 
-        match app.try_wait().context("poll the Fleet process")? {
-            // `quit` is meant to end the process — but it is meant to end it *orderly*. A Fleet
-            // that answers `quit` and then aborts in its own teardown (a panic in a destructor,
-            // a signal) has failed the run, and discarding the status here is what let it pass
-            // as "19 lines in 401 ms" while `app.log` ended in a fatal runtime error.
-            Some(status) if matches!(line.instruction, Instruction::App(Command::Quit(_))) => {
-                anyhow::ensure!(
-                    status.success(),
-                    "Fleet answered `quit` and then exited with {status}; \
-                     the shutdown is not orderly — see app.log"
-                );
-                break;
-            }
-            Some(status) => {
-                anyhow::bail!(
-                    "Fleet exited with {status} after line {}: {}; see app.log",
-                    line.number,
-                    line.source.trim()
-                )
-            }
-            None => {}
+        if quit {
+            break;
+        }
+        if let Some(status) = app.try_wait().context("poll the Fleet process")? {
+            anyhow::bail!(
+                "Fleet exited with {status} after line {}: {}; see app.log",
+                line.number,
+                line.source.trim()
+            )
         }
     }
     match failure {
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+/// Writes exactly one journal entry for one executable scenario line.
+async fn journal_outcome(
+    run_dir: &RunDirectory,
+    line: &ScenarioLine,
+    outcome: &anyhow::Result<Option<Response>>,
+    quit_problem: Option<String>,
+) -> anyhow::Result<(bool, Option<String>)> {
+    Ok(match (outcome, &line.instruction) {
+        (Ok(Some(response)), Instruction::App(command)) => {
+            run_dir
+                .record(line.number, &Request::new(response.id, command)?, response)
+                .await?;
+            match quit_problem {
+                Some(problem) => (false, Some(problem)),
+                None => (response.ok, response.error.clone()),
+            }
+        }
+        (Ok(_), _) => {
+            run_dir
+                .record_event(
+                    "runner",
+                    serde_json::json!({ "line": line.number, "source": line.source }),
+                )
+                .await?;
+            (true, None)
+        }
+        (Err(error), _) => {
+            let message = format!("{error:#}");
+            run_dir
+                .record_event(
+                    "error",
+                    serde_json::json!({
+                        "line": line.number,
+                        "source": line.source,
+                        "error": message,
+                    }),
+                )
+                .await?;
+            (false, Some(message))
+        }
+    })
 }
 
 /// Collects the evidence a failed line leaves behind. Best effort: a dead app or a lane with
@@ -819,27 +858,36 @@ pub async fn dispatch(
             Ok(None)
         }
         Instruction::App(Command::Shot(args)) => {
-            let response = context.client.send(Command::Shot(args.clone())).await?;
-            // A lane with no pixels answers `ok:false` with its own message. Capturing anyway
-            // would replace that message with a capture error and hide which line really failed.
+            let mut response = context.client.send(Command::Shot(args.clone())).await?;
             if response.ok {
-                let path = capture::capture_command(
-                    context.lane,
-                    context.run_dir,
-                    line.number,
-                    &args.name,
-                )?;
+                // An update outside the virtual lane is a deliberate non-recording outcome.
+                // Classify it before capture so a headless lane can report `not-recorded`
+                // without first failing for its intentional lack of pixels. Ordinary headless
+                // shots still reach `capture_command` and fail clearly.
+                let path = if context.update_baselines && context.lane.lane() != Lane::Virtual {
+                    capture::command_path(context.run_dir, line.number, &args.name)
+                } else {
+                    capture::capture_command(
+                        context.lane,
+                        context.run_dir,
+                        line.number,
+                        &args.name,
+                    )?
+                };
                 let outcome = crate::baseline::Baselines::for_scenario(context.scenario).check(
                     context.lane.lane(),
                     &path,
                     context.update_baselines,
                     crate::baseline::Tolerance::default(),
                 )?;
-                if let Some(event) = outcome.journal_event(&path) {
-                    context.run_dir.record_event("baseline", event).await?;
-                }
-                context.artifact = Some(path);
-                anyhow::ensure!(outcome.passed(), "{}", outcome.summary());
+                finish_shot(
+                    context.run_dir,
+                    &mut context.artifact,
+                    path,
+                    &outcome,
+                    &mut response,
+                )
+                .await?;
             }
             Ok(Some(response))
         }
@@ -855,6 +903,27 @@ pub async fn dispatch(
         }
         Instruction::App(command) => Ok(Some(context.client.send(command.clone()).await?)),
     }
+}
+
+/// Journals a shot verdict and folds a baseline failure into the command response.
+async fn finish_shot(
+    run_dir: &RunDirectory,
+    artifact: &mut Option<PathBuf>,
+    path: PathBuf,
+    outcome: &crate::baseline::BaselineOutcome,
+    response: &mut Response,
+) -> anyhow::Result<()> {
+    if let Some(event) = outcome.journal_event(&path) {
+        run_dir.record_event("baseline", event).await?;
+    }
+    if path.is_file() {
+        *artifact = Some(path);
+    }
+    if !outcome.passed() {
+        response.ok = false;
+        response.error = Some(outcome.summary());
+    }
+    Ok(())
 }
 
 /// Submits one `job` line's shape against the run's live daemon.
@@ -880,7 +949,14 @@ async fn inject_job(
         .active_context
         .or_else(|| snapshot.contexts.first().map(|entry| entry.id.clone()))
         .context("job injection needs a seeded context; use a preset other than `empty`")?;
-    fixture::jobs::inject(&client, context.fixture, &context_id, shape).await
+    fixture::jobs::inject(
+        &client,
+        context.fixture,
+        &context_id,
+        &mut context.success_ordinal,
+        shape,
+    )
+    .await
 }
 
 fn parse_instruction(line: &str) -> anyhow::Result<Instruction> {
@@ -1118,8 +1194,8 @@ fn predicate_and_timeout(rest: &str) -> anyhow::Result<(String, u64)> {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["idle", _] => 1,
         [_, "exists" | "absent", _] => 2,
+        ["idle", timeout] if timeout.parse::<u64>().is_ok() => 1,
         [_, "==" | "!=" | "~=" | ">" | "<", _, _] => 3,
         _ => return Ok((value.to_owned(), DEFAULT_AWAIT_TIMEOUT_MS)),
     };
@@ -1205,6 +1281,13 @@ fn optional_button(parts: &[&str]) -> (MouseButton, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::{
+        io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+        net::UnixListener,
+    };
+
+    const FAKE_FLEET_EXIT_134: &str = "FLEET_HARNESS_FAKE_FLEET_EXIT_134";
+
     /// Builds a throwaway corpus directory; the caller removes it.
     fn corpus(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1331,6 +1414,27 @@ mod tests {
             format!("{late:#}").contains("must be the first directive"),
             "{late:#}"
         );
+    }
+
+    #[test]
+    fn await_idle_forms_keep_operators_separate_from_numeric_timeouts() {
+        for (source, predicate, timeout_ms) in [
+            ("await idle", "idle", DEFAULT_AWAIT_TIMEOUT_MS),
+            ("await idle 3000", "idle", 3_000),
+            ("await idle exists", "idle exists", DEFAULT_AWAIT_TIMEOUT_MS),
+            ("await idle absent", "idle absent", DEFAULT_AWAIT_TIMEOUT_MS),
+            ("await idle exists 3000", "idle exists", 3_000),
+        ] {
+            let parsed = parse_instruction(source).expect("parse await idle form");
+            assert_eq!(
+                parsed,
+                Instruction::App(Command::Await(AwaitArgs {
+                    predicate: predicate.to_owned(),
+                    timeout_ms,
+                })),
+                "{source}"
+            );
+        }
     }
 
     #[test]
@@ -1463,5 +1567,200 @@ quit
         }
         // A shape that takes no argument rejects one rather than ignoring it.
         assert!(parse_instruction("job success 3").is_err());
+    }
+
+    #[tokio::test]
+    async fn fake_fleet_process_exits_134_after_answering_quit() {
+        if std::env::var_os(FAKE_FLEET_EXIT_134).is_none() {
+            return;
+        }
+        let socket = PathBuf::from(
+            std::env::var_os("FLEET_HARNESS_SOCK")
+                .expect("the parent test gives fake Fleet a socket"),
+        );
+        let listener = UnixListener::bind(&socket).expect("bind fake Fleet socket");
+        println!("FAKE_FLEET_READY");
+        std::io::Write::flush(&mut std::io::stdout()).expect("flush fake Fleet readiness");
+        let (stream, _address) = listener.accept().await.expect("accept runner");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read quit");
+        let request: Request = serde_json::from_str(line.trim_end()).expect("decode quit");
+        assert_eq!(request.cmd, "quit");
+        let mut response = serde_json::to_vec(&Response::ok(
+            request.id,
+            serde_json::json!({ "closed": true }),
+        ))
+        .expect("encode quit response");
+        response.push(b'\n');
+        writer.write_all(&response).await.expect("answer quit");
+        writer.flush().await.expect("flush quit response");
+        std::process::exit(134);
+    }
+
+    #[tokio::test]
+    async fn a_run_fails_when_fake_fleet_exits_134_after_quit() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let socket = directory.path().join("fleet.sock");
+        let executable = std::env::current_exe().expect("locate this test binary");
+        let mut app = Process::new(executable)
+            .arg("--exact")
+            .arg("scenario::tests::fake_fleet_process_exits_134_after_answering_quit")
+            .arg("--nocapture")
+            .env(FAKE_FLEET_EXIT_134, "1")
+            .env("FLEET_HARNESS_SOCK", &socket)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start fake Fleet");
+        let stdout = app.stdout.take().expect("capture fake Fleet readiness");
+        let mut stdout = BufReader::new(stdout);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = stdout
+                    .read_line(&mut line)
+                    .await
+                    .expect("read fake Fleet readiness");
+                assert!(read > 0, "fake Fleet exited before opening its socket");
+                if line.trim_end() == "FAKE_FLEET_READY" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("fake Fleet opens its socket");
+        let mut client = Client::connect(&socket)
+            .await
+            .expect("connect after explicit readiness");
+        let response = client
+            .send(Command::Quit(EmptyArgs {}))
+            .await
+            .expect("fake Fleet answers quit");
+        assert!(response.ok);
+
+        let failure = await_fleet_exit_after_quit(&mut app)
+            .await
+            .expect_err("exit 134 fails the run");
+        let message = format!("{failure:#}");
+        assert!(
+            message.contains("134"),
+            "the failure names the status: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_differed_shot_records_one_failed_exchange_before_the_next_line() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let run_dir = RunDirectory::create(
+            Some(&directory.path().join("run")),
+            Path::new("shot.scenario"),
+        )
+        .expect("create run directory");
+        let args = ShotArgs {
+            name: "hub".to_owned(),
+        };
+        let mut response = Response::ok(
+            7,
+            serde_json::json!({ "window": { "x": 11, "y": 22, "width": 1440, "height": 900 } }),
+        );
+        let shot = run_dir.shots.join("003-hub.png");
+        std::fs::write(&shot, b"captured png").expect("write captured shot");
+        let outcome = crate::baseline::BaselineOutcome::Differed {
+            baseline: directory.path().join("baseline.png"),
+            differing_pixels: 2,
+            total_pixels: 10,
+            diff: run_dir.shots.join("003-hub-diff.png"),
+        };
+        let mut artifact = None;
+        finish_shot(
+            &run_dir,
+            &mut artifact,
+            shot.clone(),
+            &outcome,
+            &mut response,
+        )
+        .await
+        .expect("fold the baseline verdict into the response");
+        assert!(!response.ok);
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("2 of 10 pixels"))
+        );
+
+        let shot_line = ScenarioLine {
+            number: 3,
+            source: "shot hub".to_owned(),
+            instruction: Instruction::App(Command::Shot(args)),
+        };
+        let shot_outcome = Ok(Some(response.clone()));
+        let (ok, error) = journal_outcome(&run_dir, &shot_line, &shot_outcome, None)
+            .await
+            .expect("journal failed shot");
+        assert!(!ok);
+        assert_eq!(error, response.error);
+
+        let dump_line = ScenarioLine {
+            number: 4,
+            source: "dump after-shot".to_owned(),
+            instruction: Instruction::App(Command::Dump(DumpArgs {
+                name: "after-shot".to_owned(),
+            })),
+        };
+        let dump_response = Response::ok(8, serde_json::json!({ "screen": "Hub" }));
+        journal_outcome(&run_dir, &dump_line, &Ok(Some(dump_response)), None)
+            .await
+            .expect("journal the next executed line");
+
+        let journal = std::fs::read_to_string(&run_dir.journal).expect("read journal");
+        let exchanges = journal
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("decode journal"))
+            .filter(|entry| entry["kind"] == "command")
+            .collect::<Vec<_>>();
+        assert_eq!(exchanges.len(), 2, "one exchange per executed line");
+        assert_eq!(exchanges[0]["data"]["line"], 3);
+        assert_eq!(exchanges[0]["request"]["cmd"], "shot");
+        assert_eq!(exchanges[0]["response"]["data"], response.data);
+        assert_eq!(
+            exchanges[0]["response"]["error"],
+            serde_json::json!(response.error.as_deref())
+        );
+        assert_eq!(exchanges[1]["data"]["line"], 4);
+        assert_eq!(exchanges[1]["request"]["cmd"], "dump");
+        assert_eq!(artifact.as_deref(), Some(shot.as_path()));
+    }
+
+    #[tokio::test]
+    async fn a_not_recorded_shot_has_a_verdict_but_no_screenshot_artifact() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let run_dir = RunDirectory::create(
+            Some(&directory.path().join("run")),
+            Path::new("shot.scenario"),
+        )
+        .expect("create run directory");
+        let path = capture::command_path(&run_dir, 14, "help");
+        let outcome = crate::baseline::BaselineOutcome::NotRecorded {
+            lane: "headless".to_owned(),
+        };
+        let mut response = Response::ok(1, serde_json::json!({ "name": "help" }));
+        let mut artifact = None;
+
+        finish_shot(&run_dir, &mut artifact, path, &outcome, &mut response)
+            .await
+            .expect("record the non-recording verdict");
+
+        assert!(response.ok);
+        assert!(
+            artifact.is_none(),
+            "no PNG was captured in the headless lane"
+        );
+        let journal = std::fs::read_to_string(&run_dir.journal).expect("read journal");
+        assert!(journal.contains("not recorded (lane: headless)"));
+        assert!(journal.contains("not-recorded"));
     }
 }

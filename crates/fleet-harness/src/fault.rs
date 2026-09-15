@@ -26,7 +26,8 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    process::Command as Process,
+    io::AsyncWriteExt as _,
+    process::{ChildStdin, Command as Process},
     time::{Instant, sleep},
 };
 
@@ -48,6 +49,9 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_INTERVAL: Duration = Duration::from_millis(5);
 /// The name `dump` is given while a fault watches the link; it never reaches `dumps/`.
 const OBSERVE_DUMP: &str = "daemon-fault";
+/// The replacement shell blocks here until the runner has adopted it and removed the PID seal.
+const REPLACEMENT_GATE: &str =
+    "IFS= read -r ready\n[ \"$ready\" = start ] || exit 70\nexec \"$@\"\n";
 
 /// The daemon faults the frozen grammar spells `daemon kill|stop|cont|restart`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,17 +236,39 @@ async fn restart(process: &mut Daemon) -> anyhow::Result<()> {
         .shutdown()
         .await
         .context("stop fleetd before restarting it")?;
+    seal(process)?;
+    // Ordering is deliberate: spawn and adopt while the home is still sealed, then unseal.
+    // Fleet therefore cannot start an unowned daemon before the runner owns its replacement.
+    let mut gate = spawn_replacement(process)?;
     unseal(process)?;
-    start_replacement(process).await
+    if let Err(error) = async {
+        gate.write_all(b"start\n").await?;
+        gate.shutdown().await
+    }
+    .await
+    .context("release the adopted replacement fleetd")
+    {
+        seal(process).context("re-seal the home after the replacement gate failed")?;
+        return Err(error);
+    }
+    let ready = process
+        .wait_until_ready()
+        .await
+        .context("the restarted fleetd never became ready");
+    if ready.is_err() {
+        seal(process).context("re-seal the home after the replacement failed to start")?;
+    }
+    ready
 }
 
-/// Starts the replacement daemon and hands it to the runner's handle.
+/// Spawns the replacement daemon and hands it to the runner's handle.
 ///
 /// Its output is appended to the hermetic home's own `logs/fleetd.out` rather than to the run
 /// directory's `fleetd.log`, which belongs to the daemon that was stopped. The handle adopts the
 /// child with [`Daemon::adopt`], so teardown and `Drop` cover the replacement exactly as they
-/// covered the original — the socket is not the only way back to it.
-async fn start_replacement(process: &mut Daemon) -> anyhow::Result<()> {
+/// covered the original — the socket is not the only way back to it. The caller keeps the home
+/// sealed until this function returns, then lifts the seal so the adopted child can start.
+fn spawn_replacement(process: &mut Daemon) -> anyhow::Result<ChildStdin> {
     let logs = process.home().join("logs");
     fs::create_dir_all(&logs).with_context(|| format!("create {}", logs.display()))?;
     let path = logs.join("fleetd.out");
@@ -252,27 +278,38 @@ async fn start_replacement(process: &mut Daemon) -> anyhow::Result<()> {
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
     let errors = log.try_clone().context("clone the daemon log handle")?;
-    let mut command = Process::new(process.binary());
-    command
-        .arg("--home")
-        .arg(process.home())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(errors));
+    let mut command = replacement_command(process.binary(), process.home());
+    command.stdout(Stdio::from(log)).stderr(Stdio::from(errors));
     // The replacement is as hermetic as the daemon it replaces: private FLEET_HOME, child-only
     // HOME, and the fake network-facing executables first on PATH.
     process.environment().apply(&mut command);
     // `kill_on_drop` is the backstop under `Daemon::drop`'s own kill: a runner that is torn
     // down between the spawn and the adopt must not leave a daemon behind either.
     command.kill_on_drop(true);
-    let child = command
+    let mut child = command
         .spawn()
         .with_context(|| format!("restart {}", process.binary().display()))?;
+    let gate = child
+        .stdin
+        .take()
+        .context("the replacement startup gate has no stdin")?;
     process.adopt(child);
-    process
-        .wait_until_ready()
-        .await
-        .context("the restarted fleetd never became ready")
+    Ok(gate)
+}
+
+/// Builds a replacement that cannot execute `fleetd` until its piped stdin receives `start`.
+fn replacement_command(binary: &Path, home: &Path) -> Process {
+    let mut command = Process::new("sh");
+    command
+        .arg("-c")
+        .arg(REPLACEMENT_GATE)
+        .arg("fleet-harness-restart")
+        .arg(binary)
+        .arg("--home")
+        .arg(home)
+        .stdin(Stdio::piped())
+        .kill_on_drop(true);
+    command
 }
 
 /// Waits until Fleet's own snapshot reports the link state this fault asked for.
@@ -646,6 +683,42 @@ mod tests {
                 .is_ok(),
             "fleetd's singleton guard must be able to open the PID file again"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacement_waits_for_adoption_and_unsealing_before_exec() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().expect("temporary home");
+        let home = temporary.path().join("home");
+        fs::create_dir(&home).expect("create home");
+        let seal = home.join("fleetd.pid");
+        fs::create_dir(&seal).expect("seal the home");
+        let marker = home.join("started");
+        let binary = temporary.path().join("fake-fleetd");
+        fs::write(
+            &binary,
+            "#!/bin/sh\n[ \"$1\" = --home ] || exit 71\n[ ! -d \"$2/fleetd.pid\" ] || exit 72\nprintf started > \"$2/started\"\n",
+        )
+        .expect("write fake fleetd");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
+            .expect("make fake fleetd executable");
+
+        let mut child = replacement_command(&binary, &home)
+            .spawn()
+            .expect("spawn the gated replacement");
+        let mut gate = child.stdin.take().expect("take the startup gate");
+        assert_eq!(child.try_wait().expect("poll gated child"), None);
+        assert!(!marker.exists(), "the sealed child must not exec fleetd");
+
+        fs::remove_dir(&seal).expect("unseal after adopting the child");
+        gate.write_all(b"start\n").await.expect("release child");
+        gate.shutdown().await.expect("close the startup gate");
+        let status = child.wait().await.expect("wait for fake fleetd");
+
+        assert!(status.success(), "the replacement exited with {status}");
+        assert_eq!(fs::read_to_string(marker).expect("read marker"), "started");
     }
 
     /// Stop, continue and kill are the three signals every daemon fault is built from, so they

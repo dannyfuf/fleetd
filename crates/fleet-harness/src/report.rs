@@ -25,13 +25,15 @@ const SHOTS: &str = "shots";
 const CELL: usize = 88;
 /// Journal entry kinds that stand one-to-one with the scenario lines that were executed.
 const EXCHANGES: [&str; 3] = ["command", "runner", "error"];
-/// The five `idle` counters, in the order `docs/TESTING-HARNESS.md` §3 lists them.
-const IDLE_COUNTERS: [&str; 5] = [
+/// The seven `idle` counters, in the order `docs/TESTING-HARNESS.md` §3 lists them.
+const IDLE_COUNTERS: [&str; 7] = [
     "in_flight_requests",
+    "settling_mutations",
     "running_jobs",
     "pending_frame",
     "live_toast_timers",
     "armed_debounces",
+    "link_opening",
 ];
 
 /// One executed scenario line, as the runner saw it.
@@ -222,9 +224,9 @@ impl Journal {
 /// Pairs each step with its journal entry.
 ///
 /// The runner writes exactly one `command`, `runner` or `error` entry per executed line, in order,
-/// so the pairing is positional. It is verified against the line number wherever the entry carries
-/// one, and abandoned the moment the two disagree: an unenriched report is honest, a misaligned one
-/// is a lie with a table around it.
+/// so the pairing is positional. It is verified against the entry's required line number and
+/// abandoned the moment the two disagree: an unenriched report is honest, a misaligned one is a lie
+/// with a table around it.
 fn align<'a>(steps: &[StepReport], journal: &'a Journal) -> Vec<Option<&'a JournalEntry>> {
     let mut exchanges = journal
         .entries
@@ -236,7 +238,7 @@ fn align<'a>(steps: &[StepReport], journal: &'a Journal) -> Vec<Option<&'a Journ
         let paired = trustworthy
             .then(|| exchanges.next())
             .flatten()
-            .filter(|entry| entry.line().is_none_or(|line| line == step.line));
+            .filter(|entry| entry.line() == Some(step.line));
         trustworthy = paired.is_some();
         aligned.push(paired);
     }
@@ -529,11 +531,17 @@ impl RunReport<'_> {
         match entry.command() {
             Some("meta") => meta_detail(entry),
             Some("dump") => entry.answer("summary").map(scalar).unwrap_or_default(),
-            Some("shot") => step
-                .artifact
-                .as_deref()
-                .map(|path| link(&self.run_dir.root, path))
-                .unwrap_or_default(),
+            Some("shot") => match step.artifact.as_deref() {
+                Some(path) => link(&self.run_dir.root, path),
+                None => {
+                    let prefix = format!("{:03}-", step.line);
+                    baseline_notes(self.journal)
+                        .into_iter()
+                        .find(|(name, _)| name.starts_with(&prefix))
+                        .map(|(_, note)| note.summary)
+                        .unwrap_or_default()
+                }
+            },
             Some("key") => key_detail(entry),
             Some("assert" | "await") => {
                 if entry.answer("satisfied").and_then(Value::as_bool) == Some(true) {
@@ -748,13 +756,20 @@ struct SuiteScenario<'a> {
     outcome: &'a ScenarioOutcome,
     journal: Journal,
     shots: Vec<PathBuf>,
+    shots_problem: Option<String>,
 }
 
 impl<'a> SuiteScenario<'a> {
     async fn read(outcome: &'a ScenarioOutcome) -> Self {
+        let shots_directory = outcome.run_dir.join(SHOTS);
+        let (shots, shots_problem) = match pngs(&shots_directory).await {
+            Ok(shots) => (shots, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
         Self {
             journal: Journal::read(&outcome.run_dir.join(JOURNAL)).await,
-            shots: pngs(&outcome.run_dir.join(SHOTS)).await,
+            shots,
+            shots_problem,
             outcome,
         }
     }
@@ -855,10 +870,16 @@ impl SuiteReport<'_> {
                 out.push_str(&format!("```text\n{}\n```\n\n", error.trim()));
             }
             out.push_str(&format!("- report: {}\n", scenario.report(self.suite)));
+            if let Some(problem) = &scenario.shots_problem {
+                out.push_str(&format!(
+                    "- screenshots could not be listed: {}\n",
+                    cell(problem)
+                ));
+            }
             for evidence in scenario
                 .shots
                 .iter()
-                .filter(|shot| is_failure_evidence(shot))
+                .filter(|shot| is_failure_evidence(shot) && !is_diff(shot))
             {
                 out.push_str(&format!("- screenshot: {}\n", link(self.suite, evidence)));
             }
@@ -866,7 +887,7 @@ impl SuiteReport<'_> {
             for evidence in scenario
                 .shots
                 .iter()
-                .filter(|shot| is_failure_evidence(shot))
+                .filter(|shot| is_failure_evidence(shot) && !is_diff(shot))
             {
                 let relative = display_relative(self.suite, evidence);
                 out.push_str(&format!("![{relative}]({relative})\n\n"));
@@ -906,23 +927,28 @@ impl SuiteReport<'_> {
     }
 
     fn shots_section(&self, out: &mut String) {
-        if self
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.shots.iter().all(|shot| is_failure_evidence(shot)))
-        {
+        if self.scenarios.iter().all(|scenario| {
+            scenario
+                .shots
+                .iter()
+                .all(|shot| is_failure_evidence(shot) || is_diff(shot))
+        }) {
             return;
         }
         out.push_str("## Screenshots\n\n");
         for scenario in &self.scenarios {
-            if scenario.shots.iter().all(|shot| is_failure_evidence(shot)) {
+            if scenario
+                .shots
+                .iter()
+                .all(|shot| is_failure_evidence(shot) || is_diff(shot))
+            {
                 continue;
             }
             out.push_str(&format!("**{}**\n\n", scenario.name()));
             let baselines = baseline_notes(&scenario.journal);
             for shot in &scenario.shots {
-                // The failure evidence is already inlined, above everything else.
-                if is_failure_evidence(shot) {
+                // Failure evidence is already above; diffs belong beside their source screenshot.
+                if is_failure_evidence(shot) || is_diff(shot) {
                     continue;
                 }
                 let relative = display_relative(self.suite, shot);
@@ -1093,7 +1119,7 @@ fn render_baseline(out: &mut String, root: &Path, note: &BaselineNote) {
     out.push_str(&format!("{}\n\n", note.summary));
     if let Some(diff) = &note.diff {
         let relative = display_relative(root, diff);
-        out.push_str(&format!("![{relative}]({relative})\n\n"));
+        out.push_str(&format!("**Diff:**\n\n![{relative}]({relative})\n\n"));
     }
 }
 
@@ -1205,6 +1231,11 @@ fn is_failure_evidence(path: &Path) -> bool {
     file_name(path).starts_with("failure-")
 }
 
+/// Whether a shot is a baseline diff, named `<stem>-diff.png` by the comparator.
+fn is_diff(path: &Path) -> bool {
+    file_name(path).ends_with("-diff.png")
+}
+
 fn is_png(path: Option<&Path>) -> bool {
     has_extension(path, "png")
 }
@@ -1224,25 +1255,67 @@ async fn exists(path: PathBuf) -> Option<PathBuf> {
 }
 
 /// Every PNG in a directory, in name order, so a report lists shots the way the run took them.
-async fn pngs(directory: &Path) -> Vec<PathBuf> {
-    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
-        return Vec::new();
-    };
+async fn pngs(directory: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut entries = tokio::fs::read_dir(directory)
+        .await
+        .with_context(|| format!("list {}", display(directory)))?;
     let mut found = Vec::new();
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .with_context(|| format!("read the next entry in {}", display(directory)))?
+    {
         let path = entry.path();
         if is_png(Some(&path)) {
             found.push(path);
         }
     }
     found.sort();
-    found
+    Ok(found)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[cfg(unix)]
+    struct PermissionGuard {
+        path: PathBuf,
+        mode: u32,
+    }
+
+    #[cfg(unix)]
+    impl PermissionGuard {
+        fn make_unreadable(path: &Path) -> Self {
+            let mode = std::fs::metadata(path)
+                .expect("read the shots directory metadata")
+                .permissions()
+                .mode();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
+                .expect("make the shots directory unreadable");
+            Self {
+                path: path.to_owned(),
+                mode,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PermissionGuard {
+        fn drop(&mut self) {
+            if let Err(error) =
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode))
+            {
+                eprintln!(
+                    "failed to restore permissions on {}: {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
 
     fn step(line: usize, source: &str, ok: bool) -> StepReport {
         StepReport {
@@ -1259,6 +1332,7 @@ mod tests {
         json!({
             "at": "2026-09-11T09:12:03.114Z",
             "kind": "command",
+            "data": { "line": id + 1 },
             "request": { "id": id, "cmd": cmd, "args": args },
             "response": {
                 "id": id,
@@ -1267,6 +1341,37 @@ mod tests {
                 "error": (!ok).then(|| "screen == \"Workspace\" but it was \"Hub\"".to_owned()),
             },
         })
+    }
+
+    #[test]
+    fn settling_and_link_opening_are_reported_as_sole_idle_blockers() {
+        for (counter, value) in [
+            ("settling_mutations", json!(1)),
+            ("link_opening", json!(true)),
+        ] {
+            let mut idle = json!({
+                "in_flight_requests": 0,
+                "settling_mutations": 0,
+                "running_jobs": 0,
+                "pending_frame": false,
+                "live_toast_timers": 0,
+                "armed_debounces": 0,
+                "link_opening": false,
+            });
+            idle[counter] = value.clone();
+            let entry: JournalEntry = serde_json::from_value(command(
+                1,
+                "await",
+                json!({ "predicate": "idle" }),
+                json!({ "idle": idle }),
+                false,
+            ))
+            .expect("decode journal entry");
+            assert_eq!(
+                busy_counters(&entry),
+                vec![format!("`{counter}` = {value}")]
+            );
+        }
     }
 
     async fn run_directory(name: &str) -> (tempfile::TempDir, RunDirectory) {
@@ -1431,7 +1536,7 @@ mod tests {
                 json!({ "at": "2026-09-11T09:12:03.000Z", "kind": "baseline", "data": {
                     "shot": shot, "baseline": "scenarios/baselines/virtual/hub/002-hub.png",
                     "passed": false, "differing_pixels": 41_234, "total_pixels": 1_296_000,
-                    "diff": run.shots.join("002-hub.diff.png"), "status": "differed",
+                    "diff": run.shots.join("002-hub-diff.png"), "status": "differed",
                     "summary": "baseline: differs by 41234 of 1296000 pixels, 3.181%",
                 } }),
             ],
@@ -1449,9 +1554,103 @@ mod tests {
 
         assert!(body.contains("**baseline: differs by 41234"), "{body}");
         assert!(
-            body.contains("![shots/002-hub.diff.png](shots/002-hub.diff.png)"),
+            body.contains("**Diff:**\n\n![shots/002-hub-diff.png](shots/002-hub-diff.png)"),
             "{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_not_recorded_shot_reports_its_verdict_without_a_png() {
+        let (_temporary, run) = run_directory("not-recorded").await;
+        journal(
+            &run,
+            &[
+                command(
+                    13,
+                    "shot",
+                    json!({ "name": "help" }),
+                    json!({ "name": "help" }),
+                    true,
+                ),
+                json!({ "at": "2026-09-11T09:12:03.000Z", "kind": "baseline", "data": {
+                    "shot": run.shots.join("014-help.png"), "baseline": null,
+                    "passed": true, "differing_pixels": null, "total_pixels": null,
+                    "diff": null, "status": "not-recorded",
+                    "summary": "not recorded (lane: headless)",
+                } }),
+            ],
+        )
+        .await;
+
+        let path = write_report(&run, Lane::Headless, &[step(14, "shot help", true)])
+            .await
+            .expect("write the report");
+        let body = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read it back");
+
+        assert!(body.contains("not recorded (lane: headless)"), "{body}");
+        assert!(!body.contains("## Screenshots"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_suite_lists_a_baseline_diff_once_and_labels_it_beside_its_screenshot() {
+        let temporary = tempfile::tempdir().expect("a temporary directory");
+        let suite = temporary.path().join("suite");
+        tokio::fs::create_dir(&suite)
+            .await
+            .expect("create the suite directory");
+        let directory = suite.join("001-hub");
+        let run = RunDirectory::create(Some(&directory), Path::new("hub.scenario"))
+            .expect("create the run directory");
+        let shot = run.shots.join("002-hub.png");
+        let diff = run.shots.join("002-hub-diff.png");
+        tokio::fs::write(&shot, b"png")
+            .await
+            .expect("write the screenshot");
+        tokio::fs::write(&diff, b"png")
+            .await
+            .expect("write the baseline diff");
+        journal(
+            &run,
+            &[
+                command(
+                    1,
+                    "shot",
+                    json!({ "name": "hub" }),
+                    json!({ "name": "hub" }),
+                    true,
+                ),
+                json!({ "at": "2026-09-11T09:12:03.000Z", "kind": "baseline", "data": {
+                    "shot": shot, "baseline": "scenarios/baselines/virtual/hub/002-hub.png",
+                    "passed": false, "differing_pixels": 12, "total_pixels": 100,
+                    "diff": diff, "status": "differed", "summary": "baseline differs",
+                } }),
+            ],
+        )
+        .await;
+        let outcomes = [ScenarioOutcome {
+            scenario: PathBuf::from("scenarios/hub/hub.scenario"),
+            run_dir: directory,
+            ok: true,
+            duration_ms: 100,
+            error: None,
+        }];
+
+        let path = write_suite_report(&suite, Lane::Virtual, &outcomes, 1)
+            .await
+            .expect("write the suite report");
+        let body = tokio::fs::read_to_string(path)
+            .await
+            .expect("read the suite report");
+        let shot_markup = "![001-hub/shots/002-hub.png](001-hub/shots/002-hub.png)";
+        let diff_markup = "![001-hub/shots/002-hub-diff.png](001-hub/shots/002-hub-diff.png)";
+        let shot_at = body.find(shot_markup).expect("the screenshot is listed");
+        let label_at = body.find("**Diff:**").expect("the diff is labelled");
+        let diff_at = body.find(diff_markup).expect("the labelled diff is listed");
+
+        assert!(shot_at < label_at && label_at < diff_at, "{body}");
+        assert_eq!(body.matches(diff_markup).count(), 1, "{body}");
     }
 
     #[tokio::test]
@@ -1483,6 +1682,9 @@ mod tests {
     async fn a_suite_report_leads_with_the_failed_scenario_and_counts_the_ones_never_reached() {
         let temporary = tempfile::tempdir().expect("a temporary directory");
         let suite = temporary.path().join("suite");
+        tokio::fs::create_dir(&suite)
+            .await
+            .expect("create the suite directory");
         let mut outcomes = Vec::new();
         for (index, (stem, ok)) in [("hub-help", true), ("hub-palette", false)]
             .iter()
@@ -1551,6 +1753,37 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_shots_directory_is_reported_in_the_suite_failure() {
+        let temporary = tempfile::tempdir().expect("a temporary directory");
+        let suite = temporary.path().join("suite");
+        tokio::fs::create_dir(&suite)
+            .await
+            .expect("create the suite directory");
+        let directory = suite.join("001-red");
+        let run = RunDirectory::create(Some(&directory), Path::new("red.scenario"))
+            .expect("create the run directory");
+        let permission_guard = PermissionGuard::make_unreadable(&run.shots);
+        let outcomes = [ScenarioOutcome {
+            scenario: PathBuf::from("scenarios/hub/red.scenario"),
+            run_dir: directory,
+            ok: false,
+            duration_ms: 100,
+            error: Some("line 2 failed".to_owned()),
+        }];
+
+        let path = write_suite_report(&suite, Lane::Headless, &outcomes, 1)
+            .await
+            .expect("write the suite report");
+        let body = tokio::fs::read_to_string(path)
+            .await
+            .expect("read the suite report");
+
+        assert!(body.contains("screenshots could not be listed"), "{body}");
+        drop(permission_guard);
+    }
+
     #[tokio::test]
     async fn a_journal_that_drifts_from_the_steps_stops_enriching_rather_than_inventing() {
         let (_temporary, run) = run_directory("drift").await;
@@ -1573,6 +1806,45 @@ mod tests {
         assert!(body.contains("daemon kill"), "{body}");
         assert!(!body.contains("## Dumps"), "{body}");
         assert!(!body.contains("## Assertions"), "{body}");
+    }
+
+    #[test]
+    fn command_entries_align_only_when_their_data_names_the_step_line() {
+        let steps = [step(2, "assert screen == Hub", true)];
+        let with_line = serde_json::from_value::<JournalEntry>(command(
+            1,
+            "assert",
+            json!({ "predicate": "screen == Hub" }),
+            json!({ "predicate": "screen == Hub", "satisfied": true }),
+            true,
+        ))
+        .expect("deserialize a command entry with its line");
+        let without_line = serde_json::from_value::<JournalEntry>(json!({
+            "at": "2026-09-11T09:12:03.114Z",
+            "kind": "command",
+            "request": {
+                "id": 1,
+                "cmd": "assert",
+                "args": { "predicate": "screen == Hub" },
+            },
+            "response": {
+                "id": 1,
+                "ok": true,
+                "data": { "predicate": "screen == Hub", "satisfied": true },
+            },
+        }))
+        .expect("deserialize a command entry without its line");
+        let trustworthy = Journal {
+            entries: vec![with_line],
+            problem: None,
+        };
+        let untrustworthy = Journal {
+            entries: vec![without_line],
+            problem: None,
+        };
+
+        assert!(align(&steps, &trustworthy)[0].is_some());
+        assert!(align(&steps, &untrustworthy)[0].is_none());
     }
 
     #[test]

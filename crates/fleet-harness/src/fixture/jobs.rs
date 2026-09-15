@@ -82,14 +82,23 @@ impl Injection {
 /// `Success`, `Failure` and `Repeated` return after their jobs have reached a terminal state,
 /// so the caller never has to guess when the toast arrives. `LongRunning` returns as soon as
 /// the job is running, because waiting for it is the one thing it exists not to do.
+/// `success_ordinal` belongs to the scenario run and advances before each successful-job
+/// submission, so retries cannot reuse a worktree slug.
 pub async fn inject(
     client: &Client,
     fixture: &Fixture,
     context: &ContextId,
+    success_ordinal: &mut u8,
     injected: Injected,
 ) -> anyhow::Result<Injection> {
     match injected {
-        Injected::Success => one(success(client, fixture, 0).await?),
+        Injected::Success => {
+            let ordinal = *success_ordinal;
+            *success_ordinal = ordinal
+                .checked_add(1)
+                .context("successful job injection ordinal exceeded 255")?;
+            one(success(client, fixture, ordinal).await?)
+        }
         Injected::LongRunning => long_running(client, fixture).await,
         Injected::Failure => one(failure(client, context).await?),
         Injected::Repeated { count } => repeated(client, fixture, count).await,
@@ -254,4 +263,53 @@ async fn latest(client: &Client, target: &str, kind: &JobKind) -> anyhow::Result
         })
         .max_by(|left, right| left.started_at.cmp(&right.started_at))
         .with_context(|| format!("no {kind:?} job was recorded for {target}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Injected, inject};
+    use crate::fixture::{Preset, plan, tests::boot};
+
+    #[tokio::test]
+    async fn two_success_injections_use_distinct_per_run_slugs() {
+        let (booted, mut daemon, _environment) = boot(Preset::OneRepo).await;
+        let context = booted.context();
+        let client = daemon
+            .client()
+            .await
+            .unwrap_or_else(|error| panic!("connect for job injection: {error:#}"));
+        let fixture = plan::describe(Preset::OneRepo);
+        let mut success_ordinal = 0;
+
+        let first = inject(
+            &client,
+            &fixture,
+            &context,
+            &mut success_ordinal,
+            Injected::Success,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("inject the first successful job: {error:#}"));
+        let second = inject(
+            &client,
+            &fixture,
+            &context,
+            &mut success_ordinal,
+            Injected::Success,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("inject the second successful job: {error:#}"));
+
+        let first_worktree = first.jobs[0].target.split(':').next();
+        let second_worktree = second.jobs[0].target.split(':').next();
+        assert_eq!(first_worktree, Some("acme/api#injected-0"));
+        assert_eq!(second_worktree, Some("acme/api#injected-1"));
+        assert_ne!(first_worktree, second_worktree);
+
+        drop(client);
+        daemon
+            .shutdown()
+            .await
+            .unwrap_or_else(|error| panic!("shut the verification daemon down: {error}"));
+    }
 }

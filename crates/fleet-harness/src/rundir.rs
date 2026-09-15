@@ -5,9 +5,11 @@
 //! evidence. Only the hermetic `home/` is reclaimed, and only after a clean run without
 //! `--keep`.
 
+use crate::env::{APP_SOCKET_NAME, DAEMON_SOCKET_RELATIVE};
 use anyhow::Context as _;
 use fleet_drive::protocol::{Request, Response};
 use std::{
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -25,8 +27,15 @@ const DEFAULT_ROOT: &str = "/tmp/fleet-harness";
 /// anything is created, naming the path and the limit.
 const MAX_SOCKET_PATH: usize = 107;
 
-/// The longest socket path any run creates inside its own directory.
-const LONGEST_SOCKET_NAME: &str = "home/fleetd.sock";
+/// The longest socket path relative to a run directory.
+///
+/// Keep the choice derived from the environment's socket names so renaming either socket cannot
+/// silently weaken the depth guard.
+const LONGEST_SOCKET_NAME: &str = if APP_SOCKET_NAME.len() >= DAEMON_SOCKET_RELATIVE.len() {
+    APP_SOCKET_NAME
+} else {
+    DAEMON_SOCKET_RELATIVE
+};
 
 /// The directory a single scenario run writes all of its artifacts into.
 #[derive(Debug, Clone)]
@@ -51,29 +60,63 @@ pub struct RunDirectory {
 
 impl RunDirectory {
     /// Creates the directory and its subdirectories, defaulting to
-    /// `/tmp/fleet-harness/<UTC timestamp>-<scenario stem>/`.
+    /// `/tmp/fleet-harness/<UTC timestamp>-<scenario stem>[-N]/`.
     pub fn create(requested: Option<&Path>, scenario: &Path) -> anyhow::Result<Self> {
+        Self::create_at(
+            requested,
+            scenario,
+            SystemTime::now(),
+            Path::new(DEFAULT_ROOT),
+        )
+    }
+
+    fn create_at(
+        requested: Option<&Path>,
+        scenario: &Path,
+        now: SystemTime,
+        default_root: &Path,
+    ) -> anyhow::Result<Self> {
         let root = match requested {
-            Some(path) => path.to_owned(),
-            None => PathBuf::from(DEFAULT_ROOT).join(format!(
-                "{}-{}",
-                stamp(utc(SystemTime::now())),
-                sanitize(&scenario.file_stem().unwrap_or_default().to_string_lossy())
-            )),
+            Some(path) => {
+                ensure_socket_path_fits(path)?;
+                anyhow::ensure!(
+                    claim(path)?,
+                    "the run directory {} already exists; refusing to use a directory this run did not create",
+                    path.display()
+                );
+                path.to_owned()
+            }
+            None => {
+                std::fs::create_dir_all(default_root).with_context(|| {
+                    format!("create default run root {}", default_root.display())
+                })?;
+                let stem = format!(
+                    "{}-{}",
+                    stamp(utc(now)),
+                    sanitize(&scenario.file_stem().unwrap_or_default().to_string_lossy())
+                );
+                let mut suffix = 1_u64;
+                loop {
+                    let name = if suffix == 1 {
+                        stem.clone()
+                    } else {
+                        format!("{stem}-{suffix}")
+                    };
+                    let candidate = default_root.join(name);
+                    ensure_socket_path_fits(&candidate)?;
+                    if claim(&candidate)? {
+                        break candidate;
+                    }
+                    suffix = suffix
+                        .checked_add(1)
+                        .context("exhausted run-directory collision suffixes")?;
+                }
+            }
         };
-        let socket = root.join(LONGEST_SOCKET_NAME);
-        let length = socket.as_os_str().as_encoded_bytes().len();
-        anyhow::ensure!(
-            length <= MAX_SOCKET_PATH,
-            "the run directory {} is too deep: its daemon socket {} would be {length} bytes, \
-             and a Unix socket path may be at most {MAX_SOCKET_PATH}. Pass a shorter --run-dir.",
-            root.display(),
-            socket.display()
-        );
         let shots = root.join("shots");
         let dumps = root.join("dumps");
         let home = root.join("home");
-        for directory in [&root, &shots, &dumps, &home] {
+        for directory in [&shots, &dumps, &home] {
             std::fs::create_dir_all(directory)
                 .with_context(|| format!("create run directory {}", directory.display()))?;
         }
@@ -110,12 +153,18 @@ impl RunDirectory {
     }
 
     /// Appends one correlated command exchange to the journal.
-    pub async fn record(&self, request: &Request, response: &Response) -> anyhow::Result<()> {
+    pub async fn record(
+        &self,
+        line: usize,
+        request: &Request,
+        response: &Response,
+    ) -> anyhow::Result<()> {
         self.append(serde_json::json!({
             "at": rfc3339(utc(SystemTime::now())),
             "kind": "command",
             "request": request,
             "response": response,
+            "data": { "line": line },
         }))
         .await
     }
@@ -200,6 +249,31 @@ impl RunDirectory {
             .await
             .with_context(|| format!("flush {}", self.journal.display()))
     }
+}
+
+/// Atomically claims `path`, returning false when another run already owns it.
+fn claim(path: &Path) -> anyhow::Result<bool> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(anyhow::Error::new(error)
+                .context(format!("claim run directory {}", path.display())))
+        }
+    }
+}
+
+fn ensure_socket_path_fits(root: &Path) -> anyhow::Result<()> {
+    let socket = root.join(LONGEST_SOCKET_NAME);
+    let length = socket.as_os_str().as_encoded_bytes().len();
+    anyhow::ensure!(
+        length <= MAX_SOCKET_PATH,
+        "the run directory {} is too deep: its longest socket {} would be {length} bytes, \
+         and a Unix socket path may be at most {MAX_SOCKET_PATH}. Pass a shorter --run-dir.",
+        root.display(),
+        socket.display()
+    );
+    Ok(())
 }
 
 /// Keeps a name usable as a path component, a compositor output name and a window title.
@@ -344,19 +418,78 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("clean up");
     }
 
+    #[test]
+    fn socket_guard_uses_the_longer_environment_socket_name() {
+        assert_eq!(
+            LONGEST_SOCKET_NAME.len(),
+            APP_SOCKET_NAME.len().max(DAEMON_SOCKET_RELATIVE.len())
+        );
+        assert!(
+            LONGEST_SOCKET_NAME == APP_SOCKET_NAME || LONGEST_SOCKET_NAME == DAEMON_SOCKET_RELATIVE
+        );
+    }
+
     /// A run directory deep enough to overrun `sun_path` has to be refused where the reader
     /// can see it, not by `fleetd` failing to bind inside its own log.
     #[test]
-    fn a_run_directory_too_deep_for_a_unix_socket_is_refused_up_front() {
-        let root = std::env::temp_dir().join("x".repeat(MAX_SOCKET_PATH));
-        let error = RunDirectory::create(Some(&root), Path::new("help.scenario"))
-            .expect_err("a path this deep cannot hold a socket");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("too deep") && message.contains("--run-dir"),
-            "the failure names the cause and the fix: {message}"
+    fn roots_of_length_89_and_90_are_refused_up_front() {
+        const PREFIX: &str = "/tmp/";
+        for length in [89, 90] {
+            let root = PathBuf::from(format!("{PREFIX}{}", "x".repeat(length - PREFIX.len())));
+            assert_eq!(root.as_os_str().as_encoded_bytes().len(), length);
+            let error = RunDirectory::create(Some(&root), Path::new("help.scenario"))
+                .expect_err("this root cannot hold the app socket");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("too deep") && message.contains("--run-dir"),
+                "the failure names the cause and the fix: {message}"
+            );
+            assert!(!root.exists(), "nothing is created before the check");
+        }
+    }
+
+    #[test]
+    fn two_default_creates_in_the_same_second_claim_distinct_directories() {
+        let temporary = tempfile::tempdir().expect("temporary default root");
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let scenario = Path::new("help.scenario");
+        let first = RunDirectory::create_at(None, scenario, now, temporary.path())
+            .expect("claim the unsuffixed directory");
+        let second = RunDirectory::create_at(None, scenario, now, temporary.path())
+            .expect("claim a suffixed directory");
+
+        assert_ne!(first.root, second.root);
+        assert_eq!(
+            second.root.file_name().and_then(|name| name.to_str()),
+            Some("20231114-221320-help-2")
         );
-        assert!(!root.exists(), "nothing is created before the check");
+        assert!(first.root.is_dir() && second.root.is_dir());
+    }
+
+    #[test]
+    fn a_failed_claim_leaves_the_existing_directory_untouched() {
+        let temporary = tempfile::tempdir().expect("temporary parent");
+        let root = temporary.path().join("already-owned");
+        let daemon_socket = root.join(DAEMON_SOCKET_RELATIVE);
+        let app_socket = root.join(APP_SOCKET_NAME);
+        std::fs::create_dir(&root).expect("create the existing directory");
+        std::fs::create_dir(root.join("home")).expect("create its existing home");
+        std::fs::write(&daemon_socket, b"daemon-owner").expect("seed the daemon socket marker");
+        std::fs::write(&app_socket, b"app-owner").expect("seed the app socket marker");
+
+        RunDirectory::create(Some(&root), Path::new("help.scenario"))
+            .expect_err("an existing directory belongs to another run");
+
+        assert_eq!(
+            std::fs::read(&daemon_socket).expect("read the daemon socket marker"),
+            b"daemon-owner"
+        );
+        assert_eq!(
+            std::fs::read(&app_socket).expect("read the app socket marker"),
+            b"app-owner"
+        );
+        assert!(!root.join("shots").exists());
+        assert!(!root.join("dumps").exists());
     }
 
     #[test]

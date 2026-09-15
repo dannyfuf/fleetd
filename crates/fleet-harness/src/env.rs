@@ -27,6 +27,10 @@ use tokio::process::{Child, Command};
 
 /// How long a run waits for fleetd to answer its first ping.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// The app command socket name inside a run directory.
+pub const APP_SOCKET_NAME: &str = "fleet-harness.sock";
+/// The daemon socket path relative to a run directory.
+pub const DAEMON_SOCKET_RELATIVE: &str = "home/fleetd.sock";
 /// How often readiness is probed while waiting for it.
 const PROBE_INTERVAL: Duration = Duration::from_millis(50);
 /// How long an orderly shutdown is given before the daemon is killed outright.
@@ -114,7 +118,7 @@ impl HarnessEnv {
         let environment = Self {
             fleet_home,
             child_home,
-            socket: root.join("fleet-harness.sock"),
+            socket: root.join(APP_SOCKET_NAME),
             path: std::env::join_paths(entries).context("build the child PATH")?,
             fake_bin,
             // A missing fleetd is reported when it is spawned, where the message can say how
@@ -152,6 +156,8 @@ impl HarnessEnv {
     }
 
     /// The daemon's Unix socket inside the private Fleet home.
+    ///
+    /// Within a run directory this is [`DAEMON_SOCKET_RELATIVE`].
     #[must_use]
     pub fn daemon_socket(&self) -> PathBuf {
         FleetHome::new(self.fleet_home.clone()).socket_path()

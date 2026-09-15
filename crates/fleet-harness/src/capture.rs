@@ -169,7 +169,7 @@ pub fn capture_command(
     sequence: usize,
     name: &str,
 ) -> anyhow::Result<PathBuf> {
-    let path = shot_path(&run_dir.shots, sequence, name);
+    let path = command_path(run_dir, sequence, name);
     std::fs::create_dir_all(&run_dir.shots)
         .with_context(|| format!("create {}", run_dir.shots.display()))?;
     backend
@@ -181,6 +181,12 @@ pub fn capture_command(
         path.display()
     );
     Ok(path)
+}
+
+/// Names the file a `shot` would write, including for a non-recorded baseline update that
+/// deliberately captures no pixels.
+pub(crate) fn command_path(run_dir: &RunDirectory, sequence: usize, name: &str) -> PathBuf {
+    shot_path(&run_dir.shots, sequence, name)
 }
 
 /// Captures the evidence a failed line leaves behind, as `shots/failure-NNN.png`.

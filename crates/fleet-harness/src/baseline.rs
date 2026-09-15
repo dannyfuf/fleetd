@@ -38,6 +38,10 @@ const DEFAULT_CHANNEL_THRESHOLD: u8 = 8;
 /// 0.2% of a 1920×1080 output is about 4000 pixels — a caret, a focus ring or one relaid-out
 /// label, and far less than any surface a human would notice.
 const DEFAULT_DIFFERING_PIXEL_RATIO: f32 = 0.002;
+/// Largest scanline payload the PNG decoder will allocate or inflate.
+const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
+/// Largest widened RGBA pixel buffer the PNG decoder will allocate.
+const MAX_RGBA_BYTES: usize = 64 * 1024 * 1024;
 
 /// The two budgets a shot is allowed to spend against its baseline.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -90,6 +94,11 @@ pub enum BaselineOutcome {
         /// The lane that ran, for the line in the report that says why.
         lane: String,
     },
+    /// Updating was requested outside the only lane whose captures may become baselines.
+    NotRecorded {
+        /// The lane that ran, for the line in the report that says why.
+        lane: String,
+    },
     /// No baseline exists yet. A new scenario is not a failure.
     Missing {
         /// Where `--update-baselines` would write it.
@@ -137,6 +146,7 @@ impl BaselineOutcome {
             Self::Skipped { lane } => {
                 format!("baseline: not compared in the {lane} lane")
             }
+            Self::NotRecorded { lane } => format!("not recorded (lane: {lane})"),
             Self::Missing { baseline } => format!(
                 "baseline: none yet at {} — record it with --update-baselines",
                 baseline.display()
@@ -178,7 +188,7 @@ impl BaselineOutcome {
             // `docs/TESTING-HARNESS.md` §8 asks for every shot to be inlined "with its baseline
             // verdict", and "no baseline yet" is a verdict: a report that says nothing leaves the
             // reader unable to tell a matched shot from one nothing was compared against.
-            Self::Skipped { .. } | Self::Missing { .. } => {
+            Self::Skipped { .. } | Self::NotRecorded { .. } | Self::Missing { .. } => {
                 return Some(serde_json::json!({
                     "shot": shot,
                     "baseline": self.baseline_path(),
@@ -229,7 +239,7 @@ impl BaselineOutcome {
     /// The baseline this outcome is about, when it names one.
     fn baseline_path(&self) -> Option<&Path> {
         match self {
-            Self::Skipped { .. } => None,
+            Self::Skipped { .. } | Self::NotRecorded { .. } => None,
             Self::Missing { baseline }
             | Self::Recorded { baseline, .. }
             | Self::Matched { baseline, .. }
@@ -241,6 +251,7 @@ impl BaselineOutcome {
     fn status(&self) -> &'static str {
         match self {
             Self::Skipped { .. } => "skipped",
+            Self::NotRecorded { .. } => "not-recorded",
             Self::Missing { .. } => "missing",
             Self::Recorded { changed: true, .. } => "rewrote",
             Self::Recorded { .. } => "unchanged",
@@ -341,8 +352,11 @@ impl Baselines {
         tolerance: Tolerance,
     ) -> anyhow::Result<BaselineOutcome> {
         if lane != Lane::Virtual {
-            return Ok(BaselineOutcome::Skipped {
-                lane: lane.as_str().to_owned(),
+            let lane = lane.as_str().to_owned();
+            return Ok(if update {
+                BaselineOutcome::NotRecorded { lane }
+            } else {
+                BaselineOutcome::Skipped { lane }
             });
         }
         let baseline = self.baseline_for(lane, shot)?;
@@ -667,8 +681,48 @@ fn decode(bytes: &[u8]) -> anyhow::Result<Image> {
     }
     let header = header.context("the file carries no IHDR chunk")?;
     anyhow::ensure!(!data.is_empty(), "the file carries no image data");
-    let raw = zlib_decompress(&data)?;
-    expand(header, &raw, &palette, &transparency)
+    let ceiling = decoded_size(header)?;
+    let pixel_capacity = rgba_capacity(header)?;
+    let raw = zlib_decompress(&data, ceiling)?;
+    expand(
+        header,
+        &raw,
+        &palette,
+        &transparency,
+        ceiling,
+        pixel_capacity,
+    )
+}
+
+/// Computes the scanline payload declared by `IHDR` without narrowing or wrapping it.
+fn decoded_size(header: Header) -> anyhow::Result<usize> {
+    let row_bits = u64::from(header.width)
+        .checked_mul(header.channels() as u64)
+        .and_then(|bits| bits.checked_mul(u64::from(header.depth)))
+        .context("the decoded image row size overflows u64")?;
+    let bytes_per_row = row_bits.div_ceil(8);
+    let expected = bytes_per_row
+        .checked_add(1)
+        .and_then(|stride| stride.checked_mul(u64::from(header.height)))
+        .context("the decoded image data size overflows u64")?;
+    anyhow::ensure!(
+        expected <= MAX_DECODED_BYTES as u64,
+        "the decoded image data is {expected} bytes, above the {MAX_DECODED_BYTES}-byte limit"
+    );
+    usize::try_from(expected).context("the decoded image data size does not fit this platform")
+}
+
+/// Computes and bounds the widened RGBA buffer before any image data is inflated.
+fn rgba_capacity(header: Header) -> anyhow::Result<usize> {
+    let capacity = u64::from(header.width)
+        .checked_mul(u64::from(header.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("the decoded RGBA image capacity overflows u64")?;
+    anyhow::ensure!(
+        capacity <= MAX_RGBA_BYTES as u64,
+        "the decoded RGBA image is {capacity} bytes, above the {MAX_RGBA_BYTES}-byte limit"
+    );
+    usize::try_from(capacity).context("the decoded RGBA image capacity does not fit this platform")
 }
 
 /// Reads the four bytes at `offset`, or says the file is truncated.
@@ -725,22 +779,28 @@ fn expand(
     raw: &[u8],
     palette: &[u8],
     transparency: &[u8],
+    ceiling: usize,
+    pixel_capacity: usize,
 ) -> anyhow::Result<Image> {
     let channels = header.channels();
     let bits_per_pixel = channels * usize::from(header.depth);
     let bytes_per_pixel = bits_per_pixel.div_ceil(8);
-    let bytes_per_row = (header.width as usize * bits_per_pixel).div_ceil(8);
-    let expected = (bytes_per_row + 1) * header.height as usize;
     anyhow::ensure!(
-        raw.len() == expected,
-        "the image data is {} bytes, not the {expected} its header describes",
+        raw.len() == ceiling,
+        "the image data is {} bytes, not the {ceiling} its header describes",
         raw.len()
     );
-    let mut pixels = Vec::with_capacity(header.width as usize * header.height as usize * 4);
+    let height =
+        usize::try_from(header.height).context("the image height does not fit this platform")?;
+    let row_stride = ceiling / height;
+    let bytes_per_row = row_stride
+        .checked_sub(1)
+        .context("the decoded image row has no filter byte")?;
+    let mut pixels = Vec::with_capacity(pixel_capacity);
     let mut previous = vec![0u8; bytes_per_row];
     let mut current = vec![0u8; bytes_per_row];
-    for row in 0..header.height as usize {
-        let start = row * (bytes_per_row + 1);
+    for row in 0..height {
+        let start = row * row_stride;
         let filter = raw[start];
         current.copy_from_slice(&raw[start + 1..start + 1 + bytes_per_row]);
         unfilter(filter, bytes_per_pixel, &mut current, &previous)?;
@@ -890,7 +950,7 @@ fn scale(value: u16, depth: u8) -> u8 {
 }
 
 /// Unwraps a zlib stream and checks both its header and its Adler-32 trailer.
-fn zlib_decompress(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+fn zlib_decompress(bytes: &[u8], ceiling: usize) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(bytes.len() >= 6, "the zlib stream is truncated");
     let (compression, flags) = (bytes[0], bytes[1]);
     anyhow::ensure!(
@@ -906,7 +966,7 @@ fn zlib_decompress(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         flags & 0x20 == 0,
         "zlib preset dictionaries are not supported"
     );
-    let (output, consumed) = inflate(&bytes[2..])?;
+    let (output, consumed) = inflate(&bytes[2..], ceiling)?;
     let trailer = bytes
         .get(2 + consumed..2 + consumed + 4)
         .and_then(|slice| slice.try_into().ok())
@@ -1050,20 +1110,20 @@ const CODE_LENGTH_ORDER: [usize; 19] = [
 ];
 
 /// Decompresses a raw deflate stream, answering with its output and the bytes it consumed.
-fn inflate(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, usize)> {
+fn inflate(bytes: &[u8], ceiling: usize) -> anyhow::Result<(Vec<u8>, usize)> {
     let mut bits = Bits::new(bytes);
     let mut output = Vec::new();
     loop {
         let last = bits.take(1)? == 1;
         match bits.take(2)? {
-            0 => stored_block(&mut bits, &mut output)?,
+            0 => stored_block(&mut bits, &mut output, ceiling)?,
             1 => {
                 let (literals, distances) = fixed_codes()?;
-                compressed_block(&mut bits, &mut output, &literals, &distances)?;
+                compressed_block(&mut bits, &mut output, &literals, &distances, ceiling)?;
             }
             2 => {
                 let (literals, distances) = dynamic_codes(&mut bits)?;
-                compressed_block(&mut bits, &mut output, &literals, &distances)?;
+                compressed_block(&mut bits, &mut output, &literals, &distances, ceiling)?;
             }
             _ => anyhow::bail!("the deflate stream uses the reserved block type"),
         }
@@ -1076,7 +1136,7 @@ fn inflate(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, usize)> {
 }
 
 /// Copies one uncompressed block.
-fn stored_block(bits: &mut Bits<'_>, output: &mut Vec<u8>) -> anyhow::Result<()> {
+fn stored_block(bits: &mut Bits<'_>, output: &mut Vec<u8>, ceiling: usize) -> anyhow::Result<()> {
     bits.align()?;
     let length = bits.take(16)? as u16;
     let complement = bits.take(16)? as u16;
@@ -1085,7 +1145,8 @@ fn stored_block(bits: &mut Bits<'_>, output: &mut Vec<u8>) -> anyhow::Result<()>
         "a stored deflate block fails its length check"
     );
     for _ in 0..length {
-        output.push(bits.take(8)? as u8);
+        let byte = bits.take(8)? as u8;
+        push_inflated(output, byte, ceiling)?;
     }
     Ok(())
 }
@@ -1096,11 +1157,12 @@ fn compressed_block(
     output: &mut Vec<u8>,
     literals: &Huffman,
     distances: &Huffman,
+    ceiling: usize,
 ) -> anyhow::Result<()> {
     loop {
         let symbol = usize::from(literals.decode(bits)?);
         match symbol {
-            0..=255 => output.push(symbol as u8),
+            0..=255 => push_inflated(output, symbol as u8, ceiling)?,
             256 => return Ok(()),
             _ => {
                 let index = symbol - 257;
@@ -1124,11 +1186,21 @@ fn compressed_block(
                 let start = output.len() - distance;
                 for step in 0..length {
                     let byte = output[start + step];
-                    output.push(byte);
+                    push_inflated(output, byte, ceiling)?;
                 }
             }
         }
     }
+}
+
+/// Appends one inflated byte without allowing DEFLATE to outgrow the PNG header's payload.
+fn push_inflated(output: &mut Vec<u8>, byte: u8, ceiling: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        output.len() < ceiling,
+        "the decompressed image data exceeds its {ceiling}-byte ceiling"
+    );
+    output.push(byte);
+    Ok(())
 }
 
 /// The two fixed codes every deflate implementation shares.
@@ -1319,6 +1391,25 @@ mod tests {
         std::fs::write(path, encode_rgb(width, height, rgb)).expect("write the image");
     }
 
+    /// Builds a PNG with a caller-selected header and stored scanline payload.
+    fn png_with_header_and_raw(
+        width: u32,
+        height: u32,
+        depth: u8,
+        colour_type: u8,
+        raw: &[u8],
+    ) -> Vec<u8> {
+        let mut header = Vec::with_capacity(13);
+        header.extend_from_slice(&width.to_be_bytes());
+        header.extend_from_slice(&height.to_be_bytes());
+        header.extend_from_slice(&[depth, colour_type, 0, 0, 0]);
+        let mut png = Vec::from(SIGNATURE);
+        write_chunk(&mut png, b"IHDR", &header);
+        write_chunk(&mut png, b"IDAT", &zlib_store(raw));
+        write_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
     #[test]
     fn a_real_zlib_stream_decodes_to_the_pixels_that_went_into_it() {
         let image = decode(&bytes(&NOISE_PNG.replace(['\n', ' '], ""))).expect("decode the PNG");
@@ -1338,6 +1429,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_hostile_ihdr_returns_a_named_size_error_instead_of_panicking() {
+        let png = png_with_header_and_raw(u32::MAX, u32::MAX, 16, 6, &[0]);
+        assert_eq!(
+            png.len(),
+            69,
+            "the regression fixture keeps its minimal shape"
+        );
+
+        let error = decode(&png).expect_err("the declared scanline payload overflows u64");
+        assert_eq!(
+            format!("{error}"),
+            "the decoded image data size overflows u64"
+        );
+    }
+
+    #[test]
+    fn the_decoder_ceiling_accepts_1080p_and_rejects_larger_declared_payloads() {
+        let full_hd = decoded_size(Header {
+            width: 1920,
+            height: 1080,
+            depth: 8,
+            colour_type: 6,
+        })
+        .expect("a 1080p RGBA image is below the ceiling");
+        assert_eq!(full_hd, 8_295_480);
+        assert!(full_hd < MAX_DECODED_BYTES);
+        assert_eq!(
+            rgba_capacity(Header {
+                width: 1920,
+                height: 1080,
+                depth: 8,
+                colour_type: 6,
+            })
+            .expect("a 1080p RGBA buffer is below the ceiling"),
+            8_294_400
+        );
+
+        let png = png_with_header_and_raw(4096, 4097, 8, 6, &[0]);
+        let error = decode(&png).expect_err("the declared scanline payload is above 64 MiB");
+        assert_eq!(
+            format!("{error}"),
+            "the decoded image data is 67129345 bytes, above the 67108864-byte limit"
+        );
+    }
+
+    #[test]
+    fn a_compact_one_bit_image_cannot_request_a_huge_rgba_allocation() {
+        let header = Header {
+            width: 134_217_728,
+            height: 1,
+            depth: 1,
+            colour_type: 0,
+        };
+        assert_eq!(
+            decoded_size(header).expect("the packed scanline is below 64 MiB"),
+            16_777_217
+        );
+        let png = png_with_header_and_raw(
+            header.width,
+            header.height,
+            header.depth,
+            header.colour_type,
+            &[0],
+        );
+
+        let error = decode(&png).expect_err("the widened image exceeds the RGBA ceiling");
+
+        assert_eq!(
+            error.to_string(),
+            "the decoded RGBA image is 536870912 bytes, above the 67108864-byte limit"
+        );
+    }
+
+    #[test]
+    fn inflate_cannot_exceed_the_size_declared_by_ihdr() {
+        let png = png_with_header_and_raw(1, 1, 8, 6, &[0, 1, 2, 3, 4, 5]);
+
+        let error = decode(&png).expect_err("one RGBA scanline is exactly five bytes");
+        assert_eq!(
+            format!("{error}"),
+            "the decompressed image data exceeds its 5-byte ceiling"
+        );
+    }
+
+    #[test]
+    fn a_small_png_still_decodes_within_the_ceiling() {
+        let rgb = vec![1, 2, 3, 4, 5, 6];
+        let image = decode(&encode_rgb(2, 1, &rgb)).expect("decode a small real PNG");
+
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(image.pixels, vec![1, 2, 3, 255, 4, 5, 6, 255]);
     }
 
     #[test]
@@ -1726,16 +1911,34 @@ mod tests {
         write(&shot, 4, 4, &solid(4, 4, [1, 2, 3]));
         let baselines = Baselines::new(directory.path().join("baselines"), "hub/hub");
         for lane in [Lane::Headless, Lane::Attach] {
-            let outcome = baselines
+            let not_recorded = baselines
                 .check(lane, &shot, true, Tolerance::default())
                 .expect("check");
             assert_eq!(
-                outcome,
+                not_recorded,
+                BaselineOutcome::NotRecorded {
+                    lane: lane.as_str().to_owned()
+                }
+            );
+            assert!(not_recorded.passed());
+            let event = not_recorded
+                .journal_event(&shot)
+                .expect("refusing an update is journalled");
+            assert_eq!(event["status"], "not-recorded");
+            assert_eq!(
+                event["summary"],
+                format!("not recorded (lane: {})", lane.as_str())
+            );
+
+            let skipped = baselines
+                .check(lane, &shot, false, Tolerance::default())
+                .expect("check");
+            assert_eq!(
+                skipped,
                 BaselineOutcome::Skipped {
                     lane: lane.as_str().to_owned()
                 }
             );
-            assert!(outcome.passed());
         }
         assert!(
             !directory.path().join("baselines").exists(),

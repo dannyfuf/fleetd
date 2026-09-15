@@ -72,11 +72,8 @@ fn install_gh(environment: &HarnessEnv, fixture: &Fixture, data: &Path) -> anyho
             &serde_json::Value::Array(repos),
         )?;
     }
-    environment.install_fake(
-        "gh",
-        &GH.replace("@DATA@", &data.to_string_lossy())
-            .replace("@VIEWER@", VIEWER),
-    )
+    let script = tool_script(GH, data)?.replace("@VIEWER@", VIEWER);
+    environment.install_fake("gh", &script)
 }
 
 /// Writes the Jira answers, then the `acli` that reads them.
@@ -98,7 +95,7 @@ fn install_acli(environment: &HarnessEnv, data: &Path) -> anyhow::Result<PathBuf
         &data.join("workitems.json"),
         &serde_json::json!({"issues": []}),
     )?;
-    environment.install_fake("acli", &ACLI.replace("@DATA@", &data.to_string_lossy()))
+    environment.install_fake("acli", &tool_script(ACLI, data)?)
 }
 
 /// Writes each provider's transcript and the shim that serves it.
@@ -190,11 +187,17 @@ fn write_json(path: &Path, value: &serde_json::Value) -> anyhow::Result<()> {
     std::fs::write(path, body).with_context(|| format!("write {}", path.display()))
 }
 
+/// Substitutes the fixture-data directory as one shell word.
+fn tool_script(template: &str, data: &Path) -> anyhow::Result<String> {
+    let data = crate::agent::shell_word(data)?;
+    Ok(template.replace("@DATA@", &data))
+}
+
 /// A `gh` that answers the daemon's exact queries from fixture data and nothing else.
 const GH: &str = r#"#!/bin/sh
 # Fake gh for the Fleet harness: answers from fixture data, never reaches the network.
 set -u
-data='@DATA@'
+data=@DATA@
 
 emit() {
   if [ -f "$1" ]; then cat "$1"; else printf '[]\n'; fi
@@ -250,7 +253,7 @@ printf '[]\n'
 const ACLI: &str = r#"#!/bin/sh
 # Fake acli for the Fleet harness: answers from fixture data, never reaches Atlassian.
 set -u
-data='@DATA@'
+data=@DATA@
 
 emit() {
   if [ -f "$1" ]; then cat "$1"; else printf '{}\n'; fi
@@ -280,3 +283,60 @@ esac
 
 printf '{}\n'
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_fake_tools_render_a_normal_data_path_as_one_quoted_word() {
+        let data = Path::new("/tmp/fleet harness/fixture/tools");
+
+        for (name, template) in [("gh", GH), ("acli", ACLI)] {
+            let script = tool_script(template, data)
+                .unwrap_or_else(|error| panic!("render the fake {name}: {error}"));
+            assert!(
+                script.contains("data='/tmp/fleet harness/fixture/tools'"),
+                "the fake {name} must receive one quoted data path: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn both_fake_tools_execute_with_an_apostrophe_in_their_data_path() {
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        let data = temporary.path().join("operator's-run/fixture/tools");
+        std::fs::create_dir_all(&data).expect("create the apostrophe data path");
+        std::fs::write(data.join("repos-acme.json"), "[{\"name\":\"api\"}]\n")
+            .expect("write gh fixture data");
+        std::fs::write(data.join("project.json"), "{\"key\":\"FLT\"}\n")
+            .expect("write acli fixture data");
+
+        for (name, template, arguments, expected) in [
+            (
+                "gh",
+                GH,
+                &["repo", "list", "acme"][..],
+                "[{\"name\":\"api\"}]",
+            ),
+            (
+                "acli",
+                ACLI,
+                &["jira", "project", "view"][..],
+                "{\"key\":\"FLT\"}",
+            ),
+        ] {
+            let script = tool_script(template, &data)
+                .unwrap_or_else(|error| panic!("render the fake {name}: {error}"));
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .arg(name)
+                .args(arguments)
+                .output()
+                .unwrap_or_else(|error| panic!("execute the fake {name} with sh -c: {error}"));
+            assert!(output.status.success(), "the fake {name} must run");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
+    }
+}
