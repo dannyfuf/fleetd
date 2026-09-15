@@ -439,8 +439,17 @@ fn the_daemon_link_is_reported_where_the_key_contexts_cannot_show_it() {
     let before = state.harness_projection().revision;
     state.daemon = DaemonLink::Reconnected {
         restarted: true,
+        reattached: 2,
         since: now,
     };
+    assert_eq!(
+        state.daemon,
+        DaemonLink::Reconnected {
+            restarted: true,
+            reattached: 2,
+            since: now,
+        }
+    );
     let after = state.harness_projection();
     assert_ne!(after.revision, before);
     assert_eq!(
