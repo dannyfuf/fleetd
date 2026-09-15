@@ -52,7 +52,9 @@ variant, never a frame-shape change.
 
 A `location` is exactly `{"target":"worktrees.row[0]"}` or `{"x":120.0,"y":64.0}`. A button
 is `left`, `right`, or `middle`. Pointer commands dispatch a move before a button event and answer
-only after the resulting frame has painted.
+only after the resulting frame has painted. A named location lands at the center of the target's
+visible intersection with the window; a target painted wholly outside the window fails instead of
+dispatching an off-window event.
 
 Four commands carry a consequence worth stating once rather than rediscovering in a scenario:
 
@@ -114,7 +116,8 @@ are ignored. A scenario may open with one `fixture: <preset>` line, and if it do
 be the first non-comment directive and appear once — a preset seeds `FLEET_HOME` before `fleetd`
 reads it, so it cannot be applied half way through a run. A scenario that names no preset gets
 `empty`, which is a Fleet that has never been run. Corpus scenarios name their preset explicitly.
-Arguments after `type` and `clipboard set` preserve spaces. The frozen line grammar is:
+Arguments after `type` and `clipboard set` have leading and trailing whitespace trimmed; interior
+spaces are preserved. The frozen line grammar is:
 
 ```text
 fixture: empty|one-repo|busy|board|agents
@@ -152,6 +155,10 @@ teardown. A directory
 run recursively executes scenario files in lexical order. Unless `--continue-on-failure` is set,
 the first failed line stops the scenario and triggers `failure-NNN` shot/dump evidence.
 
+The five pinned `idle` forms are `await idle`, `await idle <timeout-ms>`, `await idle exists`,
+`await idle absent`, and `await idle exists <timeout-ms>`. A numeric second token is the timeout
+only for the bare `idle` form; `exists` and `absent` remain predicate operators.
+
 ### Predicates
 
 An atom is `<dotted.path> <op> <value>`, `<dotted.path> exists`, `<dotted.path> absent`, or the bare
@@ -171,8 +178,10 @@ reaches the matcher unaltered. Every clause is evaluated — a conjunction names
 not just the first — and each one reports the value it actually saw.
 
 `idle` is true exactly when `idle.idle` is true: no in-flight app requests, running jobs, pending
-frame, live toast timer, or armed debounce. On an await timeout the response contains the last
-snapshot and all six idle fields.
+frame, live toast timer, or armed debounce; no mutation still awaiting its snapshot; and a daemon
+link past its first connection. On an await timeout the response contains the last snapshot and
+all eight idle fields: `idle`, `in_flight_requests`, `running_jobs`, `pending_frame`,
+`live_toast_timers`, `armed_debounces`, `settling_mutations`, and `link_opening`.
 
 ## 3. `UiSnapshot`, version 1
 
@@ -202,14 +211,16 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `terminal` | `{rows:[string],text:string,cursor:{row,col,shape},viewport:{top,rows,history}}` or null; cursor shapes are `block`, `bar`, `underline`, `hidden` |
 | `targets` | map target name → `{x,y,w,h,frame}` in logical window coordinates |
 | `daemon` | `{link,attempt,dismissed,restarted}`; `link` is `starting`, `failed`, `connected`, `lost` or `reconnected`. An additive version-1 field: `key_contexts` appends `Daemon > Banner` only behind a chain that can carry it, so on a first-run Fleet or behind an open overlay a lost daemon is otherwise invisible to every predicate |
-| `idle` | `{idle,in_flight_requests,running_jobs,pending_frame,live_toast_timers,armed_debounces}`; `idle` is *derived* from the five counters, never reported independently of them |
+| `idle` | `{idle,in_flight_requests,running_jobs,pending_frame,live_toast_timers,armed_debounces,settling_mutations,link_opening}`; `idle` is *derived* from the seven pending-work inputs, never reported independently of them |
 | `window` | `{bounds:{x,y,w,h},scale_factor,title,frame}` in logical coordinates |
 
 An unavailable collection is empty, an unavailable optional surface is null, and unavailable
 window metrics are zero/empty rather than guessed. `terminal.text` joins `rows` with `\n`;
 `rows` drops the spacer cell that follows a wide grapheme and renders an unset cell as a space, so
-column alignment survives the round trip. `jobs[].status` may also be `cancelling`, which is a
-real daemon job state.
+column alignment survives the round trip. It trims trailing spaces from each row, then removes
+trailing empty rows, so `terminal.rows.len()` need not equal `terminal.viewport.rows`. A scenario
+must not assume the viewport's last row exists in `terminal.rows`. `jobs[].status` may also be
+`cancelling`, which is a real daemon job state.
 
 The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `board` and `board.cards`. The
 last of those, and every key of `targets`, carries characters a dotted path would split on, so a
@@ -218,6 +229,10 @@ predicate reaches them with the quoted step §2 defines: `lists["board.cards"].r
 `focused` vocabulary is `filter.input`, `palette.input`, `dialog`, `agents.popup`, `board.filter`,
 `repos.row[N]`, `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `board.column[C].card[R]`,
 `tabs.tab[N]` and `agents.tabs.tab[N]`.
+
+`lists.jobs.rows` is the row set accepted by the Jobs panel's current filter, and
+`lists.jobs.selected` is the row at the panel cursor within that filtered set. Thus
+`jobs.row[N]` and `lists.jobs.rows[N]` address the same job.
 
 The snapshot is memoised behind a key naming every input its builder reads, and its revision moves
 only when the projected content actually differs — a repainted frame that changes nothing does not
@@ -231,6 +246,10 @@ Indices describe current visual order; rows also carry stable domain ids in `lis
 `frame` must equal `window.frame` before input uses it. An unknown target fails and names the
 nearest available names; a stale one fails and names both frame numbers. Neither dispatches
 anything, and neither falls back to `(0,0)`.
+
+For virtualized list rows, `N` is the model position handed to the row builder. Only rows inside
+the viewport are painted, so `targets["<list>.row[N]"]` is absent while that model row is scrolled
+out; scroll it into view before targeting it.
 
 The names Fleet paints today, by surface:
 
@@ -270,7 +289,9 @@ on.
 - `virtual` creates a dedicated Hyprland headless output, pins geometry/scale, moves the harness
   window there by its unique title, floats it and holds it at the pinned logical size — a tiling
   session sizes a new window from its own layout rules, so the size the app asked for is a size
-  the lane has to insist on — and captures it with `grim`. It is the default interactive lane.
+  the lane has to insist on — and captures it with `grim`. Window placement selects the classic
+  or Lua dispatcher syntax from `hyprctl status`, so both config providers preserve isolation. It
+  is the default interactive lane.
 - `attach` uses the developer's current compositor and is opt-in for watching a run.
 
 Every lane owns unconditional teardown. Automatic selection may fall back from unavailable
@@ -357,14 +378,16 @@ frame carries a diff — Claude reads it from the `Edit` input, Codex joins by `
 pairing has to be unambiguous. `models` is configuration rather than a stream event: it is hoisted
 at load to answer Claude's `list_models` and Codex's `model/list`, and playing it emits nothing.
 
-The starter transcripts ship in `crates/fleet-harness/transcripts/`
-(`two-turns.json`, `edit-approval.json`, `error-mid-stream.json`) and are what the `agents` fixture
-embeds.
+The `agents` fixture embeds all three starters: Claude serves the two turns from
+`two-turns.json` followed by the failed turn from `error-mid-stream.json`, and Codex serves
+`edit-approval.json`.
 
 ## 6. Run directory and baselines
 
 The runner prints its directory first. The default is
-`/tmp/fleet-harness/<UTC-timestamp>-<scenario-stem>/`:
+`/tmp/fleet-harness/<UTC-timestamp>-<scenario-stem>[-2|-3|…]/`: the first claimant gets the
+unsuffixed name, and a concurrent or same-second collision atomically claims the next suffix.
+Suite roots follow the same rule.
 
 ```text
 run.jsonl          timestamped request/response journal, one JSON object per exchange
@@ -407,8 +430,9 @@ lands well inside both, a changed colour token does not. A failed comparison wri
 `shots/<NNN>-<name>-diff.png` beside the run shot. A capture whose *size* differs from its
 baseline is an error telling the reader to re-record, never a pixel count.
 
-`--update-baselines` explicitly replaces baselines. Structured assertions remain the oracle;
-pixels are regression evidence.
+`--update-baselines` explicitly replaces baselines only in the `virtual` lane. In every other
+lane an update request reports `not-recorded` with the lane name and writes no baseline.
+Structured assertions remain the oracle; pixels are regression evidence.
 
 ## 7. The corpus
 
@@ -460,6 +484,10 @@ snapshot, and takes no screenshot.
 Every run writes `report.md` beside its journal, and a directory run writes one more for the
 suite. The journal is the complete record; the report is its digest, and it is assembled only
 from what is already on disk, so it cannot describe something `run.jsonl` does not show.
+Every `command` journal entry carries its scenario line in `data.line`, and report alignment
+requires an exact match. If a journal line is lost or lacks the expected number, the remaining
+alignment is marked untrustworthy and those rows are left unenriched rather than being paired
+with later exchanges.
 
 A scenario report leads with the verdict and the run's identity — scenario, lane, fixture, line
 counts, start time, duration, run directory — then:
@@ -468,13 +496,19 @@ counts, start time, duration, run directory — then:
 | --- | --- |
 | **Failure** | Present only on a red run, first: the failing line verbatim, the error, the clause that did not hold with the value it actually saw, the busy `idle` counters, the state at the failure, and links to `failure-NNN.png` / `failure-NNN.json`. |
 | **Lines** | One row per executed line: line number, the source line, ok/failed, duration, and a one-phrase "what happened" — which keys were handled, which predicate held, which baseline compared. |
-| **Screenshots** | Every `shot`, inlined, with its baseline verdict. |
+| **Screenshots** | Every `shot`, inlined, with its baseline verdict. A differing shot shows its diff once, labelled **Diff**, beside the screenshot; diff files are not also listed as screenshots. |
 | **Assertions** | Every `await` and `assert`, with the predicate and what satisfied it. |
 | **Dumps** | Every `dump`, linked, with its one-line summary. |
 
 A suite report names the lane, how many scenarios were planned and how many ran, lists the
 failures first with a link into each failing scenario's own report and its failure evidence, then
 every scenario with its verdict and duration, then the screenshots grouped by scenario.
+If the suite cannot list a failing scenario's `shots/` directory, its failure block says that the
+screenshots could not be listed and includes the filesystem error.
+
+After Fleet answers `quit`, the runner waits up to five seconds for the process to exit. A non-zero
+or signal-terminated exit, or an exit that misses that deadline, fails the line and therefore the
+run.
 
 Stdout is a contract of its own: a failure must be diagnosable without opening a file. The runner
 prints the run directory first, the lane second, and on a failure the line, the error, the value
@@ -577,7 +611,15 @@ still short of it, so no other document has to claim a capability that does not 
 - **A suite writes about five megabytes per scenario into `/tmp/fleet-harness` and never prunes
   it.** The run directory is the evidence (§6), so nothing deletes it on its own; `make
   harness-prune` is the broom, and it is opt-in.
-- **Five source files are past the ~900-line rule** `rust-workspace-architecture` sets:
-  `fleet-harness/src/{report.rs, baseline.rs, scenario.rs}` and `fleet-drive/src/{input.rs,
-  predicate.rs}`. Each is one coherent subject rather than an accumulation, so splitting them is a
-  deliberate refactor, not a drive-by.
+- **Seven source files are past the ~900-line rule** `rust-workspace-architecture` sets:
+  `fleet-harness/src/{report.rs, baseline.rs, scenario.rs, agent/codex.rs}`,
+  `fleet-drive/src/{input.rs, predicate.rs}`, and `fleet-app/src/state/harness/projection.rs`.
+  Each is one coherent subject rather than an accumulation, so splitting them is a deliberate
+  refactor, not a drive-by.
+- **`dialog.fields` and `dialog.message` are always empty.** Their live content belongs to the
+  dialog host entity and is not mirrored into `AppState`, so the snapshot deliberately reports
+  `[]` and `null`. Use `targets["dialog.field[N]"]` to assert and reach a field, then exercise its
+  content with keystrokes.
+- **A headless `await` does not repaint, so `window.frame` freezes for the duration of the wait.**
+  The await loop reprojects update-path state but does not draw another headless frame. Use
+  `assert` or `dump`, which paint before projecting, when current frame geometry matters.
