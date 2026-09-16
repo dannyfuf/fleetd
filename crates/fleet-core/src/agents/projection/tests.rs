@@ -8,9 +8,10 @@ use super::*;
 use crate::agents::{
     AbortReason, AgentEvent, AgentKind, Attachment, Attention, AttentionKind, FileDelta,
     GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
-    ItemStatus, ModelSelection, PermissionChoice, PermissionMode, PermissionOption, PlanAnswer,
-    ProviderOptionId, Question, QuestionOption, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
-    ToolCall, ToolDiff, ToolKind, ToolPatch, TurnId, TurnOutcome, TurnState, Usage,
+    ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode,
+    PermissionOption, PlanAnswer, ProviderOptionId, Question, QuestionOption,
+    ReasoningEffortDescriptor, Seq, SeqEvent, SessionState, StreamKind, ThreadId, ToolCall,
+    ToolDiff, ToolKind, ToolPatch, TurnId, TurnOutcome, TurnState, Usage,
 };
 use crate::ids::WorktreeId;
 
@@ -84,11 +85,58 @@ fn session_started() -> AgentEvent {
             effort: Some("high".to_owned()),
             provider: None,
         }),
+        models: Vec::new(),
         mode: PermissionMode::Ask,
         tools: vec!["Read".to_owned(), "Edit".to_owned()],
         commands: vec!["compact".to_owned()],
         skills: vec!["review".to_owned()],
     }
+}
+
+#[test]
+fn session_catalogue_and_refreshed_skills_replay_through_the_reducer() {
+    let mut projection = projection();
+    let mut events = EventBuilder::new();
+    let descriptor = ModelDescriptor {
+        id: "gpt-5.6-sol".to_owned(),
+        display_name: "GPT-5.6 Sol".to_owned(),
+        efforts: vec![ReasoningEffortDescriptor {
+            id: "xhigh".to_owned(),
+            description: "Deep reasoning".to_owned(),
+        }],
+        default_effort: Some("xhigh".to_owned()),
+    };
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::SessionConfigured {
+            provider: AgentKind::Codex,
+            resume_cursor: Some("codex-session".to_owned()),
+            model: Some(ModelSelection {
+                model: descriptor.id.clone(),
+                effort: descriptor.default_effort.clone(),
+                provider: None,
+            }),
+            models: vec![descriptor.clone()],
+            mode: PermissionMode::Ask,
+            tools: Vec::new(),
+            commands: Vec::new(),
+            skills: vec!["review".to_owned()],
+        },
+    );
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::MetadataChanged {
+            title: None,
+            mode: None,
+            model: None,
+            skills: Some(vec!["review".to_owned(), "ship".to_owned()]),
+        },
+    );
+
+    assert_eq!(projection.models, vec![descriptor]);
+    assert_eq!(projection.skills, ["review", "ship"]);
 }
 
 fn user_message(text: &str) -> ItemKind {
@@ -785,5 +833,6 @@ fn unexpected_exit_fails_the_active_turn_and_session() {
     assert_eq!(projection.attention(Seq(1)), Attention::Failed);
 }
 
+mod applied;
 mod behavior;
 mod validation;
