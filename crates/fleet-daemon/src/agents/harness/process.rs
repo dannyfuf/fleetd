@@ -6,10 +6,11 @@
 //! That is all this module; the protocols on top of it are per harness.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     ffi::{OsStr, OsString},
     path::Path,
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 
@@ -46,6 +47,86 @@ impl std::fmt::Debug for PeerStreams {
             .field("has_stderr", &self.stderr.is_some())
             .field("pid", &self.process.as_ref().and_then(Child::id))
             .finish()
+    }
+}
+
+/// How many stderr lines a transport keeps so a startup failure can quote them.
+pub const STDERR_TAIL_LINES: usize = 20;
+
+/// How many stderr bytes a transport keeps, whatever the line count.
+pub const STDERR_TAIL_BYTES: usize = 2 * 1024;
+
+/// A bounded tail of a child's stderr, shared between its drain task and whoever reports its
+/// death.
+///
+/// The adapter's `open` reads this **synchronously**, from a buffer the drain task appends to, so
+/// `Drop for Transport` aborting that task cannot race the read: whatever was drained before the
+/// abort is already here. Without it, the single most common startup failure — a configured
+/// binary that is not the harness at all — reaches the user as "the process exited during
+/// startup" with the child's own explanation thrown away.
+#[derive(Debug, Clone, Default)]
+pub struct StderrTail {
+    lines: Arc<std::sync::Mutex<VecDeque<String>>>,
+}
+
+impl StderrTail {
+    /// Appends one drained line, evicting the oldest past either bound.
+    pub fn push(&self, line: &str) {
+        let mut lines = self
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lines.push_back(clamp(line, STDERR_TAIL_BYTES));
+        while lines.len() > STDERR_TAIL_LINES {
+            lines.pop_front();
+        }
+        while lines.len() > 1
+            && lines.iter().map(|line| line.len() + 1).sum::<usize>() > STDERR_TAIL_BYTES
+        {
+            lines.pop_front();
+        }
+    }
+
+    /// The kept tail as one line, oldest first, or `None` when the child said nothing.
+    #[must_use]
+    pub fn text(&self) -> Option<String> {
+        let lines = self
+            .lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if lines.is_empty() {
+            return None;
+        }
+        Some(lines.iter().cloned().collect::<Vec<_>>().join(" \u{b7} "))
+    }
+}
+
+/// Truncates on a character boundary, marking that something was cut.
+fn clamp(line: &str, max: usize) -> String {
+    let line = line.trim_end();
+    if line.len() <= max {
+        return line.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &line[..end])
+}
+
+/// How a startup failure is spelled once the child is gone.
+///
+/// Names the **configured** command, its exit code and what it printed, because those three are
+/// what tell a user their `agentBinaries` entry points at the wrong program.
+#[must_use]
+pub fn startup_failure(command_line: &str, code: Option<i32>, tail: Option<&str>) -> String {
+    let exit = match code {
+        Some(code) => format!("`{command_line}` exited with code {code} during startup"),
+        None => format!("`{command_line}` exited during startup"),
+    };
+    match tail {
+        Some(tail) => format!("{exit}: {tail}"),
+        None => exit,
     }
 }
 
@@ -198,19 +279,9 @@ pub async fn spawn_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|error| {
-        let name = harness.display_name();
-        let binary = harness.executable();
-        if error.kind() == std::io::ErrorKind::NotFound {
-            HarnessError::Unavailable {
-                reason: format!("{name} (`{binary}`) was not found on PATH."),
-            }
-        } else {
-            HarnessError::Unavailable {
-                reason: format!("{name} is installed but failed to run: {error}."),
-            }
-        }
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| launch_failure(harness, command_line, &error))?;
     let missing = |what: &str| HarnessError::Unavailable {
         reason: format!("{} did not provide piped {what}.", harness.display_name()),
     };
@@ -246,30 +317,56 @@ pub async fn read_version(
         .stdout(Stdio::piped())
         .kill_on_drop(true);
     let name = harness.display_name();
-    let binary = harness.executable();
     let output = tokio::time::timeout(deadline, command.output())
         .await
         .map_err(|_| HarnessError::Timeout {
             what: "the agent version probe",
             after: deadline,
         })?
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                HarnessError::Unavailable {
-                    reason: format!("{name} (`{binary}`) was not found on PATH."),
-                }
-            } else {
-                HarnessError::Unavailable {
-                    reason: format!("{name} is installed but failed to run: {error}."),
-                }
-            }
-        })?;
+        .map_err(|error| launch_failure(harness, command_line, &error))?;
     if !output.status.success() {
+        let code = exit_code(&output.status).map_or_else(
+            || "an unreadable status".to_owned(),
+            |code| code.to_string(),
+        );
+        let detail = first_line(&String::from_utf8_lossy(&output.stderr))
+            .map_or_else(String::new, |line| format!(": {line}"));
         return Err(HarnessError::Unavailable {
-            reason: format!("{name} is installed but failed to run."),
+            reason: format!("{name} (`{command_line}`) failed `--version` with {code}{detail}."),
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// How a failed launch names what Fleet tried to run.
+///
+/// The **configured** command line, never [`HarnessKind::executable`]: when `agentBinaries.claude`
+/// is `cc`, a message naming `claude` points the user at a binary Fleet never touched.
+fn launch_failure(
+    harness: HarnessKind,
+    command_line: &str,
+    error: &std::io::Error,
+) -> HarnessError {
+    let name = harness.display_name();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        HarnessError::Unavailable {
+            reason: format!("{name} (`{command_line}`) was not found on PATH."),
+        }
+    } else {
+        HarnessError::Unavailable {
+            reason: format!("{name} (`{command_line}`) is installed but failed to run: {error}."),
+        }
+    }
+}
+
+/// The first non-blank line of a subprocess's output, trimmed.
+#[must_use]
+pub fn first_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Closes the child down: wait, SIGTERM, then SIGKILL.

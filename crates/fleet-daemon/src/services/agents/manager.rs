@@ -19,7 +19,7 @@ mod window;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -33,7 +33,7 @@ use fleet_core::{
         HarnessCapabilities, ItemId, ItemStatus, SandboxPolicy, SessionState, StartRequest,
         ThreadId, TurnId, TurnState, UserInput,
     },
-    config::AgentCommands,
+    config::AgentBinaries,
     ids::{HostId, WorktreeId},
 };
 use fleet_proto::{
@@ -63,7 +63,7 @@ use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
 /// Well above the 16 ms merge tick so a normal turn logs nothing.
 const EMISSION_SKEW_FLOOR: Duration = Duration::from_millis(250);
 
-type ProviderFactory = dyn Fn(AgentKind, &StartRequest, &AgentCommands) -> anyhow::Result<Box<dyn AgentProvider>>
+type ProviderFactory = dyn Fn(AgentKind, &StartRequest, &AgentBinaries) -> anyhow::Result<Box<dyn AgentProvider>>
     + Send
     + Sync;
 type RemoteHostResolver = dyn Fn(&WorktreeId) -> Option<HostId> + Send + Sync;
@@ -227,20 +227,23 @@ impl AgentSessionManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checkpoints);
     }
 
-    /// The configured provider command lines, falling back to the packaged defaults.
+    /// The configured provider executables, falling back to the packaged defaults.
+    ///
+    /// `agentBinaries`, never `agentCommands`: the latter is a shell line for a PTY pane and may
+    /// name a shell function, while this is `execve`'d by the daemon with no shell at all.
     ///
     /// A configuration that cannot be read must not block a thread from starting: the default
     /// executables are what the user would have gotten anyway, and the launch failure the
     /// adapter reports next is more actionable than a config error here.
-    async fn agent_commands(&self) -> AgentCommands {
+    async fn agent_binaries(&self) -> AgentBinaries {
         let Some(config) = self.inner.config.as_ref() else {
-            return default_agent_commands();
+            return AgentBinaries::default();
         };
         match config.load().await {
-            Ok(config) => config.agent_commands,
+            Ok(config) => config.agent_binaries,
             Err(error) => {
-                tracing::warn!(%error, "could not read agent commands; using defaults");
-                default_agent_commands()
+                tracing::warn!(%error, "could not read agent binaries; using defaults");
+                AgentBinaries::default()
             }
         }
     }
@@ -365,10 +368,16 @@ impl AgentSessionManager {
             permission_profile: None,
             title: Some(record.title),
         };
-        let commands = self.agent_commands().await;
-        let mut provider = (self.inner.provider_factory)(request.provider, &request, &commands)
-            .map_err(provider_factory_error)?;
-        provider.start(request).await.map_err(provider_error)?;
+        let binaries = self.agent_binaries().await;
+        let kind = request.provider;
+        let command = binaries.binary(kind).to_owned();
+        let worktree = request.worktree_path.clone();
+        let mut provider = (self.inner.provider_factory)(kind, &request, &binaries)
+            .map_err(|error| provider_factory_error(kind, &command, &worktree, error))?;
+        provider
+            .start(request)
+            .await
+            .map_err(|error| provider_start_error(kind, &command, &worktree, error))?;
         let provider_events = provider.events();
         // The provider process is up; `claude -p` only emits `system/init` once it is prompted,
         // so waiting for that would leave a resumed tab on a state §3.3 has no row for. The
@@ -764,32 +773,69 @@ async fn run_provider_events(
     drop(operation);
 }
 
-fn default_agent_commands() -> AgentCommands {
-    AgentCommands {
-        claude: AgentKind::Claude.executable().to_owned(),
-        codex: AgentKind::Codex.executable().to_owned(),
-        // ADR 0014 keeps the legacy field readable for one release, so the terminal an
-        // existing config still points at OpenCode with keeps a command to run.
-        opencode: "opencode".to_owned(),
-    }
-}
-
-fn provider_factory_error(error: anyhow::Error) -> ProtoError {
-    match error.downcast::<ProviderError>() {
+/// Re-frames **and logs** a provider that could not be constructed.
+fn provider_factory_error(
+    kind: AgentKind,
+    command: &str,
+    worktree: &Path,
+    error: anyhow::Error,
+) -> ProtoError {
+    let framed = match error.downcast::<ProviderError>() {
         Ok(error) => provider_error(error),
         Err(error) => ProtoError {
             kind: ErrorKind::Unknown,
-            message: one_line(&format!("could not construct agent provider: {error:#}")),
+            message: one_line(&format!(
+                "could not construct the {} provider (`{command}`): {error:#}",
+                kind.display_name()
+            )),
         },
-    }
+    };
+    log_start_failure(kind, command, worktree, &framed);
+    framed
 }
 
+/// Re-frames **and logs** a provider that could not start.
+fn provider_start_error(
+    kind: AgentKind,
+    command: &str,
+    worktree: &Path,
+    error: ProviderError,
+) -> ProtoError {
+    let framed = provider_error(error);
+    log_start_failure(kind, command, worktree, &framed);
+    framed
+}
+
+/// The one log line a native thread that never started produces.
+///
+/// Everything else on this path is quiet by design — the probe result is a single `info`, the
+/// adapter's stderr drain dies with the transport, and the typed error goes out on the wire and
+/// nowhere else — so a mis-configured `agentBinaries` entry used to leave no trace in
+/// `fleetd.log` at all.
+fn log_start_failure(kind: AgentKind, command: &str, worktree: &Path, error: &ProtoError) {
+    tracing::warn!(
+        target: "fleet::agents",
+        provider = %kind.display_name(),
+        command,
+        worktree = %worktree.display(),
+        error = %error.message,
+        "could not start a native agent thread"
+    );
+}
+
+/// Re-frames a typed provider failure as the wire error a client renders.
+///
+/// The harness kind and the configured command are already inside `reason`: the adapter puts
+/// them there (`agents/harness/process.rs`, `agents/harness/probe.rs`), because it is the only
+/// layer that knows what was actually run. This function must never trim the reason down to a
+/// generic sentence — the app shows it verbatim.
 fn provider_error(error: ProviderError) -> ProtoError {
     match error {
         ProviderError::Unavailable { reason } => ProtoError {
             kind: ErrorKind::Unsupported,
             message: one_line(&format!(
-                "{reason}. Open a terminal fallback and run the configured agent command."
+                "{} Open a terminal fallback and run the configured agent command.",
+                sentence(&reason)
             )),
         },
         ProviderError::Protocol { message } => conflict(message),
@@ -799,6 +845,15 @@ fn provider_error(error: ProviderError) -> ProtoError {
             message: one_line(&format!("agent provider timed out waiting for {what}")),
         },
     }
+}
+
+/// Ends a reason with exactly one full stop, whoever wrote it.
+fn sentence(reason: &str) -> String {
+    let reason = reason.trim_end();
+    if reason.ends_with(['.', '!', '?']) {
+        return reason.to_owned();
+    }
+    format!("{reason}.")
 }
 
 fn daemon_error(error: crate::DaemonError) -> ProtoError {

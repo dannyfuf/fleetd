@@ -31,7 +31,7 @@ use super::{
     AgentSessionManager, AgentThreadRecord, ThreadRuntime,
     apply::{publish_applied, runtime_inflight},
     conflict, daemon_error, hydrate, not_found, provider_error, provider_factory_error,
-    storage_error, validation,
+    provider_start_error, storage_error, validation,
     window::OpenRequest,
 };
 
@@ -87,10 +87,16 @@ impl AgentSessionManager {
             permission_profile: None,
             title: title.clone(),
         };
-        let commands = self.agent_commands().await;
-        let mut provider = (self.inner.provider_factory)(provider_kind, &request, &commands)
-            .map_err(provider_factory_error)?;
-        provider.start(request).await.map_err(provider_error)?;
+        let binaries = self.agent_binaries().await;
+        let command = binaries.binary(provider_kind).to_owned();
+        let worktree_path = request.worktree_path.clone();
+        let mut provider = (self.inner.provider_factory)(provider_kind, &request, &binaries)
+            .map_err(|error| {
+                provider_factory_error(provider_kind, &command, &worktree_path, error)
+            })?;
+        provider.start(request).await.map_err(|error| {
+            provider_start_error(provider_kind, &command, &worktree_path, error)
+        })?;
         let provider_events = provider.events();
         let created = Utc::now();
         let resolved_title = title.unwrap_or_else(|| provider_kind.display_name().to_owned());

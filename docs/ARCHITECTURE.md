@@ -241,8 +241,9 @@ owns lifecycle truth. Because the reducer is `fleet_core::agents::ThreadProjecti
 daemon and every client run the *same* function over the same ordered events.
 
 **Event flow.** `AgentThreadCreate` resolves the published `WorktreeId` to a trusted canonical
-path through `Worktrees`, spawns the adapter named by `config.agentCommands`, and returns an
-`AgentThreadSummary`. The adapter's `mpsc` receiver is drained by one task per thread: each
+path through `Worktrees`, spawns the adapter named by `config.agentBinaries` — the executable
+the daemon runs with **no shell**, never `config.agentCommands`, which is the shell line a PTY
+pane types — and returns an `AgentThreadSummary`. The adapter's `mpsc` receiver is drained by one task per thread: each
 event is sequenced, appended to the log, reduced, and published as `Event::Agent { thread,
 event }`, with `Event::AgentSummary` whenever the summary changes. `ContentDelta`s are coalesced
 per item on a 16 ms tick before broadcast, so a fast model cannot schedule a render per token.

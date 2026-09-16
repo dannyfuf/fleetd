@@ -177,12 +177,22 @@ pub(super) fn row_element(
             field.into_any_element()
         }
         RowKind::Text(value) => {
-            TextField::new(editing.map_or_else(|| value.clone(), |input| input.text().to_owned()))
-                .label(row.label.clone())
-                .caret(editing.map_or(0, TextFieldState::caret_chars))
-                .focused(input_is_focused(focused, editing))
-                .mono(true)
-                .into_any_element()
+            let mut field = TextField::new(
+                editing.map_or_else(|| value.clone(), |input| input.text().to_owned()),
+            )
+            .label(row.label.clone())
+            .caret(editing.map_or(0, TextFieldState::caret_chars))
+            .focused(input_is_focused(focused, editing))
+            .mono(true);
+            // The 18 px slot §3.8.1 reserves: the sub-label lives in the preview line, and an
+            // `invalid` message replaces it there, which is the zero-shift rule already.
+            if let Some(detail) = row.detail.clone() {
+                field = field.preview(detail);
+            }
+            if let Some(invalid) = row.invalid.clone() {
+                field = field.invalid(invalid);
+            }
+            field.into_any_element()
         }
         RowKind::Fact(value) => KeyValueList::new()
             .row(row.label.clone(), FactValue::known(value.clone()))

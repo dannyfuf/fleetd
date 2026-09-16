@@ -231,3 +231,45 @@ fn question_and_plan_answers_are_byte_exact() {
         ))
     );
 }
+
+/// The session environment carries the same IDE muzzle the probe does.
+///
+/// `probe.rs` documents both variables as probe *hygiene*, but a session that omits them spawns
+/// the IDE-discovery process tree the probe exists to avoid — once per thread, for the life of
+/// the daemon. An explicit `StartRequest.env` still wins, because these are defaults.
+#[tokio::test]
+async fn the_session_environment_muzzles_ide_discovery_and_strips_inherited_claude_state() {
+    use std::ffi::{OsStr, OsString};
+
+    let harness = harness("claude".to_owned());
+    let environment = harness
+        .environment(&OpenSession {
+            start: start_request(),
+        })
+        .await;
+    assert_eq!(
+        environment.get(OsStr::new("CLAUDE_CODE_AUTO_CONNECT_IDE")),
+        Some(&OsString::from("0"))
+    );
+    assert_eq!(
+        environment.get(OsStr::new("CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL")),
+        Some(&OsString::from("1"))
+    );
+    for stripped in crate::agents::harness::probe::strip_list(AgentKind::Claude) {
+        assert!(
+            !environment.contains_key(OsStr::new(stripped)),
+            "{stripped} must not be inherited by a session"
+        );
+    }
+
+    let mut start = start_request();
+    start
+        .env
+        .insert("CLAUDE_CODE_AUTO_CONNECT_IDE".to_owned(), "1".to_owned());
+    let overridden = harness.environment(&OpenSession { start }).await;
+    assert_eq!(
+        overridden.get(OsStr::new("CLAUDE_CODE_AUTO_CONNECT_IDE")),
+        Some(&OsString::from("1")),
+        "an explicit request environment still wins"
+    );
+}

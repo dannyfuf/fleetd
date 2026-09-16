@@ -106,6 +106,14 @@ impl ClaudeHarness {
     ) -> std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> {
         let inherited = process::login_environment(&request.start.worktree_path).await;
         let mut overrides: BTreeMap<String, String> = BTreeMap::new();
+        // The same two the probe sets (`probe.rs`): without them every thread Fleet starts
+        // spawns an IDE-discovery process tree, which is what the probe's own hygiene promised
+        // and only half delivered. Inserted first, so an explicit request environment wins.
+        overrides.insert("CLAUDE_CODE_AUTO_CONNECT_IDE".to_owned(), "0".to_owned());
+        overrides.insert(
+            "CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL".to_owned(),
+            "1".to_owned(),
+        );
         // Per-instance config isolates through `CLAUDE_CONFIG_DIR`, **never** by overriding
         // `HOME`: on macOS that relocates the login keychain and the CLI reports "Not logged in".
         if let Some(home) = &self.config.home {
@@ -224,9 +232,14 @@ impl Harness for ClaudeHarness {
                 break;
             }
             if !transport.is_alive().await {
+                // The child's exit code and its own last words, read before the transport (and
+                // with it the stderr drain) is dropped: without them a `cc` that is really the C
+                // compiler reports only "the process exited during startup".
+                let code = transport.exit_code().await;
+                let tail = transport.stderr_tail().await;
                 return Err(HarnessError::Handshake {
                     harness: AgentKind::Claude,
-                    detail: "the process exited during startup".to_owned(),
+                    detail: process::startup_failure(&self.config.command, code, tail.as_deref()),
                 });
             }
             if std::time::Instant::now() >= deadline {

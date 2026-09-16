@@ -844,7 +844,7 @@ Only gray spinners and the text caret animate; attention is a static amber dot o
 | Failed / exited | red `exited <code>` on the tab, header `failed`, an error card at the end of the transcript |
 | Scroll mode (`^s [`) | the tail is frozen so new output cannot pull the viewport away, and the row nearest the bottom takes the focus ring — which is what makes `⏎`/`u`/`o`/`y`/`d` fire. `G` reaches the newest row **without** leaving the mode; only `q`/`i`/`esc` re-arms the follow |
 | Unread | a neutral dot on the tab only; the header stays `idle`, because nothing is waiting on the user |
-| Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op |
+| Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op. The reason is the daemon's, verbatim, and names the harness and the `agentBinaries` command that failed (`` `cc` is not Claude Code: `cc (GCC) 16.2.1`. ``) rather than a default executable name Fleet never ran |
 
 **Intentionally omitted:** a thread sidebar, an inspector, a detached diff pane, a send button,
 per-message timestamps, an avatar or role header on assistant text, a token counter that moves
@@ -1293,7 +1293,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 
 | Section | Rows |
 | --- | --- |
-| **General** | `Agent ◂ claude ▸` · `Claude command [claude]` · `OpenCode command [opencode]` |
+| **General** | `Agent ◂ claude ▸` · `Claude command [claude]` · `Codex command [codex]` · `Claude binary [claude]` · `Codex binary [codex]`. The two *command* rows are the shell lines a terminal pane types; the two *binary* rows are what the daemon runs for a native thread, with no shell — each carries that as its sub-label |
 | **Sleep** | `Sleep on switch [x]` · `Grace ms [2000]` (editable, clamped ≥ 0) · rule list, each `[x] <label>  <kind>  <pattern>` **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
 | **Jobs & warnings** | `Warn before quitting with running jobs [x]` · `Keep finished jobs for ◂ 10 min ▸` · `Trash retention ◂ 10 min ▸` |
 | **Pool** | `Hot pool size ◂ 1 ▸` · `Freshness ms [60000]` · `Refresh interval ms [300000]` · read-only `prepared copies: 1/1 ready` |

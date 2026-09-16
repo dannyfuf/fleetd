@@ -163,6 +163,32 @@ pub async fn spawn(kind: HarnessKind, cfg: &HarnessConfig, probe: &ProbeCache)
 
 Construction is a free function because the failure modes differ before a process exists.
 
+**Which binary.** `HarnessConfig.command` comes from `config.agentBinaries.{claude,codex}` — the
+executable the daemon `execve`s, with **no shell**. It is deliberately *not* `config.agentCommands`,
+which is the shell line a PTY pane types and may legally be a shell function or an alias: `cc` in a
+pane is the user's wrapper, `cc` to `execve` is the C compiler. A bare name is resolved against the
+login shell's `PATH`; fixed arguments are allowed and tokenized with POSIX quoting.
+
+**The probe checks identity, not just semver.** `<binary> --version` must *name the harness* —
+`Claude Code` for Claude, `codex` (case-insensitive) for Codex — before its version is parsed at
+all. Without that check any program with a version line passes: `cc --version` answers
+`cc (GCC) 16.2.1`, whose first semver token clears every floor Fleet could set, and gcc is
+accepted as "Claude Code 16.2.1". A refusal is `HarnessError::Unavailable` whose reason names the
+**configured command** and quotes the first line of what it printed
+(`` `cc` is not Claude Code: `cc (GCC) 16.2.1 20260810`. ``). A successful probe logs at `info`
+with the resolved absolute path and the parsed version — the one line that says which binary a
+thread is about to run. `ProbeCache` is keyed by `(kind, command, home)`, so correcting
+`agentBinaries` is a cache miss and takes effect on the next create.
+
+**A failed start is loud.** Both adapters keep a bounded tail of the child's stderr (20 lines or
+2 KiB, whichever comes first) in a buffer the drain task appends to, so `open` can read it
+*synchronously* before the transport — and with it the drain task — is dropped. A child that dies
+inside the spawn window reports the configured command, its exit code and that tail:
+`` `cc` exited with code 1 during startup: cc: error: unrecognized command-line option
+'--output-format' ``. The manager logs one `warn` naming the provider, the command and the
+worktree before the typed error goes out on the wire; without it a mis-configured
+`agentBinaries` entry left no trace in `fleetd.log` at all.
+
 | Method | Race it closes |
 | --- | --- |
 | `capabilities` | Offering "Always allow" on a Codex exec approval, which the wire cannot express and which t3code silently downgrades to session scope (`CodexSessionRuntime.ts:2004`) — a button that lies. |
@@ -351,7 +377,13 @@ inheritance** (`CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_CODE_ENTRYPOIN
 `CLAUDE_CODE_MESSAGING_SOCKET`). Inherited, they silently re-point every thread Fleet starts. Per
 instance config isolates through `CLAUDE_CONFIG_DIR`, **never by overriding `HOME`** — on macOS
 that relocates the login keychain and the CLI reports "Not logged in"
-(t3code `ClaudeHome.ts:118-127`).
+(t3code `ClaudeHome.ts:118-127`). `CLAUDE_CODE_AUTO_CONNECT_IDE=0` and
+`CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1` are set on the **session** as well as the probe: a session
+without them spawns the IDE-discovery process tree the probe's own hygiene exists to avoid, once
+per thread, for the life of the daemon. Both are defaults — an explicit `StartRequest.env` entry
+still wins.
+
+The binary is `config.agentBinaries.claude`, not `config.agentCommands.claude` (§3.1).
 
 Handshake is `system/init`. Fleet reads six fields: `session_id` (**the resume cursor**, persisted
 before any turn), `capabilities` (the version gate), `model`, `permissionMode` (advisory), the
@@ -602,10 +634,13 @@ error anywhere. **That is the highest-value thing to do differently.** Fleet's r
 ### 4.6 Fallback
 
 `spawn` fails with `HarnessError::Unavailable { reason }` and the reason is user-facing copy, not a
-stack trace: binary not on PATH, installed but failed to run, handshake timeout, signed out (with
-JSON-quoted paths so they survive any shell), or too old for Fleet. Every one names the same
-escape hatch: **`^s F` opens the agent in a terminal on the same worktree**. The native tab does
-not half-work; it says why and points at the fallback.
+stack trace: binary not on PATH, installed but failed to run, not the harness at all, handshake
+timeout, signed out (with JSON-quoted paths so they survive any shell), or too old for Fleet. Each
+one names the **configured `agentBinaries` command**, because that is the string the user has to
+change; the app shows the daemon's message verbatim rather than prefixing a default executable
+name it may never have run. Every one names the same escape hatch: **`^s F` opens the agent in a
+terminal on the same worktree**. The native tab does not half-work; it says why and points at the
+fallback.
 
 ## 5. Rendering model
 
