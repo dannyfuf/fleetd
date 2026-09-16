@@ -317,6 +317,10 @@ fn the_status_key_set_follows_the_context_not_the_badge() {
         idle.contains(&"\u{21e7}\u{21e5}"),
         "plan mode is bound on idle"
     );
+    assert!(
+        idle.contains(&"^s s"),
+        "an agent tab repeats the Workspace session rows, and the bar says so: {idle:?}"
+    );
     let working: Vec<&str> = key_hint_set(true, false)
         .iter()
         .map(|(_, label)| *label)

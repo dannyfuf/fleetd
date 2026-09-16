@@ -237,6 +237,10 @@ pub(crate) const fn key_hint_set(
             ("^s m", "model"),
             ("^s t", "access"),
             ("^s [", "scroll"),
+            // The one Workspace session row the bar names: an agent tab replaces the
+            // `Workspace > …` chain rather than covering it, so the way out of a session is
+            // the row a reader is least likely to guess is still there.
+            ("^s s", "hub"),
             ("^s F", "terminal"),
         ]
     }

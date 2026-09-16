@@ -3,12 +3,18 @@ use crate::{
     keymap,
     state::{AppState, DaemonLink, Screen},
 };
+use fleet_ui_kit::Icon;
 use gpui::{
     Action, AnyElement, Context, DispatchPhase, Div, Entity, IntoElement, KeyDownEvent, Keystroke,
     MouseDownEvent, MouseEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
     PinchEvent, PlatformInput, ScrollWheelEvent, Window, canvas, deferred, div, prelude::*,
 };
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    rc::Rc,
+    time::Instant,
+};
 
 /// Maximum input retained while GPUI is painting a new keyboard-focus owner.
 pub(super) const STALE_KEY_CAPACITY: usize = 64;
@@ -104,14 +110,14 @@ impl FocusOwnerKeys {
 /// against a possibly older context tree. Bound and unbound keys both leave Prefix first.
 pub(super) fn take_live_prefix_action(
     state: &mut AppState,
+    chain: &[&'static str],
     keystroke: &Keystroke,
 ) -> (bool, Option<Box<dyn Action>>) {
-    let chain = state.context_chain();
-    let banner_attached = matches!(chain.as_slice(), [_, "Prefix", "Daemon", "Banner"]);
+    let banner_attached = matches!(chain, [_, "Prefix", "Daemon", "Banner"]);
     if banner_attached && keymap::action_for_keystroke("Daemon > Banner", keystroke).is_some() {
         return (false, None);
     }
-    let context = match chain.as_slice() {
+    let context = match chain {
         ["Workspace", "Prefix"] | ["Workspace", "Prefix", "Daemon", "Banner"] => {
             state.leave_prefix();
             "Workspace > Prefix"
@@ -123,6 +129,98 @@ pub(super) fn take_live_prefix_action(
         _ => return (false, None),
     };
     (true, keymap::action_for_keystroke(context, keystroke))
+}
+
+/// What one keystroke means to the `^s` chord a native agent tab owns.
+#[derive(Debug)]
+pub(super) enum AgentChord {
+    /// Nothing to do with a chord here: GPUI resolves the key as usual.
+    Passthrough,
+    /// `^s` opened the chord. The key is consumed; the next one completes it.
+    Armed,
+    /// The chord completed on a row of `keymap::table()`.
+    Run(Box<dyn Action>),
+    /// The chord completed on a key this chain binds nothing to.
+    Unbound,
+}
+
+/// Whether a live context chain is a native agent thread's rather than the legacy popup's.
+///
+/// The popup publishes `Agent > Terminal | Prefix | Scroll`; §12's thread sub-modes are the four
+/// words below, and the daemon banner may still be appended innermost after them.
+pub(super) fn is_native_agent_chain(chain: &[&'static str]) -> bool {
+    chain.first() == Some(&"Agent")
+        && matches!(
+            chain.get(1),
+            Some(&"AgentIdle" | &"AgentWorking" | &"AgentNativeScroll" | &"AgentDecision")
+        )
+}
+
+/// Takes one keystroke of the `^s` chord of a native agent tab, from authoritative state.
+///
+/// An agent tab is drawn by Fleet around a text composer, and GPUI replays the keystrokes of a
+/// sequence that matched nothing as *input* (`Window::replay_pending_input`), so leaving the
+/// chord to GPUI's own two-key matcher typed a stray character into the draft on every unbound
+/// `^s <key>` — `^s s` typed an `s`. Taking both keystrokes here instead is the same one-shot
+/// shape `Workspace > Prefix` already has: `^s` is consumed, the second key either runs its row
+/// or is consumed with a toast, and no pending input is ever left armed inside GPUI.
+///
+/// `armed` is the caller's memory of the previous keystroke. A caller that passes `true` must
+/// clear it whatever comes back: the chord is one-shot, and a chain that stopped being an agent
+/// tab between the two keys ends it as surely as the second key does.
+pub(super) fn agent_chord(
+    chain: &[&'static str],
+    armed: bool,
+    keystroke: &Keystroke,
+) -> AgentChord {
+    if !is_native_agent_chain(chain) {
+        return AgentChord::Passthrough;
+    }
+    if armed {
+        return keymap::chord_action_for_chain(chain, keystroke)
+            .map_or(AgentChord::Unbound, AgentChord::Run);
+    }
+    if keymap::is_prefix_key(keystroke) {
+        AgentChord::Armed
+    } else {
+        AgentChord::Passthrough
+    }
+}
+
+/// The §2.7 toast an unbound second key earns, in the tone of the other prefix refusals.
+///
+/// The keystroke is spelled the way `keymap::table()` spells it rather than through
+/// `Keystroke`'s own `Display`, which is platform-shaped (`⌃`, `⎋` on macOS) and upper-cases
+/// every single character: it would print `^s Q` for a `q` in a table where `^s s` and `^s S`
+/// are two different rows. `Keystroke::parse` folds an upper-case letter into shift plus the
+/// lower-case key, and this folds it back.
+pub(super) fn unbound_chord_toast(keystroke: &Keystroke) -> String {
+    let modifiers = keystroke.modifiers;
+    let shifted_letter = modifiers.shift
+        && keystroke.key.len() == 1
+        && keystroke.key.as_bytes()[0].is_ascii_lowercase();
+    let mut keys = String::from("ctrl-s ");
+    if modifiers.control {
+        keys.push_str("ctrl-");
+    }
+    if modifiers.alt {
+        keys.push_str("alt-");
+    }
+    if modifiers.platform {
+        keys.push_str("cmd-");
+    }
+    if modifiers.shift && !shifted_letter {
+        keys.push_str("shift-");
+    }
+    if shifted_letter {
+        keys.push_str(&keystroke.key.to_ascii_uppercase());
+    } else {
+        keys.push_str(&keystroke.key);
+    }
+    format!(
+        "{} is not bound here",
+        crate::presentation::pretty_keys(&keys)
+    )
 }
 
 /// Doctor shadows the base screen whenever no overlay is open.
@@ -173,9 +271,13 @@ pub(super) fn install_input_gates(
     let key_state = state.clone();
     let key_bridge = bridge.clone();
     let intercepted_keys = Rc::clone(focus_owner_keys);
+    // The one-shot memory of a native agent tab's `^s`. It is deliberately not `AppState`: the
+    // chord changes no key context, paints nothing and must not move the harness snapshot.
+    let agent_chord_armed = Cell::new(false);
     let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+        let chain = key_state.read(cx).context_chain();
         let (prefix_consumed, prefix_action) = key_state.update(cx, |state, cx| {
-            let result = take_live_prefix_action(state, &event.keystroke);
+            let result = take_live_prefix_action(state, &chain, &event.keystroke);
             if result.0 {
                 cx.notify();
             }
@@ -187,6 +289,30 @@ pub(super) fn install_input_gates(
             }
             cx.stop_propagation();
             return;
+        }
+
+        let chord = agent_chord(&chain, agent_chord_armed.replace(false), &event.keystroke);
+        match chord {
+            AgentChord::Passthrough => {}
+            AgentChord::Armed => {
+                agent_chord_armed.set(true);
+                cx.stop_propagation();
+                return;
+            }
+            AgentChord::Run(action) => {
+                window.dispatch_action(action, cx);
+                cx.stop_propagation();
+                return;
+            }
+            AgentChord::Unbound => {
+                let text = unbound_chord_toast(&event.keystroke);
+                key_state.update(cx, |state, cx| {
+                    state.toast_short(text, Icon::Info, Instant::now());
+                    cx.notify();
+                });
+                cx.stop_propagation();
+                return;
+            }
         }
 
         let popup_ctrl_q = popup_owns_ctrl_q(key_state.read(cx), &event.keystroke);

@@ -33,10 +33,11 @@ this file; where the two disagree, this file wins.
 | FirstRun | `FirstRun` | no contexts and no repos exist | any key that creates or imports something |
 
 The agent **thread** is not a shadowing surface: it is the Workspace's selected tab, so it
-*replaces* the `Workspace > …` context rather than covering it. That also means the Workspace
-prefix table below does not apply automatically inside an agent tab. The numeric selection and
-MRU rows (`^s 1`–`9`, `^s Tab`, `^s w`) are repeated explicitly under *Native agent thread*;
-unlisted rows such as `^s s` and `^s h`/`l` remain unbound there. The context stack is ordered: the Agent popup shadows
+*replaces* the `Workspace > …` context rather than covering it. Nothing is therefore inherited
+from the Workspace prefix table below: every row that works inside an agent tab is repeated
+explicitly under *Native agent thread*, which is the whole session-level table except the four
+PTY-only rows (`^s r`, `^s ,`, `^s ]`, `^s ^s`). A second key with no row there is **swallowed**
+— it never reaches the composer — and toasts `^s <key> is not bound here`. The context stack is ordered: the Agent popup shadows
 `Hub` and `Workspace`; Help and the two quit confirms may shadow the Agent popup. Palette and Settings are unavailable while the popup
 owns focus. `Daemon > Down` and `FirstRun` are full-window and shadow everything except `ctrl-q`.
 `Daemon > Doctor` is full-window in the same sense — it replaces the whole context chain, so a key
@@ -250,9 +251,14 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | `Agent > AgentIdle` | `Up` / `ctrl-p`, `Down` / `ctrl-n` | move an open completion picker; with no picker, the composer's own caret motion (and prompt history at the visual buffer edge) |
 | `Agent > AgentWorking` | `Esc` | interrupt the **active** turn |
 | `Agent > AgentWorking` | `Enter` | send — a **steer**, dispatched immediately, never a queue |
-| both | `ctrl-s m` · `ctrl-s e` · `ctrl-s t` | model picker · reasoning / traits menu · access mode |
-| both | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close tab · new thread · terminal fallback |
+| every mode with a composer | `ctrl-s m` · `ctrl-s e` · `ctrl-s t` | model picker · reasoning / traits menu · access mode |
+| every mode with a composer | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close tab · new thread · terminal fallback |
 | every agent-thread sub-mode | `ctrl-s 1`–`9` · `ctrl-s Tab` · `ctrl-s w` | select a Workspace tab · return to the tab MRU · return to the session MRU |
+| every agent-thread sub-mode | `ctrl-s s` · `ctrl-s S` | go to Hub (thread keeps running) · sleep this session and return to the Hub |
+| every agent-thread sub-mode | `ctrl-s h`/`p` · `ctrl-s l`/`n` | previous / next tab, across the mixed terminal-and-thread strip |
+| every agent-thread sub-mode | `ctrl-s W` · `ctrl-s c` · `ctrl-s y` · `ctrl-s z` | session switcher · new terminal tab · copy the worktree path · zoom |
+| every agent-thread sub-mode | `ctrl-s v` · `ctrl-s V` · `ctrl-s N` · `ctrl-s P` | the subagent watch pane: show/hide · dismiss · next · previous |
+| every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s Esc` | sticky error · jobs panel · help · cancel the prefix |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
 | `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |
 | `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` · `p` | choose · toggle (multi-select) · answer / next · previous question |
@@ -276,11 +282,23 @@ fire and retires the caveat that those keys were bound, handled and never entere
 the focus and scroll to it. Clicking a tool row, a `thought …` line or a `worked …` fold still
 expands and collapses it, so the mouse reaches every `[⏎] show` hint too.
 
-Note that gpui matches `>` as a **subsequence**, not as a parent test. The tab-selection and MRU
-rows bind through an explicit union of the agent-thread sub-modes; `ctrl-s s` is absent there and
-therefore stays unbound inside agent tabs. The other `ctrl-s` escape rows
-and every control are repeated on each `AgentDecision > *` context — `AgentIdle`/`AgentWorking` are
-not on that chain — and an embedded pane may not reuse any context word this table uses.
+**The Workspace session rows are repeated here, and the four PTY-only ones are not.** `^s r`
+(restart the exited command), `^s ,` (rename the terminal), `^s ]` (paste into it) and `^s ^s`
+(send a literal `ctrl-s`) each address a PTY, and a Fleet-drawn tab has none; binding them would
+be a key that silently does nothing. Everything else in the Workspace table above is listed in
+this one, handled by the same listener on the same ancestor — `^s s` on the `Fleet` root, the
+rest on the Workspace root — so a thread tab loses no session command by being drawn by Fleet.
+
+**An unbound second key is swallowed.** `^s` inside an agent tab is taken by the shell's keystroke
+interceptor rather than by gpui's two-key matcher, because gpui replays the keystrokes of a
+sequence that matched nothing as *input*: left to it, `^s s` typed an `s` into the composer. The
+interceptor consumes `^s`, runs the row the second key names, and where there is no row consumes
+that key too and toasts `^s <key> is not bound here`. `^s Esc` cancels the prefix without a toast.
+
+Note that gpui matches `>` as a **subsequence**, not as a parent test, so every `^s` row is
+registered against each sub-mode by name — `AgentIdle`/`AgentWorking` are not on the
+`AgentDecision > *` chain, and none of the six is on another's — and an embedded pane may not
+reuse any context word this table uses.
 
 **`Enter` is not bound on a permission.** A queued Return keystroke must never approve a shell
 command. `e` is offered only by a harness whose gate carries an edit answer (Claude, never Codex).

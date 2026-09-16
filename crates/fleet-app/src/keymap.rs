@@ -25,6 +25,15 @@
 //! binding, so no timeout is needed and no key can leak into the PTY. `ctrl-s ctrl-s` sends a
 //! literal `ctrl-s`.
 //!
+//! A native agent tab spells its prefix as two-keystroke rows (`ctrl-s s`) rather than as a
+//! context, because its chain is derived from daemon state and has no room for a mode word. Those
+//! rows are still never matched by GPUI: the shell's keystroke interceptor takes `ctrl-s` and the
+//! key after it, and resolves the pair here through [`chord_action_for_chain`]. GPUI replays the
+//! keystrokes of a sequence that matched nothing as *input*, so leaving the chord to it typed a
+//! stray character into the composer on every unbound `ctrl-s <key>`. The rows remain in the table
+//! because the table is what the Help overlay, the palette hints and `docs/KEYMAP.md` are read
+//! from — and what the resolver itself walks.
+//!
 //! # Deliberate deviations
 //!
 //! * `docs/KEYMAP.md` lists `q` as "close" in Palette mode. A `q` binding there would make the
@@ -68,6 +77,12 @@ macro_rules! key_table {
                         Err(error) => tracing::error!(keys = $keys, context = $context, %error, "invalid built-in key binding"),
                     }
                 )*
+                for (spec, action) in shared_rows() {
+                    match parse_binding(spec, action) {
+                        Ok(binding) => bindings.push((spec, binding)),
+                        Err(error) => tracing::error!(keys = spec.keys, context = spec.context, %error, "invalid built-in key binding"),
+                    }
+                }
                 bindings
             };
         }
@@ -89,11 +104,53 @@ macro_rules! key_table {
 
         fn cached_table() -> &'static [BindingSpec] {
             static TABLE: std::sync::OnceLock<Vec<BindingSpec>> = std::sync::OnceLock::new();
-            TABLE.get_or_init(|| vec![$( BindingSpec {
-                keys: $keys,
-                context: $context,
-                action: Action::name(&$action),
-            } ),*])
+            TABLE.get_or_init(|| {
+                let mut table = vec![$( BindingSpec {
+                    keys: $keys,
+                    context: $context,
+                    action: Action::name(&$action),
+                } ),*];
+                table.extend(shared_rows().into_iter().map(|(spec, _)| spec));
+                table
+            })
+        }
+
+        /// Resolves a `^s <key>` chord against one **live** key-context chain.
+        ///
+        /// A native agent tab draws a text composer, and GPUI replays the keystrokes of a
+        /// sequence that matched nothing as *input* (`Window::replay_pending_input`), so an
+        /// unbound `^s <key>` used to type a stray character into the draft. The shell's
+        /// keystroke interceptor therefore takes the whole chord before GPUI's own two-key
+        /// matcher sees it, and resolves the second key here — against the chain the state
+        /// says is live, not the one the last frame painted.
+        ///
+        /// Context matching follows gpui's own rule: `>` is a **subsequence** of the chain, and
+        /// the deepest match wins, with the later row winning a tie exactly as `cx.bind_keys`
+        /// would. The walk is O(rows) and allocates only for the answer.
+        #[must_use]
+        pub fn chord_action_for_chain(
+            chain: &[&str],
+            keystroke: &Keystroke,
+        ) -> Option<Box<dyn Action>> {
+            PARSED_BINDINGS.with(|bindings| {
+                let mut best: Option<(usize, &KeyBinding)> = None;
+                for (spec, binding) in bindings {
+                    let keystrokes = binding.keystrokes();
+                    if keystrokes.len() != 2
+                        || !is_prefix_key(keystrokes[0].inner())
+                        || !keystroke.should_match(&keystrokes[1])
+                    {
+                        continue;
+                    }
+                    let Some(depth) = context_depth(spec.context, chain) else {
+                        continue;
+                    };
+                    if best.is_none_or(|(deepest, _)| depth >= deepest) {
+                        best = Some((depth, binding));
+                    }
+                }
+                best.map(|(_, binding)| binding.action().boxed_clone())
+            })
         }
 
         /// Resolves one keystroke against one exact key context.
@@ -138,6 +195,208 @@ fn parse_binding(spec: BindingSpec, action: Box<dyn Action>) -> Result<KeyBindin
 
 /// The root key context. Present on every screen, including the daemon surfaces.
 pub const ROOT_CONTEXT: &str = "Fleet";
+
+/// One row of a table that is registered against more than one key context.
+///
+/// The action is a constructor rather than a value because a `Box<dyn Action>` cannot live in a
+/// `const`; the table stays readable data either way.
+type SharedRow = (&'static str, fn() -> Box<dyn Action>);
+
+/// The six native agent-thread key contexts of `docs/KEYMAP.md` § *Native agent thread*.
+///
+/// gpui matches `>` as a subsequence of the rendered chain rather than as a parent test, and
+/// none of these six is on another's chain, so a row that must fire in an agent tab whatever the
+/// thread is doing has to name every one of them.
+const AGENT_THREAD_CONTEXTS: &[&str] = &[
+    "Agent > AgentIdle",
+    "Agent > AgentWorking",
+    "Agent > AgentNativeScroll",
+    "Agent > AgentDecision > AgentPermission",
+    "Agent > AgentDecision > AgentQuestion",
+    "Agent > AgentDecision > AgentPlan",
+];
+
+/// The five of those that still draw a live composer.
+///
+/// `AgentNativeScroll` keeps only the three escapes its own block binds: a frozen tail has no
+/// model to change, no traits menu and no access mode, and §12 gives it `q`/`i`/`esc` to leave.
+const AGENT_COMPOSER_CONTEXTS: &[&str] = &[
+    "Agent > AgentIdle",
+    "Agent > AgentWorking",
+    "Agent > AgentDecision > AgentPermission",
+    "Agent > AgentDecision > AgentQuestion",
+    "Agent > AgentDecision > AgentPlan",
+];
+
+/// Workspace tab selection and the two MRU jumps, as `^s` chords.
+const AGENT_SELECTION_ROWS: &[SharedRow] = &[
+    ("ctrl-s 1", || Box::new(native_agent::SelectTab1)),
+    ("ctrl-s 2", || Box::new(native_agent::SelectTab2)),
+    ("ctrl-s 3", || Box::new(native_agent::SelectTab3)),
+    ("ctrl-s 4", || Box::new(native_agent::SelectTab4)),
+    ("ctrl-s 5", || Box::new(native_agent::SelectTab5)),
+    ("ctrl-s 6", || Box::new(native_agent::SelectTab6)),
+    ("ctrl-s 7", || Box::new(native_agent::SelectTab7)),
+    ("ctrl-s 8", || Box::new(native_agent::SelectTab8)),
+    ("ctrl-s 9", || Box::new(native_agent::SelectTab9)),
+    ("ctrl-s tab", || Box::new(native_agent::LastTab)),
+    ("ctrl-s w", || Box::new(native_agent::LastSession)),
+];
+
+/// The session-level rows of the Workspace prefix table, repeated inside an agent tab.
+///
+/// An agent thread is the Workspace's selected tab, so its context chain *replaces*
+/// `Workspace > …` rather than covering it; without these rows the session commands were dead
+/// keys in an agent tab and `^s s` typed an `s` into the composer. Every handler already lives
+/// on an ancestor of the agent view — `prefix::GoHub` on the `Fleet` root, the rest on the
+/// Workspace root — so the rows dispatch with no handler moved.
+///
+/// `r` (restart), `,` (rename), `]` (paste) and `^s ^s` (send a literal) stay out: each one
+/// addresses a PTY, and there is none behind a Fleet-drawn tab.
+const AGENT_SESSION_ROWS: &[SharedRow] = &[
+    ("ctrl-s s", || Box::new(prefix::GoHub)),
+    ("ctrl-s S", || Box::new(prefix::SleepAndGoHub)),
+    ("ctrl-s h", || Box::new(prefix::PrevTab)),
+    ("ctrl-s p", || Box::new(prefix::PrevTab)),
+    ("ctrl-s l", || Box::new(prefix::NextTab)),
+    ("ctrl-s n", || Box::new(prefix::NextTab)),
+    ("ctrl-s W", || Box::new(prefix::SessionSwitcher)),
+    ("ctrl-s c", || Box::new(prefix::NewTerminal)),
+    ("ctrl-s y", || Box::new(prefix::CopyWorktreePath)),
+    ("ctrl-s z", || Box::new(prefix::ToggleZoom)),
+    ("ctrl-s v", || Box::new(prefix::ToggleWatchPane)),
+    ("ctrl-s V", || Box::new(prefix::DismissWatch)),
+    ("ctrl-s N", || Box::new(prefix::NextWatch)),
+    ("ctrl-s P", || Box::new(prefix::PrevWatch)),
+    ("ctrl-s !", || Box::new(FocusStickyError)),
+    ("ctrl-s J", || Box::new(OpenJobs)),
+    ("ctrl-s ?", || Box::new(OpenHelp)),
+    ("ctrl-s escape", || Box::new(prefix::Cancel)),
+];
+
+/// The thread controls §12 gives every mode that still owns a composer.
+///
+/// §1 keeps the terminal path "as an explicit fallback, now on `^s F`" and §3.3 rule 4 lets an
+/// unanswered gate outlive its turn: without these rows on the decision contexts the escape
+/// hatches and every control are dead keys for as long as a card is open.
+const AGENT_CONTROL_ROWS: &[SharedRow] = &[
+    ("ctrl-s m", || Box::new(native_agent::Model)),
+    ("ctrl-s e", || Box::new(native_agent::Traits)),
+    ("ctrl-s t", || Box::new(native_agent::AccessMode)),
+    ("ctrl-s [", || Box::new(native_agent::Scroll)),
+    ("ctrl-s a", || Box::new(native_agent::NewClaude)),
+    ("ctrl-s A", || Box::new(native_agent::NewCodex)),
+    ("ctrl-s x", || Box::new(native_agent::CloseTab)),
+    ("ctrl-s F", || Box::new(native_agent::TerminalFallback)),
+];
+
+/// The context × row products the table registers after its literal rows, in that order.
+///
+/// The first field is the sub-head the help overlay lists the product under: a reader sees each
+/// of these once, under the family it belongs to, instead of thirty-odd identical rows repeated
+/// beneath every sub-mode.
+const SHARED_TABLES: &[(&str, &[&str], &[SharedRow])] = &[
+    (
+        "any mode: select",
+        AGENT_THREAD_CONTEXTS,
+        AGENT_SELECTION_ROWS,
+    ),
+    (
+        "any mode: session",
+        AGENT_THREAD_CONTEXTS,
+        AGENT_SESSION_ROWS,
+    ),
+    (
+        "with a composer",
+        AGENT_COMPOSER_CONTEXTS,
+        AGENT_CONTROL_ROWS,
+    ),
+];
+
+/// One product of [`SHARED_TABLES`], as a reader should see it: the rows once, and where they
+/// apply.
+#[derive(Debug, Clone)]
+pub struct SharedTable {
+    /// The sub-head this product is listed under.
+    pub label: &'static str,
+    /// Every key context the rows are registered against.
+    pub contexts: &'static [&'static str],
+    /// One representative spec per row, as registered against the first of those contexts.
+    pub rows: Vec<BindingSpec>,
+}
+
+/// The shared products, so the help overlay can list each one once.
+#[must_use]
+pub fn shared_tables() -> Vec<SharedTable> {
+    SHARED_TABLES
+        .iter()
+        .map(|(label, contexts, table)| SharedTable {
+            label,
+            contexts,
+            rows: table
+                .iter()
+                .map(|(keys, action)| BindingSpec {
+                    keys,
+                    context: contexts[0],
+                    action: action().name(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Every `(spec, action)` pair [`SHARED_TABLES`] stands for, built once per consumer.
+fn shared_rows() -> Vec<(BindingSpec, Box<dyn Action>)> {
+    let mut rows = Vec::new();
+    for (_, contexts, table) in SHARED_TABLES {
+        for context in *contexts {
+            for (keys, action) in *table {
+                let action = action();
+                rows.push((
+                    BindingSpec {
+                        keys,
+                        context,
+                        action: action.name(),
+                    },
+                    action,
+                ));
+            }
+        }
+    }
+    rows
+}
+
+/// Whether a keystroke is the `^s` prefix itself.
+///
+/// Recognised by shape rather than by a table lookup: the agent-thread contexts bind no bare
+/// `ctrl-s` row for a lookup to find, and the shell's interceptor has to know the prefix before
+/// it can decide whether a chord is starting.
+#[must_use]
+pub fn is_prefix_key(keystroke: &Keystroke) -> bool {
+    let modifiers = keystroke.modifiers;
+    keystroke.key == "s"
+        && modifiers.control
+        && !modifiers.alt
+        && !modifiers.shift
+        && !modifiers.platform
+        && !modifiers.function
+}
+
+/// How deep a context predicate matches a live chain, or `None` if it does not match.
+///
+/// gpui reads `A > B` as "B somewhere below A", not "B's parent is A", so the words are matched
+/// as a subsequence and the answer is the chain index the last word landed on — which is the
+/// depth `cx.bind_keys` ranks competing rows by.
+fn context_depth(context: &str, chain: &[&str]) -> Option<usize> {
+    let mut index = 0;
+    let mut depth = 0;
+    for word in context.split(" > ") {
+        let found = chain[index..].iter().position(|link| *link == word)?;
+        depth = index + found;
+        index = depth + 1;
+    }
+    Some(depth)
+}
 
 key_table! {
     "g b", "Hub" => board::GoBoard;
@@ -405,12 +664,14 @@ key_table! {
     // `docs/KEYMAP.md` § *Native agent thread* mirrors it.
     //
     // Three rules come with it. **gpui matches `>` as a subsequence, not as a parent test**, so
-    // the `^s` escape rows have to be repeated on every `AgentDecision > *` context —
-    // `AgentIdle`/`AgentWorking` are not on that chain. **Row focus lives inside scroll mode**,
-    // which is why `AgentRow` is only ever entered under `AgentNativeScroll`. And `/`, `@`, `$`,
-    // `⇧⏎` and `esc`-on-idle are deliberately **unbound**: the composer inserts the character
-    // and reports it, which is what keeps all three triggers typable and lets an IME preedit and
-    // a selection cancel before the `esc` cascade runs.
+    // every `^s` row has to be registered against each sub-mode by name — `AgentIdle`/
+    // `AgentWorking` are not on the `AgentDecision > *` chain, and none of them is on another's.
+    // That product lives in [`SHARED_TABLES`] below rather than as a hand-copied block per
+    // context. **Row focus lives inside scroll mode**, which is why `AgentRow` is only ever
+    // entered under `AgentNativeScroll`. And `/`, `@`, `$`, `⇧⏎` and `esc`-on-idle are
+    // deliberately **unbound**: the composer inserts the character and reports it, which is what
+    // keeps all three triggers typable and lets an IME preedit and a selection cancel before the
+    // `esc` cascade runs.
     "enter",         "Agent > AgentIdle" => native_agent::Send;
     "cmd-enter",     "Agent > AgentIdle" => native_agent::SendBackground;
     "shift-tab",     "Agent > AgentIdle" => native_agent::PlanMode;
@@ -421,14 +682,6 @@ key_table! {
     "ctrl-p",        "Agent > AgentIdle" => native_agent::History;
     "down",          "Agent > AgentIdle" => native_agent::HistoryNext;
     "ctrl-n",        "Agent > AgentIdle" => native_agent::HistoryNext;
-    "ctrl-s m",      "Agent > AgentIdle" => native_agent::Model;
-    "ctrl-s e",      "Agent > AgentIdle" => native_agent::Traits;
-    "ctrl-s t",      "Agent > AgentIdle" => native_agent::AccessMode;
-    "ctrl-s [",      "Agent > AgentIdle" => native_agent::Scroll;
-    "ctrl-s a",      "Agent > AgentIdle" => native_agent::NewClaude;
-    "ctrl-s A",      "Agent > AgentIdle" => native_agent::NewCodex;
-    "ctrl-s x",      "Agent > AgentIdle" => native_agent::CloseTab;
-    "ctrl-s F",      "Agent > AgentIdle" => native_agent::TerminalFallback;
 
     "escape",        "Agent > AgentWorking" => native_agent::Stop;
     "enter",         "Agent > AgentWorking" => native_agent::Steer;
@@ -438,84 +691,6 @@ key_table! {
     "ctrl-p",        "Agent > AgentWorking" => native_agent::History;
     "down",          "Agent > AgentWorking" => native_agent::HistoryNext;
     "ctrl-n",        "Agent > AgentWorking" => native_agent::HistoryNext;
-    "ctrl-s m",      "Agent > AgentWorking" => native_agent::Model;
-    "ctrl-s e",      "Agent > AgentWorking" => native_agent::Traits;
-    "ctrl-s t",      "Agent > AgentWorking" => native_agent::AccessMode;
-    "ctrl-s [",      "Agent > AgentWorking" => native_agent::Scroll;
-    "ctrl-s a",      "Agent > AgentWorking" => native_agent::NewClaude;
-    "ctrl-s A",      "Agent > AgentWorking" => native_agent::NewCodex;
-    "ctrl-s x",      "Agent > AgentWorking" => native_agent::CloseTab;
-    "ctrl-s F",      "Agent > AgentWorking" => native_agent::TerminalFallback;
-
-    // The Workspace selection/MRU subset is repeated for every native-thread mode because GPUI
-    // dispatches sequence bindings against the exact painted context path. `ctrl-s s` remains
-    // absent, preserving the agent-tab shadowing rule.
-    "ctrl-s 1", "Agent > AgentIdle" => native_agent::SelectTab1;
-    "ctrl-s 2", "Agent > AgentIdle" => native_agent::SelectTab2;
-    "ctrl-s 3", "Agent > AgentIdle" => native_agent::SelectTab3;
-    "ctrl-s 4", "Agent > AgentIdle" => native_agent::SelectTab4;
-    "ctrl-s 5", "Agent > AgentIdle" => native_agent::SelectTab5;
-    "ctrl-s 6", "Agent > AgentIdle" => native_agent::SelectTab6;
-    "ctrl-s 7", "Agent > AgentIdle" => native_agent::SelectTab7;
-    "ctrl-s 8", "Agent > AgentIdle" => native_agent::SelectTab8;
-    "ctrl-s 9", "Agent > AgentIdle" => native_agent::SelectTab9;
-    "ctrl-s tab", "Agent > AgentIdle" => native_agent::LastTab;
-    "ctrl-s w", "Agent > AgentIdle" => native_agent::LastSession;
-    "ctrl-s 1", "Agent > AgentWorking" => native_agent::SelectTab1;
-    "ctrl-s 2", "Agent > AgentWorking" => native_agent::SelectTab2;
-    "ctrl-s 3", "Agent > AgentWorking" => native_agent::SelectTab3;
-    "ctrl-s 4", "Agent > AgentWorking" => native_agent::SelectTab4;
-    "ctrl-s 5", "Agent > AgentWorking" => native_agent::SelectTab5;
-    "ctrl-s 6", "Agent > AgentWorking" => native_agent::SelectTab6;
-    "ctrl-s 7", "Agent > AgentWorking" => native_agent::SelectTab7;
-    "ctrl-s 8", "Agent > AgentWorking" => native_agent::SelectTab8;
-    "ctrl-s 9", "Agent > AgentWorking" => native_agent::SelectTab9;
-    "ctrl-s tab", "Agent > AgentWorking" => native_agent::LastTab;
-    "ctrl-s w", "Agent > AgentWorking" => native_agent::LastSession;
-    "ctrl-s 1", "Agent > AgentNativeScroll" => native_agent::SelectTab1;
-    "ctrl-s 2", "Agent > AgentNativeScroll" => native_agent::SelectTab2;
-    "ctrl-s 3", "Agent > AgentNativeScroll" => native_agent::SelectTab3;
-    "ctrl-s 4", "Agent > AgentNativeScroll" => native_agent::SelectTab4;
-    "ctrl-s 5", "Agent > AgentNativeScroll" => native_agent::SelectTab5;
-    "ctrl-s 6", "Agent > AgentNativeScroll" => native_agent::SelectTab6;
-    "ctrl-s 7", "Agent > AgentNativeScroll" => native_agent::SelectTab7;
-    "ctrl-s 8", "Agent > AgentNativeScroll" => native_agent::SelectTab8;
-    "ctrl-s 9", "Agent > AgentNativeScroll" => native_agent::SelectTab9;
-    "ctrl-s tab", "Agent > AgentNativeScroll" => native_agent::LastTab;
-    "ctrl-s w", "Agent > AgentNativeScroll" => native_agent::LastSession;
-    "ctrl-s 1", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab1;
-    "ctrl-s 2", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab2;
-    "ctrl-s 3", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab3;
-    "ctrl-s 4", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab4;
-    "ctrl-s 5", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab5;
-    "ctrl-s 6", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab6;
-    "ctrl-s 7", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab7;
-    "ctrl-s 8", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab8;
-    "ctrl-s 9", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab9;
-    "ctrl-s tab", "Agent > AgentDecision > AgentPermission" => native_agent::LastTab;
-    "ctrl-s w", "Agent > AgentDecision > AgentPermission" => native_agent::LastSession;
-    "ctrl-s 1", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab1;
-    "ctrl-s 2", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab2;
-    "ctrl-s 3", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab3;
-    "ctrl-s 4", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab4;
-    "ctrl-s 5", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab5;
-    "ctrl-s 6", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab6;
-    "ctrl-s 7", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab7;
-    "ctrl-s 8", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab8;
-    "ctrl-s 9", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab9;
-    "ctrl-s tab", "Agent > AgentDecision > AgentQuestion" => native_agent::LastTab;
-    "ctrl-s w", "Agent > AgentDecision > AgentQuestion" => native_agent::LastSession;
-    "ctrl-s 1", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab1;
-    "ctrl-s 2", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab2;
-    "ctrl-s 3", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab3;
-    "ctrl-s 4", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab4;
-    "ctrl-s 5", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab5;
-    "ctrl-s 6", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab6;
-    "ctrl-s 7", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab7;
-    "ctrl-s 8", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab8;
-    "ctrl-s 9", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab9;
-    "ctrl-s tab", "Agent > AgentDecision > AgentPlan" => native_agent::LastTab;
-    "ctrl-s w", "Agent > AgentDecision > AgentPlan" => native_agent::LastSession;
 
     // §12: `^s [` is a real mode — the transcript takes the same vocabulary the terminal scroll
     // mode has for as long as it is on, and `G` is "newest", not a way out of the mode.
@@ -542,35 +717,6 @@ key_table! {
     "o",             "Agent > AgentNativeScroll > AgentRow" => native_agent::OpenInEditor;
     "y",             "Agent > AgentNativeScroll > AgentRow" => native_agent::CopyRow;
     "d",             "Agent > AgentNativeScroll > AgentRow" => native_agent::DiffRow;
-
-    // §1 keeps the terminal path "as an explicit fallback, now on `^s F`" and §3.3 rule 4 lets
-    // an unanswered gate outlive its turn: without these rows the escape hatches and every
-    // control are dead keys for as long as a decision is open. gpui's subsequence match in the
-    // other direction is why they cannot be inherited from `AgentIdle`.
-    "ctrl-s [",      "Agent > AgentDecision > AgentPermission" => native_agent::Scroll;
-    "ctrl-s x",      "Agent > AgentDecision > AgentPermission" => native_agent::CloseTab;
-    "ctrl-s F",      "Agent > AgentDecision > AgentPermission" => native_agent::TerminalFallback;
-    "ctrl-s m",      "Agent > AgentDecision > AgentPermission" => native_agent::Model;
-    "ctrl-s e",      "Agent > AgentDecision > AgentPermission" => native_agent::Traits;
-    "ctrl-s t",      "Agent > AgentDecision > AgentPermission" => native_agent::AccessMode;
-    "ctrl-s a",      "Agent > AgentDecision > AgentPermission" => native_agent::NewClaude;
-    "ctrl-s A",      "Agent > AgentDecision > AgentPermission" => native_agent::NewCodex;
-    "ctrl-s [",      "Agent > AgentDecision > AgentQuestion" => native_agent::Scroll;
-    "ctrl-s x",      "Agent > AgentDecision > AgentQuestion" => native_agent::CloseTab;
-    "ctrl-s F",      "Agent > AgentDecision > AgentQuestion" => native_agent::TerminalFallback;
-    "ctrl-s m",      "Agent > AgentDecision > AgentQuestion" => native_agent::Model;
-    "ctrl-s e",      "Agent > AgentDecision > AgentQuestion" => native_agent::Traits;
-    "ctrl-s t",      "Agent > AgentDecision > AgentQuestion" => native_agent::AccessMode;
-    "ctrl-s a",      "Agent > AgentDecision > AgentQuestion" => native_agent::NewClaude;
-    "ctrl-s A",      "Agent > AgentDecision > AgentQuestion" => native_agent::NewCodex;
-    "ctrl-s [",      "Agent > AgentDecision > AgentPlan" => native_agent::Scroll;
-    "ctrl-s x",      "Agent > AgentDecision > AgentPlan" => native_agent::CloseTab;
-    "ctrl-s F",      "Agent > AgentDecision > AgentPlan" => native_agent::TerminalFallback;
-    "ctrl-s m",      "Agent > AgentDecision > AgentPlan" => native_agent::Model;
-    "ctrl-s e",      "Agent > AgentDecision > AgentPlan" => native_agent::Traits;
-    "ctrl-s t",      "Agent > AgentDecision > AgentPlan" => native_agent::AccessMode;
-    "ctrl-s a",      "Agent > AgentDecision > AgentPlan" => native_agent::NewClaude;
-    "ctrl-s A",      "Agent > AgentDecision > AgentPlan" => native_agent::NewCodex;
 
     // §6.2: the keys are bare letters in a derived context so they cannot fire anywhere else,
     // and **`⏎` is not bound on an approval** — a queued Return keystroke must never approve a
@@ -1082,17 +1228,13 @@ mod tests {
         }
     }
 
+    /// `docs/KEYMAP.md` § *Native agent thread*: an agent tab repeats the Workspace selection,
+    /// MRU **and** session rows, because its chain replaces `Workspace > …` instead of covering
+    /// it. Every one of the six sub-modes has to name them: gpui's `>` is a subsequence test and
+    /// none of the six is on another's chain.
     #[test]
-    fn native_agent_modes_bind_workspace_selection_and_mru_but_not_workspace_exit() {
-        let contexts = [
-            "Agent > AgentIdle",
-            "Agent > AgentWorking",
-            "Agent > AgentNativeScroll",
-            "Agent > AgentDecision > AgentPermission",
-            "Agent > AgentDecision > AgentQuestion",
-            "Agent > AgentDecision > AgentPlan",
-        ];
-        let selections = [
+    fn native_agent_modes_bind_workspace_selection_mru_and_session_rows() {
+        let expected = [
             ("ctrl-s 1", "native_agent::SelectTab1"),
             ("ctrl-s 2", "native_agent::SelectTab2"),
             ("ctrl-s 3", "native_agent::SelectTab3"),
@@ -1104,24 +1246,97 @@ mod tests {
             ("ctrl-s 9", "native_agent::SelectTab9"),
             ("ctrl-s tab", "native_agent::LastTab"),
             ("ctrl-s w", "native_agent::LastSession"),
+            ("ctrl-s s", "prefix::GoHub"),
+            ("ctrl-s S", "prefix::SleepAndGoHub"),
+            ("ctrl-s h", "prefix::PrevTab"),
+            ("ctrl-s p", "prefix::PrevTab"),
+            ("ctrl-s l", "prefix::NextTab"),
+            ("ctrl-s n", "prefix::NextTab"),
+            ("ctrl-s W", "prefix::SessionSwitcher"),
+            ("ctrl-s c", "prefix::NewTerminal"),
+            ("ctrl-s y", "prefix::CopyWorktreePath"),
+            ("ctrl-s z", "prefix::ToggleZoom"),
+            ("ctrl-s v", "prefix::ToggleWatchPane"),
+            ("ctrl-s V", "prefix::DismissWatch"),
+            ("ctrl-s N", "prefix::NextWatch"),
+            ("ctrl-s P", "prefix::PrevWatch"),
+            ("ctrl-s !", "fleet::FocusStickyError"),
+            ("ctrl-s J", "fleet::OpenJobs"),
+            ("ctrl-s ?", "fleet::OpenHelp"),
+            ("ctrl-s escape", "prefix::Cancel"),
         ];
         let table = table();
 
-        for context in contexts {
-            for (keys, action) in selections {
+        for context in AGENT_THREAD_CONTEXTS {
+            for (keys, action) in expected {
                 assert!(
                     table.iter().any(|spec| {
-                        spec.context == context && spec.keys == keys && spec.action == action
+                        spec.context == *context && spec.keys == keys && spec.action == action
                     }),
                     "missing `{keys}` in `{context}`"
                 );
             }
-            assert!(
-                !table
-                    .iter()
-                    .any(|spec| spec.context == context && spec.keys == "ctrl-s s"),
-                "`ctrl-s s` must remain unbound in `{context}`"
-            );
+        }
+    }
+
+    /// The four PTY-only rows of the Workspace prefix table stay out of an agent tab.
+    ///
+    /// `r` restarts the exited command, `,` renames the terminal, `]` pastes into it and
+    /// `^s ^s` sends a literal `ctrl-s`: every one of them addresses a PTY, and a Fleet-drawn
+    /// tab has none. Binding them would be a key that silently does nothing.
+    #[test]
+    fn the_pty_only_prefix_rows_are_absent_from_every_agent_thread_context() {
+        let table = table();
+        for context in AGENT_THREAD_CONTEXTS {
+            for keys in ["ctrl-s r", "ctrl-s ,", "ctrl-s ]", "ctrl-s ctrl-s"] {
+                assert!(
+                    !table
+                        .iter()
+                        .any(|spec| spec.context == *context && spec.keys == keys),
+                    "`{keys}` addresses a PTY and must stay out of `{context}`"
+                );
+            }
+        }
+    }
+
+    /// The chord resolver answers from the live chain, the way the shell's interceptor asks it.
+    #[test]
+    fn the_chord_resolver_follows_the_live_chain_and_gpui_subsequence_rule() {
+        let chord = |chain: &[&str], keys: &str| {
+            let keystroke = Keystroke::parse(keys)
+                .unwrap_or_else(|error| panic!("invalid key {keys:?}: {error}"));
+            chord_action_for_chain(chain, &keystroke).map(|action| action.name())
+        };
+
+        assert_eq!(chord(&["Agent", "AgentIdle"], "s"), Some("prefix::GoHub"));
+        assert_eq!(
+            chord(&["Agent", "AgentWorking", "Daemon", "Banner"], "s"),
+            Some("prefix::GoHub"),
+            "the daemon banner is appended innermost and owns no `^s` row"
+        );
+        // Row focus is a word *under* `AgentNativeScroll`, so the scroll rows still have to
+        // resolve through the subsequence match rather than an exact context compare.
+        assert_eq!(
+            chord(&["Agent", "AgentNativeScroll", "AgentRow"], "["),
+            Some("native_agent::Scroll")
+        );
+        assert_eq!(
+            chord(&["Agent", "AgentDecision", "AgentPlan"], "x"),
+            Some("native_agent::CloseTab")
+        );
+        // A frozen tail has no model to change, and no chord is a chord outside an agent tab.
+        assert_eq!(chord(&["Agent", "AgentNativeScroll"], "m"), None);
+        assert_eq!(chord(&["Workspace", "Terminal"], "s"), None);
+        assert_eq!(chord(&["Agent", "AgentIdle"], "q"), None);
+    }
+
+    #[test]
+    fn only_a_bare_control_s_is_the_prefix() {
+        let prefix = Keystroke::parse("ctrl-s").unwrap_or_else(|error| panic!("{error}"));
+        assert!(is_prefix_key(&prefix));
+        for keys in ["s", "ctrl-shift-s", "ctrl-alt-s", "cmd-s", "ctrl-a"] {
+            let keystroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
+            assert!(!is_prefix_key(&keystroke), "{keys}");
         }
     }
 

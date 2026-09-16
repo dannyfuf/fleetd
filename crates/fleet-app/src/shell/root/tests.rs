@@ -1,6 +1,6 @@
 use super::{first_run_import_allowed, focus::*};
 use crate::{
-    actions::{native_agent, prefix},
+    actions::{fleet::OpenJobs, native_agent, prefix},
     dialogs::Dialogs,
     state::{AppState, DaemonLink, DaemonLossReason, Overlay, Screen, TerminalMode},
 };
@@ -23,6 +23,12 @@ fn queue(keys: &mut FocusOwnerKeys, event: KeyDownEvent) -> Option<KeyDownEvent>
 
 fn rendered(keys: &mut FocusOwnerKeys, generation: u64) -> Vec<KeyDownEvent> {
     keys.finish_render(generation)
+}
+
+/// The interceptor's own shape: read the live chain once, then resolve against it.
+fn live_prefix(state: &mut AppState, keystroke: &Keystroke) -> (bool, Option<Box<dyn Action>>) {
+    let chain = state.context_chain();
+    take_live_prefix_action(state, &chain, keystroke)
 }
 
 #[test]
@@ -124,7 +130,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
 
     state.enter_prefix();
     let bound = Keystroke::parse("c").unwrap_or_else(|error| panic!("{error}"));
-    let (consumed, action) = take_live_prefix_action(&mut state, &bound);
+    let (consumed, action) = live_prefix(&mut state, &bound);
     assert!(consumed);
     assert_eq!(
         action.as_ref().map(|action| action.name()),
@@ -142,7 +148,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
     ] {
         state.enter_prefix();
         let keystroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
-        let (consumed, action) = take_live_prefix_action(&mut state, &keystroke);
+        let (consumed, action) = live_prefix(&mut state, &keystroke);
         assert!(consumed, "{keys} must consume the live one-shot prefix");
         assert_eq!(action.as_ref().map(|action| action.name()), Some(expected));
         assert_eq!(state.terminal_mode, TerminalMode::Terminal);
@@ -150,7 +156,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
 
     state.enter_prefix();
     let unbound = Keystroke::parse("d").unwrap_or_else(|error| panic!("{error}"));
-    let (consumed, action) = take_live_prefix_action(&mut state, &unbound);
+    let (consumed, action) = live_prefix(&mut state, &unbound);
     assert!(consumed);
     assert!(action.is_none());
     assert_eq!(state.terminal_mode, TerminalMode::Terminal);
@@ -169,7 +175,7 @@ fn agent_prefix_consumes_bound_and_unbound_keys_and_restores_scroll_with_daemon_
 
     state.enter_agent_prefix();
     let bound = Keystroke::parse("]").unwrap_or_else(|error| panic!("{error}"));
-    let (consumed, action) = take_live_prefix_action(&mut state, &bound);
+    let (consumed, action) = live_prefix(&mut state, &bound);
     assert!(consumed);
     assert_eq!(
         action.as_ref().map(|action| action.name()),
@@ -182,13 +188,88 @@ fn agent_prefix_consumes_bound_and_unbound_keys_and_restores_scroll_with_daemon_
 
     state.enter_agent_prefix();
     let unbound = Keystroke::parse("d").unwrap_or_else(|error| panic!("{error}"));
-    let (consumed, action) = take_live_prefix_action(&mut state, &unbound);
+    let (consumed, action) = live_prefix(&mut state, &unbound);
     assert!(consumed);
     assert!(action.is_none());
     assert_eq!(
         state.agent_popup.as_ref().map(|popup| popup.mode),
         Some(crate::state::AgentPopupMode::Scroll)
     );
+}
+
+/// The `^s` chord of a native agent tab is taken whole, so GPUI never holds pending input.
+///
+/// GPUI replays the keystrokes of a sequence that matched nothing as *input*, which is how an
+/// unbound `^s <key>` used to type a stray character into the composer. Arming on `^s` and
+/// consuming the second key — bound or not — is what takes that path away.
+#[test]
+fn a_native_agent_chord_runs_its_row_and_swallows_an_unbound_second_key() {
+    let chord = |chain: &[&'static str], armed: bool, keys: &str| {
+        let keystroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
+        agent_chord(chain, armed, &keystroke)
+    };
+
+    for chain in [
+        ["Agent", "AgentIdle"],
+        ["Agent", "AgentWorking"],
+        ["Agent", "AgentNativeScroll"],
+    ] {
+        assert!(matches!(chord(&chain, false, "ctrl-s"), AgentChord::Armed));
+        assert!(matches!(chord(&chain, false, "s"), AgentChord::Passthrough));
+        match chord(&chain, true, "s") {
+            AgentChord::Run(action) => assert_eq!(action.name(), Action::name(&prefix::GoHub)),
+            other => panic!("`^s s` must reach the Hub from {chain:?}: {other:?}"),
+        }
+        assert!(
+            matches!(chord(&chain, true, "q"), AgentChord::Unbound),
+            "an unbound second key is consumed, never replayed into the composer"
+        );
+    }
+
+    // …and says so, because a key that does nothing and reports nothing reads as a broken app.
+    assert_eq!(
+        unbound_chord_toast(&Keystroke::parse("q").unwrap_or_else(|error| panic!("{error}"))),
+        "^s q is not bound here"
+    );
+    assert_eq!(
+        unbound_chord_toast(&Keystroke::parse("ctrl-s").unwrap_or_else(|error| panic!("{error}"))),
+        "^s ^s is not bound here"
+    );
+    // `^s s` and `^s S` are two different rows, so the refusal must not fold their case.
+    assert_eq!(
+        unbound_chord_toast(&Keystroke::parse("Q").unwrap_or_else(|error| panic!("{error}"))),
+        "^s Q is not bound here"
+    );
+    assert_eq!(
+        unbound_chord_toast(&Keystroke::parse("escape").unwrap_or_else(|error| panic!("{error}"))),
+        "^s esc is not bound here"
+    );
+
+    // The gate contexts are three words long and the daemon banner is appended innermost;
+    // neither shape may cost the tab its session rows.
+    match chord(&["Agent", "AgentDecision", "AgentPlan"], true, "J") {
+        AgentChord::Run(action) => assert_eq!(action.name(), Action::name(&OpenJobs)),
+        other => panic!("`^s J` must open the jobs panel over a plan card: {other:?}"),
+    }
+    match chord(&["Agent", "AgentIdle", "Daemon", "Banner"], true, "z") {
+        AgentChord::Run(action) => assert_eq!(action.name(), Action::name(&prefix::ToggleZoom)),
+        other => panic!("the banner owns no `^s` row: {other:?}"),
+    }
+
+    // The legacy popup keeps its own one-shot Prefix mode, and nothing else is a chord at all.
+    for chain in [
+        vec!["Agent", "Terminal"],
+        vec!["Agent", "Prefix"],
+        vec!["Workspace", "Terminal"],
+        vec!["Hub", "Worktrees"],
+    ] {
+        assert!(matches!(
+            chord(&chain, false, "ctrl-s"),
+            AgentChord::Passthrough
+        ));
+        assert!(matches!(chord(&chain, true, "s"), AgentChord::Passthrough));
+        assert!(!is_native_agent_chain(&chain), "{chain:?}");
+    }
 }
 
 #[test]
@@ -208,7 +289,7 @@ fn daemon_banner_bindings_resolve_before_live_prefix_fallback() {
     for key in ["r", "l", "escape"] {
         state.enter_prefix();
         let keystroke = Keystroke::parse(key).unwrap_or_else(|error| panic!("{error}"));
-        assert!(!take_live_prefix_action(&mut state, &keystroke).0);
+        assert!(!live_prefix(&mut state, &keystroke).0);
         assert_eq!(state.terminal_mode, TerminalMode::Prefix);
     }
 }

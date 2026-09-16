@@ -1323,9 +1323,14 @@ has focus) · `Space` toggles · `←`/`→` cycles a choice · `Enter` saves ·
 
 880 × 620, **three columns × ~14 rows**, grouped by *mode* because the app is modal:
 `Hub` · `Worktrees & PRs` · `Terminal (^s)` · `Scroll` · `Agent popup (^s)` ·
-`Dialogs & filter`. Keys in a 68 px mono `fg` column, action in `fg.muted`. Context-sensitive:
-opening `?` from a Workspace or Agent terminal renders that surface's group **first and in
-accent** and dims the others to 55 %.
+`Agent thread (^s)` · `Board` · `Dialogs & filter`. Keys in a 68 px mono `fg` column, action in
+`fg.muted`. Context-sensitive: opening `?` from a Workspace terminal, the Agent popup or a native
+agent tab renders that surface's group **first and in accent** and dims the others to 55 %.
+
+A group whose sub-modes share a table lists it **once**, under a sub-head naming the family
+(`any mode: session`) rather than repeating it beneath each sub-mode: the six native agent-thread
+contexts share thirty-odd `^s` rows, and printing the product per context is a wall rather than a
+reference.
 
 The dialog opens with one block above the columns, which is the single most valuable paragraph in
 the app:

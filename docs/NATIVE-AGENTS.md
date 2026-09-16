@@ -1304,14 +1304,31 @@ authoritative.
 | Plan | `y` implement · `n` refine · `⏎` expand |
 | Scroll | `j`/`k` move focus · `ctrl-d`/`ctrl-u` · `gg`/`G` · `q`/`i`/`esc` leave |
 | Row focus | `⏎` expand · `u` revert · `o` open in editor · `y` copy · `d` diff |
+| Every sub-mode | the Workspace session rows: `^s s` hub · `^s S` sleep and hub · `^s h`/`p`, `^s l`/`n` previous/next tab · `^s 1`–`9`, `^s ⇥`, `^s w` select and MRU · `^s W` session switcher · `^s c` new terminal · `^s y` copy the worktree path · `^s z` zoom · `^s v`/`V`/`N`/`P` watch pane · `^s !` sticky error · `^s J` jobs · `^s ?` help · `^s esc` cancel |
 
-Three rules come with the table. **Row focus lives inside scroll mode**, which finally makes
+**A thread tab repeats the Workspace session table, minus its PTY rows.** The thread is the
+Workspace's selected tab, so `Agent > …` *replaces* `Workspace > …` rather than covering it and
+nothing is inherited; without the repeat every session command was a dead key in an agent tab.
+`^s r` (restart), `^s ,` (rename), `^s ]` (paste) and `^s ^s` (send a literal) stay out, because
+each addresses a PTY and a Fleet-drawn tab has none. No handler moved: `^s s` is already on the
+`Fleet` root and the rest on the Workspace root, both ancestors of the agent view.
+
+**`^s` is taken by the shell's keystroke interceptor, not by gpui's two-key matcher.** gpui
+replays the keystrokes of a sequence that matched nothing as *input*
+(`Window::replay_pending_input`), so a tab drawn around a text composer had `^s s` type an `s`
+into the draft. The interceptor consumes `^s`, resolves the second key against the *live* context
+chain through `keymap::chord_action_for_chain`, and where no row names it consumes that key too
+and toasts `^s <key> is not bound here`. It is the same one-shot shape `Workspace > Prefix`
+already has, and it leaves no pending input armed inside gpui.
+
+Three more rules come with the table. **Row focus lives inside scroll mode**, which finally makes
 `⏎`/`u`/`o` fire and retires the long-standing caveat that `Agent > AgentRow` is bound, handled and
 never entered. **`e` on a permission, `n` on a plan and a free-text answer all *open* the composer
 rather than answering at once**, and while that draft is being typed the gate's context stands
 down so the text may start with a `y`. And **gpui's `>` is a subsequence test, not a parent test**,
-so the `^s` rows must be repeated on every `AgentDecision > *` context and an embedded pane may
-not reuse any context word this table uses — there is a test for it.
+so every `^s` row is registered against each sub-mode by name — the product lives in
+`keymap::SHARED_TABLES` rather than as a copied block per context — and an embedded pane may not
+reuse any context word this table uses. There is a test for each.
 
 The `esc` cascade, in order: close a picker → abandon a gate draft → leave scroll mode →
 interrupt, but only when something is running. On an idle thread with nothing open, `esc` does
@@ -1335,10 +1352,11 @@ this build does not do**, named here rather than softened in the section that sp
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
 | 8 | **Checkpoints and revert.** Fleet-owned git refs, `AgentRevert`, `[u]` | **done**: `services/checkpoints/` captures a turn or a file scope into `refs/fleet/checkpoints/`, reverts a worktree from one without touching `HEAD`, the index or the conversation, and garbage collects per thread plus an hourly orphan sweep. `AgentSessionManager` holds the service and takes both captures — `capture_turn` in `send`, for a turn that is actually starting rather than a steer, and `capture_files` on the `ItemStarted` of an edit-shaped tool. A capture failure logs and the turn proceeds, always (§5). The app draws `[u] revert turn` from `AgentCheckpoints` and sends `AgentRevert`. **Owed**: `[u] revert this edit` on a tool row. A file-scope checkpoint names the *turn* it was taken in and not the item, so a tool row has nothing to key on; and the capture is best-effort by construction, because neither harness waits for Fleet before running an auto-approved tool — the turn-scope checkpoint is the guarantee, the file-scope one is the finer-grained revert when the race goes Fleet's way, which it always does for a gated edit |
 
-The Workspace tab-selection and MRU prefix rows (`^s 1`–`9`, `^s Tab`, `^s w`) are also bound
-inside every agent-tab sub-mode; `^s s` remains deliberately unbound there, preserving the
-shadowing rule. The fixture-driven `scenarios/agents/` corpus is the GUI smoke pass for the agent
-tab.
+The whole Workspace session table — selection and MRU (`^s 1`–`9`, `^s Tab`, `^s w`), `^s s`,
+`^s S`, `^s h`/`p`/`l`/`n`, `^s W`, `^s c`, `^s y`, `^s z`, `^s v`/`V`/`N`/`P`, `^s !`, `^s J`,
+`^s ?` — is bound inside every agent-tab sub-mode, minus the four PTY-only rows, and an unbound
+second key is swallowed with a toast rather than typed into the composer (§12). The
+fixture-driven `scenarios/agents/` corpus is the GUI smoke pass for the agent tab.
 
 One gap belongs to the seam between the app and the daemon rather than to either side:
 
