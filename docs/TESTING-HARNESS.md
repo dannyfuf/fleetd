@@ -514,6 +514,10 @@ screenshots could not be listed and includes the filesystem error.
 After Fleet answers `quit`, the runner waits up to five seconds for the process to exit. A non-zero
 or signal-terminated exit, or an exit that misses that deadline, fails the line and therefore the
 run.
+On a display lane the app first blurs and paints one cleanup frame, then closes the driven window,
+so GPUI releases the focused platform input handler and its entity handles before leak detection
+runs. Headless closes directly because it installs no platform handler and has no frame source;
+in neither lane is `quit` a direct process-level escape hatch.
 
 Stdout is a contract of its own: a failure must be diagnosable without opening a file. The runner
 prints the run directory first, the lane second, and on a failure the line, the error, the value

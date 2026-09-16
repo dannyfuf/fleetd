@@ -304,6 +304,9 @@ A stale terminal event for an old turn never ends the current turn; a terminal e
 id while a turn is active is ignored because it cannot be attributed; a `TurnSettled` naming a
 turn Fleet never saw start **is** accepted, because it recovers a lost start; a `TurnAborted`
 naming an unknown turn is rejected, because a delayed stop must not clobber a newer pending start.
+Codex also validates a non-empty string `/turn/id` before accepting a successful `turn/start`
+response. If one stdout burst maps `turn/started` and `turn/completed` before the response future
+resumes, the cleared pending start is proof that the response has nothing left to adopt or emit.
 
 The PTY fallback reuses only the `AttentionKind` vocabulary and the amber `NeedsYou` tab mark; it
 does not imitate this reducer.
@@ -640,7 +643,11 @@ feeds assistant prose through `MarkdownDocument::append`, replaces only the inde
 `TranscriptList::patch_row`, which uses `ListState::remeasure_items(index..index + 1)` and never
 `splice`. There is no projection clone, settled-turn count, deep comparison, grouping pass, or
 linear item lookup on this path. Any structural member keeps the ordinary `AppState` notification,
-clones the projection once, and prepares the complete row model.
+clones the projection once, and prepares the complete row model. Text descriptions already
+accepted earlier in that mixed batch are queued and flushed through the same single-row remeasure
+before the structural model is installed; a final delta plus completion therefore cannot splice a
+growing row. A delta that clears `retrying` also takes the structural path so its trailing notice
+disappears in the same update.
 
 The thread view holds a reveal buffer between the authoritative projection and its rows. With
 motion enabled it wakes every `motion.reveal_tick_ms` (**16 ms**) and reveals UTF-8-safe chunks at
@@ -1116,10 +1123,12 @@ or 256 KiB** per pass. Adjacent events for one thread form one ordered `mirror_a
 SQLite transaction; another thread or a structural event ends the run, so interleaved threads
 make progress and link order stays observable unchanged. Republishing remains strictly
 commit-before-visible. If a run contains a sequence gap, the mirror commits and republishes its
-gap-free prefix, withholds the suffix, and starts the ordinary window refill. The refill's
-`AgentWindow` announcement makes clients re-read the now-complete durable prefix. Each drain emits
-one debug record with event, byte, group, publishable-event and resync counts, never payloads. The
-wire remains one event per frame; batching exists only between the link receiver and local mirror.
+gap-free prefix. With a window-capable owner it withholds the suffix and starts the ordinary
+window refill; the refill's `AgentWindow` announcement makes clients re-read the now-complete
+durable prefix. With an older owner it republishes the suffix unchanged and leaves repair to the
+plain proxy path. Each drain emits one debug record with event, byte, group, publishable-event and
+resync counts, never payloads. The wire remains one event per frame; batching exists only between
+the link receiver and local mirror.
 
 Warm mirror, remote thread: the local daemon answers **entirely from the mirror in ~1 ms** with
 `synchronized = false`, the app paints the full transcript as `Cached`, and in parallel the local
@@ -1147,8 +1156,10 @@ daemon's database.
 
 Version skew gates exactly one thing: the *request* sent upstream. The delta is asked for only of
 a peer advertising `agent.window`, because a peer that ignores `after_seq` answers with a whole
-projection — no events, nothing to cache. Reading the mirror needs no capability from anyone,
-which is what keeps a transcript readable while the link is down and `hello` is gone.
+projection — no events, nothing to cache. While such an older peer is connected, opens and any
+event suffix after a mirror gap remain a plain proxy: the suffix is published unchanged and a
+client repairs the gap through the legacy full open. Once the link is down, reading the durable
+prefix needs no capability or Hello, which is what keeps the cached transcript readable offline.
 
 Offline: **disconnection changes the status, never the data.** A mirrored transcript stays readable
 from the prefix, the thread list stays painted from the durable mirror (the in-memory snapshot
