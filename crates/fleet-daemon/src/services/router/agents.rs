@@ -159,9 +159,9 @@ pub fn mirrors_against(endpoint: &Arc<dyn RemoteEndpoint>) -> bool {
 /// Answers one agent open from the mirror, and refills it from the owner in the background.
 ///
 /// `None` hands the request back to the ordinary forwarding path, and that is the answer for a
-/// local thread, a cold mirror, a version-6 open, and a paged read — a "load earlier" past what
-/// the mirror holds is the owner's to answer. The refill it starts is the only part gated on the
-/// peer's capability, because it is the only part that leaves this machine.
+/// local thread, a cold mirror, a version-6 open, a paged read, and a connected owner that cannot
+/// answer window deltas — a "load earlier" past what the mirror holds is the owner's to answer.
+/// A disconnected owner remains readable from the cache even though its Hello is gone.
 pub(crate) async fn open_from_mirror(
     mirror: Option<&Arc<dyn AgentMirror>>,
     endpoint: &Arc<dyn RemoteEndpoint>,
@@ -169,6 +169,9 @@ pub(crate) async fn open_from_mirror(
     body: &RequestBody,
 ) -> Option<DaemonResult<ResponseBody>> {
     if !matches!(body, RequestBody::AgentThreadOpen { .. }) {
+        return None;
+    }
+    if endpoint.state() != fleet_proto::snapshot::LinkState::Down && !mirrors_against(endpoint) {
         return None;
     }
     let mirror = mirror?;
@@ -237,6 +240,7 @@ pub(crate) async fn ingest_remote_events(
         mirrored_events: 0,
         resyncs: 0,
     };
+    let windowing_peer = mirrors_against(endpoint);
     let mut index = 0;
     while index < events.len() {
         match &events[index] {
@@ -258,19 +262,24 @@ pub(crate) async fn ingest_remote_events(
                 outcome.mirrored_events += run.len();
                 let write = mirror.ingest_batch(host, *thread, &run).await;
                 let publishable = write.publishable.min(run.len());
-                outcome.publishable[start + publishable..index].fill(false);
                 if write.needs_window {
-                    outcome.resyncs += 1;
-                    if mirrors_against(endpoint)
-                        && let Some(delta) = mirror.delta(host, &open_request(*thread)).await
-                    {
-                        refill_in_background(
-                            Arc::clone(mirror),
-                            Arc::clone(endpoint),
-                            host.clone(),
-                            delta,
-                        );
+                    if windowing_peer {
+                        outcome.publishable[start + publishable..index].fill(false);
+                        outcome.resyncs += 1;
+                        if let Some(delta) = mirror.delta(host, &open_request(*thread)).await {
+                            refill_in_background(
+                                Arc::clone(mirror),
+                                Arc::clone(endpoint),
+                                host.clone(),
+                                delta,
+                            );
+                        }
                     }
+                    // A peer without `agent.window` cannot refill this daemon's durable prefix.
+                    // Keep proxy compatibility by publishing the owner's stream unchanged; a
+                    // client that sees the gap repairs it through a proxied legacy full open.
+                } else {
+                    outcome.publishable[start + publishable..index].fill(false);
                 }
             }
             Event::AgentSummary(summary) => {

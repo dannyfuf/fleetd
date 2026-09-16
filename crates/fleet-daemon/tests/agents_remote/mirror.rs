@@ -196,6 +196,45 @@ async fn a_cold_mirror_is_proxied_and_the_answer_warms_it() {
 }
 
 #[tokio::test]
+async fn a_connected_peer_without_window_support_bypasses_a_warm_mirror() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let host = host("legacy-box");
+    let thread = ThreadId::new();
+    let projection = ThreadProjection::new(thread, worktree("legacy"), AgentKind::Claude);
+    let machines = Arc::new(Machines::from_config(&default_config(temp.path())));
+    let remote = Arc::new(FakeRemote::new(host.clone()));
+    remote.set_hello(RemoteHello {
+        version: "fleetd legacy".to_owned(),
+        daemon_id: "owner".to_owned(),
+        build_commit: None,
+        capabilities: Vec::new(),
+    });
+    machines.install_endpoint(host.clone(), remote.clone());
+    let router = Router::new(machines, Arc::new(Mirror::new()));
+    let mirror = Arc::new(FakeMirror::default());
+    *lock(&mirror.warm) = Some(thread_window(projection.summary(Seq::default())));
+    router.set_agent_mirror(mirror.clone());
+    router.ids.register_thread(&host, thread);
+    remote.push_response(Ok(ResponseBody::AgentThreadSnapshot {
+        projection,
+        events_after: Vec::new(),
+    }));
+
+    let request = window_open(thread, Some(Seq(4)));
+    let answer = router
+        .forward(&host, request.clone())
+        .await
+        .expect("the legacy owner answers the open");
+
+    assert!(matches!(answer, ResponseBody::AgentThreadSnapshot { .. }));
+    assert_eq!(remote.requests(), [request]);
+    assert!(
+        !mirror.calls().contains(&"open".to_owned()),
+        "a connected legacy owner must remain a plain proxy"
+    );
+}
+
+#[tokio::test]
 async fn a_mutation_is_forwarded_and_never_offered_to_the_mirror() {
     let temp = tempfile::tempdir().expect("tempdir");
     let host = host("dev-box");

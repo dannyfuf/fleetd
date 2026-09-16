@@ -233,6 +233,7 @@ fn the_captured_failure_keeps_the_error_and_the_settlement_apart() {
 }
 
 mod stage_a2;
+mod stage_fix;
 /// Byte-exact goldens for every outbound frame Fleet writes.
 mod wire;
 /// The mock peer: a real child process, scripted from the captured responses.

@@ -41,6 +41,8 @@ use fleet_proto::{
 
 mod infra;
 
+#[path = "agents_remote/gaps.rs"]
+mod gaps;
 #[path = "agents_remote/mirror.rs"]
 mod mirror;
 

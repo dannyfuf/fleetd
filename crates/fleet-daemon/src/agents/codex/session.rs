@@ -283,6 +283,15 @@ pub(super) struct CodexSession {
     pub(super) turn_aliases: HashMap<String, TurnId>,
 }
 
+/// What the `turn/start` response still has to announce after its notifications raced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TurnStartConfirmation {
+    /// Whether Codex queued this turn behind a different active turn.
+    pub(super) queued: bool,
+    /// Whether the response, rather than `turn/started`, is the first running signal.
+    pub(super) announce: bool,
+}
+
 impl CodexSession {
     /// The capabilities of this process.
     ///
@@ -352,6 +361,31 @@ impl CodexSession {
             return turn;
         }
         self.turn_for(provider_turn)
+    }
+
+    /// Reconciles a successful `turn/start` response with lifecycle notifications already read.
+    ///
+    /// One stdout burst may contain the response, `turn/started`, and `turn/completed`. The read
+    /// loop maps all three independently of the request future waking, so a response that resumes
+    /// last must not re-open the turn the notifications already settled.
+    pub(super) fn confirm_turn_start(
+        &mut self,
+        turn: TurnId,
+        provider_turn: &str,
+    ) -> TurnStartConfirmation {
+        self.alias_turn(provider_turn, turn);
+        let queued = self.active_turn.is_some() && self.active_turn != Some(turn);
+        if queued || self.active_turn == Some(turn) || self.pending_start != Some(turn) {
+            return TurnStartConfirmation {
+                queued,
+                announce: false,
+            };
+        }
+        self.adopt_turn(turn, provider_turn);
+        TurnStartConfirmation {
+            queued: false,
+            announce: true,
+        }
     }
 
     /// The Fleet item id for a provider item id, remembering the mapping.

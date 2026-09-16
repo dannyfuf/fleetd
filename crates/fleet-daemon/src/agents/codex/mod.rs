@@ -41,8 +41,11 @@ use self::{
 };
 use crate::agents::harness::{
     Harness, HarnessConfig, HarnessError, HarnessEvents, HarnessResult, HarnessSink,
-    InterruptReason, OpenSession, RuntimeApplied, RuntimeChange, RuntimeField, SessionOpened,
-    ShutdownReason, Submit, Submitted, closed_events, probe::Probed, process,
+    InterruptReason, OpenSession, ProtocolOp, RuntimeApplied, RuntimeChange, RuntimeField,
+    SessionOpened, ShutdownReason, Submit, Submitted, closed_events,
+    fingerprint::{IssueKind, SchemaFingerprint},
+    probe::Probed,
+    process,
 };
 
 /// Deadlines. The protocol has none, so every one of these is Fleet's, and each is strictly less
@@ -524,25 +527,22 @@ impl Harness for CodexHarness {
                 return Err(error);
             }
         };
-        let provider_turn = result
-            .pointer("/turn/id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let provider_turn = match turn_start_id(&result) {
+            Ok(provider_turn) => provider_turn.to_owned(),
+            Err(error) => {
+                self.session.lock().await.rollback_turn_start(req.turn);
+                return Err(error);
+            }
+        };
         let mut session = self.session.lock().await;
-        // The caller's own id stays the turn's identity, whatever Codex named it.
-        if !provider_turn.is_empty() {
-            session.alias_turn(&provider_turn, req.turn);
-        }
-        let queued = session.active_turn.is_some() && session.active_turn != Some(req.turn);
-        let already_running = session.active_turn == Some(req.turn);
-        if !queued && !already_running {
-            session.adopt_turn(req.turn, &provider_turn);
-        }
+        // The caller's own id stays the turn's identity, whatever Codex named it. The response
+        // may resume after the same stdout burst already started and settled the turn, so the
+        // session decides whether anything remains to announce.
+        let confirmation = session.confirm_turn_start(req.turn, &provider_turn);
         drop(session);
         // `turn/started` follows and is authoritative; announcing the turn here is what keeps the
         // composer honest when the notification is a few milliseconds behind the response.
-        if !queued && !already_running {
+        if confirmation.announce {
             transport::emit(
                 &self.events,
                 AgentEvent::TurnStarted {
@@ -554,7 +554,7 @@ impl Harness for CodexHarness {
         }
         Ok(Submitted {
             turn: req.turn,
-            queued,
+            queued: confirmation.queued,
         })
     }
 
@@ -774,6 +774,24 @@ impl Harness for CodexHarness {
     fn events(&mut self) -> HarnessEvents {
         self.receiver.take().unwrap_or_else(closed_events)
     }
+}
+
+/// The provider id in a successful `turn/start` response.
+fn turn_start_id(result: &Value) -> HarnessResult<&str> {
+    let value = result.pointer("/turn/id");
+    if let Some(id) = value.and_then(Value::as_str).filter(|id| !id.is_empty()) {
+        return Ok(id);
+    }
+    let kind = match value {
+        None => IssueKind::MissingField,
+        Some(Value::String(_)) => IssueKind::Shape,
+        Some(_) => IssueKind::TypeMismatch,
+    };
+    Err(HarnessError::Protocol {
+        op: ProtocolOp::Decode,
+        method: Some("turn/start".to_owned()),
+        fingerprint: SchemaFingerprint::of_value(kind, result),
+    })
 }
 
 impl CodexHarness {
