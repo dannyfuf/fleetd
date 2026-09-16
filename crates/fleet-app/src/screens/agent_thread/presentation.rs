@@ -6,8 +6,8 @@
 //! is the one that knows which scope `[a]` grants and how many options its question has.
 
 use fleet_core::agents::{
-    AgentKind, AgentThreadSummary, Attention, ModelSelection, OpenGate, PermissionMode,
-    ThreadProjection,
+    AccountStatus, AgentKind, AgentThreadSummary, Attention, ModelSelection, OpenGate,
+    PermissionMode, ThreadProjection,
 };
 use fleet_ui_kit::{KeyHintRow, MetadataSegment, format_cost, format_duration, format_token_count};
 use gpui::SharedString;
@@ -129,7 +129,21 @@ pub(crate) fn trailing_segments(projection: &ThreadProjection) -> Vec<MetadataSe
             format_token_count(projection.cumulative_usage.total_tokens)
         ))));
     }
+    // The account goes last, so the row collapses it before it collapses the context meter: which
+    // account is answering matters less per-turn than how much of the window is left. A harness
+    // that reports none contributes no segment at all (§B5.1).
+    if let Some(account) = account_segment(projection) {
+        segments.push(MetadataSegment::new(account));
+    }
     segments
+}
+
+/// `signed out`, or the account's own shortest label, or nothing at all.
+fn account_segment(projection: &ThreadProjection) -> Option<SharedString> {
+    match projection.account.as_ref()? {
+        AccountStatus::SignedOut => Some(SharedString::new_static("signed out")),
+        AccountStatus::SignedIn(info) => info.label().map(SharedString::new),
+    }
 }
 
 /// How long this thread has been alive, from its first turn to its last applied event.

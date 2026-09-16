@@ -5,7 +5,9 @@
 //! renders, and nothing here reads the view's own elements: an intent is a function of daemon
 //! state plus the composer's text.
 
-use fleet_core::agents::{GateAnswer, GateKind, ItemId, ItemKind, ModelSelection, PermissionMode};
+use fleet_core::agents::{
+    AgentKind, GateAnswer, GateKind, ItemId, ItemKind, ModelSelection, PermissionMode,
+};
 use fleet_ui_kit::{
     DecisionAction, MultilineInput, RowAction, TranscriptList, TranscriptRow, TranscriptRowKind,
 };
@@ -25,6 +27,9 @@ use super::{
     rows::{PendingSend, RowTarget},
     user_input,
 };
+
+/// The `/` rows Fleet adds on a harness with an account surface, in the order they are offered.
+const ACCOUNT_COMMANDS: [&str; 2] = ["login", "logout"];
 
 impl AgentThreadView {
     // -- the composer ----------------------------------------------------------------------
@@ -435,6 +440,15 @@ impl AgentThreadView {
             PickerKind::Commands => ["model", "plan", "default", "compact"]
                 .into_iter()
                 .map(str::to_owned)
+                // `/login` and `/logout` are offered only where they do something: Claude
+                // publishes no account surface, and DESIGN-SYSTEM §4 does not list a command that
+                // would answer "unsupported".
+                .chain(
+                    ACCOUNT_COMMANDS
+                        .iter()
+                        .filter(|_| self.projection.provider == AgentKind::Codex)
+                        .map(|command| (*command).to_owned()),
+                )
                 .chain(self.commands.iter().cloned())
                 .map(PickerCandidate::plain)
                 .collect(),
@@ -530,6 +544,22 @@ impl AgentThreadView {
                 self.clear_trigger(picker, cx);
                 self.controls.set_interaction(InteractionMode::Build);
                 self.prepare(cx);
+            }
+            // Both send nothing to the model: they are Fleet verbs on the harness process, so
+            // the trigger text goes the same way `model`, `plan` and `default` do.
+            "login" if self.projection.provider == AgentKind::Codex => {
+                self.clear_trigger(picker, cx);
+                cx.emit(AgentThreadEvent::AccountLogin);
+                cx.notify();
+            }
+            "logout" if self.projection.provider == AgentKind::Codex => {
+                self.clear_trigger(picker, cx);
+                self.dispatch(
+                    BridgeCommand::AgentAccountLogout {
+                        thread: self.thread,
+                    },
+                    cx,
+                );
             }
             _ => self.replace_trigger(picker, accepted, cx),
         }

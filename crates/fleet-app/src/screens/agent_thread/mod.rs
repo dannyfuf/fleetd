@@ -82,6 +82,12 @@ pub(crate) enum AgentThreadEvent {
     /// this view: `[u]` is drawn only where a checkpoint exists, so the listing is state the row
     /// model reads rather than a mutation to forget.
     RefreshCheckpoints,
+    /// Start a provider sign-in and open the URL it answers with.
+    ///
+    /// Separate from [`AgentThreadEvent::Command`] for the same reason: the answer carries the
+    /// one thing the user has to act on, and dropping it would leave `/login` doing nothing
+    /// visible at all.
+    AccountLogin,
 }
 
 /// The machine one thread's worktree lives on, as the thread view has to state it (§12).

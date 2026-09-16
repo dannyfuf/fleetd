@@ -793,6 +793,13 @@ this section is what the screen shows.
 The content measure is **760 px** with a 16 px inset, centered; a wide window leaves the right
 side empty on purpose. The transcript is bottom-anchored and the composer is docked under it.
 
+The composer's `/` picker lists Fleet's own built-ins before the harness's commands: `model`,
+`plan`, `default`, `compact`, and — on a **Codex** thread only — `login` and `logout`, which sign
+that harness in and out of its provider account. They are absent on a Claude thread because
+Claude publishes no account surface, and `DESIGN-SYSTEM.md` §4 does not list a command that would
+answer "unsupported". `/login` opens Codex's ChatGPT page in the user's browser and says so in a
+toast; the URL is also a `Notice` row, so it stays reachable when the browser does not open.
+
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
 | Tab | `<index> <provider> — <title>`, title from the first message or OpenCode's `Session.title`; bare `claude` until there is one | the terminal strip | one strip, one numbering: an index addresses exactly one surface | `AgentThreadSummary.title` |
@@ -816,7 +823,8 @@ side empty on purpose. The transcript is bottom-anchored and the composer is doc
 | Live activity row | one row, one id, present tense: `working 1m 12s` → `thought 6s` → `running cargo` | pinned in the running turn | thinking → tool A running → tool A done → tool B running is one row changing its label, not four mounts | `RowId::LiveActivity` |
 | Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
 | Composer | 36 px box, `❯` prompt glyph, placeholder `message claude… (@ files · $ skills · / commands)`; grows one line at a time to eight | docked, bottom | no send button: `⏎` sends, `⇧⏎` inserts a newline | `MultilineInput` |
-| Metadata row | 22 px: `claude-opus-5 · high · asks before edits · build` left, `34% · $0.42 · 48m` right; **every segment the harness reports is shown and none is invented**, and it collapses from the right into an overflow count while the model segment truncates instead | under the composer | losing which model is answering is worse than losing its name's tail | `ThreadProjection`, `MetadataRow` |
+| Metadata row | 22 px: `claude-opus-5 · high · asks before edits · build` left, `34% · $0.42 · 48m · dev@example.com` right; **every segment the harness reports is shown and none is invented**, and it collapses from the right into an overflow count while the model segment truncates instead | under the composer | losing which model is answering is worse than losing its name's tail | `ThreadProjection`, `MetadataRow` |
+| Account segment | the **last** trailing segment: `signed out` when the harness reports no account, else its email — or its plan when there is no email — and **nothing at all** when the harness reports no account signal (Claude always, Codex until its first `account/read`) | end of the metadata row | the first thing a revoked token costs is a turn, and the row is where the user finds out why before the refusal; last so it collapses before the context meter | `ThreadProjection.account` |
 | Empty state | `new claude thread · feat-x` over `ask anything · @ files · $ skills · / commands` | centered in an empty transcript | a new thread must say what to type | — |
 | Mode word | `AGENT` | status bar, center | §2.8; keys reach Fleet's composer, not a PTY | `Mode::Agent` |
 | Status-bar hints | the live key set of the current state (see **Keyboard**) | status bar, right | the card's keys are bare letters, so the bar is where they are legible | §9 of `NATIVE-AGENTS.md` |

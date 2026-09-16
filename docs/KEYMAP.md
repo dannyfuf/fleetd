@@ -305,6 +305,13 @@ reports it (`MultilineInputEvent::Trigger`), which is what opens the picker, so 
 typable inside a prompt and the picker can filter on what follows them. `/` is offered at **line
 start only**, because a harness expands a slash command only when it opens the whole message.
 
+`/` lists Fleet's own built-ins before the harness's own commands: `model`, `plan`, `default`,
+`compact`, and — on a **Codex** thread only — `login` and `logout`. A built-in is applied locally
+and its trigger text is deleted, because a built-in sends nothing to the model; a harness command
+is inserted and the harness expands it. `login` and `logout` are absent on a Claude thread rather
+than refusing there: Claude publishes no account surface, and a listed command that answers
+"unsupported" is the affordance `DESIGN-SYSTEM.md` §7 forbids (`NATIVE-AGENTS.md` §7.1).
+
 An open completion picker is a list under a text field, so DESIGN-SYSTEM §4's `ctrl-n`/`ctrl-p`
 and `↓`/`↑` move it, in that sense: `↑` moves the highlight up. All four keys are handed
 straight back to the composer when no picker is open, so a `Shift-Enter` draft still moves its

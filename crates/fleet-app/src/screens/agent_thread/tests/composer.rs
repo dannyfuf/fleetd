@@ -407,3 +407,68 @@ fn a_metadata_segment_estimates_its_own_width() {
     assert!(short.collapsible);
     assert!(!MetadataSegment::pinned("claude-opus-5").collapsible);
 }
+
+/// The account is the row's last trailing segment, and absent means absent.
+#[test]
+fn the_account_segment_is_last_and_never_invented() {
+    let mut projection = projection();
+    projection.context_pct = 34.0;
+    let texts = |projection: &ThreadProjection| {
+        presentation::trailing_segments(projection)
+            .iter()
+            .map(|segment| segment.text.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    // Claude reports no account at all, so there is no segment — `signed out` here would be a
+    // statement the harness never made.
+    assert_eq!(texts(&projection), ["34%".to_owned()]);
+
+    projection.account = Some(fleet_core::agents::AccountStatus::SignedOut);
+    assert_eq!(
+        texts(&projection),
+        ["34%".to_owned(), "signed out".to_owned()]
+    );
+
+    projection.account = Some(fleet_core::agents::AccountStatus::SignedIn(
+        fleet_core::agents::AccountInfo {
+            kind: fleet_core::agents::AccountKind::ChatGpt {
+                email: Some("dev@example.com".to_owned()),
+                plan: Some("business".to_owned()),
+            },
+        },
+    ));
+    assert_eq!(
+        texts(&projection),
+        ["34%".to_owned(), "dev@example.com".to_owned()],
+        "the email wins over the plan"
+    );
+
+    projection.account = Some(fleet_core::agents::AccountStatus::SignedIn(
+        fleet_core::agents::AccountInfo {
+            kind: fleet_core::agents::AccountKind::ChatGpt {
+                email: None,
+                plan: Some("business".to_owned()),
+            },
+        },
+    ));
+    assert_eq!(
+        texts(&projection),
+        ["34%".to_owned(), "business".to_owned()],
+        "the plan stands in when there is no email"
+    );
+
+    projection.account = Some(fleet_core::agents::AccountStatus::SignedIn(
+        fleet_core::agents::AccountInfo {
+            kind: fleet_core::agents::AccountKind::ChatGpt {
+                email: None,
+                plan: None,
+            },
+        },
+    ));
+    assert_eq!(
+        texts(&projection),
+        ["34%".to_owned()],
+        "an account with no distinguishing name contributes nothing"
+    );
+}
