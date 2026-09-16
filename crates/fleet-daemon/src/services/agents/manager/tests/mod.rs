@@ -614,6 +614,7 @@ fn permission_gate(gate: GateId) -> AgentEvent {
         gate,
         turn: None,
         kind: GateKind::Permission {
+            item: None,
             tool: ToolKind::Bash,
             title: "Run a command".to_owned(),
             payload: "cargo test".to_owned(),

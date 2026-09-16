@@ -98,6 +98,7 @@ impl Owner {
             gate: self.gate,
             turn: Some(self.turn),
             kind: GateKind::Permission {
+                item: None,
                 tool: ToolKind::Bash,
                 title: "Run ls".to_owned(),
                 payload: "ls".to_owned(),

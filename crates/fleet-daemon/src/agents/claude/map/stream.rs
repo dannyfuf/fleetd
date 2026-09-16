@@ -48,7 +48,8 @@ pub(in crate::agents::claude) fn assistant(
         );
         return MapOutput::default();
     };
-    session.current_message = frame.message.id.clone();
+    let message = frame.message.id.clone();
+    session.current_message = message.clone();
     let owner = frame.parent_tool_use_id.clone();
     let parent = owner
         .as_deref()
@@ -71,6 +72,7 @@ pub(in crate::agents::claude) fn assistant(
                     turn,
                     SnapshotBlock {
                         owner: owner.as_deref(),
+                        message: message.as_deref(),
                         kind: BlockKind::Text,
                         stream: StreamKind::AssistantText,
                         text,
@@ -90,6 +92,7 @@ pub(in crate::agents::claude) fn assistant(
                     turn,
                     SnapshotBlock {
                         owner: owner.as_deref(),
+                        message: message.as_deref(),
                         kind: BlockKind::Thinking,
                         stream: StreamKind::ReasoningSummary { part: 0 },
                         text,
@@ -117,6 +120,8 @@ pub(in crate::agents::claude) fn assistant(
 struct SnapshotBlock<'a> {
     /// The subagent whose index space this block belongs to, or `None` for the main agent.
     owner: Option<&'a str>,
+    /// The message whose stopped stream block this snapshot consumes.
+    message: Option<&'a str>,
     kind: BlockKind,
     stream: StreamKind,
     text: &'a str,
@@ -132,6 +137,7 @@ fn complete_streamed_text(
 ) {
     let SnapshotBlock {
         owner,
+        message,
         kind: block_kind,
         stream,
         text,
@@ -139,20 +145,21 @@ fn complete_streamed_text(
     // Frames arrive in block order *within one owner*, so the oldest open block of this kind
     // belonging to the same stream is the one this frame completes; a subagent's blocks are never
     // matched against the main agent's, which share their index space.
-    let streamed = session
+    let streamed_key = session
         .stream_blocks
         .iter()
-        .filter(|((block_owner, _), block)| {
-            block_owner.as_deref() == owner && block.kind == block_kind && !block.completed
+        .filter(|((block_owner, block_message, _), block)| {
+            block_owner.as_deref() == owner
+                && block_message.as_deref() == message
+                && block.kind == block_kind
         })
-        .map(|(key, _)| key.clone())
-        .min()
-        .and_then(|key| session.stream_blocks.get_mut(&key));
+        .min_by_key(|((_, _, index), _)| *index)
+        .map(|(key, _)| key.clone());
     if block_kind == BlockKind::Text && owner.is_none() && !text.trim().is_empty() {
         session.last_assistant_text = Some(text.to_owned());
     }
-    let item = if let Some(block) = streamed {
-        block.completed = true;
+    let item = if let Some(block) = streamed_key.and_then(|key| session.stream_blocks.remove(&key))
+    {
         if let Some(missing) = text.strip_prefix(&block.text) {
             if !missing.is_empty() {
                 events.push(AgentEvent::ContentDelta {
@@ -358,7 +365,7 @@ fn block_start(session: &mut ClaudeSession, frame: &StreamFrame, events: &mut Ve
     let Some(turn) = session.active_turn() else {
         return;
     };
-    let key = block_key(frame);
+    let key = block_key(session, frame);
     let content = frame
         .event
         .get("content_block")
@@ -425,14 +432,14 @@ fn block_start(session: &mut ClaudeSession, frame: &StreamFrame, events: &mut Ve
             tool_name,
             input_json: String::new(),
             text: String::new(),
-            completed: false,
+            stopped: false,
             input_fingerprint: None,
         },
     );
 }
 
 fn block_delta(session: &mut ClaudeSession, frame: &StreamFrame, events: &mut Vec<AgentEvent>) {
-    let key = block_key(frame);
+    let key = block_key(session, frame);
     let Some(block) = session.stream_blocks.get_mut(&key) else {
         return;
     };
@@ -501,12 +508,15 @@ fn block_delta(session: &mut ClaudeSession, frame: &StreamFrame, events: &mut Ve
 }
 
 fn block_stop(session: &mut ClaudeSession, frame: &StreamFrame, events: &mut Vec<AgentEvent>) {
-    let key = block_key(frame);
-    let Some(block) = session.stream_blocks.remove(&key) else {
+    let key = block_key(session, frame);
+    let Some(kind) = session.stream_blocks.get(&key).map(|block| block.kind) else {
         return;
     };
-    match block.kind {
+    match kind {
         BlockKind::Tool => {
+            let Some(block) = session.stream_blocks.remove(&key) else {
+                return;
+            };
             if block.input_json.is_empty() {
                 return;
             }
@@ -533,24 +543,30 @@ fn block_stop(session: &mut ClaudeSession, frame: &StreamFrame, events: &mut Vec
                 ),
             }
         }
-        // Invariant 4: the text item closes here at the latest, before the next block opens.
-        // Normally the `assistant` snapshot has already closed it, and `complete_item` is a
-        // no-op the second time.
+        // Invariant 4: the text item closes here at the latest, before the next block opens. Its
+        // correlation remains until the assistant snapshot backfills this same item; closing an
+        // item and consuming its snapshot are separate protocol states.
         BlockKind::Text | BlockKind::Thinking => {
-            if !block.completed {
-                let stream = if block.kind == BlockKind::Thinking {
-                    StreamKind::ReasoningSummary { part: 0 }
-                } else {
-                    StreamKind::AssistantText
-                };
-                if !block.text.is_empty() {
-                    events.push(AgentEvent::ItemUpdated {
-                        item: block.item,
-                        patch: text_replacement(stream, &block.text),
-                    });
-                }
-                session.complete_item(block.item, ItemStatus::Completed, events);
+            let Some(block) = session.stream_blocks.get_mut(&key) else {
+                return;
+            };
+            if block.stopped {
+                return;
             }
+            block.stopped = true;
+            let stream = if block.kind == BlockKind::Thinking {
+                StreamKind::ReasoningSummary { part: 0 }
+            } else {
+                StreamKind::AssistantText
+            };
+            if !block.text.is_empty() {
+                events.push(AgentEvent::ItemUpdated {
+                    item: block.item,
+                    patch: text_replacement(stream, &block.text),
+                });
+            }
+            let item = block.item;
+            session.complete_item(item, ItemStatus::Completed, events);
         }
         BlockKind::Unknown => {}
     }
@@ -571,10 +587,11 @@ fn tool_input_update(item: ItemId, name: &str, input: &Value) -> AgentEvent {
     }
 }
 
-/// The `(owner, index)` a stream frame addresses.
-fn block_key(frame: &StreamFrame) -> BlockKey {
+/// The `(owner, message, index)` a stream frame addresses.
+fn block_key(session: &ClaudeSession, frame: &StreamFrame) -> BlockKey {
     (
         frame.parent_tool_use_id.clone(),
+        session.current_message.clone(),
         frame
             .event
             .get("index")

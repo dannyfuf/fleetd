@@ -496,6 +496,7 @@ async fn answering_one_gate_twice_writes_one_response() {
             gate,
             turn: None,
             kind: GateKind::Permission {
+                item: None,
                 tool: ToolKind::Bash,
                 title: "Run command?".to_owned(),
                 payload: "cargo test".to_owned(),
@@ -863,4 +864,29 @@ async fn the_derived_title_reaches_the_thread_list_and_not_only_the_tab() {
         restarted.summaries().await[0].title,
         "rewrite the storage docs"
     );
+}
+
+#[test]
+fn reducer_rejections_are_validation_errors_named_by_thread_and_event_kind() {
+    let thread = ThreadId::new();
+    let error = apply_error(ApplyEventError::Reducer {
+        thread,
+        event: "turn_settled",
+        source: anyhow::anyhow!("event targets the wrong turn"),
+    });
+
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert!(error.message.contains(&thread.to_string()), "{error:?}");
+    assert!(error.message.contains("turn_settled"), "{error:?}");
+    assert!(!error.message.contains("storage failed"), "{error:?}");
+}
+
+#[test]
+fn sqlite_write_failures_remain_filesystem_errors() {
+    let error = apply_error(ApplyEventError::Storage(anyhow::anyhow!(
+        "database is locked"
+    )));
+
+    assert_eq!(error.kind, ErrorKind::Fs);
+    assert!(error.message.contains("storage failed"), "{error:?}");
 }

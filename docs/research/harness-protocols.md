@@ -317,7 +317,7 @@ All normal messages carry `uuid` and `session_id` unless stated. Raw controls an
 | `conversation_reset` | `new_conversation_id`. |
 | `active_goal` | `value:{condition,iterations,set_at,tokens_at_start,last_reason?}|null`. It is present in the raw `StdoutMessage` union but omitted from the narrower public `SDKMessage` union; a direct Rust decoder must still accept it. |
 
-`stream_event.event.type`: `message_start {message}`, `content_block_start {index,content_block}`, `content_block_delta {index,delta}`, `content_block_stop {index}`, `message_delta {delta,usage,...}`, `message_stop`. Delta kinds: `text_delta {text}`, `input_json_delta {partial_json}`, `thinking_delta {thinking}`, `signature_delta {signature}`, `citations_delta {citation}`. Buffer input JSON fragments through block stop.
+`stream_event.event.type`: `message_start {message}`, `content_block_start {index,content_block}`, `content_block_delta {index,delta}`, `content_block_stop {index}`, `message_delta {delta,usage,...}`, `message_stop`. Delta kinds: `text_delta {text}`, `input_json_delta {partial_json}`, `thinking_delta {thinking}`, `signature_delta {signature}`, `citations_delta {citation}`. Buffer input JSON fragments through block stop. With `--include-partial-messages`, text/thinking `content_block_stop` closes the streamed item but does not consume its correlation: a later full `assistant` frame with the same `message.id` backfills that item (patch on difference, no-op on equality). Correlate by parent tool id, message id, and block index because indexes are reused across messages. Tool-use blocks may consume their correlation at stop after final input parsing.
 
 System subtypes:
 

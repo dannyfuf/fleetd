@@ -52,9 +52,11 @@ pub(super) enum BlockKind {
     Unknown,
 }
 
-/// A streaming content block is addressed by its owner plus its index: a subagent stream has its
-/// own index space starting at zero, so the index alone collides with the main stream.
-pub(super) type BlockKey = (Option<String>, u64);
+/// A streaming content block is addressed by owner, message, and index.
+///
+/// A subagent stream has its own index space starting at zero, and Claude reuses block indexes in
+/// later messages. Omitting either namespace lets a stopped block steal a later snapshot.
+pub(super) type BlockKey = (Option<String>, Option<String>, u64);
 
 /// One in-flight streaming content block.
 #[derive(Debug, Clone)]
@@ -64,7 +66,9 @@ pub(super) struct StreamBlock {
     pub(super) tool_name: Option<String>,
     pub(super) input_json: String,
     pub(super) text: String,
-    pub(super) completed: bool,
+    /// The stream closed this block's item, but its full assistant snapshot has not necessarily
+    /// arrived yet. Closing and consuming the snapshot are separate protocol states.
+    pub(super) stopped: bool,
     /// Fingerprint of the last parsed tool input, so an `ItemUpdated` costs a frame only when
     /// the parsed document actually changed — ~1 event per tool call instead of ~30.
     pub(super) input_fingerprint: Option<u64>,
