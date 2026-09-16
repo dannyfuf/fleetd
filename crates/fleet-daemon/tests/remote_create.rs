@@ -162,6 +162,7 @@ impl DaemonClient {
             .request(RequestBody::Hello {
                 protocol: PROTOCOL_VERSION,
                 client: HelloClient {
+                    client_id: None,
                     kind: ClientKind::Cli,
                     host_id: None,
                     capabilities: Vec::new(),

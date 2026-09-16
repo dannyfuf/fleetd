@@ -14,8 +14,8 @@ use semver::Version;
 use serde_json::{Value, json};
 
 use super::{
-    CodexHarness, approvals, envelope, map, methods, params::user_input, session::CodexSession,
-    user_agent_version,
+    CodexHarness, approvals, catalogue, envelope, map, methods, params::user_input,
+    session::CodexSession, user_agent_version,
 };
 use crate::agents::harness::{
     Harness, HarnessConfig, OpenSession, Submit, SubmitIntent,

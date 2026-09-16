@@ -551,7 +551,21 @@ async fn spawn_follow_up(shared: &Shared, method: &'static str) {
         };
         match result {
             Ok((_response, skills)) => {
-                shared_for_task.session.lock().await.install_skills(skills);
+                shared_for_task
+                    .session
+                    .lock()
+                    .await
+                    .install_skills(skills.clone());
+                let event = HarnessEvent::now(
+                    fleet_core::agents::AgentEvent::MetadataChanged {
+                        title: None,
+                        mode: None,
+                        model: None,
+                        skills: Some(skills),
+                    },
+                    Some(RawRef::method(method)),
+                );
+                let _receiver_gone_at_shutdown = shared_for_task.events.send(event);
             }
             Err(error) => {
                 tracing::warn!(

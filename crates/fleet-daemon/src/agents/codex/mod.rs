@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use self::{
-    catalogue::{model_catalogue, skill_names},
+    catalogue::{model_catalogue, model_descriptors, skill_names},
     params::{compact_params, interrupt_params, settings_params},
     session::{ApprovalShape, CodexSession, TurnControls},
     transport::Transport,
@@ -414,8 +414,15 @@ impl Harness for CodexHarness {
         let mut session = self.session.lock().await;
         session.install_models(models);
         session.install_skills(skills);
+        tracing::debug!(
+            target: "fleet::agents::codex",
+            thread = %thread_id,
+            catalogue = ?session.models,
+            "Codex model catalogue discovered"
+        );
         self.capabilities = session.capabilities();
         let selection = session.model_selection();
+        let models = model_descriptors(&session.models);
         let skills = session.skills.clone();
         drop(session);
         transport::emit(
@@ -424,6 +431,7 @@ impl Harness for CodexHarness {
                 provider: AgentKind::Codex,
                 resume_cursor: Some(thread_id.clone()),
                 model: selection.clone(),
+                models,
                 mode: req.start.mode,
                 tools: Vec::new(),
                 commands: Vec::new(),

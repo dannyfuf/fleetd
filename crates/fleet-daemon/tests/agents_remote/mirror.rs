@@ -117,6 +117,7 @@ fn thread_window(summary: fleet_core::agents::AgentThreadSummary) -> ResponseBod
     ResponseBody::AgentThreadWindow(Box::new(fleet_proto::agents::AgentThreadWindow {
         head_seq: summary.last_seq,
         projected_seq: summary.last_seq,
+        seen_seq: None,
         summary,
         session: fleet_proto::agents::AgentSessionView::default(),
         window: fleet_proto::agents::TranscriptWindow::default(),

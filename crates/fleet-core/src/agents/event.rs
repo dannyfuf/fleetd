@@ -188,6 +188,9 @@ pub enum AgentEvent {
         /// Active model, when known.
         #[serde(default)]
         model: Option<ModelSelection>,
+        /// Harness-declared model and reasoning-effort vocabulary.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        models: Vec<super::ModelDescriptor>,
         /// Active permission policy.
         #[serde(default)]
         mode: PermissionMode,
@@ -212,6 +215,9 @@ pub enum AgentEvent {
         /// Model selection now in force, when it changed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ModelSelection>,
+        /// Refreshed harness-native skills, when the catalogue changed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skills: Option<Vec<String>>,
     },
     /// Whole-session lifecycle changed.
     SessionStateChanged(SessionState),

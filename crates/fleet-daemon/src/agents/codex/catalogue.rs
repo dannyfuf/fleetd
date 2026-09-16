@@ -4,6 +4,8 @@ use std::{collections::HashSet, path::Path};
 
 use serde_json::{Value, json};
 
+use fleet_core::agents::{ModelDescriptor, ReasoningEffortDescriptor};
+
 use super::{CATALOGUE_DEADLINE, HarnessResult, transport::Transport};
 
 /// Reads every `model/list` page and preserves the complete additive model records.
@@ -43,6 +45,52 @@ pub(super) async fn model_catalogue(transport: &Transport) -> HarnessResult<Vec<
         cursor = Some(next_cursor);
     }
     Ok(models)
+}
+
+/// Normalizes the additive subset Fleet projects without letting Codex wire types cross the
+/// harness boundary. Invalid catalogue entries are skipped rather than narrowing a whole thread.
+pub(super) fn model_descriptors(models: &[Value]) -> Vec<ModelDescriptor> {
+    models
+        .iter()
+        .filter_map(|model| {
+            let id = model
+                .get("id")
+                .or_else(|| model.get("model"))
+                .and_then(Value::as_str)?
+                .to_owned();
+            let display_name = model
+                .get("displayName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&id)
+                .to_owned();
+            let efforts = model
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|effort| {
+                    Some(ReasoningEffortDescriptor {
+                        id: effort.get("reasoningEffort")?.as_str()?.to_owned(),
+                        description: effort
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect();
+            Some(ModelDescriptor {
+                id,
+                display_name,
+                efforts,
+                default_effort: model
+                    .get("defaultReasoningEffort")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            })
+        })
+        .collect()
 }
 
 /// Reads skills for the thread cwd. The direct `skills` array remains accepted for older peers.

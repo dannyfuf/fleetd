@@ -169,3 +169,23 @@ fn model_discovery_adopts_the_selected_models_declared_default_effort() {
         Some("deep")
     );
 }
+
+#[test]
+fn model_discovery_normalizes_effort_descriptions_and_the_declared_default() {
+    let descriptors = catalogue::model_descriptors(&[json!({
+        "id": "gpt-5.6-sol",
+        "displayName": "GPT-5.6 Sol",
+        "supportedReasoningEfforts": [
+            {"reasoningEffort": "low", "description": "Fast answers"},
+            {"reasoningEffort": "xhigh", "description": "Deep reasoning"},
+        ],
+        "defaultReasoningEffort": "low",
+    })]);
+
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].id, "gpt-5.6-sol");
+    assert_eq!(descriptors[0].display_name, "GPT-5.6 Sol");
+    assert_eq!(descriptors[0].default_effort.as_deref(), Some("low"));
+    assert_eq!(descriptors[0].efforts[1].id, "xhigh");
+    assert_eq!(descriptors[0].efforts[1].description, "Deep reasoning");
+}

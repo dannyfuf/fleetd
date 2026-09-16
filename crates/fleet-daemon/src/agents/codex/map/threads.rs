@@ -34,6 +34,7 @@ pub(in crate::agents::codex) fn started(session: &mut CodexSession, params: &Val
                 provider: AgentKind::Codex,
                 resume_cursor: Some(thread.id),
                 model: session.model_selection(),
+                models: super::super::catalogue::model_descriptors(&session.models),
                 mode: PermissionMode::default(),
                 tools: Vec::new(),
                 commands: Vec::new(),
@@ -98,6 +99,7 @@ pub(in crate::agents::codex) fn settings_updated(
         title: None,
         mode: None,
         model: session.model_selection(),
+        skills: None,
     })
 }
 
@@ -180,6 +182,7 @@ pub(in crate::agents::codex) fn name_updated(params: &Value) -> MapOutput {
         title: Some(title),
         mode: None,
         model: None,
+        skills: None,
     })
 }
 
