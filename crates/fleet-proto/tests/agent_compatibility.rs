@@ -96,6 +96,44 @@ fn agent_event_wire_goldens() {
     }
 }
 
+/// Additive `GateKind::Permission.item`: old fixtures omit it, while this golden pins the exact
+/// join key a new daemon sends to a new app.
+#[test]
+fn permission_gate_item_wire_golden() {
+    assert_frame(
+        seq(
+            27,
+            Some("item/fileChange/requestApproval"),
+            AgentEvent::GateOpened {
+                gate: gate(),
+                turn: Some(turn()),
+                kind: GateKind::Permission {
+                    item: Some(item()),
+                    tool: ToolKind::Edit,
+                    title: "Codex wants to apply a patch".to_owned(),
+                    payload: "apply the edit to README.md".to_owned(),
+                    rationale: None,
+                    options: vec![fleet_core::agents::PermissionOption {
+                        id: ProviderOptionId("accept".to_owned()),
+                        label: PermissionChoice::AllowOnce,
+                    }],
+                },
+            },
+        ),
+        r#"{"seq":27,"at":"2026-09-07T12:00:00Z","raw":"item/fileChange/requestApproval","event":{"type":"gate_opened","data":{"gate":"cccccccc-2222-4333-8444-555555555555","turn":"aaaaaaaa-2222-4333-8444-555555555555","kind":{"type":"permission","data":{"item":"bbbbbbbb-2222-4333-8444-555555555555","tool":{"type":"edit"},"title":"Codex wants to apply a patch","payload":"apply the edit to README.md","rationale":null,"options":[{"id":"accept","label":"allow_once"}]}}}}}"#,
+    );
+}
+
+#[test]
+fn legacy_permission_gate_defaults_the_additive_item() {
+    let gate: GateKind = serde_json::from_str(
+        r#"{"type":"permission","data":{"tool":{"type":"edit"},"title":"Apply patch","payload":"README.md","rationale":null,"options":[]}}"#,
+    )
+    .unwrap_or_else(|error| panic!("legacy permission gate: {error}"));
+
+    assert!(matches!(gate, GateKind::Permission { item: None, .. }));
+}
+
 #[test]
 fn every_agent_event_variant_has_a_persisted_payload_golden() {
     let goldens = seq_event_goldens();

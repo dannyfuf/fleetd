@@ -116,6 +116,7 @@ fn command_execution(session: &mut CodexSession, id: &Value, params: &Value) -> 
         session.available_decisions_seen = true;
     }
     let gate = gate_id(&request.thread_id, id);
+    let item = session.item_for(&request.thread_id, &request.item_id);
     // The payload is the command, read from `commandActions` where Codex parsed it and from the
     // raw command line only when it did not.
     let payload = request
@@ -144,6 +145,7 @@ fn command_execution(session: &mut CodexSession, id: &Value, params: &Value) -> 
             gate,
             turn: Some(session.turn_for(&request.turn_id)),
             kind: GateKind::Permission {
+                item: Some(item),
                 tool: ToolKind::Bash,
                 title,
                 payload,
@@ -162,13 +164,12 @@ fn file_change(session: &mut CodexSession, id: &Value, params: &Value) -> Approv
             Err(degraded) => return degraded_outcome(degraded),
         };
     let gate = gate_id(&request.thread_id, id);
+    let item = session.item_for(&request.thread_id, &request.item_id);
     let decisions: Vec<String> = DEFAULT_DECISIONS.iter().map(ToString::to_string).collect();
-    // No diff, no paths: the card joins on `itemId` and shows a loading state until the item
-    // arrives. `reason` is a rationale and is never rendered as the change.
-    let payload = session
-        .items
-        .get(&request.item_id)
-        .map_or_else(String::new, |item| item.to_string());
+    // The request itself carries no diff or paths. The human sentence comes from the cached
+    // `fileChange` item; if the request wins the race, the non-empty loading sentence remains
+    // until the exact item-id join supplies the diff.
+    let payload = session.file_change_payload(&request.item_id);
     session.open_gate(
         gate,
         PendingApproval {
@@ -184,6 +185,7 @@ fn file_change(session: &mut CodexSession, id: &Value, params: &Value) -> Approv
             gate,
             turn: Some(session.turn_for(&request.turn_id)),
             kind: GateKind::Permission {
+                item: Some(item),
                 tool: ToolKind::Edit,
                 title: "Codex wants to apply a patch".to_owned(),
                 payload,
@@ -275,6 +277,7 @@ fn permissions(session: &mut CodexSession, id: &Value, params: &Value) -> Approv
             Err(degraded) => return degraded_outcome(degraded),
         };
     let gate = gate_id(&request.thread_id, id);
+    let item = session.item_for(&request.thread_id, &request.item_id);
     let profile = serde_json::to_value(&request.permissions).unwrap_or(Value::Null);
     // A *negotiation*, not a yes/no: the client returns a possibly-narrowed profile. v1 offers
     // grant-as-asked and decline, and records the narrowing seam.
@@ -296,6 +299,7 @@ fn permissions(session: &mut CodexSession, id: &Value, params: &Value) -> Approv
             gate,
             turn: Some(session.turn_for(&request.turn_id)),
             kind: GateKind::Permission {
+                item: Some(item),
                 tool: ToolKind::Unknown {
                     name: "permissions".to_owned(),
                 },
@@ -362,6 +366,7 @@ fn elicitation(session: &mut CodexSession, id: &Value, params: &Value) -> Approv
             gate,
             turn: None,
             kind: GateKind::Permission {
+                item: None,
                 tool: ToolKind::Mcp {
                     server: app.clone(),
                 },

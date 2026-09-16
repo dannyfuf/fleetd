@@ -182,6 +182,7 @@ fn fixture() -> Fixture {
             gate,
             turn: Some(turn),
             kind: GateKind::Permission {
+                item: None,
                 tool: ToolKind::Bash,
                 title: "Run ls".to_owned(),
                 payload: "ls crates".to_owned(),

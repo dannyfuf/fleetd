@@ -185,6 +185,7 @@ fn complete_turn(
 
 fn permission_gate() -> GateKind {
     GateKind::Permission {
+        item: None,
         tool: ToolKind::Bash,
         title: "Run command?".to_owned(),
         payload: "cargo test".to_owned(),

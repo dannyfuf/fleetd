@@ -8,6 +8,7 @@
 //! not revert local file changes"*, and Fleet's revert is git-based.
 
 pub mod approvals;
+mod catalogue;
 pub mod envelope;
 pub(crate) mod map;
 pub mod methods;
@@ -33,6 +34,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use self::{
+    catalogue::{model_catalogue, skill_names},
     params::{compact_params, interrupt_params, settings_params},
     session::{ApprovalShape, CodexSession, TurnControls},
     transport::Transport,
@@ -53,6 +55,7 @@ const CHILD_INTERRUPT_DEADLINE: Duration = Duration::from_secs(3);
 const INTERRUPT_FANOUT_DEADLINE: Duration = Duration::from_secs(10);
 const PARENT_INTERRUPT_DEADLINE: Duration = Duration::from_secs(5);
 const SETTINGS_DEADLINE: Duration = Duration::from_secs(5);
+const CATALOGUE_DEADLINE: Duration = Duration::from_secs(10);
 const COMPACT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How many child interrupts run at once.
@@ -219,6 +222,7 @@ impl Harness for CodexHarness {
         let controls = TurnControls::from_mode(req.start.mode);
         {
             let mut session = self.session.lock().await;
+            session.worktree_path = Some(req.start.worktree_path.clone());
             session.controls = TurnControls {
                 model: req.start.model.as_ref().map(|model| model.model.clone()),
                 effort: req
@@ -370,16 +374,49 @@ impl Harness for CodexHarness {
             .or_else(|| thread.get("model"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        {
+            let mut session = self.session.lock().await;
+            session.root = Some(thread_id.clone());
+            // Adopt `cwd` and `model` **from the response**: Codex may normalise or override what
+            // the request asked for, and Fleet records what came back.
+            if model.is_some() {
+                session.controls.model = model;
+            }
+        }
+        // Discovery happens after the thread exists because skills are cwd-scoped. Both reads
+        // complete before `SessionConfigured`, so the first durable session row is useful rather
+        // than an empty placeholder. Model pagination follows `nextCursor`; no ladder is guessed.
+        let models = match model_catalogue(&transport).await {
+            Ok(models) => models,
+            Err(error) if !error.is_fatal() => {
+                tracing::warn!(
+                    target: "fleet::agents::codex",
+                    %error,
+                    "Codex model discovery failed; model controls remain narrow"
+                );
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+        let skills = match skill_names(&transport, &req.start.worktree_path, false).await {
+            Ok(skills) => skills,
+            Err(error) if !error.is_fatal() => {
+                tracing::warn!(
+                    target: "fleet::agents::codex",
+                    %error,
+                    "Codex skill discovery failed; skill completion remains empty"
+                );
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
         self.transport = Some(transport);
         let mut session = self.session.lock().await;
-        session.root = Some(thread_id.clone());
-        // Adopt `cwd` and `model` **from the response**: Codex may normalise or override what
-        // the request asked for, and Fleet records what came back.
-        if model.is_some() {
-            session.controls.model = model;
-        }
+        session.install_models(models);
+        session.install_skills(skills);
         self.capabilities = session.capabilities();
         let selection = session.model_selection();
+        let skills = session.skills.clone();
         drop(session);
         transport::emit(
             &self.events,
@@ -390,7 +427,7 @@ impl Harness for CodexHarness {
                 mode: req.start.mode,
                 tools: Vec::new(),
                 commands: Vec::new(),
-                skills: Vec::new(),
+                skills,
             },
             Some("thread/start"),
         );
@@ -425,10 +462,6 @@ impl Harness for CodexHarness {
         // echo comes back under it, and the optimistic bubble the app already drew is the same
         // row for its whole life (§9.4).
         let user_item = req.input.item.unwrap_or_default();
-        {
-            let mut session = self.session.lock().await;
-            session.remember_user_item(req.turn, user_item);
-        }
         let transport = self.transport()?;
         let params = self.turn_params(&thread, &req.input, user_item, &controls);
 
@@ -451,7 +484,7 @@ impl Harness for CodexHarness {
                 Ok(_) => {
                     let mut session = self.session.lock().await;
                     let turn = session.turn_for(&active);
-                    session.remember_user_item(turn, user_item);
+                    session.remember_user_item(turn, user_item, &req.input.text);
                     return Ok(Submitted { turn, queued: true });
                 }
                 Err(error) if is_not_steerable(&error) => {
@@ -465,9 +498,24 @@ impl Harness for CodexHarness {
             }
         }
 
-        let result = transport
+        // Register the caller's id before writing. The response and `turn/started` may be in one
+        // stdout burst, and the reader is allowed to map the notification before this future is
+        // polled again after its response waiter resolves.
+        {
+            let mut session = self.session.lock().await;
+            session.remember_user_item(req.turn, user_item, &req.input.text);
+            session.begin_turn(req.turn);
+        }
+        let result = match transport
             .request("turn/start", Some(params), TURN_DEADLINE)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                self.session.lock().await.rollback_turn_start(req.turn);
+                return Err(error);
+            }
+        };
         let provider_turn = result
             .pointer("/turn/id")
             .and_then(Value::as_str)
@@ -479,14 +527,14 @@ impl Harness for CodexHarness {
             session.alias_turn(&provider_turn, req.turn);
         }
         let queued = session.active_turn.is_some() && session.active_turn != Some(req.turn);
-        if !queued {
-            session.begin_turn(req.turn);
+        let already_running = session.active_turn == Some(req.turn);
+        if !queued && !already_running {
             session.adopt_turn(req.turn, &provider_turn);
         }
         drop(session);
         // `turn/started` follows and is authoritative; announcing the turn here is what keeps the
         // composer honest when the notification is a few milliseconds behind the response.
-        if !queued {
+        if !queued && !already_running {
             transport::emit(
                 &self.events,
                 AgentEvent::TurnStarted {
