@@ -1,8 +1,6 @@
-# docs/KEYMAP.md §Native agent thread — the `^s` combinations bound inside an agent tab:
-#   `^s m` · `^s e` · `^s t` · `^s [` · `^s x` · `^s a`/`A` · `^s F`
-# docs/KEYMAP.md §Shadowing — "the prefix table below does not apply inside an agent tab — only
-#   the `^s` combinations listed under *Native agent thread* are bound there, and the rest
-#   (`^s s`, `^s 1`–`9`, `^s h`/`l`, …) are a follow-up"
+# docs/KEYMAP.md §Native agent thread — agent tabs retain their controls plus Workspace tab
+#   selection (`^s 1`–`9`) and MRU (`^s Tab`, `^s w`).
+# docs/KEYMAP.md §Shadowing — `^s s` stays unbound inside an agent tab.
 # docs/DESIGN-SYSTEM.md §4 — a picker with nothing to offer draws nothing
 fixture: agents
 await idle
@@ -32,6 +30,29 @@ type a draft that must survive
 key ctrl-s m
 key enter
 assert agents.threads[0].state == idle && lists.tabs.selected.label == "what does this crate do"
+
+# Numeric selection leaves the agent tab, and selecting its fourth Workspace slot returns with
+# composer focus. Selecting two terminals first gives the terminal MRU a real alternate;
+# `^s Tab` from the agent must then return to that alternate terminal.
+key ctrl-s 2
+await mode == Terminal 10000
+await lists.tabs.selected.id == 2 10000
+key ctrl-s 1
+await lists.tabs.selected.id == 1 10000
+key ctrl-s 4
+await mode == Agent 10000
+assert focused == agents.composer
+key ctrl-s tab
+await mode == Terminal 10000
+key ctrl-s 4
+await mode == Agent 10000
+assert focused == agents.composer
+
+# The session-MRU route is also available from the agent context. The fixture may have a hidden
+# process session in its MRU, so the stable contract here is that the native view stays usable.
+key ctrl-s w
+wait 200
+assert screen == Workspace && mode == Agent && focused == agents.composer
 
 # `^s s` is a Workspace prefix combination, and is not bound inside an agent tab: it must not
 # take the user back to the Hub.

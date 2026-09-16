@@ -15,6 +15,7 @@ lane=${LANE:-virtual}
 here=$(dirname "$0")
 status=0
 for scenario in "$here"/*.expected-to-fail; do
+    [ -e "$scenario" ] || continue
     if "$harness" run "$scenario" --lane "$lane" >/dev/null 2>&1; then
         echo "PASSES NOW — flip it to a .scenario and close its TODO entry: $scenario"
         status=1
