@@ -243,6 +243,8 @@ pub(super) fn mark_seen(
 /// is sent for every thread rather than only for the tab that is being shown — a tab the user
 /// never revisits would otherwise keep its dot forever.
 pub(super) fn resend_seen_cursors(bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
+    let persisted = bridge.agent_seen_cursors();
+    state.update(cx, |app, _| app.agents.seed_seen(&persisted));
     let stale = state.read(cx).agents.stale_seen();
     if stale.is_empty() {
         return;

@@ -4,11 +4,13 @@ use crate::{
     presentation::EventDamage,
     state::{AppState, DaemonLink},
 };
+use fleet_client::MirrorOutcome;
+use fleet_core::agents::{Applied, SeqEvent, ThreadId};
 use fleet_core::ids::TerminalId;
 use fleet_proto::request::RequestBody;
 use gpui::{App, Context, Entity, Task};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -32,12 +34,27 @@ fn is_terminal_only(damage: EventDamage) -> bool {
 struct BatchDamage {
     state: bool,
     nudged: bool,
+    agent_text: HashMap<ThreadId, Vec<Applied>>,
     terminals: HashSet<TerminalId>,
     recover: HashSet<TerminalId>,
 }
 
 impl BatchDamage {
     fn apply(&mut self, state: &mut AppState, event: BridgeEvent, now: Instant) {
+        let event = match event {
+            BridgeEvent::Agent { thread, event } => {
+                self.apply_agent(state, thread, &event, now);
+                return;
+            }
+            BridgeEvent::Daemon(event) => match *event {
+                fleet_proto::event::Event::Agent { thread, event } => {
+                    self.apply_agent(state, thread, &event, now);
+                    return;
+                }
+                event => BridgeEvent::Daemon(Box::new(event)),
+            },
+            event => event,
+        };
         if matches!(event, BridgeEvent::Nudge) {
             self.nudged = true;
             return;
@@ -86,6 +103,27 @@ impl BatchDamage {
         // only their own mirror, preserving each ordered delta before issuing recovery.
         if lagged {
             self.recover.extend(state.grids.keys().copied());
+        }
+    }
+
+    fn apply_agent(
+        &mut self,
+        state: &mut AppState,
+        thread: ThreadId,
+        event: &SeqEvent,
+        now: Instant,
+    ) {
+        match state.apply_agent_event(thread, event) {
+            MirrorOutcome::Applied(applied @ Applied::Text { .. }) => {
+                self.agent_text.entry(thread).or_default().push(applied);
+            }
+            MirrorOutcome::Applied(Applied::Structural)
+            | MirrorOutcome::Duplicate { .. }
+            | MirrorOutcome::Gap { .. }
+            | MirrorOutcome::Rejected { .. } => {
+                self.state = true;
+                state.notify_agent_attention(now);
+            }
         }
     }
 
@@ -166,12 +204,18 @@ impl Shell {
                     }
                     let terminal_update =
                         !damage.state && damage.affects_visible_terminal(shell.state.read(cx));
+                    if !damage.agent_text.is_empty() {
+                        shell
+                            .workspace
+                            .sync_agent_text(&shell.state, &damage.agent_text, cx);
+                    }
                     if damage.state {
                         shell.reconcile_agent_session(cx);
                     }
                     tracing::trace!(
                         events = count,
                         recovery = damage.recover.len(),
+                        agent_text = damage.agent_text.values().map(Vec::len).sum::<usize>(),
                         state_notify = damage.state,
                         "applied bridge batch"
                     );
@@ -224,6 +268,13 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screens::agent_thread::AgentThreadView;
+    use fleet_core::{
+        agents::{
+            AgentEvent, AgentKind, ItemId, ItemKind, ItemStatus, Seq, ThreadProjection, TurnId,
+        },
+        ids::WorktreeId,
+    };
     use fleet_proto::{
         event::Event,
         snapshot::{DaemonInfo, Snapshot},
@@ -280,6 +331,44 @@ mod tests {
                 home: String::new(),
             },
         }
+    }
+
+    fn streaming_projection() -> (ThreadProjection, ItemId) {
+        let thread = ThreadId::new();
+        let turn = TurnId::new();
+        let item = ItemId::new();
+        let worktree =
+            WorktreeId::try_from("fleet/app#streaming").unwrap_or_else(|error| panic!("{error}"));
+        let mut projection = ThreadProjection::new(thread, worktree, AgentKind::Claude);
+        for event in [
+            SeqEvent {
+                seq: Seq(1),
+                at: chrono::DateTime::UNIX_EPOCH,
+                raw: None,
+                event: AgentEvent::TurnStarted {
+                    turn,
+                    user_item: ItemId::new(),
+                },
+            },
+            SeqEvent {
+                seq: Seq(2),
+                at: chrono::DateTime::UNIX_EPOCH,
+                raw: None,
+                event: AgentEvent::ItemStarted {
+                    turn,
+                    item,
+                    kind: ItemKind::AssistantText {
+                        text: "a".to_owned(),
+                    },
+                    parent: None,
+                },
+            },
+        ] {
+            projection
+                .apply(&event)
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        (projection, item)
     }
 
     #[test]
@@ -380,6 +469,97 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        assert_eq!(notifications.get(), 1);
+    }
+
+    #[gpui::test]
+    fn one_hundred_text_deltas_skip_app_state_and_patch_one_row_each(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(fleet_ui_kit::Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (projection, item) = streaming_projection();
+        let thread = projection.thread;
+        let view = cx.new(|cx| AgentThreadView::new(projection.clone(), cx));
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet-agent-text", Instant::now());
+            state.agents.install_snapshot(projection, &[]);
+            state
+        });
+        let notifications = Rc::new(std::cell::Cell::new(0));
+        let count = Rc::clone(&notifications);
+        let _subscription =
+            cx.update(|cx| cx.observe(&state, move |_, _| count.set(count.get() + 1)));
+        let events = (0..100).map(|offset| BridgeEvent::Agent {
+            thread,
+            event: SeqEvent {
+                seq: Seq(3 + offset),
+                at: chrono::DateTime::UNIX_EPOCH,
+                raw: None,
+                event: AgentEvent::ContentDelta {
+                    item,
+                    stream: fleet_core::agents::StreamKind::AssistantText,
+                    delta: "x".to_owned(),
+                },
+            },
+        });
+        let damage = cx.update(|cx| apply_batch(&state, events, cx));
+        cx.run_until_parked();
+        assert!(!damage.state);
+        assert_eq!(notifications.get(), 0);
+        assert_eq!(damage.agent_text[&thread].len(), 100);
+
+        state.update(cx, |app, cx| {
+            let projection = app
+                .agents
+                .projection(thread)
+                .unwrap_or_else(|| panic!("streaming projection must remain installed"));
+            view.update(cx, |view, cx| {
+                view.sync_batch(projection, &damage.agent_text[&thread], cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 0);
+        assert_eq!(view.read_with(cx, |view, _| view.patched_rows()), 100);
+    }
+
+    #[gpui::test]
+    fn a_structural_agent_event_still_notifies_app_state(cx: &mut gpui::TestAppContext) {
+        let (projection, item) = streaming_projection();
+        let thread = projection.thread;
+        let state = cx.new(|_| {
+            let mut state = AppState::new("/tmp/fleet-agent-structural", Instant::now());
+            state.agents.install_snapshot(projection, &[]);
+            state
+        });
+        let notifications = Rc::new(std::cell::Cell::new(0));
+        let count = Rc::clone(&notifications);
+        let _subscription =
+            cx.update(|cx| cx.observe(&state, move |_, _| count.set(count.get() + 1)));
+
+        let damage = cx.update(|cx| {
+            apply_batch(
+                &state,
+                [BridgeEvent::Agent {
+                    thread,
+                    event: SeqEvent {
+                        seq: Seq(3),
+                        at: chrono::DateTime::UNIX_EPOCH,
+                        raw: None,
+                        event: AgentEvent::ItemCompleted {
+                            item,
+                            status: ItemStatus::Completed,
+                        },
+                    },
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(damage.state);
+        assert!(damage.agent_text.is_empty());
         assert_eq!(notifications.get(), 1);
     }
 

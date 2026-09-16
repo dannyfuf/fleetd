@@ -180,7 +180,7 @@ impl AgentThreadView {
                     .h(theme.metrics.row_h)
                     .px(theme.space.sm)
                     .when(index == highlight, |el| el.bg(theme.colors.row_selected))
-                    .child(Text::ui(row.to_owned()))
+                    .child(Text::ui(row.label.clone()))
             })
             .collect();
         Some(

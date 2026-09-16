@@ -1,23 +1,114 @@
 //! The wiring only an entity graph can show: what a stream chunk splices, which frame a gate
 //! takes the keyboard in, the `esc` cascade, scroll mode, and what a closed tab releases.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use fleet_core::agents::{
-    GateAnswer, ItemStatus, PermissionChoice, SessionState, ToolKind, TurnId, TurnOutcome,
-    TurnState,
+    AgentKind, Applied, GateAnswer, ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice,
+    ReasoningEffortDescriptor, SessionState, StreamKind, ToolKind, TurnId, TurnOutcome, TurnState,
 };
 use fleet_ui_kit::{TranscriptRowId, TranscriptRowKind};
 use gpui::{AppContext as _, EntityInputHandler as _, TestAppContext};
 
 use super::fixtures::{
-    assistant, command, permission_gate, projection, question, question_gate, running_turn,
+    assistant, command, edit, permission_gate, projection, question, question_gate, running_turn,
     settled_turn, tool, user,
 };
 use crate::{
     bridge::BridgeCommand,
-    screens::agent_thread::{AgentThreadEvent, AgentThreadView, composer::ComposerMode},
+    screens::agent_thread::{
+        AgentThreadEvent, AgentThreadView, composer::ComposerMode, picker::PickerKind,
+    },
 };
+
+#[gpui::test]
+fn codex_effort_picker_uses_discovered_descriptions_and_empty_catalogues_draw_nothing(
+    cx: &mut TestAppContext,
+) {
+    let mut codex = projection();
+    codex.provider = AgentKind::Codex;
+    codex.model = Some(ModelSelection {
+        model: "gpt-5.6-sol".to_owned(),
+        effort: Some("high".to_owned()),
+        provider: None,
+    });
+    codex.models = vec![ModelDescriptor {
+        id: "gpt-5.6-sol".to_owned(),
+        display_name: "GPT-5.6 Sol".to_owned(),
+        efforts: vec![ReasoningEffortDescriptor {
+            id: "xhigh".to_owned(),
+            description: "Deep reasoning".to_owned(),
+        }],
+        default_effort: Some("high".to_owned()),
+    }];
+    let described = cx.new(|cx| AgentThreadView::new(codex, cx));
+    described.update(cx, |view, cx| view.open_picker(PickerKind::Traits, cx));
+    described.read_with(cx, |view, _| {
+        let labels: Vec<&str> = view
+            .picker
+            .as_ref()
+            .into_iter()
+            .flat_map(|picker| picker.matches())
+            .map(|candidate| candidate.label.as_str())
+            .collect();
+        assert_eq!(labels, ["xhigh · Deep reasoning"]);
+    });
+
+    let mut pick_default = projection();
+    pick_default.provider = AgentKind::Codex;
+    pick_default.model = Some(ModelSelection {
+        model: "older-model".to_owned(),
+        effort: Some("medium".to_owned()),
+        provider: None,
+    });
+    pick_default.models = described.read_with(cx, |view, _| view.projection.models.clone());
+    let pick_default = cx.new(|cx| AgentThreadView::new(pick_default, cx));
+    pick_default.update(cx, |view, cx| {
+        view.open_picker(PickerKind::Models, cx);
+        view.send(cx);
+    });
+    pick_default.read_with(cx, |view, _| {
+        let picked = view
+            .controls
+            .model()
+            .unwrap_or_else(|| panic!("the discovered model should be selected"));
+        assert_eq!(picked.model, "gpt-5.6-sol");
+        assert_eq!(picked.effort.as_deref(), Some("high"));
+    });
+
+    let empty = cx.new(|cx| AgentThreadView::new(projection(), cx));
+    empty.update(cx, |view, cx| view.open_picker(PickerKind::Traits, cx));
+    empty.read_with(cx, |view, _| assert!(view.picker.is_none()));
+}
+
+#[gpui::test]
+fn decision_observable_comes_from_the_prepared_drawer_and_joined_item(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let turn = TurnId::new();
+    let mut changed = edit(turn, ItemStatus::InProgress, "README.md");
+    if let fleet_core::agents::ItemKind::Tool(call) = &mut changed.kind {
+        call.input = serde_json::json!({"paths": ["README.md"]});
+    }
+    let mut gate = permission_gate("apply README.md", &[PermissionChoice::AllowOnce]);
+    if let fleet_core::agents::GateKind::Permission { item, .. } = &mut gate.kind {
+        *item = Some(changed.id);
+    }
+    let mut projection = projection();
+    projection.provider = AgentKind::Codex;
+    projection.items = vec![changed];
+    projection.gates = vec![gate];
+
+    let view = cx.new(|cx| AgentThreadView::new(projection, cx));
+    view.read_with(cx, |view, _| {
+        let decision = view
+            .decision_observable()
+            .unwrap_or_else(|| panic!("the prepared decision should be observable"));
+        assert_eq!(decision.kind, "permission");
+        assert_eq!(decision.paths, ["README.md"]);
+        assert!(decision.has_diff);
+        assert!(decision.title.contains("codex"));
+    });
+}
 
 /// Collects every command a view emits, so a test asserts on the wire and not on a mock.
 fn recorder(
@@ -132,6 +223,10 @@ fn a_message_sent_while_a_turn_runs_is_dispatched_immediately(cx: &mut TestAppCo
 
 #[gpui::test]
 fn streaming_a_delta_rewrites_one_row_and_reuses_every_other(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        cx.set_reduce_motion(true);
+    });
     let turn = TurnId::new();
     let prompt = user(turn, "go");
     let mut base = projection();
@@ -155,7 +250,12 @@ fn streaming_a_delta_rewrites_one_row_and_reuses_every_other(cx: &mut TestAppCon
     };
     next.items[2] = prose;
     next.last_seq = fleet_core::agents::Seq(10);
-    view.update(cx, |view, cx| view.sync(&next, cx));
+    let applied = Applied::Text {
+        item: next.items[2].id,
+        stream: StreamKind::AssistantText,
+        appended: 3..10,
+    };
+    view.update(cx, |view, cx| view.sync(&next, &applied, cx));
 
     let after = view.read_with(cx, |view, _| view.rows().to_vec());
     assert_eq!(before.len(), after.len(), "no row was added or removed");
@@ -176,9 +276,68 @@ fn streaming_a_delta_rewrites_one_row_and_reuses_every_other(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn reveal_buffer_advances_on_the_theme_tick_and_finishes_within_one_horizon(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let turn = TurnId::new();
+    let prose = assistant(turn, "a", ItemStatus::InProgress);
+    let item = prose.id;
+    let mut base = projection();
+    base.items = vec![prose];
+    base.last_seq = fleet_core::agents::Seq(1);
+    let view = cx.new(|cx| AgentThreadView::new(base.clone(), cx));
+
+    let mut next = base;
+    next.items[0].kind = fleet_core::agents::ItemKind::AssistantText {
+        text: "abcdefghijklmn".to_owned(),
+    };
+    next.last_seq = fleet_core::agents::Seq(2);
+    let applied = Applied::Text {
+        item,
+        stream: StreamKind::AssistantText,
+        appended: 1..14,
+    };
+    view.update(cx, |view, cx| view.sync(&next, &applied, cx));
+    view.read_with(cx, |view, _| {
+        let TranscriptRowKind::Assistant(row) = &view.rows()[0].kind else {
+            panic!("the stream must remain an assistant row");
+        };
+        assert_eq!(*row.markdown, fleet_ui_kit::parse_markdown_document("a"));
+    });
+
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        let TranscriptRowKind::Assistant(row) = &view.rows()[0].kind else {
+            panic!("the stream must remain an assistant row");
+        };
+        assert_eq!(*row.markdown, fleet_ui_kit::parse_markdown_document("abc"));
+    });
+
+    for _ in 0..12 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+    view.read_with(cx, |view, _| {
+        let TranscriptRowKind::Assistant(row) = &view.rows()[0].kind else {
+            panic!("the stream must remain an assistant row");
+        };
+        assert_eq!(
+            *row.markdown,
+            fleet_ui_kit::parse_markdown_document("abcdefghijklmn")
+        );
+    });
+}
+
+#[gpui::test]
 fn streaming_command_output_patches_its_row_without_reallocating_the_row_slice(
     cx: &mut TestAppContext,
 ) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        cx.set_reduce_motion(true);
+    });
     let turn = TurnId::new();
     let mut command = command(turn, ItemStatus::InProgress, "cargo test");
     if let fleet_core::agents::ItemKind::Tool(call) = &mut command.kind {
@@ -197,7 +356,12 @@ fn streaming_command_output_patches_its_row_without_reallocating_the_row_slice(
     }
     next.items[0] = command;
     next.last_seq = fleet_core::agents::Seq(21);
-    view.update(cx, |view, cx| view.sync(&next, cx));
+    let applied = Applied::Text {
+        item: next.items[0].id,
+        stream: StreamKind::CommandOutput,
+        appended: 19..29,
+    };
+    view.update(cx, |view, cx| view.sync(&next, &applied, cx));
 
     view.read_with(cx, |view, _| {
         assert_eq!(view.rows().as_ptr(), before);
@@ -214,6 +378,10 @@ fn streaming_command_output_patches_its_row_without_reallocating_the_row_slice(
 
 #[gpui::test]
 fn command_output_hidden_by_the_live_row_skips_a_structural_rebuild(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        cx.set_reduce_motion(true);
+    });
     let turn = TurnId::new();
     let prompt = user(turn, "run it");
     let mut running = command(turn, ItemStatus::InProgress, "cargo test");
@@ -233,7 +401,12 @@ fn command_output_hidden_by_the_live_row_skips_a_structural_rebuild(cx: &mut Tes
     let mut next = base;
     next.items[1] = running;
     next.last_seq = fleet_core::agents::Seq(31);
-    view.update(cx, |view, cx| view.sync(&next, cx));
+    let applied = Applied::Text {
+        item: next.items[1].id,
+        stream: StreamKind::CommandOutput,
+        appended: 0..21,
+    };
+    view.update(cx, |view, cx| view.sync(&next, &applied, cx));
 
     view.read_with(cx, |view, _| {
         assert_eq!(view.rows().as_ptr(), before);
@@ -258,7 +431,7 @@ fn a_gate_moves_the_composer_mode_in_the_same_frame(cx: &mut TestAppContext) {
     let mut next = base.clone();
     next.gates = vec![gate];
     next.last_seq = fleet_core::agents::Seq(2);
-    view.update(cx, |view, cx| view.sync(&next, cx));
+    view.update(cx, |view, cx| view.sync(&next, &Applied::Structural, cx));
 
     // Derived from daemon state, not from the view, which is why it lands in this frame and not
     // one frame later.
@@ -298,7 +471,7 @@ fn a_bare_key_answers_the_open_approval_and_leaves_a_record(cx: &mut TestAppCont
     let mut next = base.clone();
     next.gates.clear();
     next.last_seq = fleet_core::agents::Seq(2);
-    view.update(cx, |view, cx| view.sync(&next, cx));
+    view.update(cx, |view, cx| view.sync(&next, &Applied::Structural, cx));
     view.read_with(cx, |view, _| {
         let record = view.rows().iter().find_map(|row| match &row.kind {
             TranscriptRowKind::Gate(row) => Some(row.label.to_string()),
@@ -418,6 +591,7 @@ fn escape_on_an_idle_thread_interrupts_nothing(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn stopping_is_held_until_the_daemon_reports_liveness_cleared(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
     let turn = TurnId::new();
     let prompt = user(turn, "go");
     let mut running = projection();
@@ -434,7 +608,7 @@ fn stopping_is_held_until_the_daemon_reports_liveness_cleared(cx: &mut TestAppCo
     // A projection that still reports the turn running keeps `stopping…` on.
     let mut same = running.clone();
     same.last_seq = fleet_core::agents::Seq(5);
-    view.update(cx, |view, cx| view.sync(&same, cx));
+    view.update(cx, |view, cx| view.sync(&same, &Applied::Structural, cx));
     view.read_with(cx, |view, _| assert!(view.is_stopping()));
 
     let mut settled = running;
@@ -442,7 +616,7 @@ fn stopping_is_held_until_the_daemon_reports_liveness_cleared(cx: &mut TestAppCo
     settled.turn = TurnState::Settled(turn, TurnOutcome::Interrupted);
     settled.session = SessionState::Ready;
     settled.last_seq = fleet_core::agents::Seq(6);
-    view.update(cx, |view, cx| view.sync(&settled, cx));
+    view.update(cx, |view, cx| view.sync(&settled, &Applied::Structural, cx));
     view.read_with(cx, |view, _| assert!(!view.is_stopping()));
 }
 
@@ -628,7 +802,7 @@ fn an_optimistic_bubble_is_reconciled_by_the_projection(cx: &mut TestAppContext)
     next.turns = vec![running_turn(turn, echoed.id)];
     next.turn = TurnState::Running(turn);
     next.last_seq = fleet_core::agents::Seq(2);
-    view.update(cx, |view, cx| view.sync(&next, cx));
+    view.update(cx, |view, cx| view.sync(&next, &Applied::Structural, cx));
 
     view.read_with(cx, |view, _| {
         assert_eq!(

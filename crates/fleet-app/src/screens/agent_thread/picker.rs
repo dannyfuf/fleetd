@@ -69,13 +69,40 @@ impl PickerKind {
 /// How many rows a picker shows, which is what keeps it small enough to sit over the composer.
 pub(crate) const VISIBLE: usize = 6;
 
+/// One picker row: the provider-owned value to apply and the human-readable label to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PickerCandidate {
+    value: String,
+    pub(crate) label: String,
+}
+
+impl PickerCandidate {
+    /// A row whose value is already its display label.
+    pub(crate) fn plain(value: String) -> Self {
+        Self {
+            label: value.clone(),
+            value,
+        }
+    }
+
+    /// A row whose provider description is visible without changing the accepted value.
+    pub(crate) fn described(value: String, description: &str) -> Self {
+        let label = if description.trim().is_empty() {
+            value.clone()
+        } else {
+            format!("{value} · {description}")
+        };
+        Self { value, label }
+    }
+}
+
 /// One open completion surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Picker {
     /// What is being completed.
     pub(crate) kind: PickerKind,
     /// Every candidate, unfiltered.
-    candidates: Vec<String>,
+    candidates: Vec<PickerCandidate>,
     /// The highlighted row within the filtered list.
     highlight: usize,
     /// The substring typed after the trigger.
@@ -84,7 +111,7 @@ pub(crate) struct Picker {
 
 impl Picker {
     /// Opens a picker over `candidates`.
-    pub(crate) fn new(kind: PickerKind, candidates: Vec<String>) -> Self {
+    pub(crate) fn new(kind: PickerKind, candidates: Vec<PickerCandidate>) -> Self {
         Self {
             kind,
             candidates,
@@ -102,14 +129,21 @@ impl Picker {
     }
 
     /// The rows currently shown, longest-prefix matches first.
-    pub(crate) fn matches(&self) -> Vec<&str> {
+    pub(crate) fn matches(&self) -> Vec<&PickerCandidate> {
         let query = self.query.to_ascii_lowercase();
         self.candidates
             .iter()
             .filter(|candidate| {
-                query.is_empty() || candidate.to_ascii_lowercase().contains(query.as_str())
+                query.is_empty()
+                    || candidate
+                        .value
+                        .to_ascii_lowercase()
+                        .contains(query.as_str())
+                    || candidate
+                        .label
+                        .to_ascii_lowercase()
+                        .contains(query.as_str())
             })
-            .map(String::as_str)
             .take(VISIBLE)
             .collect()
     }
@@ -146,7 +180,7 @@ impl Picker {
     pub(crate) fn accepted(&self) -> Option<SharedString> {
         self.matches()
             .get(self.highlight)
-            .map(|row| SharedString::from((*row).to_owned()))
+            .map(|row| SharedString::from(row.value.clone()))
     }
 
     /// Whether the picker has anything to show.

@@ -1,6 +1,7 @@
 use super::*;
 
 mod requests;
+mod streaming;
 
 use requests::{
     close_agent_tab, load_older_page, mark_seen, open_in_editor, open_terminal_fallback,
@@ -17,7 +18,7 @@ use crate::{
     views::workspace_tabs::TabTarget,
 };
 use fleet_core::{
-    agents::{AgentKind, AgentThreadSummary, PermissionMode, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, Applied, PermissionMode, ThreadId},
     ids::WorktreeId,
 };
 
@@ -237,13 +238,14 @@ impl WorkspaceScreen {
         };
         let known = self.agent_views.borrow().contains_key(&thread);
         if !known {
-            let Some(projection) = state
-                .read(cx)
-                .agents
-                .projection(thread)
-                .cloned()
-                .or_else(|| starting_projection(state.read(cx), thread))
-            else {
+            let projection = if let Some(projection) = state.read(cx).agents.projection(thread) {
+                // A newly mounted view needs its initial owned presentation projection. Every
+                // subsequent text update is borrowed and suffix-only below.
+                Some(projection.clone())
+            } else {
+                starting_projection(state.read(cx), thread)
+            };
+            let Some(projection) = projection else {
                 return;
             };
             let view = cx.new(|cx| AgentThreadView::new(projection, cx));
@@ -295,21 +297,19 @@ impl WorkspaceScreen {
         };
         // The mirror is authoritative; the view adopts it and moves only the rows a stream
         // touched, so a fast model does not rebuild the transcript per token (§5).
-        let (projection, commands, skills) = {
-            let app = state.read(cx);
-            (
-                app.agents.projection(thread).cloned(),
-                app.agents.commands(thread),
-                app.agents.skills(thread),
-            )
-        };
-        if let Some(projection) = projection {
-            view.update(cx, |view, cx| {
-                view.set_commands(commands);
-                view.set_skills(skills);
-                view.sync(&projection, cx);
-            });
-        }
+        state.update(cx, |app, cx| {
+            let structural = Applied::Structural;
+            let applied = app.agents.last_applied(thread).unwrap_or(&structural);
+            let commands = app.agents.commands(thread);
+            let skills = app.agents.skills(thread);
+            if let Some(projection) = app.agents.projection(thread) {
+                view.update(cx, |view, cx| {
+                    view.set_commands(commands);
+                    view.set_skills(skills);
+                    view.sync(projection, applied, cx);
+                });
+            }
+        });
         // P3-T04: the thread states the machine it runs on, and a link the daemon reports as
         // `Down` is what stands the composer down instead of letting a send fail on submit.
         let host = model.host.as_ref().map(|(name, reachability)| ThreadHost {
@@ -655,6 +655,63 @@ impl WorkspaceScreen {
         root = on_decision!(root, native_agent::Implement, "y");
         root = on_decision!(root, native_agent::Refine, "n");
 
+        macro_rules! select_tab {
+            ($root:expr, $action:ty, $position:expr) => {{
+                let (local, bridge, state) = self.handles(bridge, state);
+                $root.on_action(move |_: &$action, _window, cx| {
+                    let target = {
+                        let app = state.read(cx);
+                        app.active_session().and_then(|session| {
+                            let agents = threads_of(app, session);
+                            workspace_tabs::target_at(session, &agents, $position)
+                        })
+                    };
+                    select_target(&local, &bridge, &state, target, cx);
+                })
+            }};
+        }
+        root = select_tab!(root, native_agent::SelectTab1, 0);
+        root = select_tab!(root, native_agent::SelectTab2, 1);
+        root = select_tab!(root, native_agent::SelectTab3, 2);
+        root = select_tab!(root, native_agent::SelectTab4, 3);
+        root = select_tab!(root, native_agent::SelectTab5, 4);
+        root = select_tab!(root, native_agent::SelectTab6, 5);
+        root = select_tab!(root, native_agent::SelectTab7, 6);
+        root = select_tab!(root, native_agent::SelectTab8, 7);
+        root = select_tab!(root, native_agent::SelectTab9, 8);
+        let (local, tab_bridge, tab_state) = self.handles(bridge, state);
+        root = root.on_action(move |_: &native_agent::LastTab, _window, cx| {
+            let terminal = {
+                let app = tab_state.read(cx);
+                app.active_session().and_then(|session| {
+                    app.terminal_mru
+                        .get(&session.id)
+                        .and_then(|mru| mru.alternate().copied())
+                })
+            };
+            select_target(
+                &local,
+                &tab_bridge,
+                &tab_state,
+                terminal.map(TabTarget::Terminal),
+                cx,
+            );
+        });
+        let (local, session_bridge, session_state) = self.handles(bridge, state);
+        root = root.on_action(move |_: &native_agent::LastSession, _window, cx| {
+            let alternate = session_state.read(cx).session_mru.alternate().cloned();
+            match alternate {
+                Some(session) => {
+                    local.borrow_mut().detach(&session_bridge, None);
+                    open_session(&session_state, session, cx);
+                }
+                None => session_state.update(cx, |app, cx| {
+                    app.toast_short("no other session", Icon::Info, Instant::now());
+                    cx.notify();
+                }),
+            }
+        });
+
         let (new_bridge, new_state) = (bridge.clone(), state.clone());
         root = root.on_action(move |_: &native_agent::NewClaude, _window, cx| {
             create_thread(&new_bridge, &new_state, AgentKind::Claude, cx);
@@ -796,6 +853,7 @@ pub(super) fn relay_view_state(
     let composing = view.read(cx).is_composing(cx);
     let scrolling = view.read(cx).is_scrolling();
     let question_cursor = view.read(cx).question_cursor();
+    let decision = view.read(cx).decision_observable();
     // §12: the `AgentRow` context is derived from whether a row actually carries the focus ring,
     // so `⏎`/`u`/`o`/`y`/`d` are bound exactly when there is a row for them to act on.
     let row_focus = scrolling && view.read(cx).transcript().read(cx).focused_row().is_some();
@@ -804,6 +862,7 @@ pub(super) fn relay_view_state(
         changed |= app.agents.set_scrolling(thread, scrolling);
         changed |= app.agents.set_question_cursor(thread, question_cursor);
         changed |= app.agents.set_row_focus(thread, row_focus);
+        changed |= app.agents.set_decision(thread, decision);
         if changed {
             cx.notify();
         }
