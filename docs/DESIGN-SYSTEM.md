@@ -189,9 +189,10 @@ Four levels, and only two of them have a shadow.
 
 ### 2.7 Motion
 
-Fleet animates one thing — the spinner — and nothing else. Nothing blinks, nothing
-re-announces itself, nothing decays on a timer the user did not set. The other entries below
-are dwell and delay durations, not animations: they time how long something waits or stays.
+Fleet animates the spinner and progressively reveals bursty native-agent prose; nothing else
+blinks or re-announces itself. Reduced motion disables both continuous effects: the spinner holds
+its static state and prose flushes immediately. The other entries below are dwell and delay
+durations, not animations: they time how long something waits or stays.
 
 | Token | ms | What |
 | --- | --- | --- |
@@ -199,6 +200,8 @@ are dwell and delay durations, not animations: they time how long something wait
 | `spinner` | 1000 | one turn of `loader-circle` |
 | `jump_chip_delay` | 150 | how long the transcript's jump-to-latest chip waits before appearing |
 | `working_tick` | 1000 | how often the working row's elapsed label re-reads the clock |
+| `reveal_tick_ms` | 16 | cadence of UTF-8-safe native-agent prose reveal |
+| `reveal_horizon_ms` | 200 | maximum time one received prose burst may trail the authoritative projection |
 | `toast_short` | 1600 | dwell for instant acknowledgements |
 | `toast_normal` | 3200 | dwell for everything else the toast law allows |
 
@@ -1128,6 +1131,8 @@ not three mounts; `TranscriptRowId::Item` is shared by a `Work` row, the `Diff` 
 `Subagent`, so an update merging forward never remounts.
 **States.** following the tail · anchoring the first turn · free scrolling · scroll mode (tail
 frozen, a row focused) · streaming (caret and shimmer) · empty.
+The floating `jump to latest` chip is offset from the bottom by one tokenized chip height plus
+standard spacing, reserving the newest turn footer and its `[u] revert turn` hint.
 **Events.** `TranscriptEvent::{Toggle, RowAction, ReachedOldest}`. `ReachedOldest` fires when the
 reader comes within `OLDEST_PREFETCH_ROWS` of the top of the rows in hand, **once per row set**:
 the transcript cannot know whether older history exists — that is the owner's page cursor — so it

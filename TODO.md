@@ -22,72 +22,9 @@ changes live on the `fileChange` item the request names by `itemId` (see
 item. `GateKind::Permission.item` now carries the normalized `ItemId`, the Codex adapter caches
 the named file-change paths for human copy, and the thread view joins the diff by that exact id.
 A gate that wins the race with its item says `loading edit details…` rather than drawing an empty
-card. The additive `agents.decision` harness projection identifies the joined item and whether
-the drawer rendered its diff; `scenarios/agents/codex-approval-shows-the-diff.scenario` pins the
-shipped behaviour in the regular corpus.
-
-## 2. Codex effort discovery is not yet projected to `^s e`
-
-**Impact: high.** A control the docs describe is absent.
-
-§7 says the reasoning-effort options are **discovered per model** from
-`model/list.supportedReasoningEfforts`, with the harness's own `description` strings, and that
-Fleet must never hardcode a Codex ladder. The adapter now paginates `model/list`, preserves each
-complete model record, applies `defaultReasoningEffort`, reads `skills/list` after thread start,
-and refreshes its cache on `skills/changed`.
-
-The empty menu is the *correct* degradation — drawing a guessed ladder would be worse, per
-`DESIGN-SYSTEM.md` §7 — but it means the control does not work on Codex.
-
-- **Start in:** the normalized session event/view. `SessionConfigured` carries only one
-  `ModelSelection` plus plain skill names; it has no additive model-descriptor field, and
-  `MetadataChanged` cannot publish refreshed skills. Add those fields through the core event,
-  store projection and `AgentSessionView`, then have `AgentThreadView::trait_candidates` read
-  them.
-- **Cost:** small-to-medium. Discovery is complete; normalized projection and picker consumption
-  remain.
-- **Done when:** `^s e` on a Codex tab lists that model's legal efforts with their descriptions
-  and defaults to `defaultReasoningEffort`; `$` lists real skills.
-
-## 3. The amber dot comes back after an app restart
-
-**Impact: medium.** Cosmetic, but it erodes trust in the one mark that means "this needs you".
-
-`AgentMarkSeen` validates its cursor and records nothing, so the read cursor lives only in app
-memory. Restart the app and every thread you had already read is marked unread again.
-
-The storage is ready and waiting — `crates/fleet-daemon/src/services/agents/store/schema.rs`
-declares:
-
-```sql
-CREATE TABLE seen (
-  client_id TEXT    NOT NULL,   -- stable per install, sent in Hello
-  thread_id TEXT    NOT NULL,
-  seq       INTEGER NOT NULL,
-  at        INTEGER NOT NULL,
-  PRIMARY KEY (client_id, thread_id)
-) WITHOUT ROWID;
-```
-
-That comment is aspirational: **`client_id` is not sent in Hello.** `HelloClient`
-(`crates/fleet-proto/src/request.rs:45`) carries `kind`, `host_id` — which is only for a
-forwarding daemon, not an app — and `capabilities`. There is no per-install client identity
-anywhere on the wire, so the primary key has a column nothing can fill.
-
-And it genuinely needs that column. Several clients can watch one thread: two windows, a laptop
-and a remote machine, the `fleet agent` CLI. Keyed on `thread_id` alone, opening a thread in one
-window would silently clear the dot everywhere else — worse than it resetting, because then the
-dot is lying rather than merely stale.
-
-- **Cost:** two additive, capability-gated fields — `HelloClient.client_id` and a `seen_seq` on
-  the window response so a reconnecting client gets *its own* cursor back — plus the store write.
-  No `PROTOCOL_VERSION` bump; the daemon matches the version literally and a bump would lock out
-  older remote daemons.
-- **Left because:** designing a client-identity scheme is a real protocol decision with
-  multi-window and multi-machine consequences, and there was no evidence to base it on. Guessing
-  one into the wire is far more expensive to undo than a stale dot.
-- **Done when:** a thread read before an app restart is still read after it, and reading it in one
-  window does not clear it in another.
+card. The additive `agents.threads[].decision` harness projection identifies the joined paths and
+whether the drawer rendered a diff; `scenarios/agents/codex-approval-shows-the-diff.scenario`
+pins the shipped behaviour in the regular corpus.
 
 ## 4. `[u] revert this edit` on a tool row
 
@@ -159,10 +96,14 @@ because `spawn` performs no shell expansion of env values.
 
 ## Hygiene
 
-- **`crates/fleet-app/src/keymap.rs` is 1138 lines**, over the ~900 guideline. It was already
-  1095 before this work, so the rebuild added to a pre-existing oversize file rather than creating
+- **`crates/fleet-app/src/keymap.rs` is 1251 lines**, over the ~900 guideline. It was already
+  1138 before this stage, so the rebuild added to a pre-existing oversize file rather than creating
   one. Splitting a keymap table is its own change.
 - **`crates/fleet-daemon/src/services/agents/store/import.rs` is 905 lines**, marginally over.
+- **Four more files crossed ~900 lines in round 2**: `crates/fleet-app/src/screens/workspace/agent.rs`
+  (946), `crates/fleet-app/src/screens/agent_thread/actions.rs` (950), `crates/fleet-daemon/src/machines/link.rs`
+  (1003) and `crates/fleet-daemon/src/services/agents/store/import.rs` (909). `fleet-client/src/connection.rs`
+  and `fleet-daemon/src/server/connection.rs` were already far over. Each split is its own change.
 - **`Services::build` is infallible across twenty call sites**, which is why an unopenable agent
   database is fatal for the agent service rather than the daemon
   (`docs/decisions/0013-sqlite-agent-transcripts.md`). Making the composition fallible, so the

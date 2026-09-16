@@ -209,7 +209,7 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `toasts` | `[{level,text,count}]`; levels use the UX vocabulary `info`, `success`, `warning`, `error` |
 | `sticky_error` | stable human-readable failed-job text or null |
 | `jobs` | `[{id,status}]`; status is the daemon job vocabulary (`queued`, `running`, `succeeded`, `failed`, `cancelled`) |
-| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate}],decision:{kind,item,diff}|null}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md`; the active thread's `decision` uses kind `approval`, `question`, or `plan`, its joined item id or null, and whether the drawer renders a diff |
+| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate,decision}],decision:{kind,item,diff}|null}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md`; additive version-1 `threads[].decision` is null or `{kind:"permission"|"question"|"plan",title:string,paths:[string],has_diff:bool}` prepared from the rendered decision; the legacy active-thread `agents.decision` remains available |
 | `terminal` | `{rows:[string],text:string,cursor:{row,col,shape},viewport:{top,rows,history}}` or null; cursor shapes are `block`, `bar`, `underline`, `hidden` |
 | `targets` | map target name → `{x,y,w,h,frame}` in logical window coordinates |
 | `daemon` | `{link,attempt,dismissed,restarted}`; `link` is `starting`, `failed`, `connected`, `lost` or `reconnected`. An additive version-1 field: `key_contexts` appends `Daemon > Banner` only behind a chain that can carry it, so on a first-run Fleet or behind an open overlay a lost daemon is otherwise invisible to every predicate |
@@ -457,8 +457,8 @@ Surface directories group scenarios by the part of Fleet they exercise — `hub/
 `agents/`, `daemon/`, `board/` — and a scenario's corpus-relative path without its extension is
 also its baseline key, so `hub/help.scenario` and `agents/help.scenario` never collide.
 The agent corpus includes a headless two-turn wheel regression and a structured Codex
-file-approval assertion; the latter reads `agents.decision` to prove the named item supplied the
-rendered diff rather than merely observing that a gate opened.
+file-approval assertion; the latter reads `agents.threads[0].decision.paths` and `has_diff` to
+prove the named item supplied the rendered diff rather than merely observing that a gate opened.
 
 Three make targets run it, and none of them holds a list of scenario names — the corpus grows
 without a `Makefile` change:
