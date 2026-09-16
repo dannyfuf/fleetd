@@ -37,7 +37,7 @@ use fleet_proto::{
 
 use crate::{
     DaemonError, DaemonResult,
-    services::router::agents::{AgentMirror, MirrorWrite},
+    services::router::agents::{AgentMirror, MirrorBatchWrite, MirrorWrite},
 };
 
 use super::{
@@ -60,6 +60,28 @@ pub(crate) enum MirrorIngest {
     NeedsWindow,
     /// The event was refused on authority grounds and nothing was written.
     Refused,
+}
+
+/// Detailed result used by the router's publish-after-commit batch path.
+pub(crate) struct MirrorBatchIngest {
+    pub(crate) publishable: usize,
+    appended: usize,
+    pub(crate) needs_window: bool,
+    refused: bool,
+}
+
+impl MirrorBatchIngest {
+    fn outcome(&self) -> MirrorIngest {
+        if self.needs_window {
+            MirrorIngest::NeedsWindow
+        } else if self.refused {
+            MirrorIngest::Refused
+        } else if self.appended > 0 {
+            MirrorIngest::Applied
+        } else {
+            MirrorIngest::Duplicate
+        }
+    }
 }
 
 impl AgentSessionManager {
@@ -156,6 +178,20 @@ impl AgentSessionManager {
             .await
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_mirror_test_transaction_count(&self) {
+        if let Ok(store) = self.inner.store() {
+            store.reset_mirror_test_transaction_count();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mirror_test_transaction_count(&self) -> usize {
+        self.inner
+            .store()
+            .map_or(0, |store| store.mirror_test_transaction_count())
+    }
+
     /// Appends a run of owner-sequenced events, reporting what the mirror did with them.
     ///
     /// The pre-flight read and the write transaction ask the same authority question; this one
@@ -168,35 +204,70 @@ impl AgentSessionManager {
         events: &[SeqEvent],
         owner_head: Option<Seq>,
     ) -> MirrorIngest {
+        self.mirror_append_batch(host, thread, events, owner_head)
+            .await
+            .outcome()
+    }
+
+    /// Commits the longest gap-free prefix of one run and reports which events may be published.
+    ///
+    /// A gap does not roll back earlier events in the same drained link batch. The prefix is one
+    /// `MirrorAppend` command and therefore one SQLite transaction; the suffix is withheld while
+    /// the router starts the existing window refill.
+    pub(crate) async fn mirror_append_batch(
+        &self,
+        host: &HostId,
+        thread: ThreadId,
+        events: &[SeqEvent],
+        owner_head: Option<Seq>,
+    ) -> MirrorBatchIngest {
         let Ok(store) = self.inner.store() else {
-            return MirrorIngest::Refused;
+            return MirrorBatchIngest {
+                publishable: 0,
+                appended: 0,
+                needs_window: false,
+                refused: true,
+            };
         };
         let ownership = match store.ownership(thread).await {
             Ok(ownership) => ownership,
             Err(error) => {
                 tracing::warn!(%thread, %host, %error, "could not read a mirrored thread's ownership");
-                return MirrorIngest::Refused;
+                return MirrorBatchIngest {
+                    publishable: 0,
+                    appended: 0,
+                    needs_window: false,
+                    refused: true,
+                };
             }
         };
         let Some(first) = events.first() else {
-            return match owner_head {
+            let outcome = match owner_head {
                 Some(head) => self.mirror_note_head(host, thread, head, &ownership).await,
                 None => MirrorIngest::Duplicate,
             };
+            return MirrorBatchIngest {
+                publishable: 0,
+                appended: 0,
+                needs_window: outcome == MirrorIngest::NeedsWindow,
+                refused: outcome == MirrorIngest::Refused,
+            };
         };
-        match admits_append(thread, host, ownership.as_ref(), first.seq) {
-            Ok(Admission::Append) => {}
-            Ok(Admission::Duplicate) => {
-                // The whole run may still carry events past the prefix, so only a run that ends
-                // inside it is a pure duplicate.
-                let newest = events.last().map_or(first.seq, |event| event.seq);
-                let head = ownership
-                    .as_ref()
-                    .map_or(Seq::default(), |own| own.head_seq);
-                if newest <= head {
-                    return MirrorIngest::Duplicate;
-                }
-            }
+        let Some(ownership) = ownership.as_ref() else {
+            let refusal = super::super::store::MirrorRefusal::Unknown {
+                thread,
+                host: host.clone(),
+            };
+            tracing::debug!(%thread, %host, %refusal, "the mirror needs a refill");
+            return MirrorBatchIngest {
+                publishable: 0,
+                appended: 0,
+                needs_window: true,
+                refused: false,
+            };
+        };
+        match admits_append(thread, host, Some(ownership), first.seq) {
+            Ok(Admission::Append | Admission::Duplicate) => {}
             Err(refusal) => {
                 let needs_window = matches!(
                     refusal,
@@ -205,14 +276,48 @@ impl AgentSessionManager {
                 );
                 if needs_window {
                     tracing::debug!(%thread, %host, %refusal, "the mirror needs a refill");
-                    return MirrorIngest::NeedsWindow;
+                    return MirrorBatchIngest {
+                        publishable: 0,
+                        appended: 0,
+                        needs_window: true,
+                        refused: false,
+                    };
                 }
                 tracing::warn!(%thread, %host, %refusal, "refused an append to a mirrored thread");
-                return MirrorIngest::Refused;
+                return MirrorBatchIngest {
+                    publishable: 0,
+                    appended: 0,
+                    needs_window: false,
+                    refused: true,
+                };
             }
         }
+
+        let mut head = ownership.head_seq;
+        let mut publishable = 0;
+        let mut appended = 0;
+        for event in events {
+            if event.seq <= head {
+                publishable += 1;
+            } else if event.seq == head.next() {
+                head = event.seq;
+                publishable += 1;
+                appended += 1;
+            } else {
+                break;
+            }
+        }
+        let needs_window = publishable < events.len();
+        if appended == 0 {
+            return MirrorBatchIngest {
+                publishable,
+                appended,
+                needs_window,
+                refused: false,
+            };
+        }
         match store
-            .mirror_append(host.clone(), thread, events, owner_head)
+            .mirror_append(host.clone(), thread, &events[..publishable], owner_head)
             .await
         {
             Ok(()) => {
@@ -221,11 +326,21 @@ impl AgentSessionManager {
                 // database is the truth and the next open rebuilds from it, rather than this
                 // daemon re-implementing the reducer over an owner's stream.
                 self.forget(thread);
-                MirrorIngest::Applied
+                MirrorBatchIngest {
+                    publishable,
+                    appended,
+                    needs_window,
+                    refused: false,
+                }
             }
             Err(error) => {
                 tracing::warn!(%thread, %host, %error, "could not extend a mirrored thread");
-                MirrorIngest::NeedsWindow
+                MirrorBatchIngest {
+                    publishable: 0,
+                    appended: 0,
+                    needs_window: true,
+                    refused: false,
+                }
             }
         }
     }
@@ -507,6 +622,19 @@ impl AgentMirror for AgentSessionManager {
             MirrorIngest::Applied => MirrorWrite::Stored,
             MirrorIngest::NeedsWindow => MirrorWrite::NeedsWindow,
             MirrorIngest::Duplicate | MirrorIngest::Refused => MirrorWrite::Ignored,
+        }
+    }
+
+    async fn ingest_batch(
+        &self,
+        host: &HostId,
+        thread: ThreadId,
+        events: &[SeqEvent],
+    ) -> MirrorBatchWrite {
+        let result = self.mirror_append_batch(host, thread, events, None).await;
+        MirrorBatchWrite {
+            publishable: result.publishable,
+            needs_window: result.needs_window,
         }
     }
 

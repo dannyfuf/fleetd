@@ -35,6 +35,12 @@ pub mod translate;
 pub use classify::Target;
 pub use ids::{ClearedIds, RemoteIds};
 
+/// A hot link yields after this many events so another host/thread can make progress.
+const REMOTE_EVENT_BATCH_MAX_EVENTS: usize = 64;
+
+/// Serialized bytes drained at once. One larger event is still processed by itself.
+const REMOTE_EVENT_BATCH_MAX_BYTES: usize = 256 * 1024;
+
 /// Resolves protocol identifiers to the machine that owns them.
 pub trait Resolver {
     fn host_of_worktree(&self, id: &WorktreeId) -> Option<HostId>;
@@ -359,52 +365,112 @@ impl Router {
         let event_endpoint = Arc::clone(&endpoint);
         let event_agent_mirror = self.agent_mirror();
         runtime.spawn(async move {
+            let mut deferred = None;
             loop {
-                let event = match tokio::select! {
-                    () = event_cancel.cancelled() => break,
-                    event = remote_events.recv() => event,
-                } {
-                    Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(%event_host, skipped, "remote event pump lagged");
-                        continue;
+                if event_cancel.is_cancelled() {
+                    break;
+                }
+                let first = if let Some(event) = deferred.take() {
+                    event
+                } else {
+                    match tokio::select! {
+                        biased;
+                        () = event_cancel.cancelled() => break,
+                        event = remote_events.recv() => event,
+                    } {
+                        Ok(event) => event,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(%event_host, skipped, "remote event pump lagged");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
-                // Mirrored before it is republished: a client that reacts to an event by
-                // opening the thread must not be able to read a transcript older than the event
-                // that woke it (§9.3).
-                agents::ingest_remote_event(
+
+                let mut bytes = remote_event_bytes(&first);
+                let mut batch = Vec::with_capacity(REMOTE_EVENT_BATCH_MAX_EVENTS);
+                batch.push(first);
+                let mut closed = false;
+                while batch.len() < REMOTE_EVENT_BATCH_MAX_EVENTS
+                    && bytes < REMOTE_EVENT_BATCH_MAX_BYTES
+                {
+                    match remote_events.try_recv() {
+                        Ok(event) => {
+                            let event_bytes = remote_event_bytes(&event);
+                            if bytes.saturating_add(event_bytes) > REMOTE_EVENT_BATCH_MAX_BYTES {
+                                deferred = Some(event);
+                                break;
+                            }
+                            bytes = bytes.saturating_add(event_bytes);
+                            batch.push(event);
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                            tracing::warn!(%event_host, skipped, "remote event pump lagged while draining a batch");
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                            closed = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Every publishable agent event is committed before this returns. A gap commits
+                // the prefix and withholds the suffix while the existing refill runs (§9.3).
+                let ingested = agents::ingest_remote_events(
                     event_agent_mirror.as_ref(),
                     &event_endpoint,
                     &event_host,
-                    &event,
+                    &batch,
                 )
                 .await;
-                if let Event::SnapshotChanged(snapshot) = &event {
-                    event_mirror.apply(&event_host, snapshot.clone());
+                tracing::debug!(
+                    host = %event_host,
+                    events = batch.len(),
+                    bytes,
+                    groups = ingested.groups,
+                    mirrored_events = ingested.mirrored_events,
+                    publishable_events = ingested.publishable.iter().filter(|ready| **ready).count(),
+                    resyncs = ingested.resyncs,
+                    "processed a remote event batch"
+                );
+
+                for (event, publishable) in batch.into_iter().zip(ingested.publishable) {
+                    if let Event::SnapshotChanged(snapshot) = &event {
+                        event_mirror.apply(&event_host, snapshot.clone());
+                        agents::register_thread_events(
+                            &event_threads,
+                            &event,
+                            &event_host,
+                            &event_ids,
+                        );
+                        event_bus.request_snapshot_current();
+                        continue;
+                    }
                     agents::register_thread_events(&event_threads, &event, &event_host, &event_ids);
-                    event_bus.request_snapshot_current();
-                    continue;
+                    // A remote daemon stopping is a fact about one endpoint, not about this one:
+                    // republished verbatim, `DaemonShuttingDown` would tell every local client
+                    // that *this* daemon is going away and end their connections. The link
+                    // expresses it locally as `HostLinkChanged` (docs/APP-CONTRACTS.md §4).
+                    if !publishable
+                        || matches!(
+                            event,
+                            Event::TerminalFrame(_)
+                                | Event::HostLinkChanged { .. }
+                                | Event::DaemonShuttingDown
+                        )
+                    {
+                        continue;
+                    }
+                    let Some(local) = translate::event_to_local(event, &event_host, &event_ids)
+                    else {
+                        continue;
+                    };
+                    event_bus.publish(local);
                 }
-                agents::register_thread_events(&event_threads, &event, &event_host, &event_ids);
-                // A remote daemon stopping is a fact about one endpoint, not about this one:
-                // republished verbatim, `DaemonShuttingDown` would tell every local client that
-                // *this* daemon is going away and end their connections. The link expresses it
-                // locally as a `LinkState` change, which the state pump below turns into
-                // `HostLinkChanged` (docs/APP-CONTRACTS.md §4).
-                if matches!(
-                    event,
-                    Event::TerminalFrame(_)
-                        | Event::HostLinkChanged { .. }
-                        | Event::DaemonShuttingDown
-                ) {
-                    continue;
+                if closed {
+                    break;
                 }
-                let Some(local) = translate::event_to_local(event, &event_host, &event_ids) else {
-                    continue;
-                };
-                event_bus.publish(local);
             }
             finish_pump(&event_pumps, &event_host, &event_endpoint);
         });
@@ -524,6 +590,16 @@ impl Resolver for Router {
     }
     fn host_of_thread(&self, id: &ThreadId) -> Option<HostId> {
         self.ids.host_of_thread(id)
+    }
+}
+
+fn remote_event_bytes(event: &Event) -> usize {
+    match serde_json::to_vec(event) {
+        Ok(encoded) => encoded.len(),
+        Err(error) => {
+            tracing::warn!(%error, "could not measure a remote event for batch draining");
+            REMOTE_EVENT_BATCH_MAX_BYTES
+        }
     }
 }
 

@@ -15,9 +15,9 @@
 //!    asks the owner, in the background, for everything after what it holds. Zero transcript bytes
 //!    cross the link and the app paints in one frame. A cold mirror is proxied instead, and the
 //!    answer is absorbed on the way back so the *next* open is warm.
-//! 2. **An event.** [`ingest_remote_event`] appends what arrives on a host's link to that host's
-//!    mirrored thread, before the event is republished, so a client that reacts to it by opening
-//!    the thread cannot read a transcript older than the event that woke it.
+//! 2. **An event batch.** [`ingest_remote_events`] appends contiguous runs from a host's link to
+//!    that host's mirrored threads, before any stored event is republished, so a client that
+//!    reacts by opening the thread cannot read a transcript older than the event that woke it.
 //! 3. **A disconnection.** [`cached_threads`] keeps the list painted from the durable cache.
 //!    Disconnection changes the status, never the data.
 //!
@@ -54,6 +54,24 @@ pub enum MirrorWrite {
     NeedsWindow,
 }
 
+/// What the mirror made safe to publish from one contiguous run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MirrorBatchWrite {
+    /// Events at the start of the run that are now present in the mirror (or were duplicates).
+    pub publishable: usize,
+    /// Whether the first event after that prefix exposed a gap and needs the owner's window.
+    pub needs_window: bool,
+}
+
+/// Aggregate work performed while mirroring one drained link batch.
+pub(crate) struct BatchIngest {
+    /// One entry per input event. A false entry is withheld until the refill announces a window.
+    pub(crate) publishable: Vec<bool>,
+    pub(crate) groups: usize,
+    pub(crate) mirrored_events: usize,
+    pub(crate) resyncs: usize,
+}
+
 /// The durable read-through mirror, as the router uses it.
 ///
 /// Implemented by the agent service, which owns the database; named here because the router owns
@@ -67,6 +85,34 @@ pub trait AgentMirror: Send + Sync {
 
     /// Appends one event received on `host`'s link to that host's mirrored thread.
     async fn ingest(&self, host: &HostId, thread: ThreadId, event: &SeqEvent) -> MirrorWrite;
+
+    /// Appends one contiguous run in a single mirror write.
+    ///
+    /// Implementations backed by a transactional store override this. The default preserves the
+    /// old one-event seam for lightweight fakes and other implementations.
+    async fn ingest_batch(
+        &self,
+        host: &HostId,
+        thread: ThreadId,
+        events: &[SeqEvent],
+    ) -> MirrorBatchWrite {
+        let mut publishable = 0;
+        for event in events {
+            match self.ingest(host, thread, event).await {
+                MirrorWrite::Stored | MirrorWrite::Ignored => publishable += 1,
+                MirrorWrite::NeedsWindow => {
+                    return MirrorBatchWrite {
+                        publishable,
+                        needs_window: true,
+                    };
+                }
+            }
+        }
+        MirrorBatchWrite {
+            publishable,
+            needs_window: false,
+        }
+    }
 
     /// Answers one `AgentThreadOpen` from the mirror, or `None` when the owner must be asked.
     async fn open(&self, host: &HostId, body: &RequestBody) -> Option<DaemonResult<ResponseBody>>;
@@ -163,41 +209,82 @@ pub(crate) async fn cached_threads(
     }
 }
 
-/// Mirrors what one remote event carries, before the event is republished locally.
+/// Mirrors what one drained remote-event batch carries, before it is republished locally.
 ///
 /// A summary is a header and an [`Event::Agent`] is a transcript line; a snapshot is the
 /// authoritative re-sync after a link recovery and therefore re-adopts every header the owner
-/// still has. A thread that needs a window says so and the refill runs in the background rather
-/// than in the pump, which must never block on a round trip.
-pub(crate) async fn ingest_remote_event(
+/// still has. Adjacent events from one thread form one store transaction. A structural event or
+/// another thread ends the run, preserving the link's order and giving interleaved threads turns.
+/// A thread that needs a window says so and the refill runs in the background rather than in the
+/// pump, which must never block on a round trip.
+pub(crate) async fn ingest_remote_events(
     mirror: Option<&Arc<dyn AgentMirror>>,
     endpoint: &Arc<dyn RemoteEndpoint>,
     host: &HostId,
-    event: &Event,
-) {
+    events: &[Event],
+) -> BatchIngest {
     let Some(mirror) = mirror else {
-        return;
+        return BatchIngest {
+            publishable: vec![true; events.len()],
+            groups: 0,
+            mirrored_events: 0,
+            resyncs: 0,
+        };
     };
-    match event {
-        Event::AgentSummary(summary) => {
-            mirror.adopt(host, std::slice::from_ref(summary)).await;
-        }
-        Event::SnapshotChanged(snapshot) => mirror.adopt(host, &snapshot.agent_threads).await,
-        Event::Agent { thread, event } => {
-            if mirror.ingest(host, *thread, event).await == MirrorWrite::NeedsWindow
-                && mirrors_against(endpoint)
-                && let Some(delta) = mirror.delta(host, &open_request(*thread)).await
-            {
-                refill_in_background(
-                    Arc::clone(mirror),
-                    Arc::clone(endpoint),
-                    host.clone(),
-                    delta,
-                );
+    let mut outcome = BatchIngest {
+        publishable: vec![true; events.len()],
+        groups: 0,
+        mirrored_events: 0,
+        resyncs: 0,
+    };
+    let mut index = 0;
+    while index < events.len() {
+        match &events[index] {
+            Event::Agent { thread, .. } => {
+                let start = index;
+                while index < events.len()
+                    && matches!(&events[index], Event::Agent { thread: next, .. } if next == thread)
+                {
+                    index += 1;
+                }
+                let run = events[start..index]
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::Agent { event, .. } => Some(event.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                outcome.groups += 1;
+                outcome.mirrored_events += run.len();
+                let write = mirror.ingest_batch(host, *thread, &run).await;
+                let publishable = write.publishable.min(run.len());
+                outcome.publishable[start + publishable..index].fill(false);
+                if write.needs_window {
+                    outcome.resyncs += 1;
+                    if mirrors_against(endpoint)
+                        && let Some(delta) = mirror.delta(host, &open_request(*thread)).await
+                    {
+                        refill_in_background(
+                            Arc::clone(mirror),
+                            Arc::clone(endpoint),
+                            host.clone(),
+                            delta,
+                        );
+                    }
+                }
             }
+            Event::AgentSummary(summary) => {
+                mirror.adopt(host, std::slice::from_ref(summary)).await;
+                index += 1;
+            }
+            Event::SnapshotChanged(snapshot) => {
+                mirror.adopt(host, &snapshot.agent_threads).await;
+                index += 1;
+            }
+            _ => index += 1,
         }
-        _ => {}
     }
+    outcome
 }
 
 /// The plain open this daemon uses when it needs a thread's window for its own sake.

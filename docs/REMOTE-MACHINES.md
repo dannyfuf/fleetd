@@ -230,6 +230,14 @@ mutation routes upstream, and only the owner's own `AgentSynchronized` moves a c
 `Mirror::fragment` stays the in-memory fallback for a host whose threads the database has not
 cached.
 
+The endpoint event pump drains immediately-ready link traffic in bounded batches of 64 events or
+256 KiB. Adjacent native-agent events for the same thread are appended to the durable mirror in
+one transaction, while a different thread or structural event closes the run so neither fairness
+nor observable link order changes. Events are republished only after their mirror transaction
+commits. A sequence gap commits and publishes the valid prefix, withholds the remaining suffix,
+and triggers the existing window resync; no wire frame or capability changes for this local
+batching step.
+
 Terminals are held per daemon, so a remote host's PTYs live in `fleetd pty-hold` processes on that
 host (`docs/ARCHITECTURE.md`, "Detached PTY holders"). Restarting or bootstrapping a remote daemon
 therefore keeps that host's terminals: the new daemon reattaches to them and the local daemon's
