@@ -1,0 +1,31 @@
+# docs/NATIVE-AGENTS.md §5 — wheel input over the transcript scrolls measured rows without
+# panicking, and returning to the tail re-arms follow mode.
+# docs/TESTING-HARNESS.md §5 — Claude's fixture transcript contains two completed turns.
+fixture: agents
+await idle
+resize 1440x600
+key o
+await screen == Workspace 20000
+
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert focused == agents.composer
+await idle 30000
+type what does this crate do
+key enter
+await agents.threads[0].state == working 20000
+await agents.threads[0].state == idle 40000
+
+type and what is the binary called
+key enter
+await agents.threads[0].state == working 20000
+await agents.threads[0].state == idle 40000
+
+scroll 0 8 at agents.transcript
+wait 500
+assert screen == Workspace
+dump scrolled
+scroll 0 -40 at agents.transcript
+assert screen == Workspace
+dump back
+quit

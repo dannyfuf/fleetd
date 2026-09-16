@@ -20,12 +20,12 @@ key ctrl-s q
 await agents.popup absent 10000
 assert screen == Hub && mode == Normal && focused == worktrees.row[0] && hub_tab == Worktrees
 
-# `A` opens the same floating surface on Codex.
-#
-# It is hidden with `quit` rather than with `^s q`: on Codex that key is inert today, and the
-# corpus README records the defect rather than asserting the broken half.
+# `A` opens the same floating surface on Codex, and its attaching shell owns the same hide key.
 key A
 await agents.popup == Terminal 10000
 assert key_contexts[0] == Agent && focused == agents.popup && screen == Hub
 dump codex-popup
+key ctrl-s q
+await agents.popup absent 10000
+assert screen == Hub && mode == Normal && focused == worktrees.row[0] && hub_tab == Worktrees
 quit

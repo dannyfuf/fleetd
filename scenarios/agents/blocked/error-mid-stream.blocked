@@ -14,18 +14,17 @@ await screen == Workspace 20000
 
 key ctrl-s a
 await agents.threads[0].provider == claude 20000
-click agents.composer
+assert focused == agents.composer
+await idle 30000
 type what does this crate do
 key enter
 await agents.threads[0].state == idle 40000
 
-click agents.composer
 type and what is the binary called
 key enter
 await agents.threads[0].state == idle 40000
 
 # The third turn streams one line and then the provider fails mid-stream.
-click agents.composer
 type and what does it depend on
 key enter
 await agents.threads[0].state == failed 40000

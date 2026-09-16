@@ -6,10 +6,11 @@
 # docs/KEYMAP.md §Native agent thread — `^s e` opens the reasoning / traits menu
 # docs/DESIGN-SYSTEM.md §4 — a picker with nothing to offer draws nothing
 #
-# Neither `model/list` nor `skills/list` is called, so the vocabulary is empty and
-# `AgentThreadView::trait_candidates` returns no rows. The empty menu is the *correct*
-# degradation, which is exactly why nothing about it is visible: the picker paints no harness
-# target and the snapshot has no field for it.
+# The adapter now calls and paginates `model/list`, preserving each effort description and the
+# model's default, and it calls `skills/list`. The normalized session event/view still has no
+# field for model descriptors, however, so `AgentThreadView::trait_candidates` returns no rows.
+# The empty menu remains the *correct* degradation, which is exactly why nothing about it is
+# visible: the picker paints no harness target and the snapshot has no field for it.
 #
 # The oracle is therefore the one a user feels. An open picker owns `Enter` — `send` calls
 # `accept_completion` first — so with a menu open the composer's draft is kept and nothing is
@@ -26,8 +27,8 @@ await screen == Workspace 20000
 
 key ctrl-s A
 await agents.threads[0].provider == codex 20000
-assert lists.tabs.selected.badges[0] == codex && agents.threads[0].state == idle
-click agents.composer
+assert lists.tabs.selected.badges[0] == codex && agents.threads[0].state == idle && focused == agents.composer
+await idle 30000
 type apply the README fix
 
 key ctrl-s e

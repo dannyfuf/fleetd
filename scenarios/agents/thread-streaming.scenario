@@ -14,11 +14,8 @@ assert mode == Terminal && lists.tabs.rows[3] absent
 key ctrl-s a
 await agents.threads[0].provider == claude 20000
 assert mode == Agent && key_contexts[0] == Agent && key_contexts[1] == AgentIdle
-assert lists.tabs.selected.badges[0] == claude && lists.tabs.selected.label == Claude
-
-# A new thread hands focus to its *tab*, not its composer, so the pointer opens the composer
-# first — a `type` sent straight after `^s a` is accepted and dropped.
-click agents.composer
+assert lists.tabs.selected.badges[0] == claude && lists.tabs.selected.label == Claude && focused == agents.composer
+await idle 30000
 type what does this crate do
 key enter
 

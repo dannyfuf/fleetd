@@ -1,0 +1,28 @@
+# TODO.md §1, "A Codex file-change approval joins its diff"
+#
+# docs/NATIVE-AGENTS.md §6.2 — "For an edit approval Fleet shows what t3code cannot: **the
+#   diff**, joined by `itemId` and rendered by `DiffView` at bounded height"
+#
+# The gate carries the normalized item id, the card copy names `README.md`, and
+# `AgentThreadView::decision_diff` joins only that item's diff. The additive decision projection
+# proves the drawer rendered that exact join rather than merely opening an approval.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+assert focused == agents.composer
+await idle 30000
+type apply the README fix
+key enter
+
+await agents.threads[0].pending_gate == permission 30000
+assert key_contexts[2] == AgentPermission
+shot approval
+
+# The assertion this file exists for.
+assert agents.decision.kind == approval && agents.decision.item exists && agents.decision.diff == true
+dump approval-with-diff
+quit

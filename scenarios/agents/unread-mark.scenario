@@ -20,7 +20,8 @@ await screen == Workspace 20000
 
 key ctrl-s A
 await agents.threads[0].provider == codex 20000
-click agents.composer
+assert focused == agents.composer
+await idle 30000
 type apply the README fix
 key enter
 click tabs.tab[0]

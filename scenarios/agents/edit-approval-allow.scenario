@@ -12,8 +12,8 @@ await screen == Workspace 20000
 
 key ctrl-s A
 await agents.threads[0].provider == codex 20000
-assert lists.tabs.selected.badges[0] == codex
-click agents.composer
+assert lists.tabs.selected.badges[0] == codex && focused == agents.composer
+await idle 30000
 type apply the README fix
 key enter
 
@@ -34,13 +34,7 @@ dump approval
 click agents.approval.allow_once
 await agents.threads[0].pending_gate absent 30000
 assert agents.threads[0].state != needs_you && lists.tabs.selected.marks[0] != needs_you
+await agents.threads[0].state == idle 30000
+assert sticky_error absent
 dump allowed
-
-# What this scenario deliberately does not assert: that the turn then *settles*. An answered
-# Codex approval loses its settlement under load — `fleetd.log` reads `dropping a Codex
-# settlement for a turn that is not the running one`, the sticky error reads `native-agent
-# storage failed: … event targets the wrong turn`, and the thread stays `working` for ever.
-# Measured: settled on three unloaded runs, did not settle on a suite run sharing the box.
-# The defect is not in TODO.md, so it gets no expected-to-fail scenario; add
-# `await agents.threads[0].state == idle 30000` here when it is fixed.
 quit

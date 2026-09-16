@@ -11,9 +11,8 @@ target/debug/fleet-harness run scenarios/agents --lane virtual        # the corp
 scenarios/agents/expected-to-fail/run.sh                              # the TODO watch list
 ```
 
-Every scenario here is keyboard-driven, which used to keep all six out of the headless subset;
-the keyboard reaches the focused view in that lane now, so the only thing keeping them in the
-`virtual` lane is their `shot` lines.
+Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lines remain in the
+`virtual` lane; `scroll-wheel.scenario` deliberately has no shot and also runs headless.
 
 ## What is here
 
@@ -23,8 +22,10 @@ the keyboard reaches the focused view in that lane now, so the only thing keepin
 | `thread-streaming.scenario` | `^s a` starts a thread; idle → working → idle, tab mark and finished toast | `KEYMAP.md` §Native agent thread; `NATIVE-AGENTS.md` §3.3 |
 | `edit-approval-allow.scenario` | the file-change gate arrives, owns the keyboard, and `[y]` is clicked on its own target | `NATIVE-AGENTS.md` §6.1, §6.2 |
 | `edit-approval-deny.scenario` | the same gate answered `n`; the turn continues, and `Enter` is never an answer | `NATIVE-AGENTS.md` §6.2 |
+| `codex-approval-shows-the-diff.scenario` | a Codex file-change approval joins its named item and renders that item's diff | `NATIVE-AGENTS.md` §6.2; `TODO.md` §1 |
 | `unread-mark.scenario` | a turn that reaches its gate while you are on another tab marks the thread; looking clears the mark and not the gate | `NATIVE-AGENTS.md` §3.3, §6.1 |
 | `prefix-inside-a-thread.scenario` | `^s [`, `^s m`, `^s F`, `^s x` are bound in an agent tab and `^s s` is not | `KEYMAP.md` §Shadowing, §Native agent thread |
+| `scroll-wheel.scenario` | two fixture turns complete; wheel input moves up and back through the transcript without crashing | `NATIVE-AGENTS.md` §5 |
 
 `expected-to-fail/` holds one scenario per open `TODO.md` entry that documents wrong behaviour
 today. They carry an extension a directory run does not collect, so `fleet-harness run
@@ -35,24 +36,18 @@ commit.
 `blocked/` holds scenarios that are written but cannot run yet, each naming the one missing
 piece. They are not failures, they are parked assertions.
 
-## Things the corpus deliberately works around
+## Behaviours pinned by this round
 
-Each of these is a real defect or limit found while writing these scenarios. None is in
-`TODO.md`, so none gets an expected-to-fail scenario; they are recorded here so the workarounds
-do not read as superstition.
+These assertions close regressions found while building the corpus:
 
-- **A new thread focuses its tab, not its composer.** `focused` is `agents.tabs.tab[N]` right
-  after `^s a`, and a `type` sent then is accepted and dropped, so every scenario clicks
-  `agents.composer` before typing.
-- **The Hub's Codex popup cannot be hidden.** After `A`, neither `^s q` nor `^s A` dismisses it
-  and the Hub underneath stops answering keys — `o` does nothing. The Claude popup hides and
-  reopens correctly, in the Hub and over a worktree, so `popup-open.scenario` ends on `quit`.
-- **An answered Codex turn does not reliably settle.** After `n` it never settles; after `[y]`
-  it settled on three unloaded runs and not on a suite run sharing the box. Both leave
-  `fleetd.log` reading `dropping a Codex settlement for a turn that is not the running one` and
-  the sticky error reading `native-agent storage failed: … event targets the wrong turn`. Both
-  approval scenarios therefore assert that the gate closes and stop there, and no scenario here
-  asserts `sticky_error absent`.
+- **A new thread focuses its composer.** Every new-thread path asserts
+  `focused == agents.composer` before typing; no defensive composer click remains.
+- **The Hub's attaching Codex popup can be hidden.** `popup-open.scenario` exercises `^s q`
+  before a terminal model exists and verifies that focus returns to the Hub.
+- **Answered Codex turns settle against the caller's turn id.** Both approval scenarios wait
+  for idle and assert that no sticky error remains after the answer.
+- **Queued printable keys retain text semantics.** `scroll-wheel.scenario` sends a second turn
+  immediately after the first settles, then exercises wheel input in both directions.
 - **A target is read with a quoted path step.** Target names carry `.` and `[]`, so a bare
   dotted path cannot name one; `targets["agents.approval.edit"] absent` is how a clause says
   that Codex is offered no `[e] edit` (`TESTING-HARNESS.md` §2). A dump is still the friendlier
@@ -60,8 +55,9 @@ do not read as superstition.
 
 ## Why `TODO.md` §4–§8 have no scenario
 
-§1, §2 and §3 document behaviour that is *wrong* where a user meets it, and each has a scenario
-here or in `blocked/`. §4 (`[u] revert this edit`), §5 (attachments), §6 (a cold window read),
+§1 is closed by `codex-approval-shows-the-diff.scenario`; §2 and §3 document behaviour that is
+*wrong* where a user meets it and have expected-to-fail scenarios. §4 (`[u] revert this edit`),
+§5 (attachments), §6 (a cold window read),
 §7 (the raw NDJSON log) and §8 (per-instance homes) are absent capabilities rather than wrong
 answers: nothing is drawn, so there is no snapshot state to assert and nothing for a scenario to
 watch flip. Each becomes testable the same day it becomes visible.

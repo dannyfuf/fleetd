@@ -23,7 +23,8 @@ await screen == Workspace 20000
 
 key ctrl-s a
 await agents.threads[0].provider == claude 20000
-click agents.composer
+assert focused == agents.composer
+await idle 30000
 type first question
 key enter
 
