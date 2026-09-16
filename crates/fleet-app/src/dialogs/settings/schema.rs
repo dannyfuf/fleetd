@@ -72,6 +72,10 @@ pub enum RowId {
     ClaudeCommand,
     /// `agentCommands.codex`.
     CodexCommand,
+    /// `agentBinaries.claude`.
+    ClaudeBinary,
+    /// `agentBinaries.codex`.
+    CodexBinary,
     /// `sleep.enabled`.
     SleepOnSwitch,
     /// `sleep.graceMs`.
@@ -178,17 +182,45 @@ fn general_rows(config: &Config) -> Vec<SettingRow> {
             detail: None,
             invalid: None,
         },
-        text_row(
-            RowId::ClaudeCommand,
-            "Claude command",
-            &config.agent_commands.claude,
+        detailed(
+            text_row(
+                RowId::ClaudeCommand,
+                "Claude command",
+                &config.agent_commands.claude,
+            ),
+            "Shell line typed into a terminal pane; a function or alias is fine.",
         ),
-        text_row(
-            RowId::CodexCommand,
-            "Codex command",
-            &config.agent_commands.codex,
+        detailed(
+            text_row(
+                RowId::CodexCommand,
+                "Codex command",
+                &config.agent_commands.codex,
+            ),
+            "Shell line typed into a terminal pane; a function or alias is fine.",
+        ),
+        detailed(
+            text_row(
+                RowId::ClaudeBinary,
+                "Claude binary",
+                &config.agent_binaries.claude,
+            ),
+            "Executable Fleet runs for a native thread, with no shell.",
+        ),
+        detailed(
+            text_row(
+                RowId::CodexBinary,
+                "Codex binary",
+                &config.agent_binaries.codex,
+            ),
+            "Executable Fleet runs for a native thread, with no shell.",
         ),
     ]
+}
+
+/// Attaches the sub-label that says which launch path a row governs.
+fn detailed(mut row: SettingRow, detail: &str) -> SettingRow {
+    row.detail = Some(detail.to_owned());
+    row
 }
 
 fn sleep_rows(config: &Config, matches: &[KeepAliveRuleMatch]) -> Vec<SettingRow> {
