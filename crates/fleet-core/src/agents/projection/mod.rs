@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    AgentEvent, AgentKind, Attention, AttentionKind, GateId, Item, ItemId, ModelSelection,
-    OpenGate, PermissionMode, Seq, SeqEvent, SessionState, StreamKind, ThreadId, TurnId,
-    TurnOutcome, TurnState, Usage,
+    AccountStatus, AgentEvent, AgentKind, Attention, AttentionKind, GateId, Item, ItemId,
+    ModelSelection, OpenGate, PermissionMode, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
+    TurnId, TurnOutcome, TurnState, Usage,
 };
 use crate::ids::WorktreeId;
 
@@ -218,6 +218,12 @@ pub struct ThreadProjection {
     pub skills: Vec<String>,
     /// Active permission mode.
     pub mode: PermissionMode,
+    /// The harness account, when the harness publishes one.
+    ///
+    /// `None` is **never reported** rather than signed out: Claude has no account signal, and a
+    /// thread whose projection predates this field decodes to `None` for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountStatus>,
     /// Provider process exit code.
     pub exit_code: Option<i32>,
     /// Current provider retry, if any.
@@ -258,6 +264,7 @@ impl ThreadProjection {
             models: Vec::new(),
             skills: Vec::new(),
             mode: PermissionMode::Ask,
+            account: None,
             exit_code: None,
             retrying: None,
             item_index: HashMap::new(),
@@ -445,6 +452,7 @@ impl ThreadProjection {
             | AgentEvent::Retrying { .. }
             | AgentEvent::ModelRerouted { .. }
             | AgentEvent::RuntimeError { .. }
+            | AgentEvent::AccountChanged { .. }
             | AgentEvent::Notice(_)
             | AgentEvent::Unknown { .. } => {}
         }

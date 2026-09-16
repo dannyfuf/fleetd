@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    AgentKind, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ItemPatch,
-    ModelSelection, PermissionMode, Seq, SessionState, TurnId,
+    AccountStatus, AgentKind, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind,
+    ItemPatch, ModelSelection, PermissionMode, Seq, SessionState, TurnId,
 };
 
 /// Harness session metadata learned at initialization.
@@ -398,6 +398,14 @@ pub enum AgentEvent {
         fatal: bool,
         /// Sanitized human-readable detail.
         message: String,
+    },
+    /// The harness reported which account it is running as, or that it has none.
+    ///
+    /// Emitted only by a harness that publishes an account signal; a thread that never sees one
+    /// keeps `ThreadProjection::account` at `None`, which is *unknown* and not *signed out*.
+    AccountChanged {
+        /// The account as the harness last reported it.
+        account: AccountStatus,
     },
     /// Non-fatal configuration, compatibility, or deprecation notice.
     Notice(String),

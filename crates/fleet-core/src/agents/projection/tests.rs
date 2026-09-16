@@ -6,12 +6,12 @@ use uuid::Uuid;
 
 use super::*;
 use crate::agents::{
-    AbortReason, AgentEvent, AgentKind, Attachment, Attention, AttentionKind, FileDelta,
-    GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
-    ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode,
-    PermissionOption, PlanAnswer, ProviderOptionId, Question, QuestionOption,
-    ReasoningEffortDescriptor, Seq, SeqEvent, SessionState, StreamKind, ThreadId, ToolCall,
-    ToolDiff, ToolKind, ToolPatch, TurnId, TurnOutcome, TurnState, Usage,
+    AbortReason, AccountInfo, AccountKind, AccountStatus, AgentEvent, AgentKind, Attachment,
+    Attention, AttentionKind, FileDelta, GateAnswer, GateId, GateKind, GateResolver, ItemId,
+    ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection,
+    PermissionChoice, PermissionMode, PermissionOption, PlanAnswer, ProviderOptionId, Question,
+    QuestionOption, ReasoningEffortDescriptor, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
+    ToolCall, ToolDiff, ToolKind, ToolPatch, TurnId, TurnOutcome, TurnState, Usage,
 };
 use crate::ids::WorktreeId;
 
