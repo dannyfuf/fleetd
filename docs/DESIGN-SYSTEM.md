@@ -1104,7 +1104,8 @@ by the row that owns them.
 #### `TranscriptList`
 **Purpose.** The bottom-anchored, variable-height conversation.
 **API.** Entity. `TranscriptList::new(&mut Context<Self>)`, `set_rows(Vec<TranscriptRow>, cx)`,
-`set_thread(Vec<TranscriptRow>, cx)`, `set_row_body(RowBodyRenderer, cx)`; the scroll machine —
+`patch_row(usize, TranscriptRow, cx)`, `set_thread(Vec<TranscriptRow>, cx)`,
+`set_row_body(RowBodyRenderer, cx)`; the scroll machine —
 `scroll_to_latest(cx)`, `scroll_to_end(cx)`, `anchor_new_turn(cx)`, `release_anchor(cx)`,
 `gesture(Gesture, cx) -> bool`, `scroll_mode(bool, cx)`, `scroll_rows(f32, cx)`,
 `scroll_viewports(f32, cx)`, `scroll_to_top(cx)`; the row focus — `focus_row(Option<usize>, cx)`,
@@ -1135,9 +1136,16 @@ what re-arms it. A splice that touches index 0 is the re-arm signal, so a page p
 reader asks again and a fully loaded thread asks nothing.
 **Usage rule.** GPUI `list`, **not** `uniform_list` — an assistant paragraph, a 30 px tool row
 and an inline diff are not one height. ADR 0005's uniform-row rule still governs the diff, which
-stays uniform *inside* its row. `set_rows` splices only what `diff_rows` says changed, so a
-streaming turn re-measures its last row and nothing else, and `ListState::reset` is called from
-`set_thread` alone — never from `render`, where it would discard every measured height.
+stays uniform *inside* its row. `set_rows` and `diff_rows` are structural only. Streaming calls
+`patch_row`, which replaces one row and calls `ListState::remeasure_items` rather than `splice`,
+so a growing scroll-top row keeps its exact in-row offset. `ListState::reset` is called from
+`set_thread` alone — never from `render`, where it would discard every measured height. Parsed
+Markdown and collection payloads are shared behind `Rc`, while long text remains `SharedString`,
+so cloning a `TranscriptRow` does not clone transcript bodies.
+**Usage rule (scroll callback).** GPUI calls the callback while the list's `RefCell` is mutably
+borrowed. The callback uses only `ListScrollEvent::{visible_range,count,is_scrolled,
+is_following_tail}`; strict end geometry and the scroll thumb are recomputed in a deferred entity
+update after that borrow ends.
 **Usage rule (follow).** A gesture may break follow **only when it can actually move the
 viewport away from the live edge**, because follow gates the list's own auto-pin: a spurious
 break produces no scroll event, never re-arms, and streaming silently stops following. The
@@ -1218,6 +1226,7 @@ invented: a tab that has not published an effort has three blocks, not four.
 #### `MultilineInput`
 **Purpose.** The docked composer: `TextInput`'s wrapping, multi-line sibling.
 **API.** Entity. `MultilineInput::new(&mut Context<Self>, placeholder)`, `text()`, `is_empty()`,
+`is_composing()`,
 `set_text(.., cx)`, `clear(cx)`, `set_placeholder(.., cx)`, `set_focus_visible(bool, cx)`,
 `set_read_only(bool, cx)`, `submit(cx)`, `push_history(..)`, `active_trigger()`,
 `focus_handle()`, readers `buffer()` and `history()`, and the three `-> bool` motions an owner
@@ -1225,11 +1234,14 @@ falls through on — `recall_previous(cx)`, `caret_up(cx)`, `caret_down(cx)`, ea
 whether it moved; emits `MultilineInputEvent::{Submit(String), Trigger(Trigger), Changed,
 Escape}` under `MULTILINE_INPUT_KEY_CONTEXT`. `MultilineBuffer` is the pure editing model and
 `PromptHistory` the last `HISTORY_LIMIT` (100) prompts plus the draft `↑` was opened from.
-**States.** empty (placeholder) · typing · multi-line (grows one line at a time, to eight) ·
-IME composition · read-only · dimmed while a decision owns the bare keys.
+**States.** empty (placeholder) · typing · multi-line (grows one visual row at a time, to eight) ·
+capped (internal scroll thumb; wheel is consumed) · IME composition · read-only · dimmed while a
+decision owns the bare keys.
 **Keyboard.** printable · `⏎` submit · `⇧⏎` newline (the **only** newline modifier) ·
 `Backspace`/`Delete` · word-wise deletion · line/word motion · shift-selection · select-all ·
-paste · `↑`/`↓` history at the **visual** buffer edge · `@` `$` `/` report a `Trigger`.
+paste · `Home`/`End` visual-row bounds (`cmd`/`ctrl` variants keep logical-line bounds) · `↑`/`↓`
+history at the **visual** buffer edge · `@` `$` `/` report a `Trigger`. Plain `⏎` is consumed
+without submit while `is_composing()`; an owner-level Send/Steer action must guard the same state.
 **Usage rule (triggers report).** A trigger character is **inserted and reported, never
 consumed**, so all three stay typable: the owner opens a picker on `Trigger` and re-filters it
 from `active_trigger()` on every `Changed`. `@` and `$` fire wherever a token starts; `/` fires
@@ -1239,6 +1251,11 @@ message and offering it elsewhere is a whole class of "why didn't my command run
 a wrap boundary belongs to two rows — the one *farthest* from the edge under test wins, so an
 ambiguous caret never claims the key. It declines while a selection is being extended and while
 an IME composition is live, and browsing ends on any edit, even one the user immediately undoes.
+**Usage rule (layout).** Long tokens break at character boundaries inside the resolved width.
+Caret motion, hit-testing, drag/double-click selection and visual-row bounds use one
+revision-tagged layout; stale geometry falls back to logical motion. Hard tabs survive in the
+stored/submitted draft and paint as `TAB_WIDTH` spaces. Shaping is cached per logical line by
+text, width and font so an edit does not reshape untouched lines.
 **Usage rule.** It never acts on a thread: a submit, a trigger, a change and an escape are
 reported, and the owner decides what they mean. Bare-letter bindings above it must be shadowed
 in its key context.
@@ -1246,17 +1263,28 @@ in its key context.
 #### `Markdown`
 **Purpose.** Assistant prose, rendered from a stream.
 **API.** `parse_markdown_document(&str) -> MarkdownDocument`;
-`parse_markdown_prefix(&str, &HighlightCache)` for the streaming path;
-`markdown(&MarkdownDocument, &App)`. `MarkdownBlock::{Paragraph,
-Code{lang,text,highlights,closed}, List{ordered,items}, Heading{level,inlines}, Quote, Rule}`
+`parse_markdown_prefix(&str, &HighlightCache)` for cached full-prefix parsing;
+`MarkdownDocument::default().append(delta)` for incremental streaming;
+`markdown(&MarkdownDocument, &App)` or `document.render_with_caret(bool, &App)`.
+`MarkdownBlock::{Paragraph, Code{lang,text,highlights,closed}, List{ordered,items},
+Heading{level,inlines}, Quote, Table{header,alignments,rows}, Rule}`
 built through `MarkdownBlock::code(lang, text)`, `::cached_code(lang, text, &cache)` or
 `::streaming_code(lang, text)`; `MarkdownInline::{Text, Code, Strong, Emphasis, Link}`.
 **Usage rule.** Two invariants, both tested: parsing never panics or loops on any input, and for
 any prefix `p` of `s`, every block of `parse_markdown_document(p)` except its last is a block of
 `parse_markdown_document(s)` at the same index — a transcript must not reflow behind the reader
 while the model keeps typing. Setext headings are deliberately absent, because they would
-retroactively turn a finished paragraph into a heading. Tables, images and indented code are out
-of scope and survive as their own source text.
+retroactively turn a finished paragraph into a heading. A GFM table begins only when its pipe
+header is followed by a complete delimiter row; before that lookahead arrives the header remains
+the last paragraph. Escaped `\|` stays inside its cell. Images and indented code are out of scope
+and survive as their own source text.
+**Tokens and layout.** Paragraphs, headings, list-item prose, quotes and table cells each use one
+`StyledText`; strong, emphasis, inline-code background/mono family, link colour/underline and the
+optional streaming caret are text runs. Table columns are equal `flex_1` children with `min_w_0`,
+`space.sm` horizontal and `space.xs` vertical cell padding; the emphasised header uses
+`text.ui_strong` over a `metrics.hairline` / `colors.border` divider. Fenced code uses the existing
+`surface`, `radii.sm`, `space.sm`/`space.md` and `text.data` tokens, preserves whitespace, and
+scrolls horizontally with axis restriction so a vertical wheel bubbles to the transcript.
 **Usage rule (highlighting).** A fence is lexed when the document is built, never in `render`.
 Code fences are **not** highlighted while streaming, and **a partial fence is neither read from
 nor written to the `HighlightCache`** — it must never poison it, and a fence whose colours

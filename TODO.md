@@ -9,43 +9,43 @@ meets it, or degrades to a narrower behaviour rather than a wrong one.
 
 ---
 
-## 1. A Codex file-change approval shows paths, not the diff
+## 1. Done — a Codex file-change approval joins its diff
 
-**Impact: high.** This is the one item a user will call a bug.
+Closed in the native-agents round 2 adapter work.
 
 `docs/NATIVE-AGENTS.md` §6.2 promises the approval card shows the diff — *"For an edit approval
-Fleet shows what t3code cannot: **the diff**, joined by `itemId`"*. It does not, on Codex.
+Fleet shows what t3code cannot: **the diff**, joined by `itemId`"*. Codex now does.
 
 Codex's `item/fileChange/requestApproval` deliberately carries **no diff and no paths**; the
 changes live on the `fileChange` item the request names by `itemId` (see
 `docs/research/harness-codex-app-server.md` §3.2). So the card has to join the approval onto that
-item. `GateKind::Permission` has no `item` field to carry the id, so the join has nothing to key
-on and the card falls back to the path list.
+item. `GateKind::Permission.item` now carries the normalized `ItemId`, the Codex adapter caches
+the named file-change paths for human copy, and the thread view joins the diff by that exact id.
+A gate that wins the race with its item says `loading edit details…` rather than drawing an empty
+card. The additive `agents.decision` harness projection identifies the joined item and whether
+the drawer rendered its diff; `scenarios/agents/codex-approval-shows-the-diff.scenario` pins the
+shipped behaviour in the regular corpus.
 
-- **Start in:** `crates/fleet-core/src/agents/gates.rs` — add `item: Option<ItemId>` to
-  `GateKind::Permission`. Then the Codex adapter's approval mapping
-  (`crates/fleet-daemon/src/agents/codex/approvals.rs`) populates it, and the dock
-  (`crates/fleet-ui-kit/src/components/agent/`) renders `DiffView` when it resolves.
-- **Cost:** small. One additive field, one populate, one render branch.
-- **Done when:** a Codex edit approval renders its diff at bounded height, and one that arrives
-  before its item shows a loading state rather than an empty card.
-
-## 2. `^s e` draws nothing on Codex
+## 2. Codex effort discovery is not yet projected to `^s e`
 
 **Impact: high.** A control the docs describe is absent.
 
 §7 says the reasoning-effort options are **discovered per model** from
 `model/list.supportedReasoningEfforts`, with the harness's own `description` strings, and that
-Fleet must never hardcode a Codex ladder. Neither `model/list` nor `skills/list` is called, so the
-vocabularies are empty and the menu is empty.
+Fleet must never hardcode a Codex ladder. The adapter now paginates `model/list`, preserves each
+complete model record, applies `defaultReasoningEffort`, reads `skills/list` after thread start,
+and refreshes its cache on `skills/changed`.
 
 The empty menu is the *correct* degradation — drawing a guessed ladder would be worse, per
 `DESIGN-SYSTEM.md` §7 — but it means the control does not work on Codex.
 
-- **Start in:** `crates/fleet-daemon/src/agents/codex/session.rs`. Both are cursor-paginated;
-  loop on `nextCursor`. Re-run `skills/list` on the `skills/changed` notification.
-- **Cost:** small-to-medium. Two RPCs already in the generated method tables, plus plumbing the
-  results into the thread summary.
+- **Start in:** the normalized session event/view. `SessionConfigured` carries only one
+  `ModelSelection` plus plain skill names; it has no additive model-descriptor field, and
+  `MetadataChanged` cannot publish refreshed skills. Add those fields through the core event,
+  store projection and `AgentSessionView`, then have `AgentThreadView::trait_candidates` read
+  them.
+- **Cost:** small-to-medium. Discovery is complete; normalized projection and picker consumption
+  remain.
 - **Done when:** `^s e` on a Codex tab lists that model's legal efforts with their descriptions
   and defaults to `defaultReasoningEffort`; `$` lists real skills.
 
@@ -168,8 +168,9 @@ because `spawn` performs no shell expansion of env values.
   (`docs/decisions/0013-sqlite-agent-transcripts.md`). Making the composition fallible, so the
   process exits the way an unreadable `state.json` makes it exit, belongs with `Services::build`,
   not with the agent store.
-- **No GUI smoke pass for the agent tab.** ADR 0007's driver script has no agent-tab procedure.
-  2 548 green tests say the contracts hold, not that the tab feels right.
+- **The agent GUI smoke pass is fixture-driven.** The checked-in `scenarios/agents/` corpus
+  covers popup attachment, focus, streaming, decisions, unread state, prefix routing, joined
+  Codex diffs and transcript wheel input without a real provider binary or network.
 - **The Codex approval round-trip has no live fixture.** The shapes in
   `docs/research/harness-codex-app-server.md` §3 come from the generated schema for
   `codex-cli 0.147.0` and are authoritative, but the live round-trip was never captured because
