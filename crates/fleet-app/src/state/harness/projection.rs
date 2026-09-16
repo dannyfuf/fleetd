@@ -20,9 +20,10 @@ use fleet_core::{
 };
 
 use super::{
-    AgentThreadSnapshot, AgentsSnapshot, CursorSnapshot, DaemonSnapshot, DialogSnapshot,
-    HarnessProjection, IdleSnapshot, JobSnapshot, ListSnapshot, RowSnapshot, SNAPSHOT_VERSION,
-    TerminalSnapshot, ToastSnapshot, UiSnapshot, ViewportSnapshot, WindowSnapshot,
+    AgentThreadDecisionSnapshot, AgentThreadSnapshot, AgentsSnapshot, CursorSnapshot,
+    DaemonSnapshot, DialogSnapshot, HarnessProjection, IdleSnapshot, JobSnapshot, ListSnapshot,
+    RowSnapshot, SNAPSHOT_VERSION, TerminalSnapshot, ToastSnapshot, UiSnapshot, ViewportSnapshot,
+    WindowSnapshot,
 };
 use crate::presentation::DisplayedHub;
 use crate::state::{
@@ -418,6 +419,14 @@ impl AppState {
                         state: attention_name(attention).to_owned(),
                         unread: self.agents.seen(summary.thread) < summary.last_seq,
                         pending_gate: pending_gate_name(attention).map(str::to_owned),
+                        decision: self.agents.decision(summary.thread).map(|decision| {
+                            AgentThreadDecisionSnapshot {
+                                kind: decision.kind,
+                                title: decision.title.clone(),
+                                paths: decision.paths.clone(),
+                                has_diff: decision.has_diff,
+                            }
+                        }),
                     }
                 })
                 .collect(),

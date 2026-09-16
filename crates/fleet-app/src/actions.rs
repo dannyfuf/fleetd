@@ -332,6 +332,28 @@ pub mod native_agent {
             CloseTab,
             /// `ctrl-s F` — open the PTY agent session instead (migration fallback).
             TerminalFallback,
+            /// `ctrl-s 1` — select Workspace tab one from an agent tab.
+            SelectTab1,
+            /// `ctrl-s 2` — select Workspace tab two from an agent tab.
+            SelectTab2,
+            /// `ctrl-s 3` — select Workspace tab three from an agent tab.
+            SelectTab3,
+            /// `ctrl-s 4` — select Workspace tab four from an agent tab.
+            SelectTab4,
+            /// `ctrl-s 5` — select Workspace tab five from an agent tab.
+            SelectTab5,
+            /// `ctrl-s 6` — select Workspace tab six from an agent tab.
+            SelectTab6,
+            /// `ctrl-s 7` — select Workspace tab seven from an agent tab.
+            SelectTab7,
+            /// `ctrl-s 8` — select Workspace tab eight from an agent tab.
+            SelectTab8,
+            /// `ctrl-s 9` — select Workspace tab nine from an agent tab.
+            SelectTab9,
+            /// `ctrl-s Tab` — select the terminal-tab MRU from an agent tab.
+            LastTab,
+            /// `ctrl-s w` — select the session MRU from an agent tab.
+            LastSession,
         ]
     );
 }

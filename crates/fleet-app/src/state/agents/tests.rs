@@ -1,7 +1,10 @@
 use super::*;
 
 use fleet_core::{
-    agents::{AgentKind, GateId, GateKind, SessionState as AgentSessionState, ToolKind, TurnState},
+    agents::{
+        AgentEvent, AgentKind, GateId, GateKind, PermissionMode, SeqEvent,
+        SessionState as AgentSessionState, ToolKind, TurnState,
+    },
     sessions::SessionKind,
 };
 
@@ -137,6 +140,49 @@ fn a_worktrees_tabs_are_its_own_threads_in_snapshot_order() {
 }
 
 #[test]
+fn a_skills_changed_event_replaces_the_completion_catalogue() {
+    let thread = summary("feat", Attention::Idle, 1);
+    let mut state = state_with(vec![thread.clone()]);
+    let event = |seq, event| SeqEvent {
+        seq: Seq(seq),
+        at: chrono::DateTime::UNIX_EPOCH,
+        raw: None,
+        event,
+    };
+
+    state.agents.apply_event(
+        thread.thread,
+        &event(
+            1,
+            AgentEvent::SessionConfigured {
+                provider: AgentKind::Codex,
+                resume_cursor: None,
+                model: None,
+                models: Vec::new(),
+                mode: PermissionMode::Ask,
+                tools: Vec::new(),
+                commands: Vec::new(),
+                skills: vec!["review".to_owned()],
+            },
+        ),
+    );
+    state.agents.apply_event(
+        thread.thread,
+        &event(
+            2,
+            AgentEvent::MetadataChanged {
+                title: None,
+                mode: None,
+                model: None,
+                skills: Some(vec!["review".to_owned(), "ship".to_owned()]),
+            },
+        ),
+    );
+
+    assert_eq!(state.agents.skills(thread.thread), ["review", "ship"]);
+}
+
+#[test]
 fn an_open_gate_routes_the_keyboard_to_its_decision_context() {
     let thread = summary("feat", Attention::NeedsYou(AttentionKind::Permission), 1);
     let mut state = state_with(vec![thread.clone()]);
@@ -206,11 +252,22 @@ fn a_snapshot_forgets_threads_the_daemon_no_longer_lists() {
     let mut state = state_with(vec![thread.clone()]);
     state.agents.activate(worktree("feat"), thread.thread);
     state.agents.mark_seen(thread.thread, Seq(1));
+    state.agents.set_decision(
+        thread.thread,
+        crate::screens::agent_thread::PreparedDecisionObservable {
+            kind: "permission",
+            title: "edit README.md".to_owned(),
+            paths: vec!["README.md".to_owned()],
+            has_diff: true,
+        }
+        .into(),
+    );
 
     state.apply_snapshot(populated(Vec::new()), Instant::now());
 
     assert!(state.agents.summaries().is_empty());
     assert!(state.agents.active(&worktree("feat")).is_none());
+    assert!(state.agents.decision(thread.thread).is_none());
     assert_eq!(state.agents.seen(thread.thread), Seq::default());
     assert_eq!(state.agents.counts(), AgentCounts::default());
 }

@@ -736,7 +736,9 @@ impl Render for TranscriptList {
                     div()
                         .id("transcript-jump-to-latest")
                         .absolute()
-                        .bottom(theme.space.md)
+                        // Keep the newest turn footer legible while the reader is frozen above
+                        // the tail: the floating chip sits one tokenized control above it.
+                        .bottom(theme.space.md + theme.metrics.chip_h)
                         .right(theme.space.lg)
                         .flex()
                         .items_center()

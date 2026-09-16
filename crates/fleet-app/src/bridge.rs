@@ -4,10 +4,11 @@
 //! Request admission, health checks, and connection attempts progress independently.
 
 use std::{
+    collections::HashMap,
     fmt,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
@@ -100,6 +101,8 @@ pub enum BridgeEvent {
     },
     /// A compact native-agent summary update.
     AgentSummary(AgentThreadSummary),
+    /// Persisted cursors belonging to this installation, refreshed after Hello/reconnect.
+    AgentSeenCursors(Vec<(ThreadId, Seq)>),
     /// The daemon answered and sent its first snapshot (§3.12 A resolved).
     Connected(Box<Snapshot>),
     /// The daemon could not be started (§3.12 B).
@@ -400,6 +403,8 @@ pub struct Bridge {
     in_flight: Arc<AtomicU32>,
     settle: Arc<SettleCounter>,
     resync_pending: Arc<AtomicBool>,
+    /// Per-install cursors fetched once on every successful connection.
+    agent_seen: Arc<RwLock<HashMap<ThreadId, Seq>>>,
 }
 
 impl Bridge {
@@ -415,9 +420,11 @@ impl Bridge {
         let (event_tx, events) = async_channel::bounded(EVENT_CAPACITY);
         let resync_pending = Arc::new(AtomicBool::new(false));
         let settle = Arc::new(SettleCounter::default());
+        let agent_seen = Arc::new(RwLock::new(HashMap::new()));
         let thread_events = event_tx.clone();
         let thread_resync = resync_pending.clone();
         let thread_settle = Arc::clone(&settle);
+        let thread_agent_seen = Arc::clone(&agent_seen);
         if let Err(error) = thread::Builder::new()
             .name("fleet-daemon-bridge".to_owned())
             .spawn(move || {
@@ -427,6 +434,7 @@ impl Bridge {
                     thread_events,
                     thread_resync,
                     thread_settle,
+                    thread_agent_seen,
                 )
             })
         {
@@ -443,6 +451,7 @@ impl Bridge {
             resync_pending,
             in_flight: Arc::new(AtomicU32::new(0)),
             settle,
+            agent_seen,
         }
     }
 
@@ -482,7 +491,19 @@ impl Bridge {
             resync_pending,
             in_flight: Arc::new(AtomicU32::new(0)),
             settle: Arc::new(SettleCounter::default()),
+            agent_seen: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Persisted native-agent cursors fetched for the current daemon connection.
+    #[must_use]
+    pub fn agent_seen_cursors(&self) -> Vec<(ThreadId, Seq)> {
+        self.agent_seen
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(thread, seq)| (*thread, *seq))
+            .collect()
     }
 
     /// The stream of daemon events. The shell drains it in one `cx.spawn` loop.
@@ -622,6 +643,7 @@ fn run_thread(
     events: Sender<BridgeEvent>,
     resync_pending: Arc<AtomicBool>,
     settle: Arc<SettleCounter>,
+    agent_seen: Arc<RwLock<HashMap<ThreadId, Seq>>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -643,5 +665,6 @@ fn run_thread(
         &events,
         &resync_pending,
         settle,
+        agent_seen,
     ));
 }

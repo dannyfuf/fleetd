@@ -118,6 +118,14 @@ pub struct AgentThreadSnapshot {
     pub state: String,
     pub unread: bool,
     pub pending_gate: Option<String>,
+    pub decision: Option<AgentThreadDecisionSnapshot>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentThreadDecisionSnapshot {
+    pub kind: &'static str,
+    pub title: String,
+    pub paths: Vec<String>,
+    pub has_diff: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentDecisionSnapshot {
