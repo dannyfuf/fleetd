@@ -186,9 +186,22 @@ impl TranscriptList {
 
     /// Replaces the keyed row projection.
     ///
-    /// Only the rows that changed are spliced into the list state, so every untouched row keeps
-    /// the height it was measured at.
+    /// Rows that keep their identity are replaced and remeasured first. Only identity changes are
+    /// then spliced into the list state, so content growth preserves a frozen reader's in-row
+    /// offset even when the same update also appends a structural footer.
     pub fn set_rows(&mut self, rows: Vec<TranscriptRow>, cx: &mut Context<Self>) {
+        let stable_changes = self
+            .rows
+            .iter()
+            .zip(&rows)
+            .enumerate()
+            .filter_map(|(index, (current, next))| {
+                (current.id == next.id && current != next).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in stable_changes {
+            self.replace_row(index, rows[index].clone());
+        }
         if let Some(splice) = diff_rows(&self.rows, &rows) {
             // A splice that touches the front means the oldest end of the transcript moved —
             // which is what answering [`TranscriptEvent::ReachedOldest`] with a page does. The
@@ -222,6 +235,16 @@ impl TranscriptList {
         if current == &row {
             return;
         }
+        self.replace_row(index, row);
+        self.sync_working_clock(cx);
+        cx.notify();
+    }
+
+    /// Replaces one stable row and invalidates only its measured height.
+    fn replace_row(&mut self, index: usize, row: TranscriptRow) {
+        let Some(current) = self.rows.get_mut(index) else {
+            return;
+        };
         let was_working = matches!(&current.kind, TranscriptRowKind::Working(_));
         let is_working = matches!(&row.kind, TranscriptRowKind::Working(_));
         *current = row;
@@ -231,8 +254,6 @@ impl TranscriptList {
             self.working_row = Some(index);
         }
         self.state.remeasure_items(index..index + 1);
-        self.sync_working_clock(cx);
-        cx.notify();
     }
 
     /// Switches to a different thread's rows.

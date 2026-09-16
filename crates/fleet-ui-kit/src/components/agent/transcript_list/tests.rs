@@ -88,6 +88,41 @@ fn patching_the_scroll_top_row_preserves_its_in_row_offset(cx: &mut TestAppConte
     });
 }
 
+#[gpui::test]
+fn content_growth_plus_a_structural_append_preserves_the_in_row_offset(cx: &mut TestAppContext) {
+    let rows: Vec<_> = (0..20)
+        .map(|index| expandable(&format!("tool-{index}")))
+        .collect();
+    let list = transcript(cx, rows.clone());
+    cx.update(|cx| {
+        list.update(cx, |list, cx| {
+            list.state.scroll_to(gpui::ListOffset {
+                item_ix: 10,
+                offset_in_item: px(12.0),
+            });
+            let mut next = rows;
+            next[10] = TranscriptRow::new(
+                TranscriptRowId::Item("tool-10".into()),
+                TranscriptRowKind::Work(
+                    ToolRow::new("tool-10", "bash", "cargo test --all-targets")
+                        .body("the final streamed output made this row taller"),
+                ),
+            );
+            next.push(TranscriptRow::ordinal(
+                20,
+                TranscriptRowKind::Notice(NoticeRow {
+                    text: "turn complete".into(),
+                }),
+            ));
+            list.set_rows(next, cx);
+
+            let offset = list.state.logical_scroll_top();
+            assert_eq!(offset.item_ix, 10);
+            assert_eq!(offset.offset_in_item, px(12.0));
+        });
+    });
+}
+
 /// A thread switch is the only moment every measured height is worthless, so it is the only
 /// caller of `reset` — and it puts the scroll machine back at the live edge.
 #[gpui::test]

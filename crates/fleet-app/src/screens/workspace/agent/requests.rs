@@ -238,10 +238,9 @@ pub(super) fn mark_seen(
 
 /// Re-reports what this window has read for every thread the daemon has forgotten.
 ///
-/// The daemon keeps `last_seen_seq` in runtime state only (§3.3), so a restart brings every
-/// already-read tab back as amber `needs you`. The local cursor is the surviving truth, and it
-/// is sent for every thread rather than only for the tab that is being shown — a tab the user
-/// never revisits would otherwise keep its dot forever.
+/// Identified clients persist a monotonic cursor in the daemon (§9.3). This process can still be
+/// ahead of the cursor returned by the latest connection, so it re-sends only those newer local
+/// overrides; a tab the user never revisits must not regain an amber dot after reconnect.
 pub(super) fn resend_seen_cursors(bridge: &Bridge, state: &Entity<AppState>, cx: &mut App) {
     let persisted = bridge.agent_seen_cursors();
     state.update(cx, |app, _| app.agents.seed_seen(&persisted));

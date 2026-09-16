@@ -68,14 +68,20 @@ impl AgentThreadView {
         let described_tail = u64::try_from(applied.len()).ok().is_some_and(|count| {
             self.projection.last_seq.0.saturating_add(count) == projection.last_seq.0
         });
+        let retrying_changed = self.projection.retrying != projection.retrying;
+        let mut every_text_was_queued = true;
+        for change in applied {
+            if matches!(change, Applied::Text { .. }) && !self.queue_text(projection, change, cx) {
+                every_text_was_queued = false;
+            }
+        }
         if described_tail
             && !applied.is_empty()
             && applied
                 .iter()
                 .all(|change| matches!(change, Applied::Text { .. }))
-            && applied
-                .iter()
-                .all(|change| self.queue_text(projection, change, cx))
+            && every_text_was_queued
+            && !retrying_changed
         {
             self.projection.last_seq = projection.last_seq;
             self.projection.last_activity = projection.last_activity;
@@ -88,6 +94,10 @@ impl AgentThreadView {
             return;
         }
 
+        // Text descriptions are a filtered subset of a bridge batch: a final delta followed by
+        // `ItemCompleted` advances the projection twice but contributes only one entry here. The
+        // suffix was queued above; flush it through `patch_row` before rebuilding structural rows
+        // so the growing row is remeasured and never enters the structural splice.
         self.flush_reveal(cx);
         let was_working = self.is_working();
         self.record_resolved_gates(projection);

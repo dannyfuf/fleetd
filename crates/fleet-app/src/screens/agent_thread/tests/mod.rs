@@ -8,4 +8,5 @@ mod composer;
 mod decisions;
 mod fixtures;
 mod rows;
+mod streaming;
 mod view;
