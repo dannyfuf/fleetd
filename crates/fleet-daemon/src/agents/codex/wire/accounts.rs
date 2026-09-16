@@ -383,6 +383,112 @@ pub struct GetAccountResponse {
     pub requires_openai_auth: bool,
 }
 
+/// `LoginAppBrand`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoginAppBrand {
+    #[serde(rename = "codex")]
+    Codex,
+    #[serde(rename = "chatgpt")]
+    Chatgpt,
+    /// A value this build does not know. Never a decode failure (§4.5).
+    #[serde(other)]
+    Unknown,
+}
+
+/// `LoginAccountParams`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LoginAccountParams {
+    #[serde(rename = "apiKey")]
+    ApiKey { api_key: String },
+    #[serde(rename = "chatgpt")]
+    Chatgpt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_brand: Option<LoginAppBrand>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_streamlined_login: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        use_hosted_login_success_page: Option<bool>,
+    },
+    #[serde(rename = "chatgptDeviceCode")]
+    ChatgptDeviceCode,
+    /// [UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE. The access token must contain the same scopes that Codex-managed ChatGPT auth tokens have.
+    #[serde(rename = "chatgptAuthTokens")]
+    ChatgptAuthTokens {
+        access_token: String,
+        chatgpt_account_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chatgpt_plan_type: Option<String>,
+    },
+    /// [UNSTABLE] Managed Amazon Bedrock login is experimental.
+    #[serde(rename = "amazonBedrock")]
+    AmazonBedrock { api_key: String, region: String },
+    /// A variant this build does not know, kept so one new value cannot
+    /// make a whole class of frames invisible (§4.5 rule 1).
+    #[serde(other)]
+    Unknown,
+}
+
+/// `LoginAccountResponse`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LoginAccountResponse {
+    #[serde(rename = "apiKey")]
+    ApiKey,
+    #[serde(rename = "chatgpt")]
+    Chatgpt { auth_url: String, login_id: String },
+    #[serde(rename = "chatgptDeviceCode")]
+    ChatgptDeviceCode {
+        login_id: String,
+        user_code: String,
+        verification_url: String,
+    },
+    #[serde(rename = "chatgptAuthTokens")]
+    ChatgptAuthTokens,
+    #[serde(rename = "amazonBedrock")]
+    AmazonBedrock,
+    /// A variant this build does not know, kept so one new value cannot
+    /// make a whole class of frames invisible (§4.5 rule 1).
+    #[serde(other)]
+    Unknown,
+}
+
+/// `CancelLoginAccountParams`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelLoginAccountParams {
+    /// `loginId`.
+    pub login_id: String,
+}
+
+/// `CancelLoginAccountStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelLoginAccountStatus {
+    #[serde(rename = "canceled")]
+    Canceled,
+    #[serde(rename = "notFound")]
+    NotFound,
+    /// A value this build does not know. Never a decode failure (§4.5).
+    #[serde(other)]
+    Unknown,
+}
+
+/// `CancelLoginAccountResponse`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelLoginAccountResponse {
+    /// `status`.
+    pub status: CancelLoginAccountStatus,
+}
+
 /// `ModelRerouteReason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelRerouteReason {
@@ -574,4 +680,31 @@ pub struct RateLimitSnapshot {
 pub struct AccountRateLimitsUpdatedNotification {
     /// `rateLimits`.
     pub rate_limits: RateLimitSnapshot,
+}
+
+/// `DesktopOnboardingEntrypoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DesktopOnboardingEntrypoint {
+    #[serde(rename = "life_sciences")]
+    LifeSciences,
+    /// A value this build does not know. Never a decode failure (§4.5).
+    #[serde(other)]
+    Unknown,
+}
+
+/// `AccountLoginCompletedNotification`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountLoginCompletedNotification {
+    /// `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// `loginId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_id: Option<String>,
+    /// `onboardingEntrypoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_entrypoint: Option<DesktopOnboardingEntrypoint>,
+    /// `success`.
+    pub success: bool,
 }

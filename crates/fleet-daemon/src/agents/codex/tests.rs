@@ -18,7 +18,7 @@ use super::{
     session::CodexSession, user_agent_version,
 };
 use crate::agents::harness::{
-    Harness, HarnessConfig, OpenSession, Submit, SubmitIntent,
+    AccountOp, AccountOutcome, Harness, HarnessConfig, OpenSession, Submit, SubmitIntent,
     capture::{SECRETS, assert_no_secret, logged},
     mockpeer::MockPeer,
     probe::Probed,
@@ -35,6 +35,11 @@ const FAILED_TURN: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/agents/codex/codex-failed-turn.ndjson"
 ));
+
+/// The `account/read` reply every scripted handshake owes, because `open` reads the account
+/// before it starts a thread. A peer that answers nothing here still opens — the read is a
+/// warning, not a failure — but it pays the deadline for it in every test that forgets.
+const ACCOUNT_READ: &str = r#"{"id":__ID__,"result":{"account":{"type":"chatgpt","email":"dev@example.com","planType":"pro"},"requiresOpenaiAuth":true}}"#;
 
 fn start_request() -> StartRequest {
     StartRequest {
@@ -145,6 +150,7 @@ fn names(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::Retrying { .. } => "retrying",
             AgentEvent::ModelRerouted { .. } => "model_rerouted",
             AgentEvent::RuntimeError { .. } => "runtime_error",
+            AgentEvent::AccountChanged { .. } => "account_changed",
             AgentEvent::Notice(_) => "notice",
             AgentEvent::Unknown { .. } => "unknown",
         })
@@ -232,6 +238,8 @@ fn the_captured_failure_keeps_the_error_and_the_settlement_apart() {
     );
 }
 
+/// The account family: reads, the two notifications, and the login response shape.
+mod account;
 mod stage_a2;
 mod stage_fix;
 /// Byte-exact goldens for every outbound frame Fleet writes.
@@ -249,6 +257,7 @@ fn peer() -> crate::agents::harness::mockpeer::BuiltPeer {
             ),
             &[],
         )
+        .on("account/read", Some(ACCOUNT_READ), &[])
         .on(
             "thread/start",
             Some(&format!(
@@ -446,7 +455,7 @@ async fn a_scripted_peer_drives_the_handshake_a_turn_and_its_settlement() {
     );
 
     // The frames Fleet wrote, in order, byte-for-byte from the peer's own record.
-    let written = peer.wait_for_frames(7, Duration::from_secs(5)).await;
+    let written = peer.wait_for_frames(8, Duration::from_secs(5)).await;
     let written_methods = written
         .iter()
         .filter_map(|line| {
@@ -463,6 +472,7 @@ async fn a_scripted_peer_drives_the_handshake_a_turn_and_its_settlement() {
         [
             "initialize",
             "initialized",
+            "account/read",
             "thread/start",
             "model/list",
             "skills/list",
@@ -510,6 +520,7 @@ async fn a_stray_stdout_line_never_kills_the_session() {
             Some(r#"{"id":__ID__,"result":{"userAgent":"fleet/0.147.0 (Linux)"}}"#),
             &[],
         )
+        .on("account/read", Some(ACCOUNT_READ), &[])
         .on(
             "thread/start",
             Some(&format!(
@@ -557,6 +568,7 @@ async fn a_second_submit_steers_the_running_turn() {
             Some(r#"{"id":__ID__,"result":{"userAgent":"fleet/0.147.0 (Linux)"}}"#),
             &[],
         )
+        .on("account/read", Some(ACCOUNT_READ), &[])
         .on(
             "thread/start",
             Some(&format!(

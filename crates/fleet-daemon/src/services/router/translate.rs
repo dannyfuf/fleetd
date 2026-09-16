@@ -39,6 +39,8 @@ pub fn to_remote(
         | AgentMarkSeen { .. }
         | AgentCheckpoints { .. }
         | AgentRevert { .. }
+        | AgentAccountLogin { .. }
+        | AgentAccountLogout { .. }
         | AgentStop { .. } => {}
         CreateWorktree {
             host: placement, ..
@@ -188,9 +190,12 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         // rewriting its rows, and until then the id space is left as the owner sent it.
         AgentThreadWindow(window) => translate_summary(&mut window.summary, host, ids),
         // A checkpoint identity is scoped to its thread, and thread ids pass through unchanged.
+        // A sign-in URL is the owner's own loopback callback and is never rewritten — but the
+        // account verbs are refused on a mirror, so this arm is unreachable in practice.
         AgentItemBodyChunk { .. }
         | AgentCheckpoints(_)
         | AgentReverted(_)
+        | AgentAccountLogin { .. }
         | AgentSeenCursors(_) => {}
         CardWorktree { worktree, .. } => translate_worktree(worktree, host, ids),
         Watches(watches) => {
@@ -595,6 +600,8 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::AgentSetMode { .. }
         | RequestBody::AgentSetModel { .. }
         | RequestBody::AgentMarkSeen { .. }
+        | RequestBody::AgentAccountLogin { .. }
+        | RequestBody::AgentAccountLogout { .. }
         | RequestBody::AgentStop { .. }
         | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }

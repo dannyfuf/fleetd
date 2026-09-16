@@ -375,6 +375,14 @@ omit entirely:
   `output` on a `tool_call`, so two scripted threads in one scenario can be told apart and a
   transcript that names none stays byte-identical between runs.
 
+**There is no account step, and the scripted provider's account is fixed.** Fleet reads
+`account/read` in its Codex handshake (`NATIVE-AGENTS.md` §4.2); the scripted agent answers a
+constant signed-in ChatGPT account so a scripted thread looks like a real one. Signing in and out
+is deliberately *not* scriptable: a step for it would only be observable through fields the
+version-1 snapshot does not carry — the composer's `/` rows and the metadata row are both absent
+from it — so a scenario could drive the flow and assert nothing about it. Both surfaces are
+covered by `#[gpui::test]`s in `screens/agent_thread/tests/` instead.
+
 An `approval` step must immediately follow the `file_change` it gates: neither provider's approval
 frame carries a diff — Claude reads it from the `Edit` input, Codex joins by `itemId` — so the
 pairing has to be unambiguous. `models` is configuration rather than a stream event: it is hoisted

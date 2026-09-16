@@ -44,6 +44,9 @@ USED_REQUESTS = [
     "skills/list",
     "account/read",
     "account/rateLimits/read",
+    "account/login/start",
+    "account/login/cancel",
+    "account/logout",
 ]
 
 # The notifications Fleet maps. The rest are suppressed at the source or counted as unknown.
@@ -86,6 +89,7 @@ USED_NOTIFICATIONS = [
     "mcpServer/oauthLogin/completed",
     "account/updated",
     "account/rateLimits/updated",
+    "account/login/completed",
     "skills/changed",
     "hook/started",
     "hook/completed",

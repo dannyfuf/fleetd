@@ -262,6 +262,16 @@ pub enum BridgeCommand {
         /// Checkpoint to restore, as the listing named it.
         checkpoint: CheckpointId,
     },
+    /// Begin signing this thread's harness in to its provider account.
+    AgentAccountLogin {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Sign this thread's harness out of its provider account.
+    AgentAccountLogout {
+        /// Target thread.
+        thread: ThreadId,
+    },
 }
 
 impl From<BridgeCommand> for RequestBody {
@@ -317,6 +327,8 @@ impl From<BridgeCommand> for RequestBody {
             BridgeCommand::AgentRevert { thread, checkpoint } => {
                 Self::AgentRevert { thread, checkpoint }
             }
+            BridgeCommand::AgentAccountLogin { thread } => Self::AgentAccountLogin { thread },
+            BridgeCommand::AgentAccountLogout { thread } => Self::AgentAccountLogout { thread },
         }
     }
 }

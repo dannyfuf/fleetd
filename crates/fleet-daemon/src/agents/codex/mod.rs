@@ -1,12 +1,14 @@
 //! The Codex harness: `codex app-server` over stdio.
 //!
-//! Fleet uses fifteen of Codex's 99 client methods and answers five of its eleven server
-//! requests. Everything it does **not** use is a deliberate omission with a reason: `fs/*`,
-//! `command/exec/*` and `process/*` because Fleet's daemon owns the filesystem, the PTYs and the
-//! search and proxying them adds a hop and a second truth; `thread/shellCommand` because it
-//! *"runs unsandboxed with full access"*; `thread/rollback` because it is deprecated and *"does
-//! not revert local file changes"*, and Fleet's revert is git-based.
+//! Fleet uses nineteen of the 133 client methods this Codex build declares, and answers five of
+//! its eleven server requests. Everything it does **not** use is a deliberate omission with a
+//! reason: `fs/*`, `command/exec/*` and `process/*` because Fleet's daemon owns the filesystem,
+//! the PTYs and the search and proxying them adds a hop and a second truth;
+//! `thread/shellCommand` because it *"runs unsandboxed with full access"*; `thread/rollback`
+//! because it is deprecated and *"does not revert local file changes"*, and Fleet's revert is
+//! git-based.
 
+mod account;
 pub mod approvals;
 mod catalogue;
 pub mod envelope;
@@ -40,9 +42,9 @@ use self::{
     transport::Transport,
 };
 use crate::agents::harness::{
-    Harness, HarnessConfig, HarnessError, HarnessEvents, HarnessResult, HarnessSink,
-    InterruptReason, OpenSession, ProtocolOp, RuntimeApplied, RuntimeChange, RuntimeField,
-    SessionOpened, ShutdownReason, Submit, Submitted, closed_events,
+    AccountOp, AccountOutcome, Harness, HarnessConfig, HarnessError, HarnessEvents, HarnessResult,
+    HarnessSink, InterruptReason, OpenSession, ProtocolOp, RuntimeApplied, RuntimeChange,
+    RuntimeField, SessionOpened, ShutdownReason, Submit, Submitted, closed_events,
     fingerprint::{IssueKind, SchemaFingerprint},
     probe::Probed,
     process,
@@ -60,6 +62,13 @@ const PARENT_INTERRUPT_DEADLINE: Duration = Duration::from_secs(5);
 const SETTINGS_DEADLINE: Duration = Duration::from_secs(5);
 const CATALOGUE_DEADLINE: Duration = Duration::from_secs(10);
 const COMPACT_DEADLINE: Duration = Duration::from_secs(10);
+/// One `account/read`. Short because it is metadata: a slow read must not hold up the handshake
+/// it rides on, and its failure costs a chip rather than a session.
+const ACCOUNT_DEADLINE: Duration = Duration::from_secs(5);
+/// `account/login/start`, `account/login/cancel` and `account/logout`. Longer than a read because
+/// starting a sign-in binds a local callback listener, and well under the 45 s `fleet-proto`
+/// deadline of the `AgentAccountLogin`/`AgentAccountLogout` request that triggers it.
+const LOGIN_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How many child interrupts run at once.
 const CHILD_INTERRUPT_CONCURRENCY: usize = 8;
@@ -333,6 +342,9 @@ impl Harness for CodexHarness {
                 .map(ToOwned::to_owned);
         }
         transport.notify("initialized", None).await?;
+        // Before the thread exists, so the metadata row is honest in the first frame the tab
+        // paints and a signed-out session says so now rather than at the first refused turn.
+        account::announce_on_open(&transport, &self.events).await;
 
         let start_params = self.start_params(&req, &self.session.lock().await.controls.clone());
         let thread = match req.start.resume_cursor.as_deref() {
@@ -705,6 +717,14 @@ impl Harness for CodexHarness {
             )
             .await
             .map(|_| ())
+    }
+
+    async fn account(&mut self, op: AccountOp) -> HarnessResult<AccountOutcome> {
+        let transport = self.transport()?;
+        match op {
+            AccountOp::Login => account::login(transport, &self.session, &self.events).await,
+            AccountOp::Logout => account::logout(transport, &self.session, &self.events).await,
+        }
     }
 
     async fn shutdown(&mut self, reason: ShutdownReason) -> HarnessResult<()> {

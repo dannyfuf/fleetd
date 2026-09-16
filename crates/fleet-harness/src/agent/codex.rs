@@ -165,6 +165,19 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
                 self.interrupted = true;
                 json!({})
             }
+            // Fleet reads the account in its handshake (`NATIVE-AGENTS.md` §4.2). The scripted
+            // answer is a fixed signed-in ChatGPT account: the transcript grammar (§5 of
+            // `TESTING-HARNESS.md`) has no step for account state, so there is nothing for a
+            // scenario to vary here, and answering `-32601` would make every scripted Codex
+            // thread log a failed read the real binary never produces.
+            "account/read" => json!({
+                "account": {
+                    "type": "chatgpt",
+                    "email": "scripted@fleet.test",
+                    "planType": "pro",
+                },
+                "requiresOpenaiAuth": true,
+            }),
             "model/list" => json!({"models": self.model_catalogue()}),
             "skills/list" => json!({"skills": []}),
             "permissionProfile/list" => json!({"permissionProfiles": []}),

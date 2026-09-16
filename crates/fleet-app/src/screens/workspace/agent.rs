@@ -4,8 +4,8 @@ mod requests;
 mod streaming;
 
 use requests::{
-    close_agent_tab, load_older_page, mark_seen, open_in_editor, open_terminal_fallback,
-    open_thread, refresh_checkpoints, resend_seen_cursors,
+    account_login, close_agent_tab, load_older_page, mark_seen, open_in_editor,
+    open_terminal_fallback, open_thread, refresh_checkpoints, resend_seen_cursors,
 };
 
 use crate::{
@@ -262,6 +262,11 @@ impl WorkspaceScreen {
                 // The one answer that has to come back into the view: `[u]` is drawn from it.
                 AgentThreadEvent::RefreshCheckpoints => {
                     refresh_checkpoints(&relay_bridge, &view, thread, cx);
+                }
+                // The other answer the view cannot forget: `/login` is only useful if the URL
+                // it returns reaches a browser.
+                AgentThreadEvent::AccountLogin => {
+                    account_login(&relay_bridge, &relay_state, thread, cx);
                 }
                 AgentThreadEvent::LoadOlder => {
                     load_older_page(&relay_bridge, &relay_state, thread, cx);

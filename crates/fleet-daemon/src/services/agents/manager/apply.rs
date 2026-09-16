@@ -393,6 +393,7 @@ pub(super) fn event_name(event: &AgentEvent) -> &'static str {
         AgentEvent::Retrying { .. } => "retrying",
         AgentEvent::ModelRerouted { .. } => "model_rerouted",
         AgentEvent::RuntimeError { .. } => "runtime_error",
+        AgentEvent::AccountChanged { .. } => "account_changed",
         AgentEvent::Notice(_) => "notice",
         AgentEvent::Unknown { .. } => "unknown",
     }

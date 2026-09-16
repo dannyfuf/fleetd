@@ -2,11 +2,12 @@
 //!
 //! Split out of `super` because they share one shape and none of them touches
 //! [`WorkspaceScreen`](super::WorkspaceScreen): a request goes out, and the reply either installs
-//! state or is dropped with a reason. Four of them are deliberately **not** fire-and-forget —
+//! state or is dropped with a reason. Five of them are deliberately **not** fire-and-forget —
 //! `open_thread`, `load_older_page` and `refresh_checkpoints` all carry an answer the surface
-//! reads, and `close_agent_tab` has to release the lease before the view goes.
+//! reads, `account_login` carries the one thing the user has to act on, and `close_agent_tab` has
+//! to release the lease before the view goes.
 
-use gpui::{App, Entity};
+use gpui::{App, Entity, SharedString};
 
 use fleet_core::{
     agents::{AgentKind, Seq, ThreadId},
@@ -19,6 +20,7 @@ use crate::{
     screens::agent_thread::AgentThreadView,
     state::AppState,
 };
+use fleet_ui_kit::Icon;
 
 use super::super::{SessionKind, record_mutation_failure, workspace_tabs, worktree_of};
 use super::leave_agent_tab;
@@ -167,6 +169,47 @@ pub(super) fn refresh_checkpoints(
             if let Ok(Ok(ResponseBody::AgentCheckpoints(checkpoints))) = answer {
                 view.update(cx, |view, cx| view.install_checkpoints(&checkpoints, cx));
             }
+        });
+    })
+    .detach();
+}
+
+/// `/login`: starts the harness sign-in and opens the URL it answers with.
+///
+/// The answer is acted on rather than stored: a sign-in URL is a one-shot the user has to follow
+/// now, so it is opened in their browser and named in a toast — and it is *also* a `Notice` row
+/// the daemon appended, which is where it stays reachable if the browser did not open.
+pub(super) fn account_login(
+    bridge: &Bridge,
+    state: &Entity<AppState>,
+    thread: ThreadId,
+    cx: &mut App,
+) {
+    let reply = bridge.request_agent(BridgeCommand::AgentAccountLogin { thread });
+    let state = state.clone();
+    cx.spawn(async move |cx| {
+        let answer = reply.recv().await;
+        cx.update(|cx| match answer {
+            Ok(Ok(ResponseBody::AgentAccountLogin { auth_url })) => {
+                cx.open_url(&auth_url);
+                state.update(cx, |app, cx| {
+                    app.toast_short(
+                        SharedString::new_static("opening the sign-in page"),
+                        Icon::Info,
+                        std::time::Instant::now(),
+                    );
+                    cx.notify();
+                });
+            }
+            // A harness that signed in without a browser acks instead, and there is nothing to
+            // open: the transcript's own `AccountChanged` says what happened.
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => state.update(cx, |app, cx| {
+                record_mutation_failure(app, format!("agent sign-in: {}", error.message));
+                cx.notify();
+            }),
+            // The bridge is gone, which the connection banner already says.
+            Err(_) => {}
         });
     })
     .detach();

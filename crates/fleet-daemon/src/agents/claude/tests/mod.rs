@@ -154,6 +154,7 @@ fn names(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::ModelRerouted { .. } => "model_rerouted",
             AgentEvent::RuntimeError { .. } => "runtime_error",
             AgentEvent::Notice(_) => "notice",
+            AgentEvent::AccountChanged { .. } => "account_changed",
             AgentEvent::Unknown { .. } => "unknown",
         })
         .collect()

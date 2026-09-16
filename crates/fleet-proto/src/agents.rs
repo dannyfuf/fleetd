@@ -26,9 +26,9 @@ pub use checkpoints::{
 };
 
 use fleet_core::agents::{
-    AgentThreadSummary, CheckpointRecord, GateId, HarnessCapabilities, Item, ModelDescriptor,
-    ModelSelection, NoticeRecord, OpenGate, PermissionMode, RetryState, Seq, ThreadId, TurnRecord,
-    Usage,
+    AccountStatus, AgentThreadSummary, CheckpointRecord, GateId, HarnessCapabilities, Item,
+    ModelDescriptor, ModelSelection, NoticeRecord, OpenGate, PermissionMode, RetryState, Seq,
+    ThreadId, TurnRecord, Usage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -189,6 +189,12 @@ pub struct AgentSessionView {
     /// Retry the harness is currently backing off through, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrying: Option<RetryState>,
+    /// The harness account, when the harness publishes one.
+    ///
+    /// Absent is **never reported**, not signed out: Claude has no account signal, and a window
+    /// served by a daemon older than this field carries none either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountStatus>,
 }
 
 /// Thread header, session runtime, and one bounded transcript window read together.

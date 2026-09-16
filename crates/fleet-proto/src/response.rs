@@ -291,6 +291,16 @@ pub enum ResponseBody {
     },
     /// A native-agent mutation was accepted.
     AgentAck,
+    /// A sign-in was started and is waiting for the user in a browser.
+    ///
+    /// The client opens it on the machine the user is sitting at. The callback it completes
+    /// against is a loopback listener the harness opened on the machine that **owns** the thread,
+    /// which is why a mirrored thread refuses the request rather than forwarding it: the browser
+    /// would come back to the wrong host's loopback.
+    AgentAccountLogin {
+        /// Where the sign-in continues.
+        auth_url: String,
+    },
     /// The Fleet-owned checkpoints one thread's worktree can be reverted to, oldest first.
     AgentCheckpoints(Vec<TurnCheckpoint>),
     /// What a revert put back, and what it removed.

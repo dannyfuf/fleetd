@@ -256,10 +256,7 @@ pub(in crate::agents::codex) fn failure_sentence(
         Some("serverOverloaded") => {
             "The selected model is at capacity — try another model.".to_owned()
         }
-        Some("unauthorized") => {
-            "Codex is not signed in. Run `codex` in a terminal on this worktree to sign in."
-                .to_owned()
-        }
+        Some("unauthorized") => crate::agents::codex::account::SIGNED_OUT_NOTICE.to_owned(),
         // Every other member keeps the harness's own message, which is harness-authored copy and
         // not a Fleet payload echo.
         _ => error.message.clone(),

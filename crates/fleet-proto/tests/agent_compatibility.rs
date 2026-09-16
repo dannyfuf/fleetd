@@ -21,12 +21,13 @@ mod legacy;
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
-        AbortReason, AgentEvent, AgentKind, AgentThreadSummary, Attention, AttentionKind,
-        CheckpointKind, FileDelta, GateAnswer, GateId, GateKind, GateResolver, Item, ItemId,
-        ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection,
-        PermissionChoice, PermissionMode, PlanAnswer, ProviderOptionId, Question, QuestionOption,
-        ReasoningEffortDescriptor, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
-        ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
+        AbortReason, AccountInfo, AccountKind, AccountStatus, AgentEvent, AgentKind,
+        AgentThreadSummary, Attention, AttentionKind, CheckpointKind, FileDelta, GateAnswer,
+        GateId, GateKind, GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
+        ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode, PlanAnswer,
+        ProviderOptionId, Question, QuestionOption, ReasoningEffortDescriptor, Seq, SeqEvent,
+        SessionState, StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId,
+        TurnOutcome, TurnState, Usage, UserInput,
     },
     ids::WorktreeId,
 };
@@ -71,6 +72,7 @@ const AGENT_EVENT_TAGS: &[&str] = &[
     "retrying",
     "model_rerouted",
     "runtime_error",
+    "account_changed",
     "notice",
     "unknown",
 ];
@@ -177,6 +179,15 @@ fn model_descriptors_and_skill_refresh_have_additive_wire_goldens() {
             ..AgentSessionView::default()
         },
         r#"{"model":{"model":"gpt-5.6-sol","effort":"high"},"models":[{"id":"gpt-5.6-sol","displayName":"GPT-5.6 Sol","efforts":[{"id":"high","description":"Deep reasoning"}],"defaultEffort":"high"}],"mode":"ask","skills":["review","ship"]}"#,
+    );
+    // The account rides on the same view, and a view without one keeps the bytes above: the
+    // golden immediately before this proves the field is skipped when the harness reported none.
+    assert_frame(
+        AgentSessionView {
+            account: Some(AccountStatus::SignedOut),
+            ..AgentSessionView::default()
+        },
+        r#"{"mode":"ask","account":{"type":"signed_out"}}"#,
     );
 }
 
@@ -501,6 +512,20 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
             },
             r#"{"id":17,"body":{"type":"agent_seen_cursors"}}"#,
         ),
+        (
+            Request {
+                id: 18,
+                body: RequestBody::AgentAccountLogin { thread },
+            },
+            r#"{"id":18,"body":{"type":"agent_account_login","thread":"11111111-2222-4333-8444-555555555555"}}"#,
+        ),
+        (
+            Request {
+                id: 19,
+                body: RequestBody::AgentAccountLogout { thread },
+            },
+            r#"{"id":19,"body":{"type":"agent_account_logout","thread":"11111111-2222-4333-8444-555555555555"}}"#,
+        ),
     ]
 }
 
@@ -599,6 +624,15 @@ fn response_goldens() -> Vec<(Response, &'static str)> {
                 result: Ok(ResponseBody::AgentAck),
             },
             r#"{"id":6,"result":{"Ok":{"type":"agent_ack"}}}"#,
+        ),
+        (
+            Response {
+                id: 9,
+                result: Ok(ResponseBody::AgentAccountLogin {
+                    auth_url: "http://localhost:1455/auth/callback?state=abc".to_owned(),
+                }),
+            },
+            r#"{"id":9,"result":{"Ok":{"type":"agent_account_login","data":{"auth_url":"http://localhost:1455/auth/callback?state=abc"}}}}"#,
         ),
         (
             Response {
@@ -972,6 +1006,23 @@ fn seq_event_goldens() -> Vec<(SeqEvent, &'static str)> {
                 },
             ),
             r#"{"seq":24,"at":"2026-09-07T12:00:00Z","event":{"type":"runtime_error","data":{"fatal":false,"message":"stream reset"}}}"#,
+        ),
+        (
+            // The sequence numbers here are fixture ids, not an ordering: this list is ordered by
+            // the enum's *declaration*, which is what `AGENT_EVENT_TAGS` checks it against.
+            seq(
+                27,
+                Some("account/read"),
+                AgentEvent::AccountChanged {
+                    account: AccountStatus::SignedIn(AccountInfo {
+                        kind: AccountKind::ChatGpt {
+                            email: Some("dev@example.com".to_owned()),
+                            plan: Some("business".to_owned()),
+                        },
+                    }),
+                },
+            ),
+            r#"{"seq":27,"at":"2026-09-07T12:00:00Z","raw":"account/read","event":{"type":"account_changed","data":{"account":{"type":"signed_in","data":{"kind":{"type":"chatgpt","data":{"email":"dev@example.com","plan":"business"}}}}}}}"#,
         ),
         (
             seq(25, None, AgentEvent::Notice("deprecated flag".to_owned())),
