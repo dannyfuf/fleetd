@@ -29,8 +29,9 @@ pub struct Trigger {
 /// character.
 ///
 /// Unlike [`crate::TextFieldState`] a newline is *content*: `\r\n` and `\r` are normalised to
-/// `\n` on the way in, a tab becomes one space (the design system defines no tab advance), and
-/// every other control character is dropped.
+/// `\n` on the way in, hard tabs are preserved for round-tripping pasted code, and every other
+/// control character is dropped. The painted half expands tabs to the design system's
+/// [`crate::TAB_WIDTH`] advance without changing this stored value.
 ///
 /// Vertical motion is **logical**: `↑` and `↓` walk `\n`-delimited lines and preserve a goal
 /// column. [`super::MultilineInput`] overrides that with visual rows when it has a layout to
@@ -64,7 +65,7 @@ impl MultilineBuffer {
 
     /// The current value as a `SharedString`, ready to shape.
     pub fn shared_text(&self) -> SharedString {
-        SharedString::new(self.text.as_str())
+        SharedString::from(expand_tabs(&self.text))
     }
 
     /// Whether the buffer holds nothing.
@@ -141,6 +142,33 @@ impl MultilineBuffer {
             return false;
         }
         self.set_selected_range(0..self.text.len());
+        true
+    }
+
+    /// Select the word under `offset`, or the grapheme there when it is punctuation or space.
+    ///
+    /// This is the editing-model half of the composer's double-click gesture. A word uses
+    /// Unicode word boundaries; clicking between words still selects one user-perceived
+    /// character rather than leaving an accidental empty selection.
+    pub fn select_word_at(&mut self, offset: usize) -> bool {
+        if self.text.is_empty() {
+            return false;
+        }
+        let offset = self.floor_boundary(offset);
+        let probe = offset.min(self.text.len().saturating_sub(1));
+        let range = self
+            .text
+            .split_word_bound_indices()
+            .find_map(|(start, segment)| {
+                let end = start + segment.len();
+                (probe >= start && probe < end && segment.unicode_words().next().is_some())
+                    .then_some(start..end)
+            })
+            .unwrap_or_else(|| {
+                let start = self.floor_boundary(probe);
+                start..self.next_boundary(start)
+            });
+        self.set_selected_range(range);
         true
     }
 
@@ -649,9 +677,9 @@ pub(super) fn offset_from_utf16(text: &str, offset: usize) -> usize {
 
 /// Normalise text on the way into the buffer.
 ///
-/// `\r\n` and a lone `\r` become `\n`, a tab becomes one space, and every other control
-/// character is dropped: the composer shapes one run per logical line, and a glyph with no
-/// defined advance would put the caret off the grid.
+/// `\r\n` and a lone `\r` become `\n`, hard tabs survive for paste fidelity, and every other
+/// control character is dropped. [`expand_tabs`] gives each tab the design-system advance at
+/// the shaping boundary, where the caret mapping can account for it.
 fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -664,10 +692,63 @@ fn sanitize(text: &str) -> String {
                 out.push('\n');
             }
             '\n' => out.push('\n'),
-            '\t' => out.push(' '),
+            '\t' => out.push('\t'),
             ch if ch.is_control() => {}
             ch => out.push(ch),
         }
     }
     out
+}
+
+/// Expand stored hard tabs for shaping while keeping the buffer byte-for-byte intact.
+pub(super) fn expand_tabs(text: &str) -> String {
+    let extra = text.matches('\t').count() * crate::TAB_WIDTH.saturating_sub(1);
+    let mut display = String::with_capacity(text.len() + extra);
+    for ch in text.chars() {
+        if ch == '\t' {
+            display.extend(std::iter::repeat_n(' ', crate::TAB_WIDTH));
+        } else {
+            display.push(ch);
+        }
+    }
+    display
+}
+
+/// Map a stored byte offset to the corresponding byte offset in [`expand_tabs`].
+pub(super) fn display_offset(text: &str, source_offset: usize) -> usize {
+    let source_offset = source_offset.min(text.len());
+    text[..source_offset]
+        .chars()
+        .map(|ch| {
+            if ch == '\t' {
+                crate::TAB_WIDTH
+            } else {
+                ch.len_utf8()
+            }
+        })
+        .sum()
+}
+
+/// Map a shaped byte offset back into the stored text, snapping through a tab at its midpoint.
+pub(super) fn source_offset(text: &str, display_offset: usize) -> usize {
+    let mut source = 0;
+    let mut display = 0;
+    for ch in text.chars() {
+        let source_len = ch.len_utf8();
+        let display_len = if ch == '\t' {
+            crate::TAB_WIDTH
+        } else {
+            source_len
+        };
+        if display_offset < display + display_len {
+            return if ch == '\t' && display_offset - display >= display_len / 2 {
+                source + source_len
+            } else {
+                source
+            };
+        }
+        source += source_len;
+        display += display_len;
+    }
+    text.len()
 }

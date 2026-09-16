@@ -10,7 +10,7 @@
 //! into these rows once, memoised behind a revision key, and `render` composes prepared values
 //! and nothing else.
 
-use std::time::Instant;
+use std::{rc::Rc, time::Instant};
 
 use gpui::SharedString;
 
@@ -91,12 +91,12 @@ pub enum UserRowState {
 }
 
 /// The user's own turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct UserRow {
     /// What the user typed, with Fleet's own send-time additions already stripped.
     pub text: SharedString,
     /// Attachment display names, drawn as pills above the text.
-    pub attachments: Vec<SharedString>,
+    pub attachments: Rc<[SharedString]>,
     /// Send state.
     pub state: UserRowState,
     /// Whether the message joined a turn that was already running.
@@ -113,7 +113,7 @@ impl UserRow {
     pub fn new(text: impl Into<SharedString>) -> Self {
         Self {
             text: text.into(),
-            attachments: Vec::new(),
+            attachments: Rc::from([]),
             state: UserRowState::Sent,
             steered: false,
             collapsible: false,
@@ -122,16 +122,40 @@ impl UserRow {
     }
 }
 
+impl PartialEq for UserRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && (Rc::ptr_eq(&self.attachments, &other.attachments)
+                || self.attachments == other.attachments)
+            && self.state == other.state
+            && self.steered == other.steered
+            && self.collapsible == other.collapsible
+            && self.expanded == other.expanded
+    }
+}
+
+impl Eq for UserRow {}
+
 /// Assistant prose, on the app ground with no bubble.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AssistantRow {
     /// The parsed document. Parsing happens in the projection, never in render.
-    pub markdown: MarkdownDocument,
+    pub markdown: Rc<MarkdownDocument>,
     /// Whether a caret trails the last glyph.
     pub streaming: bool,
     /// A finished message with empty text draws the literal `(empty response)`.
     pub empty: bool,
 }
+
+impl PartialEq for AssistantRow {
+    fn eq(&self, other: &Self) -> bool {
+        (Rc::ptr_eq(&self.markdown, &other.markdown) || self.markdown == other.markdown)
+            && self.streaming == other.streaming
+            && self.empty == other.empty
+    }
+}
+
+impl Eq for AssistantRow {}
 
 /// The hover-revealed footer of a *terminal* assistant message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +208,7 @@ pub struct WorkGroupRow {
 }
 
 /// A subagent spawn and its roster.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SubagentRow {
     /// `spawned 3 subagents · explore, verify, write`.
     pub summary: SharedString,
@@ -193,12 +217,25 @@ pub struct SubagentRow {
     /// Cumulative tokens, when the harness reports them.
     pub tokens: Option<SharedString>,
     /// One line per child, in roster order, already truncated by the projection.
-    pub children: Vec<SharedString>,
+    pub children: Rc<[SharedString]>,
     /// Whether the child region is exposed.
     pub expanded: bool,
     /// Whether the fleet is still running, which is what keeps the row unfoldable.
     pub live: bool,
 }
+
+impl PartialEq for SubagentRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.summary == other.summary
+            && self.status == other.status
+            && self.tokens == other.tokens
+            && (Rc::ptr_eq(&self.children, &other.children) || self.children == other.children)
+            && self.expanded == other.expanded
+            && self.live == other.live
+    }
+}
+
+impl Eq for SubagentRow {}
 
 /// The diff body of an expanded edit row, emitted as its own row so its height is measured
 /// independently and an expanded diff never inflates the tool row's own measurement.
@@ -222,10 +259,10 @@ pub struct TurnFoldRow {
 }
 
 /// One right-aligned line after the terminal assistant message of a settled turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TurnFooterRow {
     /// The segments the harness actually reported, in order. Never invented.
-    pub segments: Vec<SharedString>,
+    pub segments: Rc<[SharedString]>,
     /// Whether a turn diff exists to open.
     pub diff: bool,
     /// Whether a Fleet checkpoint exists for this turn. `[u]` is drawn only when it does — a
@@ -233,19 +270,40 @@ pub struct TurnFooterRow {
     pub revert: bool,
 }
 
+impl PartialEq for TurnFooterRow {
+    fn eq(&self, other: &Self) -> bool {
+        (Rc::ptr_eq(&self.segments, &other.segments) || self.segments == other.segments)
+            && self.diff == other.diff
+            && self.revert == other.revert
+    }
+}
+
+impl Eq for TurnFooterRow {}
+
 /// A proposed plan: the only rich decision artifact in the transcript, and it carries **no
 /// buttons**. The verbs live on the composer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PlanRow {
     /// The plan's first Markdown heading, promoted out of the body and removed from it.
     pub title: SharedString,
     /// The body, already parsed.
-    pub markdown: MarkdownDocument,
+    pub markdown: Rc<MarkdownDocument>,
     /// Whether the body is long enough to fade out (> 900 chars or > 20 lines).
     pub collapsible: bool,
     /// Whether the full body is exposed.
     pub expanded: bool,
 }
+
+impl PartialEq for PlanRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.title == other.title
+            && (Rc::ptr_eq(&self.markdown, &other.markdown) || self.markdown == other.markdown)
+            && self.collapsible == other.collapsible
+            && self.expanded == other.expanded
+    }
+}
+
+impl Eq for PlanRow {}
 
 /// What a resolved gate turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,9 +539,9 @@ pub struct RowSplice {
 /// The rows that really changed between two projections, or `None` when nothing did.
 ///
 /// The common head and tail are matched by content, so a row that did not change keeps the
-/// height the list measured for it. Appending one row splices `len..len`; a streaming row
-/// splices only itself. This is the load-bearing property of §B7.6: **a stream chunk never
-/// re-runs grouping, folding or summarization**, and the splice it produces touches one row.
+/// height the list measured for it. Appending one row splices `len..len`. Streaming updates do
+/// not call this function: [`super::TranscriptList::patch_row`] replaces and remeasures their
+/// indexed row without a splice, preserving the reader's in-row scroll anchor.
 #[must_use]
 pub fn diff_rows(old: &[TranscriptRow], new: &[TranscriptRow]) -> Option<RowSplice> {
     let prefix = old

@@ -124,6 +124,7 @@ pub(super) fn project_event(
             provider,
             resume_cursor,
             model,
+            models,
             mode,
             tools,
             commands,
@@ -143,6 +144,7 @@ pub(super) fn project_event(
                 &provider,
                 resume_cursor.as_deref(),
                 &optional_json(model.as_ref())?,
+                Some(&json_text(models)?),
                 &discriminant(mode, "PermissionMode")?,
                 "ready",
                 Some(&json_text(tools)?),
@@ -150,7 +152,12 @@ pub(super) fn project_event(
                 Some(&json_text(skills)?),
             )?;
         }
-        AgentEvent::MetadataChanged { title, mode, model } => {
+        AgentEvent::MetadataChanged {
+            title,
+            mode,
+            model,
+            skills,
+        } => {
             if let Some(title) = title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
                 execute(
                     transaction,
@@ -173,6 +180,14 @@ pub(super) fn project_event(
                     "UPDATE sessions SET model_json = ?2 WHERE thread_id = ?1",
                     params![id, json_text(model)?],
                     "record a changed model selection",
+                )?;
+            }
+            if let Some(skills) = skills {
+                execute(
+                    transaction,
+                    "UPDATE sessions SET skills_json = ?2 WHERE thread_id = ?1",
+                    params![id, json_text(skills)?],
+                    "record refreshed skill names",
                 )?;
             }
         }
@@ -804,6 +819,7 @@ fn upsert_session(
     provider: &str,
     resume_cursor: Option<&str>,
     model_json: &Option<String>,
+    models_json: Option<&str>,
     mode: &str,
     state: &str,
     tools_json: Option<&str>,
@@ -812,12 +828,13 @@ fn upsert_session(
 ) -> anyhow::Result<()> {
     execute(
         transaction,
-        "INSERT INTO sessions (thread_id, provider, resume_cursor, model_json, mode, state, \
+        "INSERT INTO sessions (thread_id, provider, resume_cursor, model_json, models_json, mode, state, \
          tools_json, commands_json, skills_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT (thread_id) DO UPDATE SET \
          provider = excluded.provider, resume_cursor = excluded.resume_cursor, \
-         model_json = excluded.model_json, mode = excluded.mode, state = excluded.state, \
+         model_json = excluded.model_json, models_json = excluded.models_json, \
+         mode = excluded.mode, state = excluded.state, \
          last_error = NULL, tools_json = excluded.tools_json, \
          commands_json = excluded.commands_json, skills_json = excluded.skills_json",
         params![
@@ -825,6 +842,7 @@ fn upsert_session(
             provider,
             resume_cursor,
             model_json.as_deref(),
+            models_json,
             mode,
             state,
             tools_json,

@@ -18,9 +18,10 @@ use fleet_core::{
     ids::WorktreeId,
 };
 use fleet_proto::{
-    AGENT_CHECKPOINTS_CAPABILITY, AGENT_ITEM_BODY_CAPABILITY, AGENT_WINDOW_CAPABILITY,
+    AGENT_CHECKPOINTS_CAPABILITY, AGENT_ITEM_BODY_CAPABILITY, AGENT_SEEN_CAPABILITY,
+    AGENT_WINDOW_CAPABILITY,
     agents::{
-        AgentRevertReport, AgentThreadWindow, CheckpointId, TurnCheckpoint,
+        AgentRevertReport, AgentSeenCursor, AgentThreadWindow, CheckpointId, TurnCheckpoint,
         checkpoints_capability_error, clamp_item_body_limit, window_capability_error,
     },
     error::{ErrorKind, ProtoError},
@@ -71,6 +72,17 @@ pub(crate) fn out_of_sequence(thread: ThreadId, expected: Seq, got: Seq) -> Prot
 }
 
 impl Client {
+    /// Reads the stable installation's persisted agent cursors after capability negotiation.
+    pub async fn agent_seen_cursors(&self) -> Result<Vec<AgentSeenCursor>> {
+        if !self.supports_capability(AGENT_SEEN_CAPABILITY) {
+            return Ok(Vec::new());
+        }
+        match self.request(RequestBody::AgentSeenCursors).await? {
+            ResponseBody::AgentSeenCursors(cursors) => Ok(cursors),
+            response => Err(unexpected("agent_seen_cursors", response)),
+        }
+    }
+
     /// Creates an ordered agent-event subscription with its own projection mirror.
     #[must_use]
     pub fn agent_events(&self) -> AgentEvents {

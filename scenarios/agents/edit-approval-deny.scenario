@@ -11,7 +11,8 @@ await screen == Workspace 20000
 
 key ctrl-s A
 await agents.threads[0].provider == codex 20000
-click agents.composer
+assert focused == agents.composer
+await idle 30000
 type apply the README fix
 key enter
 await agents.threads[0].pending_gate == permission 30000
@@ -23,10 +24,7 @@ shot approval
 key n
 await agents.threads[0].pending_gate absent 20000
 assert agents.threads[0].state != needs_you && lists.tabs.selected.marks[0] != needs_you
+await agents.threads[0].state == idle 30000
+assert sticky_error absent
 dump denied
-
-# The scenario deliberately stops short of asserting that the thread settles. A declined Codex
-# turn does not settle today: `fleetd.log` shows `dropping a Codex settlement for a turn that is
-# not the running one`, and the thread stays `working` for ever. That defect is not in TODO.md,
-# so it gets no expected-to-fail scenario; tighten this to `state == idle` when it is fixed.
 quit

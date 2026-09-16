@@ -118,7 +118,8 @@ Rules that come with those signatures:
 1. **The returned root element must call `.track_focus(focus)`.** That is what puts your
    `on_action` listeners on the key-dispatch path: gpui dispatches an action from the focused
    node upwards, so a listener *below* the focus node never fires. The shell focuses the handle
-   it passed you and never touches focus again.
+   it passed you and never touches focus again, except that a native agent tab consumes one
+   activation intent after its composer has appeared in a painted frame.
 2. **Read and write `AppState` through the entity.** `state.read(cx)` for reads,
    `state.update(cx, |state, cx| { …; cx.notify(); })` for writes. The shell observes the
    entity, so a `cx.notify()` inside that closure repaints the whole frame.
@@ -218,6 +219,18 @@ act on the newest expandable item), but nothing calls `TranscriptList::focus_row
 chain contains that word and those three keys cannot fire — row focus is the follow-up in
 `NATIVE-AGENTS.md` §10.
 
+Agent-tab activation records one composer-focus intent in `AgentThreads`. The Workspace consumes
+it once and uses `Window::on_next_frame` so a newly constructed `AgentThreadView` has mounted its
+input before `focus_composer` runs. Re-selecting an existing tab follows the same path; scroll mode
+and a decision-owned keyboard veto the request. Already-mounted tabs may restore their composer
+immediately after a popup or overlay releases focus, but ordinary synchronization never schedules
+another deferred focus, so transcript reading is not pulled back to the composer.
+
+The floating popup mounts its focus-tracked overlay shell before `Model::build` can resolve a
+daemon session. The attaching shell keeps the `Agent > Terminal` / `Agent > Prefix` action path
+live, including hide and provider switching, while drawing `attaching…`; model readiness changes
+the content of that shell, not whether the keyboard can reach it.
+
 Every focus-owner generation change also dirties the window. gpui synchronously draws a dirty
 window before dispatching keyboard input, so the new context/focus tree is normally already live
 when the next key resolves. A bounded FIFO remains as a safety net if a generation ever advances
@@ -305,7 +318,7 @@ construction; there is no synchronous path and there must not be one.
 ### Native agent threads
 
 Agent traffic does not go through `RequestBody` at the call site. `BridgeCommand` mirrors the
-eleven agent requests — `AgentThreadList`, `AgentThreadCreate { worktree, provider, model, mode,
+eleven screen-issued agent requests — `AgentThreadList`, `AgentThreadCreate { worktree, provider, model, mode,
 resume_cursor, title }`, `AgentThreadOpen { thread, from_seq }`, `AgentThreadClose`, `AgentSend
 { thread, input }`, `AgentInterrupt`, `AgentRespond { thread, gate, answer }`, `AgentSetMode`,
 `AgentSetModel`, `AgentMarkSeen { thread, seq }`, `AgentStop` — and converts losslessly with
@@ -316,6 +329,14 @@ wire enum:
 bridge.send_agent(BridgeCommand::AgentSend { thread, input });          // fire and forget
 let reply = bridge.request_agent(BridgeCommand::AgentThreadOpen { thread, from_seq });
 ```
+
+Connection bootstrap has one additional typed read that no screen issues: `AgentSeenCursors`.
+When `agent.seen` was negotiated, the bridge fetches that installation's cursor census after
+Hello and publishes it as `BridgeEvent::AgentSeenCursors` before the first snapshot. Because
+`fleet-client` can reconnect beneath the bridge, the two-second health pass refreshes the census
+once when the client's connection generation changes and republishes only when the census changed.
+`AgentThreads` is seeded before it re-reports any newer local
+overrides. Keeping this read out of shared summary broadcasts preserves O(1) event fan-out.
 
 `AgentThreadView` sends nothing itself. Every mutation leaves it as an `AgentThreadEvent`
 (`Command(BridgeCommand)`, `OpenInEditor(String)`, `Notice(SharedString)`), and
@@ -328,12 +349,22 @@ thread the window has opened, and `BridgeEvent::AgentSummary(summary)` carries t
 counter state for every thread, opened or not. The shell has already applied both to
 `AppState::agents` before your screen renders.
 
+Applying an agent event also produces `fleet_core::agents::Applied`: `Text { item, stream,
+appended }` names the exact UTF-8 byte suffix appended to an existing open item;
+`Structural` covers every other change. The client exposes it in `MirrorOutcome::Applied`, and
+`AgentThreads` retains the last accepted description per opened thread. A shell batch containing
+only `Text` outcomes records scoped agent-text damage and updates only the active
+`AgentThreadView`; it neither calls `cx.notify()` on `AppState`, evaluates attention edges, nor
+runs `synchronize_surfaces`. Any summary, structural outcome, gap, rejection, or unrelated event
+keeps the ordinary global notification path.
+
 ### IPC and CLI compatibility
 
 Daemon IPC is version **7**. Rust field names are shown below; serde renders them as camelCase on
 the wire. The mandatory first request is `Hello { protocol, client: HelloClient }`, where
-`client.kind` is `app`, `cli`, or `proxy` and `client.host_id` optionally identifies the forwarding
-daemon. The entire `client` value defaults to
+`client.kind` is `app`, `cli`, or `proxy`, `client.host_id` optionally identifies the forwarding
+daemon, and `client.client_id` is the optional stable per-install UUID stored at
+`FleetHome::client_id_path()`. The entire `client` value defaults to
 an app client. `HelloResponse` flattens the ordinary correlated `Response` and adds
 `capabilities: Vec<String>`, `daemon_id: String`, and optional `build_commit`; a federating daemon
 advertises `remote-machines`. Proxy links require protocol lockstep before any request is routed.
@@ -412,7 +443,7 @@ is the single source of truth on the client. The parts a screen touches:
 | `filter` | query + whether the input still owns the keyboard |
 | `session_mru`, `terminal_mru` | `ctrl-s w` and `ctrl-s Tab` are `Mru::alternate()` |
 | `toasts`, `sticky_error` | §2.7 and §1.8; errors are sticky, never toasts |
-| `agents: AgentThreads` | the native-agent mirror: daemon summaries, opened `ThreadProjection`s, the per-worktree selected tab, seen cursors and pending resyncs |
+| `agents: AgentThreads` | the native-agent mirror: daemon summaries, opened `ThreadProjection`s, the last reducer `Applied` description per opened thread, the per-worktree selected tab, seen cursors and pending resyncs |
 | `last_agent_activity` / `last_agent_attention` | PTY status-only glyph baseline and semantic hook-attention edge baseline; reconnect seeding is silent |
 | `watches: Watches` | the read-only subagent mirror and its per-session pane state |
 | `daemon: DaemonLink` | §3.12; `refuses_mutations()` and `drops_terminal_keys()` are the two questions a screen asks |
@@ -431,15 +462,28 @@ is a pure function so no two surfaces can disagree about a thread:
 | What does the session header say? | the same attention → `header_word`: `working` · `needs you` · `failed` · `idle` |
 | What do the context-bar chips count? | `agents.counts()` → `AgentCounts { needs_you, working, failed }`, including the thread on the current tab, each chip zero-suppressed |
 | When does a notification fire? | `agents.attention_edges()` — one toast per *edge* into `NeedsYou`/`Failed`, so a thread that stays blocked does not re-notify |
-| What has this window shown? | `agents.seen(thread)`; selecting a tab sends `AgentMarkSeen`, which is what clears a `NeedsYou(Finished)` |
+| What has this installation shown? | `agents.seen(thread)`; selecting a tab sends monotonic `AgentMarkSeen`, which is what clears a `NeedsYou(Finished)`. Windows sharing one Fleet home share this cursor; a different installation does not |
 
 The **daemon's** `Attention` is authoritative — it is derived by the same `fleet-core` reducer
 every client replays, so a listed thread and an opened one cannot rank differently. The app
 applies exactly one local override: the two attentions defined against a seen cursor
-(`NeedsYou(Finished)` and `Unread`) drop to `Idle` as soon as this window's cursor reaches
-`last_seq`, so a tab the user is reading never keeps an amber dot while the daemon's echo is in
-flight. A `MirrorOutcome::Gap` from `apply_event` marks the thread for resync instead of
+(`NeedsYou(Finished)` and `Unread`) drop to `Idle` as soon as this process's cursor reaches
+`last_seq`, so a tab the user is reading never keeps an amber dot while the durable daemon echo
+is in flight. On connect and reconnect, the `agent.seen` census seeds that override before the
+workspace evaluates marks. A `MirrorOutcome::Gap` from `apply_event` marks the thread for resync instead of
 applying a hole, and the workspace re-opens it from its last applied `seq`.
+
+A clean daemon shutdown appends a synthetic stopped-session event. It changes lifecycle state but
+is not user transcript output, so the store advances only installation cursors already caught up
+to the preceding sequence; a reconnect alone cannot manufacture an unread mark.
+
+The mirror projection remains authoritative during streamed text. The active thread view keeps a
+presentation copy and, for `Applied::Text`, borrows the mirror, copies only `text[appended]`, and
+queues that suffix in its reveal buffer. Structural damage flushes the queue and replaces the
+presentation projection wholesale. This is why a text-only batch need not increment any
+`UiSnapshot` update-path revision: harness mode has reduced motion enabled and therefore flushes
+the same suffixes synchronously, while `await idle` continues to depend on bridge request/settle
+counters rather than `AppState` observer notifications.
 
 Dialogs, the palette, and activation/destructive actions resolve their target from
 `displayed_hub`, not by repeating filters against the raw snapshot. Cursor movement may clamp an

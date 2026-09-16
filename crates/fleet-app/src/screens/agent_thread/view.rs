@@ -6,7 +6,6 @@
 //! measured value `render` is allowed to consult is the frame's own width, because that is the
 //! geometry of the frame it is drawing (`docs/APP-CONTRACTS.md`, "Render prepares nothing").
 
-use fleet_core::agents::ItemKind;
 use fleet_ui_kit::{
     AGENT_CONTENT_W, ActiveTheme, Decision, DecisionDock, HarnessTargetExt, Icon, IconSize,
     MetadataRow, Text, Tone,
@@ -129,17 +128,13 @@ impl AgentThreadView {
             .gates
             .iter()
             .find(|gate| gate.id.to_string() == decision.id.as_ref())?;
-        let item = gate.turn.and_then(|turn| {
-            self.projection
-                .items
-                .iter()
-                .rev()
-                .find(|item| {
-                    item.turn == turn
-                        && matches!(&item.kind, ItemKind::Tool(call) if call.diff.is_some())
-                })
-                .map(|item| SharedString::from(item.id.to_string()))
-        })?;
+        let fleet_core::agents::GateKind::Permission {
+            item: Some(item), ..
+        } = &gate.kind
+        else {
+            return None;
+        };
+        let item = SharedString::from(item.to_string());
         self.diffs
             .borrow()
             .get(&item)
@@ -185,7 +180,7 @@ impl AgentThreadView {
                     .h(theme.metrics.row_h)
                     .px(theme.space.sm)
                     .when(index == highlight, |el| el.bg(theme.colors.row_selected))
-                    .child(Text::ui(row.to_owned()))
+                    .child(Text::ui(row.label.clone()))
             })
             .collect();
         Some(

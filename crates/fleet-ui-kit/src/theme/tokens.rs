@@ -376,8 +376,8 @@ impl Elevation {
     }
 }
 
-/// Motion. Fleet animates one thing — the spinner — and nothing else; the rest of these are
-/// dwell and delay durations, not animations.
+/// Motion. Fleet animates the spinner and smooths native-agent prose reveal; the rest of these
+/// are dwell and delay durations, not animations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Motion {
     /// 400 ms: how long the prefix hint waits before appearing.
@@ -388,6 +388,10 @@ pub struct Motion {
     pub jump_chip_delay: u64,
     /// 1000 ms: how often the working row's elapsed label re-reads the clock.
     pub working_tick: u64,
+    /// 16 ms: cadence of native-agent text reveal while motion is enabled.
+    pub reveal_tick_ms: u64,
+    /// 200 ms: maximum horizon over which one native-agent text burst is revealed.
+    pub reveal_horizon_ms: u64,
     /// 1600 ms: short toast dwell.
     pub toast_short: u64,
     /// 3200 ms: normal toast dwell.
@@ -401,6 +405,8 @@ impl Default for Motion {
             spinner: 1000,
             jump_chip_delay: 150,
             working_tick: 1000,
+            reveal_tick_ms: 16,
+            reveal_horizon_ms: 200,
             toast_short: 1600,
             toast_normal: 3200,
         }

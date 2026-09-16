@@ -214,6 +214,9 @@ impl Connection {
                             subscriptions.clear();
                             Some(Ok(ResponseBody::Ack))
                         }
+                        RequestBody::AgentSeenCursors => {
+                            Some(agent_seen_cursors(&self.services, &client).await)
+                        }
                         body if terminal_request_is_serialized(&body) => {
                             let result = run_terminal_request(
                                 &self.services,
@@ -244,9 +247,24 @@ impl Connection {
                                 if let Some(gate) = dispatch_gate {
                                     gate.cancelled().await;
                                 }
-                                let result = services
-                                    .dispatch_routed_with_owner(body, owner_id, context)
-                                    .await;
+                                let result = match persist_seen_before_routing(
+                                    &services,
+                                    &context.client,
+                                    &body,
+                                )
+                                .await
+                                {
+                                    Ok(()) => services
+                                        .dispatch_routed_with_owner(body, owner_id, context.clone())
+                                        .await,
+                                    Err(error) => Err(error),
+                                };
+                                let result = personalize_agent_window(
+                                    &services,
+                                    &context.client,
+                                    result,
+                                )
+                                .await;
                                 CompletedRequest {
                                     id,
                                     result,
@@ -486,6 +504,80 @@ async fn detach_attached_terminals(
         }
     }
     true
+}
+
+/// Identity used for per-install cursors on this connection.
+///
+/// A current app sends `client_id`. A proxy link predating that forwarding support still has a
+/// stable daemon UUID, which keeps separate installations isolated instead of collapsing them
+/// into one anonymous cursor during a mixed-version federation.
+fn agent_client_id(client: &HelloClient) -> Option<String> {
+    if !client.supports(fleet_proto::AGENT_SEEN_CAPABILITY) {
+        return None;
+    }
+    client
+        .client_id
+        .clone()
+        .filter(|client_id| fleet_core::paths::is_client_id(client_id))
+        .or_else(|| {
+            (client.kind == fleet_proto::request::ClientKind::Proxy)
+                .then(|| client.host_id.as_ref().map(ToString::to_string))
+                .flatten()
+                .filter(|client_id| fleet_core::paths::is_client_id(client_id))
+        })
+}
+
+async fn agent_seen_cursors(
+    services: &Services,
+    client: &HelloClient,
+) -> DaemonResult<ResponseBody> {
+    let Some(client_id) = agent_client_id(client) else {
+        return Ok(ResponseBody::AgentSeenCursors(Vec::new()));
+    };
+    services
+        .agents
+        .seen_cursors(client_id)
+        .await
+        .map(ResponseBody::AgentSeenCursors)
+        .map_err(crate::error::from_proto_error)
+}
+
+async fn persist_seen_before_routing(
+    services: &Services,
+    client: &HelloClient,
+    body: &RequestBody,
+) -> DaemonResult<()> {
+    let (Some(client_id), RequestBody::AgentMarkSeen { thread, seq }) =
+        (agent_client_id(client), body)
+    else {
+        return Ok(());
+    };
+    services
+        .agents
+        .mark_seen_for(Some(client_id), *thread, *seq)
+        .await
+        .map(|_| ())
+        .map_err(crate::error::from_proto_error)
+}
+
+async fn personalize_agent_window(
+    services: &Services,
+    client: &HelloClient,
+    result: DaemonResult<ResponseBody>,
+) -> DaemonResult<ResponseBody> {
+    let Some(client_id) = agent_client_id(client) else {
+        return result;
+    };
+    let mut window = match result {
+        Ok(ResponseBody::AgentThreadWindow(window)) => window,
+        other => return other,
+    };
+    window.seen_seq = services
+        .agents
+        .seen_seq(client_id, window.summary.thread)
+        .await
+        .map_err(crate::error::from_proto_error)?;
+    Ok(ResponseBody::AgentThreadWindow(window))
 }
 
 /// Answers the mandatory opening Hello and reports whether the session may proceed.
@@ -778,7 +870,7 @@ async fn write_response(
             // worse than advertising nothing (`rust-ipc-protocol` Rule 7). Every `agent.*`
             // capability is served by this build — the windowed open and its synchronization
             // marker, per-thread resync on a lagged connection, paged item bodies, Fleet-owned
-            // checkpoints, and the Codex harness — so the slice goes out whole rather than as a
+            // checkpoints, Codex harness, and persisted seen cursors — so the slice goes out whole rather than as a
             // hand-maintained subset that can drift from what dispatch answers.
             capabilities: std::iter::once(PRUNE_REVIEWED_IDS_CAPABILITY.to_owned())
                 .chain(std::iter::once(SNAPSHOT_REVISION_CAPABILITY.to_owned()))
@@ -912,7 +1004,8 @@ mod tests {
                 "agent.resync",
                 "agent.item_body",
                 "agent.checkpoints",
-                "agent.codex"
+                "agent.codex",
+                "agent.seen"
             ])
         );
 
@@ -928,6 +1021,25 @@ mod tests {
         let pong = serde_json::to_value(pong).expect("serialize Pong");
         assert_eq!(pong["daemon"]["pid"], identity.pid);
         assert_eq!(pong["daemon"]["bootId"], identity.boot_id);
+    }
+
+    #[test]
+    fn seen_identity_requires_the_capability_and_a_canonical_uuid() {
+        let valid = fleet_core::paths::new_client_id();
+        let capable = HelloClient {
+            client_id: Some(valid.clone()),
+            capabilities: vec![fleet_proto::AGENT_SEEN_CAPABILITY.to_owned()],
+            ..HelloClient::default()
+        };
+        assert_eq!(agent_client_id(&capable), Some(valid));
+
+        let invalid = HelloClient {
+            client_id: Some("shared".to_owned()),
+            capabilities: vec![fleet_proto::AGENT_SEEN_CAPABILITY.to_owned()],
+            ..HelloClient::default()
+        };
+        assert_eq!(agent_client_id(&invalid), None);
+        assert_eq!(agent_client_id(&HelloClient::default()), None);
     }
 
     #[tokio::test]

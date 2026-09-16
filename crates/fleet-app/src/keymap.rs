@@ -447,6 +447,76 @@ key_table! {
     "ctrl-s x",      "Agent > AgentWorking" => native_agent::CloseTab;
     "ctrl-s F",      "Agent > AgentWorking" => native_agent::TerminalFallback;
 
+    // The Workspace selection/MRU subset is repeated for every native-thread mode because GPUI
+    // dispatches sequence bindings against the exact painted context path. `ctrl-s s` remains
+    // absent, preserving the agent-tab shadowing rule.
+    "ctrl-s 1", "Agent > AgentIdle" => native_agent::SelectTab1;
+    "ctrl-s 2", "Agent > AgentIdle" => native_agent::SelectTab2;
+    "ctrl-s 3", "Agent > AgentIdle" => native_agent::SelectTab3;
+    "ctrl-s 4", "Agent > AgentIdle" => native_agent::SelectTab4;
+    "ctrl-s 5", "Agent > AgentIdle" => native_agent::SelectTab5;
+    "ctrl-s 6", "Agent > AgentIdle" => native_agent::SelectTab6;
+    "ctrl-s 7", "Agent > AgentIdle" => native_agent::SelectTab7;
+    "ctrl-s 8", "Agent > AgentIdle" => native_agent::SelectTab8;
+    "ctrl-s 9", "Agent > AgentIdle" => native_agent::SelectTab9;
+    "ctrl-s tab", "Agent > AgentIdle" => native_agent::LastTab;
+    "ctrl-s w", "Agent > AgentIdle" => native_agent::LastSession;
+    "ctrl-s 1", "Agent > AgentWorking" => native_agent::SelectTab1;
+    "ctrl-s 2", "Agent > AgentWorking" => native_agent::SelectTab2;
+    "ctrl-s 3", "Agent > AgentWorking" => native_agent::SelectTab3;
+    "ctrl-s 4", "Agent > AgentWorking" => native_agent::SelectTab4;
+    "ctrl-s 5", "Agent > AgentWorking" => native_agent::SelectTab5;
+    "ctrl-s 6", "Agent > AgentWorking" => native_agent::SelectTab6;
+    "ctrl-s 7", "Agent > AgentWorking" => native_agent::SelectTab7;
+    "ctrl-s 8", "Agent > AgentWorking" => native_agent::SelectTab8;
+    "ctrl-s 9", "Agent > AgentWorking" => native_agent::SelectTab9;
+    "ctrl-s tab", "Agent > AgentWorking" => native_agent::LastTab;
+    "ctrl-s w", "Agent > AgentWorking" => native_agent::LastSession;
+    "ctrl-s 1", "Agent > AgentNativeScroll" => native_agent::SelectTab1;
+    "ctrl-s 2", "Agent > AgentNativeScroll" => native_agent::SelectTab2;
+    "ctrl-s 3", "Agent > AgentNativeScroll" => native_agent::SelectTab3;
+    "ctrl-s 4", "Agent > AgentNativeScroll" => native_agent::SelectTab4;
+    "ctrl-s 5", "Agent > AgentNativeScroll" => native_agent::SelectTab5;
+    "ctrl-s 6", "Agent > AgentNativeScroll" => native_agent::SelectTab6;
+    "ctrl-s 7", "Agent > AgentNativeScroll" => native_agent::SelectTab7;
+    "ctrl-s 8", "Agent > AgentNativeScroll" => native_agent::SelectTab8;
+    "ctrl-s 9", "Agent > AgentNativeScroll" => native_agent::SelectTab9;
+    "ctrl-s tab", "Agent > AgentNativeScroll" => native_agent::LastTab;
+    "ctrl-s w", "Agent > AgentNativeScroll" => native_agent::LastSession;
+    "ctrl-s 1", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab1;
+    "ctrl-s 2", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab2;
+    "ctrl-s 3", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab3;
+    "ctrl-s 4", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab4;
+    "ctrl-s 5", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab5;
+    "ctrl-s 6", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab6;
+    "ctrl-s 7", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab7;
+    "ctrl-s 8", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab8;
+    "ctrl-s 9", "Agent > AgentDecision > AgentPermission" => native_agent::SelectTab9;
+    "ctrl-s tab", "Agent > AgentDecision > AgentPermission" => native_agent::LastTab;
+    "ctrl-s w", "Agent > AgentDecision > AgentPermission" => native_agent::LastSession;
+    "ctrl-s 1", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab1;
+    "ctrl-s 2", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab2;
+    "ctrl-s 3", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab3;
+    "ctrl-s 4", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab4;
+    "ctrl-s 5", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab5;
+    "ctrl-s 6", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab6;
+    "ctrl-s 7", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab7;
+    "ctrl-s 8", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab8;
+    "ctrl-s 9", "Agent > AgentDecision > AgentQuestion" => native_agent::SelectTab9;
+    "ctrl-s tab", "Agent > AgentDecision > AgentQuestion" => native_agent::LastTab;
+    "ctrl-s w", "Agent > AgentDecision > AgentQuestion" => native_agent::LastSession;
+    "ctrl-s 1", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab1;
+    "ctrl-s 2", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab2;
+    "ctrl-s 3", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab3;
+    "ctrl-s 4", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab4;
+    "ctrl-s 5", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab5;
+    "ctrl-s 6", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab6;
+    "ctrl-s 7", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab7;
+    "ctrl-s 8", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab8;
+    "ctrl-s 9", "Agent > AgentDecision > AgentPlan" => native_agent::SelectTab9;
+    "ctrl-s tab", "Agent > AgentDecision > AgentPlan" => native_agent::LastTab;
+    "ctrl-s w", "Agent > AgentDecision > AgentPlan" => native_agent::LastSession;
+
     // §12: `^s [` is a real mode — the transcript takes the same vocabulary the terminal scroll
     // mode has for as long as it is on, and `G` is "newest", not a way out of the mode.
     "j",             "Agent > AgentNativeScroll" => native_agent::ScrollLineDown;
@@ -1009,6 +1079,49 @@ mod tests {
             assert!(table().iter().any(|spec| {
                 spec.context == "Agent > Prefix" && spec.keys == keys && spec.action == expected
             }));
+        }
+    }
+
+    #[test]
+    fn native_agent_modes_bind_workspace_selection_and_mru_but_not_workspace_exit() {
+        let contexts = [
+            "Agent > AgentIdle",
+            "Agent > AgentWorking",
+            "Agent > AgentNativeScroll",
+            "Agent > AgentDecision > AgentPermission",
+            "Agent > AgentDecision > AgentQuestion",
+            "Agent > AgentDecision > AgentPlan",
+        ];
+        let selections = [
+            ("ctrl-s 1", "native_agent::SelectTab1"),
+            ("ctrl-s 2", "native_agent::SelectTab2"),
+            ("ctrl-s 3", "native_agent::SelectTab3"),
+            ("ctrl-s 4", "native_agent::SelectTab4"),
+            ("ctrl-s 5", "native_agent::SelectTab5"),
+            ("ctrl-s 6", "native_agent::SelectTab6"),
+            ("ctrl-s 7", "native_agent::SelectTab7"),
+            ("ctrl-s 8", "native_agent::SelectTab8"),
+            ("ctrl-s 9", "native_agent::SelectTab9"),
+            ("ctrl-s tab", "native_agent::LastTab"),
+            ("ctrl-s w", "native_agent::LastSession"),
+        ];
+        let table = table();
+
+        for context in contexts {
+            for (keys, action) in selections {
+                assert!(
+                    table.iter().any(|spec| {
+                        spec.context == context && spec.keys == keys && spec.action == action
+                    }),
+                    "missing `{keys}` in `{context}`"
+                );
+            }
+            assert!(
+                !table
+                    .iter()
+                    .any(|spec| spec.context == context && spec.keys == "ctrl-s s"),
+                "`ctrl-s s` must remain unbound in `{context}`"
+            );
         }
     }
 

@@ -498,7 +498,14 @@ fn replay_stale_keys(
     // Release the Shell lease before dispatch; an owner-changing replay makes later events
     // re-enter the bounded FIFO through the application interceptor.
     for event in queued {
-        window.dispatch_event(PlatformInput::KeyDown(event), cx);
+        if event.keystroke.key_char.is_some() {
+            // `dispatch_event(KeyDown)` stops after the raw dispatch tree. Printable input also
+            // needs GPUI's simulated-IME half, or a character queued across an AgentWorking ↔
+            // AgentIdle frame is replayed as a handled key that inserts no text.
+            window.dispatch_keystroke(event.keystroke, cx);
+        } else {
+            window.dispatch_event(PlatformInput::KeyDown(event), cx);
+        }
     }
 }
 

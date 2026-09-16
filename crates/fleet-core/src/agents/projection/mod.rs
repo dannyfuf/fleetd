@@ -5,7 +5,7 @@ mod reduce;
 mod summary;
 mod usage;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,25 @@ use crate::ids::WorktreeId;
 pub use summary::AgentThreadSummary;
 use summary::{GateDiscriminant, event_is_nonterminal, gate_requires_attention};
 use usage::file_totals;
+
+/// The smallest useful description of what one accepted reducer event changed.
+///
+/// Text is reserved for an append to an already-open item. Every other accepted transition is
+/// structural from a transcript consumer's point of view, even when it only changes metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Applied {
+    /// One append-only content stream grew by the named byte range.
+    Text {
+        /// Item whose payload grew.
+        item: ItemId,
+        /// Typed stream within the item.
+        stream: StreamKind,
+        /// Byte range added to the stream's accumulated UTF-8 text.
+        appended: Range<usize>,
+    },
+    /// A row, lifecycle fact, gate, turn, session, usage value, or item shape changed.
+    Structural,
+}
 
 #[cfg(test)]
 mod tests;
@@ -191,6 +210,12 @@ pub struct ThreadProjection {
     pub context_pct: f32,
     /// Active model.
     pub model: Option<ModelSelection>,
+    /// Harness-declared model and reasoning-effort vocabulary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<super::ModelDescriptor>,
+    /// Harness-native skills, refreshed independently of session startup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
     /// Active permission mode.
     pub mode: PermissionMode,
     /// Provider process exit code.
@@ -230,6 +255,8 @@ impl ThreadProjection {
             cumulative_cost_usd: None,
             context_pct: 0.0,
             model: None,
+            models: Vec::new(),
+            skills: Vec::new(),
             mode: PermissionMode::Ask,
             exit_code: None,
             retrying: None,
@@ -256,6 +283,68 @@ impl ThreadProjection {
         }
         self.last_activity = Some(ev.at);
         Ok(())
+    }
+
+    /// Applies one ordered event and reports the narrowest safe presentation damage.
+    ///
+    /// [`ThreadProjection::apply`] remains unchanged for replay and daemon callers. Consumers
+    /// that maintain an incremental presentation use this additive entry point to avoid
+    /// rediscovering a text append with a deep projection comparison.
+    pub fn apply_described(&mut self, ev: &SeqEvent) -> Result<Applied, ProjectionError> {
+        let text = match &ev.event {
+            AgentEvent::ContentDelta {
+                item,
+                stream,
+                delta,
+            } => self
+                .item(*item)
+                .filter(|item| item.status == super::ItemStatus::InProgress)
+                .map(|_| {
+                    self.stream_text(*item, *stream)
+                        .map(|text| (*item, *stream, text.len()..text.len() + delta.len()))
+                })
+                .transpose()?,
+            _ => None,
+        };
+        self.apply(ev)?;
+        Ok(
+            text.map_or(Applied::Structural, |(item, stream, appended)| {
+                Applied::Text {
+                    item,
+                    stream,
+                    appended,
+                }
+            }),
+        )
+    }
+
+    /// Returns one item by identity in constant time once the projection is warm.
+    #[must_use]
+    pub fn item(&self, item: ItemId) -> Option<&Item> {
+        self.item_position(item)
+            .and_then(|index| self.items.get(index))
+    }
+
+    /// Returns the accumulated UTF-8 payload of one append-only item stream.
+    pub fn stream_text(&self, item: ItemId, stream: StreamKind) -> Result<&str, ProjectionError> {
+        let item = self.item(item).ok_or(ProjectionError::UnknownItem(item))?;
+        patch::content(item, stream)
+    }
+
+    /// Appends a revealed suffix to a presentation projection without replaying an event.
+    ///
+    /// This is intentionally narrower than [`ThreadProjection::apply_described`]: it changes
+    /// only the item payload. Sequence and activity metadata remain owned by the caller's source
+    /// projection and can be adopted without cloning the transcript.
+    pub fn append_stream_text(
+        &mut self,
+        item: ItemId,
+        stream: StreamKind,
+        delta: &str,
+    ) -> Result<(), ProjectionError> {
+        self.rebuild_indices_if_needed();
+        let item = self.item_mut(item)?;
+        patch::append_content(item, stream, delta)
     }
 
     /// Whether this event would be accepted, decided without writing anything.

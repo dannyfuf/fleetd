@@ -114,6 +114,7 @@ pub fn to_remote(
             }
         }
         AgentThreadList
+        | AgentSeenCursors
         | ListBoards { .. }
         | GetBoard { .. }
         | EnsureBoard { .. }
@@ -187,7 +188,10 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         // rewriting its rows, and until then the id space is left as the owner sent it.
         AgentThreadWindow(window) => translate_summary(&mut window.summary, host, ids),
         // A checkpoint identity is scoped to its thread, and thread ids pass through unchanged.
-        AgentItemBodyChunk { .. } | AgentCheckpoints(_) | AgentReverted(_) => {}
+        AgentItemBodyChunk { .. }
+        | AgentCheckpoints(_)
+        | AgentReverted(_)
+        | AgentSeenCursors(_) => {}
         CardWorktree { worktree, .. } => translate_worktree(worktree, host, ids),
         Watches(watches) => {
             for watch in watches {
@@ -581,6 +585,7 @@ pub(crate) fn unavailable_fanout_response(
         })),
         RequestBody::PruneWorktrees { ids: None, .. }
         | RequestBody::AgentThreadList
+        | RequestBody::AgentSeenCursors
         | RequestBody::AgentThreadCreate { .. }
         | RequestBody::AgentThreadOpen { .. }
         | RequestBody::AgentThreadClose { .. }

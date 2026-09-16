@@ -344,6 +344,7 @@ mod tests {
     #[test]
     fn parses_permission_plan_and_question_answers() {
         let permission = GateKind::Permission {
+            item: None,
             tool: fleet_core::agents::ToolKind::Bash,
             title: "run".to_owned(),
             payload: "echo old".to_owned(),

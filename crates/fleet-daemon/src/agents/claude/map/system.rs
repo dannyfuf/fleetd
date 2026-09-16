@@ -200,6 +200,7 @@ fn init(session: &mut ClaudeSession, frame: &SystemFrame, events: &mut Vec<Agent
         provider: AgentKind::Claude,
         resume_cursor: string_field(&frame.fields, "session_id"),
         model,
+        models: Vec::new(),
         mode,
         tools: string_list(frame.fields.get("tools")),
         commands: string_list(frame.fields.get("slash_commands")),

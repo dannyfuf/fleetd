@@ -136,6 +136,7 @@ pub(crate) fn window_response(
         }),
         head_seq: projection.last_seq,
         projected_seq: projection.last_seq,
+        seen_seq: None,
         events_after,
         synchronized,
     }
@@ -195,6 +196,7 @@ fn session_view(
 ) -> AgentSessionView {
     AgentSessionView {
         model: projection.model.clone(),
+        models: projection.models.clone(),
         mode: projection.mode,
         tools: session
             .map(|session| session.tools.clone())
@@ -202,9 +204,13 @@ fn session_view(
         commands: session
             .map(|session| session.commands.clone())
             .unwrap_or_default(),
-        skills: session
-            .map(|session| session.skills.clone())
-            .unwrap_or_default(),
+        skills: if projection.skills.is_empty() {
+            session
+                .map(|session| session.skills.clone())
+                .unwrap_or_default()
+        } else {
+            projection.skills.clone()
+        },
         // Negotiated harness capabilities are owned by the harness layer and are not projected
         // yet; the surface gates on `None` by disabling, which is the safe direction.
         capabilities: None,

@@ -6,15 +6,16 @@ use std::time::Duration;
 
 use fleet_core::agents::{
     AgentEvent, AgentKind, ApprovalPolicy, GateAnswer, ItemId, ItemStatus, ModelSelection,
-    PermissionChoice, PermissionMode, SandboxPolicy, StartRequest, ThreadId, TurnId, TurnOutcome,
-    UserInput,
+    PermissionChoice, PermissionMode, SandboxPolicy, Seq, SeqEvent, StartRequest, ThreadId,
+    ThreadProjection, TurnId, TurnOutcome, TurnState, UserInput,
 };
+use fleet_core::ids::WorktreeId;
 use semver::Version;
 use serde_json::{Value, json};
 
 use super::{
-    CodexHarness, approvals, envelope, map, methods, params::user_input, session::CodexSession,
-    user_agent_version,
+    CodexHarness, approvals, catalogue, envelope, map, methods, params::user_input,
+    session::CodexSession, user_agent_version,
 };
 use crate::agents::harness::{
     Harness, HarnessConfig, OpenSession, Submit, SubmitIntent,
@@ -231,12 +232,15 @@ fn the_captured_failure_keeps_the_error_and_the_settlement_apart() {
     );
 }
 
+mod stage_a2;
+mod stage_fix;
 /// Byte-exact goldens for every outbound frame Fleet writes.
 mod wire;
 /// The mock peer: a real child process, scripted from the captured responses.
 fn peer() -> crate::agents::harness::mockpeer::BuiltPeer {
     let thread = "01a089f2-5337-7470-adb1-219e71d62a35";
     let turn = "01a089f2-579b-75c2-8e51-3492ec617046";
+    let client_item = "11111111-2222-4333-8444-555555555555";
     MockPeer::new()
         .on(
             "initialize",
@@ -255,23 +259,36 @@ fn peer() -> crate::agents::harness::mockpeer::BuiltPeer {
             )],
         )
         .on(
+            "model/list",
+            Some(
+                r#"{"id":__ID__,"result":{"data":[{"id":"gpt-5.1-codex","model":"gpt-5.1-codex","displayName":"Codex","description":"test model","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low","description":"fast"},{"reasoningEffort":"high","description":"deep"}],"defaultReasoningEffort":"high","isDefault":true}],"nextCursor":null}}"#,
+            ),
+            &[],
+        )
+        .on(
+            "skills/list",
+            Some(
+                r#"{"id":__ID__,"result":{"data":[{"cwd":"/tmp","skills":[{"name":"review"}]}]}}"#,
+            ),
+            &[],
+        )
+        .on(
             "turn/start",
             Some(&format!(
-                r#"{{"id":__ID__,"result":{{"turn":{{"id":"{turn}","items":[],"itemsView":"notLoaded","status":"inProgress"}}}}}}"#
+                "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+                format_args!(r#"{{"id":__ID__,"result":{{"turn":{{"id":"{turn}","items":[],"itemsView":"notLoaded","status":"inProgress"}}}}}}"#),
+                format_args!(r#"{{"method":"turn/started","params":{{"threadId":"{thread}","turn":{{"id":"{turn}","items":[],"itemsView":"notLoaded","status":"inProgress"}}}},"emittedAtMs":1}}"#),
+                format_args!(r#"{{"method":"item/started","params":{{"threadId":"{thread}","turnId":"{turn}","startedAtMs":1,"item":{{"type":"userMessage","id":"user_1","clientId":"{client_item}","content":[{{"type":"text","text":"hello","text_elements":[]}}]}}}},"emittedAtMs":2}}"#),
+                format_args!(r#"{{"method":"item/completed","params":{{"threadId":"{thread}","turnId":"{turn}","completedAtMs":2,"item":{{"type":"userMessage","id":"user_1","clientId":"{client_item}","content":[{{"type":"text","text":"hello","text_elements":[]}}]}}}},"emittedAtMs":2}}"#),
+                format_args!(r#"{{"method":"item/started","params":{{"threadId":"{thread}","turnId":"{turn}","startedAtMs":2,"item":{{"type":"agentMessage","id":"msg_1","text":""}}}},"emittedAtMs":2}}"#),
+                format_args!(r#"{{"method":"item/agentMessage/delta","params":{{"threadId":"{thread}","turnId":"{turn}","itemId":"msg_1","delta":"hi"}},"emittedAtMs":3}}"#),
+                format_args!(r#"{{"method":"item/completed","params":{{"threadId":"{thread}","turnId":"{turn}","completedAtMs":4,"item":{{"type":"agentMessage","id":"msg_1","text":"hi"}}}},"emittedAtMs":4}}"#),
             )),
             &[
                 &format!(
-                    r#"{{"method":"item/started","params":{{"threadId":"{thread}","turnId":"{turn}","startedAtMs":1,"item":{{"type":"agentMessage","id":"msg_1","text":""}}}},"emittedAtMs":2}}"#
-                ),
-                &format!(
-                    r#"{{"method":"item/agentMessage/delta","params":{{"threadId":"{thread}","turnId":"{turn}","itemId":"msg_1","delta":"hi"}},"emittedAtMs":3}}"#
-                ),
-                &format!(
-                    r#"{{"method":"item/completed","params":{{"threadId":"{thread}","turnId":"{turn}","completedAtMs":4,"item":{{"type":"agentMessage","id":"msg_1","text":"hi"}}}},"emittedAtMs":4}}"#
-                ),
-                &format!(
                     r#"{{"method":"turn/completed","params":{{"threadId":"{thread}","turn":{{"id":"{turn}","items":[],"itemsView":"summary","status":"completed","durationMs":12}}}},"emittedAtMs":5}}"#
                 ),
+                r#"{"method":"skills/changed","params":{},"emittedAtMs":6}"#,
             ],
         )
         .lingering()
@@ -290,15 +307,31 @@ async fn a_scripted_peer_drives_the_handshake_a_turn_and_its_settlement() {
         })
         .await
         .unwrap_or_else(|error| panic!("open: {error}"));
+    {
+        let session = harness.session.lock().await;
+        assert_eq!(session.skills, ["review"]);
+        assert_eq!(
+            session
+                .models
+                .first()
+                .and_then(|model| model.pointer("/supportedReasoningEfforts/1/description"))
+                .and_then(Value::as_str),
+            Some("deep"),
+            "Codex's descriptions survive discovery rather than becoming a hardcoded ladder"
+        );
+    }
 
     let turn = TurnId::new();
+    let user_item: ItemId = "11111111-2222-4333-8444-555555555555"
+        .parse()
+        .unwrap_or_else(|error| panic!("fixed item id: {error}"));
     let submitted = harness
         .submit(Submit {
             turn,
             input: UserInput {
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
-                item: None,
+                item: Some(user_item),
             },
             intent: SubmitIntent::Fresh,
         })
@@ -331,6 +364,81 @@ async fn a_scripted_peer_drives_the_handshake_a_turn_and_its_settlement() {
     assert!(mapped.contains(&"turn_started"), "{mapped:?}");
     assert!(mapped.contains(&"content_delta"), "{mapped:?}");
     assert_eq!(mapped.last().copied(), Some("turn_settled"), "{mapped:?}");
+    assert!(seen.iter().any(|event| matches!(
+        &event.event,
+        AgentEvent::SessionConfigured { skills, .. } if skills == &["review"]
+    )));
+    assert_eq!(
+        mapped
+            .iter()
+            .filter(|name| **name == "turn_started")
+            .count(),
+        1,
+        "the response and notification announce one turn: {mapped:?}"
+    );
+    assert_eq!(
+        mapped
+            .iter()
+            .filter(|name| **name == "item_started")
+            .count(),
+        1,
+        "the echoed user item is reconciled; only the assistant item is emitted: {mapped:?}"
+    );
+    assert_eq!(
+        mapped
+            .iter()
+            .filter(|name| **name == "item_completed")
+            .count(),
+        1,
+        "the assistant item completes once and the user completion stays reconciled: {mapped:?}"
+    );
+    let events_only = seen
+        .iter()
+        .map(|event| event.event.clone())
+        .collect::<Vec<_>>();
+    for event in &events_only {
+        let event_turn = match event {
+            AgentEvent::TurnStarted { turn, .. }
+            | AgentEvent::TurnSettled { turn, .. }
+            | AgentEvent::TurnAborted { turn, .. }
+            | AgentEvent::TurnDiff { turn, .. }
+            | AgentEvent::PlanSteps { turn, .. }
+            | AgentEvent::ItemStarted { turn, .. }
+            | AgentEvent::TokenUsage { turn, .. } => Some(*turn),
+            _ => None,
+        };
+        if let Some(event_turn) = event_turn {
+            assert_eq!(event_turn, turn, "provider ids never escape: {event:#?}");
+        }
+    }
+
+    let mut projection = ThreadProjection::new(
+        ThreadId::new(),
+        WorktreeId::try_from("test/native-agents#turn-race")
+            .unwrap_or_else(|error| panic!("fixed worktree id: {error}")),
+        AgentKind::Codex,
+    );
+    let at = "2026-09-16T12:00:00Z"
+        .parse()
+        .unwrap_or_else(|error| panic!("fixed timestamp: {error}"));
+    for (index, event) in events_only.into_iter().enumerate() {
+        let terminal = matches!(event, AgentEvent::TurnSettled { .. });
+        projection
+            .apply(&SeqEvent {
+                seq: Seq((index + 1) as u64),
+                at,
+                raw: None,
+                event,
+            })
+            .unwrap_or_else(|error| panic!("the burst must reduce cleanly: {error}"));
+        if !terminal && projection.turns.iter().any(|record| record.id == turn) {
+            assert_eq!(projection.turn, TurnState::Running(turn));
+        }
+    }
+    assert!(
+        !matches!(projection.turn, TurnState::Running(_)),
+        "only turn/completed settles the projection"
+    );
     // Codex stamps every notification with its own clock, and Fleet keeps it.
     assert!(
         seen.iter().any(|event| event.emitted_at.is_some()),
@@ -338,7 +446,7 @@ async fn a_scripted_peer_drives_the_handshake_a_turn_and_its_settlement() {
     );
 
     // The frames Fleet wrote, in order, byte-for-byte from the peer's own record.
-    let written = peer.wait_for_frames(4, Duration::from_secs(5)).await;
+    let written = peer.wait_for_frames(7, Duration::from_secs(5)).await;
     let written_methods = written
         .iter()
         .filter_map(|line| {
@@ -352,8 +460,33 @@ async fn a_scripted_peer_drives_the_handshake_a_turn_and_its_settlement() {
         .collect::<Vec<_>>();
     assert_eq!(
         written_methods,
-        ["initialize", "initialized", "thread/start", "turn/start"],
+        [
+            "initialize",
+            "initialized",
+            "thread/start",
+            "model/list",
+            "skills/list",
+            "turn/start",
+            "skills/list"
+        ],
         "{written:?}"
+    );
+    let refresh = written
+        .last()
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .unwrap_or_else(|| panic!("the skills/changed follow-up was recorded: {written:?}"));
+    assert_eq!(
+        refresh
+            .pointer("/params/forceReload")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        refresh
+            .pointer("/params/cwds/0")
+            .and_then(Value::as_str)
+            .is_some_and(|cwd| !cwd.is_empty()),
+        "the refresh stays scoped to the thread cwd: {refresh}"
     );
     assert!(
         !written.iter().any(|line| line.contains("jsonrpc")),
@@ -382,6 +515,16 @@ async fn a_stray_stdout_line_never_kills_the_session() {
             Some(&format!(
                 r#"{{"id":__ID__,"result":{{"thread":{{"id":"{thread}"}}}}}}"#
             )),
+            &[],
+        )
+        .on(
+            "model/list",
+            Some(r#"{"id":__ID__,"result":{"data":[],"nextCursor":null}}"#),
+            &[],
+        )
+        .on(
+            "skills/list",
+            Some(r#"{"id":__ID__,"result":{"data":[]}}"#),
             &[],
         )
         .lingering()
@@ -419,6 +562,16 @@ async fn a_second_submit_steers_the_running_turn() {
             Some(&format!(
                 r#"{{"id":__ID__,"result":{{"thread":{{"id":"{thread}"}}}}}}"#
             )),
+            &[],
+        )
+        .on(
+            "model/list",
+            Some(r#"{"id":__ID__,"result":{"data":[],"nextCursor":null}}"#),
+            &[],
+        )
+        .on(
+            "skills/list",
+            Some(r#"{"id":__ID__,"result":{"data":[]}}"#),
             &[],
         )
         .on(

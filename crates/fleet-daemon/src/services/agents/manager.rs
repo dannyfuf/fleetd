@@ -48,12 +48,11 @@ use super::{
     thread,
 };
 use apply::{
-    Serialized, apply_event, closed_gate_answer, edited_paths, ends_the_session, ends_the_turn,
-    pending_input_turn, publish_applied, runtime_inflight, user_item_started,
+    ApplyEventError, Serialized, apply_event, closed_gate_answer, edited_paths, ends_the_session,
+    ends_the_turn, event_name, pending_input_turn, publish_applied, runtime_inflight,
+    user_item_started,
 };
-use thread::{AppliedEvent, ThreadRuntime, coalesce_deltas};
-
-const DELTA_TICK: Duration = Duration::from_millis(16);
+use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
 
 /// Emission-to-read skew worth a log line.
 ///
@@ -662,7 +661,7 @@ impl AgentSessionManager {
     ) -> Result<AppliedEvent, ProtoError> {
         apply_event(&self.inner, runtime, operation, event, raw)
             .await
-            .map_err(storage_error)
+            .map_err(apply_error)
     }
 }
 
@@ -674,17 +673,11 @@ async fn run_provider_events(
     let manager = AgentSessionManager {
         inner: Arc::clone(&inner),
     };
-    while let Some(first) = receiver.recv().await {
-        let mut batch = vec![first];
-        if matches!(batch[0].event, AgentEvent::ContentDelta { .. }) {
-            tokio::time::sleep(DELTA_TICK).await;
-            while let Ok(event) = receiver.try_recv() {
-                batch.push(event);
-            }
-        }
-        // §5: one event per item per tick. The run is merged *before* it is reduced, so the tick
-        // costs one sequence, one stored line and one broadcast frame rather than one per token.
-        for event in coalesce_deltas(batch) {
+    while let Some(batch) = next_coalesced_batch(&mut receiver).await {
+        // §5: adjacent deltas and repeated patches are collapsed *before* reduction, so a window
+        // costs one sequence, stored row and broadcast frame per retained event.
+        for event in batch {
+            let event_kind = event_name(&event.event);
             let operation = runtime.operation.lock().await;
             let exited = matches!(event.event, AgentEvent::SessionExited { .. });
             if let Some(skew) = event.emission_skew
@@ -707,7 +700,18 @@ async fn run_provider_events(
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "dropped invalid native-agent provider event");
+                    let thread = runtime
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record
+                        .thread;
+                    tracing::warn!(
+                        %error,
+                        %thread,
+                        event = event_kind,
+                        "dropped invalid native-agent provider event"
+                    );
                 }
             }
             // §6 resumes a stopped thread "lazily with a new adapter the next time it is
@@ -799,6 +803,16 @@ fn provider_error(error: ProviderError) -> ProtoError {
 
 fn daemon_error(error: crate::DaemonError) -> ProtoError {
     error.into()
+}
+
+fn apply_error(error: ApplyEventError) -> ProtoError {
+    match error {
+        reducer @ ApplyEventError::Reducer { .. } => ProtoError {
+            kind: ErrorKind::Validation,
+            message: one_line(&reducer.to_string()),
+        },
+        ApplyEventError::Storage(source) => storage_error(source),
+    }
 }
 
 fn storage_error(error: anyhow::Error) -> ProtoError {

@@ -178,8 +178,18 @@ fn load_or_create_daemon_id(home: &Path) -> HostId {
             None
         }
     };
-    let id = HostId::try_from(uuid::Uuid::new_v4().to_string().as_str())
-        .expect("a generated uuid is a valid host id");
+    // The client owns creation of `client-id`. If it connected before the first daemon start,
+    // adopt that UUID as this installation's forwarding identity; then proxy Hello forwards the
+    // originating installation id unchanged. A daemon never creates the client-owned file.
+    let id = std::fs::read_to_string(home.join("client-id"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| fleet_core::paths::is_client_id(value))
+        .and_then(|value| HostId::try_from(value).ok())
+        .unwrap_or_else(|| {
+            HostId::try_from(uuid::Uuid::new_v4().to_string().as_str())
+                .expect("a generated uuid is a valid host id")
+        });
     if let Some((value, reason)) = rejected {
         quarantine_daemon_id(&path, &value, &reason, &id);
     }

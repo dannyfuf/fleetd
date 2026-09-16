@@ -56,7 +56,7 @@ fn serialized_shape_is_pinned() {
             "version":1,"screen":"Hub","mode":"Normal","hub_pane":"List","hub_tab":"Worktrees","overlay":null,
             "key_contexts":["Hub","Worktrees"],"focused":"worktrees.row[0]","lists":{},"dialog":null,"toasts":[],
             "sticky_error":null,"jobs":[],
-            "agents":{"popup":null,"threads":[]},"terminal":null,"targets":{},
+            "agents":{"popup":null,"threads":[],"decision":null},"terminal":null,"targets":{},
             "daemon":{"link":"starting","attempt":0,"dismissed":false,"restarted":false},
             "idle":{"idle":false,"in_flight_requests":0,"running_jobs":0,"pending_frame":false,"live_toast_timers":0,"armed_debounces":0,"settling_mutations":0,"link_opening":true},
             "window":{"bounds":{"x":0.0,"y":0.0,"w":0.0,"h":0.0},"scale_factor":0.0,"title":"","frame":0}

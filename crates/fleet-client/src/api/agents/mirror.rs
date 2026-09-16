@@ -8,16 +8,16 @@
 
 use std::collections::HashMap;
 
-use fleet_core::agents::{Seq, SeqEvent, ThreadId, ThreadProjection};
+use fleet_core::agents::{Applied, Seq, SeqEvent, ThreadId, ThreadProjection};
 use fleet_proto::agents::{AgentThreadWindow, TranscriptPage};
 
 use super::{AgentSnapshot, Result, window::projection_from_window};
 
 /// Result of applying a sequenced native-agent event to the local mirror.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirrorOutcome {
     /// The event was applied to an installed projection.
-    Applied,
+    Applied(Applied),
     /// The event is already in the projection; the mirror is ahead of it, not behind.
     ///
     /// A cursored open reads the log outside the daemon's state lock, so its tail and the live
@@ -122,10 +122,10 @@ impl AgentMirror {
                 got: event.seq,
             };
         }
-        if projection.apply(event).is_err() {
-            return MirrorOutcome::Rejected { seq: event.seq };
+        match projection.apply_described(event) {
+            Ok(applied) => MirrorOutcome::Applied(applied),
+            Err(_) => MirrorOutcome::Rejected { seq: event.seq },
         }
-        MirrorOutcome::Applied
     }
 
     /// Replaces a projection and applies its ordered event tail.
@@ -138,11 +138,11 @@ impl AgentMirror {
         self.projections.insert(thread, projection);
         for event in events_after {
             match self.apply_event(thread, event) {
-                MirrorOutcome::Applied | MirrorOutcome::Duplicate { .. } => {}
+                MirrorOutcome::Applied(_) | MirrorOutcome::Duplicate { .. } => {}
                 outcome => return outcome,
             }
         }
-        MirrorOutcome::Applied
+        MirrorOutcome::Applied(Applied::Structural)
     }
 
     /// Replaces a projection from a bounded window and applies its live tail.
@@ -270,7 +270,10 @@ impl AgentMirror {
 
     /// Records the latest sequence visible to the user for a thread.
     pub fn mark_seen(&mut self, thread: ThreadId, seq: Seq) {
-        self.last_seen.insert(thread, seq);
+        self.last_seen
+            .entry(thread)
+            .and_modify(|seen| *seen = (*seen).max(seq))
+            .or_insert(seq);
     }
 
     /// Applies an event and fetches an ordered snapshot tail when delivery has a gap.
@@ -337,7 +340,7 @@ mod tests {
             .await
             .expect("resync");
 
-        assert_eq!(outcome, MirrorOutcome::Applied);
+        assert_eq!(outcome, MirrorOutcome::Applied(Applied::Structural));
         assert_eq!(mirror.projections[&thread].last_seq, Seq(3));
     }
 
@@ -428,6 +431,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_open_item_delta_surfaces_its_exact_appended_range() {
+        let thread = ThreadId::new();
+        let worktree = WorktreeId::try_from("acme/api#feature").expect("worktree");
+        let mut projection = ThreadProjection::new(thread, worktree, AgentKind::Claude);
+        let mut assistant = item(ItemId::new());
+        assistant.status = fleet_core::agents::ItemStatus::InProgress;
+        let item = assistant.id;
+        projection.items.push(assistant);
+        let mut mirror = AgentMirror::default();
+        mirror.install_snapshot(projection, &[]);
+
+        let outcome = mirror.apply_event(
+            thread,
+            &SeqEvent {
+                seq: Seq(1),
+                at: "2026-09-07T12:00:00Z".parse().expect("timestamp"),
+                raw: None,
+                event: AgentEvent::ContentDelta {
+                    item,
+                    stream: fleet_core::agents::StreamKind::AssistantText,
+                    delta: "!".to_owned(),
+                },
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            MirrorOutcome::Applied(Applied::Text {
+                item,
+                stream: fleet_core::agents::StreamKind::AssistantText,
+                appended: 5..6,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn a_window_installs_the_sequence_its_content_applied_not_the_log_head() {
         // A daemon mid-rebuild answers a window that is a prefix: `head_seq` is ahead of what the
         // projection could apply. Trusting the head would skip every event in between, and they
@@ -438,7 +477,7 @@ mod tests {
         let mut mirror = AgentMirror::default();
         let outcome = mirror.install_window(&window);
 
-        assert_eq!(outcome, MirrorOutcome::Applied);
+        assert_eq!(outcome, MirrorOutcome::Applied(Applied::Structural));
         assert_eq!(mirror.applied_seq(thread), Seq(9));
         assert!(mirror.is_synchronized(thread));
         assert_eq!(
@@ -598,6 +637,7 @@ mod tests {
             }),
             head_seq,
             projected_seq,
+            seen_seq: None,
             events_after: Vec::new(),
             synchronized,
         }

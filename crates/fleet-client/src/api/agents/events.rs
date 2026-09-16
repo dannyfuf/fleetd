@@ -88,7 +88,7 @@ impl AgentEvents {
                         MirrorOutcome::Rejected { seq } => {
                             tracing::warn!(%thread, %seq, "agent event refused by the client projection");
                         }
-                        MirrorOutcome::Applied | MirrorOutcome::Duplicate { .. } => {}
+                        MirrorOutcome::Applied(_) | MirrorOutcome::Duplicate { .. } => {}
                     }
                     return Ok((thread, event));
                 }
@@ -206,7 +206,7 @@ impl AgentEvents {
                 tracing::warn!(%thread, %seq, "agent event refused by the client projection");
                 Ok(())
             }
-            MirrorOutcome::Applied | MirrorOutcome::Duplicate { .. } => Ok(()),
+            MirrorOutcome::Applied(_) | MirrorOutcome::Duplicate { .. } => Ok(()),
         }
     }
 }

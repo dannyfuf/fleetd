@@ -267,9 +267,11 @@ fn a_reused_block_index_mints_a_new_item() {
         .unwrap_or_else(|error| panic!("{error}"));
     let mut items = Vec::new();
     for line in [
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_first"}}}"#,
         r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}"#,
         r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}}"#,
         r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_second"}}}"#,
         r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}"#,
         r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"second"}}}"#,
     ] {
@@ -281,6 +283,119 @@ fn a_reused_block_index_mints_a_new_item() {
     }
     assert_eq!(items.len(), 2);
     assert_ne!(items[0], items[1], "two rows, two ids");
+}
+
+/// A stopped partial block and its later assistant snapshot are one transcript item.
+#[test]
+fn a_snapshot_after_message_stop_backfills_the_streamed_item_without_starting_another() {
+    let mut session = ClaudeSession::default();
+    session
+        .begin_turn(TurnId::new(), ItemId::new())
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut events = Vec::new();
+    for line in [
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_one"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me read "}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"the manifest first."}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+        r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+    ] {
+        events.extend(map::handle(&mut session, frame(line)).events);
+    }
+
+    let snapshot = map::handle(
+        &mut session,
+        frame(
+            r#"{"type":"assistant","message":{"id":"msg_one","content":[{"type":"text","text":"Let me read the manifest first."}]}}"#,
+        ),
+    );
+    assert!(
+        snapshot.events.is_empty(),
+        "an equal snapshot is a no-op: {:?}",
+        names(&snapshot.events)
+    );
+    events.extend(snapshot.events);
+    events.extend(
+        map::handle(
+            &mut session,
+            frame(
+                r#"{"type":"result","subtype":"success","terminal_reason":"completed","duration_ms":10}"#,
+            ),
+        )
+        .events,
+    );
+
+    let started = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ItemStarted { item, .. } => Some(*item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        started.len(),
+        1,
+        "the snapshot must not start a duplicate row"
+    );
+    let item = started[0];
+    assert!(events.iter().all(|event| match event {
+        AgentEvent::ContentDelta { item: target, .. }
+        | AgentEvent::ItemUpdated { item: target, .. }
+        | AgentEvent::ItemCompleted { item: target, .. } => *target == item,
+        _ => true,
+    }));
+    let text = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContentDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text, "Let me read the manifest first.");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::TurnSettled { .. }))
+            .count(),
+        1,
+        "only the result settles the turn"
+    );
+}
+
+#[test]
+fn a_changed_snapshot_patches_the_stopped_streamed_item() {
+    let mut session = ClaudeSession::default();
+    session
+        .begin_turn(TurnId::new(), ItemId::new())
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut streamed_item = None;
+    for line in [
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_patch"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"draft"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+        r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+    ] {
+        for event in map::handle(&mut session, frame(line)).events {
+            if let AgentEvent::ItemStarted { item, .. } = event {
+                streamed_item = Some(item);
+            }
+        }
+    }
+    let streamed_item = streamed_item.unwrap_or_else(|| panic!("the stream starts one item"));
+
+    let snapshot = map::handle(
+        &mut session,
+        frame(
+            r#"{"type":"assistant","message":{"id":"msg_patch","content":[{"type":"text","text":"final"}]}}"#,
+        ),
+    );
+    assert_eq!(names(&snapshot.events), ["item_updated"]);
+    let AgentEvent::ItemUpdated { item, .. } = &snapshot.events[0] else {
+        panic!("a changed snapshot patches the stream");
+    };
+    assert_eq!(*item, streamed_item);
 }
 
 /// `signature_delta` is dropped: appending it to the thinking body is a visible corruption bug.

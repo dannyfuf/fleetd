@@ -114,6 +114,8 @@ pub fn projection_from_window(window: &AgentThreadWindow) -> ThreadProjection {
     projection.exit_code = summary.exit_code;
 
     projection.model = window.session.model.clone();
+    projection.models.clone_from(&window.session.models);
+    projection.skills.clone_from(&window.session.skills);
     projection.mode = window.session.mode;
     projection.cumulative_usage = window.session.usage.clone().unwrap_or_default();
     projection.cumulative_cost_usd = window.session.cost_usd;

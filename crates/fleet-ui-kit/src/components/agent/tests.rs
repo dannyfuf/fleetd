@@ -7,6 +7,7 @@
 //! honest between visual passes.
 
 use gpui::{TestAppContext, VisualTestContext, div, prelude::*};
+use std::rc::Rc;
 
 use super::{
     ApprovalRequest, AssistantMetaRow, AssistantRow, CheckpointRow, Decision, DecisionDock,
@@ -27,7 +28,7 @@ fn every_row_kind() -> Vec<TranscriptRow> {
     let document = parse_markdown_document("A paragraph, and `code`.\n\n```rs\nlet x = 1;\n```");
     let mut kinds = vec![
         TranscriptRowKind::User(UserRow {
-            attachments: vec!["payroll.rs".into()],
+            attachments: vec!["payroll.rs".into()].into(),
             collapsible: true,
             expanded: true,
             ..UserRow::new("fix the rounding")
@@ -42,12 +43,12 @@ fn every_row_kind() -> Vec<TranscriptRow> {
             ..UserRow::new("and the version")
         }),
         TranscriptRowKind::Assistant(AssistantRow {
-            markdown: document.clone(),
+            markdown: Rc::new(document.clone()),
             streaming: true,
             empty: false,
         }),
         TranscriptRowKind::Assistant(AssistantRow {
-            markdown: document.clone(),
+            markdown: Rc::new(document.clone()),
             streaming: false,
             empty: true,
         }),
@@ -80,7 +81,7 @@ fn every_row_kind() -> Vec<TranscriptRow> {
             summary: "spawned 3 subagents".into(),
             status: Some("2 working".into()),
             tokens: Some("24.1k".into()),
-            children: vec!["explore · reading".into()],
+            children: vec!["explore · reading".into()].into(),
             expanded: true,
             live: true,
         }),
@@ -93,13 +94,13 @@ fn every_row_kind() -> Vec<TranscriptRow> {
             expanded: true,
         }),
         TranscriptRowKind::TurnFooter(TurnFooterRow {
-            segments: turn_footer_segments(Some(12_400), Some(0.42), Some((2, 36, 3))),
+            segments: turn_footer_segments(Some(12_400), Some(0.42), Some((2, 36, 3))).into(),
             diff: true,
             revert: true,
         }),
         TranscriptRowKind::Plan(PlanRow {
             title: "fix the rounding".into(),
-            markdown: document,
+            markdown: Rc::new(document),
             collapsible: true,
             expanded: false,
         }),

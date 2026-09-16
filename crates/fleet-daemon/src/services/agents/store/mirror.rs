@@ -43,6 +43,14 @@ use super::project::{
     self, OptionalRow as _, StagedEvent, discriminant, json_text, session_state_column,
 };
 
+#[cfg(test)]
+thread_local! {
+    /// Successful `MirrorAppend` commands staged by the current single-threaded test runtime.
+    /// Each command is applied atomically by the writer, so this is the mirror transaction count
+    /// unless the transaction fails and enters the writer's error-only retry path.
+    static TEST_MIRROR_TRANSACTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Where a thread is owned, and how much of it this daemon holds.
 ///
 /// Read in one statement against the `threads` primary key, which is why every authority check
@@ -467,7 +475,24 @@ pub(super) fn resume_admission(
 
 /// The events one mirrored append batch will write, prepared off the writer thread.
 pub(super) fn stage(events: &[SeqEvent]) -> anyhow::Result<Vec<StagedEvent>> {
-    events.iter().map(StagedEvent::prepare).collect()
+    let staged = events
+        .iter()
+        .map(StagedEvent::prepare)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    #[cfg(test)]
+    TEST_MIRROR_TRANSACTIONS.with(|transactions| transactions.set(transactions.get() + 1));
+    Ok(staged)
+}
+
+#[cfg(test)]
+impl super::SqliteAgentStore {
+    pub(crate) fn reset_mirror_test_transaction_count(&self) {
+        TEST_MIRROR_TRANSACTIONS.with(|transactions| transactions.set(0));
+    }
+
+    pub(crate) fn mirror_test_transaction_count(&self) -> usize {
+        TEST_MIRROR_TRANSACTIONS.with(std::cell::Cell::get)
+    }
 }
 
 fn seq(value: i64) -> Seq {

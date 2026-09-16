@@ -3,14 +3,17 @@ use super::*;
 use fleet_client::{AgentMirror, MirrorOutcome, PageOutcome};
 use fleet_core::{
     agents::{
-        AgentThreadSummary, Attention, AttentionKind, Seq, SeqEvent, ThreadId, ThreadProjection,
+        AgentThreadSummary, Applied, Attention, AttentionKind, Seq, SeqEvent, ThreadId,
+        ThreadProjection,
     },
     ids::WorktreeId,
 };
 
 use fleet_proto::agents::AgentThreadWindow;
 
-use crate::screens::agent_thread::{decisions::decision_context, presentation::tab_title};
+use crate::screens::agent_thread::{
+    PreparedDecisionObservable, decisions::decision_context, presentation::tab_title,
+};
 
 /// The context bar's `N needs you · N working · N failed`, across every thread in the snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,8 +37,8 @@ impl AgentCounts {
 /// The client's native-agent mirror: daemon summaries, opened projections and seen cursors.
 ///
 /// The daemon owns thread truth, so the summary list is replaced wholesale by every snapshot;
-/// the app only adds what is local to a client — which tab is selected per worktree, which
-/// sequence this window has actually shown the user, and which threads need a resync.
+/// the app only adds what is local to a client — which tab is selected per worktree, the
+/// installation's persisted seen cursor plus this process's newer override, and resync state.
 #[derive(Debug, Default)]
 pub struct AgentThreads {
     /// Daemon summaries in snapshot order; the tab strip inherits that order.
@@ -52,6 +55,8 @@ pub struct AgentThreads {
     commands: HashMap<ThreadId, Vec<String>>,
     /// Harness skills, which `$` completes and the projection does not carry either.
     skills: HashMap<ThreadId, Vec<String>>,
+    /// Prepared drawer observables relayed by mounted thread views.
+    decisions: HashMap<ThreadId, PreparedDecisionObservable>,
     /// The cursor a daemon-declared resync must resume from, per thread.
     resume_from: HashMap<ThreadId, Seq>,
     /// Threads whose composer is being typed into while a card is open.
@@ -70,6 +75,12 @@ pub struct AgentThreads {
     /// §12 puts row focus **inside** scroll mode, which is what finally makes `⏎`/`u`/`o`/`y`/`d`
     /// fire: the `AgentRow` context is only ever on the chain under `AgentNativeScroll`.
     row_focus: HashSet<ThreadId>,
+    /// The one agent tab whose composer must take focus after its next mounted frame.
+    focus_composer: Option<ThreadId>,
+    /// The active thread whose mounted composer most recently proved it held focus.
+    composer_focused: Option<ThreadId>,
+    /// Narrow damage reported by the latest accepted event for each opened thread.
+    last_applied: HashMap<ThreadId, Applied>,
 }
 
 impl AgentThreads {
@@ -120,6 +131,12 @@ impl AgentThreads {
         self.mirror.projections.get(&thread)
     }
 
+    /// Narrow damage reported by the latest accepted event for one thread.
+    #[must_use]
+    pub fn last_applied(&self, thread: ThreadId) -> Option<&Applied> {
+        self.last_applied.get(&thread)
+    }
+
     /// The sequence this client has reported as seen for a thread.
     #[must_use]
     pub fn seen(&self, thread: ThreadId) -> Seq {
@@ -132,10 +149,9 @@ impl AgentThreads {
 
     /// The attention a client actually shows.
     ///
-    /// §3.3 puts the view axis "per client, not persisted daemon-side": the daemon broadcasts
-    /// one summary derived against an unseen thread, and each client narrows the two
-    /// seen-relative attentions with the cursor it holds itself. Two windows on one thread
-    /// therefore disagree honestly instead of clearing each other's amber dot.
+    /// §3.3 puts the view axis per installation. The daemon broadcasts one shared summary and
+    /// each installation narrows the two seen-relative attentions with its own persisted cursor.
+    /// Windows from one installation share that identity; separate installations do not.
     #[must_use]
     pub fn attention(&self, thread: ThreadId) -> Attention {
         let Some(summary) = self.summary(thread) else {
@@ -181,11 +197,53 @@ impl AgentThreads {
     /// Selects an agent tab, replacing whichever one that worktree showed.
     pub fn activate(&mut self, worktree: WorktreeId, thread: ThreadId) {
         self.active.insert(worktree, thread);
+        self.focus_composer = Some(thread);
+        self.composer_focused = None;
     }
 
     /// Returns to the terminal tabs of a worktree.
     pub fn deactivate(&mut self, worktree: &WorktreeId) -> bool {
-        self.active.remove(worktree).is_some()
+        let Some(thread) = self.active.remove(worktree) else {
+            return false;
+        };
+        if self.focus_composer == Some(thread) {
+            self.focus_composer = None;
+        }
+        if self.composer_focused == Some(thread) {
+            self.composer_focused = None;
+        }
+        true
+    }
+
+    /// Consumes the one-shot focus request for `thread`.
+    pub fn take_composer_focus(&mut self, thread: ThreadId) -> bool {
+        if self.focus_composer != Some(thread) {
+            return false;
+        }
+        self.focus_composer = None;
+        true
+    }
+
+    /// Records whether the mounted composer actually owns a descendant focus handle.
+    pub fn set_composer_focused(&mut self, thread: ThreadId, focused: bool) -> bool {
+        let next = if focused {
+            Some(thread)
+        } else if self.composer_focused == Some(thread) {
+            None
+        } else {
+            return false;
+        };
+        if self.composer_focused == next {
+            return false;
+        }
+        self.composer_focused = next;
+        true
+    }
+
+    /// Whether the mounted composer of `thread` most recently proved it held focus.
+    #[must_use]
+    pub fn composer_is_focused(&self, thread: ThreadId) -> bool {
+        self.composer_focused == Some(thread)
     }
 
     /// Records whether the composer, rather than the open card, owns the bare letters.
@@ -322,15 +380,19 @@ impl AgentThreads {
     /// what is in hand rather than from the newest row the daemon has.
     pub fn install_window(&mut self, window: &AgentThreadWindow) {
         let thread = window.summary.thread;
+        if let Some(seen) = window.seen_seq {
+            self.mirror.mark_seen(thread, seen);
+        }
         self.apply_summary(window.summary.clone());
         self.commands
             .insert(thread, window.session.commands.clone());
         self.skills.insert(thread, window.session.skills.clone());
+        self.last_applied.insert(thread, Applied::Structural);
         match self.mirror.install_window(window) {
             MirrorOutcome::Gap { .. } => {
                 self.resync.insert(thread);
             }
-            MirrorOutcome::Applied
+            MirrorOutcome::Applied(_)
             | MirrorOutcome::Duplicate { .. }
             | MirrorOutcome::Rejected { .. } => {
                 self.resync.remove(&thread);
@@ -353,6 +415,30 @@ impl AgentThreads {
     #[must_use]
     pub fn skills(&self, thread: ThreadId) -> Vec<String> {
         self.skills.get(&thread).cloned().unwrap_or_default()
+    }
+
+    /// The prepared decision currently rendered for one mounted thread.
+    #[must_use]
+    pub(crate) fn decision(&self, thread: ThreadId) -> Option<&PreparedDecisionObservable> {
+        self.decisions.get(&thread)
+    }
+
+    /// Mirrors a view's prepared decision and reports whether the snapshot-visible value moved.
+    pub(crate) fn set_decision(
+        &mut self,
+        thread: ThreadId,
+        decision: Option<PreparedDecisionObservable>,
+    ) -> bool {
+        match decision {
+            Some(decision) => {
+                if self.decisions.get(&thread) == Some(&decision) {
+                    return false;
+                }
+                self.decisions.insert(thread, decision);
+                true
+            }
+            None => self.decisions.remove(&thread).is_some(),
+        }
     }
 
     /// Records whether a thread's transcript has a row focused.
@@ -381,13 +467,14 @@ impl AgentThreads {
     /// Replaces a projection with a daemon snapshot and applies its ordered tail.
     pub fn install_snapshot(&mut self, projection: ThreadProjection, events: &[SeqEvent]) {
         let thread = projection.thread;
+        self.last_applied.insert(thread, Applied::Structural);
         match self.mirror.install_snapshot(projection, events) {
             MirrorOutcome::Gap { .. } => {
                 self.resync.insert(thread);
             }
             // A replay is already installed, and an event the reducer refused would come back
             // from the daemon unchanged: neither is worth another open request.
-            MirrorOutcome::Applied
+            MirrorOutcome::Applied(_)
             | MirrorOutcome::Duplicate { .. }
             | MirrorOutcome::Rejected { .. } => {
                 self.resync.remove(&thread);
@@ -403,15 +490,30 @@ impl AgentThreads {
 
     /// Applies one sequenced event, reporting whether the caller must resync the thread.
     pub fn apply_event(&mut self, thread: ThreadId, event: &SeqEvent) -> MirrorOutcome {
-        if let fleet_core::agents::AgentEvent::SessionConfigured { commands, .. } = &event.event {
-            self.commands.insert(thread, commands.clone());
+        match &event.event {
+            fleet_core::agents::AgentEvent::SessionConfigured {
+                commands, skills, ..
+            } => {
+                self.commands.insert(thread, commands.clone());
+                self.skills.insert(thread, skills.clone());
+            }
+            fleet_core::agents::AgentEvent::MetadataChanged {
+                skills: Some(skills),
+                ..
+            } => {
+                self.skills.insert(thread, skills.clone());
+            }
+            _ => {}
         }
         if !self.mirror.projections.contains_key(&thread) {
             // A thread this client has not opened has no projection to advance; its tab still
             // updates from the summary the daemon broadcasts beside the event.
-            return MirrorOutcome::Applied;
+            return MirrorOutcome::Applied(Applied::Structural);
         }
         let outcome = self.mirror.apply_event(thread, event);
+        if let MirrorOutcome::Applied(applied) = &outcome {
+            self.last_applied.insert(thread, applied.clone());
+        }
         if matches!(outcome, MirrorOutcome::Gap { .. }) {
             self.resync.insert(thread);
         }
@@ -435,12 +537,18 @@ impl AgentThreads {
         self.mirror.mark_seen(thread, seq);
     }
 
+    /// Seeds persisted cursors returned for this installation after Hello.
+    pub fn seed_seen(&mut self, cursors: &[(ThreadId, Seq)]) {
+        for (thread, seq) in cursors {
+            self.mirror.mark_seen(*thread, *seq);
+        }
+    }
+
     /// Threads the daemon is showing as unread that this window has already read.
     ///
-    /// §3.3 clears `NeedsYou(Finished)` when the user views the tab, and the seen cursor lives
-    /// in the daemon's runtime only — a daemon restart resets it to zero, so every tab the user
-    /// had already read comes back amber. The local cursor survives, so it is re-reported for
-    /// every thread rather than only for the one tab that happens to be visible.
+    /// §3.3 clears `NeedsYou(Finished)` when the user views the tab. The process-local override
+    /// can be newer than the persisted census fetched during Hello, so it is re-reported for
+    /// every thread rather than only for the tab that happens to be visible.
     #[must_use]
     pub fn stale_seen(&self) -> Vec<(ThreadId, Seq)> {
         self.summaries
@@ -489,7 +597,9 @@ impl AgentThreads {
         self.notified.retain(|thread, _| live.contains(thread));
         self.commands.retain(|thread, _| live.contains(thread));
         self.skills.retain(|thread, _| live.contains(thread));
+        self.decisions.retain(|thread, _| live.contains(thread));
         self.resume_from.retain(|thread, _| live.contains(thread));
+        self.last_applied.retain(|thread, _| live.contains(thread));
         self.row_focus.retain(|thread| live.contains(thread));
         self.composing.retain(|thread| live.contains(thread));
         self.scrolling.retain(|thread| live.contains(thread));
@@ -497,6 +607,18 @@ impl AgentThreads {
             .retain(|thread, _| live.contains(thread));
         self.reported.retain(|thread, _| live.contains(thread));
         self.active.retain(|_, thread| live.contains(thread));
+        if self
+            .focus_composer
+            .is_some_and(|thread| !live.contains(&thread))
+        {
+            self.focus_composer = None;
+        }
+        if self
+            .composer_focused
+            .is_some_and(|thread| !live.contains(&thread))
+        {
+            self.composer_focused = None;
+        }
     }
 
     /// The threads that just entered an attention worth a notification, and their tab labels.
@@ -597,14 +719,13 @@ impl AppState {
         ])
     }
 
-    /// Applies one native-agent event to the mirror, returning a thread that needs a resync.
-    pub fn apply_agent_event(&mut self, thread: ThreadId, event: &SeqEvent) -> Option<ThreadId> {
-        match self.agents.apply_event(thread, event) {
-            MirrorOutcome::Gap { .. } => Some(thread),
-            MirrorOutcome::Applied
-            | MirrorOutcome::Duplicate { .. }
-            | MirrorOutcome::Rejected { .. } => None,
+    /// Applies one native-agent event to the mirror and returns its continuity and damage.
+    pub fn apply_agent_event(&mut self, thread: ThreadId, event: &SeqEvent) -> MirrorOutcome {
+        let outcome = self.agents.apply_event(thread, event);
+        if matches!(outcome, MirrorOutcome::Gap { .. }) {
+            self.agents.mark_resync(thread);
         }
+        outcome
     }
 
     /// Applies one broadcast summary and presents whatever attention edge it created.
@@ -614,10 +735,41 @@ impl AppState {
     }
 
     /// Presents every fresh `needs you` / `failed` edge through the activity notification path.
-    pub(super) fn notify_agent_attention(&mut self, now: Instant) {
+    pub(crate) fn notify_agent_attention(&mut self, now: Instant) {
         for (label, attention) in self.agents.attention_edges() {
             self.notify_agent_thread(&label, attention, now);
         }
+    }
+}
+
+#[cfg(test)]
+mod persisted_cursor_tests {
+    use super::*;
+    use fleet_core::agents::AgentKind;
+
+    #[test]
+    fn reconnect_seeds_only_the_originating_installations_cursor() {
+        let thread = ThreadId::new();
+        let worktree = "buk/payroll#feat"
+            .parse()
+            .unwrap_or_else(|error| panic!("test worktree must parse: {error}"));
+        let mut projection = ThreadProjection::new(thread, worktree, AgentKind::Claude);
+        projection.last_seq = Seq(9);
+        projection.last_completed_seq = Some(Seq(9));
+        let summary = projection.summary(Seq::default());
+
+        let mut reconnected = AgentThreads::default();
+        reconnected.apply_summary(summary.clone());
+        reconnected.seed_seen(&[(thread, Seq(9))]);
+
+        let mut other_installation = AgentThreads::default();
+        other_installation.apply_summary(summary);
+
+        assert_eq!(reconnected.attention(thread), Attention::Idle);
+        assert_eq!(
+            other_installation.attention(thread),
+            Attention::NeedsYou(AttentionKind::Finished)
+        );
     }
 }
 

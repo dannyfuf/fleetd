@@ -208,6 +208,7 @@ fn permission_gate(tool_name: &str, frame: &ControlRequestFrame) -> GateKind {
         .map(strip_ansi)
         .or_else(|| frame.request.description.clone());
     GateKind::Permission {
+        item: None,
         tool: tool_kind(tool_name),
         title,
         payload,

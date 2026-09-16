@@ -5,7 +5,7 @@
 //! transcript would never show together. It lives beside the gallery rather than inside it so
 //! the panel code stays readable.
 
-use std::time::Instant;
+use std::{rc::Rc, time::Instant};
 
 use fleet_ui_kit::prelude::*;
 
@@ -50,7 +50,7 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     push(
         TranscriptRowKind::User(UserRow {
             text: "fix the payroll rounding and add a test".into(),
-            attachments: vec!["payroll.rs".into(), "spec.md".into()],
+            attachments: vec!["payroll.rs".into(), "spec.md".into()].into(),
             state: UserRowState::Sent,
             steered: false,
             collapsible: true,
@@ -84,9 +84,9 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     );
     push(
         TranscriptRowKind::Assistant(AssistantRow {
-            markdown: parse_markdown_document(
+            markdown: Rc::new(parse_markdown_document(
                 "Reading the reducer first, then the projection it feeds.",
-            ),
+            )),
             streaming: false,
             empty: false,
         }),
@@ -127,7 +127,8 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
                 "explore · reading crates/fleet-core/src/payroll.rs".into(),
                 "verify · running cargo test -p fleet-core".into(),
                 "write · idle".into(),
-            ],
+            ]
+            .into(),
             expanded,
             live: true,
         }),
@@ -176,9 +177,9 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     push(
         TranscriptRowKind::Plan(PlanRow {
             title: "fix the payroll rounding".into(),
-            markdown: parse_markdown_document(
+            markdown: Rc::new(parse_markdown_document(
                 "1. read the current reducer\n2. add a failing test\n3. fix the projection",
-            ),
+            )),
             collapsible: true,
             expanded,
         }),
@@ -206,10 +207,10 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     );
     push(
         TranscriptRowKind::Assistant(AssistantRow {
-            markdown: parse_markdown_document(
+            markdown: Rc::new(parse_markdown_document(
                 "Fixed the rounding in `round`, and the reducer test now covers the \
                  half-up case.\n\n```rust\nlet cents = cents.div_euclid(100);\n```",
-            ),
+            )),
             streaming: false,
             empty: false,
         }),
@@ -223,7 +224,7 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     );
     push(
         TranscriptRowKind::TurnFooter(TurnFooterRow {
-            segments: turn_footer_segments(Some(12_400), Some(0.42), Some((2, 36, 3))),
+            segments: turn_footer_segments(Some(12_400), Some(0.42), Some((2, 36, 3))).into(),
             diff: true,
             revert: true,
         }),
@@ -255,7 +256,7 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     );
     push(
         TranscriptRowKind::Assistant(AssistantRow {
-            markdown: parse_markdown_document("Re-running the suite to confir"),
+            markdown: Rc::new(parse_markdown_document("Re-running the suite to confir")),
             streaming: thread.streaming,
             empty: false,
         }),

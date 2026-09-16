@@ -432,7 +432,15 @@ Confirmations that matter:
 - **The user's own message is echoed back as a `userMessage` item.** Fleet must reconcile its
   optimistic local echo against this item rather than appending a duplicate. `clientId` on the
   item is the `clientUserMessageId` Fleet sent — that is the reconciliation key, and Fleet
-  should always send one.
+  should always send one. Fleet suppresses both `item/started` and `item/completed` for that
+  echo; suppressing only the start recreates the duplicate when completion arrives. Tolerant
+  compatibility for a server that omits `clientId` matches the first unreconciled pending user
+  item with identical text, in submission order.
+- **The `turn/start` response can be immediately followed by `turn/started` in the same stdout
+  read.** Resolving the response waiter does not synchronously resume its submit future. The
+  adapter therefore registers the caller-minted Fleet turn before the request and lets
+  `turn/started` bind the previously unknown provider turn id; the response path then observes
+  the binding and emits no duplicate start. Only `turn/completed` settles it.
 - `thread/status/changed` fires `active` **before** `turn/started` and `idle` **before**
   `turn/completed`. Status is a thread-level hint; `turn/completed` remains the authority.
 - `item/started` for a `commandExecution` already carries `status:"inProgress"` and the full

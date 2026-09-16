@@ -21,10 +21,11 @@ impl ThreadProjection {
                 provider,
                 resume_cursor: _,
                 model,
+                models,
                 mode,
                 tools: _,
                 commands: _,
-                skills: _,
+                skills,
             } => {
                 let default_title = self.title == self.provider.display_name();
                 self.provider = *provider;
@@ -32,6 +33,8 @@ impl ThreadProjection {
                     self.title = provider.display_name().to_owned();
                 }
                 self.model = model.clone();
+                self.models.clone_from(models);
+                self.skills.clone_from(skills);
                 self.mode = *mode;
                 self.session = SessionState::Ready;
                 self.exit_code = None;
@@ -40,7 +43,12 @@ impl ThreadProjection {
                 // one, so the metadata row drops back to no cost here and only here.
                 self.cumulative_cost_usd = None;
             }
-            AgentEvent::MetadataChanged { title, mode, model } => {
+            AgentEvent::MetadataChanged {
+                title,
+                mode,
+                model,
+                skills,
+            } => {
                 if let Some(title) = title
                     && !title.trim().is_empty()
                 {
@@ -51,6 +59,9 @@ impl ThreadProjection {
                 }
                 if let Some(model) = model {
                     self.model = Some(model.clone());
+                }
+                if let Some(skills) = skills {
+                    self.skills.clone_from(skills);
                 }
             }
             AgentEvent::SessionStateChanged(state) => {

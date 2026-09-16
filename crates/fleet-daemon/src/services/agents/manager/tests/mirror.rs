@@ -26,6 +26,7 @@ struct Owner {
     projection: ThreadProjection,
     events: Vec<SeqEvent>,
     turn: TurnId,
+    assistant: ItemId,
     gate: GateId,
 }
 
@@ -37,6 +38,7 @@ impl Owner {
             projection: ThreadProjection::new(thread, worktree, AgentKind::Claude),
             events: Vec::new(),
             turn: TurnId::new(),
+            assistant: ItemId::new(),
             gate: GateId::new(),
         }
     }
@@ -62,11 +64,11 @@ impl Owner {
     /// A prompt, an answer, and a permission card still open: the shape of a live remote turn.
     fn live_turn(&mut self) {
         let user = ItemId::new();
-        let assistant = ItemId::new();
         self.log(AgentEvent::SessionConfigured {
             provider: AgentKind::Claude,
             resume_cursor: Some("owner-cursor".to_owned()),
             model: None,
+            models: Vec::new(),
             mode: PermissionMode::Ask,
             tools: vec!["Bash".to_owned()],
             commands: Vec::new(),
@@ -88,7 +90,7 @@ impl Owner {
         });
         self.log(AgentEvent::ItemStarted {
             turn: self.turn,
-            item: assistant,
+            item: self.assistant,
             kind: ItemKind::AssistantText {
                 text: "the remote answer".to_owned(),
             },
@@ -98,6 +100,7 @@ impl Owner {
             gate: self.gate,
             turn: Some(self.turn),
             kind: GateKind::Permission {
+                item: None,
                 tool: ToolKind::Bash,
                 title: "Run ls".to_owned(),
                 payload: "ls".to_owned(),
@@ -461,6 +464,57 @@ async fn a_gap_asks_for_a_window_instead_of_leaving_a_hole() {
             .await,
         MirrorIngest::Duplicate
     );
+}
+
+#[tokio::test]
+async fn fifty_remote_deltas_commit_in_one_mirror_transaction() {
+    let harness = Harness::start(full()).await;
+    let owner_host = host("dev-box");
+    let mut owner = mirrored(&harness, &owner_host).await;
+    let held_before = held(&harness, owner.thread).await;
+    let start = owner.events.len();
+    for _ in 0..50 {
+        owner.log(AgentEvent::ContentDelta {
+            item: owner.assistant,
+            stream: StreamKind::AssistantText,
+            delta: "x".to_owned(),
+        });
+    }
+    harness.manager.reset_mirror_test_transaction_count();
+
+    let outcome = harness
+        .manager
+        .mirror_append(&owner_host, owner.thread, &owner.events[start..], None)
+        .await;
+
+    assert_eq!(outcome, MirrorIngest::Applied);
+    assert_eq!(held(&harness, owner.thread).await, Seq(held_before.0 + 50));
+    assert!(
+        harness.manager.mirror_test_transaction_count() <= 2,
+        "a 50-delta link burst used more than two mirror transactions"
+    );
+}
+
+#[tokio::test]
+async fn a_gap_inside_a_batch_commits_the_prefix_and_requests_a_window() {
+    let harness = Harness::start(full()).await;
+    let owner_host = host("dev-box");
+    let mut owner = mirrored(&harness, &owner_host).await;
+    let held_before = held(&harness, owner.thread).await;
+    let first = owner.log(AgentEvent::Notice("before gap".to_owned()));
+    let mut after_gap = owner.log(AgentEvent::Notice("after gap".to_owned()));
+    after_gap.seq = after_gap.seq.next();
+    harness.manager.reset_mirror_test_transaction_count();
+
+    let result = harness
+        .manager
+        .mirror_append_batch(&owner_host, owner.thread, &[first, after_gap], None)
+        .await;
+
+    assert_eq!(result.publishable, 1);
+    assert!(result.needs_window);
+    assert_eq!(held(&harness, owner.thread).await, held_before.next());
+    assert_eq!(harness.manager.mirror_test_transaction_count(), 1);
 }
 
 #[tokio::test]

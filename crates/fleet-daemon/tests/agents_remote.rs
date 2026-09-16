@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::Utc;
 use fleet_core::{
@@ -21,7 +24,7 @@ use fleet_daemon::{
         router::{
             Router, Target,
             agents::{
-                AgentMirror, MirrorWrite, ThreadRegistrations, agent_list_target,
+                AgentMirror, MirrorBatchWrite, MirrorWrite, ThreadRegistrations, agent_list_target,
                 register_mirror_threads, register_thread_events,
             },
         },
@@ -38,8 +41,157 @@ use fleet_proto::{
 
 mod infra;
 
+#[path = "agents_remote/gaps.rs"]
+mod gaps;
 #[path = "agents_remote/mirror.rs"]
 mod mirror;
+
+#[derive(Default)]
+struct BatchMirror {
+    calls: Mutex<Vec<(ThreadId, Vec<Seq>)>>,
+    trace: Mutex<Vec<String>>,
+    gap_after: Mutex<Option<usize>>,
+    delta: Mutex<Option<RequestBody>>,
+    refill_finished: tokio::sync::Notify,
+}
+
+impl BatchMirror {
+    fn calls(&self) -> Vec<(ThreadId, Vec<Seq>)> {
+        lock_test(&self.calls).clone()
+    }
+
+    fn trace(&self) -> Vec<String> {
+        lock_test(&self.trace).clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentMirror for BatchMirror {
+    async fn adopt(&self, _host: &HostId, _summaries: &[fleet_core::agents::AgentThreadSummary]) {
+        lock_test(&self.trace).push("summary".to_owned());
+    }
+
+    async fn ingest(&self, _host: &HostId, _thread: ThreadId, _event: &SeqEvent) -> MirrorWrite {
+        MirrorWrite::Stored
+    }
+
+    async fn ingest_batch(
+        &self,
+        _host: &HostId,
+        thread: ThreadId,
+        events: &[SeqEvent],
+    ) -> MirrorBatchWrite {
+        let sequences = events.iter().map(|event| event.seq).collect::<Vec<_>>();
+        lock_test(&self.calls).push((thread, sequences.clone()));
+        lock_test(&self.trace).push(format!(
+            "events:{thread}:{}",
+            sequences
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        match *lock_test(&self.gap_after) {
+            Some(publishable) => MirrorBatchWrite {
+                publishable: publishable.min(events.len()),
+                needs_window: true,
+            },
+            None => MirrorBatchWrite {
+                publishable: events.len(),
+                needs_window: false,
+            },
+        }
+    }
+
+    async fn open(
+        &self,
+        _host: &HostId,
+        _body: &RequestBody,
+    ) -> Option<DaemonResult<ResponseBody>> {
+        None
+    }
+
+    async fn delta(&self, _host: &HostId, _body: &RequestBody) -> Option<RequestBody> {
+        lock_test(&self.delta).clone()
+    }
+
+    async fn absorb(
+        &self,
+        _host: &HostId,
+        _body: &RequestBody,
+        _response: &ResponseBody,
+        _announce: bool,
+    ) -> bool {
+        self.refill_finished.notify_one();
+        false
+    }
+
+    async fn cached_threads(&self, _host: &HostId) -> Vec<fleet_core::agents::AgentThreadSummary> {
+        Vec::new()
+    }
+}
+
+fn lock_test<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn remote_agent_event(thread: ThreadId, seq: u64) -> Event {
+    Event::Agent {
+        thread,
+        event: SeqEvent {
+            seq: Seq(seq),
+            at: Utc::now(),
+            raw: None,
+            event: AgentEvent::Notice(format!("event {seq}")),
+        },
+    }
+}
+
+fn drain_agent_events(receiver: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        if matches!(event, Event::Agent { .. } | Event::AgentSummary(_)) {
+            events.push(event);
+        }
+    }
+    events
+}
+
+async fn receive_agent_events(
+    receiver: &mut tokio::sync::broadcast::Receiver<Event>,
+    count: usize,
+) -> Result<Vec<Event>, tokio::sync::broadcast::error::RecvError> {
+    let mut events = Vec::with_capacity(count);
+    while events.len() < count {
+        let event = receiver.recv().await?;
+        if matches!(event, Event::Agent { .. } | Event::AgentSummary(_)) {
+            events.push(event);
+        }
+    }
+    Ok(events)
+}
+
+fn batching_router(host: &HostId) -> (Router, Arc<FakeRemote>, Arc<BatchMirror>, BroadcastBus) {
+    let machines = Arc::new(Machines::from_config(&default_config(
+        "/tmp/fleet-agent-batch",
+    )));
+    let remote = Arc::new(FakeRemote::new(host.clone()));
+    remote.set_hello(RemoteHello {
+        version: "fleetd test".to_owned(),
+        daemon_id: "owner".to_owned(),
+        build_commit: None,
+        capabilities: vec![fleet_proto::AGENT_WINDOW_CAPABILITY.to_owned()],
+    });
+    machines.install_endpoint(host.clone(), remote.clone());
+    let router = Router::new(machines, Arc::new(Mirror::new()));
+    let mirror = Arc::new(BatchMirror::default());
+    router.set_agent_mirror(mirror.clone());
+    let events = BroadcastBus::default();
+    router.start_event_pumps(events.clone());
+    (router, remote, mirror, events)
+}
 
 #[tokio::test]
 async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
@@ -170,6 +322,157 @@ async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
     );
     assert!(router.ids.host_of_thread(&thread).is_none());
     assert_eq!(router.route(&send), Target::Local);
+}
+
+#[tokio::test]
+async fn a_fifty_delta_link_burst_uses_at_most_two_mirror_transactions_and_keeps_order() {
+    let host = host("dev-box");
+    let thread = ThreadId::new();
+    let (_router, remote, mirror, events) = batching_router(&host);
+    let mut receiver = events.subscribe();
+
+    for seq in 1..=50 {
+        remote.emit(remote_agent_event(thread, seq));
+    }
+
+    let published = receive_agent_events(&mut receiver, 50)
+        .await
+        .expect("fifty remote events")
+        .into_iter()
+        .map(|event| match event {
+            Event::Agent {
+                thread: seen,
+                event,
+            } => (seen, event.seq),
+            other => panic!("expected an agent event, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        published,
+        (1..=50).map(|seq| (thread, Seq(seq))).collect::<Vec<_>>()
+    );
+    let calls = mirror.calls();
+    assert!(
+        calls.len() <= 2,
+        "50 immediately ready events used {} mirror transactions",
+        calls.len()
+    );
+    assert_eq!(
+        calls
+            .into_iter()
+            .flat_map(|(_, sequences)| sequences)
+            .collect::<Vec<_>>(),
+        (1..=50).map(Seq).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn interleaved_remote_threads_keep_link_order() {
+    let host = host("dev-box");
+    let first = ThreadId::new();
+    let second = ThreadId::new();
+    let (_router, remote, _mirror, events) = batching_router(&host);
+    let mut receiver = events.subscribe();
+    for event in [
+        remote_agent_event(first, 1),
+        remote_agent_event(second, 1),
+        remote_agent_event(first, 2),
+        remote_agent_event(second, 2),
+    ] {
+        remote.emit(event);
+    }
+
+    let published = receive_agent_events(&mut receiver, 4)
+        .await
+        .expect("four interleaved events")
+        .into_iter()
+        .map(|event| match event {
+            Event::Agent { thread, event } => (thread, event.seq),
+            other => panic!("expected an agent event, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        published,
+        vec![
+            (first, Seq(1)),
+            (second, Seq(1)),
+            (first, Seq(2)),
+            (second, Seq(2)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_gap_mid_batch_publishes_the_committed_prefix_and_starts_resync() {
+    let host = host("dev-box");
+    let thread = ThreadId::new();
+    let (_router, remote, mirror, events) = batching_router(&host);
+    let mut receiver = events.subscribe();
+    *lock_test(&mirror.gap_after) = Some(1);
+    *lock_test(&mirror.delta) = Some(RequestBody::AgentThreadOpen {
+        thread,
+        from_seq: None,
+        after_seq: Some(Seq(1)),
+        turn_limit: Some(10),
+        before_cursor: None,
+        request_sync_marker: true,
+    });
+    remote.push_response(Ok(ResponseBody::AgentAck));
+
+    for seq in [1, 3, 4] {
+        remote.emit(remote_agent_event(thread, seq));
+    }
+
+    let published = receive_agent_events(&mut receiver, 1)
+        .await
+        .expect("committed prefix event");
+    mirror.refill_finished.notified().await;
+    let extra = drain_agent_events(&mut receiver);
+    assert!(matches!(
+        published.as_slice(),
+        [Event::Agent { thread: seen, event }] if *seen == thread && event.seq == Seq(1)
+    ));
+    assert!(extra.is_empty(), "the gap suffix was published");
+    assert_eq!(mirror.calls().len(), 1);
+    assert!(matches!(
+        remote.requests().as_slice(),
+        [RequestBody::AgentThreadOpen { thread: requested, after_seq: Some(Seq(1)), .. }]
+            if *requested == thread
+    ));
+}
+
+#[tokio::test]
+async fn a_structural_event_between_runs_is_not_reordered() {
+    let host = host("dev-box");
+    let thread = ThreadId::new();
+    let worktree = worktree("structural-order");
+    let summary =
+        ThreadProjection::new(thread, worktree, AgentKind::Claude).summary(Seq::default());
+    let (_router, remote, mirror, events) = batching_router(&host);
+    let mut receiver = events.subscribe();
+    remote.emit(remote_agent_event(thread, 1));
+    remote.emit(Event::AgentSummary(summary));
+    remote.emit(remote_agent_event(thread, 2));
+
+    let published = receive_agent_events(&mut receiver, 3)
+        .await
+        .expect("structurally ordered events");
+    assert!(matches!(
+        &published[..],
+        [
+            Event::Agent { event: first, .. },
+            Event::AgentSummary(_),
+            Event::Agent { event: second, .. },
+        ] if first.seq == Seq(1) && second.seq == Seq(2)
+    ));
+    assert_eq!(
+        mirror.trace(),
+        vec![
+            format!("events:{thread}:1"),
+            "summary".to_owned(),
+            format!("events:{thread}:2"),
+        ]
+    );
 }
 
 #[test]

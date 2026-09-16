@@ -1,6 +1,36 @@
 use super::*;
 
 impl AgentPopup {
+    /// The action shell used before a terminal model exists.
+    ///
+    /// Provider switches bubble to the shell. The popup itself owns prefix entry/cancel and
+    /// dismissal so an attaching session never leaves the veiled Hub with a dead keyboard.
+    pub(super) fn with_attaching_keys(&self, root: Div, state: &Entity<AppState>) -> Div {
+        let enter_state = state.clone();
+        let root = root.on_action(move |_: &agent::EnterPrefix, _window, cx| {
+            enter_state.update(cx, |app, cx| {
+                app.enter_agent_prefix();
+                cx.notify();
+            });
+        });
+        let hide_local = Rc::clone(&self.local);
+        let hide_state = state.clone();
+        let root = root.on_action(move |_: &agent::Hide, _window, cx| {
+            hide_local.borrow_mut().discard_pending();
+            hide_state.update(cx, |app, cx| {
+                app.hide_agent_popup();
+                cx.notify();
+            });
+        });
+        let cancel_state = state.clone();
+        root.on_action(move |_: &prefix::Cancel, _window, cx| {
+            cancel_state.update(cx, |app, cx| {
+                app.leave_agent_prefix();
+                cx.notify();
+            });
+        })
+    }
+
     pub(super) fn terminal_area(
         &self,
         model: &Model,

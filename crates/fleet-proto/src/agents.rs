@@ -26,8 +26,9 @@ pub use checkpoints::{
 };
 
 use fleet_core::agents::{
-    AgentThreadSummary, CheckpointRecord, GateId, HarnessCapabilities, Item, ModelSelection,
-    NoticeRecord, OpenGate, PermissionMode, RetryState, Seq, ThreadId, TurnRecord, Usage,
+    AgentThreadSummary, CheckpointRecord, GateId, HarnessCapabilities, Item, ModelDescriptor,
+    ModelSelection, NoticeRecord, OpenGate, PermissionMode, RetryState, Seq, ThreadId, TurnRecord,
+    Usage,
 };
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +156,9 @@ pub struct AgentSessionView {
     /// Active model, when the harness has reported one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelSelection>,
+    /// Harness-declared model and reasoning-effort vocabulary.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelDescriptor>,
     /// Active permission policy.
     pub mode: PermissionMode,
     /// Harness-native tool names.
@@ -215,6 +219,9 @@ pub struct AgentThreadWindow {
     /// complete.
     #[serde(default)]
     pub projected_seq: Seq,
+    /// Calling installation's persisted read cursor, when `agent.seen` was negotiated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_seq: Option<Seq>,
     /// Ordered events after `head_seq`, when the daemon chose the replay path over a window.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events_after: Vec<fleet_core::agents::SeqEvent>,
@@ -226,6 +233,16 @@ pub struct AgentThreadWindow {
     /// transition into live.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synchronized: bool,
+}
+
+/// One persisted read cursor returned only to the installation that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSeenCursor {
+    /// Thread whose transcript was read.
+    pub thread: ThreadId,
+    /// Highest sequence this installation has marked as seen.
+    pub seq: Seq,
 }
 
 impl AgentThreadWindow {

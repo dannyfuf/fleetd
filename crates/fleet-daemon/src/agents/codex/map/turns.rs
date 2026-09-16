@@ -19,7 +19,6 @@ pub(in crate::agents::codex) fn started(session: &mut CodexSession, params: &Val
         Ok(decoded) => decoded,
         Err(degraded) => return degraded,
     };
-    let turn = session.turn_for(&notification.turn.id);
     // A child's `turn/started` is recorded so Stop reaches it, whatever the routing says.
     if session.root.as_deref() != Some(notification.thread_id.as_str()) {
         session
@@ -27,6 +26,10 @@ pub(in crate::agents::codex) fn started(session: &mut CodexSession, params: &Val
             .note_live_turn(&notification.thread_id, &notification.turn.id);
         return MapOutput::default();
     }
+    // The response and this notification can share one stdout read. If the notification wins the
+    // scheduler race, bind its provider id to the Fleet id registered before `turn/start` was
+    // written; item notifications are deliberately not allowed to consume this fallback.
+    let turn = session.bind_pending_turn(&notification.turn.id);
     if !session.may_apply(LifecycleKind::TurnStarted, Some(turn)) {
         tracing::debug!(
             target: "fleet::agents::codex",

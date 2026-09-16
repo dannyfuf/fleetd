@@ -9,9 +9,10 @@ use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
         AgentEvent, AgentKind, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind,
-        ItemPatch, ItemPayloadPatch, ItemStatus, PermissionChoice, PermissionMode,
-        PermissionOption, ProviderOptionId, Seq, SeqEvent, StreamKind, ThreadId, ThreadProjection,
-        ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage,
+        ItemPatch, ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice,
+        PermissionMode, PermissionOption, ProviderOptionId, ReasoningEffortDescriptor, Seq,
+        SeqEvent, StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome,
+        TurnState, Usage,
     },
     ids::WorktreeId,
 };
@@ -74,6 +75,79 @@ fn worktree() -> WorktreeId {
     WorktreeId::try_from("acme/api#feature").unwrap_or_else(|error| panic!("{error}"))
 }
 
+#[tokio::test]
+async fn seen_cursors_are_monotonic_and_isolated_per_client() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let thread = ThreadId::new();
+
+    store
+        .mark_seen("client-a".to_owned(), thread, Seq(8), 100)
+        .await?;
+    store
+        .mark_seen("client-a".to_owned(), thread, Seq(3), 200)
+        .await?;
+    store
+        .mark_seen("client-b".to_owned(), thread, Seq(5), 300)
+        .await?;
+
+    assert_eq!(
+        store.seen_seq("client-a".to_owned(), thread).await?,
+        Some(Seq(8)),
+        "an older mark never moves a cursor backwards"
+    );
+    assert_eq!(
+        store.seen_seq("client-b".to_owned(), thread).await?,
+        Some(Seq(5)),
+        "another installation owns an independent cursor"
+    );
+    assert_eq!(
+        store.seen_cursors("client-a".to_owned()).await?,
+        vec![fleet_proto::agents::AgentSeenCursor {
+            thread,
+            seq: Seq(8),
+        }]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_clean_stop_advances_only_cursors_that_were_already_caught_up() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let thread = ThreadId::new();
+    store.write_record(&record(thread, "seen-stop", 1)).await?;
+    store
+        .append(thread, &event(1, AgentEvent::Notice("visible".to_owned())))
+        .await?;
+    store
+        .mark_seen("caught-up".to_owned(), thread, Seq(1), 100)
+        .await?;
+    store
+        .mark_seen("behind".to_owned(), thread, Seq(0), 100)
+        .await?;
+
+    store
+        .append(
+            thread,
+            &event(
+                2,
+                AgentEvent::SessionStateChanged(fleet_core::agents::SessionState::Stopped),
+            ),
+        )
+        .await?;
+
+    assert_eq!(
+        store.seen_seq("caught-up".to_owned(), thread).await?,
+        Some(Seq(2)),
+        "clean shutdown bookkeeping is not unread transcript output"
+    );
+    assert_eq!(
+        store.seen_seq("behind".to_owned(), thread).await?,
+        Some(Seq(0)),
+        "a clean stop cannot hide output an installation had not read"
+    );
+    Ok(())
+}
+
 /// The shape of a real turn: a session, a prompt, streamed prose, a gated tool, and a completion.
 struct Fixture {
     events: Vec<SeqEvent>,
@@ -102,6 +176,7 @@ fn fixture() -> Fixture {
             provider: AgentKind::Claude,
             resume_cursor: Some("resume-1".to_owned()),
             model: None,
+            models: Vec::new(),
             mode: PermissionMode::Ask,
             tools: vec!["Bash".to_owned()],
             commands: Vec::new(),
@@ -182,6 +257,7 @@ fn fixture() -> Fixture {
             gate,
             turn: Some(turn),
             kind: GateKind::Permission {
+                item: None,
                 tool: ToolKind::Bash,
                 title: "Run ls".to_owned(),
                 payload: "ls crates".to_owned(),
@@ -279,6 +355,66 @@ async fn append_then_load_round_trips_a_realistic_turn() -> anyhow::Result<()> {
     let loaded = store.load(thread).await?;
 
     assert_eq!(loaded, fixture.events);
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_descriptors_and_skill_refresh_round_trip_through_the_projector()
+-> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let thread = ThreadId::new();
+    let descriptor = ModelDescriptor {
+        id: "gpt-5.6-sol".to_owned(),
+        display_name: "GPT-5.6 Sol".to_owned(),
+        efforts: vec![ReasoningEffortDescriptor {
+            id: "high".to_owned(),
+            description: "Deep reasoning".to_owned(),
+        }],
+        default_effort: Some("high".to_owned()),
+    };
+    store
+        .append(
+            thread,
+            &event(
+                1,
+                AgentEvent::SessionConfigured {
+                    provider: AgentKind::Codex,
+                    resume_cursor: Some("codex-session".to_owned()),
+                    model: Some(ModelSelection {
+                        model: descriptor.id.clone(),
+                        effort: descriptor.default_effort.clone(),
+                        provider: None,
+                    }),
+                    models: vec![descriptor.clone()],
+                    mode: PermissionMode::Ask,
+                    tools: Vec::new(),
+                    commands: Vec::new(),
+                    skills: vec!["review".to_owned()],
+                },
+            ),
+        )
+        .await?;
+    store
+        .append(
+            thread,
+            &event(
+                2,
+                AgentEvent::MetadataChanged {
+                    title: None,
+                    mode: None,
+                    model: None,
+                    skills: Some(vec!["review".to_owned(), "ship".to_owned()]),
+                },
+            ),
+        )
+        .await?;
+
+    let runtime = store
+        .session_runtime(thread)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("session runtime was not projected"))?;
+    assert_eq!(runtime.models, vec![descriptor]);
+    assert_eq!(runtime.skills, ["review", "ship"]);
     Ok(())
 }
 

@@ -128,8 +128,10 @@ struct Shared {
     session: Arc<Mutex<CodexSession>>,
     events: HarnessSink,
     writer: Writer,
+    next_id: Arc<AtomicU64>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Answer>>>>,
     inbound: Arc<Mutex<HashMap<String, AbortHandle>>>,
+    follow_ups: Arc<Mutex<HashMap<String, AbortHandle>>>,
     terminated: Arc<Mutex<Option<HarnessError>>>,
     unroutable: Arc<AtomicU64>,
 }
@@ -137,7 +139,6 @@ struct Shared {
 /// One live Codex transport.
 pub(super) struct Transport {
     writer: Writer,
-    next_id: AtomicU64,
     shared: Shared,
     child: Arc<Mutex<Option<Child>>>,
     expected_stop: Arc<AtomicBool>,
@@ -164,8 +165,10 @@ impl Transport {
             session,
             events: events.clone(),
             writer: writer.clone(),
+            next_id: Arc::new(AtomicU64::new(1)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             inbound: Arc::new(Mutex::new(HashMap::new())),
+            follow_ups: Arc::new(Mutex::new(HashMap::new())),
             terminated: Arc::new(Mutex::new(None)),
             unroutable: Arc::new(AtomicU64::new(0)),
         };
@@ -187,7 +190,6 @@ impl Transport {
         let stderr = stderr.map(|stderr| tokio::spawn(classify_stderr(stderr, events)));
         Self {
             writer,
-            next_id: AtomicU64::new(1),
             shared,
             child,
             expected_stop,
@@ -203,54 +205,7 @@ impl Transport {
         params: Option<Value>,
         deadline: Duration,
     ) -> HarnessResult<Value> {
-        if let Some(error) = self.shared.terminated.lock().await.clone() {
-            return Err(error);
-        }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-        self.shared
-            .pending
-            .lock()
-            .await
-            .insert(id.to_string(), sender);
-        let frame = OutboundRequest { id, method, params };
-        let line = serde_json::to_string(&frame).map_err(|error| HarnessError::Request {
-            method: method.to_owned(),
-            code: None,
-            detail: error.to_string(),
-        })?;
-        if let Err(error) = self.writer.write_line(line).await {
-            self.shared.pending.lock().await.remove(&id.to_string());
-            return Err(error);
-        }
-        match tokio::time::timeout(deadline, receiver).await {
-            Ok(Ok(Ok(result))) => Ok(result),
-            Ok(Ok(Err((code, detail)))) => Err(HarnessError::Request {
-                method: method.to_owned(),
-                code: Some(code),
-                detail,
-            }),
-            // The sender was dropped: termination fanned out and stored the classified error.
-            Ok(Err(_)) => {
-                Err(self
-                    .shared
-                    .terminated
-                    .lock()
-                    .await
-                    .clone()
-                    .unwrap_or(HarnessError::Exited {
-                        code: None,
-                        signal: None,
-                    }))
-            }
-            Err(_) => {
-                self.shared.pending.lock().await.remove(&id.to_string());
-                Err(HarnessError::Timeout {
-                    what: method_label(method),
-                    after: deadline,
-                })
-            }
-        }
+        request_shared(&self.shared, method, params, deadline).await
     }
 
     /// Sends a notification.
@@ -279,6 +234,9 @@ impl Transport {
         for (_, handle) in self.shared.inbound.lock().await.drain() {
             handle.abort();
         }
+        for (_, handle) in self.shared.follow_ups.lock().await.drain() {
+            handle.abort();
+        }
         self.writer.close().await;
         let mut child = self.child.lock().await;
         match child.as_mut() {
@@ -305,6 +263,61 @@ impl Transport {
     #[cfg(test)]
     pub(super) fn unroutable_lines(&self) -> u64 {
         self.shared.unroutable.load(Ordering::Relaxed)
+    }
+}
+
+/// The request path shared by adapter calls and notification-triggered refreshes.
+async fn request_shared(
+    shared: &Shared,
+    method: &'static str,
+    params: Option<Value>,
+    deadline: Duration,
+) -> HarnessResult<Value> {
+    if let Some(error) = shared.terminated.lock().await.clone() {
+        return Err(error);
+    }
+    let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    let (sender, receiver) = oneshot::channel();
+    shared.pending.lock().await.insert(id.to_string(), sender);
+    let frame = OutboundRequest { id, method, params };
+    let line = match serde_json::to_string(&frame) {
+        Ok(line) => line,
+        Err(error) => {
+            shared.pending.lock().await.remove(&id.to_string());
+            return Err(HarnessError::Request {
+                method: method.to_owned(),
+                code: None,
+                detail: error.to_string(),
+            });
+        }
+    };
+    if let Err(error) = shared.writer.write_line(line).await {
+        shared.pending.lock().await.remove(&id.to_string());
+        return Err(error);
+    }
+    match tokio::time::timeout(deadline, receiver).await {
+        Ok(Ok(Ok(result))) => Ok(result),
+        Ok(Ok(Err((code, detail)))) => Err(HarnessError::Request {
+            method: method.to_owned(),
+            code: Some(code),
+            detail,
+        }),
+        Ok(Err(_)) => Err(shared
+            .terminated
+            .lock()
+            .await
+            .clone()
+            .unwrap_or(HarnessError::Exited {
+                code: None,
+                signal: None,
+            })),
+        Err(_) => {
+            shared.pending.lock().await.remove(&id.to_string());
+            Err(HarnessError::Timeout {
+                what: method_label(method),
+                after: deadline,
+            })
+        }
     }
 }
 
@@ -388,6 +401,9 @@ async fn read_loop(
         let _caller_gave_up = waiter.send(Err((0, cause.to_string())));
     }
     for (_, handle) in shared.inbound.lock().await.drain() {
+        handle.abort();
+    }
+    for (_, handle) in shared.follow_ups.lock().await.drain() {
         handle.abort();
     }
     let expected = expected_stop.load(Ordering::Acquire);
@@ -496,16 +512,76 @@ async fn handle_line(shared: &Shared, line: Line) {
                 let _receiver_gone_at_shutdown = shared.events.send(event);
             }
             for follow_up in output.follow_up {
-                tracing::debug!(
-                    target: "fleet::agents::codex",
-                    follow_up,
-                    "a Codex notification asked for a follow-up read"
-                );
+                spawn_follow_up(shared, follow_up).await;
             }
         }
         Inbound::Request { id, method, params } => {
             dispatch_request(shared, id, method, params).await;
         }
+    }
+}
+
+/// Starts a notification-triggered vocabulary refresh without blocking the stdout reader.
+async fn spawn_follow_up(shared: &Shared, method: &'static str) {
+    let key = format!("follow-up:{method}");
+    let shared_for_task = shared.clone();
+    let task = tokio::spawn(async move {
+        let result = match method {
+            "skills/list" => {
+                let cwd = shared_for_task.session.lock().await.worktree_path.clone();
+                request_shared(
+                    &shared_for_task,
+                    "skills/list",
+                    Some(serde_json::json!({
+                        "cwds": cwd
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                        "forceReload": true,
+                    })),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map(|result| {
+                    let skills = super::catalogue::parse_skill_names(&result);
+                    (result, skills)
+                })
+            }
+            _ => return,
+        };
+        match result {
+            Ok((_response, skills)) => {
+                shared_for_task
+                    .session
+                    .lock()
+                    .await
+                    .install_skills(skills.clone());
+                let event = HarnessEvent::now(
+                    fleet_core::agents::AgentEvent::MetadataChanged {
+                        title: None,
+                        mode: None,
+                        model: None,
+                        skills: Some(skills),
+                    },
+                    Some(RawRef::method(method)),
+                );
+                let _receiver_gone_at_shutdown = shared_for_task.events.send(event);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "fleet::agents::codex",
+                    %error,
+                    method,
+                    "a Codex vocabulary refresh failed"
+                );
+            }
+        }
+    });
+    // One retained handle per vocabulary keeps shutdown/retrigger cancellation explicit without
+    // consuming the human-latency inbound-request budget.
+    let mut tasks = shared.follow_ups.lock().await;
+    if let Some(previous) = tasks.insert(key, task.abort_handle()) {
+        previous.abort();
     }
 }
 

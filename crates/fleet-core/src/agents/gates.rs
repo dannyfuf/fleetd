@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{GateId, Seq, ToolKind, TurnId};
+use super::{GateId, ItemId, Seq, ToolKind, TurnId};
 
 /// An opaque provider-native permission option identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -85,6 +85,9 @@ const fn default_true() -> bool {
 pub enum GateKind {
     /// Permission to invoke a protected tool.
     Permission {
+        /// Item whose protected invocation or diff this gate authorizes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<ItemId>,
         /// Normalized tool category.
         tool: ToolKind,
         /// Provider-supplied card title.

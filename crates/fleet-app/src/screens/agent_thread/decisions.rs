@@ -341,6 +341,7 @@ pub(crate) fn decision_for(
             payload,
             rationale,
             options,
+            ..
         } => {
             let mut approval = ApprovalRequest::new(
                 SharedString::from(kind_word(tool)),

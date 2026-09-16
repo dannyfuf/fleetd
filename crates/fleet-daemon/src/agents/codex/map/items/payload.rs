@@ -351,7 +351,7 @@ fn changes_summary(changes: &[FileUpdateChange]) -> String {
 }
 
 /// The user-visible text of a `userMessage` item's parts.
-fn user_text(content: &[UserInput]) -> String {
+pub(super) fn user_text(content: &[UserInput]) -> String {
     content
         .iter()
         .filter_map(|part| match part {

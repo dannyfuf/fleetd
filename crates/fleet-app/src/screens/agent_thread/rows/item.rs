@@ -14,6 +14,7 @@ use fleet_ui_kit::{
     TranscriptRowKind, UserRow, UserRowState, format_exit, parse_markdown_document,
 };
 use gpui::SharedString;
+use std::rc::Rc;
 
 use super::{PendingSend, RowInputs, RowTarget};
 
@@ -59,7 +60,11 @@ pub(crate) fn rows_for(
                     id,
                     TranscriptRowKind::User(UserRow {
                         text: SharedString::new(text),
-                        attachments: attachments.iter().map(attachment_name).collect(),
+                        attachments: attachments
+                            .iter()
+                            .map(attachment_name)
+                            .collect::<Vec<_>>()
+                            .into(),
                         state: UserRowState::Sent,
                         // The harness's own answer, recorded on the item: a `↳` the optimistic
                         // row drew now survives the reload that replaces it (§7.2).
@@ -79,7 +84,7 @@ pub(crate) fn rows_for(
                 TranscriptRow::new(
                     id,
                     TranscriptRowKind::Assistant(AssistantRow {
-                        markdown: parse_markdown_document(text),
+                        markdown: Rc::new(parse_markdown_document(text)),
                         streaming: item.status == ItemStatus::InProgress,
                         empty: text.trim().is_empty(),
                     }),
@@ -120,7 +125,7 @@ pub(crate) fn rows_for(
                     id,
                     TranscriptRowKind::Plan(PlanRow {
                         title,
-                        markdown: parse_markdown_document(&body),
+                        markdown: Rc::new(parse_markdown_document(&body)),
                         collapsible: collapses(&body, PLAN_COLLAPSE_CHARS, PLAN_COLLAPSE_LINES),
                         expanded,
                     }),
@@ -200,7 +205,7 @@ pub(crate) fn pending_row(pending: &PendingSend) -> TranscriptRow {
         TranscriptRowId::Item(SharedString::from(pending.id.to_string())),
         TranscriptRowKind::User(UserRow {
             text: SharedString::new(pending.text.as_str()),
-            attachments: Vec::new(),
+            attachments: Rc::from([]),
             state: if pending.failed {
                 UserRowState::Failed
             } else {
@@ -364,6 +369,11 @@ pub(crate) fn split_plan(markdown: &str) -> (SharedString, String) {
 
 /// The presentation properties of one 30 px tool row.
 pub(crate) fn tool_row(inputs: &RowInputs<'_>, item: &Item, call: &ToolCall) -> ToolRow {
+    projected_tool_row(item, call, inputs.is_expanded(item.id))
+}
+
+/// Rebuilds one existing tool row after command output grows, without rebuilding the transcript.
+pub(crate) fn projected_tool_row(item: &Item, call: &ToolCall, expanded: bool) -> ToolRow {
     let mut row = ToolRow::new(
         SharedString::from(item.id.to_string()),
         SharedString::from(kind_word(&call.kind)),
@@ -371,7 +381,7 @@ pub(crate) fn tool_row(inputs: &RowInputs<'_>, item: &Item, call: &ToolCall) -> 
     )
     .state(row_state(item.status))
     .icon(tool_icon(&call.kind))
-    .expanded(inputs.is_expanded(item.id));
+    .expanded(expanded);
     // §5: an exit code is a structured field rendered explicitly, never a colour and never a
     // substring match on English error text.
     if let Some(code) = call.exit_code.filter(|code| *code != 0) {
@@ -530,7 +540,7 @@ fn subagent_row(
         summary: SharedString::from(summary_text(item)),
         status,
         tokens: None,
-        children,
+        children: children.into(),
         expanded,
         live,
     }

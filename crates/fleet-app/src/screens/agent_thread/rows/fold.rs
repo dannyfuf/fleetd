@@ -85,16 +85,21 @@ pub(crate) fn derive(
         .collect();
     let mut hidden = Vec::new();
     let mut anchor = None;
+    let mut hides_work = false;
     for (index, item) in items.iter().enumerate() {
         if !folds(item, index, terminal, &live_subagents) {
             continue;
         }
         anchor.get_or_insert(index);
         hidden.push(item.id);
+        hides_work |= is_work(item);
     }
     let Some(anchor) = anchor else {
         return Err(Exempt::NothingToFold);
     };
+    if !hides_work {
+        return Err(Exempt::NothingToFold);
+    }
     if hidden.len() == 1
         && items
             .iter()

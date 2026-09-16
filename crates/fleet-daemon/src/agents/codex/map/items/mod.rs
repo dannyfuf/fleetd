@@ -18,7 +18,9 @@ use fleet_core::agents::{
 };
 use serde_json::{Value, json};
 
-use self::payload::{changes_diff, item_id_of, item_patch, item_payload, item_status, plan_steps};
+use self::payload::{
+    changes_diff, item_id_of, item_patch, item_payload, item_status, plan_steps, user_text,
+};
 use super::{MapOutput, decode, item_type};
 use crate::agents::codex::{
     session::{ApprovalShape, CodexSession, PendingApproval, async_gate_id},
@@ -48,14 +50,26 @@ pub(in crate::agents::codex) fn started(session: &mut CodexSession, params: &Val
         return subagent_item(session, &notification.item);
     }
     let provider_item = item_id_of(&notification.item);
+    if let ThreadItem::FileChange { changes, .. } = &notification.item {
+        session.note_file_change(
+            &provider_item,
+            changes.iter().map(|change| change.path.clone()).collect(),
+        );
+    }
     let item = session.item_for(&notification.thread_id, &provider_item);
     // The user's own message is echoed back: reconcile against the optimistic row rather than
     // appending a duplicate of the user's bubble.
-    if let ThreadItem::UserMessage { client_id, .. } = &notification.item
-        && let Some(client_id) = client_id
-        && session.item_for_client(client_id).is_some()
+    if let ThreadItem::UserMessage {
+        client_id, content, ..
+    } = &notification.item
     {
-        return MapOutput::default();
+        let text = user_text(content);
+        if session
+            .reconcile_user_message(&provider_item, client_id.as_deref(), &text)
+            .is_some()
+        {
+            return MapOutput::default();
+        }
     }
     let Some(payload) = item_payload(&notification.item) else {
         return MapOutput::one(AgentEvent::Unknown {
@@ -87,6 +101,25 @@ pub(in crate::agents::codex) fn completed(session: &mut CodexSession, params: &V
         return subagent_item(session, &notification.item);
     }
     let provider_item = item_id_of(&notification.item);
+    if let ThreadItem::FileChange { changes, .. } = &notification.item {
+        session.note_file_change(
+            &provider_item,
+            changes.iter().map(|change| change.path.clone()).collect(),
+        );
+    }
+    if let ThreadItem::UserMessage {
+        client_id, content, ..
+    } = &notification.item
+    {
+        let text = user_text(content);
+        if session.is_reconciled_user_message(&provider_item)
+            || session
+                .reconcile_user_message(&provider_item, client_id.as_deref(), &text)
+                .is_some()
+        {
+            return MapOutput::default();
+        }
+    }
     let item = session.item_for(&notification.thread_id, &provider_item);
     let mut events = Vec::new();
 
@@ -305,6 +338,14 @@ pub(in crate::agents::codex) fn patch_updated(
             Ok(decoded) => decoded,
             Err(degraded) => return degraded,
         };
+    session.note_file_change(
+        &notification.item_id,
+        notification
+            .changes
+            .iter()
+            .map(|change| change.path.clone())
+            .collect(),
+    );
     let Some(item) = session
         .items
         .get(&notification.item_id)

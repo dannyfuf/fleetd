@@ -229,6 +229,7 @@ impl CommandEndpoint {
                 body: RequestBody::Hello {
                     protocol: PROTOCOL_VERSION,
                     client: HelloClient {
+                        client_id: None,
                         kind: ClientKind::Proxy,
                         host_id: Some("mirror-test".parse().expect("proxy id")),
                         capabilities: Vec::new(),

@@ -173,6 +173,21 @@ pub(super) fn append_content(
     Ok(())
 }
 
+pub(super) fn content(item: &Item, stream: StreamKind) -> Result<&str, ProjectionError> {
+    match (&item.kind, stream) {
+        (ItemKind::AssistantText { text }, StreamKind::AssistantText)
+        | (ItemKind::Plan { text }, StreamKind::PlanText) => Ok(text),
+        (ItemKind::Reasoning { summary, .. }, StreamKind::ReasoningSummary { part }) => {
+            Ok(summary.get(&part).map_or("", String::as_str))
+        }
+        (ItemKind::Reasoning { raw, .. }, StreamKind::ReasoningRaw { part }) => {
+            Ok(raw.get(&part).map_or("", String::as_str))
+        }
+        (ItemKind::Tool(call), StreamKind::CommandOutput) => Ok(&call.output),
+        _ => Err(ProjectionError::WrongStream(item.id, stream)),
+    }
+}
+
 pub(super) fn tool_has_result(item: &ItemKind) -> bool {
     matches!(item, ItemKind::Tool(call) if call.result.is_some())
 }

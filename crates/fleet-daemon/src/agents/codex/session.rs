@@ -6,7 +6,10 @@
 //! string. Deterministic derivation is what makes a replay or a reconnect re-derive the same
 //! identity instead of duplicating a row (spec A.7.5).
 
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    path::PathBuf,
+};
 
 use fleet_core::agents::{
     AgentEvent, ApprovalPolicy, ControlCost, GateAnswer, GateId, HarnessCapabilities,
@@ -114,6 +117,14 @@ pub(super) struct PendingApproval {
     pub(super) shape: ApprovalShape,
     /// The decisions Codex itself offered, in Codex's order.
     pub(super) decisions: Vec<String>,
+}
+
+/// One user message waiting for Codex's echo.
+#[derive(Debug, Clone)]
+pub(super) struct PendingUserEcho {
+    turn: TurnId,
+    item: ItemId,
+    text: String,
 }
 
 /// The runtime controls Codex re-asserts on every turn.
@@ -245,17 +256,40 @@ pub(super) struct CodexSession {
     pub(super) controls: TurnControls,
     /// The context-window denominator, which Codex pushes live.
     pub(super) context_window: Option<u64>,
+    /// Raw `model/list` entries, retained inside the adapter because Codex wire types never cross
+    /// the harness boundary.
+    pub(super) models: Vec<Value>,
+    /// Skill names discovered for this thread's working directory.
+    pub(super) skills: Vec<String>,
+    /// Working directory used to refresh the cwd-scoped skill catalogue.
+    pub(super) worktree_path: Option<PathBuf>,
     /// The optimistic user item of each submitted turn, so the echoed `userMessage` reconciles
     /// against it instead of appending a duplicate of the user's own bubble.
     pub(super) user_items: HashMap<TurnId, ItemId>,
     /// `clientUserMessageId` to item, which is the reconciliation key Codex echoes back.
     pub(super) client_items: HashMap<String, ItemId>,
+    /// User messages not yet reconciled against Codex's `userMessage` echo, in submission order.
+    pub(super) pending_user_echoes: VecDeque<PendingUserEcho>,
+    /// Provider item ids already reconciled, retained until the turn settles so both the
+    /// `item/started` and `item/completed` halves are suppressed.
+    pub(super) reconciled_user_items: HashSet<String>,
+    /// File-change paths keyed by Codex item id, for approval payloads that arrive after the item.
+    pub(super) file_change_paths: HashMap<String, Vec<String>>,
     /// Codex turn id to the `TurnId` Fleet minted for that submission.
     ///
     /// Codex names its own turns, and Fleet's caller has already minted an id for the turn it is
     /// sending: the alias keeps one identity for the turn across both id spaces, so a settlement
     /// arriving under Codex's name still settles the turn the caller is waiting on.
     pub(super) turn_aliases: HashMap<String, TurnId>,
+}
+
+/// What the `turn/start` response still has to announce after its notifications raced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TurnStartConfirmation {
+    /// Whether Codex queued this turn behind a different active turn.
+    pub(super) queued: bool,
+    /// Whether the response, rather than `turn/started`, is the first running signal.
+    pub(super) announce: bool,
 }
 
 impl CodexSession {
@@ -314,6 +348,46 @@ impl CodexSession {
         self.turn_aliases.insert(provider_turn.to_owned(), turn);
     }
 
+    /// Binds a `turn/started` id to the one pending Fleet submission before it is interpreted.
+    ///
+    /// Only the lifecycle notification may consume this fallback. Item notifications can arrive
+    /// for queued turns and must never steal the pending caller identity.
+    pub(super) fn bind_pending_turn(&mut self, provider_turn: &str) -> TurnId {
+        if let Some(turn) = self.turn_aliases.get(provider_turn).copied() {
+            return turn;
+        }
+        if let Some(turn) = self.pending_start {
+            self.alias_turn(provider_turn, turn);
+            return turn;
+        }
+        self.turn_for(provider_turn)
+    }
+
+    /// Reconciles a successful `turn/start` response with lifecycle notifications already read.
+    ///
+    /// One stdout burst may contain the response, `turn/started`, and `turn/completed`. The read
+    /// loop maps all three independently of the request future waking, so a response that resumes
+    /// last must not re-open the turn the notifications already settled.
+    pub(super) fn confirm_turn_start(
+        &mut self,
+        turn: TurnId,
+        provider_turn: &str,
+    ) -> TurnStartConfirmation {
+        self.alias_turn(provider_turn, turn);
+        let queued = self.active_turn.is_some() && self.active_turn != Some(turn);
+        if queued || self.active_turn == Some(turn) || self.pending_start != Some(turn) {
+            return TurnStartConfirmation {
+                queued,
+                announce: false,
+            };
+        }
+        self.adopt_turn(turn, provider_turn);
+        TurnStartConfirmation {
+            queued: false,
+            announce: true,
+        }
+    }
+
     /// The Fleet item id for a provider item id, remembering the mapping.
     pub(super) fn item_for(&mut self, thread: &str, provider_item: &str) -> ItemId {
         let item = item_id(thread, provider_item);
@@ -326,9 +400,14 @@ impl CodexSession {
     /// `clientUserMessageId` is **always** set by Fleet and comes back as `clientId` on the
     /// echoed `userMessage` item: it is the reconciliation key that stops Fleet appending a
     /// duplicate of the user's own bubble.
-    pub(super) fn remember_user_item(&mut self, turn: TurnId, item: ItemId) {
+    pub(super) fn remember_user_item(&mut self, turn: TurnId, item: ItemId, text: &str) {
         self.user_items.insert(turn, item);
         self.client_items.insert(item.to_string(), item);
+        self.pending_user_echoes.push_back(PendingUserEcho {
+            turn,
+            item,
+            text: text.to_owned(),
+        });
     }
 
     /// The optimistic user item of a provider turn, if Fleet submitted it.
@@ -341,10 +420,82 @@ impl CodexSession {
         self.client_items.get(client_id).copied()
     }
 
+    /// Reconciles one Codex `userMessage` with the client-minted optimistic item.
+    ///
+    /// Codex 0.147.0 normally echoes `clientUserMessageId` as `item.clientId`. Some real frames
+    /// omit it, so the compatibility fallback takes the first unreconciled message with identical
+    /// text. The provider item is remembered so its later completion cannot append the duplicate
+    /// that its start correctly suppressed.
+    pub(super) fn reconcile_user_message(
+        &mut self,
+        provider_item: &str,
+        client_id: Option<&str>,
+        text: &str,
+    ) -> Option<ItemId> {
+        if self.reconciled_user_items.contains(provider_item) {
+            return self
+                .pending_user_echoes
+                .iter()
+                .find(|pending| pending.text == text)
+                .map(|pending| pending.item);
+        }
+        let client_item = client_id.and_then(|id| self.item_for_client(id));
+        let position = self.pending_user_echoes.iter().position(|pending| {
+            client_item.map_or_else(|| pending.text == text, |item| pending.item == item)
+        })?;
+        let pending = self.pending_user_echoes.remove(position)?;
+        self.reconciled_user_items.insert(provider_item.to_owned());
+        Some(pending.item)
+    }
+
+    /// Whether a provider user item was reconciled on its start notification.
+    pub(super) fn is_reconciled_user_message(&self, provider_item: &str) -> bool {
+        self.reconciled_user_items.contains(provider_item)
+    }
+
+    /// Caches the paths named by a `fileChange` item for its later approval request.
+    pub(super) fn note_file_change(&mut self, provider_item: &str, paths: Vec<String>) {
+        self.file_change_paths
+            .insert(provider_item.to_owned(), paths);
+    }
+
+    /// Human approval payload for a `fileChange`, or an explicit loading sentence.
+    pub(super) fn file_change_payload(&self, provider_item: &str) -> String {
+        let Some(paths) = self.file_change_paths.get(provider_item) else {
+            return "loading edit details\u{2026}".to_owned();
+        };
+        match paths.as_slice() {
+            [] => "apply the edit".to_owned(),
+            [path] => format!("apply the edit to {path}"),
+            paths => format!("apply edits to {}", paths.join(", ")),
+        }
+    }
+
     /// Opens a turn Fleet is about to submit.
     pub(super) fn begin_turn(&mut self, turn: TurnId) {
         self.pending_start = Some(turn);
         self.last_turn = Some(turn);
+    }
+
+    /// Rolls back a pending submission whose `turn/start` RPC failed.
+    pub(super) fn rollback_turn_start(&mut self, turn: TurnId) {
+        if self.pending_start == Some(turn) {
+            self.pending_start = None;
+        }
+        if self.active_turn != Some(turn) {
+            self.user_items.remove(&turn);
+            let removed = self
+                .pending_user_echoes
+                .iter()
+                .filter(|pending| pending.turn == turn)
+                .map(|pending| pending.item)
+                .collect::<Vec<_>>();
+            self.pending_user_echoes
+                .retain(|pending| pending.turn != turn);
+            for item in removed {
+                self.client_items.remove(&item.to_string());
+            }
+        }
     }
 
     /// Adopts the turn the harness confirmed.
@@ -379,6 +530,7 @@ impl CodexSession {
             self.pending_start = None;
         }
         self.reasoning_parts.clear();
+        self.reconciled_user_items.clear();
     }
 
     /// Registers a pending gate and answers its stable id.
@@ -468,6 +620,31 @@ impl CodexSession {
             effort: self.controls.effort.clone(),
             provider: None,
         })
+    }
+
+    /// Installs the complete paginated model catalogue and adopts the selected model's default
+    /// effort when the thread response did not name one.
+    pub(super) fn install_models(&mut self, models: Vec<Value>) {
+        if self.controls.effort.is_none()
+            && let Some(selected) = self.controls.model.as_deref()
+            && let Some(default) = models.iter().find_map(|model| {
+                let matches = model.get("id").and_then(Value::as_str) == Some(selected)
+                    || model.get("model").and_then(Value::as_str) == Some(selected);
+                matches
+                    .then(|| model.get("defaultReasoningEffort").and_then(Value::as_str))
+                    .flatten()
+            })
+        {
+            self.controls.effort = Some(default.to_owned());
+        }
+        self.models = models;
+    }
+
+    /// Replaces the current skill vocabulary with a stable, duplicate-free listing.
+    pub(super) fn install_skills(&mut self, mut skills: Vec<String>) {
+        skills.sort();
+        skills.dedup();
+        self.skills = skills;
     }
 }
 

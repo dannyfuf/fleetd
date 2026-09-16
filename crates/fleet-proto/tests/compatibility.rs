@@ -35,6 +35,20 @@ fn request_wire_goldens() {
     );
     assert_frame(
         Request {
+            id: 101,
+            body: RequestBody::Hello {
+                protocol: PROTOCOL_VERSION,
+                client: fleet_proto::request::HelloClient {
+                    client_id: Some("11111111-2222-4333-8444-555555555555".to_owned()),
+                    capabilities: vec![fleet_proto::AGENT_SEEN_CAPABILITY.to_owned()],
+                    ..fleet_proto::request::HelloClient::default()
+                },
+            },
+        },
+        r#"{"id":101,"body":{"type":"hello","protocol":7,"client":{"kind":"app","clientId":"11111111-2222-4333-8444-555555555555","capabilities":["agent.seen"]}}}"#,
+    );
+    assert_frame(
+        Request {
             id: 2,
             body: RequestBody::CreateWorktree {
                 repo: "acme/api".parse().unwrap(),

@@ -65,6 +65,7 @@ use fleet_core::{
     agents::{AgentThreadSummary, Seq, SeqEvent, ThreadId},
     ids::HostId,
 };
+use fleet_proto::agents::AgentSeenCursor;
 
 use super::{AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord};
 use cursor::TranscriptCursor;
@@ -268,6 +269,47 @@ impl SqliteAgentStore {
         self.inner
             .readers
             .read("list the agent threads", list::summaries)
+            .await
+    }
+
+    /// Advances one installation's cursor through the owned writer.
+    pub(crate) async fn mark_seen(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+        seq: Seq,
+        at: i64,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .writer
+            .mark_seen(client_id, thread, seq, at)
+            .await
+    }
+
+    /// Reads one installation's cursor for one thread.
+    pub(crate) async fn seen_seq(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+    ) -> anyhow::Result<Option<Seq>> {
+        self.inner
+            .readers
+            .read("read a native-agent seen cursor", move |conn| {
+                read::seen_seq(conn, &client_id, thread)
+            })
+            .await
+    }
+
+    /// Reads the installation-wide cursor census used once after Hello.
+    pub(crate) async fn seen_cursors(
+        &self,
+        client_id: String,
+    ) -> anyhow::Result<Vec<AgentSeenCursor>> {
+        self.inner
+            .readers
+            .read("read native-agent seen cursors", move |conn| {
+                read::seen_cursors(conn, &client_id)
+            })
             .await
     }
 

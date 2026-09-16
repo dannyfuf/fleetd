@@ -209,7 +209,7 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `toasts` | `[{level,text,count}]`; levels use the UX vocabulary `info`, `success`, `warning`, `error` |
 | `sticky_error` | stable human-readable failed-job text or null |
 | `jobs` | `[{id,status}]`; status is the daemon job vocabulary (`queued`, `running`, `succeeded`, `failed`, `cancelled`) |
-| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate}]}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md` |
+| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate,decision}],decision:{kind,item,diff}|null}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md`; additive version-1 `threads[].decision` is null or `{kind:"permission"|"question"|"plan",title:string,paths:[string],has_diff:bool}` prepared from the rendered decision; the legacy active-thread `agents.decision` remains available |
 | `terminal` | `{rows:[string],text:string,cursor:{row,col,shape},viewport:{top,rows,history}}` or null; cursor shapes are `block`, `bar`, `underline`, `hidden` |
 | `targets` | map target name → `{x,y,w,h,frame}` in logical window coordinates |
 | `daemon` | `{link,attempt,dismissed,restarted}`; `link` is `starting`, `failed`, `connected`, `lost` or `reconnected`. An additive version-1 field: `key_contexts` appends `Daemon > Banner` only behind a chain that can carry it, so on a first-run Fleet or behind an open overlay a lost daemon is otherwise invisible to every predicate |
@@ -230,7 +230,7 @@ predicate reaches them with the quoted step §2 defines: `lists["board.cards"].r
 `targets["worktrees.row[0]"].frame`. The
 `focused` vocabulary is `filter.input`, `palette.input`, `dialog`, `agents.popup`, `board.filter`,
 `repos.row[N]`, `worktrees.row[N]`, `prs.row[N]`, `jobs.row[N]`, `board.column[C].card[R]`,
-`tabs.tab[N]` and `agents.tabs.tab[N]`.
+`tabs.tab[N]`, `agents.tabs.tab[N]` and `agents.composer`.
 
 `lists.jobs.rows` is the row set accepted by the Jobs panel's current filter, and
 `lists.jobs.selected` is the row at the panel cursor within that filtered set. Thus
@@ -456,6 +456,9 @@ A file counts as a scenario when its extension is `.scenario` or `.txt`, which i
 Surface directories group scenarios by the part of Fleet they exercise — `hub/`, `workspace/`,
 `agents/`, `daemon/`, `board/` — and a scenario's corpus-relative path without its extension is
 also its baseline key, so `hub/help.scenario` and `agents/help.scenario` never collide.
+The agent corpus includes a headless two-turn wheel regression and a structured Codex
+file-approval assertion; the latter reads `agents.threads[0].decision.paths` and `has_diff` to
+prove the named item supplied the rendered diff rather than merely observing that a gate opened.
 
 Three make targets run it, and none of them holds a list of scenario names — the corpus grows
 without a `Makefile` change:
@@ -511,6 +514,10 @@ screenshots could not be listed and includes the filesystem error.
 After Fleet answers `quit`, the runner waits up to five seconds for the process to exit. A non-zero
 or signal-terminated exit, or an exit that misses that deadline, fails the line and therefore the
 run.
+On a display lane the app first blurs and paints one cleanup frame, then closes the driven window,
+so GPUI releases the focused platform input handler and its entity handles before leak detection
+runs. Headless closes directly because it installs no platform handler and has no frame source;
+in neither lane is `quit` a direct process-level escape hatch.
 
 Stdout is a contract of its own: a failure must be diagnosable without opening a file. The runner
 prints the run directory first, the lane second, and on a failure the line, the error, the value
@@ -603,19 +610,13 @@ still short of it, so no other document has to claim a capability that does not 
   `baseline: none yet …` in its report, which is a verdict rather than silence (§8).
 - **`clipboard set` and `clipboard get` have no working lane.** Stated in §1 and unchanged: they
   are part of the frozen grammar and no scenario may use them.
-- **An answered Codex gate does not reliably settle its turn.** The `agents` preset's gated
-  transcripts leave `fleetd.log` reading *"dropped invalid native-agent provider event … event
-  targets the wrong turn"* and Fleet's sticky-error slot reading the same, while the scenarios
-  around the gate pass. That is a native-agent adapter defect the harness *found* rather than a
-  harness defect; it is recorded at `scenarios/agents/README.md` beside the scenarios that work
-  around it, and `agents/unread-mark.scenario` is intermittent for the same reason.
 - **`advance` does not move `BackgroundExecutor` timers.** Stated in §1 and unchanged.
 - **A suite writes about five megabytes per scenario into `/tmp/fleet-harness` and never prunes
   it.** The run directory is the evidence (§6), so nothing deletes it on its own; `make
   harness-prune` is the broom, and it is opt-in.
-- **Seven source files are past the ~900-line rule** `rust-workspace-architecture` sets:
+- **Six source files are past the ~900-line rule** `rust-workspace-architecture` sets:
   `fleet-harness/src/{report.rs, baseline.rs, scenario.rs, agent/codex.rs}`,
-  `fleet-drive/src/{input.rs, predicate.rs}`, and `fleet-app/src/state/harness/projection.rs`.
+  and `fleet-drive/src/{input.rs, predicate.rs}`.
   Each is one coherent subject rather than an accumulation, so splitting them is a deliberate
   refactor, not a drive-by.
 - **`dialog.fields` and `dialog.message` are always empty.** Their live content belongs to the

@@ -1,6 +1,7 @@
 use super::*;
 
 mod requests;
+mod streaming;
 
 use requests::{
     close_agent_tab, load_older_page, mark_seen, open_in_editor, open_terminal_fallback,
@@ -17,7 +18,7 @@ use crate::{
     views::workspace_tabs::TabTarget,
 };
 use fleet_core::{
-    agents::{AgentKind, AgentThreadSummary, PermissionMode, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, Applied, PermissionMode, ThreadId},
     ids::WorktreeId,
 };
 
@@ -237,18 +238,20 @@ impl WorkspaceScreen {
         };
         let known = self.agent_views.borrow().contains_key(&thread);
         if !known {
-            let Some(projection) = state
-                .read(cx)
-                .agents
-                .projection(thread)
-                .cloned()
-                .or_else(|| starting_projection(state.read(cx), thread))
-            else {
+            let projection = if let Some(projection) = state.read(cx).agents.projection(thread) {
+                // A newly mounted view needs its initial owned presentation projection. Every
+                // subsequent text update is borrowed and suffix-only below.
+                Some(projection.clone())
+            } else {
+                starting_projection(state.read(cx), thread)
+            };
+            let Some(projection) = projection else {
                 return;
             };
             let view = cx.new(|cx| AgentThreadView::new(projection, cx));
             let mut subscriptions = Vec::new();
             subscriptions.push(observe_view_state(&view, thread, state, cx));
+            subscriptions.extend(observe_composer_focus(&view, thread, state, window, cx));
             let (relay_bridge, relay_state) = (bridge.clone(), state.clone());
             subscriptions.push(cx.subscribe(&view, move |view, event, cx| match event {
                 AgentThreadEvent::Command(command) => relay_bridge.send_agent(command.clone()),
@@ -294,21 +297,19 @@ impl WorkspaceScreen {
         };
         // The mirror is authoritative; the view adopts it and moves only the rows a stream
         // touched, so a fast model does not rebuild the transcript per token (§5).
-        let (projection, commands, skills) = {
-            let app = state.read(cx);
-            (
-                app.agents.projection(thread).cloned(),
-                app.agents.commands(thread),
-                app.agents.skills(thread),
-            )
-        };
-        if let Some(projection) = projection {
-            view.update(cx, |view, cx| {
-                view.set_commands(commands);
-                view.set_skills(skills);
-                view.sync(&projection, cx);
-            });
-        }
+        state.update(cx, |app, cx| {
+            let structural = Applied::Structural;
+            let applied = app.agents.last_applied(thread).unwrap_or(&structural);
+            let commands = app.agents.commands(thread);
+            let skills = app.agents.skills(thread);
+            if let Some(projection) = app.agents.projection(thread) {
+                view.update(cx, |view, cx| {
+                    view.set_commands(commands);
+                    view.set_skills(skills);
+                    view.sync(projection, applied, cx);
+                });
+            }
+        });
         // P3-T04: the thread states the machine it runs on, and a link the daemon reports as
         // `Down` is what stands the composer down instead of letting a send fail on submit.
         let host = model.host.as_ref().map(|(name, reachability)| ThreadHost {
@@ -329,7 +330,20 @@ impl WorkspaceScreen {
         if model.overlay_open {
             return;
         }
-        view.update(cx, |view, cx| view.focus_composer(window, cx));
+        let requested = state.update(cx, |app, _| app.agents.take_composer_focus(thread));
+        if requested {
+            focus_composer_after_mount(view.clone(), thread, state.clone(), window);
+        } else if known && agent_tab_may_take_focus(state.read(cx), thread) {
+            // An already-mounted tab restores its descendant after a popup or overlay releases
+            // the keyboard. This is deliberately immediate: only activation gets the one-frame
+            // defer needed to mount a newly constructed composer.
+            let handle = view.read(cx).focus_handle(cx);
+            if !handle.contains_focused(window, cx) {
+                let (scrolling, decision) = agent_tab_focus_mode(state.read(cx), thread);
+                focus_agent_tab(&view, scrolling, decision, window, cx);
+                record_composer_focus(&view, thread, state, window, cx);
+            }
+        }
         relay_view_state(&view, thread, state, cx);
         mark_seen(bridge, state, view.read(cx).last_seq(), thread, cx);
     }
@@ -641,6 +655,63 @@ impl WorkspaceScreen {
         root = on_decision!(root, native_agent::Implement, "y");
         root = on_decision!(root, native_agent::Refine, "n");
 
+        macro_rules! select_tab {
+            ($root:expr, $action:ty, $position:expr) => {{
+                let (local, bridge, state) = self.handles(bridge, state);
+                $root.on_action(move |_: &$action, _window, cx| {
+                    let target = {
+                        let app = state.read(cx);
+                        app.active_session().and_then(|session| {
+                            let agents = threads_of(app, session);
+                            workspace_tabs::target_at(session, &agents, $position)
+                        })
+                    };
+                    select_target(&local, &bridge, &state, target, cx);
+                })
+            }};
+        }
+        root = select_tab!(root, native_agent::SelectTab1, 0);
+        root = select_tab!(root, native_agent::SelectTab2, 1);
+        root = select_tab!(root, native_agent::SelectTab3, 2);
+        root = select_tab!(root, native_agent::SelectTab4, 3);
+        root = select_tab!(root, native_agent::SelectTab5, 4);
+        root = select_tab!(root, native_agent::SelectTab6, 5);
+        root = select_tab!(root, native_agent::SelectTab7, 6);
+        root = select_tab!(root, native_agent::SelectTab8, 7);
+        root = select_tab!(root, native_agent::SelectTab9, 8);
+        let (local, tab_bridge, tab_state) = self.handles(bridge, state);
+        root = root.on_action(move |_: &native_agent::LastTab, _window, cx| {
+            let terminal = {
+                let app = tab_state.read(cx);
+                app.active_session().and_then(|session| {
+                    app.terminal_mru
+                        .get(&session.id)
+                        .and_then(|mru| mru.alternate().copied())
+                })
+            };
+            select_target(
+                &local,
+                &tab_bridge,
+                &tab_state,
+                terminal.map(TabTarget::Terminal),
+                cx,
+            );
+        });
+        let (local, session_bridge, session_state) = self.handles(bridge, state);
+        root = root.on_action(move |_: &native_agent::LastSession, _window, cx| {
+            let alternate = session_state.read(cx).session_mru.alternate().cloned();
+            match alternate {
+                Some(session) => {
+                    local.borrow_mut().detach(&session_bridge, None);
+                    open_session(&session_state, session, cx);
+                }
+                None => session_state.update(cx, |app, cx| {
+                    app.toast_short("no other session", Icon::Info, Instant::now());
+                    cx.notify();
+                }),
+            }
+        });
+
         let (new_bridge, new_state) = (bridge.clone(), state.clone());
         root = root.on_action(move |_: &native_agent::NewClaude, _window, cx| {
             create_thread(&new_bridge, &new_state, AgentKind::Claude, cx);
@@ -663,6 +734,109 @@ impl WorkspaceScreen {
     }
 }
 
+/// Defers one activation request until the frame that mounts the composer has been painted.
+fn focus_composer_after_mount(
+    view: Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: Entity<AppState>,
+    window: &Window,
+) {
+    window.on_next_frame(move |window, cx| {
+        if !agent_tab_may_take_focus(state.read(cx), thread) {
+            state.update(cx, |app, cx| {
+                if app.agents.set_composer_focused(thread, false) {
+                    cx.notify();
+                }
+            });
+            return;
+        }
+        let (scrolling, decision) = agent_tab_focus_mode(state.read(cx), thread);
+        focus_agent_tab(&view, scrolling, decision, window, cx);
+        record_composer_focus(&view, thread, &state, window, cx);
+    });
+}
+
+/// Whether the requested agent tab is still the topmost keyboard surface.
+fn agent_tab_may_take_focus(app: &AppState, thread: ThreadId) -> bool {
+    app.overlay.is_none() && app.agent_popup.is_none() && app.active_agent_thread() == Some(thread)
+}
+
+/// Focuses the selected tab's mode owner.
+fn focus_agent_tab(
+    view: &Entity<AgentThreadView>,
+    scrolling: bool,
+    decision: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if scrolling {
+        let transcript = view.read(cx).transcript().clone();
+        let focus = transcript.read(cx).focus_handle().clone();
+        focus.focus(window, cx);
+        return;
+    }
+    if decision {
+        let focus = view.read(cx).focus_handle(cx);
+        focus.focus(window, cx);
+        return;
+    }
+    view.update(cx, |view, cx| view.focus_composer(window, cx));
+}
+
+fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
+    (
+        app.agents.is_scrolling(thread),
+        app.agent_context_chain()
+            .is_some_and(|chain| chain.contains(&"AgentDecision")),
+    )
+}
+
+/// Mirrors the mounted focus tree into the harness-only vocabulary.
+fn record_composer_focus(
+    view: &Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    window: &Window,
+    cx: &mut App,
+) {
+    let input = view.read(cx).input().clone();
+    let focused = input.read(cx).focus_handle().is_focused(window);
+    state.update(cx, |app, cx| {
+        if app.agents.set_composer_focused(thread, focused) {
+            cx.notify();
+        }
+    });
+}
+
+/// Mirrors exact composer focus for the harness for as long as this tab remains mounted.
+fn observe_composer_focus(
+    view: &Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> [Subscription; 2] {
+    let input = view.read(cx).input().clone();
+    let focus = input.read(cx).focus_handle().clone();
+    let focused_state = state.clone();
+    let focused = window.on_focus_in(&focus, cx, move |_, cx| {
+        focused_state.update(cx, |app, cx| {
+            if app.agents.set_composer_focused(thread, true) {
+                cx.notify();
+            }
+        });
+    });
+    let blurred_state = state.clone();
+    let blurred = window.on_focus_out(&focus, cx, move |_, _, cx| {
+        blurred_state.update(cx, |app, cx| {
+            if app.agents.set_composer_focused(thread, false) {
+                cx.notify();
+            }
+        });
+    });
+    [focused, blurred]
+}
+
 /// Mirrors one thread view's `AppState`-visible state, notifying only when it actually moved.
 ///
 /// `AppState` is the single model, so `state.update(cx, |_, cx| cx.notify())` re-runs every
@@ -679,6 +853,7 @@ pub(super) fn relay_view_state(
     let composing = view.read(cx).is_composing(cx);
     let scrolling = view.read(cx).is_scrolling();
     let question_cursor = view.read(cx).question_cursor();
+    let decision = view.read(cx).decision_observable();
     // §12: the `AgentRow` context is derived from whether a row actually carries the focus ring,
     // so `⏎`/`u`/`o`/`y`/`d` are bound exactly when there is a row for them to act on.
     let row_focus = scrolling && view.read(cx).transcript().read(cx).focused_row().is_some();
@@ -687,6 +862,7 @@ pub(super) fn relay_view_state(
         changed |= app.agents.set_scrolling(thread, scrolling);
         changed |= app.agents.set_question_cursor(thread, question_cursor);
         changed |= app.agents.set_row_focus(thread, row_focus);
+        changed |= app.agents.set_decision(thread, decision);
         if changed {
             cx.notify();
         }

@@ -174,6 +174,32 @@ pub struct ModelSelection {
     pub provider: Option<String>,
 }
 
+/// One harness-declared reasoning-effort option for a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningEffortDescriptor {
+    /// Harness-native effort identifier sent back unchanged.
+    pub id: String,
+    /// Harness-authored explanation shown beside the option.
+    pub description: String,
+}
+
+/// One model and the reasoning-effort vocabulary the harness declares for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDescriptor {
+    /// Harness-native model identifier sent back unchanged.
+    pub id: String,
+    /// Harness-authored model name for presentation.
+    pub display_name: String,
+    /// Legal reasoning efforts for this model, in harness order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<ReasoningEffortDescriptor>,
+    /// Harness-declared default effort, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+}
+
 /// Cost of changing one runtime control.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

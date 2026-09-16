@@ -29,12 +29,12 @@ use fleet_core::agents::{
 };
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
-    Decision, MetadataFit, MetadataSegment, MultilineInput, MultilineInputEvent, TranscriptEvent,
-    TranscriptList, TranscriptRow, TranscriptRowKind,
+    Decision, DecisionKind, MetadataFit, MetadataSegment, MultilineInput, MultilineInputEvent,
+    TranscriptEvent, TranscriptList, TranscriptRow, TranscriptRowKind,
 };
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Window,
-    prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription, Task,
+    Window, prelude::*,
 };
 
 use fleet_proto::agents::{CheckpointId, CheckpointScope, TurnCheckpoint};
@@ -46,6 +46,7 @@ pub(crate) mod composer;
 pub(crate) mod decisions;
 pub(crate) mod picker;
 pub(crate) mod presentation;
+mod reveal;
 pub(crate) mod rows;
 mod sync;
 #[cfg(test)]
@@ -56,6 +57,7 @@ use composer::{ComposerMode, ControlDraft, InteractionMode};
 use decisions::QuestionWizard;
 use picker::Picker;
 use presentation::composer_placeholder;
+use reveal::RevealBuffer;
 use rows::{PendingSend, ResolvedGate, RowTarget};
 
 /// What the thread asks the workspace to do on its behalf.
@@ -89,6 +91,15 @@ pub(crate) struct ThreadHost {
     pub(crate) name: SharedString,
     /// Whether the daemon reports the link to that machine as down.
     pub(crate) unreachable: bool,
+}
+
+/// The harness-visible facts prepared from the same decision the drawer renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedDecisionObservable {
+    pub(crate) kind: &'static str,
+    pub(crate) title: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) has_diff: bool,
 }
 
 /// The memo key of one row projection (`spec-B` §B7.7).
@@ -196,6 +207,14 @@ pub struct AgentThreadView {
     /// When the live row's clock started, and which turn it belongs to.
     started_at: Option<Instant>,
     clock_turn: Option<TurnId>,
+    /// Text received from the mirror but not yet admitted to the row presentation.
+    reveal: RevealBuffer,
+    /// Foreground timer that drains [`Self::reveal`]; replacement cancels the prior timer.
+    reveal_task: Option<Task<()>>,
+    /// A completed task remains stored until the next burst replaces it, so running is explicit.
+    reveal_running: bool,
+    #[cfg(test)]
+    patched_rows: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -270,6 +289,11 @@ impl AgentThreadView {
             listed_turns: 0,
             started_at: None,
             clock_turn: None,
+            reveal: RevealBuffer::default(),
+            reveal_task: None,
+            reveal_running: false,
+            #[cfg(test)]
+            patched_rows: 0,
             _subscriptions: subscriptions,
         };
         view.prepare(cx);
@@ -309,6 +333,12 @@ impl AgentThreadView {
         &self.rows
     }
 
+    /// Number of single-row transcript patches performed by this view.
+    #[cfg(test)]
+    pub(crate) fn patched_rows(&self) -> usize {
+        self.patched_rows
+    }
+
     /// The prepared decisions, newest gate last.
     #[cfg(test)]
     pub(crate) fn decisions(&self) -> &[Decision] {
@@ -323,6 +353,51 @@ impl AgentThreadView {
     /// The gate that owns the keyboard, which is always the newest open one.
     pub(crate) fn open_gate(&self) -> Option<&fleet_core::agents::OpenGate> {
         self.projection.gates.last()
+    }
+
+    /// The head decision's stable test facts, prepared on update and merely copied by snapshots.
+    pub(crate) fn decision_observable(&self) -> Option<PreparedDecisionObservable> {
+        let decision = Decision::head(&self.decisions)?;
+        let (kind, item) = match &decision.kind {
+            DecisionKind::Approval(_) => {
+                let gate = self
+                    .projection
+                    .gates
+                    .iter()
+                    .find(|gate| gate.id.to_string() == decision.id.as_ref());
+                let item = gate.and_then(|gate| match gate.kind {
+                    fleet_core::agents::GateKind::Permission { item, .. } => item,
+                    _ => None,
+                });
+                ("permission", item)
+            }
+            DecisionKind::Question(_) => ("question", None),
+            DecisionKind::PlanReady { .. } => ("plan", None),
+        };
+        let call = item.and_then(|item| {
+            self.projection
+                .items
+                .iter()
+                .find(|candidate| candidate.id == item)
+                .and_then(|candidate| match &candidate.kind {
+                    ItemKind::Tool(call) => Some(call.as_ref()),
+                    _ => None,
+                })
+        });
+        let paths = call
+            .and_then(|call| call.input.get("paths"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        Some(PreparedDecisionObservable {
+            kind,
+            title: decision.title.to_string(),
+            paths,
+            has_diff: call.is_some_and(|call| call.diff.is_some()),
+        })
     }
 
     /// §3.3's `Working`: a running turn, a live session, a background task, or a backoff.

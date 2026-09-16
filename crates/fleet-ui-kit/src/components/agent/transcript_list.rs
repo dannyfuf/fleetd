@@ -2,10 +2,10 @@
 //!
 //! §5 and §11 of `docs/NATIVE-AGENTS.md` pin the primitive: GPUI `list`, **not**
 //! `uniform_list`, because an assistant paragraph, a diff and a 30 px tool row are not the same
-//! height. `list` caches the height it measured for every row, so [`TranscriptList::set_rows`]
-//! diffs the projection and splices only what really changed: a streaming turn re-measures its
-//! last row and nothing else, which is what keeps a fast model from re-laying-out the whole
-//! thread per token.
+//! height. `list` caches the height it measured for every row, so structural changes go through
+//! [`TranscriptList::set_rows`] and its keyed splice, while streaming content goes through
+//! [`TranscriptList::patch_row`] and remeasures one existing item without changing its logical
+//! scroll anchor.
 //!
 //! It is one of the kit's few entities, and it earns it three times over: `ListState` caches
 //! measured heights, the scroll machine (`spec-B` §B7) is state that must outlive a frame, and
@@ -129,7 +129,11 @@ pub struct TranscriptList {
     row_body: Option<RowBodyRenderer>,
     /// The working row's clock, recomputed by [`Self::sync_working_clock`] and read by `render`.
     working_label: Option<SharedString>,
+    /// The working row, maintained by row mutations so the 1 Hz tick never scans the transcript.
+    working_row: Option<usize>,
     _working_tick: Option<Task<()>>,
+    /// Scrollbar geometry prepared after list-state mutations, never from the scroll callback.
+    scroll_thumb: Option<(f32, f32)>,
     jump_visible: bool,
     _jump_debounce: Option<Task<()>>,
     /// Whether [`TranscriptEvent::ReachedOldest`] has already fired for the rows in hand.
@@ -161,7 +165,9 @@ impl TranscriptList {
             focused_row: None,
             row_body: None,
             working_label: None,
+            working_row: None,
             _working_tick: None,
+            scroll_thumb: None,
             jump_visible: false,
             _jump_debounce: None,
             asked_for_older: false,
@@ -180,9 +186,22 @@ impl TranscriptList {
 
     /// Replaces the keyed row projection.
     ///
-    /// Only the rows that changed are spliced into the list state, so every untouched row keeps
-    /// the height it was measured at.
+    /// Rows that keep their identity are replaced and remeasured first. Only identity changes are
+    /// then spliced into the list state, so content growth preserves a frozen reader's in-row
+    /// offset even when the same update also appends a structural footer.
     pub fn set_rows(&mut self, rows: Vec<TranscriptRow>, cx: &mut Context<Self>) {
+        let stable_changes = self
+            .rows
+            .iter()
+            .zip(&rows)
+            .enumerate()
+            .filter_map(|(index, (current, next))| {
+                (current.id == next.id && current != next).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in stable_changes {
+            self.replace_row(index, rows[index].clone());
+        }
         if let Some(splice) = diff_rows(&self.rows, &rows) {
             // A splice that touches the front means the oldest end of the transcript moved —
             // which is what answering [`TranscriptEvent::ReachedOldest`] with a page does. The
@@ -191,6 +210,7 @@ impl TranscriptList {
             if splice.old_range.start == 0 {
                 self.asked_for_older = false;
             }
+            self.update_working_row_for_splice(&rows, &splice.old_range, splice.count);
             self.state.splice(splice.old_range, splice.count);
         }
         self.rows = rows;
@@ -203,6 +223,39 @@ impl TranscriptList {
         cx.notify();
     }
 
+    /// Replaces one existing row without changing list structure.
+    ///
+    /// Streaming text and tool output use this path. [`ListState::remeasure_items`] preserves the
+    /// current item's `offset_in_item`; `splice` would reset it to zero when the growing row is the
+    /// reader's scroll-top item and visibly jump the frozen viewport.
+    pub fn patch_row(&mut self, index: usize, row: TranscriptRow, cx: &mut Context<Self>) {
+        let Some(current) = self.rows.get_mut(index) else {
+            return;
+        };
+        if current == &row {
+            return;
+        }
+        self.replace_row(index, row);
+        self.sync_working_clock(cx);
+        cx.notify();
+    }
+
+    /// Replaces one stable row and invalidates only its measured height.
+    fn replace_row(&mut self, index: usize, row: TranscriptRow) {
+        let Some(current) = self.rows.get_mut(index) else {
+            return;
+        };
+        let was_working = matches!(&current.kind, TranscriptRowKind::Working(_));
+        let is_working = matches!(&row.kind, TranscriptRowKind::Working(_));
+        *current = row;
+        if was_working && !is_working {
+            self.working_row = None;
+        } else if is_working {
+            self.working_row = Some(index);
+        }
+        self.state.remeasure_items(index..index + 1);
+    }
+
     /// Switches to a different thread's rows.
     ///
     /// This is the **only** caller of [`ListState::reset`]: every measured height belongs to the
@@ -210,6 +263,10 @@ impl TranscriptList {
     pub fn set_thread(&mut self, rows: Vec<TranscriptRow>, cx: &mut Context<Self>) {
         self.state.reset(rows.len());
         self.rows = rows;
+        self.working_row = self
+            .rows
+            .iter()
+            .position(|row| matches!(&row.kind, TranscriptRowKind::Working(_)));
         self.focused_row = None;
         self.scroll_mode = false;
         self.follow = FollowState::new();
@@ -437,9 +494,13 @@ impl TranscriptList {
     }
 
     fn on_scroll(&mut self, event: &ListScrollEvent, cx: &mut Context<Self>) {
-        self.visible = event.visible_range.clone();
-        let (_, at_end) = self.geometry();
-        self.follow.scrolled(at_end && !self.scroll_mode);
+        self.visible =
+            event.visible_range.start.min(event.count)..event.visible_range.end.min(event.count);
+        let event_at_end = event.is_following_tail || !event.is_scrolled;
+        if !event_at_end && self.follow.is_following() {
+            self.follow.break_follow();
+        }
+        self.follow.scrolled(event_at_end && !self.scroll_mode);
         let following = self.follow.is_following() || self.follow.is_anchoring();
         self.set_jump_visible(!following, cx);
         // Only once the list has actually measured something: an empty or not-yet-laid-out
@@ -448,7 +509,41 @@ impl TranscriptList {
         if !self.visible.is_empty() {
             self.reached_oldest(self.visible.start, cx);
         }
+        let this = cx.weak_entity();
+        // GPUI invokes this callback while `ListState`'s `RefCell` is mutably borrowed. Defer
+        // every state read until that lease is released; reading geometry here double-borrows
+        // and panics on the first wheel event that produces a callback.
+        cx.defer(move |cx| {
+            this.update(cx, |this, cx| {
+                this.refresh_scroll_geometry(event_at_end, cx)
+            })
+            .ok();
+        });
         cx.notify();
+    }
+
+    /// Refines the event's tail flag with strict geometry and prepares the scroll thumb.
+    fn refresh_scroll_geometry(&mut self, event_at_end: bool, cx: &mut Context<Self>) {
+        let (overflows, geometry_at_end) = self.geometry();
+        let at_end = if overflows {
+            geometry_at_end
+        } else {
+            event_at_end
+        };
+        self.follow.scrolled(at_end && !self.scroll_mode);
+        let next_thumb = scroll_thumb(
+            -self.state.scroll_px_offset_for_scrollbar().y,
+            self.state.max_offset_for_scrollbar().y,
+            self.state.viewport_bounds().size.height,
+            cx.theme().metrics.diff_thumb_min_h,
+        );
+        let thumb_changed = self.scroll_thumb != next_thumb;
+        self.scroll_thumb = next_thumb;
+        let following = self.follow.is_following() || self.follow.is_anchoring();
+        self.set_jump_visible(!following, cx);
+        if thumb_changed {
+            cx.notify();
+        }
     }
 
     /// Asks the owner for older history, at most once per row set.
@@ -501,10 +596,7 @@ impl TranscriptList {
     /// [`SharedString`], and `render` reads it. One element repaints per second instead of the
     /// whole tree.
     fn sync_working_clock(&mut self, cx: &mut Context<Self>) {
-        let started = self.rows.iter().find_map(|row| match &row.kind {
-            TranscriptRowKind::Working(working) => working.started_at,
-            _ => None,
-        });
+        let started = self.working_started_at();
         let Some(started) = started else {
             self.working_label = None;
             self._working_tick = None;
@@ -520,10 +612,7 @@ impl TranscriptList {
                 cx.background_executor().timer(tick).await;
                 let alive = this
                     .update(cx, |this, cx| {
-                        let Some(started) = this.rows.iter().find_map(|row| match &row.kind {
-                            TranscriptRowKind::Working(working) => working.started_at,
-                            _ => None,
-                        }) else {
+                        let Some(started) = this.working_started_at() else {
                             this.working_label = None;
                             return false;
                         };
@@ -540,6 +629,37 @@ impl TranscriptList {
                 }
             }
         }));
+    }
+
+    fn working_started_at(&self) -> Option<Instant> {
+        let index = self.working_row?;
+        match &self.rows.get(index)?.kind {
+            TranscriptRowKind::Working(working) => working.started_at,
+            _ => None,
+        }
+    }
+
+    fn update_working_row_for_splice(
+        &mut self,
+        rows: &[TranscriptRow],
+        old_range: &Range<usize>,
+        count: usize,
+    ) {
+        self.working_row = self.working_row.and_then(|index| {
+            if index < old_range.start {
+                Some(index)
+            } else if index >= old_range.end {
+                Some(index - (old_range.end - old_range.start) + count)
+            } else {
+                None
+            }
+        });
+        if self.working_row.is_none() {
+            let changed = old_range.start..old_range.start.saturating_add(count).min(rows.len());
+            self.working_row = changed
+                .clone()
+                .find(|index| matches!(&rows[*index].kind, TranscriptRowKind::Working(_)));
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -596,12 +716,7 @@ impl Focusable for TranscriptList {
 impl Render for TranscriptList {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let thumb = scroll_thumb(
-            -self.state.scroll_px_offset_for_scrollbar().y,
-            self.state.max_offset_for_scrollbar().y,
-            self.state.viewport_bounds().size.height,
-            theme.metrics.diff_thumb_min_h,
-        );
+        let thumb = self.scroll_thumb;
         let show_jump = self.jump_visible;
 
         div()
@@ -642,7 +757,9 @@ impl Render for TranscriptList {
                     div()
                         .id("transcript-jump-to-latest")
                         .absolute()
-                        .bottom(theme.space.md)
+                        // Keep the newest turn footer legible while the reader is frozen above
+                        // the tail: the floating chip sits one tokenized control above it.
+                        .bottom(theme.space.md + theme.metrics.chip_h)
                         .right(theme.space.lg)
                         .flex()
                         .items_center()

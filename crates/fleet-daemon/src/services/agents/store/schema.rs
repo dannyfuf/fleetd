@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS fleet_migrations (
 /// needs a lexicographically sortable time; booleans are `INTEGER` 0/1; all JSON is `TEXT` and
 /// never `BLOB`, so it stays greppable from `sqlite3` during an incident; and every index is
 /// `IF NOT EXISTS` so a slot that adds one is safe to re-run.
-pub(super) const INITIAL_SCHEMA: &str = r#"
+pub(super) const INITIAL_SCHEMA: &str = concat!(
+    r#"
 -- ── the log ─────────────────────────────────────────────────────────────────
 -- The only truth. Every table below it is derivable from these rows by replaying one thread.
 CREATE TABLE agent_events (
@@ -317,7 +318,11 @@ CREATE INDEX IF NOT EXISTS idx_item_attachments_path
   ON item_attachments(relative_path);
 
 -- ── per-client seen cursors ─────────────────────────────────────────────────
--- Gives AgentMarkSeen somewhere to land: today it is a wire round trip that validates its input
+"#,
+    // Slot 001 is immutable. The next two embedded lines record the behavior when it shipped;
+    // identified clients now persist a monotonic cursor, while anonymous clients remain
+    // validate-only (`docs/NATIVE-AGENTS.md` §9.3).
+    r#"-- Gives AgentMarkSeen somewhere to land: today it is a wire round trip that validates its input
 -- and returns an ack without recording anything.
 CREATE TABLE seen (
   client_id TEXT    NOT NULL,                    -- stable per install, sent in Hello
@@ -326,7 +331,8 @@ CREATE TABLE seen (
   at        INTEGER NOT NULL,
   PRIMARY KEY (client_id, thread_id)
 ) WITHOUT ROWID;
-"#;
+"#,
+);
 
 /// Every table the schema declares at head, as `sqlite_master` names them.
 #[cfg(test)]

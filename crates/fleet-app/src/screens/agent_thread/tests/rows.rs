@@ -112,6 +112,29 @@ fn opening_a_fold_keeps_the_number_it_just_showed() {
 }
 
 #[test]
+fn a_settled_turn_with_zero_tool_steps_keeps_its_footer_but_draws_no_fold() {
+    let mut projection = projection();
+    let turn = TurnId::new();
+    let prompt = user(turn, "explain it");
+    projection.items = vec![
+        prompt.clone(),
+        reasoning(turn, "checked the premise", ItemStatus::Completed),
+        assistant(turn, "done", ItemStatus::Completed),
+    ];
+    projection.turns = vec![settled_turn(turn, prompt.id, TurnOutcome::Completed)];
+    projection.turn = TurnState::Settled(turn, TurnOutcome::Completed);
+
+    let locals = Locals::default();
+    let built = build_rows(&locals.inputs(&projection));
+
+    assert_eq!(
+        kinds(&built.rows),
+        ["user", "reasoning", "assistant", "meta", "footer"]
+    );
+    assert!(!kinds(&built.rows).contains(&"fold"));
+}
+
+#[test]
 fn the_fold_exemption_table_holds_one_case_per_row() {
     let turn = TurnId::new();
     let prompt = user(turn, "go");
@@ -275,6 +298,8 @@ fn the_live_row_subsumes_only_the_plain_work_tail() {
         "one live row stands for the whole tail"
     );
     assert_eq!(built.rows[3].id, TranscriptRowId::LiveActivity);
+    assert_eq!(built.streaming.get(&projection.items[3].id), Some(&3));
+    assert_eq!(built.streaming.get(&projection.items[4].id), Some(&3));
 }
 
 #[test]

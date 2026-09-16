@@ -43,7 +43,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use fleet_core::{
-    agents::{AgentEvent, AgentThreadSummary, Seq, SeqEvent, ThreadId},
+    agents::{AgentEvent, AgentThreadSummary, Seq, SeqEvent, SessionState, ThreadId},
     ids::HostId,
 };
 use rusqlite::{Connection, TransactionBehavior};
@@ -101,6 +101,13 @@ enum Work {
     },
     /// Throw one mirrored thread's cached transcript away, leaving its header.
     MirrorDiscard { thread: ThreadId },
+    /// Advance one installation's read cursor without ever moving it backwards.
+    MarkSeen {
+        client_id: String,
+        thread: ThreadId,
+        seq: Seq,
+        at: i64,
+    },
 }
 
 /// A handle on the owned writer thread.
@@ -243,6 +250,23 @@ impl Writer {
         self.request(Work::FailSession { thread, message }).await
     }
 
+    /// Advances one installation's durable cursor for a thread.
+    pub(super) async fn mark_seen(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+        seq: Seq,
+        at: i64,
+    ) -> anyhow::Result<()> {
+        self.request(Work::MarkSeen {
+            client_id,
+            thread,
+            seq,
+            at,
+        })
+        .await
+    }
+
     /// Queues one command and awaits the commit it produces.
     ///
     /// The reply resolves strictly after `COMMIT`, which is the "durable before visible" rule the
@@ -383,6 +407,11 @@ fn transact<'work>(
                 project::append_event(&transaction, *thread, staged)?;
                 project::project_event(&transaction, *thread, &staged.event)?;
                 project::advance_head(&transaction, *thread, &staged.event)?;
+                advance_caught_up_seen_through_invisible_stop(
+                    &transaction,
+                    *thread,
+                    &staged.event,
+                )?;
             }
             Work::TruncateAfter { thread, last } => {
                 project::quarantine_after(
@@ -413,11 +442,65 @@ fn transact<'work>(
                 }
             }
             Work::MirrorDiscard { thread } => mirror::discard(&transaction, *thread)?,
+            Work::MarkSeen {
+                client_id,
+                thread,
+                seq,
+                at,
+            } => {
+                transaction
+                    .execute(
+                        "INSERT INTO seen(client_id, thread_id, seq, at) VALUES (?1, ?2, ?3, ?4) \
+                         ON CONFLICT(client_id, thread_id) DO UPDATE SET \
+                           seq = excluded.seq, at = excluded.at \
+                         WHERE excluded.seq > seen.seq",
+                        rusqlite::params![
+                            client_id,
+                            thread.to_string(),
+                            i64::try_from(seq.0).unwrap_or(i64::MAX),
+                            at,
+                        ],
+                    )
+                    .context("upsert a native-agent seen cursor")?;
+            }
         }
     }
     transaction
         .commit()
         .context("commit an agent database write transaction")
+}
+
+/// A clean daemon stop is lifecycle bookkeeping, not unread transcript output.
+///
+/// Advance only installations that were exactly caught up before the synthetic `Stopped` event;
+/// an installation already behind stays behind, and every other event retains normal unread
+/// semantics. Keeping this in the event transaction prevents a crash between the head and cursor
+/// writes from resurrecting the amber dot on the next start.
+fn advance_caught_up_seen_through_invisible_stop(
+    transaction: &rusqlite::Transaction<'_>,
+    thread: ThreadId,
+    event: &SeqEvent,
+) -> anyhow::Result<()> {
+    if !matches!(
+        event.event,
+        AgentEvent::SessionStateChanged(SessionState::Stopped)
+    ) {
+        return Ok(());
+    }
+    let current = i64::try_from(event.seq.0).unwrap_or(i64::MAX);
+    let previous = current.saturating_sub(1);
+    transaction
+        .execute(
+            "UPDATE seen SET seq = ?2, at = ?3 WHERE thread_id = ?1 AND seq = ?4",
+            rusqlite::params![
+                thread.to_string(),
+                current,
+                event.at.timestamp_millis(),
+                previous,
+            ],
+        )
+        .context("advance caught-up seen cursors through a clean session stop")?;
+    Ok(())
 }
 
 /// Whether this work must survive power loss, not merely a process crash.
@@ -455,6 +538,7 @@ fn needs_durability(work: &Work) -> bool {
             )
         }),
         Work::MirrorClaim { .. } | Work::MirrorDiscard { .. } => true,
+        Work::MarkSeen { .. } => true,
         // A rebuild derives rows that are already derivable from a durable log, and a failed
         // session is re-derived by the next start's census from the same rows.
         Work::Rebuild { .. } | Work::FailSession { .. } => false,
@@ -477,7 +561,8 @@ fn size_of_work(work: &Work) -> usize {
         | Work::Rebuild { .. }
         | Work::FailSession { .. }
         | Work::MirrorClaim { .. }
-        | Work::MirrorDiscard { .. } => WRITE_BATCH_MAX_BYTES,
+        | Work::MirrorDiscard { .. }
+        | Work::MarkSeen { .. } => WRITE_BATCH_MAX_BYTES,
     }
 }
 

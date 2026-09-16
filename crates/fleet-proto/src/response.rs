@@ -14,7 +14,7 @@ use fleet_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agents::{AgentRevertReport, AgentThreadWindow, TurnCheckpoint},
+    agents::{AgentRevertReport, AgentSeenCursor, AgentThreadWindow, TurnCheckpoint},
     error::ProtoError,
     job::JobRecord,
     snapshot::Snapshot,
@@ -247,6 +247,8 @@ pub struct KeepAliveRuleMatch {
 pub enum ResponseBody {
     /// Current native-agent thread summaries.
     AgentThreads(Vec<AgentThreadSummary>),
+    /// Persisted native-agent cursors belonging to the calling installation.
+    AgentSeenCursors(Vec<AgentSeenCursor>),
     /// Summary of a newly allocated native-agent thread.
     AgentThreadCreated(AgentThreadSummary),
     /// Materialized thread state and the ordered persisted tail after it.
@@ -521,6 +523,7 @@ mod tests {
                 }),
                 head_seq: fleet_core::agents::Seq(12),
                 projected_seq: fleet_core::agents::Seq(12),
+                seen_seq: None,
                 events_after: Vec::new(),
                 synchronized: true,
             })),
@@ -621,6 +624,7 @@ mod tests {
             page: None,
             head_seq: Seq(600),
             projected_seq: Seq(600),
+            seen_seq: None,
             events_after: Vec::new(),
             synchronized: true,
         };

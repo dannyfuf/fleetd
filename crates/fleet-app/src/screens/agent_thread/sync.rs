@@ -1,18 +1,18 @@
 //! Adopting the daemon's projection, and preparing everything `render` will compose.
 //!
 //! The split this module exists for: a **structural** change — a new item, a settled turn, an
-//! opened gate — rebuilds the grouping, the folds and the footers, while pure text growth on an
-//! item that already has a row rewrites that row and nothing else. That is what keeps a fast
-//! model from re-running grouping, folding and summarization per token, and it is why
-//! [`streaming_only_change`] compares every row-bearing part of the projection rather than the
-//! three that happen to be lists of items: a part missing from the comparison is a row that
-//! silently never appears.
+//! opened gate — rebuilds the grouping, the folds and the footers, while the reducer's
+//! [`Applied::Text`] description rewrites one existing row. The view never rediscovers that fact
+//! by walking or deep-comparing the projection.
 
-use std::{collections::HashMap, rc::Rc, time::Instant};
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use fleet_core::agents::{ItemId, ItemKind, ThreadProjection, TurnState};
+use fleet_core::agents::{Applied, ItemKind, StreamKind, ThreadProjection, TurnState};
 use fleet_lazygit::diff_view::DiffView;
-use fleet_ui_kit::{TranscriptRow, TranscriptRowKind};
+use fleet_ui_kit::{ActiveTheme, TranscriptRowKind};
 use gpui::{Context, SharedString, prelude::*};
 
 use super::{
@@ -20,12 +20,14 @@ use super::{
     composer::ComposerMode,
     decisions::QuestionWizard,
     presentation::{self, composer_placeholder, empty_invitation, unreachable_placeholder},
+    reveal::RevealChunk,
     rows::{self, ResolvedGate, RowInputs, build_rows},
 };
 
 impl AgentThreadView {
     /// Replaces the daemon projection wholesale, which a thread switch does.
     pub fn set_projection(&mut self, projection: ThreadProjection, cx: &mut Context<Self>) {
+        self.flush_reveal(cx);
         self.thread = projection.thread;
         self.projection = projection;
         self.rows_key = None;
@@ -43,11 +45,60 @@ impl AgentThreadView {
     /// Structural change — a new item, a settled turn, an opened gate — rebuilds the grouping;
     /// pure text growth on already-known streaming items rewrites those rows and nothing else,
     /// so a fast model does not re-run grouping, folding or summarization per token.
-    pub(crate) fn sync(&mut self, projection: &ThreadProjection, cx: &mut Context<Self>) {
+    pub(crate) fn sync(
+        &mut self,
+        projection: &ThreadProjection,
+        applied: &Applied,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_batch(projection, std::slice::from_ref(applied), cx);
+    }
+
+    /// Adopts one bridge batch. Pure text suffixes stay incremental; any structural member makes
+    /// the batch one structural adoption so grouping runs at most once.
+    pub(crate) fn sync_batch(
+        &mut self,
+        projection: &ThreadProjection,
+        applied: &[Applied],
+        cx: &mut Context<Self>,
+    ) {
         if projection.last_seq == self.projection.last_seq {
             return;
         }
-        let streaming_only = streaming_only_change(&self.projection, projection, &self.row_of_item);
+        let described_tail = u64::try_from(applied.len()).ok().is_some_and(|count| {
+            self.projection.last_seq.0.saturating_add(count) == projection.last_seq.0
+        });
+        let retrying_changed = self.projection.retrying != projection.retrying;
+        let mut every_text_was_queued = true;
+        for change in applied {
+            if matches!(change, Applied::Text { .. }) && !self.queue_text(projection, change, cx) {
+                every_text_was_queued = false;
+            }
+        }
+        if described_tail
+            && !applied.is_empty()
+            && applied
+                .iter()
+                .all(|change| matches!(change, Applied::Text { .. }))
+            && every_text_was_queued
+            && !retrying_changed
+        {
+            self.projection.last_seq = projection.last_seq;
+            self.projection.last_activity = projection.last_activity;
+            self.projection.last_nonterminal_seq = projection.last_nonterminal_seq;
+            self.projection.retrying.clone_from(&projection.retrying);
+            self.rows_key = self.rows_key.take().map(|key| RowsKey {
+                last_seq: projection.last_seq,
+                ..key
+            });
+            return;
+        }
+
+        // Text descriptions are a filtered subset of a bridge batch: a final delta followed by
+        // `ItemCompleted` advances the projection twice but contributes only one entry here. The
+        // suffix was queued above; flush it through `patch_row` before rebuilding structural rows
+        // so the growing row is remeasured and never enters the structural splice.
+        self.flush_reveal(cx);
         let was_working = self.is_working();
         self.record_resolved_gates(projection);
         self.projection = projection.clone();
@@ -66,26 +117,6 @@ impl AgentThreadView {
         self.reconcile_pending();
         self.seed_controls();
         self.sync_clock();
-        if streaming_only {
-            let items: Vec<ItemId> = self.row_of_item.keys().copied().collect();
-            let mut rows = self.rows.to_vec();
-            let mut moved = false;
-            for item in items {
-                moved |= self.patch_streaming_row(&mut rows, item);
-            }
-            if moved {
-                self.rows = Rc::from(rows);
-                self.rows_key = self.rows_key.take().map(|key| RowsKey {
-                    last_seq: self.projection.last_seq,
-                    ..key
-                });
-                let rows = self.rows.to_vec();
-                self.transcript
-                    .update(cx, |list, cx| list.set_rows(rows, cx));
-            }
-            cx.notify();
-            return;
-        }
         self.prepare(cx);
         self.install_rows(cx);
         // B7.2: real tool activity in the running turn releases the first-turn anchor, and
@@ -98,6 +129,153 @@ impl AgentThreadView {
         // until the interrupt request returns.
         if self.stopping && was_working && !self.is_working() {
             self.stopping = false;
+        }
+        cx.notify();
+    }
+
+    fn queue_text(
+        &mut self,
+        projection: &ThreadProjection,
+        applied: &Applied,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Applied::Text {
+            item,
+            stream,
+            appended,
+        } = applied
+        else {
+            return false;
+        };
+        if !self.row_of_item.contains_key(item) {
+            return false;
+        }
+        let Ok(text) = projection.stream_text(*item, *stream) else {
+            return false;
+        };
+        let Some(suffix) = text.get(appended.clone()) else {
+            return false;
+        };
+        let tick_ms = cx.theme().motion.reveal_tick_ms;
+        let horizon_ms = cx.theme().motion.reveal_horizon_ms;
+        self.reveal
+            .push(*item, *stream, suffix.to_owned(), tick_ms, horizon_ms);
+        if cx.reduce_motion() {
+            self.flush_reveal(cx);
+        } else {
+            self.start_reveal_task(tick_ms, cx);
+        }
+        true
+    }
+
+    fn start_reveal_task(&mut self, tick_ms: u64, cx: &mut Context<Self>) {
+        if self.reveal_running || self.reveal.is_empty() {
+            return;
+        }
+        self.reveal_running = true;
+        let tick = Duration::from_millis(tick_ms);
+        self.reveal_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(tick).await;
+                let keep_running = this
+                    .update(cx, |this, cx| {
+                        let chunks = if cx.reduce_motion() {
+                            this.reveal.drain()
+                        } else {
+                            this.reveal.take_tick()
+                        };
+                        for chunk in chunks {
+                            this.apply_reveal(chunk, cx);
+                        }
+                        let pending = !this.reveal.is_empty();
+                        if !pending {
+                            this.reveal_running = false;
+                        }
+                        pending
+                    })
+                    .unwrap_or(false);
+                if !keep_running {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn flush_reveal(&mut self, cx: &mut Context<Self>) {
+        self.reveal_running = false;
+        self.reveal_task = None;
+        for chunk in self.reveal.drain() {
+            self.apply_reveal(chunk, cx);
+        }
+    }
+
+    fn apply_reveal(&mut self, chunk: RevealChunk, cx: &mut Context<Self>) {
+        if let Err(error) =
+            self.projection
+                .append_stream_text(chunk.item, chunk.stream, &chunk.text)
+        {
+            tracing::warn!(%error, item = %chunk.item, "discarded an invalid reveal suffix");
+            return;
+        }
+        let Some(index) = self.row_of_item.get(&chunk.item).copied() else {
+            return;
+        };
+        let Some(current) = self.rows.get(index) else {
+            return;
+        };
+        let Some(source) = self.projection.item(chunk.item) else {
+            return;
+        };
+        let mut row = current.clone();
+        match &mut row.kind {
+            TranscriptRowKind::Assistant(assistant) => {
+                Rc::make_mut(&mut assistant.markdown).append(&chunk.text);
+                assistant.empty = self
+                    .projection
+                    .stream_text(chunk.item, StreamKind::AssistantText)
+                    .is_ok_and(|text| text.trim().is_empty());
+            }
+            TranscriptRowKind::Reasoning(reasoning) => {
+                reasoning.text = SharedString::from(rows::item_text(source));
+            }
+            TranscriptRowKind::Work(work) => {
+                let ItemKind::Tool(call) = &source.kind else {
+                    return;
+                };
+                *work = rows::item::projected_tool_row(source, call, work.expanded);
+            }
+            // Output hidden by the fixed-height live row changes no painted payload.
+            TranscriptRowKind::WorkLive(_) if matches!(&source.kind, ItemKind::Tool(_)) => return,
+            // Plan streams are rare, but still stay on the one-row path. Their promoted heading
+            // means the whole row payload must be refreshed even though grouping does not.
+            TranscriptRowKind::Plan(_) => {
+                let items = std::collections::HashMap::from([(source.id, source)]);
+                let inputs = RowInputs {
+                    projection: &self.projection,
+                    expanded: &self.expanded,
+                    unfolded: &self.unfolded,
+                    expanded_gates: &self.expanded_gates,
+                    resolved: &self.resolved,
+                    pending: &self.pending,
+                    checkpoints: &self.checkpoints,
+                    started_at: self.started_at,
+                    parked: self.parked_detail(),
+                    empty: SharedString::default(),
+                };
+                let Some((replacement, _)) = rows::item::rows_for(&inputs, &items, source).pop()
+                else {
+                    return;
+                };
+                row = replacement;
+            }
+            _ => return,
+        }
+        Rc::make_mut(&mut self.rows)[index] = row.clone();
+        self.transcript
+            .update(cx, |list, cx| list.patch_row(index, row, cx));
+        #[cfg(test)]
+        {
+            self.patched_rows += 1;
         }
         cx.notify();
     }
@@ -363,44 +541,6 @@ impl AgentThreadView {
         }
     }
 
-    /// Rewrites the text of the row that carries `item`, returning whether it moved.
-    fn patch_streaming_row(&self, rows: &mut [TranscriptRow], item: ItemId) -> bool {
-        let Some(index) = self.row_of_item.get(&item).copied() else {
-            return false;
-        };
-        let Some(source) = self
-            .projection
-            .items
-            .iter()
-            .find(|candidate| candidate.id == item)
-        else {
-            return false;
-        };
-        let text = rows::item_text(source);
-        let Some(row) = rows.get_mut(index) else {
-            return false;
-        };
-        match &mut row.kind {
-            TranscriptRowKind::Assistant(assistant) => {
-                let markdown = fleet_ui_kit::parse_markdown_document(&text);
-                if assistant.markdown == markdown {
-                    return false;
-                }
-                assistant.markdown = markdown;
-                assistant.empty = text.trim().is_empty();
-            }
-            TranscriptRowKind::Reasoning(reasoning) => {
-                let text = SharedString::from(text);
-                if reasoning.text == text {
-                    return false;
-                }
-                reasoning.text = text;
-            }
-            _ => return false,
-        }
-        true
-    }
-
     /// Builds, updates and drops the inline diff surface of every item that carries a patch.
     fn sync_diffs(&mut self, cx: &mut Context<Self>) {
         let patches: Vec<(SharedString, Option<String>, String)> = self
@@ -463,64 +603,4 @@ pub(crate) fn count_user_items(projection: &ThreadProjection, text: &str) -> usi
             _ => false,
         })
         .count()
-}
-
-/// Whether one projection differs from the next only by text on items that already have rows.
-///
-/// A free function so the rule can be asserted without a window: it decides whether `sync` takes
-/// the cheap streaming path, and a part of the projection missing from the comparison is a row
-/// that silently never appears.
-fn streaming_only_change(
-    current: &ThreadProjection,
-    next: &ThreadProjection,
-    row_of_item: &HashMap<ItemId, usize>,
-) -> bool {
-    let structure_held = next.items.len() == current.items.len()
-        && next.turns.len() == current.turns.len()
-        && next.gates.len() == current.gates.len()
-        // §5 gives notices and checkpoints rows of their own, and a `GateResolved` immediately
-        // followed by a `GateOpened` keeps the count at one while replacing the decision the
-        // drawer draws: every row-bearing part of the projection has to be compared.
-        && next.notices.len() == current.notices.len()
-        && next.checkpoints.len() == current.checkpoints.len()
-        && next.background_tasks == current.background_tasks
-        && next
-            .gates
-            .iter()
-            .zip(&current.gates)
-            .all(|(next, current)| next.id == current.id && next.kind == current.kind)
-        && next.turn == current.turn
-        && next.session == current.session
-        && next.retrying == current.retrying
-        && next.mode == current.mode
-        && next.exit_code == current.exit_code
-        && next
-            .turns
-            .iter()
-            .zip(&current.turns)
-            .all(|(next, current)| next.ended.is_some() == current.ended.is_some());
-    if !structure_held {
-        return false;
-    }
-    next.items
-        .iter()
-        .zip(&current.items)
-        .all(|(next, current)| {
-            let same_row = next.id == current.id
-                && next.status == current.status
-                && next.parent == current.parent
-                && next.children == current.children;
-            // Text may only have grown on an item this view already has a row for; a text
-            // change anywhere else is structural as far as the row model is concerned.
-            same_row
-                && (next.kind == current.kind
-                    || (row_of_item.contains_key(&next.id)
-                        && matches!(
-                            (&next.kind, &current.kind),
-                            (
-                                ItemKind::AssistantText { .. },
-                                ItemKind::AssistantText { .. }
-                            ) | (ItemKind::Reasoning { .. }, ItemKind::Reasoning { .. })
-                        )))
-        })
 }

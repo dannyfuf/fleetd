@@ -34,9 +34,9 @@ this file; where the two disagree, this file wins.
 
 The agent **thread** is not a shadowing surface: it is the Workspace's selected tab, so it
 *replaces* the `Workspace > …` context rather than covering it. That also means the Workspace
-prefix table below does not apply inside an agent tab — only the `ctrl-s` combinations listed
-under *Native agent thread* are bound there, and the rest (`^s s`, `^s 1`–`9`, `^s h`/`l`, …)
-are a follow-up. The context stack is ordered: the Agent popup shadows
+prefix table below does not apply automatically inside an agent tab. The numeric selection and
+MRU rows (`^s 1`–`9`, `^s Tab`, `^s w`) are repeated explicitly under *Native agent thread*;
+unlisted rows such as `^s s` and `^s h`/`l` remain unbound there. The context stack is ordered: the Agent popup shadows
 `Hub` and `Workspace`; Help and the two quit confirms may shadow the Agent popup. Palette and Settings are unavailable while the popup
 owns focus. `Daemon > Down` and `FirstRun` are full-window and shadow everything except `ctrl-q`.
 `Daemon > Doctor` is full-window in the same sense — it replaces the whole context chain, so a key
@@ -202,6 +202,8 @@ not modal Workspace commands.
 The popup uses `Agent > Terminal`, `Agent > Prefix`, and `Agent > Scroll`. In Terminal mode every
 unlisted key goes to the agent PTY. Mouse selection, wheel routing, and Scroll mode match a
 Workspace terminal; direct viewport keystrokes remain PTY input unless Scroll mode is entered.
+While the daemon is still ensuring the popup session, the same tracked card shows `attaching…`:
+`ctrl-s`, `ctrl-q`, `ctrl-s q`, and the `ctrl-s a` / `ctrl-s A` switch-or-hide actions remain live.
 
 | Key | Action |
 | --- | --- |
@@ -234,6 +236,10 @@ A native agent tab is drawn by Fleet, so keys reach its composer rather than a P
 status bar reads `AGENT`. The context is chosen by what the thread is doing: an open decision
 card shadows everything else, and the focused transcript row is last.
 
+Creating a thread or selecting an existing agent tab with `ctrl-s 1`–`9` focuses its composer
+after the tab's first mounted frame. That request is one-shot: selecting a thread already in
+scroll mode or owned by a decision card preserves that mode's keyboard owner instead.
+
 | Context | Key | Action |
 | --- | --- | --- |
 | `Agent > AgentIdle` | `Enter` | send the composer |
@@ -246,6 +252,7 @@ card shadows everything else, and the focused transcript row is last.
 | `Agent > AgentWorking` | `Enter` | send — a **steer**, dispatched immediately, never a queue |
 | both | `ctrl-s m` · `ctrl-s e` · `ctrl-s t` | model picker · reasoning / traits menu · access mode |
 | both | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close tab · new thread · terminal fallback |
+| every agent-thread sub-mode | `ctrl-s 1`–`9` · `ctrl-s Tab` · `ctrl-s w` | select a Workspace tab · return to the tab MRU · return to the session MRU |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
 | `Agent > AgentDecision > AgentPermission` | `y` · `a` · `n` · `e` · `Esc` | allow once · allow for this session · deny · edit the command · deny and stop |
 | `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` · `p` | choose · toggle (multi-select) · answer / next · previous question |
@@ -269,7 +276,9 @@ fire and retires the caveat that those keys were bound, handled and never entere
 the focus and scroll to it. Clicking a tool row, a `thought …` line or a `worked …` fold still
 expands and collapses it, so the mouse reaches every `[⏎] show` hint too.
 
-Note that gpui matches `>` as a **subsequence**, not as a parent test, so the `ctrl-s` escape rows
+Note that gpui matches `>` as a **subsequence**, not as a parent test. The tab-selection and MRU
+rows bind through an explicit union of the agent-thread sub-modes; `ctrl-s s` is absent there and
+therefore stays unbound inside agent tabs. The other `ctrl-s` escape rows
 and every control are repeated on each `AgentDecision > *` context — `AgentIdle`/`AgentWorking` are
 not on that chain — and an embedded pane may not reuse any context word this table uses.
 

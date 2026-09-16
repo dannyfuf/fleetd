@@ -111,6 +111,7 @@ impl Services {
         context: RequestContext,
     ) -> DaemonResult<ResponseBody> {
         match body {
+            RequestBody::AgentSeenCursors => Ok(ResponseBody::AgentSeenCursors(Vec::new())),
             RequestBody::AgentThreadList => self.agent_response(self.agents.list().await),
             RequestBody::AgentThreadCreate {
                 worktree,

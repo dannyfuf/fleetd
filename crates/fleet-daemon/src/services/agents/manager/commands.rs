@@ -18,7 +18,7 @@ use fleet_core::{
     ids::WorktreeId,
 };
 use fleet_proto::{
-    agents::{snapshot_ceiling_error, snapshot_fits, wire_bytes},
+    agents::{AgentSeenCursor, snapshot_ceiling_error, snapshot_fits, wire_bytes},
     error::{ErrorKind, ProtoError},
     event::Event,
     request::RequestBody,
@@ -496,20 +496,21 @@ impl AgentSessionManager {
         Ok(ResponseBody::AgentAck)
     }
 
-    /// Handles `AgentMarkSeen`.
+    /// Handles `AgentMarkSeen` from a peer with no stable identity.
     ///
-    /// **Validates the cursor and records nothing**, which is not what §3.3 asks for: the design
-    /// wants `last_seen_seq` persisted daemon-side *per client*, and phase 2's `seen` table is
-    /// waiting for it. Two things are missing before it can be, and neither is guessable —
-    /// a stable client identity on the handshake to key the row by, and a field on a read
-    /// response to hand a client its own cursor back. Until then the cursor lives in client
-    /// memory: the reading client narrows the broadcast attention with
-    /// `AgentThreadSummary::attention_for` against what it holds, and the amber dot returns
-    /// after an app restart. `docs/NATIVE-AGENTS.md` §13 phase 4 records it as owed.
-    ///
-    /// What the daemon must *not* do is fold a cursor into [`Event::AgentSummary`]: one summary
-    /// reaches every subscriber, so one client's read would clear the dot on all the others.
+    /// Compatibility peers keep the historical validate-only behaviour. A negotiated connection
+    /// calls [`Self::mark_seen_for`] with its Hello identity before dispatch reaches this method.
     pub async fn mark_seen(&self, thread: ThreadId, seq: Seq) -> Result<ResponseBody, ProtoError> {
+        self.mark_seen_for(None, thread, seq).await
+    }
+
+    /// Validates and monotonically persists one installation's read cursor.
+    pub async fn mark_seen_for(
+        &self,
+        client_id: Option<String>,
+        thread: ThreadId,
+        seq: Seq,
+    ) -> Result<ResponseBody, ProtoError> {
         let runtime = self.runtime(thread).await?;
         let _operation = runtime.operation.lock().await;
         let last_seq = {
@@ -524,7 +525,42 @@ impl AgentSessionManager {
                 "cannot mark unseen sequence {seq}; latest is {last_seq}"
             )));
         }
+        if let Some(client_id) = client_id {
+            self.inner
+                .store()
+                .map_err(storage_error)?
+                .mark_seen(client_id, thread, seq, Utc::now().timestamp_millis())
+                .await
+                .map_err(storage_error)?;
+        }
         Ok(ResponseBody::AgentAck)
+    }
+
+    /// Reads one installation's cursor for a window response.
+    pub async fn seen_seq(
+        &self,
+        client_id: String,
+        thread: ThreadId,
+    ) -> Result<Option<Seq>, ProtoError> {
+        self.inner
+            .store()
+            .map_err(storage_error)?
+            .seen_seq(client_id, thread)
+            .await
+            .map_err(storage_error)
+    }
+
+    /// Reads the one-shot post-Hello cursor census for an installation.
+    pub async fn seen_cursors(
+        &self,
+        client_id: String,
+    ) -> Result<Vec<AgentSeenCursor>, ProtoError> {
+        self.inner
+            .store()
+            .map_err(storage_error)?
+            .seen_cursors(client_id)
+            .await
+            .map_err(storage_error)
     }
 
     /// Handles `AgentStop`.

@@ -20,7 +20,7 @@ use super::{
         strip_send_time_context, submit_gate, submit_intent,
     },
     decisions::{self, Routed},
-    picker::{Picker, PickerKind},
+    picker::{Picker, PickerCandidate, PickerKind},
     presentation::{mode_label, unreachable_notice},
     rows::{PendingSend, RowTarget},
     user_input,
@@ -31,6 +31,9 @@ impl AgentThreadView {
 
     /// `⏎`: accept a completion, answer the open decision, else send.
     pub(crate) fn send(&mut self, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() {
+            return;
+        }
         if self.accept_completion(cx) {
             return;
         }
@@ -105,6 +108,9 @@ impl AgentThreadView {
     /// on a started thread it is identical to `⏎`, which is why the intent is one function and
     /// the difference is a return value rather than a second code path.
     pub(crate) fn send_background(&mut self, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() {
+            return;
+        }
         let is_new_thread = self.projection.turns.is_empty();
         let text = self.input.read(cx).text().to_owned();
         match submit_intent(false, true, is_new_thread) {
@@ -417,22 +423,33 @@ impl AgentThreadView {
     }
 
     /// What one surface offers.
-    fn candidates(&self, kind: PickerKind) -> Vec<String> {
+    fn candidates(&self, kind: PickerKind) -> Vec<PickerCandidate> {
         match kind {
-            PickerKind::Files => self.files.clone(),
+            PickerKind::Files => self
+                .files
+                .iter()
+                .cloned()
+                .map(PickerCandidate::plain)
+                .collect(),
             // Fleet's own built-ins lead, then the harness's commands.
             PickerKind::Commands => ["model", "plan", "default", "compact"]
                 .into_iter()
                 .map(str::to_owned)
                 .chain(self.commands.iter().cloned())
+                .map(PickerCandidate::plain)
                 .collect(),
-            PickerKind::Skills => self.skills.clone(),
+            PickerKind::Skills => self
+                .skills
+                .iter()
+                .cloned()
+                .map(PickerCandidate::plain)
+                .collect(),
             PickerKind::Models => self.model_candidates(),
             PickerKind::Traits => self.trait_candidates(),
             PickerKind::Access => ACCESS_LADDER
                 .iter()
                 .filter(|(mode, _)| *mode != self.controls.access(self.projection.mode))
-                .map(|(_, label)| (*label).to_owned())
+                .map(|(_, label)| PickerCandidate::plain((*label).to_owned()))
                 .collect(),
         }
     }
@@ -441,17 +458,37 @@ impl AgentThreadView {
     ///
     /// Fleet never hardcodes an effort ladder: the legal set is the harness's own, and until a
     /// probe publishes one the picker offers the model the session reports and nothing invented.
-    fn model_candidates(&self) -> Vec<String> {
+    fn model_candidates(&self) -> Vec<PickerCandidate> {
+        if !self.projection.models.is_empty() {
+            return self
+                .projection
+                .models
+                .iter()
+                .map(|model| PickerCandidate::described(model.id.clone(), &model.display_name))
+                .collect();
+        }
         self.projection
             .model
             .iter()
-            .map(|model| model.model.clone())
+            .map(|model| PickerCandidate::plain(model.model.clone()))
             .collect()
     }
 
     /// The traits `^s e` offers, which are the harness's declared options and no others.
-    fn trait_candidates(&self) -> Vec<String> {
-        Vec::new()
+    fn trait_candidates(&self) -> Vec<PickerCandidate> {
+        let selected = self
+            .controls
+            .model()
+            .or(self.projection.model.as_ref())
+            .map(|model| model.model.as_str());
+        self.projection
+            .models
+            .iter()
+            .find(|model| Some(model.id.as_str()) == selected)
+            .into_iter()
+            .flat_map(|model| model.efforts.iter())
+            .map(|effort| PickerCandidate::described(effort.id.clone(), &effort.description))
+            .collect()
     }
 
     /// `⏎` while a surface is open: accept its highlighted row.
@@ -466,7 +503,7 @@ impl AgentThreadView {
         match picker.kind {
             PickerKind::Models => self.pick_model(accepted.to_string(), cx),
             PickerKind::Access => self.pick_access(&accepted, cx),
-            PickerKind::Traits => {}
+            PickerKind::Traits => self.pick_trait(accepted.to_string(), cx),
             PickerKind::Commands => self.accept_command(&picker, &accepted, cx),
             PickerKind::Files | PickerKind::Skills => {
                 self.replace_trigger(&picker, &accepted, cx);
@@ -529,17 +566,46 @@ impl AgentThreadView {
     /// Records a human's model pick, which no later seed may overwrite.
     fn pick_model(&mut self, model: String, cx: &mut Context<Self>) {
         let instance = SharedString::new_static(self.projection.provider.executable());
-        let effort = self
-            .projection
-            .model
-            .as_ref()
-            .and_then(|current| current.effort.clone());
+        let current = self.controls.model().or(self.projection.model.as_ref());
+        let effort = current
+            .filter(|current| current.model == model)
+            .and_then(|current| current.effort.clone())
+            .or_else(|| {
+                self.projection
+                    .models
+                    .iter()
+                    .find(|descriptor| descriptor.id == model)
+                    .and_then(|descriptor| descriptor.default_effort.clone())
+            });
         self.controls.pick_model(
             instance,
             ModelSelection {
                 model,
                 effort,
                 provider: None,
+            },
+        );
+        self.prepare(cx);
+        cx.notify();
+    }
+
+    /// Records one provider-declared reasoning effort for the active model.
+    fn pick_trait(&mut self, effort: String, cx: &mut Context<Self>) {
+        let Some(current) = self
+            .controls
+            .model()
+            .or(self.projection.model.as_ref())
+            .cloned()
+        else {
+            return;
+        };
+        let instance = SharedString::new_static(self.projection.provider.executable());
+        self.controls.pick_model(
+            instance,
+            ModelSelection {
+                model: current.model,
+                effort: Some(effort),
+                provider: current.provider,
             },
         );
         self.prepare(cx);

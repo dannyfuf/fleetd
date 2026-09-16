@@ -27,7 +27,8 @@ use anyhow::Context;
 use chrono::Utc;
 use fleet_core::agents::{
     AgentEvent, AgentThreadSummary, GateAnswer, GateKind, ItemId, ItemKind, PermissionChoice,
-    PlanAnswer, Seq, SeqEvent, SessionState, ToolKind, TurnId, TurnOutcome, TurnState, UserInput,
+    PlanAnswer, Seq, SeqEvent, SessionState, ThreadId, ToolKind, TurnId, TurnOutcome, TurnState,
+    UserInput,
 };
 use fleet_proto::event::Event;
 use tokio::sync::MutexGuard;
@@ -40,6 +41,22 @@ use super::{
 /// Proof, checked by the compiler, that the caller holds one thread's serialized-operation gate.
 pub(super) type Serialized<'guard> = &'guard MutexGuard<'guard, ()>;
 
+/// Failure stage for the ordered reducer write path.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ApplyEventError {
+    /// The normalized event conflicts with the thread's reducer state.
+    #[error("native-agent reducer rejected {event} for thread {thread}: {source:#}")]
+    Reducer {
+        thread: ThreadId,
+        event: &'static str,
+        #[source]
+        source: anyhow::Error,
+    },
+    /// The durable log or its SQLite projections could not be written.
+    #[error("native-agent storage failed: {0:#}")]
+    Storage(#[source] anyhow::Error),
+}
+
 /// Sequences one event, makes it durable, applies it to memory, and reports what changed.
 ///
 /// See the module docs for why the three steps are in this order and why the guard is a
@@ -50,7 +67,8 @@ pub(super) async fn apply_event(
     _serialized: Serialized<'_>,
     event: AgentEvent,
     raw: Option<String>,
-) -> anyhow::Result<AppliedEvent> {
+) -> Result<AppliedEvent, ApplyEventError> {
+    let kind = event_name(&event);
     let (thread, before, sequenced) = {
         let state = runtime
             .state
@@ -62,10 +80,17 @@ pub(super) async fn apply_event(
             raw: raw.or_else(|| Some(event_name(&event).to_owned())),
             event,
         };
-        state
+        if let Err(source) = state
             .projection
             .accepts(&sequenced)
-            .with_context(|| format!("apply native-agent event {}", sequenced.seq))?;
+            .with_context(|| format!("accept native-agent event {}", sequenced.seq))
+        {
+            return Err(ApplyEventError::Reducer {
+                thread: state.record.thread,
+                event: kind,
+                source,
+            });
+        }
         (
             state.record.thread,
             state.projection.summary(Seq::default()),
@@ -73,19 +98,28 @@ pub(super) async fn apply_event(
         )
     };
     inner
-        .store()?
+        .store()
+        .map_err(ApplyEventError::Storage)?
         .append(thread, &sequenced)
         .await
-        .context("persist native-agent event")?;
+        .context("persist native-agent event")
+        .map_err(ApplyEventError::Storage)?;
     let (applied, record, persist_record) = {
         let mut state = runtime
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state
+        if let Err(source) = state
             .projection
             .apply(&sequenced)
-            .with_context(|| format!("apply native-agent event {}", sequenced.seq))?;
+            .with_context(|| format!("apply native-agent event {}", sequenced.seq))
+        {
+            return Err(ApplyEventError::Reducer {
+                thread,
+                event: kind,
+                source,
+            });
+        }
         // Reborrowed so `record` and `title` are two disjoint field borrows: taking them both
         // through the guard would need a clone of the whole transcript per applied event.
         let state = &mut *state;
@@ -113,7 +147,13 @@ pub(super) async fn apply_event(
     // statement rather than a whole-file rewrite, but it is still a separate commit, so
     // `last_activity` alone rides along with the next real metadata transition instead of
     // costing a streaming turn a write per delta — every consumer reads the log for the rest.
-    if persist_record && let Err(error) = inner.store()?.write_record(&record).await {
+    if persist_record
+        && let Err(error) = inner
+            .store()
+            .map_err(ApplyEventError::Storage)?
+            .write_record(&record)
+            .await
+    {
         tracing::warn!(%error, thread = %record.thread, "could not update a native-agent thread record");
     }
     Ok(applied)

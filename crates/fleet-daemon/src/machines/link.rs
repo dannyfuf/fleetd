@@ -598,6 +598,7 @@ async fn establish_before(
                 client: HelloClient {
                     kind: ClientKind::Proxy,
                     host_id: Some(local_daemon_id.clone()),
+                    client_id: Some(local_daemon_id.to_string()),
                     // A proxy decodes the owner's agent events before forwarding them, so it
                     // has to name the families it can decode exactly as a direct client does.
                     capabilities: fleet_proto::AGENT_CAPABILITIES

@@ -70,6 +70,11 @@ The canvas fixes these decisions; do not relitigate them in code.
   cut at 48 characters — for the life of the thread.
 - **One visual vocabulary for both harnesses.** User turns are the only block with a background
   (`bg.panel`, radius 6). Assistant prose sits on the ground with no bubble, avatar or header.
+  Each prose block is one shaped text element, so inline marks do not turn paragraphs into flex
+  items and an unbroken token wider than the 760 px measure still wraps. GFM tables use equal,
+  wrapping columns and an emphasised header separated by one hairline. Fenced code alone keeps
+  its line structure in a horizontal scroller; a vertical wheel over it continues scrolling the
+  transcript.
   Reasoning is one collapsed muted line. Every tool call is one 30 px row: `state glyph · 60 px
   kind column · one-line summary · right-aligned result`. Completed work folds to
   `worked 22s · 14 steps  ⌄`. A turn ends with one right-aligned footer.
@@ -235,8 +240,15 @@ session:  Starting | Ready | Running | Waiting(reason) | Stopped | Error
 turn:     None | Running(TurnId) | Settled(TurnId, outcome)
 gates:    Vec<OpenGate>            // permissions, questions, actionable plan
 work:     open_items, background_tasks (subagents), retrying
-view:     last_seen_seq            // per client, persisted daemon-side (new)
+view:     last_seen_seq            // per installation, persisted daemon-side
 ```
+
+The client library creates one UUID at `FleetHome::client_id_path()` on first use and sends it as
+`HelloClient.client_id`. Every Fleet window using that home shares the cursor; another installation
+has another UUID and cannot clear its mark. A newer in-process cursor remains an immediate local
+override until its monotonic `AgentMarkSeen` write is echoed by a later connection. A clean daemon
+shutdown's synthetic `SessionStateChanged(Stopped)` is not unread transcript output: the same
+writer transaction advances only cursors that were already exactly caught up before that event.
 
 Derived **attention**, in priority order, carried in the thread summary so the tab, the header and
 the context-bar counts agree:
@@ -292,6 +304,9 @@ A stale terminal event for an old turn never ends the current turn; a terminal e
 id while a turn is active is ignored because it cannot be attributed; a `TurnSettled` naming a
 turn Fleet never saw start **is** accepted, because it recovers a lost start; a `TurnAborted`
 naming an unknown turn is rejected, because a delayed stop must not clobber a newer pending start.
+Codex also validates a non-empty string `/turn/id` before accepting a successful `turn/start`
+response. If one stdout burst maps `turn/started` and `turn/completed` before the response future
+resumes, the cleared pending start is proof that the response has nothing left to adopt or emit.
 
 The PTY fallback reuses only the `AttentionKind` vocabulary and the amber `NeedsYou` tab mark; it
 does not imitate this reducer.
@@ -352,7 +367,10 @@ makes a refusal look like a hang).
 
 Streaming: `stream_event` deltas move the cursor, `assistant` frames backfill completed blocks —
 **one frame per content block, several frames sharing one `message.id`**, so the *content block*
-is the transcript atom, not the message. Four invariants: `signature_delta` is **dropped** (it
+is the transcript atom, not the message. `content_block_stop` closes the item but retains its
+`(parent_tool_use_id, message.id, block index)` correlation; the later `assistant` snapshot
+consumes that correlation, patches the same item only when its text differs, and otherwise emits
+nothing. Four further invariants: `signature_delta` is **dropped** (it
 closes the thinking block's signature and is not display text); a reused block index within one
 turn must mint a **new** item id; the assistant text item closes before the following tool item
 opens; and `input_json_delta` is accumulated and re-parsed, emitting `ItemUpdated` **only when the
@@ -615,9 +633,43 @@ purpose: `RowId::LiveActivity` is used by `WorkLive`, by `Reasoning` while strea
 label**, not four mounts (t3code's `LIVE_ACTIVITY_ROW_ID`); and `RowId::Item(ItemId)` is shared by
 a `Work` row and the `Diff` row under it so an update merging forward does not remount.
 
-Update policy: a `ContentDelta` mutates only the text of the row for that item and notifies;
-structural events rebuild grouping. Turn metadata is **withheld until the turn completes**, so the
-footer never moves under the reader.
+Update policy: `ThreadProjection::apply_described` returns `Applied::Text { item, stream,
+appended }` only for an append to an existing open item and `Applied::Structural` for every other
+accepted event. The client mirror carries that description into `AppState`. A bridge batch made
+only of text descriptions does not notify `AppState`, run attention edges, or synchronize the
+shell; it passes the borrowed authoritative projection and the descriptions directly to the
+active thread view. The view copies only each appended suffix into its presentation projection,
+feeds assistant prose through `MarkdownDocument::append`, replaces only the indexed row, and calls
+`TranscriptList::patch_row`, which uses `ListState::remeasure_items(index..index + 1)` and never
+`splice`. There is no projection clone, settled-turn count, deep comparison, grouping pass, or
+linear item lookup on this path. Any structural member keeps the ordinary `AppState` notification,
+clones the projection once, and prepares the complete row model. Text descriptions already
+accepted earlier in that mixed batch are queued and flushed through the same single-row remeasure
+before the structural model is installed; a final delta plus completion therefore cannot splice a
+growing row. A delta that clears `retrying` also takes the structural path so its trailing notice
+disappears in the same update.
+
+The thread view holds a reveal buffer between the authoritative projection and its rows. With
+motion enabled it wakes every `motion.reveal_tick_ms` (**16 ms**) and reveals UTF-8-safe chunks at
+the rate needed to drain the burst within `motion.reveal_horizon_ms` (**200 ms**), feeding every
+chunk through the same incremental Markdown and single-row patch path. `ItemCompleted`,
+`TurnSettled`, a thread switch, and reduced motion flush the buffer immediately; `FLEET_HARNESS=1`
+sets reduced motion, so harness snapshots remain deterministic. The stored foreground task stops
+when the queue empties. The `AppState` projection remains truth throughout; only painted rows lag.
+
+That distinction preserves `logical_scroll_top.offset_in_item` when the row under a frozen reader
+grows; `splice` is reserved for structural events that rebuild grouping. Heavy row payloads are
+shared (`Rc<MarkdownDocument>`, shared attachment/roster/footer slices, and `SharedString` tool
+output/diff text, whose heap representation is `Arc<str>`), so cloning a `TranscriptRow` is O(1).
+Assistant, reasoning, and tool items—including output hidden by `WorkLive`—retain a `row_of_item`
+entry. Turn metadata is **withheld until the turn completes**, so the footer never moves under the
+reader.
+
+Assistant prose keeps the same row while streaming. Its `MarkdownDocument::append` path retains
+every settled block and reparses only the final open block; the optional caret is a final text run,
+not a sibling element. Paragraphs and table cells shape as one wrapping text element, while fenced
+code preserves its lines in a horizontal, axis-restricted scroller so vertical wheel input still
+belongs to the transcript.
 
 Tool rows keep their 30 px geometry while streaming. Five states and no more —
 `Running | Done | Failed | Denied | Stopped` — plus `Severe`, reserved for a runtime error or a
@@ -794,7 +846,8 @@ for the answer Fleet sends back, so a declined gate and an accepted one are both
 scenario. The `agents` fixture installs it on `PATH` under the vendor's own name.
 
 A scenario therefore exercises a gate entirely through this document's own surfaces: open the
-worktree, `key ctrl-s A` for a native thread, `click agents.composer` and `type` a prompt, then
+worktree, `key ctrl-s A` for a native thread, `assert focused == agents.composer` and `type` a
+prompt, then
 `await agents.threads[0].pending_gate == "permission"`, `click agents.approval.allow_once`, and
 `await agents.threads[0].pending_gate absent`. The approval controls carry the frozen target names
 `agents.approval.{allow_once,allow_always,deny,deny_and_stop,edit}` (§6.2); a model question's
@@ -818,6 +871,11 @@ There is no slider, no number, no free text. Reasoning effort, thinking, context
 service tier are all one of those two, so adding an effort level is a data change rather than a
 code change. **Fleet never hardcodes a Codex effort ladder** — the legal set is per model from
 `model/list.supportedReasoningEfforts`, with the harness's own `description` strings.
+`SessionConfigured.models` projects `{ id, display_name, efforts: [{ id, description }],
+default_effort }` through the store and `AgentSessionView`; `^s e` reads only the selected model's
+descriptor and a newly selected model starts at its advertised default. Claude keeps the
+vocabulary it reports at initialization. A later Codex `skills/changed` is a
+`MetadataChanged.skills` observation, so `$` refreshes without pretending the session restarted.
 
 | Control | Claude | Codex | Mid-thread? | Mid-turn? | Key |
 | --- | --- | --- | --- | --- | --- |
@@ -865,6 +923,24 @@ The user bubble shows **what the user typed**. Attachment manifests, `@file` exp
 Fleet's own prompt prefixes are stripped for display and for `↑` recall, and kept verbatim for
 copy.
 
+The composer wraps every logical line to its resolved value-column width, breaking an unbroken
+token at a character boundary rather than widening the panel. Its caret, pointer hit-testing,
+drag selection, double-click word selection, visual `↑`/`↓` and unmodified `Home`/`End` all read
+the same revision-tagged wrapped layout; a key arriving after an unpainted edit falls back to the
+logical line instead of consulting stale geometry. Modified `cmd`/`ctrl` line motions remain
+logical-line motions.
+
+Pasted `\t` is stored and submitted unchanged, while rendering expands it to the design-system
+`TAB_WIDTH`; other non-printing controls are discarded and CRLF is normalized. Plain `Enter`
+while an IME marked range is open is consumed without submitting, leaving the platform to commit
+the preedit. The app's global Send/Steer actions must make the same `is_composing()` check because
+an action binding wins before the input's own key listener.
+
+The surface grows through eight visual rows. Beyond that it clips, draws an internal scroll thumb
+and owns the wheel so the transcript behind it does not move. A per-logical-line shaping cache is
+validated by line text, wrap width and font; editing one line keeps the other shaped lines and
+their stable `SharedString`s.
+
 ## 8. Storage
 
 **One SQLite database per daemon at `$FLEET_HOME/agents/state.sqlite`**, holding the event log and
@@ -896,8 +972,8 @@ row, with **denormalized** `open_gate_count`, `running_turn_id`, `head_seq`, `pr
 list read never touches `items`, `turns` or `gates`), `turns`, `items` (with append-only `text` and
 `reasoning` columns concatenated **in SQL**, which collapses thousands of delta rows into one row
 for reads while the log keeps every delta for replay), `gates`, `checkpoints`, `sessions`,
-`item_attachments`, `seen` (the per-client read cursor `AgentMarkSeen` has nowhere to land
-today), `agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
+`item_attachments`, `seen` (the monotonic per-installation read cursors written by
+`AgentMarkSeen`), `agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
 multi-table statements in the projector, which is what you want when you also have to delete
 files.
 
@@ -966,11 +1042,26 @@ appended events**, never as a silent state edit.
 
 ### 9.1 Coalescing
 
-Two windows on the broadcast path, and no others: **16 ms merge** for `ContentDelta` (one frame,
-free latency) and **50 ms last-wins** for `ItemUpdated`. Every other event — a tool completing, a
-turn settling, a gate opening — **flushes the pending window and emits with zero added latency, by
-rule**, asserted by a test that the clock does not advance. Assistant text is merged, never
-delayed further.
+Two windows on the broadcast path, and no others: **16 ms merge** for adjacent `ContentDelta`
+events with the same item and stream, and **50 ms last-wins** for `ItemUpdated` per item. The
+earliest live deadline wins when both kinds share a batch. Every other event — a tool completing,
+a turn settling, a gate opening — **wakes the select, flushes the pending window first, then emits
+unchanged with zero added latency, by rule**. Paused-clock tests assert the clock does not advance
+and terminal events are neither dropped nor reordered.
+
+The harness→provider and provider→manager compatibility channels remain unbounded to avoid the
+operation-gate deadlock described at their type definitions, but the pair forms one **coalescing
+drain**, not two sleeping queues: the forwarder continuously empties the first into the second,
+and the manager select drains that until the earliest 16/50 ms deadline. Thus streamed text
+occupies one pending batch rather than one retained event per token; structural events bypass the
+window immediately.
+Assistant text is merged at the transport boundary and then revealed by the active view over at
+most the 200 ms presentation horizon. A terminal item or turn event flushes that remainder before
+its structural row preparation, so terminal signals still have zero added latency.
+
+Reducer `accepts`/`apply` failures are `Validation` errors naming the thread and normalized event
+kind, never the payload. Only SQLite/store failures are `Fs`; dispatch therefore adds filesystem
+path wording only to actual storage I/O failures.
 
 Backpressure: a budget overflow emits `Event::AgentResync` and the client re-opens with
 `after_seq`. Never a stall, never an OOM, **never a silent drop**.
@@ -994,6 +1085,11 @@ The existing routing model is correct and tested (`tests/agents_remote.rs`) and 
 unchanged. The **no-copy rule does not**: `AgentThreadOpen` used to ship the whole
 `ThreadProjection` over SSH against a 16 MiB ceiling with no compression, and past that ceiling it
 became permanently *undecodable* — a codec error, not a truncation.
+
+Read cursors follow the reader across this boundary. The source daemon retains the originating
+installation identity while routing `AgentMarkSeen`; the owning daemon persists that identity's
+cursor, and the bounded window carried back through the mirror includes its `seen_seq`. The mirror
+never turns a remote reader into one shared global cursor.
 
 A mirrored thread is stored in the **same tables** as a local one with one nullable
 `threads.owner_host` set, because a mirrored thread is a prefix of the owner's log with the
@@ -1022,6 +1118,18 @@ with a test in `services/agents/manager/tests/mirror.rs`:
 | A mutation routes upstream and is never applied locally on optimism | the router classifies by owner, **and** the local manager refuses every mutation on a mirrored thread with `ErrorKind::Remote`, for the window between a daemon start and the owner's first snapshot in which the router's id map is still empty |
 | The mirror never fabricates a `Synchronized` | a mirrored answer carries `synchronized = false` unconditionally, and only the owner's own `Event::AgentSynchronized`, forwarded verbatim, moves a client to `Live` |
 
+The local router drains everything immediately ready from each host link, bounded at **64 events
+or 256 KiB** per pass. Adjacent events for one thread form one ordered `mirror_append` and one
+SQLite transaction; another thread or a structural event ends the run, so interleaved threads
+make progress and link order stays observable unchanged. Republishing remains strictly
+commit-before-visible. If a run contains a sequence gap, the mirror commits and republishes its
+gap-free prefix. With a window-capable owner it withholds the suffix and starts the ordinary
+window refill; the refill's `AgentWindow` announcement makes clients re-read the now-complete
+durable prefix. With an older owner it republishes the suffix unchanged and leaves repair to the
+plain proxy path. Each drain emits one debug record with event, byte, group, publishable-event and
+resync counts, never payloads. The wire remains one event per frame; batching exists only between
+the link receiver and local mirror.
+
 Warm mirror, remote thread: the local daemon answers **entirely from the mirror in ~1 ms** with
 `synchronized = false`, the app paints the full transcript as `Cached`, and in parallel the local
 daemon asks the owner for `(after_seq, head]` — where `after_seq` is the prefix's own head, so a
@@ -1048,8 +1156,10 @@ daemon's database.
 
 Version skew gates exactly one thing: the *request* sent upstream. The delta is asked for only of
 a peer advertising `agent.window`, because a peer that ignores `after_seq` answers with a whole
-projection — no events, nothing to cache. Reading the mirror needs no capability from anyone,
-which is what keeps a transcript readable while the link is down and `hello` is gone.
+projection — no events, nothing to cache. While such an older peer is connected, opens and any
+event suffix after a mirror gap remain a plain proxy: the suffix is published unchanged and a
+client repairs the gap through the legacy full open. Once the link is down, reading the durable
+prefix needs no capability or Hello, which is what keeps the cached transcript readable offline.
 
 Offline: **disconnection changes the status, never the data.** A mirrored transcript stays readable
 from the prefix, the thread list stays painted from the durable mirror (the in-memory snapshot
@@ -1069,7 +1179,7 @@ remote `fleetd` at 40 ms RTT.
 | "Load earlier" | ≤ 100 ms | ≤ RTT + 100 ms | keyset cursor; `LIMIT` genuinely bounds the scan |
 | **Keystroke to echo** | **1 frame** | **1 frame** | the composer never awaits the daemon; nothing about a keystroke crosses a socket |
 | Enter to the user's bubble | **1 frame** | **1 frame** | optimistic item with a client-generated id that *is* the server id |
-| **Assistant token to pixel** | ≤ 16 ms + 1 frame | ≤ 16 ms + RTT + 1 frame | 16 ms merge, appended in SQL, one row touched |
+| **Assistant token to pixel** | ≤ 16 ms + 200 ms + 1 frame | ≤ 16 ms + RTT + one batched local-mirror commit + 200 ms + 1 frame | 16 ms owner merge; one local mirror commit; UTF-8 reveal horizon; incremental Markdown; one row touched |
 | Tool progress to pixel | ≤ 50 ms + 1 frame | + RTT | 50 ms last-wins |
 | **Tool completion / turn end / gate open** | ≤ 1 frame | ≤ RTT + 1 frame | **zero added latency by rule** |
 | Gate answer to the card clearing | ≤ 30 ms | ≤ RTT | optimistic clear, restored on transient failure |
@@ -1081,8 +1191,9 @@ remote `fleetd` at 40 ms RTT.
 | Writes on the frame path | **0** | **0** | the writer is a separate thread; the app never writes to disk |
 
 The reading of that table is also the design rule: **the only things Fleet is willing to delay are
-in-flight tool progress (50 ms) and text that has not finished a frame (16 ms). Everything a human
-reads word by word or waits on is zero added latency.**
+in-flight tool progress (50 ms) and the visual reveal of assistant text (at most 200 ms after its
+16 ms merge). Completion, a turn end, a gate, and everything a human waits on have zero added
+latency and flush queued prose first.**
 
 ## 10. Protocol additions (`fleet-proto`)
 
@@ -1093,10 +1204,11 @@ avoid that.
 
 The version-6 agent request family survives in shape. What changes: `AgentThreadOpen` gains
 `turn_limit`, `after_seq`, `before_cursor` and `request_sync_marker`, and answers with a
-**bounded** `AgentThreadWindow { window, page, head_seq }` instead of an unbounded
+**bounded** `AgentThreadWindow { window, page, head_seq, seen_seq }` instead of an unbounded
 `AgentThreadSnapshot`; `AgentItemBody` is added to page a large item body out of the store in
 256 KiB chunks; `AgentMarkSeen` gains a real implementation backed by a `seen` table, replacing
-today's no-op; `Event::AgentWindow`, `Event::AgentSynchronized` and `Event::AgentResync` are added.
+the old validate-only path when a client identity is present; `Event::AgentWindow`,
+`Event::AgentSynchronized` and `Event::AgentResync` are added.
 `WINDOW_MAX_WIRE_BYTES = 2 MiB` is asserted on every window response against a fixture built from
 the heaviest real transcript.
 
@@ -1115,6 +1227,15 @@ defining them (`agent.resync`, `agent.sync_marker`, `agent.window`); an older cl
 recovery it already had, which is a sequence gap in `Event::Agent`. `Event::Unknown` is never
 re-broadcast: it is a tag *this* daemon could not name, so forwarding it tells no peer anything.
 
+`agent.seen` gates persisted read cursors without a protocol-version bump. `HelloClient.client_id`
+is the stable UUID created by the client library at `$FLEET_HOME/client-id`; a peer without it keeps
+the historical validate-only `AgentMarkSeen` behaviour. A capable client asks once per negotiated
+connection with `AgentSeenCursors` and receives its `Vec<AgentSeenCursor { thread, seq }>` census;
+the app's health pass refreshes it after a transparent client reconnect. Every bounded
+`AgentThreadWindow` also carries that connection's optional `seen_seq`. The census is deliberately
+separate from `AgentThreadSummary`: summary broadcasts remain one shared O(1) fan-out, instead of
+performing a per-connection database lookup for every summary event. Cursor upserts are monotonic.
+
 Two additive fields close seams that used to be guesses rather than answers. `UserInput.item`
 carries the identity the client already drew its optimistic bubble under, and the adapter adopts
 it — Claude's announced `TurnStarted.user_item`, Codex's `clientUserMessageId` — so reconciliation
@@ -1123,6 +1244,13 @@ the harness's own answer to "did this join a turn that was already running?", so
 `↳` survives a reload instead of living only in the sending client's optimistic row.
 `snapshot::AgentBinaries` gains `codex`, defaulted, so a host listing and `fleet doctor` report
 the third executable the same way they report the other two (ADR 0014).
+
+Two further additive metadata shapes make provider discovery observable without changing protocol
+7. `SessionConfigured.models` and `AgentSessionView.models` carry each model id, display name,
+reasoning-effort ids and descriptions, and default effort; empty lists are omitted so the old
+byte-exact goldens remain unchanged. `MetadataChanged.skills` carries a refreshed skill-name list
+after `skills/changed`. Both replay through `ThreadProjection`, and neither invents vocabulary for
+a provider that reported none.
 
 `AgentRevert { thread, checkpoint }` restores a worktree from one Fleet checkpoint and answers
 `AgentReverted` with what it put back and what it removed; `AgentCheckpoints { thread }` lists what
@@ -1145,9 +1273,9 @@ The CLI drives the same requests: `fleet agent list|new|send|respond|interrupt|s
 
 | Component | Contract |
 | --- | --- |
-| `TranscriptList` | Variable-height rows over GPUI `list`, bottom-aligned, keyed rows, overdraw, jump-to-latest, `^s [` scroll mode. Not `uniform_list`; ADR 0005's uniform-row rule applies to diffs, which stay uniform inside their row. It owns the three-state scroll machine and its generation counter, splices only what `diff_rows` changed, and calls `ListState::reset` from `set_thread` alone. It reports reaching the oldest row it holds (`TranscriptEvent::ReachedOldest`, once per row set) and never decides whether older history exists — that is the owner's page cursor. |
+| `TranscriptList` | Variable-height rows over GPUI `list`, bottom-aligned, keyed rows, overdraw, jump-to-latest, `^s [` scroll mode. Not `uniform_list`; ADR 0005's uniform-row rule applies to diffs, which stay uniform inside their row. Structural `set_rows` calls splice only for `diff_rows`; streaming `patch_row(index, row)` replaces one row and calls `remeasure_items`, preserving the reader's in-row scroll offset. `ListState::reset` remains exclusive to `set_thread`. The scroll callback consumes only `ListScrollEvent`; geometry and the scroll thumb are refreshed in a deferred entity update after GPUI releases the list's mutable lease. It reports reaching the oldest row it holds (`TranscriptEvent::ReachedOldest`, once per row set) and never decides whether older history exists — that is the owner's page cursor. |
 | `MultilineInput` | Wrapping, IME, paste, history, Enter/Shift+Enter, `@` `/` `$` triggers. Reports triggers rather than consuming the keys, so all three stay typable and a picker filters on `active_trigger().query`. History recalls at the *visual* buffer edge. |
-| `Markdown` | Parses a *prefix* safely: every decided block stays a block, at the same index, as the stream grows. A partial fence is not highlighted and never reaches the highlight cache. No tables or images in v1. |
+| `Markdown` | Parses a *prefix* safely: every decided block stays a block, at the same index, as the stream grows. A table's header is the one two-line opener and stays the last paragraph until its delimiter arrives. `MarkdownDocument::append` reparses only that open tail and reuses its highlight cache. A partial fence is not highlighted and never reaches the cache. Prose is one wrapping `StyledText` per block; tables wrap equal-width cells; fenced code scrolls horizontally without capturing a vertical wheel. Images remain literal in v1. |
 | `ToolRow` | The 30 px row: state glyph, kind column, summary, result, optional nested children region. Five states plus `Severe`. The click target is the 30 px line only, so clicking inside an expanded body does not fold the row, and the expand chevron is `invisible` rather than absent when a row cannot expand. |
 | `DecisionDock` | The docked drawer: approval / question variants, amber left bar, keycap actions, `1/N` counter, owns key routing while open. Attaches to the composer by overlapping it and masking the shared border so the two read as one panel. |
 | `MetadataRow` | A measured, ordered list of collapsible blocks; collapses from the right into an overflow menu. The hidden count is memoised **per width**, never recomputed per frame. |
@@ -1199,17 +1327,18 @@ this build does not do**, named here rather than softened in the section that sp
 | # | Phase | Status |
 | --- | --- | --- |
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle` | **done**; `providers/opencode/**` was deleted with it. `ItemKind::UserMessage` later gained `steered` and `UserInput` gained `item`, both additive and both with a producer |
-| 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. Owed: the `seen` table has no writer (see `AgentMarkSeen` below), and `item_attachments` has no writer because attachments are not built |
-| 3 | **Harnesses.** The `Harness` trait and probe; the Claude adapter rewritten against the 2.1.266 wire; the Codex adapter over app-server with generated `wire.rs`/`methods.rs`; the Codex fixtures | **done**: `agents/harness/` is the seam of §3.1 with the probe cache, the NDJSON framing and the SIGTERM→SIGKILL ladder; `agents/claude/**` speaks 2.1.266 with byte-exact argv goldens; `agents/codex/**` speaks app-server with `wire/`+`methods.rs` generated by `scripts/generate-codex-wire.py` from the installed 0.147.0's own schema; fixtures live under `crates/fleet-daemon/tests/fixtures/agents/{claude,codex}/`, and `--features real-agents` exercises both real binaries. The manager reads all three of the adapter's answers: `Submitted{turn,queued}`, `RuntimeApplied.restart` (performed at a turn boundary by `manager/controls.rs`), and `emitted_at` as a skew log line. **Owed**: the per-thread raw NDJSON log (`RawRef.offset` is always `None`), `model/list`/`skills/list` (so Codex's per-model reasoning-effort vocabularies are empty and `^s e` draws nothing rather than a hardcoded ladder), `thread/read`/`thread/items/list` cold rehydration (the store replays instead), per-instance `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (`HarnessConfig.home` is plumbed and nothing sets it — multi-account is out of scope per §14), and an `item` field on `GateKind::Permission`, without which a Codex file-change approval card cannot join its diff onto the `fileChange` item it names and shows the paths alone |
-| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability string | **done** except `AgentMarkSeen`. Six `agent.*` capabilities, all six advertised and all six served; `AgentThreadOpen`'s four defaulted window fields and the bounded `AgentThreadWindow`; `AgentItemBody`/`AgentItemBodyChunk` served from the reducer's projection, which holds the whole body whatever the window sent; the three stream-control events plus `Event::Unknown`, filtered per connection against `HelloClient.capabilities`; 51 byte-exact goldens including one per `AgentEvent` variant; per-request deadlines. **Owed**: `AgentMarkSeen` still validates its cursor and records nothing. §3.3 asks for `last_seen_seq` *persisted daemon-side per client*, and the `seen` table is waiting for it, but there is no client identity on the wire to key it by and no field on any read response to hand a client its own cursor back — so the cursor lives in client memory and the amber dot returns after an app restart. Closing it is two additive fields (`HelloClient.client_id`, a `seen_seq` on the window) plus the store write, and it is deliberately not guessed at here |
-| 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer |
-| 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, and the §12 key contexts including row focus inside scroll mode. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it), the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it), and the harness-declared trait descriptors, which need `model/list` from phase 3 |
+| 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Owed: `item_attachments` has no writer because attachments are not built |
+| 3 | **Harnesses.** The `Harness` trait and probe; the Claude adapter rewritten against the 2.1.266 wire; the Codex adapter over app-server with generated `wire.rs`/`methods.rs`; the Codex fixtures | **done**: `agents/harness/` is the seam of §3.1 with the probe cache, the NDJSON framing and the SIGTERM→SIGKILL ladder; `agents/claude/**` speaks 2.1.266 with byte-exact argv goldens; `agents/codex/**` speaks app-server with `wire/`+`methods.rs` generated by `scripts/generate-codex-wire.py` from the installed 0.147.0's own schema; fixtures live under `crates/fleet-daemon/tests/fixtures/agents/{claude,codex}/`, and `--features real-agents` exercises both real binaries. The manager reads all three of the adapter's answers: `Submitted{turn,queued}`, `RuntimeApplied.restart` (performed at a turn boundary by `manager/controls.rs`), and `emitted_at` as a skew log line. Codex binds the caller's turn before the response/notification race, reconciles both halves of its user-message echo, discovers every `model/list` page, projects every model's effort descriptions and default, reads `skills/list`, and publishes refreshes on `skills/changed`; permission gates carry the named item, so file approvals join the exact diff. A direct 0.147.0 catalogue probe reports `low` as `gpt-5.6-sol`'s default and Fleet displays that discovered value. **Owed**: the per-thread raw NDJSON log (`RawRef.offset` is always `None`), `thread/read`/`thread/items/list` cold rehydration (the store replays instead), and per-instance `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (`HarnessConfig.home` is plumbed and nothing sets it — multi-account is out of scope per §14) |
+| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Seven `agent.*` capabilities are advertised and served. `agent.seen` adds `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write without changing protocol 7; anonymous and older peers retain validate-only compatibility. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
+| 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer. Deferred scroll refresh no longer borrows list state from inside its own callback; the two-turn `scroll-wheel.scenario` exercises wheel input up and back at a 600-pixel viewport |
+| 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
 | 8 | **Checkpoints and revert.** Fleet-owned git refs, `AgentRevert`, `[u]` | **done**: `services/checkpoints/` captures a turn or a file scope into `refs/fleet/checkpoints/`, reverts a worktree from one without touching `HEAD`, the index or the conversation, and garbage collects per thread plus an hourly orphan sweep. `AgentSessionManager` holds the service and takes both captures — `capture_turn` in `send`, for a turn that is actually starting rather than a steer, and `capture_files` on the `ItemStarted` of an edit-shaped tool. A capture failure logs and the turn proceeds, always (§5). The app draws `[u] revert turn` from `AgentCheckpoints` and sends `AgentRevert`. **Owed**: `[u] revert this edit` on a tool row. A file-scope checkpoint names the *turn* it was taken in and not the item, so a tool row has nothing to key on; and the capture is best-effort by construction, because neither harness waits for Fleet before running an auto-approved tool — the turn-scope checkpoint is the guarantee, the file-scope one is the finer-grained revert when the race goes Fleet's way, which it always does for a gated edit |
 
-Carried forward as known gaps, each to be named where the user meets it: the Workspace prefix
-inside an agent tab (only `^s m e t [ a A x F` are bound); and a GUI smoke pass for the agent tab,
-which ADR 0007's driver script still lacks.
+The Workspace tab-selection and MRU prefix rows (`^s 1`–`9`, `^s Tab`, `^s w`) are also bound
+inside every agent-tab sub-mode; `^s s` remains deliberately unbound there, preserving the
+shadowing rule. The fixture-driven `scenarios/agents/` corpus is the GUI smoke pass for the agent
+tab.
 
 One gap belongs to the seam between the app and the daemon rather than to either side:
 
@@ -1222,9 +1351,12 @@ One gap belongs to the seam between the app and the daemon rather than to either
   invented outcome on a decision the user made is the one kind of wrong a transcript must not be.
 
 The optimistic user bubble **is** reconciled by id: `UserInput.item` carries the client's own
-`ItemId`, Claude announces it as `TurnStarted.user_item` and Codex echoes it as
-`clientUserMessageId`, so the row the user saw and the row the daemon recorded are one item. The
-text-plus-echo-count join it replaced is gone.
+`ItemId`, Claude announces it as `TurnStarted.user_item`, and Codex sends it as
+`clientUserMessageId` then echoes it as `userMessage.item.clientId`, so the row the user saw and
+the row the daemon recorded are one item. Both Codex lifecycle frames are suppressed after the
+join. For Codex builds that omit `clientId`, the adapter consumes the first unreconciled pending
+user item with identical text; that compatibility fallback is submission-ordered and remains
+inside the adapter rather than becoming transcript identity.
 
 ## 14. Risks and open questions
 
@@ -1244,7 +1376,8 @@ text-plus-echo-count join it replaced is gone.
 - **Codex interrupt scope.** Stop fans out to children first with per-child deadlines; a wedged
   child must not block the parent forever.
 - **Markdown scope.** A focused in-house renderer was chosen over Zed's `markdown` crate to
-  respect ADR 0003 and keep the dependency graph small (ADR 0010); tables and images come later.
+  respect ADR 0003 and keep the dependency graph small (ADR 0010). GFM pipe tables are in scope;
+  images and indented code remain literal source text.
 - **Multi-account shadow homes** (t3code's symlink overlay) are out of scope. If Fleet ever wants
   two Codex accounts sharing thread continuity, the non-obvious part is that the continuation key
   must ignore the shadow home.

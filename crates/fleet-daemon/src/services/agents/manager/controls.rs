@@ -39,6 +39,7 @@ impl AgentSessionManager {
                 title: None,
                 mode,
                 model,
+                skills: None,
             },
             None,
         )

@@ -143,13 +143,13 @@ impl AgentPopup {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let Some(model) = self.model.as_ref() else {
-            return div().into_any_element();
-        };
         let viewport = window.viewport_size();
         let width = px(f32::from(viewport.width) * CARD_WIDTH_FRACTION);
         let height = px(f32::from(viewport.height) * CARD_HEIGHT_FRACTION);
         let top = px(f32::from(viewport.height) * (1.0 - CARD_HEIGHT_FRACTION) / 2.0);
+        let Some(model) = self.model.as_ref() else {
+            return self.render_attaching(state, focus, width, height, top, cx);
+        };
         let header = self.header(model, cx);
         let terminal = Veil::new(!model.reachable)
             .content(self.terminal_area(model, state, bridge, focus, window, cx));
@@ -176,6 +176,38 @@ impl AgentPopup {
             .layer(OverlayLayer::Dialog)
             .content(
                 self.with_keys(card, state, bridge)
+                    .harness_target("agents.popup"),
+            )
+            .into_any_element()
+    }
+
+    /// Keeps the popup's focus path and dismissal keys live while its daemon session is ensured.
+    fn render_attaching(
+        &self,
+        state: &Entity<AppState>,
+        focus: &FocusHandle,
+        width: Pixels,
+        height: Pixels,
+        top: Pixels,
+        cx: &App,
+    ) -> AnyElement {
+        let card = div()
+            .track_focus(focus)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w_full()
+            .h(height)
+            .min_h_0()
+            .child(attaching(cx.theme()));
+
+        FloatingOverlay::new()
+            .top(top)
+            .width(width)
+            .scrim(true)
+            .layer(OverlayLayer::Dialog)
+            .content(
+                self.with_attaching_keys(card, state)
                     .harness_target("agents.popup"),
             )
             .into_any_element()

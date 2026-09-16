@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{Entity, SharedString, TestAppContext};
+use gpui::{Entity, ScrollDelta, ScrollWheelEvent, SharedString, TestAppContext, point, px};
 
 use super::*;
 use crate::components::agent::rows::{
@@ -55,6 +55,71 @@ fn set_rows_keeps_the_list_state_in_step_with_the_projection(cx: &mut TestAppCon
         assert_eq!(list.rows().len(), 1);
         assert_eq!(list.state.item_count(), 1);
         assert_eq!(list.focused_row(), None);
+    });
+}
+
+#[gpui::test]
+fn patching_the_scroll_top_row_preserves_its_in_row_offset(cx: &mut TestAppContext) {
+    let rows: Vec<_> = (0..20)
+        .map(|index| expandable(&format!("tool-{index}")))
+        .collect();
+    let list = transcript(cx, rows);
+    cx.update(|cx| {
+        list.update(cx, |list, cx| {
+            list.state.scroll_to(gpui::ListOffset {
+                item_ix: 10,
+                offset_in_item: px(12.0),
+            });
+            list.patch_row(
+                10,
+                TranscriptRow::new(
+                    TranscriptRowId::Item("tool-10".into()),
+                    TranscriptRowKind::Work(
+                        ToolRow::new("tool-10", "bash", "cargo test --all-targets")
+                            .body("streamed output"),
+                    ),
+                ),
+                cx,
+            );
+            let offset = list.state.logical_scroll_top();
+            assert_eq!(offset.item_ix, 10);
+            assert_eq!(offset.offset_in_item, px(12.0));
+        });
+    });
+}
+
+#[gpui::test]
+fn content_growth_plus_a_structural_append_preserves_the_in_row_offset(cx: &mut TestAppContext) {
+    let rows: Vec<_> = (0..20)
+        .map(|index| expandable(&format!("tool-{index}")))
+        .collect();
+    let list = transcript(cx, rows.clone());
+    cx.update(|cx| {
+        list.update(cx, |list, cx| {
+            list.state.scroll_to(gpui::ListOffset {
+                item_ix: 10,
+                offset_in_item: px(12.0),
+            });
+            let mut next = rows;
+            next[10] = TranscriptRow::new(
+                TranscriptRowId::Item("tool-10".into()),
+                TranscriptRowKind::Work(
+                    ToolRow::new("tool-10", "bash", "cargo test --all-targets")
+                        .body("the final streamed output made this row taller"),
+                ),
+            );
+            next.push(TranscriptRow::ordinal(
+                20,
+                TranscriptRowKind::Notice(NoticeRow {
+                    text: "turn complete".into(),
+                }),
+            ));
+            list.set_rows(next, cx);
+
+            let offset = list.state.logical_scroll_top();
+            assert_eq!(offset.item_ix, 10);
+            assert_eq!(offset.offset_in_item, px(12.0));
+        });
     });
 }
 
@@ -239,6 +304,64 @@ fn the_jump_chip_is_debounced_on_show_and_immediate_on_hide(cx: &mut TestAppCont
             list.scroll_to_latest(cx);
             assert!(!list.shows_jump_to_latest(), "hiding is never debounced");
         });
+    });
+}
+
+/// Regression for the P0 double borrow: GPUI calls the list's scroll callback while its
+/// `ListState` is mutably leased. The callback may consume `ListScrollEvent`, but every geometry
+/// read must happen after that lease is released.
+#[gpui::test]
+fn a_wheel_scroll_moves_on_the_first_event_and_rearms_at_the_tail(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let rows: Vec<_> = (0..80)
+        .map(|index| user(&format!("message {index}")))
+        .collect();
+    let window = cx
+        .update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| {
+                    let mut list = TranscriptList::new(cx);
+                    list.set_rows(rows, cx);
+                    list
+                })
+            })
+        })
+        .expect("test window");
+    let list = window.root(cx).expect("transcript");
+    let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+
+    let before = list.read_with(visual, |list, _| list.state.logical_scroll_top());
+    visual.simulate_event(ScrollWheelEvent {
+        position: point(px(100.0), px(100.0)),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(80.0))),
+        ..Default::default()
+    });
+    let after = list.read_with(visual, |list, _| {
+        assert!(!list.state.is_following_tail());
+        assert!(!list.is_following());
+        assert!(!list.shows_jump_to_latest());
+        list.state.logical_scroll_top()
+    });
+    assert!(
+        after.item_ix != before.item_ix || after.offset_in_item != before.offset_in_item,
+        "the first wheel-up must move the viewport"
+    );
+
+    visual.executor().advance_clock(Duration::from_millis(200));
+    visual.run_until_parked();
+    list.read_with(visual, |list, _| assert!(list.shows_jump_to_latest()));
+
+    visual.simulate_event(ScrollWheelEvent {
+        position: point(px(100.0), px(100.0)),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-100_000.0))),
+        ..Default::default()
+    });
+    visual.run_until_parked();
+    list.read_with(visual, |list, _| {
+        assert!(list.state.is_following_tail());
+        assert!(list.is_following());
+        assert!(!list.shows_jump_to_latest());
     });
 }
 

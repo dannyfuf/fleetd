@@ -48,13 +48,22 @@ pub(super) struct Migration {
 }
 
 /// The ladder, in slot order.
-pub(super) const MIGRATIONS: &[Migration] = &[Migration {
-    id: 1,
-    name: "initial_schema",
-    run: m001::run,
-    source: schema::INITIAL_SCHEMA,
-    sha256: "dbd290f683a3916d3c1cde9d8062892230a694c0f94c5e828d3210a3ab57bd62",
-}];
+pub(super) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        id: 1,
+        name: "initial_schema",
+        run: m001::run,
+        source: schema::INITIAL_SCHEMA,
+        sha256: "dbd290f683a3916d3c1cde9d8062892230a694c0f94c5e828d3210a3ab57bd62",
+    },
+    Migration {
+        id: 2,
+        name: "session_model_descriptors",
+        run: m002::run,
+        source: m002::SOURCE,
+        sha256: "13a395b29dd1c0a1ee6a0fd7d29263b871ead729eaa2475e7405f54dbe49484d",
+    },
+];
 
 /// Slot 001 — create the log and every read model derived from it.
 ///
@@ -68,6 +77,27 @@ mod m001 {
 
     pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
         transaction.execute_batch(schema::INITIAL_SCHEMA)
+    }
+}
+
+/// Slot 002 — retain the provider's model catalogue beside the active selection.
+///
+/// The column is nullable so databases created by slot 001 remain readable while the projector
+/// replays their older events, which did not carry descriptors.
+mod m002 {
+    use rusqlite::Transaction;
+
+    pub(super) const SOURCE: &str = "ALTER TABLE sessions ADD COLUMN models_json TEXT";
+
+    pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        let mut statement = transaction.prepare("PRAGMA table_info(sessions)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for column in columns {
+            if column? == "models_json" {
+                return Ok(());
+            }
+        }
+        transaction.execute_batch(SOURCE)
     }
 }
 
@@ -264,7 +294,7 @@ mod tests {
         run(&mut conn, None)?;
 
         assert_eq!(objects(&conn, "table")?, expected(REQUIRED_TABLES));
-        assert_eq!(applied_slots(&conn)?, vec![1]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2]);
         Ok(())
     }
 
@@ -393,6 +423,19 @@ mod tests {
     }
 
     #[test]
+    fn slot_002_adds_the_model_catalogue_to_an_existing_session_table() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(1))?;
+        assert!(!table_columns(&conn, "sessions")?.contains("models_json"));
+
+        run(&mut conn, Some(2))?;
+
+        assert!(table_columns(&conn, "sessions")?.contains("models_json"));
+        assert_eq!(applied_slots(&conn)?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
     fn every_slot_hash_matches_its_source() {
         for migration in MIGRATIONS {
             assert_eq!(
@@ -477,7 +520,7 @@ mod tests {
 
         run(&mut conn, None)?;
 
-        assert_eq!(applied_slots(&conn)?, vec![1]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2]);
         Ok(())
     }
 
@@ -502,6 +545,20 @@ mod tests {
         let mut names = BTreeSet::new();
         for row in rows {
             names.insert(row.with_context(|| format!("decode a {kind} name"))?);
+        }
+        Ok(names)
+    }
+
+    fn table_columns(conn: &Connection, table: &str) -> anyhow::Result<BTreeSet<String>> {
+        let mut statement = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .with_context(|| format!("prepare the {table} column query"))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .with_context(|| format!("query the {table} columns"))?;
+        let mut names = BTreeSet::new();
+        for row in rows {
+            names.insert(row.with_context(|| format!("decode a {table} column"))?);
         }
         Ok(names)
     }

@@ -186,6 +186,7 @@ pub(super) fn permission_gate(payload: &str, options: &[PermissionChoice]) -> Op
         id: GateId::new(),
         turn: None,
         kind: GateKind::Permission {
+            item: None,
             tool: ToolKind::Bash,
             title: "claude wants to run a command".to_owned(),
             payload: payload.to_owned(),

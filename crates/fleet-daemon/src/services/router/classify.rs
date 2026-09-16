@@ -36,6 +36,8 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | AgentRevert { .. }
         | AgentStop { .. } => classify_agent(body, resolver),
 
+        AgentSeenCursors => Target::Local,
+
         CreateWorktree {
             host: Some(host), ..
         }
@@ -272,7 +274,8 @@ pub(crate) fn local_fanout_part(
         }
         RequestBody::AgentItemBody { .. }
         | RequestBody::PruneWorktrees { ids: None, .. }
-        | RequestBody::AgentThreadList => Some(body.clone()),
+        | RequestBody::AgentThreadList
+        | RequestBody::AgentSeenCursors => Some(body.clone()),
         RequestBody::AgentThreadCreate { .. }
         | RequestBody::AgentThreadOpen { .. }
         | RequestBody::AgentCheckpoints { .. }

@@ -160,6 +160,7 @@ impl AppState {
                 self.seed_agent_activity(&snapshot, now);
                 self.apply_snapshot(*snapshot, now);
             }
+            BridgeEvent::AgentSeenCursors(cursors) => self.agents.seed_seen(&cursors),
             BridgeEvent::ConnectFailed {
                 message,
                 log_tail,
@@ -233,9 +234,7 @@ impl AppState {
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
             BridgeEvent::Agent { thread, event } => {
-                if let Some(stale) = self.apply_agent_event(thread, &event) {
-                    self.agents.mark_resync(stale);
-                }
+                self.apply_agent_event(thread, &event);
                 self.notify_agent_attention(now);
             }
             BridgeEvent::AgentSummary(summary) => self.apply_agent_summary(summary, now),
@@ -287,9 +286,7 @@ impl AppState {
                 now,
             ),
             Event::Agent { thread, event } => {
-                if let Some(stale) = self.apply_agent_event(thread, &event) {
-                    self.agents.mark_resync(stale);
-                }
+                self.apply_agent_event(thread, &event);
                 self.notify_agent_attention(now);
             }
             Event::AgentSummary(summary) => self.apply_agent_summary(summary, now),
