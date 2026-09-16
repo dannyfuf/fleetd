@@ -20,6 +20,7 @@ key enter
 
 await agents.threads[0].pending_gate == permission 30000
 assert key_contexts[2] == AgentPermission
+await agents.threads[0].decision.has_diff == true 30000
 shot approval
 
 # The assertion this file exists for.

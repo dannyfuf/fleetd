@@ -16,8 +16,7 @@ type apply the README fix
 
 key ctrl-s e
 key enter
-wait 500
-assert agents.threads[0].state == idle && agents.threads[0].pending_gate absent
+await agents.threads[0].state == idle && agents.threads[0].pending_gate absent 30000
 dump effort-menu-kept-the-draft
 
 key enter

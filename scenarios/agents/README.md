@@ -45,6 +45,12 @@ These assertions close regressions found while building the corpus:
   before a terminal model exists and verifies that focus returns to the Hub.
 - **Answered Codex turns settle against the caller's turn id.** Both approval scenarios wait
   for idle and assert that no sticky error remains after the answer.
+- **A Codex approval waits for its prepared item join.** The gate can make attention observable
+  one frame before the thread view prepares the named file-change item; the scenario waits for
+  `decision.has_diff` before capturing or asserting the joined path.
+- **Effort selection waits for the selected thread to be seen.** The model catalogue can advance
+  attention while the composer remains selected, so the scenario awaits the resulting monotonic
+  seen cursor instead of sleeping and sampling a transient `unread` state.
 - **Queued printable keys retain text semantics.** `scroll-wheel.scenario` sends a second turn
   immediately after the first settles, then exercises wheel input in both directions.
 - **A target is read with a quoted path step.** Target names carry `.` and `[]`, so a bare
