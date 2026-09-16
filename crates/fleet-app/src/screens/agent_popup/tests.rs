@@ -4,6 +4,7 @@ use super::{
     terminal::{copy_reaches_pty, end_mouse_drag, popup_mouse_cell_at},
 };
 use crate::terminal::{AbsoluteCellPoint, AbsoluteCellSelection, SelectionGranularity};
+use gpui::{Context, Render, Subscription, Window};
 
 #[test]
 fn creation_input_survives_terminal_discovery_for_the_same_owner() {
@@ -189,4 +190,81 @@ fn header_tones_cover_all_agent_states() {
     let mut unreachable = model_with(AgentTerminalState::Running, AgentActivity::Idle);
     unreachable.reachable = false;
     assert_eq!(header_status_tone(&unreachable), Tone::Danger);
+}
+
+struct AttachingPopupFixture {
+    popup: AgentPopup,
+    state: Entity<AppState>,
+    focus: FocusHandle,
+    _subscription: Subscription,
+}
+
+impl Render for AttachingPopupFixture {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
+        let width = px(f32::from(viewport.width) * CARD_WIDTH_FRACTION);
+        let height = px(f32::from(viewport.height) * CARD_HEIGHT_FRACTION);
+        let top = px(f32::from(viewport.height) * (1.0 - CARD_HEIGHT_FRACTION) / 2.0);
+        let mut popup =
+            self.popup
+                .render_attaching(&self.state, &self.focus, width, height, top, cx);
+        for context in self.state.read(cx).context_chain().into_iter().rev() {
+            popup = div().key_context(context).child(popup).into_any_element();
+        }
+        popup
+    }
+}
+
+#[gpui::test]
+fn attaching_popups_for_both_providers_can_be_hidden_with_ctrl_s_q(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(fleet_ui_kit::Theme::dark());
+        crate::keymap::init(cx);
+    });
+    let state = cx.new(|_| {
+        let mut app = AppState::new("/tmp/fleet-agent-popup-focus", Instant::now());
+        app.daemon = crate::state::DaemonLink::Connected;
+        app.toggle_agent_popup(Agent::Claude, None);
+        app
+    });
+    let fixture_state = state.clone();
+    let (fixture, visual) = cx.add_window_view(move |window, cx| {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let subscription = cx.observe_in(
+            &fixture_state,
+            window,
+            |view: &mut AttachingPopupFixture, state, window, cx| {
+                if state.read(cx).agent_popup.is_some() {
+                    view.focus.focus(window, cx);
+                }
+                cx.notify();
+            },
+        );
+        AttachingPopupFixture {
+            popup: AgentPopup::new(cx),
+            state: fixture_state,
+            focus,
+            _subscription: subscription,
+        }
+    });
+
+    for provider in [Agent::Claude, Agent::Codex] {
+        visual.update(|window, cx| {
+            fixture.update(cx, |view, cx| {
+                view.state.update(cx, |app, cx| {
+                    if app.agent_popup.is_none() {
+                        app.toggle_agent_popup(provider, None);
+                        cx.notify();
+                    }
+                });
+                view.focus.focus(window, cx);
+            });
+        });
+        visual.run_until_parked();
+        visual.simulate_keystrokes("ctrl-s");
+        visual.run_until_parked();
+        visual.simulate_keystrokes("q");
+        visual.update(|_, cx| assert!(state.read(cx).agent_popup.is_none()));
+    }
 }

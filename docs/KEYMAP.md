@@ -202,6 +202,8 @@ not modal Workspace commands.
 The popup uses `Agent > Terminal`, `Agent > Prefix`, and `Agent > Scroll`. In Terminal mode every
 unlisted key goes to the agent PTY. Mouse selection, wheel routing, and Scroll mode match a
 Workspace terminal; direct viewport keystrokes remain PTY input unless Scroll mode is entered.
+While the daemon is still ensuring the popup session, the same tracked card shows `attaching…`:
+`ctrl-s`, `ctrl-q`, `ctrl-s q`, and the `ctrl-s a` / `ctrl-s A` switch-or-hide actions remain live.
 
 | Key | Action |
 | --- | --- |
@@ -233,6 +235,10 @@ exit keys as Workspace Scroll mode.
 A native agent tab is drawn by Fleet, so keys reach its composer rather than a PTY, and the
 status bar reads `AGENT`. The context is chosen by what the thread is doing: an open decision
 card shadows everything else, and the focused transcript row is last.
+
+Creating a thread or selecting an existing agent tab with `ctrl-s 1`–`9` focuses its composer
+after the tab's first mounted frame. That request is one-shot: selecting a thread already in
+scroll mode or owned by a decision card preserves that mode's keyboard owner instead.
 
 | Context | Key | Action |
 | --- | --- | --- |

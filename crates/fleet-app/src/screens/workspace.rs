@@ -47,7 +47,7 @@ use fleet_ui_kit::{
     SplitLayout, StatusKind, TerminalMode as KitTerminalMode, TerminalTabStrip, Text,
 };
 use gpui::{
-    AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, KeyDownEvent, MouseButton,
+    AnyElement, App, ClipboardItem, Div, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, ScrollWheelEvent, SharedString, Size, Subscription,
     Task, UniformListScrollHandle, Window, div, prelude::*, px,
 };

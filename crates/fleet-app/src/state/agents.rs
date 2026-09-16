@@ -70,6 +70,10 @@ pub struct AgentThreads {
     /// §12 puts row focus **inside** scroll mode, which is what finally makes `⏎`/`u`/`o`/`y`/`d`
     /// fire: the `AgentRow` context is only ever on the chain under `AgentNativeScroll`.
     row_focus: HashSet<ThreadId>,
+    /// The one agent tab whose composer must take focus after its next mounted frame.
+    focus_composer: Option<ThreadId>,
+    /// The active thread whose mounted composer most recently proved it held focus.
+    composer_focused: Option<ThreadId>,
 }
 
 impl AgentThreads {
@@ -181,11 +185,53 @@ impl AgentThreads {
     /// Selects an agent tab, replacing whichever one that worktree showed.
     pub fn activate(&mut self, worktree: WorktreeId, thread: ThreadId) {
         self.active.insert(worktree, thread);
+        self.focus_composer = Some(thread);
+        self.composer_focused = None;
     }
 
     /// Returns to the terminal tabs of a worktree.
     pub fn deactivate(&mut self, worktree: &WorktreeId) -> bool {
-        self.active.remove(worktree).is_some()
+        let Some(thread) = self.active.remove(worktree) else {
+            return false;
+        };
+        if self.focus_composer == Some(thread) {
+            self.focus_composer = None;
+        }
+        if self.composer_focused == Some(thread) {
+            self.composer_focused = None;
+        }
+        true
+    }
+
+    /// Consumes the one-shot focus request for `thread`.
+    pub fn take_composer_focus(&mut self, thread: ThreadId) -> bool {
+        if self.focus_composer != Some(thread) {
+            return false;
+        }
+        self.focus_composer = None;
+        true
+    }
+
+    /// Records whether the mounted composer actually owns a descendant focus handle.
+    pub fn set_composer_focused(&mut self, thread: ThreadId, focused: bool) -> bool {
+        let next = if focused {
+            Some(thread)
+        } else if self.composer_focused == Some(thread) {
+            None
+        } else {
+            return false;
+        };
+        if self.composer_focused == next {
+            return false;
+        }
+        self.composer_focused = next;
+        true
+    }
+
+    /// Whether the mounted composer of `thread` most recently proved it held focus.
+    #[must_use]
+    pub fn composer_is_focused(&self, thread: ThreadId) -> bool {
+        self.composer_focused == Some(thread)
     }
 
     /// Records whether the composer, rather than the open card, owns the bare letters.
@@ -497,6 +543,18 @@ impl AgentThreads {
             .retain(|thread, _| live.contains(thread));
         self.reported.retain(|thread, _| live.contains(thread));
         self.active.retain(|_, thread| live.contains(thread));
+        if self
+            .focus_composer
+            .is_some_and(|thread| !live.contains(&thread))
+        {
+            self.focus_composer = None;
+        }
+        if self
+            .composer_focused
+            .is_some_and(|thread| !live.contains(&thread))
+        {
+            self.composer_focused = None;
+        }
     }
 
     /// The threads that just entered an attention worth a notification, and their tab labels.

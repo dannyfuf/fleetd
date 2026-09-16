@@ -118,7 +118,8 @@ Rules that come with those signatures:
 1. **The returned root element must call `.track_focus(focus)`.** That is what puts your
    `on_action` listeners on the key-dispatch path: gpui dispatches an action from the focused
    node upwards, so a listener *below* the focus node never fires. The shell focuses the handle
-   it passed you and never touches focus again.
+   it passed you and never touches focus again, except that a native agent tab consumes one
+   activation intent after its composer has appeared in a painted frame.
 2. **Read and write `AppState` through the entity.** `state.read(cx)` for reads,
    `state.update(cx, |state, cx| { …; cx.notify(); })` for writes. The shell observes the
    entity, so a `cx.notify()` inside that closure repaints the whole frame.
@@ -217,6 +218,18 @@ is bound, listed in Help and handled by the workspace (`ExpandRow`, `Revert`, `O
 act on the newest expandable item), but nothing calls `TranscriptList::focus_row` yet, so no
 chain contains that word and those three keys cannot fire — row focus is the follow-up in
 `NATIVE-AGENTS.md` §10.
+
+Agent-tab activation records one composer-focus intent in `AgentThreads`. The Workspace consumes
+it once and uses `Window::on_next_frame` so a newly constructed `AgentThreadView` has mounted its
+input before `focus_composer` runs. Re-selecting an existing tab follows the same path; scroll mode
+and a decision-owned keyboard veto the request. Already-mounted tabs may restore their composer
+immediately after a popup or overlay releases focus, but ordinary synchronization never schedules
+another deferred focus, so transcript reading is not pulled back to the composer.
+
+The floating popup mounts its focus-tracked overlay shell before `Model::build` can resolve a
+daemon session. The attaching shell keeps the `Agent > Terminal` / `Agent > Prefix` action path
+live, including hide and provider switching, while drawing `attaching…`; model readiness changes
+the content of that shell, not whether the keyboard can reach it.
 
 Every focus-owner generation change also dirties the window. gpui synchronously draws a dirty
 window before dispatching keyboard input, so the new context/focus tree is normally already live

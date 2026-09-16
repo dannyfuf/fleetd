@@ -249,6 +249,7 @@ impl WorkspaceScreen {
             let view = cx.new(|cx| AgentThreadView::new(projection, cx));
             let mut subscriptions = Vec::new();
             subscriptions.push(observe_view_state(&view, thread, state, cx));
+            subscriptions.extend(observe_composer_focus(&view, thread, state, window, cx));
             let (relay_bridge, relay_state) = (bridge.clone(), state.clone());
             subscriptions.push(cx.subscribe(&view, move |view, event, cx| match event {
                 AgentThreadEvent::Command(command) => relay_bridge.send_agent(command.clone()),
@@ -329,7 +330,20 @@ impl WorkspaceScreen {
         if model.overlay_open {
             return;
         }
-        view.update(cx, |view, cx| view.focus_composer(window, cx));
+        let requested = state.update(cx, |app, _| app.agents.take_composer_focus(thread));
+        if requested {
+            focus_composer_after_mount(view.clone(), thread, state.clone(), window);
+        } else if known && agent_tab_may_take_focus(state.read(cx), thread) {
+            // An already-mounted tab restores its descendant after a popup or overlay releases
+            // the keyboard. This is deliberately immediate: only activation gets the one-frame
+            // defer needed to mount a newly constructed composer.
+            let handle = view.read(cx).focus_handle(cx);
+            if !handle.contains_focused(window, cx) {
+                let (scrolling, decision) = agent_tab_focus_mode(state.read(cx), thread);
+                focus_agent_tab(&view, scrolling, decision, window, cx);
+                record_composer_focus(&view, thread, state, window, cx);
+            }
+        }
         relay_view_state(&view, thread, state, cx);
         mark_seen(bridge, state, view.read(cx).last_seq(), thread, cx);
     }
@@ -661,6 +675,109 @@ impl WorkspaceScreen {
             open_terminal_fallback(&fallback_state, provider, worktree, cx);
         })
     }
+}
+
+/// Defers one activation request until the frame that mounts the composer has been painted.
+fn focus_composer_after_mount(
+    view: Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: Entity<AppState>,
+    window: &Window,
+) {
+    window.on_next_frame(move |window, cx| {
+        if !agent_tab_may_take_focus(state.read(cx), thread) {
+            state.update(cx, |app, cx| {
+                if app.agents.set_composer_focused(thread, false) {
+                    cx.notify();
+                }
+            });
+            return;
+        }
+        let (scrolling, decision) = agent_tab_focus_mode(state.read(cx), thread);
+        focus_agent_tab(&view, scrolling, decision, window, cx);
+        record_composer_focus(&view, thread, &state, window, cx);
+    });
+}
+
+/// Whether the requested agent tab is still the topmost keyboard surface.
+fn agent_tab_may_take_focus(app: &AppState, thread: ThreadId) -> bool {
+    app.overlay.is_none() && app.agent_popup.is_none() && app.active_agent_thread() == Some(thread)
+}
+
+/// Focuses the selected tab's mode owner.
+fn focus_agent_tab(
+    view: &Entity<AgentThreadView>,
+    scrolling: bool,
+    decision: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if scrolling {
+        let transcript = view.read(cx).transcript().clone();
+        let focus = transcript.read(cx).focus_handle().clone();
+        focus.focus(window, cx);
+        return;
+    }
+    if decision {
+        let focus = view.read(cx).focus_handle(cx);
+        focus.focus(window, cx);
+        return;
+    }
+    view.update(cx, |view, cx| view.focus_composer(window, cx));
+}
+
+fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
+    (
+        app.agents.is_scrolling(thread),
+        app.agent_context_chain()
+            .is_some_and(|chain| chain.contains(&"AgentDecision")),
+    )
+}
+
+/// Mirrors the mounted focus tree into the harness-only vocabulary.
+fn record_composer_focus(
+    view: &Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    window: &Window,
+    cx: &mut App,
+) {
+    let input = view.read(cx).input().clone();
+    let focused = input.read(cx).focus_handle().is_focused(window);
+    state.update(cx, |app, cx| {
+        if app.agents.set_composer_focused(thread, focused) {
+            cx.notify();
+        }
+    });
+}
+
+/// Mirrors exact composer focus for the harness for as long as this tab remains mounted.
+fn observe_composer_focus(
+    view: &Entity<AgentThreadView>,
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) -> [Subscription; 2] {
+    let input = view.read(cx).input().clone();
+    let focus = input.read(cx).focus_handle().clone();
+    let focused_state = state.clone();
+    let focused = window.on_focus_in(&focus, cx, move |_, cx| {
+        focused_state.update(cx, |app, cx| {
+            if app.agents.set_composer_focused(thread, true) {
+                cx.notify();
+            }
+        });
+    });
+    let blurred_state = state.clone();
+    let blurred = window.on_focus_out(&focus, cx, move |_, _, cx| {
+        blurred_state.update(cx, |app, cx| {
+            if app.agents.set_composer_focused(thread, false) {
+                cx.notify();
+            }
+        });
+    });
+    [focused, blurred]
 }
 
 /// Mirrors one thread view's `AppState`-visible state, notifying only when it actually moved.

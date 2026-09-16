@@ -1,6 +1,7 @@
 use std::cell::Cell;
 
 use gpui::AppContext as _;
+use gpui::{Context, Render, Window, div};
 
 use super::*;
 
@@ -119,5 +120,96 @@ fn a_created_thread_activates_its_owning_worktree_after_navigation(cx: &mut gpui
         assert_eq!(app.agents.active(&worktree), Some(thread));
         assert_eq!(app.agents.of_worktree(&worktree).len(), 1);
         assert!(app.sticky_error.is_none());
+    });
+}
+
+struct ComposerFocusFixture;
+
+impl Render for ComposerFocusFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full()
+    }
+}
+
+#[gpui::test]
+fn an_activated_thread_focuses_its_mounted_composer_on_the_next_frame(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let worktree: WorktreeId = "fleet/app#composer-focus"
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
+    let session_id = SessionId::try_from("fleet/composer-focus")
+        .unwrap_or_else(|error| panic!("invalid test session: {error}"));
+    let projection = ThreadProjection::new(ThreadId::new(), worktree.clone(), AgentKind::Claude);
+    let thread = projection.thread;
+    let state = cx.new(|_| {
+        let mut app = AppState::new("/tmp/fleet-agent-focus", Instant::now());
+        app.screen = Screen::Workspace {
+            session: session_id.clone(),
+        };
+        app.snapshot = Some(fleet_proto::snapshot::Snapshot {
+            boards: Vec::new(),
+            generated_at: String::new(),
+            revision: None,
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: Vec::new(),
+            active_context: None,
+            sessions: vec![Session {
+                id: session_id,
+                host: None,
+                kind: SessionKind::Worktree(worktree.clone()),
+                cwd: "/tmp".to_owned(),
+                terminals: Vec::new(),
+                active_terminal: None,
+                slept_at: None,
+                kept_terminals: Vec::new(),
+            }],
+            agent_threads: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: fleet_proto::snapshot::DaemonInfo {
+                version: "test".to_owned(),
+                pid: 1,
+                started_at: String::new(),
+                home: "/tmp/fleet-agent-focus".to_owned(),
+            },
+        });
+        app.agents
+            .apply_summary(projection.summary(fleet_core::agents::Seq::default()));
+        app.agents.activate(worktree, thread);
+        app
+    });
+    let view = cx.new(|cx| AgentThreadView::new(projection, cx));
+    let scheduled_view = view.clone();
+    let scheduled_state = state.clone();
+    let window = cx.add_window(move |window, cx| {
+        assert!(scheduled_state.update(cx, |app, _| { app.agents.take_composer_focus(thread) }));
+        focus_composer_after_mount(scheduled_view.clone(), thread, scheduled_state, window);
+        ComposerFocusFixture
+    });
+
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.draw(
+        gpui::Point::default(),
+        gpui::size(px(800.0), px(600.0)),
+        |_, _| div().size_full().child(view.clone()),
+    );
+    visual.update(|window, cx| assert!(window.simulate_next_frame(cx) >= 1));
+
+    visual.update(|window, cx| {
+        let input = view.read(cx).input().clone();
+        assert!(
+            input.read(cx).focus_handle().is_focused(window),
+            "the mounted composer input must hold the exact focused handle"
+        );
+        assert_eq!(
+            state.read(cx).harness_snapshot().focused.as_deref(),
+            Some("agents.composer")
+        );
     });
 }

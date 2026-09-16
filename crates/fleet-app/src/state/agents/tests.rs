@@ -169,6 +169,7 @@ fn an_open_gate_routes_the_keyboard_to_its_decision_context() {
         id: GateId::new(),
         turn: None,
         kind: GateKind::Permission {
+            item: None,
             tool: ToolKind::Bash,
             title: "run a command".to_owned(),
             payload: "ls".to_owned(),
