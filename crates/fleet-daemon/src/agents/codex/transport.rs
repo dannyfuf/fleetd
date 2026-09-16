@@ -21,7 +21,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use fleet_core::agents::AgentEvent;
@@ -44,8 +44,15 @@ use super::{
 use crate::agents::harness::{
     HarnessError, HarnessEvent, HarnessResult, HarnessSink, RawRef,
     ndjson::{Line, LineSplitter},
-    process::{self, PeerStreams},
+    process::{self, PeerStreams, StderrTail},
 };
+
+/// How long a failed startup waits for the stderr classifier to reach EOF before quoting the tail.
+///
+/// Only on the failure path, and only until the classifier says it is done: the child is already
+/// gone, so this is the time it takes one task to be polled, not a deadline anything normal waits
+/// on.
+const STDERR_SETTLE: Duration = Duration::from_millis(250);
 
 /// The reader's hard cap. Messages can legitimately be multi-megabyte — a 4 MiB
 /// `turn/diff/updated` is a real upstream test case — so the cap is high, and exceeding it is a
@@ -144,6 +151,10 @@ pub(super) struct Transport {
     expected_stop: Arc<AtomicBool>,
     reader: JoinHandle<()>,
     stderr: Option<JoinHandle<()>>,
+    /// The child's own last words, kept for a startup failure to quote.
+    stderr_tail: StderrTail,
+    /// Whether the stderr classifier has reached EOF, so the tail is final.
+    stderr_done: Arc<AtomicBool>,
 }
 
 impl Transport {
@@ -187,7 +198,16 @@ impl Transport {
         // stderr is drained from the moment of spawn or Codex blocks on a full pipe: there is an
         // upstream regression test for exactly this — 512 KiB of stderr before the `initialize`
         // response must not deadlock.
-        let stderr = stderr.map(|stderr| tokio::spawn(classify_stderr(stderr, events)));
+        let stderr_tail = StderrTail::default();
+        let stderr_done = Arc::new(AtomicBool::new(false));
+        let stderr = stderr.map(|stderr| {
+            tokio::spawn(classify_stderr(
+                stderr,
+                events,
+                stderr_tail.clone(),
+                Arc::clone(&stderr_done),
+            ))
+        });
         Self {
             writer,
             shared,
@@ -195,6 +215,8 @@ impl Transport {
             expected_stop,
             reader,
             stderr,
+            stderr_tail,
+            stderr_done,
         }
     }
 
@@ -247,11 +269,52 @@ impl Transport {
 
     /// Whether the child is still running.
     pub(super) async fn is_alive(&self) -> bool {
+        matches!(self.reaped().await, Liveness::Alive)
+    }
+
+    /// The exit code of a child that has already exited.
+    pub(super) async fn exit_code(&self) -> Option<i32> {
+        match self.reaped().await {
+            Liveness::Exited(code) => code,
+            Liveness::Alive | Liveness::Gone => None,
+        }
+    }
+
+    /// Reaps the child without blocking, logging a `try_wait` that failed outright.
+    async fn reaped(&self) -> Liveness {
         let mut child = self.child.lock().await;
         match child.as_mut() {
-            Some(process) => matches!(process.try_wait(), Ok(None)),
-            None => false,
+            Some(process) => match process.try_wait() {
+                Ok(Some(status)) => Liveness::Exited(process::exit_code(&status)),
+                Ok(None) => Liveness::Alive,
+                Err(error) => {
+                    // An unreapable child is a leaked process; silence here is what made it
+                    // invisible.
+                    tracing::warn!(
+                        target: "fleet::agents::codex",
+                        %error,
+                        "could not read the Codex child's exit status"
+                    );
+                    Liveness::Gone
+                }
+            },
+            None => Liveness::Gone,
         }
+    }
+
+    /// The child's stderr tail, once the classifier has reached EOF or the grace has passed.
+    ///
+    /// Read from a shared buffer rather than by joining the classifier task, so `Drop` aborting
+    /// that task cannot take the child's own explanation with it.
+    ///
+    /// Only the startup-failure path reads it, and it is the same text `classify_stderr` already
+    /// logs: a child that died before its first turn has no transcript to leak.
+    pub(super) async fn stderr_tail(&self) -> Option<String> {
+        let deadline = Instant::now() + STDERR_SETTLE;
+        while !self.stderr_done.load(Ordering::Acquire) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.stderr_tail.text()
     }
 
     /// The serialized writer, for answering a server request the adapter owns.
@@ -330,6 +393,17 @@ impl Drop for Transport {
     }
 }
 
+/// What a non-blocking reap found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    /// The child is still running.
+    Alive,
+    /// The child exited, with this code when one was readable.
+    Exited(Option<i32>),
+    /// There is no child, or its status can no longer be read.
+    Gone,
+}
+
 /// A label for a timeout, without allocating per call.
 fn method_label(method: &str) -> &'static str {
     match method {
@@ -382,7 +456,16 @@ async fn read_loop(
             Some(process) => match process.try_wait() {
                 Ok(Some(status)) => process::exit_code(&status),
                 Ok(None) => process::terminate(process, process::TERMINATE_GRACE).await,
-                Err(_) => None,
+                Err(error) => {
+                    // The child is unreapable, so its exit code is lost; without this line so is
+                    // the fact that one is still out there holding the worktree.
+                    tracing::warn!(
+                        target: "fleet::agents::codex",
+                        %error,
+                        "could not read the Codex child's exit status after stdout EOF"
+                    );
+                    None
+                }
             },
             None => None,
         }
@@ -717,6 +800,8 @@ async fn write_loop(
 async fn classify_stderr(
     stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     events: HarnessSink,
+    tail: StderrTail,
+    done: Arc<AtomicBool>,
 ) {
     use tokio::io::AsyncBufReadExt as _;
 
@@ -732,6 +817,9 @@ async fn classify_stderr(
         if line.trim().is_empty() {
             continue;
         }
+        // The tail keeps the line **before** classification: a binary that is not Codex prints
+        // an unstructured usage error, and classification exists to quiet a running server.
+        tail.push(&line);
         let (level, message) = match structured
             .as_ref()
             .ok()
@@ -769,6 +857,7 @@ async fn classify_stderr(
         tracing::warn!(target: "fleet::agents::codex", "{message}");
         emit(&events, AgentEvent::Notice(message), Some("stderr"));
     }
+    done.store(true, Ordering::Release);
 }
 
 /// Removes ANSI SGR sequences.

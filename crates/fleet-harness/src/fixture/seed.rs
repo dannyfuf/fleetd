@@ -100,7 +100,9 @@ async fn write_everything(
 /// The prepared-copy pool is switched off rather than left at its default of one: a pool that
 /// builds and refreshes in the background would put jobs, worktree directories and timing
 /// into a run that never asked for them, and a scenario that wants pool behaviour can turn it
-/// back on. `agentCommands` points at the shims `super::tools` wrote.
+/// back on. `agentCommands` **and** `agentBinaries` point at the shims `super::tools` wrote: the
+/// first is the PTY pane's shell line, the second is what the daemon `execve`s for a native
+/// thread, and a scenario that exercises native threads needs the second.
 async fn configure(
     client: &Client,
     fixture: &Fixture,
@@ -123,6 +125,10 @@ async fn configure(
         if let Some(object) = patch.as_object_mut() {
             object.insert(
                 "agentCommands".to_owned(),
+                serde_json::Value::Object(commands.clone()),
+            );
+            object.insert(
+                "agentBinaries".to_owned(),
                 serde_json::Value::Object(commands),
             );
         }

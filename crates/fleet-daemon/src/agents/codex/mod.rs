@@ -274,8 +274,16 @@ impl Harness for CodexHarness {
             // precisely than the deadline does.
             Err(error @ HarnessError::Timeout { .. }) => {
                 if !transport.is_alive().await {
+                    // Its exit code and its own last words, read before the transport (and with
+                    // it the stderr classifier) is dropped.
+                    let code = transport.exit_code().await;
+                    let tail = transport.stderr_tail().await;
                     return Err(HarnessError::Unavailable {
-                        reason: "Codex is installed but exited during startup.".to_owned(),
+                        reason: format!(
+                            "{}: {}.",
+                            AgentKind::Codex.display_name(),
+                            process::startup_failure(&self.config.command, code, tail.as_deref())
+                        ),
                     });
                 }
                 return Err(HarnessError::Handshake {

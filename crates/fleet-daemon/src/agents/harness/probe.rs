@@ -1,14 +1,20 @@
 //! Pre-spawn capability probe and its cache.
 //!
 //! Two facts shape this module (spec A.6.1). A probe **runs a binary**, so it is cached per
-//! `(binary, home, cwd)` with a 5-minute TTL — an agent tab that re-probes on every keystroke is
-//! a fork bomb with a spinner. And a probe **must not** make an API request, persist a session,
-//! run hooks or start an IDE-discovery process tree, which is why the environment it uses is not
-//! the environment a session uses.
+//! `(kind, command, home)` with a 5-minute TTL — an agent tab that re-probes on every keystroke
+//! is a fork bomb with a spinner. The key is the **whole configured command line**, so correcting
+//! `agentBinaries` is a cache miss and takes effect on the next create. And a probe **must not**
+//! make an API request, persist a session, run hooks or start an IDE-discovery process tree,
+//! which is why the environment it uses is not the environment a session uses.
 //!
-//! What a probe can learn is deliberately small: the parsed version and, for Claude, nothing
-//! else — its real capability list arrives on `system/init` and Codex declares nothing at all.
-//! Everything richer is a behaviour probe at handshake time, where it costs nothing extra.
+//! What a probe can learn is deliberately small: that the binary **is** the harness it claims to
+//! be, and its parsed version. Nothing else — Claude's real capability list arrives on
+//! `system/init` and Codex declares nothing at all. Everything richer is a behaviour probe at
+//! handshake time, where it costs nothing extra.
+//!
+//! The identity check is not a formality. `agentBinaries.claude = "cc"` resolves to the C
+//! compiler on most machines, whose `--version` line carries a semver far above any floor Fleet
+//! could set; gated on version alone, gcc is accepted as "Claude Code 16.2.1".
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -175,11 +181,27 @@ async fn probe_binary(kind: HarnessKind, cfg: HarnessConfig) -> HarnessResult<Pr
         HarnessKind::Claude => CLAUDE_PROBE_BUDGET,
         HarnessKind::Codex => CODEX_PROBE_BUDGET,
     };
+    let (program, _) = process::command_parts(&cfg.command)?;
+    let resolved = process::resolve_program(program, &environment);
     let reported = process::read_version(kind, &cfg.command, &cwd, &environment, budget).await?;
+    let first_line = process::first_line(&reported);
+    // Identity before semver, because a wrong binary usually prints a perfectly good version.
+    // `cc` is a C compiler on most machines and answers `cc (GCC) 16.2.1`, whose first semver
+    // token clears every floor Fleet could set — so the floor is not the gate, the name is.
+    if !identifies(kind, &reported) {
+        let product = product_name(kind);
+        return Err(HarnessError::Unavailable {
+            reason: match &first_line {
+                Some(line) => format!("`{}` is not {product}: `{line}`.", cfg.command),
+                None => format!("`{}` is not {product}: it printed nothing.", cfg.command),
+            },
+        });
+    }
     let version = parse_version(&reported).ok_or_else(|| HarnessError::Unavailable {
         reason: format!(
-            "{} is installed but did not report a version Fleet understands.",
-            kind.display_name()
+            "`{}` did not report a version Fleet understands: `{}`.",
+            cfg.command,
+            first_line.as_deref().unwrap_or("")
         ),
     })?;
     // Claude's real capability gate is `system/init.capabilities` (§4.5). This floor exists only
@@ -193,9 +215,13 @@ async fn probe_binary(kind: HarnessKind, cfg: HarnessConfig) -> HarnessResult<Pr
             ),
         });
     }
-    tracing::debug!(
+    // `info`, not `debug`: which binary a thread is about to run is lifecycle, and it is the one
+    // line that tells a user whose `agentBinaries` entry is wrong what Fleet actually resolved.
+    tracing::info!(
         target: "fleet::agents",
         harness = %kind.display_name(),
+        command = %cfg.command,
+        path = %resolved.to_string_lossy(),
         %version,
         "probed an agent harness"
     );
@@ -229,6 +255,27 @@ pub const fn strip_list(kind: HarnessKind) -> &'static [&'static str] {
     }
 }
 
+/// Whether a `--version` line identifies this harness.
+///
+/// `claude --version` answers `2.1.266 (Claude Code)` and `codex --version` answers
+/// `codex-cli 0.147.0`. Anything else is a different program, however well its output parses.
+#[must_use]
+fn identifies(kind: HarnessKind, reported: &str) -> bool {
+    match kind {
+        HarnessKind::Claude => reported.contains("Claude Code"),
+        HarnessKind::Codex => reported.to_ascii_lowercase().contains("codex"),
+    }
+}
+
+/// The product name a refusal uses, which is not always the short UI name.
+#[must_use]
+const fn product_name(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::Claude => "Claude Code",
+        HarnessKind::Codex => "Codex",
+    }
+}
+
 /// Parses the semver out of a harness's own version line.
 ///
 /// `claude --version` answers `2.1.266 (Claude Code)` and `codex --version` answers
@@ -245,9 +292,91 @@ pub fn parse_version(reported: &str) -> Option<Version> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
+
+    /// A `/bin/sh` script that answers `--version` with `line` and nothing else.
+    ///
+    /// The absolute path is the configured command, which is how a real `agentBinaries` entry
+    /// pointing at a wrapper behaves, and it keeps the test off the developer's `PATH`.
+    fn fake_binary(directory: &Path, name: &str, line: &str) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = directory.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' {line}\n"))
+            .unwrap_or_else(|error| panic!("write {name}: {error}"));
+        let mut permissions = std::fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("stat {name}: {error}"))
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions)
+            .unwrap_or_else(|error| panic!("chmod {name}: {error}"));
+        path.to_string_lossy().into_owned()
+    }
+
+    fn config(command: &str) -> HarnessConfig {
+        HarnessConfig {
+            command: command.to_owned(),
+            ..HarnessConfig::default()
+        }
+    }
+
+    /// `cc` is a C compiler on most machines and its version line clears every semver floor
+    /// Fleet could set, so the probe has to refuse it by **name** — and say which command it was.
+    #[tokio::test]
+    async fn a_binary_that_is_not_the_harness_is_refused_by_name() {
+        let directory =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("probe fixture dir: {error}"));
+        let command = fake_binary(directory.path(), "cc", "'cc (GCC) 16.2.1 20260810'");
+        let reason = ProbeCache::new()
+            .probe(HarnessKind::Claude, &config(&command))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("gcc must not be accepted as Claude Code"))
+            .to_string();
+        assert!(reason.contains(&command), "{reason}");
+        assert!(reason.contains("is not Claude Code"), "{reason}");
+        assert!(reason.contains("cc (GCC) 16.2.1 20260810"), "{reason}");
+    }
+
+    /// The same refusal for Codex, so neither harness is gated on semver alone.
+    #[tokio::test]
+    async fn a_binary_that_is_not_codex_is_refused_by_name() {
+        let directory =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("probe fixture dir: {error}"));
+        let command = fake_binary(directory.path(), "cc", "'cc (GCC) 16.2.1 20260810'");
+        let reason = ProbeCache::new()
+            .probe(HarnessKind::Codex, &config(&command))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("gcc must not be accepted as Codex"))
+            .to_string();
+        assert!(reason.contains("is not Codex"), "{reason}");
+    }
+
+    /// Both real version lines still pass, identity check and all.
+    #[tokio::test]
+    async fn the_real_version_lines_of_both_harnesses_are_accepted() {
+        let directory =
+            tempfile::tempdir().unwrap_or_else(|error| panic!("probe fixture dir: {error}"));
+        let claude = fake_binary(directory.path(), "claude", "'2.1.266 (Claude Code)'");
+        let probed = ProbeCache::new()
+            .probe(HarnessKind::Claude, &config(&claude))
+            .await
+            .unwrap_or_else(|error| panic!("a real Claude version line must pass: {error}"));
+        assert_eq!(probed.version, Version::new(2, 1, 266));
+
+        let codex = fake_binary(directory.path(), "codex", "'codex-cli 0.147.0'");
+        let probed = ProbeCache::new()
+            .probe(HarnessKind::Codex, &config(&codex))
+            .await
+            .unwrap_or_else(|error| panic!("a real Codex version line must pass: {error}"));
+        assert_eq!(probed.version, Version::new(0, 147, 0));
+    }
 
     fn probed(kind: HarnessKind) -> Probed {
         Probed {

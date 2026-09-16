@@ -249,7 +249,7 @@ impl AgentProvider for FakeProvider {
 fn factory(script: &Arc<FakeScript>) -> Arc<ProviderFactory> {
     let script = Arc::clone(script);
     Arc::new(
-        move |kind: AgentKind, _request: &StartRequest, _commands: &AgentCommands| {
+        move |kind: AgentKind, _request: &StartRequest, _binaries: &AgentBinaries| {
             if script.unavailable.load(Ordering::SeqCst) {
                 return Err(anyhow::Error::new(ProviderError::Unavailable {
                     reason: format!("the {} executable was not found", kind.executable()),
