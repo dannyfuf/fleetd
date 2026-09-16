@@ -1,6 +1,12 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
-use gpui::{Entity, EntityInputHandler, VisualTestContext, prelude::*};
+use gpui::{
+    ClipboardItem, Entity, EntityInputHandler, Modifiers, MouseButton, MouseDownEvent, ScrollDelta,
+    ScrollWheelEvent, VisualTestContext, point, prelude::*, px,
+};
 
 use super::{HISTORY_LIMIT, MultilineBuffer, MultilineInput, MultilineInputEvent, PromptHistory};
 
@@ -26,8 +32,18 @@ fn caret(buffer: &MultilineBuffer) -> usize {
 fn insert_keeps_newlines_and_normalises_the_rest() {
     let mut b = MultilineBuffer::new();
     b.insert("one\r\ntwo\rthree\tfour\u{7}");
-    assert_eq!(b.text(), "one\ntwo\nthree four");
+    assert_eq!(b.text(), "one\ntwo\nthree\tfour");
+    assert_eq!(b.shared_text(), "one\ntwo\nthree  four");
     assert_eq!(b.cursor(), b.text().len());
+}
+
+#[test]
+fn double_click_word_selection_uses_unicode_boundaries() {
+    let mut b = MultilineBuffer::from_text("alpha café, gamma");
+    assert!(b.select_word_at("alpha ca".len()));
+    assert_eq!(b.selected_text(), "café");
+    assert!(b.select_word_at("alpha café".len()));
+    assert_eq!(b.selected_text(), ",");
 }
 
 #[test]
@@ -331,6 +347,70 @@ fn composer(cx: &mut gpui::TestAppContext) -> (VisualTestContext, Composed) {
     (cx, (input, events))
 }
 
+struct ComposerHost {
+    input: Entity<MultilineInput>,
+    width: gpui::Pixels,
+    bubbled_wheels: Rc<Cell<usize>>,
+}
+
+impl Render for ComposerHost {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let bubbled_wheels = self.bubbled_wheels.clone();
+        gpui::div()
+            .size_full()
+            .on_scroll_wheel(move |_, _, _| bubbled_wheels.set(bubbled_wheels.get() + 1))
+            .child(gpui::div().w(self.width).child(self.input.clone()))
+    }
+}
+
+fn hosted_composer(
+    cx: &mut gpui::TestAppContext,
+    text: String,
+    width: gpui::Pixels,
+) -> (VisualTestContext, Entity<MultilineInput>, Rc<Cell<usize>>) {
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let bubbled_wheels = Rc::new(Cell::new(0));
+    let wheel_sink = bubbled_wheels.clone();
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            let input = cx.new(|cx| {
+                let mut input = MultilineInput::new(cx, "Message claude…".into());
+                input.set_text(text, cx);
+                input
+            });
+            cx.new(|_| ComposerHost {
+                input,
+                width,
+                bubbled_wheels: wheel_sink,
+            })
+        })
+        .expect("hosted composer window")
+    });
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let host = window.root(&mut visual).expect("composer host");
+    let input = host.read_with(&visual, |host, _| host.input.clone());
+    visual
+        .update(|window, cx| input.update(cx, |input, cx| window.focus(input.focus_handle(), cx)));
+    visual.run_until_parked();
+    (visual, input, bubbled_wheels)
+}
+
+#[track_caller]
+fn point_for_offset(input: &MultilineInput, offset: usize) -> gpui::Point<gpui::Pixels> {
+    let bounds = input.last_bounds.expect("composer bounds");
+    let local = input
+        .position_for_offset(offset)
+        .expect("offset has painted geometry");
+    point(
+        bounds.left() + local.x,
+        bounds.top() + local.y - input.scroll + input.line_height / 2.0,
+    )
+}
+
 /// The reported events with the per-keystroke [`MultilineInputEvent::Changed`] noise removed.
 ///
 /// A picker subscribes to `Changed`; a test about submit or escape cares about the intent.
@@ -369,6 +449,19 @@ fn a_blank_composer_neither_submits_nor_clears(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("enter");
     input.read_with(&cx, |input, _| assert_eq!(input.text(), "  "));
     assert!(intents(&events).is_empty());
+}
+
+#[gpui::test]
+fn paste_preserves_tabs_and_drops_other_controls(cx: &mut gpui::TestAppContext) {
+    let (mut cx, (input, _events)) = composer(cx);
+    cx.update(|_, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string("\tname\tvalue\u{7}".to_owned()))
+    });
+    cx.simulate_keystrokes("cmd-v");
+    input.read_with(&cx, |input, _| {
+        assert_eq!(input.text(), "\tname\tvalue");
+        assert_eq!(input.buffer().shared_text(), "  name  value");
+    });
 }
 
 #[gpui::test]
@@ -468,6 +561,149 @@ fn ime_composition_marks_and_commits_like_the_single_line_field(cx: &mut gpui::T
             assert!(input.buffer().marked_range().is_none());
         });
     });
+}
+
+#[gpui::test]
+fn enter_does_not_submit_an_open_ime_composition(cx: &mut gpui::TestAppContext) {
+    let (mut cx, (input, events)) = composer(cx);
+    cx.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(None, "漢", Some(1..1), window, cx);
+            assert!(input.is_composing());
+        });
+    });
+    cx.simulate_keystrokes("enter");
+    input.read_with(&cx, |input, _| {
+        assert_eq!(input.text(), "漢");
+        assert!(input.is_composing());
+    });
+    assert!(
+        intents(&events).is_empty(),
+        "an IME confirmation must not become a submit"
+    );
+}
+
+#[gpui::test]
+fn an_overlong_token_wraps_inside_the_composer(cx: &mut gpui::TestAppContext) {
+    let (visual, input, _) = hosted_composer(cx, "x".repeat(300), px(140.0));
+    input.read_with(&visual, |input, _| {
+        let bounds = input.last_bounds.expect("composer value bounds");
+        assert!(input.line_cache.visual_rows() > 1);
+        assert!(input.line_cache.max_width() <= bounds.size.width);
+    });
+}
+
+#[gpui::test]
+fn shaping_cache_invalidates_only_the_edited_logical_line(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _) = hosted_composer(cx, "first\nsecond\nthird".to_owned(), px(240.0));
+    visual.update(|_, cx| {
+        input.update(cx, |input, cx| {
+            input.line_cache.reset_probe();
+            input.set_text("first\nsecond!\nthird", cx)
+        });
+    });
+    visual.run_until_parked();
+    input.read_with(&visual, |input, _| {
+        let counts = input.line_cache.miss_counts();
+        assert!(counts.contains(&1), "the edited line was not reshaped");
+        assert!(
+            counts.iter().all(|misses| matches!(*misses, 0 | 1 | 3)),
+            "a stable-width pass reshaped an unchanged logical line: {counts:?}"
+        );
+    });
+}
+
+#[gpui::test]
+fn home_uses_the_visual_row_and_stale_layout_falls_back_to_logical_motion(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut visual, input, _) = hosted_composer(cx, "x".repeat(300), px(140.0));
+    visual.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.set_selected_text_range(150..150, window, cx)
+        });
+    });
+    visual.run_until_parked();
+    visual.simulate_keystrokes("home");
+    input.read_with(&visual, |input, _| {
+        assert!(input.buffer().cursor() > 0);
+        assert!(input.buffer().cursor() < 150);
+    });
+
+    visual.update(|_, cx| {
+        input.update(cx, |input, cx| {
+            input.set_text("a\nb", cx);
+            assert!(input.caret_up(cx));
+            assert_eq!(input.buffer().cursor(), 1);
+        });
+    });
+}
+
+#[gpui::test]
+fn modified_home_and_end_keep_logical_line_semantics(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _) = hosted_composer(cx, "x".repeat(300), px(140.0));
+    visual.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.set_selected_text_range(150..150, window, cx)
+        });
+    });
+    visual.run_until_parked();
+
+    visual.simulate_keystrokes("ctrl-home");
+    input.read_with(&visual, |input, _| assert_eq!(input.buffer().cursor(), 0));
+
+    visual.simulate_keystrokes("cmd-end");
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.buffer().cursor(), input.text().len())
+    });
+}
+
+#[gpui::test]
+fn pointer_drag_selects_and_double_click_selects_a_word(cx: &mut gpui::TestAppContext) {
+    let (mut visual, input, _) = hosted_composer(cx, "alpha beta".to_owned(), px(240.0));
+    let (start, end, beta) = input.read_with(&visual, |input, _| {
+        (
+            point_for_offset(input, 0),
+            point_for_offset(input, input.text().len()),
+            point_for_offset(input, "alpha be".len()),
+        )
+    });
+    visual.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.buffer().selected_text(), "alpha beta")
+    });
+
+    visual.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: beta,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.buffer().selected_text(), "beta")
+    });
+}
+
+#[gpui::test]
+fn wheel_scrolls_an_overflowing_draft_without_bubbling(cx: &mut gpui::TestAppContext) {
+    let text = (0..20)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (mut visual, input, bubbled_wheels) = hosted_composer(cx, text, px(240.0));
+    let center = input.read_with(&visual, |input, _| {
+        input.last_bounds.expect("composer bounds").center()
+    });
+    visual.simulate_event(ScrollWheelEvent {
+        position: center,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-80.0))),
+        ..Default::default()
+    });
+    input.read_with(&visual, |input, _| assert!(input.scroll > px(0.0)));
+    assert_eq!(bubbled_wheels.get(), 0);
 }
 
 #[gpui::test]

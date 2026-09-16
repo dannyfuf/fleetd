@@ -21,6 +21,7 @@
 mod buffer;
 mod element;
 mod input;
+mod platform;
 
 pub use buffer::{MultilineBuffer, PromptHistory, Trigger};
 pub use input::MultilineInput;

@@ -1,15 +1,15 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point,
-    SharedString, UTF16Selection, Window, WrappedLine, div, point, prelude::*,
+    App, Bounds, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, ScrollWheelEvent, SharedString, Window, div, point, prelude::*,
 };
 
 use super::{
     MULTILINE_INPUT_KEY_CONTEXT, MultilineBuffer, MultilineInputEvent, PromptHistory,
-    buffer::offset_from_utf16,
-    element::{MultilineInputElement, visual_rows},
+    buffer::{display_offset, source_offset},
+    element::{LineLayoutCache, MultilineInputElement},
 };
 
 use crate::{
@@ -47,16 +47,18 @@ pub struct MultilineInput {
     pub(super) focus_handle: FocusHandle,
     pub(super) placeholder: SharedString,
     pub(super) buffer: MultilineBuffer,
-    pub(super) display_text: SharedString,
     pub(super) history: PromptHistory,
-    pub(super) line_layout: Vec<WrappedLine>,
+    pub(super) line_cache: LineLayoutCache,
+    pub(super) text_revision: u64,
     pub(super) line_height: Pixels,
     pub(super) last_bounds: Option<Bounds<Pixels>>,
     pub(super) scroll: Pixels,
-    goal_x: Option<Pixels>,
+    pub(super) scroll_to_caret: bool,
+    pub(super) goal_x: Option<Pixels>,
+    drag_anchor: Option<usize>,
     /// Whether the composer draws the focus affordance while it holds the focus handle.
     focus_visible: bool,
-    read_only: bool,
+    pub(super) read_only: bool,
 }
 
 impl MultilineInput {
@@ -67,13 +69,15 @@ impl MultilineInput {
             focus_handle: cx.focus_handle(),
             placeholder,
             buffer: MultilineBuffer::new(),
-            display_text: SharedString::default(),
             history: PromptHistory::new(),
-            line_layout: Vec::new(),
+            line_cache: LineLayoutCache::default(),
+            text_revision: 0,
             line_height: Pixels::ZERO,
             last_bounds: None,
             scroll: Pixels::ZERO,
+            scroll_to_caret: true,
             goal_x: None,
+            drag_anchor: None,
             focus_visible: true,
             read_only: false,
         }
@@ -117,6 +121,12 @@ impl MultilineInput {
         self.buffer.is_empty()
     }
 
+    /// Whether the platform input method currently owns a marked (preedit) range.
+    #[must_use]
+    pub fn is_composing(&self) -> bool {
+        self.buffer.marked_range().is_some()
+    }
+
     /// The editing model, for a caller that wants to drive or inspect it directly.
     #[must_use]
     pub fn buffer(&self) -> &MultilineBuffer {
@@ -144,7 +154,7 @@ impl MultilineInput {
         self.buffer.set_text(text);
         self.history.reset();
         self.goal_x = None;
-        self.sync(cx);
+        self.sync_text(cx);
     }
 
     /// Clears the composer text.
@@ -152,7 +162,7 @@ impl MultilineInput {
         self.buffer.clear();
         self.history.reset();
         self.goal_x = None;
-        self.sync(cx);
+        self.sync_text(cx);
     }
 
     /// Replaces the empty-value placeholder.
@@ -164,6 +174,8 @@ impl MultilineInput {
         let placeholder = placeholder.into();
         if self.placeholder != placeholder {
             self.placeholder = placeholder;
+            self.text_revision = self.text_revision.wrapping_add(1);
+            self.scroll_to_caret = true;
             cx.notify();
         }
     }
@@ -184,25 +196,31 @@ impl MultilineInput {
 
     /// `⏎`: emit the current text and clear, unless it is blank.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
-        if self.read_only || self.buffer.is_blank() {
+        if self.read_only || self.is_composing() || self.buffer.is_blank() {
             return;
         }
         let text = self.buffer.text().to_owned();
         self.buffer.clear();
         self.history.push(text.clone());
         self.goal_x = None;
-        self.sync(cx);
+        self.sync_text(cx);
         cx.emit(MultilineInputEvent::Submit(text));
     }
 
     /// The caret's position inside the shaped block, relative to the text origin.
     pub(super) fn position_for_offset(&self, offset: usize) -> Option<Point<Pixels>> {
+        if !self.line_cache.is_current(self.text_revision) {
+            return None;
+        }
         let mut top = Pixels::ZERO;
         let mut start = 0usize;
-        for line in &self.line_layout {
-            let end = start + line.text.len();
+        let source = self.buffer.text();
+        for (index, raw_line) in source.split('\n').enumerate() {
+            let line = self.line_cache.line(index)?;
+            let end = start + raw_line.len();
             if offset <= end {
-                let local = line.position_for_index(offset - start, self.line_height)?;
+                let display = display_offset(raw_line, offset.saturating_sub(start));
+                let local = line.position_for_index(display, self.line_height)?;
                 return Some(point(local.x, top + local.y));
             }
             top += self.line_height * (line.wrap_boundaries.len() + 1) as f32;
@@ -213,18 +231,25 @@ impl MultilineInput {
 
     /// The byte offset closest to a position inside the shaped block.
     pub(super) fn offset_for_position(&self, position: Point<Pixels>) -> Option<usize> {
+        if !self.line_cache.is_current(self.text_revision) {
+            return None;
+        }
+        if self.buffer.is_empty() {
+            return Some(0);
+        }
         let mut top = Pixels::ZERO;
         let mut start = 0usize;
         let mut last = None;
-        for line in &self.line_layout {
+        for (line_index, raw_line) in self.buffer.text().split('\n').enumerate() {
+            let line = self.line_cache.line(line_index)?;
             let height = self.line_height * (line.wrap_boundaries.len() + 1) as f32;
-            let end = start + line.text.len();
+            let end = start + raw_line.len();
             if position.y < top + height {
                 let local = point(position.x, position.y - top);
                 let index = match line.closest_index_for_position(local, self.line_height) {
                     Ok(index) | Err(index) => index,
                 };
-                return Some(start + index.min(line.text.len()));
+                return Some(start + source_offset(raw_line, index));
             }
             top += height;
             start = end + '\n'.len_utf8();
@@ -235,12 +260,19 @@ impl MultilineInput {
 
     /// The height every shaped line occupies together.
     pub(super) fn content_height(&self) -> Pixels {
-        self.line_height * visual_rows(&self.line_layout).max(1) as f32
+        self.line_height * self.line_cache.visual_rows().max(1) as f32
     }
 
-    /// Refresh the shaped string and schedule a repaint.
-    fn sync(&mut self, cx: &mut Context<Self>) {
-        self.display_text = self.buffer.shared_text();
+    /// Refresh text-derived state and revision-tag the old geometry as stale.
+    pub(super) fn sync_text(&mut self, cx: &mut Context<Self>) {
+        self.text_revision = self.text_revision.wrapping_add(1);
+        self.scroll_to_caret = true;
+        cx.notify();
+    }
+
+    /// Repaint a caret or selection change without copying the whole draft.
+    pub(super) fn sync_view(&mut self, cx: &mut Context<Self>) {
+        self.scroll_to_caret = true;
         cx.notify();
     }
 
@@ -253,7 +285,7 @@ impl MultilineInput {
         edit(&mut self.buffer);
         self.history.reset();
         self.goal_x = None;
-        self.sync(cx);
+        self.sync_text(cx);
         cx.emit(MultilineInputEvent::Changed);
         true
     }
@@ -266,7 +298,7 @@ impl MultilineInput {
     ) -> bool {
         motion(&mut self.buffer);
         self.goal_x = None;
-        self.sync(cx);
+        self.sync_view(cx);
         true
     }
 
@@ -282,7 +314,7 @@ impl MultilineInput {
         };
         self.buffer.set_text(entry);
         self.goal_x = None;
-        self.sync(cx);
+        self.sync_text(cx);
         true
     }
 
@@ -322,7 +354,7 @@ impl MultilineInput {
             if let Some(entry) = self.history.newer() {
                 self.buffer.set_text(entry);
                 self.goal_x = None;
-                self.sync(cx);
+                self.sync_text(cx);
             }
             return true;
         }
@@ -344,7 +376,7 @@ impl MultilineInput {
     /// following row, which is already the lower of the two, so an ambiguous caret never
     /// claims `↑`. With no layout to consult the logical line is the fallback.
     fn on_first_visual_row(&mut self) -> bool {
-        if self.line_height <= Pixels::ZERO || self.line_layout.is_empty() {
+        if self.line_height <= Pixels::ZERO || !self.line_cache.is_current(self.text_revision) {
             return self.buffer.on_first_line();
         }
         match self.position_for_offset(self.buffer.cursor()) {
@@ -356,7 +388,7 @@ impl MultilineInput {
     /// Whether the caret is on the last **visual** row, resolved away from that edge at a
     /// soft-wrap boundary for the same reason as [`Self::on_first_visual_row`].
     fn on_last_visual_row(&mut self) -> bool {
-        if self.line_height <= Pixels::ZERO || self.line_layout.is_empty() {
+        if self.line_height <= Pixels::ZERO || !self.line_cache.is_current(self.text_revision) {
             return self.buffer.on_last_line();
         }
         let cursor = self.buffer.cursor();
@@ -389,13 +421,13 @@ impl MultilineInput {
                 self.goal_x = None;
             }
         }
-        self.sync(cx);
+        self.sync_view(cx);
         true
     }
 
     /// Move the caret one wrapped row, keeping `goal` as the column to land on.
     fn visual_row(&mut self, down: bool, select: bool, goal: Option<Pixels>) -> Option<Pixels> {
-        if self.line_height <= Pixels::ZERO || self.line_layout.is_empty() {
+        if self.line_height <= Pixels::ZERO || !self.line_cache.is_current(self.text_revision) {
             return None;
         }
         let position = self.position_for_offset(self.buffer.cursor())?;
@@ -411,6 +443,31 @@ impl MultilineInput {
         let offset = self.offset_for_position(point(x, y))?;
         self.buffer.move_to(offset, select);
         Some(x)
+    }
+
+    /// Move to the start or end of the current wrapped row, falling back to the logical line
+    /// whenever the last painted geometry belongs to an older text revision.
+    fn visual_row_boundary(&mut self, end: bool, select: bool, cx: &mut Context<Self>) -> bool {
+        let target = self
+            .position_for_offset(self.buffer.cursor())
+            .and_then(|position| {
+                let x = if end {
+                    self.last_bounds?.size.width
+                } else {
+                    Pixels::ZERO
+                };
+                self.offset_for_position(point(x, position.y + self.line_height / 2.0))
+            });
+        if let Some(target) = target {
+            self.buffer.move_to(target, select);
+        } else if end {
+            self.buffer.move_to_line_end(select);
+        } else {
+            self.buffer.move_to_line_start(select);
+        }
+        self.goal_x = None;
+        self.sync_view(cx);
+        true
     }
 
     /// `⌘c`: put the selection on the clipboard.
@@ -466,6 +523,8 @@ impl MultilineInput {
             && !modifiers.shift
             && !modifiers.platform
             && !modifiers.function;
+        let control_line =
+            modifiers.control && !modifiers.alt && !modifiers.platform && !modifiers.function;
 
         match keystroke.key.as_str() {
             "enter" if plain => {
@@ -497,18 +556,20 @@ impl MultilineInput {
             "right" | "end" if command => self.motion(cx, |buffer| {
                 buffer.move_to_line_end(select);
             }),
+            "home" if control_line => self.motion(cx, |buffer| {
+                buffer.move_to_line_start(select);
+            }),
+            "end" if control_line => self.motion(cx, |buffer| {
+                buffer.move_to_line_end(select);
+            }),
             "up" if command => self.motion(cx, |buffer| {
                 buffer.move_to_start(select);
             }),
             "down" if command => self.motion(cx, |buffer| {
                 buffer.move_to_end(select);
             }),
-            "home" if motion => self.motion(cx, |buffer| {
-                buffer.move_to_line_start(select);
-            }),
-            "end" if motion => self.motion(cx, |buffer| {
-                buffer.move_to_line_end(select);
-            }),
+            "home" if motion => self.visual_row_boundary(false, select, cx),
+            "end" if motion => self.visual_row_boundary(true, select, cx),
             "backspace" if plain => self.edit(cx, |buffer| {
                 buffer.backspace();
             }),
@@ -586,22 +647,86 @@ impl MultilineInput {
             return;
         }
         window.focus(&self.focus_handle, cx);
-        if let Some(bounds) = self.last_bounds {
-            let position = point(
-                event.position.x - bounds.left(),
-                event.position.y - bounds.top() + self.scroll,
-            );
-            if let Some(offset) = self.offset_for_position(position) {
+        if let Some(offset) = self.offset_for_pointer(event.position) {
+            if event.click_count >= 2 {
+                self.buffer.select_word_at(offset);
+                self.drag_anchor = None;
+            } else if event.modifiers.shift {
+                self.buffer.move_to(offset, true);
+                self.drag_anchor = Some(self.buffer.anchor());
+            } else {
                 self.buffer.set_cursor(offset);
+                self.drag_anchor = Some(offset);
             }
         }
         self.goal_x = None;
-        cx.notify();
+        self.sync_view(cx);
+    }
+
+    /// Extend a pointer selection while the primary button remains down.
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_only || !event.dragging() {
+            return;
+        }
+        let (Some(anchor), Some(offset)) =
+            (self.drag_anchor, self.offset_for_pointer(event.position))
+        else {
+            return;
+        };
+        self.buffer.set_selected_range(anchor..offset);
+        self.goal_x = None;
+        self.sync_view(cx);
+    }
+
+    /// Finish a pointer selection, including when the release lands outside the composer.
+    fn on_mouse_up(
+        &mut self,
+        _event: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.drag_anchor = None;
+    }
+
+    /// Scroll a capped draft without letting the same wheel move the transcript behind it.
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = self
+            .last_bounds
+            .map_or(Pixels::ZERO, |bounds| bounds.size.height);
+        let max_scroll = (self.content_height() - viewport).max(Pixels::ZERO);
+        if max_scroll > Pixels::ZERO {
+            let delta = event.delta.pixel_delta(window.line_height()).y;
+            let scroll = (self.scroll - delta).clamp(Pixels::ZERO, max_scroll);
+            if scroll != self.scroll {
+                self.scroll = scroll;
+                self.scroll_to_caret = false;
+                cx.notify();
+            }
+        }
+        cx.stop_propagation();
+    }
+
+    fn offset_for_pointer(&self, position: Point<Pixels>) -> Option<usize> {
+        let bounds = self.last_bounds?;
+        self.offset_for_position(point(
+            position.x - bounds.left(),
+            position.y - bounds.top() + self.scroll,
+        ))
     }
 
     /// The byte range an IME edit applies to: the explicit range, else the marked range, else
     /// the platform selection.
-    fn resolve_range(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
+    pub(super) fn resolve_range(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
         match range_utf16 {
             Some(range) => self.buffer.range_from_utf16(&range),
             None => self
@@ -646,6 +771,10 @@ impl Render for MultilineInput {
             })
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .flex()
             .items_start()
             .gap(theme.space.sm)
@@ -680,150 +809,5 @@ impl Render for MultilineInput {
                         max_lines: MAX_VISIBLE_LINES,
                     }),
             )
-    }
-}
-
-impl EntityInputHandler for MultilineInput {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let range = self.buffer.range_from_utf16(&range_utf16);
-        actual_range.replace(self.buffer.range_to_utf16(&range));
-        self.buffer.text().get(range).map(str::to_string)
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: self.buffer.range_to_utf16(&self.buffer.selected_range()),
-            reversed: self.buffer.cursor() < self.buffer.anchor(),
-        })
-    }
-
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        self.buffer
-            .marked_range()
-            .map(|range| self.buffer.range_to_utf16(&range))
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.buffer.unmark();
-        cx.notify();
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        text: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        let range = self.resolve_range(range_utf16);
-        let trigger = self.buffer.trigger_for(range.start, text);
-        self.buffer.replace_range(range, text);
-        self.history.reset();
-        self.goal_x = None;
-        self.sync(cx);
-        // The character is already in the buffer: the trigger is a report, not a consumption.
-        cx.emit(MultilineInputEvent::Changed);
-        if let Some(trigger) = trigger {
-            cx.emit(MultilineInputEvent::Trigger(trigger));
-        }
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range_utf16: Option<Range<usize>>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        let range = self.resolve_range(range_utf16);
-        self.buffer.replace_and_mark(range, new_text);
-        if let Some(selected) = new_selected_range_utf16 {
-            let inserted = self.buffer.marked_range().unwrap_or_else(|| {
-                let cursor = self.buffer.cursor();
-                cursor..cursor
-            });
-            let insertion = self.buffer.text().get(inserted.clone()).unwrap_or("");
-            let relative_start = offset_from_utf16(insertion, selected.start);
-            let relative_end = offset_from_utf16(insertion, selected.end);
-            self.buffer
-                .set_selected_range(inserted.start + relative_start..inserted.start + relative_end);
-        }
-        self.history.reset();
-        self.goal_x = None;
-        self.sync(cx);
-        cx.emit(MultilineInputEvent::Changed);
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        let range = self.buffer.range_from_utf16(&range_utf16);
-        let start = self.position_for_offset(range.start)?;
-        let end = self.position_for_offset(range.end)?;
-        let origin = point(element_bounds.left(), element_bounds.top() - self.scroll);
-        Some(Bounds::from_corners(
-            point(origin.x + start.x, origin.y + start.y),
-            point(origin.x + end.x, origin.y + end.y + self.line_height),
-        ))
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        point_in_window: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        let bounds = self.last_bounds?;
-        let position = point(
-            point_in_window.x - bounds.left(),
-            point_in_window.y - bounds.top() + self.scroll,
-        );
-        let offset = self.offset_for_position(position)?;
-        Some(self.buffer.offset_to_utf16(offset))
-    }
-
-    fn set_selected_text_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = self.buffer.range_from_utf16(&range_utf16);
-        self.buffer.set_selected_range(range);
-        cx.notify();
-    }
-
-    fn text_length_utf16(
-        &mut self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        Some(self.buffer.len_utf16())
     }
 }
