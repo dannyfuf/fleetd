@@ -20,11 +20,48 @@ fn assistant(text: &str) -> TranscriptRow {
     TranscriptRow::ordinal(
         0,
         TranscriptRowKind::Assistant(AssistantRow {
-            markdown: crate::components::parse_markdown_document(text),
+            markdown: std::rc::Rc::new(crate::components::parse_markdown_document(text)),
             streaming: true,
             empty: false,
         }),
     )
+}
+
+#[test]
+fn cloning_heavy_rows_shares_their_payloads() {
+    let row = assistant("a long parsed document");
+    let clone = row.clone();
+    let (TranscriptRowKind::Assistant(original), TranscriptRowKind::Assistant(cloned)) =
+        (&row.kind, &clone.kind)
+    else {
+        panic!("both rows are assistant rows");
+    };
+    assert!(std::rc::Rc::ptr_eq(&original.markdown, &cloned.markdown));
+
+    let user = UserRow {
+        attachments: vec!["a-large-recording.mov".into(), "requirements.pdf".into()].into(),
+        ..UserRow::new("inspect these")
+    };
+    let cloned = user.clone();
+    assert!(std::rc::Rc::ptr_eq(&user.attachments, &cloned.attachments));
+
+    let footer = TurnFooterRow {
+        segments: vec!["12.4s".into(), "$0.42".into(), "2 files".into()].into(),
+        diff: true,
+        revert: false,
+    };
+    let cloned = footer.clone();
+    assert!(std::rc::Rc::ptr_eq(&footer.segments, &cloned.segments));
+
+    // `SharedString` heap values are Arc-backed and pointer-fast on equality, which covers the
+    // long output/diff payloads without wrapping every text run in a second smart pointer.
+    let output = "streamed command output ".repeat(32);
+    let tool = ToolRow::new("t1", "bash", "cargo test").body(output);
+    let cloned = tool.clone();
+    let (Some(body), Some(cloned_body)) = (&tool.body, &cloned.body) else {
+        panic!("both tool rows retain their body")
+    };
+    assert_eq!(body.as_str().as_ptr(), cloned_body.as_str().as_ptr());
 }
 
 #[test]
@@ -232,7 +269,7 @@ fn a_default_document_is_an_empty_assistant_row() {
     let row = TranscriptRow::ordinal(
         0,
         TranscriptRowKind::Assistant(AssistantRow {
-            markdown: MarkdownDocument::default(),
+            markdown: std::rc::Rc::new(MarkdownDocument::default()),
             streaming: false,
             empty: true,
         }),

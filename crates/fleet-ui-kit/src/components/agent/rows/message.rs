@@ -125,7 +125,6 @@ pub(super) fn attachment_pill(name: &SharedString, cx: &App) -> AnyElement {
 ///
 /// No bubble, no background, no avatar, no name header, no per-message model or token line.
 pub(super) fn assistant(row: &AssistantRow, index: usize, cx: &App) -> AnyElement {
-    let theme = cx.theme();
     if row.empty {
         return Text::ui(SharedString::new_static("(empty response)"))
             .muted()
@@ -133,23 +132,8 @@ pub(super) fn assistant(row: &AssistantRow, index: usize, cx: &App) -> AnyElemen
     }
     div()
         .id(("assistant", index))
-        .flex()
-        .items_end()
-        .gap(theme.space.xs)
-        .px(theme.space.xs)
-        .py(theme.space.xxs)
-        .child(div().flex_1().min_w_0().child(markdown(&row.markdown, cx)))
-        // One cell of caret trailing the last glyph. Its width and height are fixed, so the
-        // paragraph does not reflow when it disappears.
-        .when(row.streaming, |el| {
-            el.child(
-                div()
-                    .flex_none()
-                    .w(theme.metrics.cell_w)
-                    .h(metrics::AGENT_CARET_H)
-                    .bg(theme.colors.accent),
-            )
-        })
+        .w_full()
+        .child(row.markdown.render_with_caret(row.streaming, cx))
         .into_any_element()
 }
 

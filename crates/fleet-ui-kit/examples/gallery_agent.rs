@@ -61,6 +61,10 @@ actions!(
 /// The widths `ctrl-w` walks, so the metadata strip's collapse ladder is visible.
 const WIDTHS: [f32; 4] = [520.0, 300.0, 200.0, 120.0];
 
+const MARKDOWN_PREFIX: &str = "## rounding\n\nThe reducer truncates, the spec says half-up.\n\n\
+                                      - read the reducer\n- add a failing test\n\n> then fix the projection\n\n\
+                                      ```rust\nlet cents = cents.div_euclid(1";
+
 // ---------------------------------------------------------------------------------------------
 // The drawer
 // ---------------------------------------------------------------------------------------------
@@ -185,6 +189,8 @@ struct AgentGallery {
     /// dimmed while it still holds the focus handle but is not where the user is.
     read_only: Entity<MultilineInput>,
     dimmed: Entity<MultilineInput>,
+    /// A capped draft: preserved tabs, character wrapping and the internal scroll thumb.
+    overflow: Entity<MultilineInput>,
     /// The per-width memo the composer's metadata strip reads. It outlives the frame on
     /// purpose: that is the whole point of `MetadataFit`.
     fit: MetadataFit,
@@ -197,6 +203,9 @@ struct AgentGallery {
     empty: bool,
     started_at: Instant,
     trigger: Option<SharedString>,
+    markdown_prefix: MarkdownDocument,
+    markdown_closed: MarkdownDocument,
+    markdown_table: MarkdownDocument,
 }
 
 impl AgentGallery {
@@ -229,12 +238,37 @@ impl AgentGallery {
             input.set_focus_visible(false, cx);
             input
         });
+        let overflow = cx.new(|cx| {
+            let mut input = MultilineInput::new(cx, "message claude…".into());
+            input.set_text(
+                format!(
+                    "fn main() {{\n\t{}\n}}\n{}",
+                    "send_the_unbroken_token_to_the_agent();".repeat(5),
+                    (0..10)
+                        .map(|index| format!("line {index}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+                cx,
+            );
+            input
+        });
+        let markdown_closed = format!("{MARKDOWN_PREFIX}00);\n```");
+        let markdown_table = format!(
+            "| Edition | Stabilized in | Notes |\n| :--- | :---: | ---: |\n\
+             | 2024 | 1.80 | escaped \\| pipe |\n| 2025 | 1.90 | {} |\n\n\
+             A token that must wrap: {}\n\n```text\n{}\n```",
+            "wrapped cell content ".repeat(5),
+            "abcdefghij".repeat(22),
+            "0123456789".repeat(30),
+        );
         let this = Self {
             focus_handle: cx.focus_handle(),
             transcript,
             composer,
             read_only,
             dimmed,
+            overflow,
             fit: MetadataFit::new(),
             width: 0,
             expanded: false,
@@ -245,6 +279,9 @@ impl AgentGallery {
             empty: false,
             started_at: Instant::now(),
             trigger: None,
+            markdown_prefix: parse_markdown_document(MARKDOWN_PREFIX),
+            markdown_closed: parse_markdown_document(&markdown_closed),
+            markdown_table: parse_markdown_document(&markdown_table),
         };
         this.publish(cx);
         this
@@ -309,7 +346,18 @@ impl AgentGallery {
         cx: &mut Context<Self>,
     ) {
         self.streaming = !self.streaming;
-        self.publish(cx);
+        let rows = self.rows();
+        if let Some((index, row)) = rows
+            .into_iter()
+            .enumerate()
+            .rev()
+            .find(|(_, row)| matches!(&row.kind, TranscriptRowKind::Assistant(_)))
+        {
+            // Streaming keeps row identity and list structure: the gallery exercises the same
+            // one-row remeasure path the app uses for content deltas.
+            self.transcript
+                .update(cx, |transcript, cx| transcript.patch_row(index, row, cx));
+        }
         cx.notify();
     }
 
@@ -444,26 +492,25 @@ fn tool_states(cx: &mut App) -> AnyElement {
 
 /// The `Markdown` streaming invariants, side by side: an open fence is code and uncoloured, the
 /// same fence closed is coloured, and every decided block above it stayed where it was.
-fn markdown_states(cx: &mut App) -> AnyElement {
+fn markdown_states(gallery: &AgentGallery, cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
-    const PREFIX: &str = "## rounding\n\nThe reducer truncates, the spec says half-up.\n\n\
-                          - read the reducer\n- add a failing test\n\n> then fix the projection\n\n\
-                          ```rust\nlet cents = cents.div_euclid(1";
-    let closed = format!("{PREFIX}00);\n```");
     let children = vec![
         LAYOUT.labeled(
-            "streaming prefix",
+            "streaming prefix · caret run",
             &theme,
             div()
                 .w_full()
-                .child(markdown(&parse_markdown_document(PREFIX), cx)),
+                .child(gallery.markdown_prefix.render_with_caret(true, cx)),
         ),
         LAYOUT.labeled(
             "closed fence",
             &theme,
-            div()
-                .w_full()
-                .child(markdown(&parse_markdown_document(&closed), cx)),
+            div().w_full().child(markdown(&gallery.markdown_closed, cx)),
+        ),
+        LAYOUT.labeled(
+            "table · wrapped cells · long token · scrolling code",
+            &theme,
+            div().w_full().child(markdown(&gallery.markdown_table, cx)),
         ),
     ];
     LAYOUT.section("markdown · a prefix parses safely", &theme, children)
@@ -483,6 +530,11 @@ fn composer_states(gallery: &AgentGallery, cx: &mut App) -> AnyElement {
             "dimmed · a decision owns the keys",
             &theme,
             div().w_full().child(gallery.dimmed.clone()),
+        ),
+        LAYOUT.labeled(
+            "capped · tabs · long token · scroll thumb",
+            &theme,
+            div().w_full().child(gallery.overflow.clone()),
         ),
     ];
     LAYOUT.section("composer · non-editing states", &theme, children)
@@ -537,7 +589,7 @@ impl Render for AgentGallery {
                     .flex_col()
                     .child(tool_states(cx))
                     .child(composer_states(self, cx))
-                    .child(markdown_states(cx)),
+                    .child(markdown_states(self, cx)),
             )
             .child(
                 // The live half: the transcript, the drawer and the composer, in their real
