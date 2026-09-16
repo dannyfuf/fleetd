@@ -1,5 +1,4 @@
 use super::*;
-use crate::theme::Theme;
 
 // -----------------------------------------------------------------------------------------
 // A plain-text tree of the block structure, which is what the snapshot tests compare.
@@ -41,9 +40,27 @@ fn write_blocks(out: &mut String, blocks: &[MarkdownBlock], depth: usize) {
                 out.push_str(&format!("{pad}quote\n"));
                 write_blocks(out, inner, depth + 1);
             }
+            MarkdownBlock::Table {
+                header,
+                alignments,
+                rows,
+            } => {
+                out.push_str(&format!("{pad}table.{alignments:?}\n"));
+                out.push_str(&format!("{pad}  header {}\n", table_row_tree(header)));
+                for row in rows {
+                    out.push_str(&format!("{pad}  row {}\n", table_row_tree(row)));
+                }
+            }
             MarkdownBlock::Rule => out.push_str(&format!("{pad}rule\n")),
         }
     }
+}
+
+fn table_row_tree(row: &[Vec<MarkdownInline>]) -> String {
+    row.iter()
+        .map(|cell| format!("[{}]", inline_tree(cell)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn inline_tree(inlines: &[MarkdownInline]) -> String {
@@ -276,14 +293,80 @@ fn quotes_strip_their_marker_and_accept_lazy_continuation() {
 }
 
 #[test]
-fn tables_and_images_survive_as_their_own_source() {
-    let document = parse_markdown("| a | b |\n| - | - |\n\n![alt](img.png)");
+fn tables_parse_header_alignment_body_and_escaped_pipes() {
+    let document = parse_markdown(
+        "| Edition | Stabilized in | Note |\n| :--- | :---: | ---: |\n| 2024 | 1.80 | a \\| b |\n| 2025 | 1.90 | |",
+    );
     assert_eq!(
         document.blocks,
-        vec![
-            MarkdownBlock::Paragraph(vec![text("| a | b | | - | - |")]),
-            MarkdownBlock::Paragraph(vec![text("![alt](img.png)")]),
-        ]
+        vec![MarkdownBlock::Table {
+            header: vec![
+                vec![text("Edition")],
+                vec![text("Stabilized in")],
+                vec![text("Note")],
+            ],
+            alignments: vec![
+                gpui::TextAlign::Left,
+                gpui::TextAlign::Center,
+                gpui::TextAlign::Right,
+            ],
+            rows: vec![
+                vec![vec![text("2024")], vec![text("1.80")], vec![text("a | b")]],
+                vec![vec![text("2025")], vec![text("1.90")], Vec::new()],
+            ],
+        }]
+    );
+}
+
+#[test]
+fn a_table_header_stays_a_paragraph_until_the_delimiter_arrives() {
+    assert_eq!(
+        parse_markdown("Edition | Stabilized in").blocks,
+        vec![MarkdownBlock::Paragraph(vec![text(
+            "Edition | Stabilized in"
+        )])]
+    );
+    assert!(matches!(
+        parse_markdown("Edition | Stabilized in\n--- | ---").blocks.as_slice(),
+        [MarkdownBlock::Table { rows, .. }] if rows.is_empty()
+    ));
+    assert!(matches!(
+        parse_markdown("Edition | Stabilized in\n---")
+            .blocks
+            .as_slice(),
+        [MarkdownBlock::Paragraph(_)]
+    ));
+}
+
+#[test]
+fn a_growing_table_never_changes_an_earlier_block() {
+    let source = "before\n\nA | B\n--- | ---:\none | two\nthree | four\n\nafter";
+    let full = parse_markdown(source);
+    for (end, _) in source.char_indices() {
+        let prefix = parse_markdown(&source[..end]);
+        let decided = prefix.blocks.len().saturating_sub(1);
+        assert_eq!(
+            prefix.blocks[..decided],
+            full.blocks[..decided],
+            "the table changed an earlier block at byte {end}"
+        );
+    }
+}
+
+#[test]
+fn images_remain_literal_text() {
+    assert_eq!(
+        parse_markdown("![alt](img.png)").blocks,
+        vec![MarkdownBlock::Paragraph(vec![text("![alt](img.png)")])]
+    );
+}
+
+#[test]
+fn a_long_unbroken_token_remains_one_inline_run() {
+    let token = "abcdefghij".repeat(22);
+    assert_eq!(
+        parse_markdown(&token).blocks,
+        vec![MarkdownBlock::Paragraph(vec![text(&token)])]
     );
 }
 
@@ -474,6 +557,75 @@ fn completed_blocks_are_stable_as_the_text_grows() {
             "block structure moved at a {end}-byte prefix"
         );
     }
+}
+
+#[test]
+fn incremental_append_matches_a_full_parse_at_every_character_prefix() {
+    let source = "intro\n\nEdition | Stabilized in\n--- | :---:\n2024 | 1.80\n\n```rust\nlet value = 1;\n```\n\nafter";
+    let cache = HighlightCache::new();
+    let mut stream = MarkdownDocument::default();
+    let mut previous = 0;
+    for end in source
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+    {
+        stream.append(&source[previous..end]);
+        assert_eq!(
+            stream,
+            parse_markdown_cached(&source[..end], &cache),
+            "incremental parse diverged at byte {end}"
+        );
+        previous = end;
+    }
+}
+
+#[test]
+fn random_stream_chunks_match_full_parses_over_the_fixtures() {
+    let long = "abcdefghij".repeat(22);
+    let table = "| Edition | Stabilized in |\n| --- | :---: |\n| 2024 | 1.80 |\n| 2025 | 1.90 |";
+    let fence = "before\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nafter";
+    let fixtures = [FIXTURE, table, fence, long.as_str()];
+    let mut rng = Rng(0x51EA_5EED_F00D_BAAD);
+
+    for source in fixtures {
+        let boundaries: Vec<usize> = source
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(source.len()))
+            .collect();
+        let cache = HighlightCache::new();
+        let mut stream = MarkdownDocument::default();
+        let mut boundary = 0;
+        while boundary + 1 < boundaries.len() {
+            let remaining = boundaries.len() - boundary - 1;
+            let step = 1 + rng.below(remaining.min(19));
+            let next = boundary + step;
+            let start = boundaries[boundary];
+            let end = boundaries[next];
+            stream.append(&source[start..end]);
+            assert_eq!(
+                stream,
+                parse_markdown_cached(&source[..end], &cache),
+                "chunked parse diverged for {source:?} at byte {end}"
+            );
+            boundary = next;
+        }
+    }
+}
+
+#[test]
+fn incremental_append_reuses_highlights_after_a_fence_settles() {
+    code::HIGHLIGHT_CALLS.with(|calls| calls.set(0));
+    let mut stream = MarkdownDocument::default();
+    stream.append("```rust\nlet x = 1;\n```");
+    assert_eq!(code::HIGHLIGHT_CALLS.with(std::cell::Cell::get), 1);
+    stream.append("\n\nnext paragraph");
+    stream.append(" keeps growing");
+    assert_eq!(
+        code::HIGHLIGHT_CALLS.with(std::cell::Cell::get),
+        1,
+        "the settled fence was highlighted again"
+    );
 }
 
 /// A deterministic 64-bit xorshift, so a failure reproduces from the seed alone.
@@ -679,96 +831,5 @@ fn the_scanner_never_runs_off_the_end() {
             let spans = code::highlight(Some(lang), source);
             assert!(spans.iter().all(|(range, _)| range.end <= source.len()));
         }
-    }
-}
-
-// -----------------------------------------------------------------------------------------
-// Rendering
-// -----------------------------------------------------------------------------------------
-
-#[test]
-fn a_paragraph_becomes_one_chunk_per_word_plus_one_per_hard_break() {
-    let theme = Theme::dark();
-    // Three words, one chip, one hard break, then two words.
-    let nodes = inlines("alpha beta gamma `chip`  \ndelta epsilon");
-    assert_eq!(render::inline_chunk_count(&nodes, &theme), 7);
-}
-
-#[test]
-fn the_inline_code_fill_is_a_translucent_neutral() {
-    let theme = Theme::dark();
-    let fill = render::code_fill(&theme);
-    assert!(fill.a < 0.1, "the chip must not read as a solid block");
-    assert_eq!(fill.h, theme.colors.text_secondary.h);
-    assert_eq!(fill.s, theme.colors.text_secondary.s);
-    assert_eq!(fill.l, theme.colors.text_secondary.l);
-}
-
-#[test]
-fn flattening_drops_marks_and_keeps_text() {
-    let nodes = inlines("a **b** [c](https://example.com) `d`");
-    assert_eq!(render::flatten(&nodes), "a b c d");
-}
-
-/// A fence is lexed when its document is built, not when the document is drawn: the transcript
-/// redraws a streaming turn every frame, and re-scanning a 300-line block each time is the
-/// render-path work `gpui-performance` rule 1 forbids.
-#[gpui::test]
-fn a_code_block_is_highlighted_once_per_document(cx: &mut gpui::TestAppContext) {
-    cx.update(|cx| cx.set_global(Theme::dark()));
-    code::HIGHLIGHT_CALLS.with(|calls| calls.set(0));
-
-    let document = parse_markdown("```rust\nlet x = 1; // one\n```");
-    assert_eq!(
-        code::HIGHLIGHT_CALLS.with(std::cell::Cell::get),
-        1,
-        "the fence must be lexed once while the document is parsed"
-    );
-
-    cx.update(|cx| {
-        for _ in 0..3 {
-            let _ = render::render(&document, cx);
-        }
-    });
-    assert_eq!(
-        code::HIGHLIGHT_CALLS.with(std::cell::Cell::get),
-        1,
-        "drawing the document re-lexed the fence"
-    );
-}
-
-#[gpui::test]
-fn every_construct_renders_in_both_themes(cx: &mut gpui::TestAppContext) {
-    use gpui::AppContext;
-
-    for theme in [Theme::dark(), Theme::light()] {
-        cx.update(|cx| cx.set_global(theme));
-        let window = cx.update(|cx| {
-            cx.open_window(Default::default(), |_, cx| {
-                cx.new(|_| MarkdownHarness {
-                    document: parse_markdown(FIXTURE),
-                })
-            })
-            .unwrap_or_else(|error| panic!("test window: {error}"))
-        });
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.run_until_parked();
-        window
-            .root(&mut visual)
-            .unwrap_or_else(|error| panic!("test root: {error}"));
-    }
-}
-
-struct MarkdownHarness {
-    document: MarkdownDocument,
-}
-
-impl gpui::Render for MarkdownHarness {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) -> impl IntoElement {
-        gpui::div().size_full().child(markdown(&self.document, cx))
     }
 }

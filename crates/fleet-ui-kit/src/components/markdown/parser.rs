@@ -10,17 +10,17 @@
 //!    `*` or `[` stays literal. Nothing is ever dropped waiting for a delimiter that a slower
 //!    model has not typed yet.
 //! 3. **Stable under growth.** Every block is decided by its own opening line, so appending
-//!    text can only extend or replace the **last** block. `setext` headings (`text` then
-//!    `---`) are deliberately absent for exactly that reason: they would retroactively turn a
-//!    finished paragraph into a heading two lines later, and the transcript would reflow under
-//!    the reader. `---` is always a thematic break here.
+//!    text can only extend or replace the **last** block. A table is the one two-line opener:
+//!    its header stays the last paragraph until the delimiter arrives. `setext` headings
+//!    (`text` then `---`) are deliberately absent because they could replace an earlier block;
+//!    `---` is always a thematic break here.
 //!
 //! Line breaks are normalised into the inline text: a soft break becomes a space, a hard break
 //! (two trailing spaces, or a trailing backslash) becomes a `\n` inside a
 //! [`MarkdownInline::Text`]. The renderer is the only place that knows what a `\n` looks like.
 //!
-//! Out of scope, per `docs/NATIVE-AGENTS.md` §8: tables, images and indented code blocks. They
-//! are kept as their own source text so nothing is silently lost.
+//! Images and indented code blocks remain out of scope and are kept as source text so nothing
+//! is silently lost.
 
 use super::{HighlightCache, MarkdownBlock, MarkdownDocument, MarkdownInline};
 
@@ -35,12 +35,32 @@ const MAX_OPENER_INDENT: usize = 3;
 
 /// Parse a whole document, optionally reusing already-lexed fences.
 pub(super) fn parse(source: &str, cache: Option<&HighlightCache>) -> MarkdownDocument {
+    let parsed = parse_fragment(source, cache);
+    MarkdownDocument::parsed(source, parsed.blocks, parsed.starts)
+}
+
+/// Blocks plus their opening byte offsets, used by the incremental document path.
+pub(super) struct ParseFragment {
+    pub(super) blocks: Vec<MarkdownBlock>,
+    pub(super) starts: Vec<usize>,
+}
+
+/// Parse a source tail and retain where each top-level block began.
+pub(super) fn parse_fragment(source: &str, cache: Option<&HighlightCache>) -> ParseFragment {
+    let mut byte = 0;
+    let mut starts = Vec::new();
     let lines: Vec<&str> = source
         .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .map(|line| {
+            starts.push(byte);
+            byte += line.len() + usize::from(byte + line.len() < source.len());
+            line.strip_suffix('\r').unwrap_or(line)
+        })
         .collect();
-    MarkdownDocument {
-        blocks: parse_blocks(&lines, 0, cache),
+    let parsed = parse_blocks_ranged(&lines, 0, cache);
+    ParseFragment {
+        starts: parsed.iter().map(|block| starts[block.start]).collect(),
+        blocks: parsed.into_iter().map(|block| block.block).collect(),
     }
 }
 
@@ -50,8 +70,29 @@ fn parse_blocks(
     depth: usize,
     cache: Option<&HighlightCache>,
 ) -> Vec<MarkdownBlock> {
+    parse_blocks_ranged(lines, depth, cache)
+        .into_iter()
+        .map(|parsed| parsed.block)
+        .collect()
+}
+
+struct ParsedBlock {
+    block: MarkdownBlock,
+    start: usize,
+}
+
+/// Parse blocks while retaining top-level line starts for incremental reparsing.
+fn parse_blocks_ranged(
+    lines: &[&str],
+    depth: usize,
+    cache: Option<&HighlightCache>,
+) -> Vec<ParsedBlock> {
     if depth > MAX_BLOCK_DEPTH {
-        return literal_paragraphs(lines);
+        return literal_paragraphs(lines)
+            .into_iter()
+            .enumerate()
+            .map(|(start, block)| ParsedBlock { block, start })
+            .collect();
     }
 
     let mut blocks = Vec::new();
@@ -65,24 +106,37 @@ fn parse_blocks(
         let (indent, rest) = split_indent(line);
         if indent > MAX_OPENER_INDENT {
             let (block, next) = paragraph(lines, index);
-            blocks.push(block);
+            blocks.push(ParsedBlock {
+                block,
+                start: index,
+            });
             index = next;
             continue;
         }
 
+        let start = index;
         if let Some(fence) = fence_open(rest) {
             let (block, next) = code_block(lines, index, indent, fence, cache);
-            blocks.push(block);
+            blocks.push(ParsedBlock { block, start });
             index = next;
         } else if is_thematic_break(rest) {
-            blocks.push(MarkdownBlock::Rule);
-            index += 1;
-        } else if let Some((level, text)) = atx_heading(rest) {
-            blocks.push(MarkdownBlock::Heading {
-                level,
-                inlines: parse_inlines(text),
+            blocks.push(ParsedBlock {
+                block: MarkdownBlock::Rule,
+                start,
             });
             index += 1;
+        } else if let Some((level, text)) = atx_heading(rest) {
+            blocks.push(ParsedBlock {
+                block: MarkdownBlock::Heading {
+                    level,
+                    inlines: parse_inlines(text),
+                },
+                start,
+            });
+            index += 1;
+        } else if let Some((block, next)) = super::table::parse(lines, index) {
+            blocks.push(ParsedBlock { block, start });
+            index = next;
         } else {
             // A container that consumed nothing would spin here forever, so the paragraph
             // fallback is what actually guarantees the parser terminates on every input.
@@ -95,7 +149,7 @@ fn parse_blocks(
                 Some((block, next)) if next > index => (block, next),
                 _ => paragraph(lines, index),
             };
-            blocks.push(block);
+            blocks.push(ParsedBlock { block, start });
             index = next;
         }
     }
@@ -412,7 +466,10 @@ fn paragraph(lines: &[&str], start: usize) -> (MarkdownBlock, usize) {
         if is_blank(line) {
             break;
         }
-        if index > start && starts_block(split_indent(line).1) {
+        let pending_table_delimiter = index == start + 1
+            && index + 1 == lines.len()
+            && super::table::is_opening_prefix(lines[start], line);
+        if index > start && starts_block(split_indent(line).1) && !pending_table_delimiter {
             break;
         }
         let (content, hard_break) = strip_break(line);

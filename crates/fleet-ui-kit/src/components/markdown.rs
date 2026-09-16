@@ -5,8 +5,8 @@
 //! a time, so half of everything here is about what a *prefix* must look like.
 //!
 //! The abstract syntax is deliberately small — paragraphs, ATX headings, fenced code, lists,
-//! quotes, rules, and inline code / strong / emphasis / links. Tables, images and indented code
-//! are out of scope and survive as their own source text.
+//! quotes, rules, GFM tables, and inline code / strong / emphasis / links. Images and indented
+//! code are out of scope and survive as their own source text.
 //!
 //! Two invariants hold, and both are tested:
 //!
@@ -20,22 +20,108 @@
 //! geometry; `code` documents why fenced blocks are coloured locally rather than with the
 //! ADR 0005 `syntect` stack.
 
-use gpui::{App, SharedString, prelude::*};
+use std::{
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use gpui::{App, SharedString, TextAlign, prelude::*};
 
 mod code;
 mod parser;
 mod render;
+mod table;
 
 pub use code::{CodeHighlights, HighlightCache};
 
 #[cfg(test)]
+mod render_tests;
+#[cfg(test)]
 mod tests;
 
 /// Parsed Markdown document supported by the native-agent transcript.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MarkdownDocument {
     /// Ordered block nodes.
     pub blocks: Vec<MarkdownBlock>,
+    open_source: String,
+    settled_blocks: usize,
+    cache: Rc<HighlightCache>,
+    render_namespace: u64,
+}
+
+static NEXT_RENDER_NAMESPACE: AtomicU64 = AtomicU64::new(1);
+
+fn next_render_namespace() -> u64 {
+    NEXT_RENDER_NAMESPACE.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Default for MarkdownDocument {
+    fn default() -> Self {
+        Self {
+            blocks: Vec::new(),
+            open_source: String::new(),
+            settled_blocks: 0,
+            cache: Rc::new(HighlightCache::new()),
+            render_namespace: next_render_namespace(),
+        }
+    }
+}
+
+impl PartialEq for MarkdownDocument {
+    fn eq(&self, other: &Self) -> bool {
+        self.blocks == other.blocks
+    }
+}
+
+impl Eq for MarkdownDocument {}
+
+impl MarkdownDocument {
+    fn parsed(source: &str, blocks: Vec<MarkdownBlock>, starts: Vec<usize>) -> Self {
+        let settled_blocks = blocks.len().saturating_sub(1);
+        let open_start = starts.last().copied().unwrap_or(source.len());
+        Self {
+            blocks,
+            open_source: source[open_start..].to_owned(),
+            settled_blocks,
+            cache: Rc::new(HighlightCache::new()),
+            render_namespace: next_render_namespace(),
+        }
+    }
+
+    /// Append one source delta, reparsing only the last block that may still grow.
+    ///
+    /// Completed blocks are retained byte-for-byte and closed fences reuse this document's
+    /// [`HighlightCache`]. The work is therefore proportional to the open block, not the whole
+    /// transcript. A default document is an empty stream, while a document returned by either
+    /// parse entry point can continue streaming from its existing source.
+    pub fn append(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.open_source.push_str(delta);
+        let parsed = parser::parse_fragment(&self.open_source, Some(&self.cache));
+        self.blocks.truncate(self.settled_blocks);
+        let prior = self.blocks.len();
+        let parsed_len = parsed.blocks.len();
+        self.blocks.extend(parsed.blocks);
+        if parsed_len > 0 {
+            self.settled_blocks = prior + parsed_len - 1;
+        }
+        if let Some(start) = parsed.starts.last().copied()
+            && start > 0
+        {
+            drop(self.open_source.drain(..start));
+        }
+    }
+
+    /// Render this document, optionally appending a caret glyph to its final prose block.
+    ///
+    /// The caret is a separate text run and does not mutate the parsed source. Agent transcript
+    /// rows can set `caret` while the assistant item is streaming.
+    pub fn render_with_caret(&self, caret: bool, cx: &App) -> impl IntoElement {
+        render::render(self, caret, cx)
+    }
 }
 
 /// Supported block-level Markdown nodes.
@@ -76,6 +162,15 @@ pub enum MarkdownBlock {
     },
     /// A quoted block sequence.
     Quote(Vec<MarkdownBlock>),
+    /// A GFM table. Every cell contains the same inline nodes as a paragraph.
+    Table {
+        /// The emphasised header row.
+        header: Vec<Vec<MarkdownInline>>,
+        /// Column alignment decoded from the delimiter row.
+        alignments: Vec<TextAlign>,
+        /// Body rows, padded or clipped to the header's column count.
+        rows: Vec<Vec<Vec<MarkdownInline>>>,
+    },
     /// A horizontal rule.
     Rule,
 }
@@ -168,5 +263,5 @@ pub fn parse_markdown_cached(source: &str, cache: &HighlightCache) -> MarkdownDo
 /// Every colour, size and radius comes from [`crate::theme::Theme`]; the element takes the width
 /// it is given and grows downwards, so a transcript row can hand it the 760 px content measure.
 pub fn markdown(document: &MarkdownDocument, cx: &App) -> impl IntoElement {
-    render::render(document, cx)
+    render::render(document, false, cx)
 }
