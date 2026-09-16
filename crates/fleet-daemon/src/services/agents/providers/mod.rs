@@ -34,9 +34,9 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 
 use crate::agents::harness::{
-    self, Harness, HarnessConfig, HarnessError, HarnessEvent, HarnessEvents, InterruptReason,
-    OpenSession, RestartPlan, RuntimeApplied, RuntimeChange, ShutdownReason, Submit, SubmitIntent,
-    Submitted, probe::ProbeCache,
+    self, AccountOp, AccountOutcome, Harness, HarnessConfig, HarnessError, HarnessEvent,
+    HarnessEvents, InterruptReason, OpenSession, RestartPlan, RuntimeApplied, RuntimeChange,
+    ShutdownReason, Submit, SubmitIntent, Submitted, probe::ProbeCache,
 };
 
 /// One normalized event and the provider wire type that produced it.
@@ -118,6 +118,19 @@ pub trait AgentProvider: Send {
     /// `change` is re-applied to the launch request, so the replacement opens with the values
     /// the live process could not take.
     async fn restart(&mut self, plan: &RestartPlan, change: &RuntimeChange) -> ProviderResult<()>;
+    /// Signs the harness in or out of its provider account.
+    ///
+    /// Defaulted to a refusal so an adapter with no account surface — and every test fake — says
+    /// `Unsupported` rather than pretending. The account itself is never returned: it arrives on
+    /// the event stream as `AccountChanged`.
+    async fn account(&mut self, _op: AccountOp) -> ProviderResult<AccountOutcome> {
+        Err(ProviderError::Unavailable {
+            reason: format!(
+                "{} cannot be signed in or out from Fleet",
+                self.kind().display_name()
+            ),
+        })
+    }
     /// Stops the provider process or server.
     async fn stop(&mut self) -> ProviderResult<()>;
     /// Takes the next normalized event receiver.
@@ -321,6 +334,13 @@ impl AgentProvider for HarnessProvider {
 
     async fn restart(&mut self, plan: &RestartPlan, change: &RuntimeChange) -> ProviderResult<()> {
         self.restart_with(plan, change).await
+    }
+
+    async fn account(&mut self, op: AccountOp) -> ProviderResult<AccountOutcome> {
+        self.harness()?
+            .account(op)
+            .await
+            .map_err(ProviderError::from)
     }
 
     async fn stop(&mut self) -> ProviderResult<()> {

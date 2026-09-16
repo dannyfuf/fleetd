@@ -28,11 +28,39 @@ use crate::agents::harness::fingerprint::SchemaFingerprint;
 pub(crate) struct MapOutput {
     /// Normalized events, in order.
     pub(crate) events: Vec<AgentEvent>,
-    /// A follow-up request Fleet owes the server, by method name.
+    /// Follow-up requests Fleet owes the server.
     ///
-    /// The transport issues it; the mapper never awaits, so a notification can ask for
+    /// The transport issues them; the mapper never awaits, so a notification can ask for
     /// `skills/list` without the read loop blocking on a round trip.
-    pub(crate) follow_up: Vec<&'static str>,
+    pub(crate) follow_up: Vec<FollowUp>,
+}
+
+/// A request one notification asks the transport to issue on its behalf.
+///
+/// A typed list rather than a bare method name because two of these carry a decision the mapper
+/// made and the transport must not re-derive: whether the re-read announces itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowUp {
+    /// Re-read the skill vocabulary and publish it as `MetadataChanged`.
+    Skills,
+    /// Re-read the account and publish it as `AccountChanged`.
+    Account {
+        /// Whether the account that comes back is also announced in the transcript.
+        ///
+        /// `account/updated` is metadata and appends nothing; a completed sign-in is a thing the
+        /// user just did and gets its own notice row.
+        announce_sign_in: bool,
+    },
+}
+
+impl FollowUp {
+    /// The method this follow-up issues, which is also the key its task is cancelled under.
+    pub(crate) const fn method(self) -> &'static str {
+        match self {
+            Self::Skills => "skills/list",
+            Self::Account { .. } => "account/read",
+        }
+    }
 }
 
 impl From<Vec<AgentEvent>> for MapOutput {
@@ -68,6 +96,7 @@ pub(in crate::agents::codex) fn handle(
         "thread/environment/disconnected" => threads::environment(params, false),
         "thread/compacted" => threads::compacted(params),
         "account/updated" => threads::account_updated(),
+        "account/login/completed" => threads::login_completed(session, params),
         "account/rateLimits/updated" => threads::rate_limits(params),
         "model/rerouted" => threads::model_rerouted(params),
         "model/safetyBuffering/updated" => threads::safety_buffering(params),
@@ -81,7 +110,7 @@ pub(in crate::agents::codex) fn handle(
         // appended to the transcript for it.
         "skills/changed" => MapOutput {
             events: Vec::new(),
-            follow_up: vec!["skills/list"],
+            follow_up: vec![FollowUp::Skills],
         },
         "turn/started" => turns::started(session, params),
         "turn/completed" => turns::completed(session, params),

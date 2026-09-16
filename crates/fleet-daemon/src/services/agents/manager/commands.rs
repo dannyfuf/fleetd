@@ -25,7 +25,7 @@ use fleet_proto::{
     response::ResponseBody,
 };
 
-use crate::agents::harness::RuntimeChange;
+use crate::agents::harness::{AccountOp, AccountOutcome, RuntimeChange};
 
 use super::{
     AgentSessionManager, AgentThreadRecord, ThreadRuntime,
@@ -494,6 +494,43 @@ impl AgentSessionManager {
         self.update_settings(&runtime, &operation, None, Some(model))
             .await?;
         Ok(ResponseBody::AgentAck)
+    }
+
+    /// Handles `AgentAccountLogin`.
+    ///
+    /// Refused on a mirror rather than forwarded: the sign-in Codex starts is a loopback callback
+    /// on the **owner** host, so a browser opened here would come back to the wrong machine.
+    pub async fn account_login(&self, thread: ThreadId) -> Result<ResponseBody, ProtoError> {
+        self.refuse_if_mirrored(thread, "sign in").await?;
+        match self.account(thread, AccountOp::Login).await? {
+            AccountOutcome::Browser { auth_url } => {
+                Ok(ResponseBody::AgentAccountLogin { auth_url })
+            }
+            // A harness that signed in without a browser has nothing for the caller to open, and
+            // an empty URL would be a link to nowhere.
+            AccountOutcome::Settled => Ok(ResponseBody::AgentAck),
+        }
+    }
+
+    /// Handles `AgentAccountLogout`.
+    pub async fn account_logout(&self, thread: ThreadId) -> Result<ResponseBody, ProtoError> {
+        self.refuse_if_mirrored(thread, "sign out").await?;
+        self.account(thread, AccountOp::Logout).await?;
+        Ok(ResponseBody::AgentAck)
+    }
+
+    /// The shared half of both account verbs: the live provider, under the operation gate.
+    ///
+    /// The gate is held for the same reason `set_model` holds it — the call talks to the harness
+    /// process — and released before the response is built.
+    async fn account(&self, thread: ThreadId, op: AccountOp) -> Result<AccountOutcome, ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        let _operation = runtime.operation.lock().await;
+        let mut provider_slot = runtime.provider.lock().await;
+        let provider = provider_slot
+            .as_mut()
+            .ok_or_else(|| conflict(format!("agent thread {thread} is not live")))?;
+        provider.account(op).await.map_err(provider_error)
     }
 
     /// Handles `AgentMarkSeen` from a peer with no stable identity.

@@ -263,6 +263,11 @@ pub(super) struct CodexSession {
     pub(super) skills: Vec<String>,
     /// Working directory used to refresh the cwd-scoped skill catalogue.
     pub(super) worktree_path: Option<PathBuf>,
+    /// The `loginId` of a browser sign-in this session started and Codex has not settled.
+    ///
+    /// Held so a second `/login` cancels the first flow instead of leaving Codex with two live
+    /// callbacks and the user with two tabs that both claim to be the sign-in.
+    pub(super) pending_login: Option<String>,
     /// The optimistic user item of each submitted turn, so the echoed `userMessage` reconciles
     /// against it instead of appending a duplicate of the user's own bubble.
     pub(super) user_items: HashMap<TurnId, ItemId>,

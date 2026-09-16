@@ -634,8 +634,10 @@ pub(super) fn project_event(
             }
         }
         // A notice is a transcript row the read path picks up from the log by sequence range,
-        // exactly as imported history is, so it projects to nothing of its own.
-        AgentEvent::Notice(_) | AgentEvent::Unknown { .. } => {}
+        // exactly as imported history is, so it projects to nothing of its own. The account is
+        // the reducer's to hold: it lands on `ThreadProjection::account` and reaches a cold open
+        // through the replay, so a column here would be a second copy of the same truth.
+        AgentEvent::AccountChanged { .. } | AgentEvent::Notice(_) | AgentEvent::Unknown { .. } => {}
     }
 
     if changes_attention(&event.event) {

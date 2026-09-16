@@ -248,6 +248,35 @@ pub struct RuntimeChange {
     pub permission_profile: Option<Option<String>>,
 }
 
+/// One account operation a harness may be asked to perform.
+///
+/// Deliberately **not** a [`RuntimeChange`] field: that struct describes one thread's runtime, and
+/// an account is process-wide state shared by every thread the same harness home serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountOp {
+    /// Begin a sign-in. The harness answers with whatever the user must do next.
+    Login,
+    /// Sign out. The harness publishes the resulting account on its event stream.
+    Logout,
+}
+
+/// What an account operation produced.
+///
+/// The account itself is never returned here: it arrives as
+/// [`AgentEvent::AccountChanged`](fleet_core::agents::AgentEvent::AccountChanged) on the event
+/// stream, so a mirror and the acting client learn it the same way (§4.4).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AccountOutcome {
+    /// Nothing for the caller to do.
+    #[default]
+    Settled,
+    /// The user has to finish the flow in a browser at this URL.
+    Browser {
+        /// Where the sign-in continues, on the host the harness runs on.
+        auth_url: String,
+    },
+}
+
 /// What a restart would take, handed back to the manager rather than performed by the adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestartPlan {
@@ -430,6 +459,21 @@ pub trait Harness: Send + 'static {
 
     /// Asks the harness to compact its own context now.
     async fn compact(&mut self) -> HarnessResult<()>;
+
+    /// Signs the harness in or out of its provider account.
+    ///
+    /// The default refuses, because most harnesses have no account surface Fleet can drive: a
+    /// button that silently means something weaker than it says is worse than no button, so a
+    /// harness that has not implemented this says so as [`HarnessError::Unavailable`], which the
+    /// manager turns into `Unsupported` and the UI into the terminal fallback (§4.6).
+    async fn account(&mut self, _op: AccountOp) -> HarnessResult<AccountOutcome> {
+        Err(HarnessError::Unavailable {
+            reason: format!(
+                "{} cannot be signed in or out from Fleet",
+                self.kind().display_name()
+            ),
+        })
+    }
 
     /// Ordered teardown: settle every gate, force-complete every item and the open turn, then
     /// kill the process, and emit `SessionExited` last. Idempotent.

@@ -46,6 +46,19 @@ pub const AGENT_CODEX_CAPABILITY: &str = "agent.codex";
 /// Capability advertised by daemons that persist read cursors per Fleet installation.
 pub const AGENT_SEEN_CAPABILITY: &str = "agent.seen";
 
+/// Capability advertised by daemons that can sign a harness in and out of its provider account.
+///
+/// [`RequestBody`](request::RequestBody) is internally tagged with no catch-all arm, so a daemon
+/// that predates
+/// [`AgentAccountLogin`](request::RequestBody::AgentAccountLogin) /
+/// [`AgentAccountLogout`](request::RequestBody::AgentAccountLogout) cannot decode either frame at
+/// all — this is what lets a peer ask before it sends. Advertising it says the *daemon* serves
+/// the two verbs; whether the **harness** on a given thread implements them is a second question,
+/// answered per thread with
+/// [`ErrorKind::Unsupported`](crate::error::ErrorKind::Unsupported), which is why the composer
+/// offers `/login` on a Codex thread and on no other.
+pub const AGENT_ACCOUNT_CAPABILITY: &str = "agent.account";
+
 /// Every `agent.*` capability this build implements, in advertisement order.
 ///
 /// Both directions publish it. A daemon puts it in `HelloResponse.capabilities`, and a client
@@ -62,6 +75,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     AGENT_CHECKPOINTS_CAPABILITY,
     AGENT_CODEX_CAPABILITY,
     AGENT_SEEN_CAPABILITY,
+    AGENT_ACCOUNT_CAPABILITY,
 ];
 
 pub mod agents;

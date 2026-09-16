@@ -34,6 +34,8 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | AgentItemBody { .. }
         | AgentCheckpoints { .. }
         | AgentRevert { .. }
+        | AgentAccountLogin { .. }
+        | AgentAccountLogout { .. }
         | AgentStop { .. } => classify_agent(body, resolver),
 
         AgentSeenCursors => Target::Local,
@@ -287,6 +289,8 @@ pub(crate) fn local_fanout_part(
         | RequestBody::AgentSetMode { .. }
         | RequestBody::AgentSetModel { .. }
         | RequestBody::AgentMarkSeen { .. }
+        | RequestBody::AgentAccountLogin { .. }
+        | RequestBody::AgentAccountLogout { .. }
         | RequestBody::AgentStop { .. }
         | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }
@@ -416,7 +420,7 @@ mod tests {
             None
         }
         fn host_of_thread(&self, _id: &ThreadId) -> Option<HostId> {
-            None
+            Some(self.host.clone())
         }
     }
 
@@ -444,7 +448,23 @@ mod tests {
                 },
                 &resolver
             ),
-            Target::Host(host)
+            Target::Host(host.clone())
         );
+        // Every other thread mutation follows its owner. The two account verbs do not: the
+        // sign-in Codex starts is a loopback callback on whichever daemon runs the harness, so
+        // forwarding one would hand this machine's browser a URL only the owner's loopback can
+        // answer. They stay local and the manager refuses a mirrored thread by name.
+        let thread = ThreadId::new();
+        assert_eq!(
+            classify(&RequestBody::AgentStop { thread }, &resolver),
+            Target::Host(host),
+            "the resolver claims every thread, so this is the forwarding baseline"
+        );
+        for local in [
+            RequestBody::AgentAccountLogin { thread },
+            RequestBody::AgentAccountLogout { thread },
+        ] {
+            assert_eq!(classify(&local, &resolver), Target::Local, "{local:?}");
+        }
     }
 }

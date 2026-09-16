@@ -44,7 +44,11 @@ The agent thread follows the same split:
 `screens/agent_thread/{rows/,decisions,composer,presentation,picker,actions}` prepare,
 `state/agents.rs` holds the per-worktree tab order and the client mirror, and the view itself
 issues no I/O — it emits `AgentThreadEvent`, which `screens/workspace/agent.rs` relays as
-`BridgeCommand`s. `rows/` is the flat row projection (`NATIVE-AGENTS.md` §5): a turn is an
+`BridgeCommand`s. Three of those events are **not** fire-and-forget, because their answer is
+state the surface reads rather than a mutation to forget: `LoadOlder` prepends a page,
+`RefreshCheckpoints` decides whether `[u]` is drawn at all, and `AccountLogin` carries the
+sign-in URL the workspace opens in a browser. `rows/` is the flat row projection
+(`NATIVE-AGENTS.md` §5): a turn is an
 emergent run of rows, never a container, and every row is memoised behind a revision key so a
 stream chunk never re-runs grouping, folding or summarization.
 

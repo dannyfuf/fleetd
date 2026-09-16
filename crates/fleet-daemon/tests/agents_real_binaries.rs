@@ -11,7 +11,8 @@
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use fleet_core::agents::{
-    AgentKind, ApprovalPolicy, PermissionMode, SandboxPolicy, StartRequest, ThreadId,
+    AccountStatus, AgentEvent, AgentKind, ApprovalPolicy, PermissionMode, SandboxPolicy,
+    StartRequest, ThreadId,
 };
 use fleet_daemon::agents::harness::{self, OpenSession, ShutdownReason, probe::ProbeCache};
 
@@ -83,6 +84,26 @@ async fn codex_completes_the_real_handshake() {
         "the resume cursor is the thread id and is durable before any turn"
     );
     assert!(codex.capabilities().version.minor > 0);
+    // The handshake reads the account, and the read is **read-only**: nothing here signs in or
+    // out, because this test runs against the developer's own Codex install. A machine with no
+    // OpenAI account configured reports `SignedOut`, which is just as valid an answer — what is
+    // asserted is that the signal arrives at all, and that it never carries a secret.
+    let mut account = None;
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::AccountChanged { account: status } = event.event {
+            account = Some(status);
+        }
+    }
+    let account = account.unwrap_or_else(|| {
+        panic!("the handshake publishes the account Codex reported, signed in or not")
+    });
+    if let AccountStatus::SignedIn(info) = &account {
+        assert!(
+            info.label().is_none_or(|label| !label.is_empty()),
+            "a label is a real label or no label at all: {info:?}"
+        );
+    }
+
     codex
         .shutdown(ShutdownReason::User)
         .await

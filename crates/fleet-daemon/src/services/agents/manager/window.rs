@@ -218,6 +218,7 @@ fn session_view(
         cost_usd: projection.cumulative_cost_usd,
         context_pct: Some(projection.context_pct),
         retrying: projection.retrying.clone(),
+        account: projection.account.clone(),
     }
 }
 

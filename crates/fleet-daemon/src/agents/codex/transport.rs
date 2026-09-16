@@ -25,7 +25,7 @@ use std::{
 };
 
 use fleet_core::agents::AgentEvent;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     process::Child,
@@ -34,7 +34,7 @@ use tokio::{
 };
 
 use super::{
-    approvals,
+    ACCOUNT_DEADLINE, account, approvals,
     envelope::{
         self, Inbound, OutboundError, OutboundNotification, OutboundRequest, OutboundResponse,
     },
@@ -257,6 +257,14 @@ impl Transport {
     /// The serialized writer, for answering a server request the adapter owns.
     pub(super) fn writer(&self) -> &Writer {
         &self.writer
+    }
+
+    /// One `account/read`, normalized, or `None` when there is nothing honest to report.
+    ///
+    /// The caller decides what to emit: a handshake read and a logout read publish different
+    /// transcript lines for the same answer.
+    pub(super) async fn read_account(&self) -> Option<fleet_core::agents::AccountStatus> {
+        read_account(&self.shared).await
     }
 
     /// How many unroutable lines this connection has seen.
@@ -521,67 +529,124 @@ async fn handle_line(shared: &Shared, line: Line) {
     }
 }
 
-/// Starts a notification-triggered vocabulary refresh without blocking the stdout reader.
-async fn spawn_follow_up(shared: &Shared, method: &'static str) {
+/// Starts a notification-triggered refresh without blocking the stdout reader.
+async fn spawn_follow_up(shared: &Shared, follow_up: map::FollowUp) {
+    let method = follow_up.method();
     let key = format!("follow-up:{method}");
     let shared_for_task = shared.clone();
     let task = tokio::spawn(async move {
-        let result = match method {
-            "skills/list" => {
-                let cwd = shared_for_task.session.lock().await.worktree_path.clone();
-                request_shared(
-                    &shared_for_task,
-                    "skills/list",
-                    Some(serde_json::json!({
-                        "cwds": cwd
-                            .map(|path| path.to_string_lossy().into_owned())
-                            .into_iter()
-                            .collect::<Vec<_>>(),
-                        "forceReload": true,
-                    })),
-                    Duration::from_secs(10),
-                )
-                .await
-                .map(|result| {
-                    let skills = super::catalogue::parse_skill_names(&result);
-                    (result, skills)
-                })
-            }
-            _ => return,
-        };
-        match result {
-            Ok((_response, skills)) => {
-                shared_for_task
-                    .session
-                    .lock()
-                    .await
-                    .install_skills(skills.clone());
-                let event = HarnessEvent::now(
-                    fleet_core::agents::AgentEvent::MetadataChanged {
-                        title: None,
-                        mode: None,
-                        model: None,
-                        skills: Some(skills),
-                    },
-                    Some(RawRef::method(method)),
-                );
-                let _receiver_gone_at_shutdown = shared_for_task.events.send(event);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "fleet::agents::codex",
-                    %error,
-                    method,
-                    "a Codex vocabulary refresh failed"
-                );
+        match follow_up {
+            map::FollowUp::Skills => refresh_skills(&shared_for_task).await,
+            map::FollowUp::Account { announce_sign_in } => {
+                refresh_account(&shared_for_task, announce_sign_in).await;
             }
         }
     });
-    // One retained handle per vocabulary keeps shutdown/retrigger cancellation explicit without
+    // One retained handle per refresh keeps shutdown/retrigger cancellation explicit without
     // consuming the human-latency inbound-request budget.
     let mut tasks = shared.follow_ups.lock().await;
     if let Some(previous) = tasks.insert(key, task.abort_handle()) {
         previous.abort();
+    }
+}
+
+/// Re-reads the cwd-scoped skill catalogue and publishes it.
+async fn refresh_skills(shared: &Shared) {
+    let cwd = shared.session.lock().await.worktree_path.clone();
+    let result = request_shared(
+        shared,
+        "skills/list",
+        Some(serde_json::json!({
+            "cwds": cwd
+                .map(|path| path.to_string_lossy().into_owned())
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "forceReload": true,
+        })),
+        Duration::from_secs(10),
+    )
+    .await;
+    match result {
+        Ok(response) => {
+            let skills = super::catalogue::parse_skill_names(&response);
+            shared.session.lock().await.install_skills(skills.clone());
+            let event = HarnessEvent::now(
+                fleet_core::agents::AgentEvent::MetadataChanged {
+                    title: None,
+                    mode: None,
+                    model: None,
+                    skills: Some(skills),
+                },
+                Some(RawRef::method("skills/list")),
+            );
+            let _receiver_gone_at_shutdown = shared.events.send(event);
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "fleet::agents::codex",
+                %error,
+                method = "skills/list",
+                "a Codex vocabulary refresh failed"
+            );
+        }
+    }
+}
+
+/// Re-reads the account and publishes it, optionally announcing a completed sign-in.
+///
+/// A failed read is a warning and no event: the account is a chip, and an unreadable chip must
+/// not become a transcript row claiming the session is signed out.
+async fn refresh_account(shared: &Shared, announce_sign_in: bool) {
+    let Some(status) = read_account(shared).await else {
+        return;
+    };
+    emit_account(&shared.events, &status, announce_sign_in);
+}
+
+/// One `account/read`, normalized, or `None` when there is nothing honest to report.
+async fn read_account(shared: &Shared) -> Option<fleet_core::agents::AccountStatus> {
+    match request_shared(shared, "account/read", Some(json!({})), ACCOUNT_DEADLINE).await {
+        Ok(response) => match account::status_of(&response) {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::warn!(
+                    target: "fleet::agents::codex",
+                    %error,
+                    "could not decode the Codex account"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                target: "fleet::agents::codex",
+                %error,
+                "could not read the Codex account"
+            );
+            None
+        }
+    }
+}
+
+/// Publishes one account observation, and the sentence a completed sign-in earns.
+fn emit_account(
+    events: &HarnessSink,
+    status: &fleet_core::agents::AccountStatus,
+    announce_sign_in: bool,
+) {
+    emit(
+        events,
+        fleet_core::agents::AgentEvent::AccountChanged {
+            account: status.clone(),
+        },
+        Some("account/read"),
+    );
+    if announce_sign_in {
+        emit(
+            events,
+            fleet_core::agents::AgentEvent::Notice(account::signed_in_notice(status)),
+            Some("account/read"),
+        );
     }
 }
 

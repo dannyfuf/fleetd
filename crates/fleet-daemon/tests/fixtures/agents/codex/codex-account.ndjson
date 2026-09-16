@@ -1,0 +1,13 @@
+{"_note": "The account frames of codex-cli 0.147.0's app-server, in the shapes its own generated JSON schema declares. Hand-built rather than captured: a capture of this family carries the signed-in user's email, which is exactly the payload docs/NATIVE-AGENTS.md forbids putting in a fixture."}
+{"_dir": "out", "id": 3, "method": "account/read", "params": {}}
+{"_case": "chatgpt", "_dir": "in", "id": 3, "result": {"account": {"type": "chatgpt", "email": "dev@example.com", "planType": "business"}, "requiresOpenaiAuth": true}}
+{"_case": "api-key", "_dir": "in", "id": 4, "result": {"account": {"type": "apiKey"}, "requiresOpenaiAuth": true}}
+{"_case": "signed-out", "_dir": "in", "id": 5, "result": {"account": null, "requiresOpenaiAuth": true}}
+{"_case": "other-provider", "_dir": "in", "id": 6, "result": {"account": null, "requiresOpenaiAuth": false}}
+{"_case": "updated", "_dir": "in", "method": "account/updated", "params": {"authMode": "chatgpt", "planType": "business"}, "emittedAtMs": 1789020752901}
+{"_dir": "out", "id": 7, "method": "account/login/start", "params": {"type": "chatgpt"}}
+{"_case": "login-start", "_dir": "in", "id": 7, "result": {"type": "chatgpt", "loginId": "9f1a0d1c-6f0a-4a0a-9a0a-1c2d3e4f5a6b", "authUrl": "http://localhost:1455/auth/callback?state=9f1a0d1c"}}
+{"_case": "login-ok", "_dir": "in", "method": "account/login/completed", "params": {"loginId": "9f1a0d1c-6f0a-4a0a-9a0a-1c2d3e4f5a6b", "success": true, "error": null, "onboardingEntrypoint": null}, "emittedAtMs": 1789020760112}
+{"_case": "login-failed", "_dir": "in", "method": "account/login/completed", "params": {"loginId": "9f1a0d1c-6f0a-4a0a-9a0a-1c2d3e4f5a6b", "success": false, "error": "the authorization request was denied", "onboardingEntrypoint": null}, "emittedAtMs": 1789020760112}
+{"_dir": "out", "id": 8, "method": "account/logout", "params": null}
+{"_dir": "in", "id": 8, "result": {}}

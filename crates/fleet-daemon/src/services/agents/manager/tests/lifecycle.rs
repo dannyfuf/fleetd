@@ -891,3 +891,28 @@ fn sqlite_write_failures_remain_filesystem_errors() {
     assert_eq!(error.kind, ErrorKind::Fs);
     assert!(error.message.contains("storage failed"), "{error:?}");
 }
+
+/// A harness with no account surface refuses both account verbs as `Unsupported`.
+///
+/// The refusal is the adapter's own default, not a manager-side allowlist: the manager asks the
+/// live provider and reports what it said, so a harness that later grows an account surface needs
+/// no change here (`NATIVE-AGENTS.md` §7.1).
+#[tokio::test]
+async fn a_harness_without_an_account_surface_refuses_both_account_verbs() {
+    let harness = Harness::start(full()).await;
+    let summary = harness.create(None).await;
+    assert_eq!(summary.provider, AgentKind::Claude);
+
+    for refusal in [
+        harness.manager.account_login(summary.thread).await,
+        harness.manager.account_logout(summary.thread).await,
+    ] {
+        let error = refusal.expect_err("a harness with no account surface refuses");
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert!(
+            error.message.contains("signed in or out"),
+            "the refusal says what is missing: {}",
+            error.message
+        );
+    }
+}

@@ -5,14 +5,15 @@ use fleet_core::agents::{
 };
 use serde_json::Value;
 
-use super::{MapOutput, decode};
+use super::{FollowUp, MapOutput, decode};
 use crate::agents::codex::{
     session::{CodexSession, gate_id},
     wire::{
-        AccountRateLimitsUpdatedNotification, ContextCompactedNotification,
-        ServerRequestResolvedNotification, ThreadClosedNotification, ThreadNameUpdatedNotification,
-        ThreadSettingsUpdatedNotification, ThreadStartedNotification, ThreadStatus,
-        ThreadStatusChangedNotification, ThreadTokenUsageUpdatedNotification,
+        AccountLoginCompletedNotification, AccountRateLimitsUpdatedNotification,
+        ContextCompactedNotification, ServerRequestResolvedNotification, ThreadClosedNotification,
+        ThreadNameUpdatedNotification, ThreadSettingsUpdatedNotification,
+        ThreadStartedNotification, ThreadStatus, ThreadStatusChangedNotification,
+        ThreadTokenUsageUpdatedNotification,
     },
 };
 
@@ -239,10 +240,59 @@ pub(in crate::agents::codex) fn compacted(params: &Value) -> MapOutput {
 
 /// `account/updated`.
 ///
-/// Account metadata is a chip, not a transcript row, and the plan label it carries belongs to the
-/// account surface rather than to one thread's log. Nothing is appended for it.
+/// Account metadata is a chip, not a transcript row, so nothing is appended for it. The
+/// notification itself carries only `authMode` and `planType` — **never the email** — so it is
+/// treated as a bare "something changed" and answered with a real `account/read`, which is the
+/// only call that can say who Codex is signed in as.
 pub(in crate::agents::codex) fn account_updated() -> MapOutput {
-    MapOutput::default()
+    MapOutput {
+        events: Vec::new(),
+        follow_up: vec![FollowUp::Account {
+            announce_sign_in: false,
+        }],
+    }
+}
+
+/// `account/login/completed`: the end of a browser sign-in Fleet started.
+///
+/// Success is answered with an `account/read` rather than believed on its own, for the same
+/// reason as `account/updated`: the notification names no account. A failure is the one case that
+/// is a transcript row on its own, because the user is standing in front of a browser wondering
+/// what happened.
+pub(in crate::agents::codex) fn login_completed(
+    session: &mut CodexSession,
+    params: &Value,
+) -> MapOutput {
+    let notification: AccountLoginCompletedNotification =
+        match decode("account/login/completed", params) {
+            Ok(decoded) => decoded,
+            Err(degraded) => return degraded,
+        };
+    // The flow this settles is over either way, so the pending id is dropped before anything
+    // else: a later `/login` must start a fresh flow rather than cancel a finished one.
+    if notification
+        .login_id
+        .as_deref()
+        .is_none_or(|login| session.pending_login.as_deref() == Some(login))
+    {
+        session.pending_login = None;
+    }
+    if notification.success {
+        return MapOutput {
+            events: Vec::new(),
+            follow_up: vec![FollowUp::Account {
+                announce_sign_in: true,
+            }],
+        };
+    }
+    let detail = notification
+        .error
+        .map(|error| error.trim().to_owned())
+        .filter(|error| !error.is_empty());
+    MapOutput::one(AgentEvent::Notice(match detail {
+        Some(error) => format!("Codex sign-in failed: {error}"),
+        None => "Codex sign-in failed.".to_owned(),
+    }))
 }
 
 /// `account/rateLimits/updated`: a **sparse merge**.
