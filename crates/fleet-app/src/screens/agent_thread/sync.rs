@@ -67,21 +67,23 @@ impl AgentThreadView {
         self.seed_controls();
         self.sync_clock();
         if streaming_only {
-            let items: Vec<ItemId> = self.row_of_item.keys().copied().collect();
-            let mut rows = self.rows.to_vec();
-            let mut moved = false;
-            for item in items {
-                moved |= self.patch_streaming_row(&mut rows, item);
-            }
-            if moved {
-                self.rows = Rc::from(rows);
-                self.rows_key = self.rows_key.take().map(|key| RowsKey {
-                    last_seq: self.projection.last_seq,
-                    ..key
-                });
-                let rows = self.rows.to_vec();
+            let patches: Vec<(usize, TranscriptRow)> = self
+                .row_of_item
+                .keys()
+                .filter_map(|item| self.streaming_row(*item))
+                .collect();
+            self.rows_key = self.rows_key.take().map(|key| RowsKey {
+                last_seq: self.projection.last_seq,
+                ..key
+            });
+            for (index, row) in patches {
+                let rows = Rc::make_mut(&mut self.rows);
+                let Some(slot) = rows.get_mut(index) else {
+                    continue;
+                };
+                *slot = row.clone();
                 self.transcript
-                    .update(cx, |list, cx| list.set_rows(rows, cx));
+                    .update(cx, |list, cx| list.patch_row(index, row, cx));
             }
             cx.notify();
             return;
@@ -363,42 +365,52 @@ impl AgentThreadView {
         }
     }
 
-    /// Rewrites the text of the row that carries `item`, returning whether it moved.
-    fn patch_streaming_row(&self, rows: &mut [TranscriptRow], item: ItemId) -> bool {
-        let Some(index) = self.row_of_item.get(&item).copied() else {
-            return false;
-        };
-        let Some(source) = self
+    /// Builds the one replacement row for `item`, without cloning the transcript row vector.
+    fn streaming_row(&self, item: ItemId) -> Option<(usize, TranscriptRow)> {
+        let index = self.row_of_item.get(&item).copied()?;
+        let source = self
             .projection
             .items
             .iter()
-            .find(|candidate| candidate.id == item)
-        else {
-            return false;
-        };
-        let text = rows::item_text(source);
-        let Some(row) = rows.get_mut(index) else {
-            return false;
-        };
+            .find(|candidate| candidate.id == item)?;
+        let current = self.rows.get(index)?;
+        let mut row = current.clone();
         match &mut row.kind {
             TranscriptRowKind::Assistant(assistant) => {
-                let markdown = fleet_ui_kit::parse_markdown_document(&text);
-                if assistant.markdown == markdown {
-                    return false;
+                let text = rows::item_text(source);
+                let markdown = Rc::new(fleet_ui_kit::parse_markdown_document(&text));
+                if assistant.markdown == markdown && assistant.empty == text.trim().is_empty() {
+                    return None;
                 }
                 assistant.markdown = markdown;
                 assistant.empty = text.trim().is_empty();
             }
             TranscriptRowKind::Reasoning(reasoning) => {
+                let text = rows::item_text(source);
                 let text = SharedString::from(text);
                 if reasoning.text == text {
-                    return false;
+                    return None;
                 }
                 reasoning.text = text;
             }
-            _ => return false,
+            TranscriptRowKind::Work(work) => {
+                let ItemKind::Tool(call) = &source.kind else {
+                    return None;
+                };
+                let next = rows::item::projected_tool_row(source, call, work.expanded);
+                if *work == next {
+                    return None;
+                }
+                *work = next;
+            }
+            // A live tool's command output is intentionally hidden behind the fixed-height live
+            // row. Indexing it still matters: the delta can now skip a full grouping rebuild.
+            TranscriptRowKind::WorkLive(_) if matches!(&source.kind, ItemKind::Tool(_)) => {
+                return None;
+            }
+            _ => return None,
         }
-        true
+        Some((index, row))
     }
 
     /// Builds, updates and drops the inline diff surface of every item that carries a patch.
@@ -515,12 +527,25 @@ fn streaming_only_change(
             same_row
                 && (next.kind == current.kind
                     || (row_of_item.contains_key(&next.id)
-                        && matches!(
-                            (&next.kind, &current.kind),
-                            (
-                                ItemKind::AssistantText { .. },
-                                ItemKind::AssistantText { .. }
-                            ) | (ItemKind::Reasoning { .. }, ItemKind::Reasoning { .. })
-                        )))
+                        && streaming_kind_held(&next.kind, &current.kind)))
         })
+}
+
+fn streaming_kind_held(next: &ItemKind, current: &ItemKind) -> bool {
+    match (next, current) {
+        (ItemKind::AssistantText { .. }, ItemKind::AssistantText { .. })
+        | (ItemKind::Reasoning { .. }, ItemKind::Reasoning { .. }) => true,
+        (ItemKind::Tool(next), ItemKind::Tool(current)) => {
+            next.kind == current.kind
+                && next.name == current.name
+                && next.input == current.input
+                && next.summary == current.summary
+                && next.result == current.result
+                && next.diff == current.diff
+                && next.exit_code == current.exit_code
+                && next.duration_ms == current.duration_ms
+                && next.extra == current.extra
+        }
+        _ => false,
+    }
 }

@@ -8,7 +8,7 @@ use fleet_core::agents::{
     TurnState,
 };
 use fleet_ui_kit::{TranscriptRowId, TranscriptRowKind};
-use gpui::{AppContext as _, TestAppContext};
+use gpui::{AppContext as _, EntityInputHandler as _, TestAppContext};
 
 use super::fixtures::{
     assistant, command, permission_gate, projection, question, question_gate, running_turn,
@@ -67,6 +67,30 @@ fn a_composer_submit_sends_the_text_it_reported(cx: &mut TestAppContext) {
         assert!(view.input().read(cx).text().is_empty());
         // The bubble is optimistic: it is on screen in the same frame the key was pressed.
         assert_eq!(count_user_rows(view), 1);
+    });
+}
+
+#[gpui::test]
+fn send_actions_do_not_submit_an_open_ime_composition(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let (view, visual) = cx.add_window_view(|_, cx| AgentThreadView::new(projection(), cx));
+
+    visual.update(|window, cx| {
+        let input = view.read(cx).input().clone();
+        input.update(cx, |input, cx| {
+            input.replace_and_mark_text_in_range(None, "漢", Some(1..1), window, cx);
+        });
+        view.update(cx, |view, cx| {
+            view.send(cx);
+            view.send_background(cx);
+        });
+    });
+    cx.run_until_parked();
+
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.input().read(cx).text(), "漢");
+        assert!(view.input().read(cx).is_composing());
+        assert_eq!(count_user_rows(view), 0);
     });
 }
 
@@ -149,6 +173,75 @@ fn streaming_a_delta_rewrites_one_row_and_reuses_every_other(cx: &mut TestAppCon
     );
     let splice = fleet_ui_kit::diff_rows(&before, &after).expect("one row moved");
     assert_eq!(splice.count, 1);
+}
+
+#[gpui::test]
+fn streaming_command_output_patches_its_row_without_reallocating_the_row_slice(
+    cx: &mut TestAppContext,
+) {
+    let turn = TurnId::new();
+    let mut command = command(turn, ItemStatus::InProgress, "cargo test");
+    if let fleet_core::agents::ItemKind::Tool(call) = &mut command.kind {
+        call.output = "running crate tests".to_owned();
+    }
+    let mut base = projection();
+    base.items = vec![command.clone()];
+    base.last_seq = fleet_core::agents::Seq(20);
+
+    let view = cx.new(|cx| AgentThreadView::new(base.clone(), cx));
+    let before = view.read_with(cx, |view, _| view.rows().as_ptr());
+
+    let mut next = base;
+    if let fleet_core::agents::ItemKind::Tool(call) = &mut command.kind {
+        call.output.push_str("\nall green");
+    }
+    next.items[0] = command;
+    next.last_seq = fleet_core::agents::Seq(21);
+    view.update(cx, |view, cx| view.sync(&next, cx));
+
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.rows().as_ptr(), before);
+        let TranscriptRowKind::Work(row) = &view.rows()[0].kind else {
+            panic!("the command remains one work row");
+        };
+        assert!(
+            row.body
+                .as_ref()
+                .is_some_and(|body| body.contains("all green"))
+        );
+    });
+}
+
+#[gpui::test]
+fn command_output_hidden_by_the_live_row_skips_a_structural_rebuild(cx: &mut TestAppContext) {
+    let turn = TurnId::new();
+    let prompt = user(turn, "run it");
+    let mut running = command(turn, ItemStatus::InProgress, "cargo test");
+    let mut base = projection();
+    base.items = vec![prompt.clone(), running.clone()];
+    base.turns = vec![running_turn(turn, prompt.id)];
+    base.turn = TurnState::Running(turn);
+    base.session = SessionState::Running;
+    base.last_seq = fleet_core::agents::Seq(30);
+
+    let view = cx.new(|cx| AgentThreadView::new(base.clone(), cx));
+    let before = view.read_with(cx, |view, _| view.rows().as_ptr());
+
+    if let fleet_core::agents::ItemKind::Tool(call) = &mut running.kind {
+        call.output = "one more crate passed".to_owned();
+    }
+    let mut next = base;
+    next.items[1] = running;
+    next.last_seq = fleet_core::agents::Seq(31);
+    view.update(cx, |view, cx| view.sync(&next, cx));
+
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.rows().as_ptr(), before);
+        assert!(matches!(
+            &view.rows()[1].kind,
+            TranscriptRowKind::WorkLive(_)
+        ));
+    });
 }
 
 #[gpui::test]

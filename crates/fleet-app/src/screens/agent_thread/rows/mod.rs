@@ -189,9 +189,8 @@ impl BuiltRows {
         self.rows.push(row);
     }
 
-    /// Records that `item`'s text streams into the row just pushed.
-    pub(crate) fn mark_streaming(&mut self, item: ItemId) {
-        let index = self.rows.len().saturating_sub(1);
+    /// Records the primary row that receives `item`'s streamed content.
+    pub(crate) fn mark_streaming(&mut self, item: ItemId, index: usize) {
         self.streaming.insert(item, index);
     }
 }

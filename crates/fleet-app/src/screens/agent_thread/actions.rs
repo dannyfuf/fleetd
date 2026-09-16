@@ -31,6 +31,9 @@ impl AgentThreadView {
 
     /// `⏎`: accept a completion, answer the open decision, else send.
     pub(crate) fn send(&mut self, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() {
+            return;
+        }
         if self.accept_completion(cx) {
             return;
         }
@@ -105,6 +108,9 @@ impl AgentThreadView {
     /// on a started thread it is identical to `⏎`, which is why the intent is one function and
     /// the difference is a return value rather than a second code path.
     pub(crate) fn send_background(&mut self, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() {
+            return;
+        }
         let is_new_thread = self.projection.turns.is_empty();
         let text = self.input.read(cx).text().to_owned();
         match submit_intent(false, true, is_new_thread) {

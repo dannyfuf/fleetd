@@ -54,6 +54,7 @@ pub(crate) fn emit(
         if tail.first() == Some(&index)
             && let Some(row) = live::row(&own, &tail, active)
         {
+            let live_row = built.rows.len();
             built.push(
                 TranscriptRow::new(
                     TranscriptRowId::LiveActivity,
@@ -61,6 +62,11 @@ pub(crate) fn emit(
                 ),
                 None,
             );
+            for tail_index in &tail {
+                if let Some(item) = own.get(*tail_index) {
+                    built.mark_streaming(item.id, live_row);
+                }
+            }
         }
         if subsumed.contains(&entry.id) {
             index += 1;
@@ -74,15 +80,16 @@ pub(crate) fn emit(
             index += run.len();
             continue;
         }
+        let first_row = built.rows.len();
+        let streaming = matches!(
+            entry.kind,
+            ItemKind::AssistantText { .. } | ItemKind::Reasoning { .. } | ItemKind::Tool(_)
+        ) && !is_settled(entry.status);
         for (row, target) in item::rows_for(inputs, items, entry) {
-            let streaming = matches!(
-                entry.kind,
-                ItemKind::AssistantText { .. } | ItemKind::Reasoning { .. }
-            ) && !is_settled(entry.status);
             built.push(row, target);
-            if streaming {
-                built.mark_streaming(entry.id);
-            }
+        }
+        if streaming && first_row < built.rows.len() {
+            built.mark_streaming(entry.id, first_row);
         }
         index += 1;
     }
@@ -104,15 +111,16 @@ pub(crate) fn emit_orphans(
     built: &mut BuiltRows,
 ) {
     for entry in orphans {
+        let first_row = built.rows.len();
         for (row, target) in item::rows_for(inputs, items, entry) {
             built.push(row, target);
         }
         if matches!(
             entry.kind,
-            ItemKind::AssistantText { .. } | ItemKind::Reasoning { .. }
+            ItemKind::AssistantText { .. } | ItemKind::Reasoning { .. } | ItemKind::Tool(_)
         ) && !is_settled(entry.status)
         {
-            built.mark_streaming(entry.id);
+            built.mark_streaming(entry.id, first_row);
         }
     }
 }
@@ -249,7 +257,7 @@ fn emit_close(
         TranscriptRow::new(
             TranscriptRowId::Turn(SharedString::from(format!("footer-{}", record.id))),
             TranscriptRowKind::TurnFooter(TurnFooterRow {
-                segments,
+                segments: segments.into(),
                 diff: footer.is_some_and(|footer| footer.files_changed > 0),
                 revert: inputs.checkpoints.contains_key(&record.id),
             }),
