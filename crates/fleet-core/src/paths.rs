@@ -53,6 +53,11 @@ impl FleetHome {
     pub fn state_path(&self) -> PathBuf {
         self.root.join("state.json")
     }
+    /// Returns the stable identity used by clients from this Fleet installation.
+    #[must_use]
+    pub fn client_id_path(&self) -> PathBuf {
+        self.root.join("client-id")
+    }
     /// Returns the agents directory.
     #[must_use]
     pub fn agents_path(&self) -> PathBuf {
@@ -151,6 +156,18 @@ impl FleetHome {
     pub fn pty_log_path(&self) -> PathBuf {
         self.logs_dir().join("pty-hold.log")
     }
+}
+
+/// Mints a client identity without exposing the UUID dependency to the client crate.
+#[must_use]
+pub fn new_client_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+/// Whether `value` is the canonical UUID spelling used for a client identity.
+#[must_use]
+pub fn is_client_id(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|parsed| parsed.to_string() == value)
 }
 
 /// Longest `sun_path` a Unix socket address can carry.

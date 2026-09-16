@@ -9,8 +9,8 @@ use std::{path::Path, time::Duration};
 use fleet_client::{AgentSnapshot, AgentWindowRequest, Client, MirrorOutcome};
 use fleet_core::{
     agents::{
-        AgentKind, AgentThreadSummary, Attention, Seq, SessionState, ThreadId, ThreadProjection,
-        TurnState,
+        AgentKind, AgentThreadSummary, Applied, Attention, Seq, SessionState, ThreadId,
+        ThreadProjection, TurnState,
     },
     ids::WorktreeId,
 };
@@ -259,7 +259,7 @@ async fn an_installed_snapshot_still_reports_the_four_way_outcome() {
             projection: projection(thread),
             events_after: vec![notice(Seq(1))],
         }),
-        MirrorOutcome::Applied
+        MirrorOutcome::Applied(Applied::Structural)
     );
     assert_eq!(events.mirror().applied_seq(thread), Seq(1));
     server.await.expect("server");
@@ -324,7 +324,7 @@ async fn a_sequence_gap_is_repaired_through_the_window_not_the_unbounded_snapsho
             projection: projection(thread),
             events_after: vec![notice(Seq(1))],
         }),
-        MirrorOutcome::Applied
+        MirrorOutcome::Applied(Applied::Structural)
     );
 
     let (delivered, event) = timeout(BUDGET, events.recv())
@@ -470,6 +470,7 @@ fn window(
         }),
         head_seq,
         projected_seq,
+        seen_seq: None,
         events_after: Vec::new(),
         synchronized,
     }

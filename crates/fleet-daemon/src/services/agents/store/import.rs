@@ -527,6 +527,7 @@ mod tests {
                     provider: AgentKind::Claude,
                     resume_cursor: Some("session-42".to_owned()),
                     model: None,
+                    models: Vec::new(),
                     mode: PermissionMode::Ask,
                     tools: Vec::new(),
                     commands: Vec::new(),

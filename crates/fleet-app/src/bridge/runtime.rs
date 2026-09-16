@@ -1,13 +1,26 @@
 use super::{
-    connection::{Failure, HealthCheckError, Link, check_health, daemon_identity, open},
+    connection::{
+        Failure, HealthCheckError, Link, check_health, daemon_identity, open, refresh_agent_seen,
+    },
     requests, *,
 };
-use std::{collections::VecDeque, future::Future, pin::Pin};
+use std::{
+    collections::{HashMap, VecDeque},
+    future::Future,
+    pin::Pin,
+    sync::{Arc, RwLock},
+};
 
 type Opening<'a> = Pin<Box<dyn Future<Output = Result<(Link, Snapshot), Failure>> + Send + 'a>>;
 type HealthCheck = Pin<Box<dyn Future<Output = (u32, Result<(), HealthCheckError>)> + Send>>;
 type IdentityCheck =
     Pin<Box<dyn Future<Output = (u32, Option<String>, Option<(u32, String)>)> + Send>>;
+
+#[derive(Clone, Copy)]
+pub(super) struct RuntimeIntervals {
+    pub(super) health: Duration,
+    pub(super) identity: Duration,
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Backoff {
@@ -55,6 +68,7 @@ pub(super) async fn run(
     events: &Sender<BridgeEvent>,
     resync_pending: &Arc<AtomicBool>,
     settle: Arc<SettleCounter>,
+    agent_seen: Arc<RwLock<HashMap<ThreadId, Seq>>>,
 ) {
     run_with_intervals(
         home,
@@ -62,8 +76,11 @@ pub(super) async fn run(
         events,
         resync_pending,
         settle,
-        HEALTH_INTERVAL,
-        IDENTITY_INTERVAL,
+        agent_seen,
+        RuntimeIntervals {
+            health: HEALTH_INTERVAL,
+            identity: IDENTITY_INTERVAL,
+        },
     )
     .await;
 }
@@ -74,8 +91,8 @@ pub(super) async fn run_with_intervals(
     events: &Sender<BridgeEvent>,
     resync_pending: &Arc<AtomicBool>,
     settle: Arc<SettleCounter>,
-    health_interval: Duration,
-    identity_interval: Duration,
+    agent_seen: Arc<RwLock<HashMap<ThreadId, Seq>>>,
+    intervals: RuntimeIntervals,
 ) {
     let (requests, request_rx) = async_channel::bounded(COMMAND_CAPACITY);
     let _request_task = tokio::spawn(requests::run(
@@ -85,17 +102,17 @@ pub(super) async fn run_with_intervals(
         settle,
     ));
     let mut link: Option<Link> = None;
-    let mut opening: Option<Opening<'_>> = Some(Box::pin(open(home, events)));
+    let mut opening: Option<Opening<'_>> = Some(Box::pin(open(home, events, &agent_seen)));
     let mut reason = OpeningReason::Initial;
     let mut health: Option<HealthCheck> = None;
     let mut identity: Option<IdentityCheck> = None;
     let mut waiting = VecDeque::new();
     let mut backoff = Backoff::Idle;
-    let mut ticker = tokio::time::interval(health_interval);
+    let mut ticker = tokio::time::interval(intervals.health);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut identity_ticker = tokio::time::interval_at(
-        tokio::time::Instant::now() + identity_interval,
-        identity_interval,
+        tokio::time::Instant::now() + intervals.identity,
+        intervals.identity,
     );
     identity_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -125,7 +142,7 @@ pub(super) async fn run_with_intervals(
                         health = None;
                         identity = None;
                         reason = manual_opening_reason(backoff);
-                        opening = Some(Box::pin(open(home, events)));
+                        opening = Some(Box::pin(open(home, events, &agent_seen)));
                     }
                 }
                 Ok(Command::Shutdown) | Err(_) => return,
@@ -172,7 +189,33 @@ pub(super) async fn run_with_intervals(
                     link = None;
                     identity = None;
                     reason = OpeningReason::RecoveryProbe { previous_pid };
-                    opening = Some(Box::pin(open(home, events)));
+                    opening = Some(Box::pin(open(home, events, &agent_seen)));
+                } else {
+                    let refresh = link
+                        .as_mut()
+                        .filter(|current| current.pid == previous_pid)
+                        .and_then(|current| {
+                            let generation = current.client.connection_generation();
+                            if generation == current.connection_generation {
+                                return None;
+                            }
+                            current.connection_generation = generation;
+                            Some(current.client.clone())
+                        });
+                    let Some(client) = refresh else { continue };
+                    match refresh_agent_seen(&client, &agent_seen).await {
+                        Ok(Some(cursors)) => {
+                            if events
+                                .send(BridgeEvent::AgentSeenCursors(cursors))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(%error, "could not refresh native-agent seen cursors"),
+                    }
                 }
             },
             (expected_pid, expected_boot_id, actual_identity) = wait(&mut identity) => {
@@ -195,7 +238,7 @@ pub(super) async fn run_with_intervals(
             () = at(retry_at) => {
                 if let Backoff::Reconnecting { previous_pid, attempt, .. } = backoff {
                     reason = OpeningReason::Retry { previous_pid, attempt };
-                    opening = Some(Box::pin(open(home, events)));
+                    opening = Some(Box::pin(open(home, events, &agent_seen)));
                 }
             },
             _ = ticker.tick() => {

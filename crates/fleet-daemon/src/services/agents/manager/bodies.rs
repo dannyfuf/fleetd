@@ -285,6 +285,7 @@ mod tests {
             page: None,
             head_seq: Seq::default(),
             projected_seq: Seq::default(),
+            seen_seq: None,
             events_after: Vec::new(),
             synchronized: false,
         }

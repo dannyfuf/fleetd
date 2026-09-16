@@ -86,6 +86,7 @@ async fn a_turn_streams_items_and_moves_attention_to_finished() {
             provider: AgentKind::Claude,
             resume_cursor: None,
             model: None,
+            models: Vec::new(),
             mode: PermissionMode::Ask,
             tools: Vec::new(),
             commands: Vec::new(),

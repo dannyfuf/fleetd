@@ -43,6 +43,9 @@ pub const AGENT_CHECKPOINTS_CAPABILITY: &str = "agent.checkpoints";
 /// would force every machine to upgrade in lockstep for a harness only one of them can run.
 pub const AGENT_CODEX_CAPABILITY: &str = "agent.codex";
 
+/// Capability advertised by daemons that persist read cursors per Fleet installation.
+pub const AGENT_SEEN_CAPABILITY: &str = "agent.seen";
+
 /// Every `agent.*` capability this build implements, in advertisement order.
 ///
 /// Both directions publish it. A daemon puts it in `HelloResponse.capabilities`, and a client
@@ -58,6 +61,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     AGENT_ITEM_BODY_CAPABILITY,
     AGENT_CHECKPOINTS_CAPABILITY,
     AGENT_CODEX_CAPABILITY,
+    AGENT_SEEN_CAPABILITY,
 ];
 
 pub mod agents;

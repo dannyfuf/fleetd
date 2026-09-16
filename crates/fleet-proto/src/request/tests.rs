@@ -26,6 +26,7 @@ fn request_bodies_round_trip() {
             client: HelloClient {
                 kind: ClientKind::Proxy,
                 host_id: Some(HostId::try_from("local-daemon").expect("host")),
+                client_id: Some("11111111-2222-4333-8444-555555555555".to_owned()),
                 capabilities: vec![crate::AGENT_WINDOW_CAPABILITY.to_owned()],
             },
         },
@@ -37,6 +38,7 @@ fn request_bodies_round_trip() {
             host: HostId::try_from("dev-box").expect("host"),
         },
         RequestBody::AgentThreadList,
+        RequestBody::AgentSeenCursors,
         RequestBody::AgentThreadCreate {
             worktree: WorktreeId::try_from("acme/api#native-agents")
                 .unwrap_or_else(|error| panic!("{error}")),
@@ -334,6 +336,7 @@ fn hello_accepts_the_protocol_v6_string_client_wire_shape() {
     assert_eq!(protocol, 6);
     assert_eq!(client.kind, ClientKind::App);
     assert_eq!(client.host_id, None);
+    assert_eq!(client.client_id, None);
     // A peer that named nothing supports nothing optional, which is what withholds the agent
     // stream-control events from it rather than killing its frames.
     assert!(client.capabilities.is_empty());
@@ -344,7 +347,7 @@ fn hello_accepts_the_protocol_v6_string_client_wire_shape() {
 #[test]
 fn hello_carries_the_capabilities_a_client_can_decode() {
     let request: Request = serde_json::from_str(
-        r#"{"id":1,"body":{"type":"hello","protocol":7,"client":{"kind":"app","capabilities":["agent.resync"]}}}"#,
+        r#"{"id":1,"body":{"type":"hello","protocol":7,"client":{"kind":"app","clientId":"11111111-2222-4333-8444-555555555555","capabilities":["agent.resync"]}}}"#,
     )
     .expect("a capability-carrying Hello");
     let RequestBody::Hello { client, .. } = request.body else {
@@ -352,4 +355,8 @@ fn hello_carries_the_capabilities_a_client_can_decode() {
     };
     assert!(client.supports(crate::AGENT_RESYNC_CAPABILITY));
     assert!(!client.supports(crate::AGENT_WINDOW_CAPABILITY));
+    assert_eq!(
+        client.client_id.as_deref(),
+        Some("11111111-2222-4333-8444-555555555555")
+    );
 }

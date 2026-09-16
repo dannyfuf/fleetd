@@ -7,6 +7,7 @@ pub(super) struct Link {
     pub(super) client: Client,
     pub(super) pid: u32,
     pub(super) boot_id: Option<String>,
+    pub(super) connection_generation: u64,
     forwarder: Forwarder,
 }
 
@@ -112,10 +113,37 @@ pub(super) async fn daemon_identity(client: &Client) -> Option<(u32, String)> {
     client.daemon_identity()
 }
 
+/// Refreshes the capability-gated cursor census after either an app-level or transparent client
+/// reconnect. Returns whether the foreground mirror needs a wake to consume a changed census.
+pub(super) async fn refresh_agent_seen(
+    client: &Client,
+    agent_seen: &Arc<RwLock<HashMap<ThreadId, Seq>>>,
+) -> Result<Option<Vec<(ThreadId, Seq)>>, ProtoError> {
+    if !client.supports_capability(fleet_proto::AGENT_SEEN_CAPABILITY) {
+        return Ok(None);
+    }
+    let next = client
+        .agent_seen_cursors()
+        .await?
+        .into_iter()
+        .map(|cursor| (cursor.thread, cursor.seq))
+        .collect::<HashMap<_, _>>();
+    let mut current = agent_seen
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *current == next {
+        return Ok(None);
+    }
+    let cursors = next.iter().map(|(thread, seq)| (*thread, *seq)).collect();
+    *current = next;
+    Ok(Some(cursors))
+}
+
 /// Connects, spawning fleetd when the socket is dead, and reads the first snapshot.
 pub(super) async fn open(
     home: &Path,
     events: &Sender<BridgeEvent>,
+    agent_seen: &Arc<RwLock<HashMap<ThreadId, Seq>>>,
 ) -> Result<(Link, Snapshot), Failure> {
     let client = match ensure_daemon(home, None).await {
         Ok(client) => client,
@@ -141,6 +169,31 @@ pub(super) async fn open(
             cause: FailureCause::Unavailable,
         });
     }
+    match refresh_agent_seen(&client, agent_seen).await {
+        Ok(Some(cursors)) => {
+            if events
+                .send(BridgeEvent::AgentSeenCursors(cursors))
+                .await
+                .is_err()
+            {
+                return Err(Failure {
+                    message: "the app stopped receiving native-agent cursors".to_owned(),
+                    log_tail: Vec::new(),
+                    stale_socket: false,
+                    cause: FailureCause::Unavailable,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(Failure {
+                message: error.message,
+                log_tail: log_tail(home).await,
+                stale_socket: false,
+                cause: FailureCause::Unavailable,
+            });
+        }
+    }
     let forwarder = Forwarder::pending(client.events());
     if let Ok(config) = client.get_config().await {
         let _ = events
@@ -152,11 +205,13 @@ pub(super) async fn open(
     match client.get_snapshot().await {
         Ok(snapshot) => {
             let pid = snapshot.daemon.pid;
+            let connection_generation = client.connection_generation();
             Ok((
                 Link {
                     client,
                     pid,
                     boot_id: None,
+                    connection_generation,
                     forwarder,
                 },
                 snapshot,

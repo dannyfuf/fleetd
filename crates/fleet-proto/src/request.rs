@@ -49,6 +49,9 @@ pub struct HelloClient {
     /// Identity of the forwarding daemon when `kind` is proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<HostId>,
+    /// Stable identity of the originating Fleet installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     /// Optional behaviours this **client** can handle, by the same names the daemon advertises.
     ///
     /// Capability negotiation runs both ways for one reason: an adjacently tagged `Event` variant
@@ -81,6 +84,8 @@ impl<'de> Deserialize<'de> for HelloClient {
             #[serde(default)]
             host_id: Option<HostId>,
             #[serde(default)]
+            client_id: Option<String>,
+            #[serde(default)]
             capabilities: Vec<String>,
         }
 
@@ -96,6 +101,7 @@ impl<'de> Deserialize<'de> for HelloClient {
             WireClient::Metadata(metadata) => Self {
                 kind: metadata.kind,
                 host_id: metadata.host_id,
+                client_id: metadata.client_id,
                 capabilities: metadata.capabilities,
             },
         })
@@ -130,6 +136,8 @@ pub struct Request {
 pub enum RequestBody {
     /// List persisted and live native-agent threads.
     AgentThreadList,
+    /// Read the calling installation's persisted native-agent cursors.
+    AgentSeenCursors,
     /// Create and start a native-agent thread in a published worktree.
     AgentThreadCreate {
         /// Owning published worktree; the daemon resolves its canonical path.

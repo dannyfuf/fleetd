@@ -23,17 +23,17 @@ use fleet_core::{
     agents::{
         AbortReason, AgentEvent, AgentKind, AgentThreadSummary, Attention, AttentionKind,
         CheckpointKind, FileDelta, GateAnswer, GateId, GateKind, GateResolver, Item, ItemId,
-        ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, ModelSelection, PermissionChoice,
-        PermissionMode, PlanAnswer, ProviderOptionId, Question, QuestionOption, Seq, SeqEvent,
-        SessionState, StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId,
-        TurnOutcome, TurnState, Usage, UserInput,
+        ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection,
+        PermissionChoice, PermissionMode, PlanAnswer, ProviderOptionId, Question, QuestionOption,
+        ReasoningEffortDescriptor, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
+        ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
     },
     ids::WorktreeId,
 };
 use fleet_proto::{
     agents::{
-        AgentRevertReport, AgentSessionView, AgentThreadWindow, CheckpointId, CheckpointScope,
-        TranscriptPage, TranscriptWindow, TurnCheckpoint,
+        AgentRevertReport, AgentSeenCursor, AgentSessionView, AgentThreadWindow, CheckpointId,
+        CheckpointScope, TranscriptPage, TranscriptWindow, TurnCheckpoint,
     },
     event::Event,
     request::{Request, RequestBody},
@@ -121,6 +121,62 @@ fn permission_gate_item_wire_golden() {
             },
         ),
         r#"{"seq":27,"at":"2026-09-07T12:00:00Z","raw":"item/fileChange/requestApproval","event":{"type":"gate_opened","data":{"gate":"cccccccc-2222-4333-8444-555555555555","turn":"aaaaaaaa-2222-4333-8444-555555555555","kind":{"type":"permission","data":{"item":"bbbbbbbb-2222-4333-8444-555555555555","tool":{"type":"edit"},"title":"Codex wants to apply a patch","payload":"apply the edit to README.md","rationale":null,"options":[{"id":"accept","label":"allow_once"}]}}}}}"#,
+    );
+}
+
+#[test]
+fn model_descriptors_and_skill_refresh_have_additive_wire_goldens() {
+    let descriptor = ModelDescriptor {
+        id: "gpt-5.6-sol".to_owned(),
+        display_name: "GPT-5.6 Sol".to_owned(),
+        efforts: vec![ReasoningEffortDescriptor {
+            id: "high".to_owned(),
+            description: "Deep reasoning".to_owned(),
+        }],
+        default_effort: Some("high".to_owned()),
+    };
+    assert_frame(
+        seq(
+            28,
+            Some("model/list"),
+            AgentEvent::SessionConfigured {
+                provider: AgentKind::Codex,
+                resume_cursor: Some("thread-1".to_owned()),
+                model: Some(model()),
+                models: vec![descriptor.clone()],
+                mode: PermissionMode::Ask,
+                tools: Vec::new(),
+                commands: Vec::new(),
+                skills: vec!["review".to_owned()],
+            },
+        ),
+        r#"{"seq":28,"at":"2026-09-07T12:00:00Z","raw":"model/list","event":{"type":"session_configured","data":{"provider":"codex","resume_cursor":"thread-1","model":{"model":"gpt-5-codex","effort":"high"},"models":[{"id":"gpt-5.6-sol","displayName":"GPT-5.6 Sol","efforts":[{"id":"high","description":"Deep reasoning"}],"defaultEffort":"high"}],"mode":"ask","tools":[],"commands":[],"skills":["review"]}}}"#,
+    );
+    assert_frame(
+        seq(
+            29,
+            Some("skills/changed"),
+            AgentEvent::MetadataChanged {
+                title: None,
+                mode: None,
+                model: None,
+                skills: Some(vec!["review".to_owned(), "ship".to_owned()]),
+            },
+        ),
+        r#"{"seq":29,"at":"2026-09-07T12:00:00Z","raw":"skills/changed","event":{"type":"metadata_changed","data":{"skills":["review","ship"]}}}"#,
+    );
+    assert_frame(
+        AgentSessionView {
+            model: Some(ModelSelection {
+                model: "gpt-5.6-sol".to_owned(),
+                effort: Some("high".to_owned()),
+                provider: None,
+            }),
+            models: vec![descriptor],
+            skills: vec!["review".to_owned(), "ship".to_owned()],
+            ..AgentSessionView::default()
+        },
+        r#"{"model":{"model":"gpt-5.6-sol","effort":"high"},"models":[{"id":"gpt-5.6-sol","displayName":"GPT-5.6 Sol","efforts":[{"id":"high","description":"Deep reasoning"}],"defaultEffort":"high"}],"mode":"ask","skills":["review","ship"]}"#,
     );
 }
 
@@ -438,6 +494,13 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
             },
             r#"{"id":16,"body":{"type":"agent_revert","thread":"11111111-2222-4333-8444-555555555555","checkpoint":"00003-turn-aaaaaaaa-2222-4333-8444-555555555555"}}"#,
         ),
+        (
+            Request {
+                id: 17,
+                body: RequestBody::AgentSeenCursors,
+            },
+            r#"{"id":17,"body":{"type":"agent_seen_cursors"}}"#,
+        ),
     ]
 }
 
@@ -498,12 +561,23 @@ fn response_goldens() -> Vec<(Response, &'static str)> {
                         }),
                         head_seq: Seq(12),
                         projected_seq: Seq(12),
+                        seen_seq: Some(Seq(9)),
                         events_after: Vec::new(),
                         synchronized: true,
                     },
                 ))),
             },
-            r#"{"id":4,"result":{"Ok":{"type":"agent_thread_window","data":{"summary":{"thread":"11111111-2222-4333-8444-555555555555","worktree":"acme/api#native-agents","provider":"codex","title":"Codex","attention":{"type":"needs_you","data":"permission"},"session":{"type":"ready"},"turn":{"type":"running","data":"aaaaaaaa-2222-4333-8444-555555555555"},"lastSeq":12,"lastActivity":"2026-09-07T12:00:00Z","lastCompletedSeq":9,"lastNonterminalSeq":11,"exitCode":null},"session":{"model":{"model":"gpt-5-codex","effort":"high"},"mode":"ask","tools":["shell"],"commands":["/review"]},"window":{"items":[{"id":"bbbbbbbb-2222-4333-8444-555555555555","turn":"aaaaaaaa-2222-4333-8444-555555555555","kind":{"type":"assistant_text","data":{"text":"done"}},"status":"completed","children":[],"started":"2026-09-07T12:00:00Z","ended":"2026-09-07T12:00:00Z"}],"elided":["bbbbbbbb-2222-4333-8444-555555555555"]},"page":{"beforeCursor":"fat.1.11111111-2222-4333-8444-555555555555.90","hasMore":true,"threadSeq":12},"headSeq":12,"projectedSeq":12,"synchronized":true}}}}"#,
+            r#"{"id":4,"result":{"Ok":{"type":"agent_thread_window","data":{"summary":{"thread":"11111111-2222-4333-8444-555555555555","worktree":"acme/api#native-agents","provider":"codex","title":"Codex","attention":{"type":"needs_you","data":"permission"},"session":{"type":"ready"},"turn":{"type":"running","data":"aaaaaaaa-2222-4333-8444-555555555555"},"lastSeq":12,"lastActivity":"2026-09-07T12:00:00Z","lastCompletedSeq":9,"lastNonterminalSeq":11,"exitCode":null},"session":{"model":{"model":"gpt-5-codex","effort":"high"},"mode":"ask","tools":["shell"],"commands":["/review"]},"window":{"items":[{"id":"bbbbbbbb-2222-4333-8444-555555555555","turn":"aaaaaaaa-2222-4333-8444-555555555555","kind":{"type":"assistant_text","data":{"text":"done"}},"status":"completed","children":[],"started":"2026-09-07T12:00:00Z","ended":"2026-09-07T12:00:00Z"}],"elided":["bbbbbbbb-2222-4333-8444-555555555555"]},"page":{"beforeCursor":"fat.1.11111111-2222-4333-8444-555555555555.90","hasMore":true,"threadSeq":12},"headSeq":12,"projectedSeq":12,"seenSeq":9,"synchronized":true}}}}"#,
+        ),
+        (
+            Response {
+                id: 18,
+                result: Ok(ResponseBody::AgentSeenCursors(vec![AgentSeenCursor {
+                    thread: thread(),
+                    seq: Seq(9),
+                }])),
+            },
+            r#"{"id":18,"result":{"Ok":{"type":"agent_seen_cursors","data":[{"thread":"11111111-2222-4333-8444-555555555555","seq":9}]}}}"#,
         ),
         (
             Response {
@@ -600,6 +674,7 @@ fn seq_event_goldens() -> Vec<(SeqEvent, &'static str)> {
                     provider: AgentKind::Codex,
                     resume_cursor: Some("thread-1".to_owned()),
                     model: Some(model()),
+                    models: Vec::new(),
                     mode: PermissionMode::Ask,
                     tools: vec!["shell".to_owned()],
                     commands: vec!["/review".to_owned()],
@@ -616,6 +691,7 @@ fn seq_event_goldens() -> Vec<(SeqEvent, &'static str)> {
                     title: Some("protocol goldens".to_owned()),
                     mode: Some(PermissionMode::Plan),
                     model: None,
+                    skills: None,
                 },
             ),
             r#"{"seq":2,"at":"2026-09-07T12:00:00Z","event":{"type":"metadata_changed","data":{"title":"protocol goldens","mode":"plan"}}}"#,

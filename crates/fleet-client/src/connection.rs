@@ -2,7 +2,9 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs,
+    fs::{self, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock,
@@ -88,6 +90,9 @@ pub enum ConnectError {
     /// The daemon returned an invalid handshake response.
     #[error("Fleet daemon returned an invalid handshake response: {0}")]
     InvalidHandshake(String),
+    /// The stable per-install client identity could not be loaded or persisted.
+    #[error("Fleet client identity could not be prepared: {0}")]
+    ClientIdentity(String),
 }
 
 /// An asynchronous, reconnecting client for a Fleet daemon.
@@ -138,25 +143,30 @@ struct Attachment {
 struct ConnectionMetadata {
     capabilities: HashSet<String>,
     daemon_identity: Option<DaemonIdentity>,
+    generation: u64,
 }
 
 #[derive(Debug)]
 struct ConnectionState {
+    client_id: String,
     subscriptions: Vec<EventKind>,
     attachments: HashMap<TerminalId, Attachment>,
     capabilities: HashSet<String>,
     daemon_identity: Option<DaemonIdentity>,
     daemon_identity_initialized: bool,
+    generation: u64,
 }
 
 impl Default for ConnectionState {
     fn default() -> Self {
         Self {
+            client_id: String::new(),
             subscriptions: all_event_kinds(),
             attachments: HashMap::new(),
             capabilities: HashSet::new(),
             daemon_identity: None,
             daemon_identity_initialized: false,
+            generation: 0,
         }
     }
 }
@@ -165,7 +175,16 @@ impl Client {
     /// Connects to `home/fleetd.sock`, negotiates Fleet's current protocol, and starts the actor.
     pub async fn connect(home: impl AsRef<Path>) -> Result<Self, ConnectError> {
         let home = home.as_ref().to_path_buf();
-        let mut state = ConnectionState::default();
+        let identity_home = home.clone();
+        let client_id =
+            tokio::task::spawn_blocking(move || load_or_create_client_id(&identity_home))
+                .await
+                .map_err(|error| ConnectError::ClientIdentity(error.to_string()))?
+                .map_err(|error| ConnectError::ClientIdentity(error.to_string()))?;
+        let mut state = ConnectionState {
+            client_id,
+            ..ConnectionState::default()
+        };
         let established = establish(&home, &mut state).await?;
         let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let events = broadcast::Sender::new(EVENT_CAPACITY);
@@ -176,6 +195,7 @@ impl Client {
             metadata: Arc::new(RwLock::new(ConnectionMetadata {
                 capabilities: state.capabilities.clone(),
                 daemon_identity: None,
+                generation: state.generation,
             })),
         });
         let metadata = Arc::clone(&inner.metadata);
@@ -270,6 +290,15 @@ impl Client {
             .metadata
             .read()
             .is_ok_and(|metadata| metadata.capabilities.contains(capability))
+    }
+
+    /// Monotonic generation of the underlying negotiated daemon connection.
+    #[must_use]
+    pub fn connection_generation(&self) -> u64 {
+        self.inner
+            .metadata
+            .read()
+            .map_or(0, |metadata| metadata.generation)
     }
 
     /// PID reported by the most recent identity-bearing Pong.
@@ -684,9 +713,9 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         // because a 10 s transport error on a revert that lands at 12 s invites the user to
         // press `[u]` again on a tree that is already half restored.
         | RequestBody::AgentRevert { .. } => Some(AGENT_HARNESS_TIMEOUT),
-        // `AgentThreadList` is one `SELECT` against a denormalized table, `AgentMarkSeen` is one
+        // `AgentThreadList` and `AgentSeenCursors` are bounded reads, `AgentMarkSeen` is one
         // upsert, and `AgentCheckpoints` is one `git for-each-ref` over a namespace bounded by
-        // the thread's turn count; none touches a harness, so all three keep the default
+        // the thread's turn count; none touches a harness, so all four keep the default
         // deliberately.
         _ => Some(REQUEST_TIMEOUT),
     }
@@ -784,13 +813,7 @@ async fn establish(
                 protocol: PROTOCOL_VERSION,
                 // Named so the daemon knows which agent event families this build can decode;
                 // without it the three stream-control events are withheld (`AGENT_CAPABILITIES`).
-                client: fleet_proto::request::HelloClient {
-                    capabilities: fleet_proto::AGENT_CAPABILITIES
-                        .iter()
-                        .map(|capability| (*capability).to_owned())
-                        .collect(),
-                    ..fleet_proto::request::HelloClient::default()
-                },
+                client: hello_client(&state.client_id),
             },
         },
         negotiated_capabilities,
@@ -842,10 +865,66 @@ async fn establish(
             Err(error) => return Err(error),
         }
     }
+    state.generation = state.generation.wrapping_add(1);
     Ok(Established {
         transport,
         buffered_events,
     })
+}
+
+fn hello_client(client_id: &str) -> fleet_proto::request::HelloClient {
+    fleet_proto::request::HelloClient {
+        client_id: Some(client_id.to_owned()),
+        capabilities: fleet_proto::AGENT_CAPABILITIES
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect(),
+        ..fleet_proto::request::HelloClient::default()
+    }
+}
+
+fn load_or_create_client_id(home: &Path) -> std::io::Result<String> {
+    fs::create_dir_all(home)?;
+    let path = FleetHome::new(home).client_id_path();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    // Multiple app processes may start together. The advisory lock covers the read-or-mint
+    // decision, so exactly one UUID wins and every connection from this installation shares it.
+    // SAFETY: `file` owns this live descriptor for the duration of the call; `flock` neither
+    // retains the pointer nor accesses Rust memory, and the lock is released when `file` drops.
+    let lock_result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if lock_result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut stored = String::new();
+    file.read_to_string(&mut stored)?;
+    let stored = stored.trim();
+    if !stored.is_empty() {
+        if fleet_core::paths::is_client_id(stored) {
+            return Ok(stored.to_owned());
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("`{}` does not contain a UUID", path.display()),
+        ));
+    }
+    // Reuse this installation's forwarding-daemon UUID when it already exists. The daemon also
+    // adopts a pre-existing client UUID on first start, so a proxy can forward the originating
+    // installation identity unchanged even though its link is shared by that installation.
+    let client_id = fs::read_to_string(home.join("daemon-id"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| fleet_core::paths::is_client_id(value))
+        .unwrap_or_else(fleet_core::paths::new_client_id);
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(client_id.as_bytes())?;
+    file.sync_all()?;
+    Ok(client_id)
 }
 
 fn reconcile_daemon_identity(state: &mut ConnectionState, identity: Option<DaemonIdentity>) {
@@ -878,6 +957,7 @@ fn synchronize_metadata(metadata: &RwLock<ConnectionMetadata>, state: &Connectio
     };
     metadata.capabilities.clone_from(&state.capabilities);
     metadata.daemon_identity = None;
+    metadata.generation = state.generation;
 }
 
 fn retain_pong_identity(metadata: &RwLock<ConnectionMetadata>, identity: Option<DaemonIdentity>) {
@@ -1076,6 +1156,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hello_carries_the_persisted_installation_identity() {
+        let home = tempfile::tempdir().expect("temporary Fleet home");
+        let first = load_or_create_client_id(home.path()).expect("first client identity");
+        let second = load_or_create_client_id(home.path()).expect("reloaded client identity");
+
+        assert_eq!(first, second, "connections from one install share an id");
+        assert_eq!(
+            hello_client(&second).client_id.as_deref(),
+            Some(first.as_str())
+        );
+        assert_eq!(
+            std::fs::read_to_string(FleetHome::new(home.path()).client_id_path())
+                .expect("persisted client identity"),
+            first
+        );
+    }
+
+    #[test]
+    fn first_client_identity_reuses_the_installations_forwarding_identity() {
+        let home = tempfile::tempdir().expect("temporary Fleet home");
+        let daemon_id = fleet_core::paths::new_client_id();
+        std::fs::write(home.path().join("daemon-id"), format!("{daemon_id}\n"))
+            .expect("daemon identity fixture");
+
+        assert_eq!(
+            load_or_create_client_id(home.path()).expect("client identity"),
+            daemon_id,
+            "a proxy must forward the originating installation id unchanged"
+        );
+    }
+
+    #[test]
     fn create_requests_are_not_bound_by_the_generic_rpc_deadline() {
         let repo = RepoId::try_from("acme/api").unwrap();
         assert!(
@@ -1190,9 +1302,13 @@ mod tests {
              failure for work that succeeds"
         );
 
-        // The two that touch no harness keep the default, on purpose rather than by omission.
+        // These metadata operations touch no harness and keep the default on purpose.
         assert_eq!(
             request_timeout(&RequestBody::AgentThreadList),
+            Some(REQUEST_TIMEOUT)
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::AgentSeenCursors),
             Some(REQUEST_TIMEOUT)
         );
         assert_eq!(
@@ -1502,6 +1618,7 @@ mod tests {
             metadata: Arc::new(RwLock::new(ConnectionMetadata {
                 capabilities: capabilities.into_iter().collect(),
                 daemon_identity: None,
+                generation: 1,
             })),
         });
         let client = Client {

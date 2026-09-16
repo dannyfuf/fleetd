@@ -1,5 +1,9 @@
 use super::*;
 
+fn empty_seen_cursors() -> Arc<RwLock<HashMap<ThreadId, Seq>>> {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
 #[tokio::test]
 async fn diagnostic_tail_is_bounded_and_keeps_nonempty_lines() {
     let home = tempfile::tempdir().unwrap();
@@ -253,6 +257,7 @@ async fn stalled_health_check_does_not_delay_fifo_input_or_shutdown() {
             &events,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
+            empty_seen_cursors(),
         )
         .await
     });
@@ -318,6 +323,7 @@ async fn a_manual_reconnect_reopens_a_link_that_is_still_alive() {
             &events,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
+            empty_seen_cursors(),
         )
         .await
     });
@@ -371,6 +377,7 @@ async fn a_stalled_mutation_does_not_delay_shutdown() {
             &events,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
+            empty_seen_cursors(),
         )
         .await
     });
@@ -430,6 +437,7 @@ async fn shutdown_is_observed_while_initial_connection_is_waiting() {
             &events,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
+            empty_seen_cursors(),
         )
         .await
     });
@@ -474,8 +482,11 @@ async fn failed_health_ping_recovers_on_a_fresh_connection_without_disconnect() 
             &events,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
-            Duration::from_millis(10),
-            IDENTITY_INTERVAL,
+            empty_seen_cursors(),
+            runtime::RuntimeIntervals {
+                health: Duration::from_millis(10),
+                identity: IDENTITY_INTERVAL,
+            },
         )
         .await
     });
@@ -529,8 +540,11 @@ async fn failed_recovery_probe_enters_normal_backoff() {
             &events,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
-            Duration::from_millis(10),
-            IDENTITY_INTERVAL,
+            empty_seen_cursors(),
+            runtime::RuntimeIntervals {
+                health: Duration::from_millis(10),
+                identity: IDENTITY_INTERVAL,
+            },
         )
         .await
     });
@@ -639,8 +653,11 @@ async fn transparent_reconnect_detects_new_daemon_pid() {
             &events,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
-            Duration::from_secs(1),
-            Duration::from_millis(10),
+            empty_seen_cursors(),
+            runtime::RuntimeIntervals {
+                health: Duration::from_secs(1),
+                identity: Duration::from_millis(10),
+            },
         )
         .await
     });
@@ -728,6 +745,7 @@ async fn bounded_queues_coalesce_and_resynchronize() {
             &event_tx,
             &runtime_resync,
             Arc::new(SettleCounter::default()),
+            empty_seen_cursors(),
         )
         .await
     });

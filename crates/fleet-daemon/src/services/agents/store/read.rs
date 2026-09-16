@@ -22,6 +22,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use fleet_core::agents::{Seq, SeqEvent, ThreadId, TurnId};
+use fleet_proto::agents::AgentSeenCursor;
 use rusqlite::{Connection, OpenFlags, params};
 use tokio::sync::Semaphore;
 
@@ -31,7 +32,7 @@ use super::{
     index, migrations,
     project::{self, OptionalRow as _},
 };
-use fleet_core::agents::{ModelSelection, PermissionMode};
+use fleet_core::agents::{ModelDescriptor, ModelSelection, PermissionMode};
 
 /// Read-only connections. Two, because a snapshot read and a pagination read are the two things
 /// that can legitimately be in flight at once; a third would only queue behind the same disk.
@@ -40,6 +41,64 @@ const READERS: usize = 2;
 /// Events per statement on the unbounded replay path, so peak memory is a chunk and not a
 /// transcript.
 const REPLAY_CHUNK: usize = 512;
+
+/// Defensive ceiling on the installation-wide cursor census returned after Hello.
+const SEEN_CURSOR_LIMIT: i64 = 100_000;
+
+/// Reads one installation's cursor for one thread.
+pub(super) fn seen_seq(
+    conn: &Connection,
+    client_id: &str,
+    thread: ThreadId,
+) -> anyhow::Result<Option<Seq>> {
+    let stored = conn
+        .query_row(
+            "SELECT seq FROM seen WHERE client_id = ?1 AND thread_id = ?2 LIMIT 1",
+            params![client_id, thread.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional_row()
+        .with_context(|| format!("read the seen cursor of thread {thread}"))?;
+    stored
+        .map(|seq| {
+            u64::try_from(seq)
+                .map(Seq)
+                .with_context(|| format!("seen cursor of thread {thread} is negative"))
+        })
+        .transpose()
+}
+
+/// Reads every cursor belonging to one installation for the post-Hello census.
+pub(super) fn seen_cursors(
+    conn: &Connection,
+    client_id: &str,
+) -> anyhow::Result<Vec<AgentSeenCursor>> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT thread_id, seq FROM seen WHERE client_id = ?1 \
+             ORDER BY thread_id LIMIT ?2",
+        )
+        .context("prepare the native-agent seen cursor census")?;
+    let rows = statement
+        .query_map(params![client_id, SEEN_CURSOR_LIMIT], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .context("query native-agent seen cursors")?;
+    let mut cursors = Vec::new();
+    for row in rows {
+        let (thread, seq) = row.context("read a native-agent seen cursor")?;
+        let thread = thread
+            .parse::<ThreadId>()
+            .with_context(|| format!("decode seen cursor thread `{thread}`"))?;
+        let seq = u64::try_from(seq)
+            .with_context(|| format!("seen cursor of thread {thread} is negative"))?;
+        cursors.push(AgentSeenCursor {
+            thread,
+            seq: Seq(seq),
+        });
+    }
+    Ok(cursors)
+}
 
 /// The bounded page read. Hoisted so a test can assert its query plan against the exact text the
 /// read path runs: an index the planner stops choosing costs a whole-thread scan, returns the
@@ -152,6 +211,8 @@ pub(crate) struct TurnKeyset {
 pub(crate) struct SessionRuntime {
     /// Active model, when the harness has reported one.
     pub(crate) model: Option<ModelSelection>,
+    /// Harness-declared model and reasoning-effort vocabulary.
+    pub(crate) models: Vec<ModelDescriptor>,
     /// Active permission policy.
     pub(crate) mode: PermissionMode,
     /// Harness-native tool names.
@@ -172,17 +233,18 @@ pub(super) fn session_runtime(
 ) -> anyhow::Result<Option<SessionRuntime>> {
     let row = conn
         .prepare_cached(
-            "SELECT model_json, mode, tools_json, commands_json, skills_json \
+            "SELECT model_json, models_json, mode, tools_json, commands_json, skills_json \
                FROM sessions WHERE thread_id = ?1",
         )
         .context("prepare the session runtime query")?
         .query_row(params![thread.to_string()], |row| {
             Ok(SessionRow {
                 model_json: row.get(0)?,
-                mode: row.get(1)?,
-                tools_json: row.get(2)?,
-                commands_json: row.get(3)?,
-                skills_json: row.get(4)?,
+                models_json: row.get(1)?,
+                mode: row.get(2)?,
+                tools_json: row.get(3)?,
+                commands_json: row.get(4)?,
+                skills_json: row.get(5)?,
             })
         })
         .optional_row()
@@ -193,6 +255,7 @@ pub(super) fn session_runtime(
 /// One session row, still encoded.
 struct SessionRow {
     model_json: Option<String>,
+    models_json: Option<String>,
     mode: Option<String>,
     tools_json: Option<String>,
     commands_json: Option<String>,
@@ -203,6 +266,8 @@ impl SessionRow {
     fn decode(self, thread: ThreadId) -> SessionRuntime {
         SessionRuntime {
             model: decode_column(self.model_json.as_deref(), thread, "model selection"),
+            models: decode_column(self.models_json.as_deref(), thread, "model descriptors")
+                .unwrap_or_default(),
             // The column stores the bare discriminant, so it becomes JSON before it decodes.
             mode: self
                 .mode
