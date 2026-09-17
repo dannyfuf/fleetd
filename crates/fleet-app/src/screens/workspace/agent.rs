@@ -5,7 +5,7 @@ mod streaming;
 
 use requests::{
     account_login, close_agent_tab, load_older_page, mark_seen, open_in_editor,
-    open_terminal_fallback, open_thread, refresh_checkpoints, resend_seen_cursors,
+    open_terminal_fallback, open_thread, refresh_checkpoints, resend_seen_cursors, send_turn,
 };
 
 use crate::{
@@ -258,6 +258,11 @@ impl WorkspaceScreen {
             subscriptions.extend(observe_composer_focus(&view, thread, state, window, cx));
             let (relay_bridge, relay_state) = (bridge.clone(), state.clone());
             subscriptions.push(cx.subscribe(&view, move |view, event, cx| match event {
+                // A send is the one command whose refusal the view has to hear about: the
+                // optimistic bubble it drew is otherwise `sending` for good.
+                AgentThreadEvent::Command(command @ BridgeCommand::AgentSend { input, .. }) => {
+                    send_turn(&relay_bridge, &view, command.clone(), input.item, cx);
+                }
                 AgentThreadEvent::Command(command) => relay_bridge.send_agent(command.clone()),
                 // The one answer that has to come back into the view: `[u]` is drawn from it.
                 AgentThreadEvent::RefreshCheckpoints => {

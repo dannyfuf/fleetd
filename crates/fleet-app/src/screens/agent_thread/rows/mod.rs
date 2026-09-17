@@ -63,7 +63,10 @@ pub(crate) struct PendingSend {
     pub(crate) text: String,
     /// Whether the message joined a turn that was already running.
     pub(crate) steered: bool,
-    /// Whether the dispatch failed, which draws the danger hairline and `[r] retry`.
+    /// Whether the daemon refused the send, which draws the row as failed and frees the composer.
+    ///
+    /// There is no retry key: the text is in the composer's history, and the next send is not
+    /// blocked by a bubble that has already failed.
     pub(crate) failed: bool,
     /// How many user items carrying this exact text the projection held at dispatch time.
     ///
@@ -131,7 +134,7 @@ impl RowInputs<'_> {
             || projection.session == SessionState::Starting
             || !projection.background_tasks.is_empty()
             || projection.retrying.is_some()
-            || !self.pending.is_empty()
+            || self.pending.iter().any(|pending| !pending.failed)
     }
 
     /// The turn the harness is actually working on, which is **not** always the latest one.

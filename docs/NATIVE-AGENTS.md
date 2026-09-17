@@ -1018,6 +1018,14 @@ The user bubble shows **what the user typed**. Attachment manifests, `@file` exp
 Fleet's own prompt prefixes are stripped for display and for `↑` recall, and kept verbatim for
 copy.
 
+**A send the daemon refuses is a failed bubble, never a stuck one.** The optimistic bubble is
+reconciled by its client-minted `ItemId` (§9.2), so what the user typed never has to match what
+the daemon stored. When the `AgentSend` request comes back an error — the thread is not live, the
+harness would not take the prompt, the transport deadline passed — the bubble turns failed, the
+daemon's sentence is said once as a notice, and the composer is free: a failed bubble counts as
+neither work nor an unacknowledged send, so it blocks nothing and spins nothing. There is no retry
+key; the text is one `↑` away.
+
 The composer wraps every logical line to its resolved value-column width, breaking an unbroken
 token at a character boundary rather than widening the panel. Its caret, pointer hit-testing,
 drag selection, double-click word selection, visual `↑`/`↓` and unmodified `Home`/`End` all read

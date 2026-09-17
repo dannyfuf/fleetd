@@ -443,7 +443,7 @@ impl AgentThreadView {
             || self.projection.session == fleet_core::agents::SessionState::Starting
             || !self.projection.background_tasks.is_empty()
             || self.projection.retrying.is_some()
-            || !self.pending.is_empty()
+            || self.pending.iter().any(|pending| !pending.failed)
     }
 
     /// Whether the running turn has a live work row, which is what releases the anchor.
@@ -522,10 +522,11 @@ impl AgentThreadView {
 
     /// Drops the optimistic bubbles the projection has now echoed back.
     ///
-    /// The comparison is against the echo count recorded at dispatch, not "any user item with
-    /// this text", so sending the same message twice does not clear both bubbles on the first
-    /// echo. The daemon cannot yet adopt the client's item id — `UserInput` carries no id field
-    /// — so text is the join; see this module's integration notes.
+    /// The join is by **id** (§9.2): the client-minted `ItemId` went out with the message, both
+    /// adapters adopt it, and the daemon records the user item under it. Text is only the
+    /// fallback for a daemon that did not adopt the id, and there it compares against the echo
+    /// count recorded at dispatch so sending the same message twice does not clear both bubbles
+    /// on the first echo. A failed bubble is never reconciled away: it stays until the user acts.
     fn reconcile_pending(&mut self) {
         if self.pending.is_empty() {
             return;
@@ -533,6 +534,12 @@ impl AgentThreadView {
         let before = self.pending.len();
         let projection = &self.projection;
         self.pending.retain(|pending| {
+            if pending.failed {
+                return true;
+            }
+            if projection.items.iter().any(|item| item.id == pending.id) {
+                return false;
+            }
             let echoes = count_user_items(projection, &pending.text);
             echoes <= pending.echoes
         });

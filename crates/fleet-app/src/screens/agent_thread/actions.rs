@@ -100,7 +100,8 @@ impl AgentThreadView {
             return;
         }
 
-        if let Err(refusal) = submit_gate(&text, 0, self.pending.len(), self.is_unreachable()) {
+        if let Err(refusal) = submit_gate(&text, 0, self.pending_in_flight(), self.is_unreachable())
+        {
             self.refuse_send(refusal, text, cx);
             return;
         }
@@ -160,7 +161,7 @@ impl AgentThreadView {
     /// invisible to `fleet agent` — and it re-implemented what both harnesses already do.
     fn dispatch_turn(&mut self, text: String, cx: &mut Context<Self>) {
         let steered = self.is_working();
-        let first = self.projection.turns.is_empty() && self.pending.is_empty();
+        let first = self.projection.turns.is_empty() && self.pending_in_flight() == 0;
         self.input.update(cx, |input, cx| {
             input.push_history(text.clone());
             input.clear(cx);
@@ -195,6 +196,36 @@ impl AgentThreadView {
                 list.scroll_to_latest(cx);
             }
         });
+    }
+
+    /// How many sends are still waiting for the daemon's copy.
+    ///
+    /// A failed bubble is on screen but not in flight: it blocks nothing and spins nothing.
+    pub(crate) fn pending_in_flight(&self) -> usize {
+        self.pending
+            .iter()
+            .filter(|pending| !pending.failed)
+            .count()
+    }
+
+    /// The daemon refused a send: the bubble turns failed, the reason is said once, and the
+    /// composer is free again. Without this the bubble read `sending` forever, the thread kept
+    /// spinning, and every later send was refused as unacknowledged (§7.2).
+    pub(crate) fn send_failed(&mut self, item: ItemId, reason: &str, cx: &mut Context<Self>) {
+        let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|pending| pending.id == item && !pending.failed)
+        else {
+            return;
+        };
+        pending.failed = true;
+        self.pending_rev = self.pending_rev.wrapping_add(1);
+        self.sync_clock();
+        self.notice(format!("message not sent: {reason}"), cx);
+        self.prepare(cx);
+        self.install_rows_for_send(cx);
+        cx.notify();
     }
 
     /// Dispatches the control draft ahead of the turn, in §B6.4's order.
