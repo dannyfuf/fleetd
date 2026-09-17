@@ -1218,7 +1218,7 @@ with a test in `services/agents/manager/tests/mirror.rs`:
 | --- | --- |
 | A thread with `owner_host` set may only be appended to from events received on that host's link — two writers on one sequence space is silent corruption | `store::mirror::admits_append`, a pure function asked once on the pre-flight read and again inside the write transaction |
 | No harness process is ever started for a mirrored thread | the owner check in `resume_runtime` and in `create`, plus the orphan-settlement skip in `hydrate` — settling an orphan *appends events*, which is the same violation wearing a different hat |
-| A mutation routes upstream and is never applied locally on optimism | the router classifies by owner, **and** the local manager refuses every mutation on a mirrored thread with `ErrorKind::Remote`, for the window between a daemon start and the owner's first snapshot in which the router's id map is still empty |
+| A mutation routes upstream and is never applied locally on optimism | the router classifies by owner from its id map **and the snapshot mirror as the fallback** — so a verb on a mirrored thread is forwarded even across a local restart, before any list or open re-registers the id, exactly as `host_of_worktree` already resolves a worktree; the local manager's `ErrorKind::Remote` refusal is then the backstop for the narrow window before the owner's first snapshot reaches the mirror, so an optimistic local apply never happens |
 | The mirror never fabricates a `Synchronized` | a mirrored answer carries `synchronized = false` unconditionally, and only the owner's own `Event::AgentSynchronized`, forwarded verbatim, moves a client to `Live` |
 
 The local router drains everything immediately ready from each host link, bounded at **64 events
