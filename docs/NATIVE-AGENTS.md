@@ -584,6 +584,16 @@ The file-change approval **carries no diff and no paths**. The changes live on t
 item named by `itemId`. Fleet joins on `itemId`, shows a loading state if the item has not
 arrived, and never renders `reason` as if it were the change.
 
+**Codex's stderr is a signal, deduplicated.** `app-server` writes structured log lines to stderr;
+only `ERROR` lines are surfaced, and each distinct failure is surfaced **once per process** — the
+fingerprint drops the `url:`, `cf-ray:` and `request id:` segments that change between repeats, so
+the background model refresh Codex retries every three minutes on a dead token is one transcript
+row, not one every three minutes (the shipped store had 906 of them). A line naming a `401
+Unauthorized`, a `token_revoked`, or an invalidated authentication token is **the signed-out
+signal**: `account/read` still answers the cached account after a revocation, so this line is the
+only thing that tells Fleet every turn is about to be refused. It publishes
+`AccountChanged { SignedOut }` and the one `/login` notice, and never the raw sentence.
+
 ### 4.3 Divergence — where normalisation would lose something
 
 The full 48-row table is in the harness spec; these are the rows where flattening the two
