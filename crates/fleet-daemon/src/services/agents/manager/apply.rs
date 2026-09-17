@@ -132,6 +132,7 @@ pub(super) async fn apply_event(
         if let AgentEvent::GateResolved { gate, .. } = &sequenced.event {
             state.answered_gates.remove(gate);
         }
+        log_lifecycle(thread, &sequenced.event);
         let after = state.projection.summary(Seq::default());
         let persist_record = record_metadata_changed(&previous, &state.record);
         (
@@ -270,6 +271,53 @@ pub(super) fn pending_input_turn(runtime: &ThreadRuntime) -> Option<TurnId> {
         .pending_inputs
         .front()
         .map(|(turn, _)| *turn)
+}
+
+/// The lifecycle events worth one INFO line each, so `fleetd.log` can answer "is this thread
+/// working or stuck" without the transcript store. Deltas and items are deliberately not here.
+fn log_lifecycle(thread: ThreadId, event: &AgentEvent) {
+    match event {
+        AgentEvent::TurnStarted { turn, .. } => {
+            tracing::info!(target: "fleet::agents", %thread, %turn, "agent turn started");
+        }
+        AgentEvent::TurnSettled {
+            turn,
+            outcome,
+            duration_ms,
+            ..
+        } => {
+            tracing::info!(
+                target: "fleet::agents",
+                %thread,
+                %turn,
+                outcome = ?outcome,
+                duration_ms = *duration_ms,
+                "agent turn settled"
+            );
+        }
+        AgentEvent::TurnAborted { turn, reason } => {
+            tracing::info!(
+                target: "fleet::agents",
+                %thread,
+                %turn,
+                reason = ?reason,
+                "agent turn aborted"
+            );
+        }
+        AgentEvent::SessionExited { code, expected } => {
+            tracing::info!(
+                target: "fleet::agents",
+                %thread,
+                code = ?code,
+                expected,
+                "agent session exited"
+            );
+        }
+        AgentEvent::SessionStateChanged(state) => {
+            tracing::debug!(target: "fleet::agents", %thread, state = ?state, "agent session state");
+        }
+        _ => {}
+    }
 }
 
 /// Folds one applied event into the durable record.

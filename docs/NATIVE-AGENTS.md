@@ -316,6 +316,11 @@ Transition rules, each closing a real race:
 8. **Settlement is sticky.** `Interrupted` never downgrades to `Completed`; `Failed` never
    downgrades. This is what makes "the user pressed Stop and the turn completed anyway" render
    correctly.
+9. **A thread whose provider is gone comes back lazily, on the next open or send.** A thread with
+   a resume cursor and at least one turn is resumed from that cursor. A thread that never started
+   a turn has nothing to resume — the harness never wrote a conversation for its cursor — so it is
+   `Stopped` after a daemon restart, not `Error`, and the next open or send **starts it over**
+   with a fresh launch. Only a thread with turns and no cursor stays `Error`.
 
 One pure function, ~30 lines and unit-tested, guards the whole class of "the UI says it is still
 running / it says it finished but it did not" bugs:
@@ -390,6 +395,27 @@ before any turn), `capabilities` (the version gate), `model`, `permissionMode` (
 `tools`/`slash_commands`/`skills`/`agents`/`mcp_servers` vocabularies for the composer's `/`, `@`
 and `$` menus — **per session, discovered here, never hardcoded** — and `claude_code_version` for
 the log.
+
+**`system/init` arrives with the first prompt, and again with every later one** (observed live on
+2.1.266: one init per turn). Three consequences, each implemented:
+
+- `open` does not wait for it. The barrier is "the child survived its spawn window", and a child
+  that did is accepting input, so the adapter publishes `SessionStateChanged(Ready)` at open and
+  `system/init` re-affirms it later. Without this a fresh thread read `starting…` — the working
+  spinner — until the user typed, which is indistinguishable from a hang.
+- The cursor is durable from `create`: the adapter mints the session id it launches with, hands it
+  back as `SessionOpened.resume_cursor`, and the manager writes it into the thread record before
+  the harness has said a word. A daemon that goes away between the first prompt and init still
+  comes back to the same conversation.
+- Repeated inits configure the session **once**: the mapper ignores every init after the first,
+  and the cursor keeps following durable frames as before.
+
+`--resume <cursor>` for a session the CLI never wrote a conversation for prints `No conversation
+found with session ID`, emits one `result` with `is_error: true` and exits 0. The manager never
+asks for that (§3.3 rule 9: a thread with no turn starts over), and the adapter catches the case
+anyway: a `--resume` child that dies inside the spawn window with that sentence on stderr is
+relaunched **once** with `--session-id <the same cursor>`, so the thread keeps the cursor the store
+already holds.
 
 Frames not in the previous revision, all observed live: `system/status` (a truthful spinner
 sub-label, never a terminal), `system/thinking_tokens` (a live reasoning-token counter that lets
@@ -591,7 +617,7 @@ allowed to make the UI more truthful and is forbidden from changing the state ma
 
 | Signal | Claude Code | Codex | Hints that must NOT be treated as authoritative |
 | --- | --- | --- | --- |
-| Session ready | `system/init` | `initialize` result **and** `thread/start`/`resume` result | process spawn succeeding |
+| Session ready | the child surviving its spawn window (`system/init` only lands with the first prompt, and re-affirms `Ready` when it does; §4.1) | `initialize` result **and** `thread/start`/`resume` result | a spawn that has not yet outlived the window |
 | Resume cursor | `session_id` on any **durable** frame | the Codex thread id | any `session_id` on `hook_started`/`hook_progress`/`hook_response` — those are **transient** and adopting one corrupts the cursor |
 | Turn started | Fleet's own `submit` wrote a `user` frame with no turn open; or synthetic | `turn/started`, or the `turn/start` response | `thread/status/changed{active}`, which fires **before** `turn/started`; `session_state_changed{running}` |
 | Streaming text | `content_block_delta{text_delta}` | `item/agentMessage/delta` | `assistant` snapshot frames (they backfill, never stream) |

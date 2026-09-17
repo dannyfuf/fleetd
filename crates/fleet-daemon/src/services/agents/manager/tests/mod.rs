@@ -75,6 +75,8 @@ struct FakeScript {
     active_turn: StdMutex<Option<TurnId>>,
     /// Makes every control change cost a restart, as Claude's launch flags do.
     restarts_on_control: AtomicBool,
+    /// The cursor every started provider reports, as the real adapters do at `start`.
+    cursor: StdMutex<Option<String>>,
 }
 
 impl FakeScript {
@@ -87,6 +89,7 @@ impl FakeScript {
             stop_fails: AtomicBool::new(false),
             active_turn: StdMutex::new(None),
             restarts_on_control: AtomicBool::new(false),
+            cursor: StdMutex::new(None),
         })
     }
 
@@ -173,6 +176,14 @@ impl AgentProvider for FakeProvider {
         self.script
             .record(FakeCall::Start(req.thread, req.resume_cursor));
         Ok(())
+    }
+
+    fn resume_cursor(&self) -> Option<String> {
+        self.script
+            .cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted> {
