@@ -266,6 +266,10 @@ mod tests {
     use std::sync::Arc;
 
     use fleet_core::{
+        agents::{
+            AgentKind, AgentThreadSummary, Attention, ItemId, Seq, SessionState, StreamKind,
+            ThreadId, TurnState, UserInput,
+        },
         config::default_config,
         ids::{ContextId, JobId, RepoId, SessionId},
         model::{Context, HostConfigEntry, RepoHooks},
@@ -277,7 +281,8 @@ mod tests {
     };
 
     use crate::{
-        machines::Machines, server::BroadcastBus, services::mirror::Mirror, testing::FakeRemote,
+        machines::Machines, server::BroadcastBus, services::mirror::Mirror,
+        services::router::Target, testing::FakeRemote,
     };
 
     use super::*;
@@ -451,6 +456,69 @@ mod tests {
             placed,
             RequestBody::CreateWorktree { host: Some(host), .. } if host == target
         ));
+    }
+
+    #[test]
+    fn a_mirrored_thread_routes_upstream_before_its_id_is_registered() {
+        // The reported regression: after a local daemon restart the router's in-memory id map is
+        // empty, but the snapshot mirror still names each mirrored thread's owner. A per-thread
+        // verb must classify as `Host(owner)` from the mirror alone, with no prior list or open
+        // registering the thread — otherwise it dispatches locally and the manager refuses a
+        // mutation on a mirrored thread (`docs/NATIVE-AGENTS.md` §9.3).
+        let owner = host("dev-box");
+        let (router, _remote) = router_with_remote(owner.clone());
+        let owned = worktree("feature", Some(owner.clone()));
+        let thread = ThreadId::new();
+        let mut snapshot = snapshot(vec![repo()], vec![owned.clone()]);
+        snapshot
+            .agent_threads
+            .push(thread_summary(thread, owned.id.clone()));
+        router.mirror.apply(&owner, snapshot);
+
+        assert_eq!(
+            router.ids.host_of_thread(&thread),
+            None,
+            "no list or open has registered the thread in the id map"
+        );
+        for forwarded in [
+            RequestBody::AgentSend {
+                thread,
+                input: UserInput::default(),
+            },
+            RequestBody::AgentStop { thread },
+            // A lazy body read of a mirrored thread is fetched from the owner too (§9.3).
+            RequestBody::AgentItemBody {
+                thread,
+                item: ItemId::new(),
+                stream: StreamKind::AssistantText,
+                offset: 0,
+                limit: 4_096,
+            },
+        ] {
+            assert_eq!(
+                router.route(&forwarded),
+                Target::Host(owner.clone()),
+                "{forwarded:?}"
+            );
+        }
+    }
+
+    fn thread_summary(thread: ThreadId, worktree: WorktreeId) -> AgentThreadSummary {
+        AgentThreadSummary {
+            thread,
+            worktree,
+            host: None,
+            provider: AgentKind::Codex,
+            title: "mirrored thread".to_owned(),
+            attention: Attention::Idle,
+            session: SessionState::Ready,
+            turn: TurnState::None,
+            last_seq: Seq::default(),
+            last_activity: None,
+            last_completed_seq: None,
+            last_nonterminal_seq: None,
+            exit_code: None,
+        }
     }
 
     fn router_with_remote(host: HostId) -> (Router, Arc<FakeRemote>) {

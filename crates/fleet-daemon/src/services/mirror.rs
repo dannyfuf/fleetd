@@ -162,6 +162,23 @@ impl Mirror {
         })
     }
 
+    /// The host that owns one mirrored native-agent thread, if a snapshot fragment names it.
+    ///
+    /// The router falls back to this when its in-memory id map has not yet registered the thread —
+    /// the window right after a local daemon restart, before the owner's first per-thread list.
+    /// It is the thread analog of [`Self::host_of_worktree`] (`docs/NATIVE-AGENTS.md` §9.3).
+    #[must_use]
+    pub fn host_of_thread(&self, id: &ThreadId) -> Option<HostId> {
+        read(&self.fragments).iter().find_map(|(host, fragment)| {
+            fragment
+                .snapshot
+                .agent_threads
+                .iter()
+                .any(|summary| &summary.thread == id)
+                .then(|| host.clone())
+        })
+    }
+
     #[must_use]
     pub fn worktrees(&self) -> Vec<Worktree> {
         read(&self.fragments)
@@ -447,4 +464,73 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use fleet_core::agents::{AgentKind, Attention, Seq, SessionState, TurnState};
+    use fleet_proto::snapshot::DaemonInfo;
+
+    use super::*;
+
+    #[test]
+    fn host_of_thread_names_the_owning_fragment() {
+        let mirror = Mirror::new();
+        let owner: HostId = "dev-box".parse().expect("host");
+        let thread = ThreadId::new();
+        let worktree = WorktreeId::try_from("acme/api#feature").expect("worktree");
+        mirror.apply(
+            &owner,
+            snapshot_with_thread(thread_summary(thread, worktree)),
+        );
+
+        // The thread analog of `host_of_worktree`: a mirrored thread's owner is answerable from
+        // the snapshot fragment alone, which is what lets the router forward a verb across a local
+        // restart before any per-thread list registers the id.
+        assert_eq!(mirror.host_of_thread(&thread), Some(owner));
+        assert_eq!(mirror.host_of_thread(&ThreadId::new()), None);
+    }
+
+    fn snapshot_with_thread(summary: AgentThreadSummary) -> Snapshot {
+        Snapshot {
+            boards: Vec::new(),
+            generated_at: "2026-09-08T12:00:00Z".to_owned(),
+            revision: None,
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: Vec::new(),
+            active_context: None,
+            sessions: Vec::new(),
+            agent_threads: vec![summary],
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: DaemonInfo {
+                version: "fleetd test".to_owned(),
+                pid: 1,
+                started_at: "2026-09-08T12:00:00Z".to_owned(),
+                home: "/tmp/remote".to_owned(),
+            },
+        }
+    }
+
+    fn thread_summary(thread: ThreadId, worktree: WorktreeId) -> AgentThreadSummary {
+        AgentThreadSummary {
+            thread,
+            worktree,
+            host: None,
+            provider: AgentKind::Codex,
+            title: "mirrored thread".to_owned(),
+            attention: Attention::Idle,
+            session: SessionState::Ready,
+            turn: TurnState::None,
+            last_seq: Seq::default(),
+            last_activity: None,
+            last_completed_seq: None,
+            last_nonterminal_seq: None,
+            exit_code: None,
+        }
+    }
 }

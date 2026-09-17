@@ -321,6 +321,22 @@ async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
         &router.ids,
     );
     assert!(router.ids.host_of_thread(&thread).is_none());
+    // The router's id map has forgotten the thread, but the snapshot mirror re-synced at link
+    // recovery still names its owner. A send must therefore still be forwarded, never answered
+    // locally and refused — the regression for the window after a local daemon restart in which
+    // the id map is empty and only the mirror knows the owner (`docs/NATIVE-AGENTS.md` §9.3).
+    assert_eq!(router.route(&send), Target::Host(host.clone()));
+
+    // Only once the owner's own snapshot drops the thread from the mirror does a verb fall local.
+    router.mirror.apply(
+        &host,
+        snapshot(
+            vec![remote_worktree(summary.worktree.clone())],
+            Vec::new(),
+            temp.path().to_string_lossy().into_owned(),
+        ),
+    );
+    assert!(router.mirror.host_of_thread(&thread).is_none());
     assert_eq!(router.route(&send), Target::Local);
 }
 
