@@ -102,6 +102,13 @@ pub trait AgentProvider: Send {
     fn capabilities(&self) -> HarnessCapabilities;
     /// Starts a fresh or resumed provider session.
     async fn start(&mut self, req: StartRequest) -> ProviderResult<()>;
+    /// The cursor a later `start` can resume this session from, once one is known.
+    ///
+    /// Both real adapters know it at `start`: Codex answers its thread id, and Claude mints the
+    /// session id it launches with. Persisting it then — rather than on `system/init`, which
+    /// Claude only publishes with the first prompt — is what leaves a thread resumable when the
+    /// daemon goes away before anyone typed.
+    fn resume_cursor(&self) -> Option<String>;
     /// Sends or steers user input for a turn, answering what the harness did with it.
     async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted>;
     /// Requests interruption of a turn; the later terminal provider event remains authoritative.
@@ -295,6 +302,10 @@ impl AgentProvider for HarnessProvider {
             });
         }
         self.open(req).await
+    }
+
+    fn resume_cursor(&self) -> Option<String> {
+        self.cursor.clone()
     }
 
     async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted> {

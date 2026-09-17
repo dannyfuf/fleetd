@@ -292,16 +292,18 @@ impl AgentSessionManager {
             .map_err(storage_error)
     }
 
-    /// Resumes a thread whose provider is gone but whose cursor can bring it back.
+    /// Resumes a thread whose provider is gone but whose cursor can bring it back — or, for a
+    /// thread that never started a turn, starts it over.
     ///
-    /// A thread with no cursor, or one that already has a provider, is left exactly as it is.
+    /// A thread with turns and no cursor, or one that already has a provider, is left exactly
+    /// as it is.
     async fn resume_if_stopped(&self, runtime: &ThreadRuntime) -> Result<(), ProtoError> {
         let resumable = {
             let state = runtime
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.record.resume_cursor.is_some()
+            (state.record.resume_cursor.is_some() || state.projection.turns.is_empty())
                 && matches!(
                     state.projection.session,
                     SessionState::Stopped | SessionState::Error | SessionState::Starting
@@ -332,7 +334,7 @@ impl AgentSessionManager {
         if runtime.provider.lock().await.is_some() {
             return Ok(());
         }
-        let (record, age_ms) = {
+        let (record, age_ms, fresh) = {
             let state = runtime
                 .state
                 .lock()
@@ -341,12 +343,32 @@ impl AgentSessionManager {
                 .signed_duration_since(state.record.last_activity)
                 .num_milliseconds()
                 .max(0) as u64;
-            (state.record.clone(), age_ms)
+            (
+                state.record.clone(),
+                age_ms,
+                state.projection.turns.is_empty(),
+            )
         };
-        let cursor = record
-            .resume_cursor
-            .clone()
-            .ok_or_else(|| conflict("agent thread has no resume cursor"))?;
+        // A thread that never started a turn has nothing to resume: the harness never wrote a
+        // conversation for its cursor, and asking it to resume one it does not have is how a
+        // never-prompted thread used to die on the first restart. It starts over instead.
+        let cursor = if fresh {
+            None
+        } else {
+            Some(
+                record
+                    .resume_cursor
+                    .clone()
+                    .ok_or_else(|| conflict("agent thread has no resume cursor"))?,
+            )
+        };
+        tracing::info!(
+            target: "fleet::agents",
+            thread = %record.thread,
+            provider = %record.provider.display_name(),
+            mode = if fresh { "fresh" } else { "resume" },
+            "agent thread resuming"
+        );
         let path = self
             .inner
             .worktrees
@@ -360,7 +382,7 @@ impl AgentSessionManager {
             provider: record.provider,
             model: record.model,
             mode: record.mode,
-            resume_cursor: Some(cursor),
+            resume_cursor: cursor,
             fork: false,
             env: BTreeMap::new(),
             sandbox: SandboxPolicy::default(),

@@ -98,8 +98,20 @@ impl AgentSessionManager {
             provider_start_error(provider_kind, &command, &worktree_path, error)
         })?;
         let provider_events = provider.events();
+        // The adapter's own cursor, durable before the harness has said anything: Claude only
+        // publishes `system/init` with the first prompt, and a thread the daemon loses before
+        // then must still be the same thread when it comes back.
+        let resume_cursor = provider.resume_cursor().or(resume_cursor);
         let created = Utc::now();
         let resolved_title = title.unwrap_or_else(|| provider_kind.display_name().to_owned());
+        tracing::info!(
+            target: "fleet::agents",
+            %thread,
+            provider = %provider_kind.display_name(),
+            worktree = %worktree_path.display(),
+            has_cursor = resume_cursor.is_some(),
+            "agent thread created"
+        );
         let record = AgentThreadRecord {
             thread,
             worktree: worktree.clone(),

@@ -235,7 +235,9 @@ pub(super) async fn recover_orphan(
             return;
         }
     }
-    if record.resume_cursor.is_some() {
+    // A thread with no cursor and no turn lost nothing: `resume_if_stopped` starts it over on the
+    // next open or send, so it is `Stopped` like any resumable thread rather than `Error`.
+    if record.resume_cursor.is_some() || projection.turns.is_empty() {
         if let TurnState::Running(turn) = projection.turn
             && !append_recovery(
                 inner,

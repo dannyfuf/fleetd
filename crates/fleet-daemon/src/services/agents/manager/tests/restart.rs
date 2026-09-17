@@ -149,6 +149,76 @@ async fn restart_fails_orphaned_threads_without_a_resume_cursor() {
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
 }
 
+/// A thread that was created and never prompted has no turn to lose. A restart leaves it
+/// `Stopped`, and the next open starts it over — a fresh launch, not a `--resume` of a
+/// conversation the harness never wrote — rather than parking it on `Error` for good.
+#[tokio::test]
+async fn restart_stops_a_never_prompted_thread_and_open_starts_it_over() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    harness
+        .script
+        .emit(AgentEvent::SessionStateChanged(SessionState::Ready))
+        .await;
+    harness
+        .settle(thread, "a ready session", |projection| {
+            projection.session == SessionState::Ready
+        })
+        .await;
+
+    let restarted = harness.restart().await;
+    let summary = restarted
+        .summaries()
+        .await
+        .into_iter()
+        .find(|summary| summary.thread == thread)
+        .expect("the thread survives a restart");
+    assert_eq!(summary.session, SessionState::Stopped);
+    assert_eq!(summary.attention, Attention::Idle);
+    assert_eq!(harness.script.starts(), 1, "restart never reattaches");
+
+    restarted
+        .open(&open_body(thread))
+        .await
+        .expect("open starts the thread over");
+    assert_eq!(harness.script.starts(), 2, "open started a provider");
+    assert_eq!(
+        harness.script.calls().last(),
+        Some(&FakeCall::Start(thread, None)),
+        "a thread with no turn is started fresh, never resumed"
+    );
+}
+
+/// The adapter's cursor is durable from `create`, so the same never-prompted thread — this time
+/// with a cursor the harness minted at launch — is still started over rather than resumed.
+#[tokio::test]
+async fn a_never_prompted_thread_with_a_minted_cursor_still_starts_over() {
+    let harness = Harness::start(full()).await;
+    *harness
+        .script
+        .cursor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some("6b8fc1c4-2f4e-4c4a-9f1a-6b7f0e2c1d3e".to_owned());
+    let thread = harness.create(None).await.thread;
+    harness
+        .manager
+        .stop(thread)
+        .await
+        .expect("stop the live thread");
+
+    harness
+        .manager
+        .open(&open_body(thread))
+        .await
+        .expect("open starts the thread over");
+    assert_eq!(
+        harness.script.calls().last(),
+        Some(&FakeCall::Start(thread, None)),
+        "a minted cursor names no conversation yet; resuming it would fail"
+    );
+}
+
 #[tokio::test]
 async fn restart_stops_resumable_threads_and_resumes_them_on_open() {
     let harness = Harness::start(full()).await;

@@ -316,6 +316,11 @@ Transition rules, each closing a real race:
 8. **Settlement is sticky.** `Interrupted` never downgrades to `Completed`; `Failed` never
    downgrades. This is what makes "the user pressed Stop and the turn completed anyway" render
    correctly.
+9. **A thread whose provider is gone comes back lazily, on the next open or send.** A thread with
+   a resume cursor and at least one turn is resumed from that cursor. A thread that never started
+   a turn has nothing to resume — the harness never wrote a conversation for its cursor — so it is
+   `Stopped` after a daemon restart, not `Error`, and the next open or send **starts it over**
+   with a fresh launch. Only a thread with turns and no cursor stays `Error`.
 
 One pure function, ~30 lines and unit-tested, guards the whole class of "the UI says it is still
 running / it says it finished but it did not" bugs:
@@ -390,6 +395,27 @@ before any turn), `capabilities` (the version gate), `model`, `permissionMode` (
 `tools`/`slash_commands`/`skills`/`agents`/`mcp_servers` vocabularies for the composer's `/`, `@`
 and `$` menus — **per session, discovered here, never hardcoded** — and `claude_code_version` for
 the log.
+
+**`system/init` arrives with the first prompt, and again with every later one** (observed live on
+2.1.266: one init per turn). Three consequences, each implemented:
+
+- `open` does not wait for it. The barrier is "the child survived its spawn window", and a child
+  that did is accepting input, so the adapter publishes `SessionStateChanged(Ready)` at open and
+  `system/init` re-affirms it later. Without this a fresh thread read `starting…` — the working
+  spinner — until the user typed, which is indistinguishable from a hang.
+- The cursor is durable from `create`: the adapter mints the session id it launches with, hands it
+  back as `SessionOpened.resume_cursor`, and the manager writes it into the thread record before
+  the harness has said a word. A daemon that goes away between the first prompt and init still
+  comes back to the same conversation.
+- Repeated inits configure the session **once**: the mapper ignores every init after the first,
+  and the cursor keeps following durable frames as before.
+
+`--resume <cursor>` for a session the CLI never wrote a conversation for prints `No conversation
+found with session ID`, emits one `result` with `is_error: true` and exits 0. The manager never
+asks for that (§3.3 rule 9: a thread with no turn starts over), and the adapter catches the case
+anyway: a `--resume` child that dies inside the spawn window with that sentence on stderr is
+relaunched **once** with `--session-id <the same cursor>`, so the thread keeps the cursor the store
+already holds.
 
 Frames not in the previous revision, all observed live: `system/status` (a truthful spinner
 sub-label, never a terminal), `system/thinking_tokens` (a live reasoning-token counter that lets
@@ -558,6 +584,16 @@ The file-change approval **carries no diff and no paths**. The changes live on t
 item named by `itemId`. Fleet joins on `itemId`, shows a loading state if the item has not
 arrived, and never renders `reason` as if it were the change.
 
+**Codex's stderr is a signal, deduplicated.** `app-server` writes structured log lines to stderr;
+only `ERROR` lines are surfaced, and each distinct failure is surfaced **once per process** — the
+fingerprint drops the `url:`, `cf-ray:` and `request id:` segments that change between repeats, so
+the background model refresh Codex retries every three minutes on a dead token is one transcript
+row, not one every three minutes (the shipped store had 906 of them). A line naming a `401
+Unauthorized`, a `token_revoked`, or an invalidated authentication token is **the signed-out
+signal**: `account/read` still answers the cached account after a revocation, so this line is the
+only thing that tells Fleet every turn is about to be refused. It publishes
+`AccountChanged { SignedOut }` and the one `/login` notice, and never the raw sentence.
+
 ### 4.3 Divergence — where normalisation would lose something
 
 The full 48-row table is in the harness spec; these are the rows where flattening the two
@@ -591,7 +627,7 @@ allowed to make the UI more truthful and is forbidden from changing the state ma
 
 | Signal | Claude Code | Codex | Hints that must NOT be treated as authoritative |
 | --- | --- | --- | --- |
-| Session ready | `system/init` | `initialize` result **and** `thread/start`/`resume` result | process spawn succeeding |
+| Session ready | the child surviving its spawn window (`system/init` only lands with the first prompt, and re-affirms `Ready` when it does; §4.1) | `initialize` result **and** `thread/start`/`resume` result | a spawn that has not yet outlived the window |
 | Resume cursor | `session_id` on any **durable** frame | the Codex thread id | any `session_id` on `hook_started`/`hook_progress`/`hook_response` — those are **transient** and adopting one corrupts the cursor |
 | Turn started | Fleet's own `submit` wrote a `user` frame with no turn open; or synthetic | `turn/started`, or the `turn/start` response | `thread/status/changed{active}`, which fires **before** `turn/started`; `session_state_changed{running}` |
 | Streaming text | `content_block_delta{text_delta}` | `item/agentMessage/delta` | `assistant` snapshot frames (they backfill, never stream) |
@@ -981,6 +1017,14 @@ unexpanded (`ClaudeAdapter.ts:1538-1549`).
 The user bubble shows **what the user typed**. Attachment manifests, `@file` expansions and
 Fleet's own prompt prefixes are stripped for display and for `↑` recall, and kept verbatim for
 copy.
+
+**A send the daemon refuses is a failed bubble, never a stuck one.** The optimistic bubble is
+reconciled by its client-minted `ItemId` (§9.2), so what the user typed never has to match what
+the daemon stored. When the `AgentSend` request comes back an error — the thread is not live, the
+harness would not take the prompt, the transport deadline passed — the bubble turns failed, the
+daemon's sentence is said once as a notice, and the composer is free: a failed bubble counts as
+neither work nor an unacknowledged send, so it blocks nothing and spins nothing. There is no retry
+key; the text is one `↑` away.
 
 The composer wraps every logical line to its resolved value-column width, breaking an unbroken
 token at a character boundary rather than widening the panel. Its caret, pointer hit-testing,

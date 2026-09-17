@@ -42,6 +42,12 @@ use crate::agents::harness::{
 /// handshake failure with the terminal fallback, which is the case the spec's deadline exists for.
 const SPAWN_WINDOW: Duration = Duration::from_millis(750);
 
+/// What the CLI prints when `--resume` names a session it never wrote a conversation for.
+///
+/// A thread that was created and never prompted has exactly such a cursor, so the launch falls
+/// back to a fresh session under the same id rather than reporting a dead thread.
+const NO_CONVERSATION: &str = "No conversation found with session ID";
+
 /// How long an interrupt receipt is worth waiting for. A nicety, never a barrier.
 const RECEIPT_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -173,6 +179,77 @@ impl ClaudeHarness {
     }
 }
 
+/// How a launch can fail before the session exists.
+enum LaunchFailure {
+    /// The process could not be spawned, or the launch line could not be built.
+    Spawn(HarnessError),
+    /// The child died inside the spawn window, with its exit code and its own last words.
+    Startup {
+        code: Option<i32>,
+        tail: Option<String>,
+    },
+}
+
+impl LaunchFailure {
+    /// The harness error a failed launch reports, naming the configured command.
+    fn into_error(self, command: &str) -> HarnessError {
+        match self {
+            Self::Spawn(error) => error,
+            Self::Startup { code, tail } => HarnessError::Handshake {
+                harness: AgentKind::Claude,
+                detail: process::startup_failure(command, code, tail.as_deref()),
+            },
+        }
+    }
+}
+
+impl ClaudeHarness {
+    /// Spawns the CLI for `start` and holds the barrier: the child either publishes
+    /// `system/init` or at least survives its own startup.
+    async fn launch(
+        &self,
+        start: &fleet_core::agents::StartRequest,
+        environment: &std::collections::HashMap<std::ffi::OsString, std::ffi::OsString>,
+    ) -> Result<Transport, LaunchFailure> {
+        let args = argv::launch_args(&argv::Launch {
+            start,
+            session_id: self.minted_session,
+            attachments_dir: self.config.attachments_dir.as_deref(),
+            user_args: "",
+        })
+        .map_err(LaunchFailure::Spawn)?;
+        let peer = process::spawn_child(
+            AgentKind::Claude,
+            &self.config.command,
+            &args,
+            &start.worktree_path,
+            environment.clone(),
+        )
+        .await
+        .map_err(LaunchFailure::Spawn)?;
+        let transport = Transport::start(peer, Arc::clone(&self.session), self.events.clone());
+        let deadline = std::time::Instant::now() + SPAWN_WINDOW;
+        loop {
+            if self.session.lock().await.initialized {
+                break;
+            }
+            if !transport.is_alive().await {
+                // The child's exit code and its own last words, read before the transport (and
+                // with it the stderr drain) is dropped: without them a `cc` that is really the C
+                // compiler reports only "the process exited during startup".
+                let code = transport.exit_code().await;
+                let tail = transport.stderr_tail().await;
+                return Err(LaunchFailure::Startup { code, tail });
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(transport)
+    }
+}
+
 #[async_trait]
 impl Harness for ClaudeHarness {
     fn kind(&self) -> AgentKind {
@@ -196,6 +273,7 @@ impl Harness for ClaudeHarness {
                 detail: "the thread was created for another harness".to_owned(),
             });
         }
+        let resume = argv::resume_cursor(req.start.resume_cursor.as_ref());
         {
             let mut session = self.session.lock().await;
             session.launched_effort = req
@@ -203,50 +281,39 @@ impl Harness for ClaudeHarness {
                 .model
                 .as_ref()
                 .and_then(|model| model.effort.clone());
-            session.cursor = argv::resume_cursor(req.start.resume_cursor.as_ref())
-                // The cursor is durable *before the CLI speaks*: a crash between spawn and
-                // `system/init` still leaves a resumable thread.
+            // The cursor is durable *before the CLI speaks*: a crash between spawn and
+            // `system/init` still leaves a resumable thread.
+            session.cursor = resume
+                .clone()
                 .or_else(|| Some(self.minted_session.to_string()));
         }
-        let args = argv::launch_args(&argv::Launch {
-            start: &req.start,
-            session_id: self.minted_session,
-            attachments_dir: self.config.attachments_dir.as_deref(),
-            user_args: "",
-        })?;
         let environment = self.environment(&req).await;
-        let peer = process::spawn_child(
-            AgentKind::Claude,
-            &self.config.command,
-            &args,
-            &req.start.worktree_path,
-            environment,
-        )
-        .await?;
-        let transport = Transport::start(peer, Arc::clone(&self.session), self.events.clone());
-        // The barrier: the child either publishes `system/init` or at least survives its own
-        // startup. A child that dies here is a handshake failure, not a failed turn.
-        let deadline = std::time::Instant::now() + SPAWN_WINDOW;
-        loop {
-            if self.session.lock().await.initialized {
-                break;
+        let transport = match self.launch(&req.start, &environment).await {
+            Ok(transport) => transport,
+            // A cursor Claude never wrote a conversation for: the thread was created, the daemon
+            // went away before its first prompt, and the CLI now refuses the resume. The session
+            // starts fresh **under the same id**, so the thread's cursor stays what the store
+            // already holds, instead of dying with "No conversation found".
+            Err(LaunchFailure::Startup {
+                tail: Some(tail), ..
+            }) if let Some(cursor) = &resume
+                && tail.contains(NO_CONVERSATION)
+                && let Ok(id) = Uuid::parse_str(cursor) =>
+            {
+                tracing::warn!(
+                    target: "fleet::agents::claude",
+                    "Claude has no conversation for the resume cursor; starting a fresh session under the same id"
+                );
+                self.minted_session = id;
+                let mut start = req.start.clone();
+                start.resume_cursor = None;
+                start.fork = false;
+                self.launch(&start, &environment)
+                    .await
+                    .map_err(|failure| failure.into_error(&self.config.command))?
             }
-            if !transport.is_alive().await {
-                // The child's exit code and its own last words, read before the transport (and
-                // with it the stderr drain) is dropped: without them a `cc` that is really the C
-                // compiler reports only "the process exited during startup".
-                let code = transport.exit_code().await;
-                let tail = transport.stderr_tail().await;
-                return Err(HarnessError::Handshake {
-                    harness: AgentKind::Claude,
-                    detail: process::startup_failure(&self.config.command, code, tail.as_deref()),
-                });
-            }
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+            Err(failure) => return Err(failure.into_error(&self.config.command)),
+        };
         self.transport = Some(transport);
         let session = self.session.lock().await;
         // `system/init` may not have landed yet (it lands with the first prompt), so the gate is
@@ -259,6 +326,16 @@ impl Harness for ClaudeHarness {
                     session::CAPABILITY_MSG_LIFECYCLE
                 ),
             });
+        }
+        // A child that survived its startup is accepting input, and `system/init` — which
+        // re-affirms `Ready` — only arrives with the first prompt. Without this the thread reads
+        // `starting…` until the user types, which is indistinguishable from a hang.
+        if !session.initialized {
+            transport::emit(
+                &self.events,
+                AgentEvent::SessionStateChanged(SessionState::Ready),
+                Some("spawn"),
+            );
         }
         self.capabilities = session.capabilities(self.probed.version.clone());
         Ok(SessionOpened {

@@ -5,7 +5,9 @@
 //! drives a scripted `/bin/sh` mock peer — because a test suite that needs two vendor CLIs
 //! installed is a test suite that silently skips on the machine that most needs it.
 //!
-//! Nothing here sends a prompt, so nothing here costs a token: the handshake is the whole point.
+//! The handshake tests send no prompt and cost no token. The two `*_answers_*` tests below do:
+//! each drives one or two real turns, because a harness that greets and then never settles a turn
+//! is exactly the failure a user reports as "it looks stuck".
 #![cfg(feature = "real-agents")]
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
@@ -13,11 +15,65 @@ use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 use fleet_core::{
     agents::{
         AccountStatus, AgentEvent, AgentKind, ApprovalPolicy, PermissionMode, SandboxPolicy,
-        StartRequest, ThreadId,
+        SessionState, StartRequest, ThreadId, TurnId, TurnOutcome, UserInput,
     },
     config::AgentBinaries,
 };
-use fleet_daemon::agents::harness::{self, OpenSession, ShutdownReason, probe::ProbeCache};
+use fleet_daemon::agents::harness::{
+    self, Harness, HarnessEvents, OpenSession, ShutdownReason, Submit, SubmitIntent,
+    probe::ProbeCache,
+};
+
+/// How long one real turn may take. Generous: a cold model call over a slow link is not a bug.
+const TURN_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Submits `text` as a fresh turn and waits for its settlement, collecting every event seen.
+async fn answer(
+    harness: &mut Box<dyn Harness>,
+    events: &mut HarnessEvents,
+    text: &str,
+    seen: &mut Vec<AgentEvent>,
+) -> TurnOutcome {
+    let turn = TurnId::new();
+    harness
+        .submit(Submit {
+            turn,
+            input: UserInput {
+                text: text.to_owned(),
+                ..UserInput::default()
+            },
+            intent: SubmitIntent::Fresh,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("submit: {error}"));
+    tokio::time::timeout(TURN_DEADLINE, async {
+        while let Some(event) = events.recv().await {
+            let settled = match &event.event {
+                AgentEvent::TurnSettled {
+                    turn: settled,
+                    outcome,
+                    ..
+                } if *settled == turn => Some(outcome.clone()),
+                _ => None,
+            };
+            seen.push(event.event);
+            if let Some(outcome) = settled {
+                return outcome;
+            }
+        }
+        panic!("the event stream closed before the turn settled");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the turn never settled; seen: {}", summary(seen)))
+}
+
+fn summary(events: &[AgentEvent]) -> String {
+    events
+        .iter()
+        .map(|event| format!("{event:?}").chars().take(60).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
 
 /// The `config.agentBinaries` section this suite runs against.
 ///
@@ -179,4 +235,106 @@ async fn claude_starts_and_tears_down() {
         .await
         .unwrap_or_else(|error| panic!("shutdown claude: {error}"));
     drop(events.try_recv());
+}
+
+/// Two real Claude turns settle, the session is `Ready` before anyone types, and the repeated
+/// `system/init` the CLI sends with every prompt configures the session exactly once.
+#[tokio::test]
+async fn claude_answers_two_turns_and_publishes_ready_before_the_first_prompt() {
+    let worktree = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let probes = ProbeCache::new();
+    let mut claude = harness::spawn(AgentKind::Claude, &config(AgentKind::Claude), &probes)
+        .await
+        .unwrap_or_else(|error| panic!("spawn claude: {error}"));
+    let mut events = claude.events();
+    claude
+        .open(OpenSession {
+            start: request(AgentKind::Claude, worktree.path().to_path_buf()),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("open claude: {error}"));
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event.event);
+    }
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, AgentEvent::SessionStateChanged(SessionState::Ready))),
+        "a child that survived its startup is ready before the first prompt: {}",
+        summary(&seen)
+    );
+
+    let first = answer(
+        &mut claude,
+        &mut events,
+        "Reply with exactly the single word: pong",
+        &mut seen,
+    )
+    .await;
+    assert_eq!(first, TurnOutcome::Completed, "{}", summary(&seen));
+    let second = answer(
+        &mut claude,
+        &mut events,
+        "Reply with exactly the single word: pong",
+        &mut seen,
+    )
+    .await;
+    assert_eq!(second, TurnOutcome::Completed, "{}", summary(&seen));
+    assert_eq!(
+        seen.iter()
+            .filter(|event| matches!(event, AgentEvent::SessionConfigured { .. }))
+            .count(),
+        1,
+        "init is re-sent every turn and must configure the session once: {}",
+        summary(&seen)
+    );
+    claude
+        .shutdown(ShutdownReason::User)
+        .await
+        .unwrap_or_else(|error| panic!("shutdown claude: {error}"));
+}
+
+/// One real Codex turn settles. A machine with no signed-in account cannot run a turn, and says
+/// so instead of failing.
+#[tokio::test]
+async fn codex_answers_a_turn() {
+    let worktree = tempfile::tempdir().unwrap_or_else(|error| panic!("{error}"));
+    let probes = ProbeCache::new();
+    let mut codex = harness::spawn(AgentKind::Codex, &config(AgentKind::Codex), &probes)
+        .await
+        .unwrap_or_else(|error| panic!("spawn codex: {error}"));
+    let mut events = codex.events();
+    codex
+        .open(OpenSession {
+            start: request(AgentKind::Codex, worktree.path().to_path_buf()),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("open codex: {error}"));
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event.event);
+    }
+    if seen.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::AccountChanged {
+                account: AccountStatus::SignedOut
+            }
+        )
+    }) {
+        eprintln!("codex is signed out on this machine; a turn cannot be exercised");
+        return;
+    }
+    let outcome = answer(
+        &mut codex,
+        &mut events,
+        "Reply with exactly the single word: pong",
+        &mut seen,
+    )
+    .await;
+    assert_eq!(outcome, TurnOutcome::Completed, "{}", summary(&seen));
+    codex
+        .shutdown(ShutdownReason::User)
+        .await
+        .unwrap_or_else(|error| panic!("shutdown codex: {error}"));
 }

@@ -813,6 +813,160 @@ fn an_optimistic_bubble_is_reconciled_by_the_projection(cx: &mut TestAppContext)
     });
 }
 
+/// The join is by id: a pasted code block after a blank line is stripped from the bubble's
+/// display text, and a text join never matched the daemon's full copy — the bubble stayed
+/// `sending`, the thread kept `working`, and every later send was refused as unacknowledged.
+#[gpui::test]
+fn an_optimistic_bubble_is_reconciled_by_id_even_when_its_display_text_differs(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| fleet_ui_kit::Theme::init(fleet_ui_kit::ThemeMode::Dark, cx));
+    let mut base = projection();
+    base.last_seq = fleet_core::agents::Seq(1);
+    let view = cx.new(|cx| AgentThreadView::new(base.clone(), cx));
+    let commands = recorder(&view, cx);
+    let text = "fix this\n\n```rust\nfn a() {}\n```";
+
+    view.update(cx, |view, cx| {
+        let input = view.input().clone();
+        input.update(cx, |input, cx| {
+            input.set_text(text, cx);
+            input.submit(cx);
+        });
+    });
+    cx.run_until_parked();
+    let sent = commands
+        .borrow()
+        .iter()
+        .find_map(|command| match command {
+            BridgeCommand::AgentSend { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the composer dispatched a send"));
+    assert_eq!(sent.text, text, "the daemon receives the whole message");
+    let item = sent
+        .item
+        .unwrap_or_else(|| panic!("the send carries the client-minted id"));
+    view.read_with(cx, |view, _| {
+        assert_eq!(count_user_rows(view), 1);
+        assert!(view.is_working(), "an in-flight send is work");
+    });
+
+    let turn = TurnId::new();
+    let mut next = base;
+    let mut echoed = user(turn, text);
+    echoed.id = item;
+    next.items = vec![echoed];
+    next.turns = vec![running_turn(turn, item)];
+    next.turn = TurnState::Running(turn);
+    next.last_seq = fleet_core::agents::Seq(2);
+    view.update(cx, |view, cx| view.sync(&next, &Applied::Structural, cx));
+
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            count_user_rows(view),
+            1,
+            "the daemon's copy replaces the bubble by id rather than doubling it"
+        );
+        assert_eq!(view.pending_in_flight(), 0);
+    });
+}
+
+/// A refused send marks its bubble failed and frees the composer: the thread stops reading
+/// `working`, the reason is said once, and the next send goes out instead of being refused as
+/// unacknowledged.
+#[gpui::test]
+fn a_refused_send_fails_its_bubble_and_frees_the_composer(cx: &mut TestAppContext) {
+    cx.update(|cx| fleet_ui_kit::Theme::init(fleet_ui_kit::ThemeMode::Dark, cx));
+    let view = cx.new(|cx| AgentThreadView::new(projection(), cx));
+    let commands = recorder(&view, cx);
+    let notices: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let seen = Rc::clone(&notices);
+    cx.update(|cx| {
+        cx.subscribe(&view, move |_, event, _| {
+            if let AgentThreadEvent::Notice(text) = event {
+                seen.borrow_mut().push(text.to_string());
+            }
+        })
+        .detach();
+    });
+
+    let submit = |text: &str, cx: &mut TestAppContext| {
+        view.update(cx, |view, cx| {
+            let input = view.input().clone();
+            input.update(cx, |input, cx| {
+                input.set_text(text, cx);
+                input.submit(cx);
+            });
+        });
+        cx.run_until_parked();
+    };
+    submit("first", cx);
+    let item = commands
+        .borrow()
+        .iter()
+        .find_map(|command| match command {
+            BridgeCommand::AgentSend { input, .. } => input.item,
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the send carries the client-minted id"));
+
+    // Before the failure lands, a second send is refused as unacknowledged and the draft is kept.
+    submit("second", cx);
+    assert_eq!(sends(&commands.borrow()), ["first".to_owned()]);
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.input().read(cx).text(), "second");
+    });
+
+    view.update(cx, |view, cx| {
+        view.send_failed(item, "agent thread is not live", cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(!view.is_working(), "a failed send is not work");
+        assert_eq!(view.pending_in_flight(), 0);
+        let failed = view
+            .rows()
+            .iter()
+            .filter(|row| {
+                matches!(
+                    &row.kind,
+                    TranscriptRowKind::User(user) if user.state == fleet_ui_kit::UserRowState::Failed
+                )
+            })
+            .count();
+        assert_eq!(failed, 1, "the bubble stays on screen, drawn as failed");
+    });
+    assert!(
+        notices
+            .borrow()
+            .iter()
+            .any(|notice| notice.contains("agent thread is not live")),
+        "{notices:?}"
+    );
+
+    // The composer still holds the refused draft; `⏎` now sends it.
+    view.update(cx, |view, cx| {
+        let input = view.input().clone();
+        input.update(cx, |input, cx| input.submit(cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        sends(&commands.borrow()),
+        ["first".to_owned(), "second".to_owned()]
+    );
+}
+
+fn sends(commands: &[BridgeCommand]) -> Vec<String> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            BridgeCommand::AgentSend { input, .. } => Some(input.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn count_user_rows(view: &AgentThreadView) -> usize {
     view.rows()
         .iter()

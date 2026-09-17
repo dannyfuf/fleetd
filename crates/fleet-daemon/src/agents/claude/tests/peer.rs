@@ -170,3 +170,104 @@ async fn a_child_that_dies_at_startup_reports_its_command_code_and_stderr() {
     );
     drop(events);
 }
+
+/// A child that survives its startup is accepting input, so the session reads `Ready` at once:
+/// `system/init` only arrives with the first prompt, and a thread that showed `starting…` until
+/// then could not be told apart from a hang.
+#[tokio::test]
+async fn a_child_that_survives_its_startup_is_ready_before_the_first_prompt() {
+    let peer = MockPeer::new().lingering().build();
+    let mut harness = harness(peer.command());
+    let mut events = harness.events();
+    harness
+        .open(OpenSession {
+            start: start_request(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("open: {error}"));
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        seen.push(event.event);
+    }
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionStateChanged(fleet_core::agents::SessionState::Ready)
+        )),
+        "{:?}",
+        names(&seen)
+    );
+    harness
+        .shutdown(ShutdownReason::User)
+        .await
+        .unwrap_or_else(|error| panic!("shutdown: {error}"));
+}
+
+/// `--resume` of a session the CLI never wrote a conversation for — a thread created and never
+/// prompted before the daemon went away — falls back to a fresh launch under the same id, so the
+/// thread keeps its cursor instead of dying with "No conversation found".
+#[tokio::test]
+async fn a_resume_of_a_conversation_claude_never_wrote_starts_fresh_under_the_same_id() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory =
+        tempfile::tempdir().unwrap_or_else(|error| panic!("resume fixture dir: {error}"));
+    let script = directory.path().join("claude");
+    let argv_log = directory.path().join("argv.log");
+    // The first launch (`--resume`) is refused the way 2.1.266 refuses it; the second one, which
+    // must carry `--session-id`, stays up like a healthy child.
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> {log}\n\
+             case \" $* \" in\n\
+             \x20 *' --resume '*)\n\
+             \x20   printf '%s\\n' 'No conversation found with session ID: x' >&2\n\
+             \x20   exit 0 ;;\n\
+             esac\n\
+             sleep 120\n",
+            log = argv_log.display()
+        ),
+    )
+    .unwrap_or_else(|error| panic!("write the fake binary: {error}"));
+    let mut permissions = std::fs::metadata(&script)
+        .unwrap_or_else(|error| panic!("stat the fake binary: {error}"))
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions)
+        .unwrap_or_else(|error| panic!("chmod the fake binary: {error}"));
+
+    let cursor = "6b8fc1c4-2f4e-4c4a-9f1a-6b7f0e2c1d3e";
+    let mut harness = harness(script.to_string_lossy().into_owned());
+    let events = harness.events();
+    let opened = harness
+        .open(OpenSession {
+            start: StartRequest {
+                resume_cursor: Some(cursor.to_owned()),
+                ..start_request()
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("the fallback launch must open: {error}"));
+    assert_eq!(opened.resume_cursor.as_deref(), Some(cursor));
+
+    let launches = std::fs::read_to_string(&argv_log)
+        .unwrap_or_else(|error| panic!("read the argv log: {error}"));
+    let launches: Vec<&str> = launches.lines().collect();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert!(
+        launches[0].contains(&format!("--resume {cursor}")),
+        "{launches:?}"
+    );
+    assert!(
+        launches[1].contains(&format!("--session-id {cursor}")),
+        "{launches:?}"
+    );
+    assert!(!launches[1].contains("--resume"), "{launches:?}");
+    harness
+        .shutdown(ShutdownReason::User)
+        .await
+        .unwrap_or_else(|error| panic!("shutdown: {error}"));
+    drop(events);
+}

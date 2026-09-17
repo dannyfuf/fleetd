@@ -75,6 +75,45 @@ async fn create_starts_the_provider_and_persists_the_thread() {
     );
 }
 
+/// The adapter knows its cursor at `start` — Codex's thread id, Claude's minted session id —
+/// and the record carries it from the first write, so a daemon that goes away before the first
+/// prompt still comes back to the same conversation.
+#[tokio::test]
+async fn create_persists_the_cursor_the_adapter_minted_at_start() {
+    let harness = Harness::start(full()).await;
+    *harness
+        .script
+        .cursor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some("minted-1".to_owned());
+    let thread = harness.create(None).await.thread;
+    let turn = TurnId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn,
+            user_item: ItemId::new(),
+        })
+        .await;
+    harness
+        .settle(thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(turn)
+        })
+        .await;
+
+    // A restart with a turn in flight resumes from the minted cursor rather than failing the
+    // thread for lack of one.
+    let restarted = harness.restart().await;
+    restarted
+        .open(&open_body(thread))
+        .await
+        .expect("open resumes the thread");
+    assert_eq!(
+        harness.script.calls().last(),
+        Some(&FakeCall::Start(thread, Some("minted-1".to_owned())))
+    );
+}
+
 #[tokio::test]
 async fn a_turn_streams_items_and_moves_attention_to_finished() {
     let harness = Harness::start(full()).await;
@@ -546,6 +585,9 @@ async fn a_session_that_ends_settles_the_gates_it_leaves_open() {
         })
         .await;
 
+    // Observed through the list rather than an open: a thread with no turn is started over the
+    // moment it is opened (§6), and the assertion here is about the state the crash left.
+    let mut updates = harness.events.subscribe();
     harness
         .script
         .emit(AgentEvent::SessionExited {
@@ -553,22 +595,36 @@ async fn a_session_that_ends_settles_the_gates_it_leaves_open() {
             expected: false,
         })
         .await;
-    let projection = harness
-        .settle(thread, "a dead session", |projection| {
-            projection.session == SessionState::Error
-        })
-        .await;
+    let summary = tokio::time::timeout(SETTLE, async {
+        loop {
+            if let Some(summary) = harness
+                .manager
+                .summaries()
+                .await
+                .into_iter()
+                .find(|summary| summary.thread == thread && summary.session == SessionState::Error)
+            {
+                return summary;
+            }
+            next_update(&mut updates, "a dead session").await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("agent thread never reached a dead session"));
+    assert_eq!(
+        summary.attention,
+        Attention::Failed,
+        "the tab reports the dead session, not the gate it left"
+    );
 
-    // §3.3 rule 4 and §6: the card cannot outlive the adapter that could answer it.
+    // §3.3 rule 4 and §6: the card cannot outlive the adapter that could answer it. Opening the
+    // thread starts it over, and the fresh session inherits no card from the dead one.
+    let projection = harness.projection(thread).await;
     assert!(
         projection.gates.is_empty(),
         "a dead session leaves no unanswerable card behind"
     );
-    assert_eq!(
-        harness.manager.summaries().await[0].attention,
-        Attention::Failed,
-        "the tab reports the dead session, not the gate it left"
-    );
+    assert_eq!(harness.script.starts(), 2, "open started the thread over");
 }
 
 #[tokio::test]
