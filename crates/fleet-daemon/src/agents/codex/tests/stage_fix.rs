@@ -62,6 +62,7 @@ async fn a_successful_turn_response_without_a_string_id_is_rejected_and_rolled_b
             Some(r#"{"id":__ID__,"result":{"userAgent":"fleet/0.147.0 (Linux)"}}"#),
             &[],
         )
+        .on("account/read", Some(ACCOUNT_READ), &[])
         .on(
             "thread/start",
             Some(&format!(

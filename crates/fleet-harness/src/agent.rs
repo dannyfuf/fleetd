@@ -66,10 +66,12 @@ impl Provider {
 
     /// The line this provider's real binary answers `--version` with.
     ///
-    /// `fleet-daemon`'s pre-spawn probe runs `<command> --version` and parses the first token
-    /// that looks like semver (`agents::harness::probe::parse_version`), and refuses a Claude
-    /// older than 2.1 because the launch line itself is version-shaped. These are the versions
-    /// the two research captures were taken against.
+    /// `fleet-daemon`'s pre-spawn probe runs `<command> --version`, requires the output to
+    /// **name the harness** (`Claude Code`, `codex`), parses the first token that looks like
+    /// semver (`agents::harness::probe::parse_version`), and refuses a Claude older than 2.1
+    /// because the launch line itself is version-shaped. So these lines are copied verbatim from
+    /// the real binaries — a paraphrase fails the identity check — and they are the versions the
+    /// two research captures were taken against.
     #[must_use]
     pub const fn version_line(self) -> &'static str {
         match self {

@@ -437,7 +437,7 @@ async fn the_board_preset_boots_with_cards_in_their_columns() {
 }
 
 #[tokio::test]
-async fn the_agents_preset_points_the_configured_commands_at_the_scripted_binary() {
+async fn the_agents_preset_points_both_agent_launchers_at_the_scripted_binary() {
     let (booted, mut daemon, environment) = boot(Preset::Agents).await;
     assert_eq!(booted.worktree_slugs(), vec!["acme/api#agent".to_owned()]);
     let client = daemon
@@ -450,14 +450,18 @@ async fn the_agents_preset_points_the_configured_commands_at_the_scripted_binary
         .unwrap_or_else(|error| panic!("read the configuration: {error}"));
     for provider in ["claude", "codex"] {
         let shim = environment.fake_bin.join(provider);
-        let configured = match provider {
-            "claude" => &config.agent_commands.claude,
-            _ => &config.agent_commands.codex,
+        let expected = shim.to_string_lossy().into_owned();
+        let (configured, binary) = match provider {
+            "claude" => (&config.agent_commands.claude, &config.agent_binaries.claude),
+            _ => (&config.agent_commands.codex, &config.agent_binaries.codex),
         };
         assert_eq!(
-            configured,
-            &shim.to_string_lossy().into_owned(),
+            configured, &expected,
             "{provider} must be launched from the fixture's shim, never from the developer's PATH"
+        );
+        assert_eq!(
+            binary, &expected,
+            "a native {provider} thread runs `agentBinaries`, so the shim has to be there too"
         );
         let version = tokio::process::Command::new(&shim)
             .arg("--version")

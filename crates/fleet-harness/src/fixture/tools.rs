@@ -114,8 +114,9 @@ fn install_agents(
     Ok(written)
 }
 
-/// The `/bin/sh` shim a seeded `agentCommands` entry points at, installed under the *vendor's*
-/// name so it also shadows a real `claude` or `codex` on the child `PATH`.
+/// The `/bin/sh` shim the seeded `agentCommands` **and** `agentBinaries` entries point at,
+/// installed under the *vendor's* name so it also shadows a real `claude` or `codex` on the
+/// child `PATH`.
 ///
 /// The script is `crate::agent::launcher_script`'s, not one of this module's own: it has to
 /// answer the daemon's `<command> --version` probe with a version the probe accepts

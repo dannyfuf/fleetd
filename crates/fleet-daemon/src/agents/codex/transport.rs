@@ -21,11 +21,11 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use fleet_core::agents::AgentEvent;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     process::Child,
@@ -34,7 +34,7 @@ use tokio::{
 };
 
 use super::{
-    approvals,
+    ACCOUNT_DEADLINE, account, approvals,
     envelope::{
         self, Inbound, OutboundError, OutboundNotification, OutboundRequest, OutboundResponse,
     },
@@ -44,8 +44,15 @@ use super::{
 use crate::agents::harness::{
     HarnessError, HarnessEvent, HarnessResult, HarnessSink, RawRef,
     ndjson::{Line, LineSplitter},
-    process::{self, PeerStreams},
+    process::{self, PeerStreams, StderrTail},
 };
+
+/// How long a failed startup waits for the stderr classifier to reach EOF before quoting the tail.
+///
+/// Only on the failure path, and only until the classifier says it is done: the child is already
+/// gone, so this is the time it takes one task to be polled, not a deadline anything normal waits
+/// on.
+const STDERR_SETTLE: Duration = Duration::from_millis(250);
 
 /// The reader's hard cap. Messages can legitimately be multi-megabyte — a 4 MiB
 /// `turn/diff/updated` is a real upstream test case — so the cap is high, and exceeding it is a
@@ -144,6 +151,10 @@ pub(super) struct Transport {
     expected_stop: Arc<AtomicBool>,
     reader: JoinHandle<()>,
     stderr: Option<JoinHandle<()>>,
+    /// The child's own last words, kept for a startup failure to quote.
+    stderr_tail: StderrTail,
+    /// Whether the stderr classifier has reached EOF, so the tail is final.
+    stderr_done: Arc<AtomicBool>,
 }
 
 impl Transport {
@@ -187,7 +198,16 @@ impl Transport {
         // stderr is drained from the moment of spawn or Codex blocks on a full pipe: there is an
         // upstream regression test for exactly this — 512 KiB of stderr before the `initialize`
         // response must not deadlock.
-        let stderr = stderr.map(|stderr| tokio::spawn(classify_stderr(stderr, events)));
+        let stderr_tail = StderrTail::default();
+        let stderr_done = Arc::new(AtomicBool::new(false));
+        let stderr = stderr.map(|stderr| {
+            tokio::spawn(classify_stderr(
+                stderr,
+                events,
+                stderr_tail.clone(),
+                Arc::clone(&stderr_done),
+            ))
+        });
         Self {
             writer,
             shared,
@@ -195,6 +215,8 @@ impl Transport {
             expected_stop,
             reader,
             stderr,
+            stderr_tail,
+            stderr_done,
         }
     }
 
@@ -247,16 +269,65 @@ impl Transport {
 
     /// Whether the child is still running.
     pub(super) async fn is_alive(&self) -> bool {
+        matches!(self.reaped().await, Liveness::Alive)
+    }
+
+    /// The exit code of a child that has already exited.
+    pub(super) async fn exit_code(&self) -> Option<i32> {
+        match self.reaped().await {
+            Liveness::Exited(code) => code,
+            Liveness::Alive | Liveness::Gone => None,
+        }
+    }
+
+    /// Reaps the child without blocking, logging a `try_wait` that failed outright.
+    async fn reaped(&self) -> Liveness {
         let mut child = self.child.lock().await;
         match child.as_mut() {
-            Some(process) => matches!(process.try_wait(), Ok(None)),
-            None => false,
+            Some(process) => match process.try_wait() {
+                Ok(Some(status)) => Liveness::Exited(process::exit_code(&status)),
+                Ok(None) => Liveness::Alive,
+                Err(error) => {
+                    // An unreapable child is a leaked process; silence here is what made it
+                    // invisible.
+                    tracing::warn!(
+                        target: "fleet::agents::codex",
+                        %error,
+                        "could not read the Codex child's exit status"
+                    );
+                    Liveness::Gone
+                }
+            },
+            None => Liveness::Gone,
         }
+    }
+
+    /// The child's stderr tail, once the classifier has reached EOF or the grace has passed.
+    ///
+    /// Read from a shared buffer rather than by joining the classifier task, so `Drop` aborting
+    /// that task cannot take the child's own explanation with it.
+    ///
+    /// Only the startup-failure path reads it, and it is the same text `classify_stderr` already
+    /// logs: a child that died before its first turn has no transcript to leak.
+    pub(super) async fn stderr_tail(&self) -> Option<String> {
+        let deadline = Instant::now() + STDERR_SETTLE;
+        while !self.stderr_done.load(Ordering::Acquire) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.stderr_tail.text()
     }
 
     /// The serialized writer, for answering a server request the adapter owns.
     pub(super) fn writer(&self) -> &Writer {
         &self.writer
+    }
+
+    /// One `account/read`, normalized, or `None` when there is nothing honest to report.
+    ///
+    /// The caller decides what to emit: a handshake read and a logout read publish different
+    /// transcript lines for the same answer.
+    pub(super) async fn read_account(&self) -> Option<fleet_core::agents::AccountStatus> {
+        read_account(&self.shared).await
     }
 
     /// How many unroutable lines this connection has seen.
@@ -330,6 +401,17 @@ impl Drop for Transport {
     }
 }
 
+/// What a non-blocking reap found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    /// The child is still running.
+    Alive,
+    /// The child exited, with this code when one was readable.
+    Exited(Option<i32>),
+    /// There is no child, or its status can no longer be read.
+    Gone,
+}
+
 /// A label for a timeout, without allocating per call.
 fn method_label(method: &str) -> &'static str {
     match method {
@@ -382,7 +464,16 @@ async fn read_loop(
             Some(process) => match process.try_wait() {
                 Ok(Some(status)) => process::exit_code(&status),
                 Ok(None) => process::terminate(process, process::TERMINATE_GRACE).await,
-                Err(_) => None,
+                Err(error) => {
+                    // The child is unreapable, so its exit code is lost; without this line so is
+                    // the fact that one is still out there holding the worktree.
+                    tracing::warn!(
+                        target: "fleet::agents::codex",
+                        %error,
+                        "could not read the Codex child's exit status after stdout EOF"
+                    );
+                    None
+                }
             },
             None => None,
         }
@@ -521,67 +612,124 @@ async fn handle_line(shared: &Shared, line: Line) {
     }
 }
 
-/// Starts a notification-triggered vocabulary refresh without blocking the stdout reader.
-async fn spawn_follow_up(shared: &Shared, method: &'static str) {
+/// Starts a notification-triggered refresh without blocking the stdout reader.
+async fn spawn_follow_up(shared: &Shared, follow_up: map::FollowUp) {
+    let method = follow_up.method();
     let key = format!("follow-up:{method}");
     let shared_for_task = shared.clone();
     let task = tokio::spawn(async move {
-        let result = match method {
-            "skills/list" => {
-                let cwd = shared_for_task.session.lock().await.worktree_path.clone();
-                request_shared(
-                    &shared_for_task,
-                    "skills/list",
-                    Some(serde_json::json!({
-                        "cwds": cwd
-                            .map(|path| path.to_string_lossy().into_owned())
-                            .into_iter()
-                            .collect::<Vec<_>>(),
-                        "forceReload": true,
-                    })),
-                    Duration::from_secs(10),
-                )
-                .await
-                .map(|result| {
-                    let skills = super::catalogue::parse_skill_names(&result);
-                    (result, skills)
-                })
-            }
-            _ => return,
-        };
-        match result {
-            Ok((_response, skills)) => {
-                shared_for_task
-                    .session
-                    .lock()
-                    .await
-                    .install_skills(skills.clone());
-                let event = HarnessEvent::now(
-                    fleet_core::agents::AgentEvent::MetadataChanged {
-                        title: None,
-                        mode: None,
-                        model: None,
-                        skills: Some(skills),
-                    },
-                    Some(RawRef::method(method)),
-                );
-                let _receiver_gone_at_shutdown = shared_for_task.events.send(event);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "fleet::agents::codex",
-                    %error,
-                    method,
-                    "a Codex vocabulary refresh failed"
-                );
+        match follow_up {
+            map::FollowUp::Skills => refresh_skills(&shared_for_task).await,
+            map::FollowUp::Account { announce_sign_in } => {
+                refresh_account(&shared_for_task, announce_sign_in).await;
             }
         }
     });
-    // One retained handle per vocabulary keeps shutdown/retrigger cancellation explicit without
+    // One retained handle per refresh keeps shutdown/retrigger cancellation explicit without
     // consuming the human-latency inbound-request budget.
     let mut tasks = shared.follow_ups.lock().await;
     if let Some(previous) = tasks.insert(key, task.abort_handle()) {
         previous.abort();
+    }
+}
+
+/// Re-reads the cwd-scoped skill catalogue and publishes it.
+async fn refresh_skills(shared: &Shared) {
+    let cwd = shared.session.lock().await.worktree_path.clone();
+    let result = request_shared(
+        shared,
+        "skills/list",
+        Some(serde_json::json!({
+            "cwds": cwd
+                .map(|path| path.to_string_lossy().into_owned())
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "forceReload": true,
+        })),
+        Duration::from_secs(10),
+    )
+    .await;
+    match result {
+        Ok(response) => {
+            let skills = super::catalogue::parse_skill_names(&response);
+            shared.session.lock().await.install_skills(skills.clone());
+            let event = HarnessEvent::now(
+                fleet_core::agents::AgentEvent::MetadataChanged {
+                    title: None,
+                    mode: None,
+                    model: None,
+                    skills: Some(skills),
+                },
+                Some(RawRef::method("skills/list")),
+            );
+            let _receiver_gone_at_shutdown = shared.events.send(event);
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "fleet::agents::codex",
+                %error,
+                method = "skills/list",
+                "a Codex vocabulary refresh failed"
+            );
+        }
+    }
+}
+
+/// Re-reads the account and publishes it, optionally announcing a completed sign-in.
+///
+/// A failed read is a warning and no event: the account is a chip, and an unreadable chip must
+/// not become a transcript row claiming the session is signed out.
+async fn refresh_account(shared: &Shared, announce_sign_in: bool) {
+    let Some(status) = read_account(shared).await else {
+        return;
+    };
+    emit_account(&shared.events, &status, announce_sign_in);
+}
+
+/// One `account/read`, normalized, or `None` when there is nothing honest to report.
+async fn read_account(shared: &Shared) -> Option<fleet_core::agents::AccountStatus> {
+    match request_shared(shared, "account/read", Some(json!({})), ACCOUNT_DEADLINE).await {
+        Ok(response) => match account::status_of(&response) {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::warn!(
+                    target: "fleet::agents::codex",
+                    %error,
+                    "could not decode the Codex account"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                target: "fleet::agents::codex",
+                %error,
+                "could not read the Codex account"
+            );
+            None
+        }
+    }
+}
+
+/// Publishes one account observation, and the sentence a completed sign-in earns.
+fn emit_account(
+    events: &HarnessSink,
+    status: &fleet_core::agents::AccountStatus,
+    announce_sign_in: bool,
+) {
+    emit(
+        events,
+        fleet_core::agents::AgentEvent::AccountChanged {
+            account: status.clone(),
+        },
+        Some("account/read"),
+    );
+    if announce_sign_in {
+        emit(
+            events,
+            fleet_core::agents::AgentEvent::Notice(account::signed_in_notice(status)),
+            Some("account/read"),
+        );
     }
 }
 
@@ -717,6 +865,8 @@ async fn write_loop(
 async fn classify_stderr(
     stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     events: HarnessSink,
+    tail: StderrTail,
+    done: Arc<AtomicBool>,
 ) {
     use tokio::io::AsyncBufReadExt as _;
 
@@ -732,6 +882,9 @@ async fn classify_stderr(
         if line.trim().is_empty() {
             continue;
         }
+        // The tail keeps the line **before** classification: a binary that is not Codex prints
+        // an unstructured usage error, and classification exists to quiet a running server.
+        tail.push(&line);
         let (level, message) = match structured
             .as_ref()
             .ok()
@@ -769,6 +922,7 @@ async fn classify_stderr(
         tracing::warn!(target: "fleet::agents::codex", "{message}");
         emit(&events, AgentEvent::Notice(message), Some("stderr"));
     }
+    done.store(true, Ordering::Release);
 }
 
 /// Removes ANSI SGR sequences.

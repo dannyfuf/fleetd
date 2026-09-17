@@ -793,6 +793,13 @@ this section is what the screen shows.
 The content measure is **760 px** with a 16 px inset, centered; a wide window leaves the right
 side empty on purpose. The transcript is bottom-anchored and the composer is docked under it.
 
+The composer's `/` picker lists Fleet's own built-ins before the harness's commands: `model`,
+`plan`, `default`, `compact`, and — on a **Codex** thread only — `login` and `logout`, which sign
+that harness in and out of its provider account. They are absent on a Claude thread because
+Claude publishes no account surface, and `DESIGN-SYSTEM.md` §4 does not list a command that would
+answer "unsupported". `/login` opens Codex's ChatGPT page in the user's browser and says so in a
+toast; the URL is also a `Notice` row, so it stays reachable when the browser does not open.
+
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
 | Tab | `<index> <provider> — <title>`, title from the first message or OpenCode's `Session.title`; bare `claude` until there is one | the terminal strip | one strip, one numbering: an index addresses exactly one surface | `AgentThreadSummary.title` |
@@ -816,7 +823,8 @@ side empty on purpose. The transcript is bottom-anchored and the composer is doc
 | Live activity row | one row, one id, present tense: `working 1m 12s` → `thought 6s` → `running cargo` | pinned in the running turn | thinking → tool A running → tool A done → tool B running is one row changing its label, not four mounts | `RowId::LiveActivity` |
 | Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
 | Composer | 36 px box, `❯` prompt glyph, placeholder `message claude… (@ files · $ skills · / commands)`; grows one line at a time to eight | docked, bottom | no send button: `⏎` sends, `⇧⏎` inserts a newline | `MultilineInput` |
-| Metadata row | 22 px: `claude-opus-5 · high · asks before edits · build` left, `34% · $0.42 · 48m` right; **every segment the harness reports is shown and none is invented**, and it collapses from the right into an overflow count while the model segment truncates instead | under the composer | losing which model is answering is worse than losing its name's tail | `ThreadProjection`, `MetadataRow` |
+| Metadata row | 22 px: `claude-opus-5 · high · asks before edits · build` left, `34% · $0.42 · 48m · dev@example.com` right; **every segment the harness reports is shown and none is invented**, and it collapses from the right into an overflow count while the model segment truncates instead | under the composer | losing which model is answering is worse than losing its name's tail | `ThreadProjection`, `MetadataRow` |
+| Account segment | the **last** trailing segment: `signed out` when the harness reports no account, else its email — or its plan when there is no email — and **nothing at all** when the harness reports no account signal (Claude always, Codex until its first `account/read`) | end of the metadata row | the first thing a revoked token costs is a turn, and the row is where the user finds out why before the refusal; last so it collapses before the context meter | `ThreadProjection.account` |
 | Empty state | `new claude thread · feat-x` over `ask anything · @ files · $ skills · / commands` | centered in an empty transcript | a new thread must say what to type | — |
 | Mode word | `AGENT` | status bar, center | §2.8; keys reach Fleet's composer, not a PTY | `Mode::Agent` |
 | Status-bar hints | the live key set of the current state (see **Keyboard**) | status bar, right | the card's keys are bare letters, so the bar is where they are legible | §9 of `NATIVE-AGENTS.md` |
@@ -844,7 +852,7 @@ Only gray spinners and the text caret animate; attention is a static amber dot o
 | Failed / exited | red `exited <code>` on the tab, header `failed`, an error card at the end of the transcript |
 | Scroll mode (`^s [`) | the tail is frozen so new output cannot pull the viewport away, and the row nearest the bottom takes the focus ring — which is what makes `⏎`/`u`/`o`/`y`/`d` fire. `G` reaches the newest row **without** leaving the mode; only `q`/`i`/`esc` re-arms the follow |
 | Unread | a neutral dot on the tab only; the header stays `idle`, because nothing is waiting on the user |
-| Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op |
+| Provider unavailable | the create fails with the typed reason and names `^s F`, the terminal fallback — never a silent no-op. The reason is the daemon's, verbatim, and names the harness and the `agentBinaries` command that failed (`` `cc` is not Claude Code: `cc (GCC) 16.2.1`. ``) rather than a default executable name Fleet never ran |
 
 **Intentionally omitted:** a thread sidebar, an inspector, a detached diff pane, a send button,
 per-message timestamps, an avatar or role header on assistant text, a token counter that moves
@@ -1293,7 +1301,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 
 | Section | Rows |
 | --- | --- |
-| **General** | `Agent ◂ claude ▸` · `Claude command [claude]` · `OpenCode command [opencode]` |
+| **General** | `Agent ◂ claude ▸` · `Claude command [claude]` · `Codex command [codex]` · `Claude binary [claude]` · `Codex binary [codex]`. The two *command* rows are the shell lines a terminal pane types; the two *binary* rows are what the daemon runs for a native thread, with no shell — each carries that as its sub-label |
 | **Sleep** | `Sleep on switch [x]` · `Grace ms [2000]` (editable, clamped ≥ 0) · rule list, each `[x] <label>  <kind>  <pattern>` **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
 | **Jobs & warnings** | `Warn before quitting with running jobs [x]` · `Keep finished jobs for ◂ 10 min ▸` · `Trash retention ◂ 10 min ▸` |
 | **Pool** | `Hot pool size ◂ 1 ▸` · `Freshness ms [60000]` · `Refresh interval ms [300000]` · read-only `prepared copies: 1/1 ready` |
@@ -1323,9 +1331,14 @@ has focus) · `Space` toggles · `←`/`→` cycles a choice · `Enter` saves ·
 
 880 × 620, **three columns × ~14 rows**, grouped by *mode* because the app is modal:
 `Hub` · `Worktrees & PRs` · `Terminal (^s)` · `Scroll` · `Agent popup (^s)` ·
-`Dialogs & filter`. Keys in a 68 px mono `fg` column, action in `fg.muted`. Context-sensitive:
-opening `?` from a Workspace or Agent terminal renders that surface's group **first and in
-accent** and dims the others to 55 %.
+`Agent thread (^s)` · `Board` · `Dialogs & filter`. Keys in a 68 px mono `fg` column, action in
+`fg.muted`. Context-sensitive: opening `?` from a Workspace terminal, the Agent popup or a native
+agent tab renders that surface's group **first and in accent** and dims the others to 55 %.
+
+A group whose sub-modes share a table lists it **once**, under a sub-head naming the family
+(`any mode: session`) rather than repeating it beneath each sub-mode: the six native agent-thread
+contexts share thirty-odd `^s` rows, and printing the product per context is a wall rather than a
+reference.
 
 The dialog opens with one block above the columns, which is the single most valuable paragraph in
 the app:

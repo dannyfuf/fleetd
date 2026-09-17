@@ -4,8 +4,8 @@ mod requests;
 mod streaming;
 
 use requests::{
-    close_agent_tab, load_older_page, mark_seen, open_in_editor, open_terminal_fallback,
-    open_thread, refresh_checkpoints, resend_seen_cursors,
+    account_login, close_agent_tab, load_older_page, mark_seen, open_in_editor,
+    open_terminal_fallback, open_thread, refresh_checkpoints, resend_seen_cursors,
 };
 
 use crate::{
@@ -159,7 +159,10 @@ fn create_thread(
                 "refused to create a native agent thread"
             );
             state.update(cx, |app, cx| {
-                record_mutation_failure(app, create_failure(provider, reason));
+                // Fleet's own refusal, so Fleet names the harness; the daemon's messages name it
+                // themselves, along with the command they ran.
+                let refusal = format!("{}: {reason}", provider.display_name());
+                record_mutation_failure(app, create_failure(&refusal));
                 cx.notify();
             });
             return;
@@ -186,11 +189,11 @@ fn create_thread(
                 activate_agent_tab(&state, thread, cx);
             }
             Ok(Err(error)) => state.update(cx, |app, cx| {
-                record_mutation_failure(app, create_failure(provider, &error.message));
+                record_mutation_failure(app, create_failure(&error.message));
                 cx.notify();
             }),
             Ok(Ok(_)) | Err(_) => state.update(cx, |app, cx| {
-                record_mutation_failure(app, create_failure(provider, "the daemon did not answer"));
+                record_mutation_failure(app, create_failure("the daemon did not answer"));
                 cx.notify();
             }),
         });
@@ -199,11 +202,12 @@ fn create_thread(
 }
 
 /// The refusal copy, which always names the explicit terminal fallback (§10).
-fn create_failure(provider: AgentKind, message: &str) -> String {
-    format!(
-        "{}: {message} \u{b7} press ctrl-s F for the terminal fallback",
-        provider.executable()
-    )
+///
+/// The daemon's message is shown as-is: it names the harness and the `agentBinaries` command it
+/// actually ran, where `AgentKind::executable()` would name `claude` however the user configured
+/// it — pointing at a binary Fleet never touched.
+fn create_failure(message: &str) -> String {
+    format!("{message} \u{b7} press ctrl-s F for the terminal fallback")
 }
 
 impl WorkspaceScreen {
@@ -258,6 +262,11 @@ impl WorkspaceScreen {
                 // The one answer that has to come back into the view: `[u]` is drawn from it.
                 AgentThreadEvent::RefreshCheckpoints => {
                     refresh_checkpoints(&relay_bridge, &view, thread, cx);
+                }
+                // The other answer the view cannot forget: `/login` is only useful if the URL
+                // it returns reaches a browser.
+                AgentThreadEvent::AccountLogin => {
+                    account_login(&relay_bridge, &relay_state, thread, cx);
                 }
                 AgentThreadEvent::LoadOlder => {
                     load_older_page(&relay_bridge, &relay_state, thread, cx);

@@ -708,6 +708,11 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         | RequestBody::AgentSetMode { .. }
         | RequestBody::AgentSetModel { .. }
         | RequestBody::AgentStop { .. }
+        // Signing in starts a browser flow behind a loopback listener and signing out tears one
+        // down; both are harness round trips on the same serialized-per-thread gate as the five
+        // above, and both are bounded harness-side well inside this deadline.
+        | RequestBody::AgentAccountLogin { .. }
+        | RequestBody::AgentAccountLogout { .. }
         // A revert is `git add -A` plus a checkout of everything the turn touched, on a worktree
         // the user chose the size of. It shares the mutation deadline rather than the default
         // because a 10 s transport error on a revert that lands at 12 s invites the user to

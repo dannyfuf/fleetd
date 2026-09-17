@@ -1,6 +1,6 @@
 # Phase 4 acceptance — a scripted Codex edit approval, with no vendor CLI, no network, no token.
 #
-# The `agents` preset points fleetd's Codex command at `fleet-harness agent --provider codex`
+# The `agents` preset points fleetd's Codex binary at `fleet-harness agent --provider codex`
 # and hands it `transcripts/edit-approval.json`, so everything below is Codex's real wire
 # protocol spoken by the harness binary.
 fixture: agents

@@ -111,7 +111,11 @@ pub enum Agent {
     Opencode,
 }
 
-/// Shell commands used to launch each supported agent.
+/// Shell command lines typed into a PTY pane for each supported agent.
+///
+/// These are **shell lines**, interpolated into a terminal's command by
+/// [`crate::sessions`], so a shell function or an alias is a legal value. The executables
+/// `fleetd` runs itself, without a shell, are [`AgentBinaries`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCommands {
@@ -147,6 +151,50 @@ fn default_codex_command() -> String {
 
 fn default_opencode_command() -> String {
     "opencode".to_owned()
+}
+
+/// Executables `fleetd` runs directly, without a shell, for native agent threads.
+///
+/// Separate from [`AgentCommands`] because the two are not interchangeable: a PTY pane runs its
+/// command line through the user's shell, so `cc` may be a shell function, while a native thread
+/// is `execve`'d by the daemon and `cc` is then whatever `PATH` resolves — on most machines the C
+/// compiler. A bare name here is resolved against the login shell's `PATH`; extra fixed arguments
+/// are allowed and tokenized with POSIX quoting (`claude --model opus`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AgentBinaries {
+    /// The executable Fleet runs for a native Claude Code thread.
+    pub claude: String,
+    /// The executable Fleet runs for a native Codex thread.
+    pub codex: String,
+}
+
+impl Default for AgentBinaries {
+    fn default() -> Self {
+        Self {
+            claude: default_claude_binary(),
+            codex: default_codex_binary(),
+        }
+    }
+}
+
+impl AgentBinaries {
+    /// Returns the configured executable for a native harness.
+    #[must_use]
+    pub fn binary(&self, kind: crate::agents::AgentKind) -> &str {
+        match kind {
+            crate::agents::AgentKind::Claude => &self.claude,
+            crate::agents::AgentKind::Codex => &self.codex,
+        }
+    }
+}
+
+fn default_claude_binary() -> String {
+    "claude".to_owned()
+}
+
+fn default_codex_binary() -> String {
+    "codex".to_owned()
 }
 
 /// A terminal in the default session layout.
@@ -301,8 +349,11 @@ pub struct Config {
     pub hot_refresh_interval_ms: u64,
     /// Selected coding agent.
     pub agent: Agent,
-    /// Agent launch commands.
+    /// Shell command lines typed into a PTY pane.
     pub agent_commands: AgentCommands,
+    /// Executables the daemon runs directly for native agent threads.
+    #[serde(default)]
+    pub agent_binaries: AgentBinaries,
     /// Ordered terminal layout.
     pub windows: Vec<WindowConfig>,
     /// Terminal sleep policy.
@@ -355,6 +406,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
             codex: default_codex_command(),
             opencode: "opencode".to_owned(),
         },
+        agent_binaries: AgentBinaries::default(),
         windows: vec![
             WindowConfig {
                 name: "nvim".to_owned(),
@@ -567,6 +619,11 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
             "agent commands must be non-empty".to_owned(),
         ));
     }
+    if config.agent_binaries.claude.is_empty() || config.agent_binaries.codex.is_empty() {
+        return Err(ConfigError::Validation(
+            "agent binaries must be non-empty".to_owned(),
+        ));
+    }
     for window in &config.windows {
         if window.name.is_empty() || window.command.is_empty() {
             return Err(ConfigError::Validation(
@@ -667,6 +724,7 @@ mod tests {
             "hotRefreshIntervalMs": 300000,
             "agent": "claude",
             "agentCommands": {"claude": "claude", "codex": "codex", "opencode": "opencode"},
+            "agentBinaries": {"claude": "claude", "codex": "codex"},
             "windows": [
                 {"name": "nvim", "command": "nvim ."},
                 {"name": "cc", "command": "{agent}"},
@@ -809,6 +867,67 @@ mod tests {
         assert!(
             merge_config("/home/me/.fleet", json!({"ui":{"remoteStatusRefreshMs":0}})).is_err()
         );
+    }
+
+    /// `agentBinaries` is what the daemon `execve`s; `agentCommands` is the PTY pane's shell
+    /// line. A config written before the split keeps decoding, and the two stay independent.
+    #[test]
+    fn agent_binaries_default_independently_of_the_pty_command_lines() {
+        let legacy = merge_config_with_user_home(
+            "/home/me/.fleet",
+            "/home/me",
+            json!({"agentCommands": {"claude": "cc"}}),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(legacy.agent_commands.claude, "cc");
+        assert_eq!(
+            legacy.agent_binaries,
+            AgentBinaries::default(),
+            "a shell function in `agentCommands` must never become the native binary"
+        );
+        assert_eq!(legacy.agent_binaries.claude, "claude");
+        assert_eq!(legacy.agent_binaries.codex, "codex");
+
+        let configured = merge_config_with_user_home(
+            "/home/me/.fleet",
+            "/home/me",
+            json!({"agentBinaries": {"claude": "/opt/claude/bin/claude"}}),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(configured.agent_binaries.claude, "/opt/claude/bin/claude");
+        assert_eq!(
+            configured.agent_binaries.codex, "codex",
+            "the two entries default independently"
+        );
+        assert_eq!(configured.agent_commands.claude, "claude");
+    }
+
+    /// Both entries are written back, so a config that decodes and re-serializes keeps them.
+    #[test]
+    fn agent_binaries_round_trip_through_serialization() {
+        let config = merge_config_with_user_home(
+            "/home/me/.fleet",
+            "/home/me",
+            json!({"agentBinaries": {"claude": "claude-canary", "codex": "codex-canary"}}),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        let json = serde_json::to_value(&config).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            json.get("agentBinaries"),
+            Some(&json!({"claude": "claude-canary", "codex": "codex-canary"}))
+        );
+        let decoded: Config =
+            serde_json::from_value(json).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(decoded.agent_binaries, config.agent_binaries);
+    }
+
+    #[test]
+    fn an_empty_agent_binary_is_a_validation_error() {
+        let error = merge_config("/home/me/.fleet", json!({"agentBinaries": {"claude": ""}}))
+            .err()
+            .unwrap_or_else(|| panic!("an empty binary cannot be launched"));
+        assert!(error.to_string().contains("agent binaries"), "{error}");
+        assert!(merge_config("/home/me/.fleet", json!({"agentBinaries": {"codex": ""}})).is_err());
     }
 
     #[test]

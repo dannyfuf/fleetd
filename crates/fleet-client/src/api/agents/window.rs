@@ -121,6 +121,7 @@ pub fn projection_from_window(window: &AgentThreadWindow) -> ThreadProjection {
     projection.cumulative_cost_usd = window.session.cost_usd;
     projection.context_pct = window.session.context_pct.unwrap_or_default();
     projection.retrying = window.session.retrying.clone();
+    projection.account = window.session.account.clone();
 
     projection.turns = window.window.turns.clone();
     projection.items = window.window.items.clone();

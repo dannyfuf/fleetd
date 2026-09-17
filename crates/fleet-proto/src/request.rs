@@ -264,6 +264,27 @@ pub enum RequestBody {
         /// Target thread.
         thread: ThreadId,
     },
+    /// Begin signing this thread's harness in to its provider account.
+    ///
+    /// Sent only to daemons advertising
+    /// [`AGENT_ACCOUNT_CAPABILITY`](crate::AGENT_ACCOUNT_CAPABILITY), and answered with
+    /// [`ResponseBody::AgentAccountLogin`](crate::response::ResponseBody::AgentAccountLogin)
+    /// carrying the URL the user opens. The account itself never comes back here: it arrives as
+    /// an `AccountChanged` event, so a mirror learns it the same way the acting client does
+    /// (`docs/NATIVE-AGENTS.md` §4.4). A harness with no account surface refuses with
+    /// [`ErrorKind::Unsupported`](crate::error::ErrorKind::Unsupported).
+    AgentAccountLogin {
+        /// Target thread.
+        thread: ThreadId,
+    },
+    /// Sign this thread's harness out of its provider account.
+    ///
+    /// Signing out is **process-wide** for that harness home, not per thread: every thread
+    /// sharing it sees the resulting `AccountChanged`.
+    AgentAccountLogout {
+        /// Target thread.
+        thread: ThreadId,
+    },
     /// List the Fleet-owned checkpoints a thread's worktree can be reverted to.
     ///
     /// Sent only to daemons advertising

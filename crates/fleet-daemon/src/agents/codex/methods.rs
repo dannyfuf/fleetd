@@ -263,7 +263,7 @@ pub const OPT_OUT_NOTIFICATION_METHODS: [&str; 21] = [
 ];
 
 /// Notifications Fleet maps to normalized events.
-pub const MAPPED_NOTIFICATION_METHODS: [&str; 41] = [
+pub const MAPPED_NOTIFICATION_METHODS: [&str; 42] = [
     "thread/started",
     "thread/status/changed",
     "thread/settings/updated",
@@ -302,6 +302,7 @@ pub const MAPPED_NOTIFICATION_METHODS: [&str; 41] = [
     "mcpServer/oauthLogin/completed",
     "account/updated",
     "account/rateLimits/updated",
+    "account/login/completed",
     "skills/changed",
     "hook/started",
     "hook/completed",

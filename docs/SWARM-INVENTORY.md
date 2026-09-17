@@ -165,8 +165,11 @@ Missing fields deep-merge with `defaultConfig(SWARM_HOME)`. `~`/`~/` expansion a
 | `hotFreshnessMs` | nonnegative integer | `60000` | Fresh-marker age. |
 | `hotRefreshIntervalMs` | nonnegative integer | `300000` | Periodic refresh; 0 disables. |
 | `agent` | `"claude" \| "opencode"` | `"claude"` | Selected agent. |
-| `agentCommands.claude` | nonempty string | `"claude"` | Full shell command typed into pane. |
-| `agentCommands.opencode` | nonempty string | `"opencode"` | Same. Entries default independently. |
+| `agentCommands.claude` | nonempty string | `"claude"` | Shell command line typed into a **PTY pane**, run through the user's shell, so a function or alias is legal. Never used for a native thread. |
+| `agentCommands.codex` | nonempty string | `"codex"` | Same. Entries default independently. |
+| `agentCommands.opencode` | nonempty string | `"opencode"` | Same. Legacy, kept readable for one release (ADR 0014). |
+| `agentBinaries.claude` | nonempty string | `"claude"` | **Fleet divergence.** The executable `fleetd` runs directly, with **no shell**, for a *native* Claude thread (`docs/NATIVE-AGENTS.md` §4.1). A bare name resolves on the login shell's `PATH`; fixed arguments are allowed and tokenized with POSIX quoting. |
+| `agentBinaries.codex` | nonempty string | `"codex"` | Same, for a native Codex thread. Entries default independently; the section may be absent entirely. |
 | `windows` | `{name:nonempty string,command:nonempty string}[]` | `[ {"name":"nvim","command":"nvim ."}, {"name":"cc","command":"{agent}"}, {"name":"lg","command":"fleet://lazygit"} ]` | Ordered windows; `{agent}` replaced by selected configured command. A `fleet://` command names a Fleet-provided surface instead of a program (only `fleet://lazygit` exists; an unknown one is a validation error). **Fleet divergence**: the third default is the native git pane, not the `lazygit` binary; an imported swarm `lazygit` window is upgraded to it, while a `lazygit` written into Fleet's own `config.json` is left alone. Schema allows `[]`, mount does not. |
 | `sleep.enabled` | boolean | `true` | False keeps every window. |
 | `sleep.keepAlive` | rules below | four defaults below | Window-preservation rules. |

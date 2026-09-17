@@ -333,3 +333,71 @@ impl Default for HarnessCapabilities {
         }
     }
 }
+
+/// Whether the harness holds a usable account, as the harness itself reports it.
+///
+/// `None` on a projection means **never reported** — Claude publishes no account signal at all —
+/// and is not the same thing as [`AccountStatus::SignedOut`], which is the harness saying it
+/// looked and found nothing. A surface that collapsed the two would draw `signed out` on every
+/// Claude thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum AccountStatus {
+    /// The harness has no account and cannot run a turn until one is added.
+    SignedOut,
+    /// The harness is signed in.
+    SignedIn(AccountInfo),
+}
+
+/// What is known about the signed-in account.
+///
+/// A struct rather than a bare [`AccountKind`] so a later addition — an organization name, a
+/// credit balance — is an additive field rather than a re-shaped event (`rust-ipc-protocol`
+/// Rule 7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountInfo {
+    /// How the account authenticates.
+    pub kind: AccountKind,
+}
+
+impl AccountInfo {
+    /// The shortest honest label for this account, or `None` when it has no distinguishing name.
+    ///
+    /// The email when there is one, the plan when there is not, and nothing at all rather than a
+    /// placeholder: `docs/UX-SPEC.md` §3.6.0 forbids inventing a metadata segment.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        match &self.kind {
+            AccountKind::ChatGpt { email, plan } => email
+                .as_deref()
+                .or(plan.as_deref())
+                .filter(|label| !label.is_empty()),
+            AccountKind::ApiKey => Some("api key"),
+            AccountKind::Other(name) => Some(name.as_str()).filter(|name| !name.is_empty()),
+        }
+    }
+}
+
+/// How a signed-in harness account authenticates.
+///
+/// `Other` carries the harness's own word for a mode this build does not model, so a new Codex
+/// auth mode is a label rather than a lost event (§4.5 rule 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum AccountKind {
+    /// A ChatGPT subscription, with whatever the harness published about it.
+    #[serde(rename = "chatgpt")]
+    ChatGpt {
+        /// Account email, when the harness reports one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
+        /// Plan name, when the harness reports one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
+    },
+    /// A raw API key.
+    ApiKey,
+    /// An auth mode this build does not model, named by the harness.
+    Other(String),
+}

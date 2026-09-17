@@ -28,15 +28,15 @@ use fleet_core::{
         AgentEvent, AgentKind, GateAnswer, GateId, HarnessCapabilities, StartRequest, TurnId,
         UserInput,
     },
-    config::AgentCommands,
+    config::AgentBinaries,
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
 
 use crate::agents::harness::{
-    self, Harness, HarnessConfig, HarnessError, HarnessEvent, HarnessEvents, InterruptReason,
-    OpenSession, RestartPlan, RuntimeApplied, RuntimeChange, ShutdownReason, Submit, SubmitIntent,
-    Submitted, probe::ProbeCache,
+    self, AccountOp, AccountOutcome, Harness, HarnessConfig, HarnessError, HarnessEvent,
+    HarnessEvents, InterruptReason, OpenSession, RestartPlan, RuntimeApplied, RuntimeChange,
+    ShutdownReason, Submit, SubmitIntent, Submitted, probe::ProbeCache,
 };
 
 /// One normalized event and the provider wire type that produced it.
@@ -118,6 +118,19 @@ pub trait AgentProvider: Send {
     /// `change` is re-applied to the launch request, so the replacement opens with the values
     /// the live process could not take.
     async fn restart(&mut self, plan: &RestartPlan, change: &RuntimeChange) -> ProviderResult<()>;
+    /// Signs the harness in or out of its provider account.
+    ///
+    /// Defaulted to a refusal so an adapter with no account surface — and every test fake — says
+    /// `Unsupported` rather than pretending. The account itself is never returned: it arrives on
+    /// the event stream as `AccountChanged`.
+    async fn account(&mut self, _op: AccountOp) -> ProviderResult<AccountOutcome> {
+        Err(ProviderError::Unavailable {
+            reason: format!(
+                "{} cannot be signed in or out from Fleet",
+                self.kind().display_name()
+            ),
+        })
+    }
     /// Stops the provider process or server.
     async fn stop(&mut self) -> ProviderResult<()>;
     /// Takes the next normalized event receiver.
@@ -323,6 +336,13 @@ impl AgentProvider for HarnessProvider {
         self.restart_with(plan, change).await
     }
 
+    async fn account(&mut self, op: AccountOp) -> ProviderResult<AccountOutcome> {
+        self.harness()?
+            .account(op)
+            .await
+            .map_err(ProviderError::from)
+    }
+
     async fn stop(&mut self) -> ProviderResult<()> {
         let Some(mut harness) = self.harness.take() else {
             return Ok(());
@@ -343,19 +363,18 @@ impl AgentProvider for HarnessProvider {
 
 /// Constructs the adapter for a provider kind.
 ///
-/// `commands` are the configured shell command lines (`config.agentCommands`); each adapter
-/// tokenizes its own with shell words, so `claude --model opus` keeps working. Nothing is spawned
-/// here — [`AgentProvider::start`] owns the process, so a launch failure arrives as a typed
-/// [`ProviderError`] the manager can turn into the terminal fallback.
+/// `binaries` are `config.agentBinaries` — the executables the daemon runs itself, with **no
+/// shell**. Never `config.agentCommands`, which is a shell line for a PTY pane and may legally
+/// name a shell function. Each adapter tokenizes its own with shell words, so
+/// `claude --model opus` keeps working. Nothing is spawned here — [`AgentProvider::start`] owns
+/// the process, so a launch failure arrives as a typed [`ProviderError`] the manager can turn
+/// into the terminal fallback.
 pub fn spawn_provider(
     kind: AgentKind,
     req: &StartRequest,
-    commands: &AgentCommands,
+    binaries: &AgentBinaries,
 ) -> anyhow::Result<Box<dyn AgentProvider>> {
-    let command = match kind {
-        AgentKind::Claude => commands.claude.clone(),
-        AgentKind::Codex => commands.codex.clone(),
-    };
+    let command = binaries.binary(kind).to_owned();
     let config = HarnessConfig {
         command,
         home: None,
@@ -419,7 +438,11 @@ impl From<HarnessError> for ProviderError {
     fn from(error: HarnessError) -> Self {
         match error {
             HarnessError::Unavailable { reason } => Self::Unavailable { reason },
-            HarnessError::Handshake { detail, .. } => Self::Unavailable { reason: detail },
+            // The harness name comes from `HarnessError`'s own `Display`: a detail alone reads
+            // as an anonymous failure, and the sticky error in the app is this string.
+            HarnessError::Handshake { .. } => Self::Unavailable {
+                reason: error.to_string(),
+            },
             HarnessError::Protocol { .. } => Self::Protocol {
                 message: error.to_string(),
             },
@@ -465,11 +488,10 @@ mod tests {
         }
     }
 
-    fn commands() -> AgentCommands {
-        AgentCommands {
+    fn binaries() -> AgentBinaries {
+        AgentBinaries {
             claude: "claude --model opus".to_owned(),
             codex: "codex".to_owned(),
-            opencode: "opencode".to_owned(),
         }
     }
 
@@ -477,7 +499,7 @@ mod tests {
     #[test]
     fn both_harnesses_are_selectable_and_nothing_is_spawned() {
         for kind in [AgentKind::Claude, AgentKind::Codex] {
-            let provider = spawn_provider(kind, &request(kind), &commands())
+            let provider = spawn_provider(kind, &request(kind), &binaries())
                 .unwrap_or_else(|error| panic!("construct {kind:?}: {error}"));
             assert_eq!(provider.kind(), kind);
         }
@@ -488,7 +510,7 @@ mod tests {
     #[tokio::test]
     async fn a_thread_is_never_started_on_the_other_harness() {
         let mut provider =
-            spawn_provider(AgentKind::Claude, &request(AgentKind::Claude), &commands())
+            spawn_provider(AgentKind::Claude, &request(AgentKind::Claude), &binaries())
                 .unwrap_or_else(|error| panic!("{error}"));
         let error = provider
             .start(request(AgentKind::Codex))
@@ -504,9 +526,9 @@ mod tests {
         let mut provider = spawn_provider(
             AgentKind::Codex,
             &request(AgentKind::Codex),
-            &AgentCommands {
+            &AgentBinaries {
                 codex: "fleet-no-such-agent-binary".to_owned(),
-                ..commands()
+                ..binaries()
             },
         )
         .unwrap_or_else(|error| panic!("{error}"));
@@ -526,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn every_verb_refuses_before_the_session_is_open() {
         let mut provider =
-            spawn_provider(AgentKind::Claude, &request(AgentKind::Claude), &commands())
+            spawn_provider(AgentKind::Claude, &request(AgentKind::Claude), &binaries())
                 .unwrap_or_else(|error| panic!("{error}"));
         assert!(
             provider

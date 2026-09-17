@@ -40,7 +40,7 @@ use super::{
 use crate::agents::harness::{
     HarnessError, HarnessEvent, HarnessResult, HarnessSink, RawRef,
     ndjson::{Line, LineSplitter},
-    process::{self, PeerStreams},
+    process::{self, PeerStreams, StderrTail},
 };
 
 /// The largest single stdout line the transport will buffer.
@@ -55,6 +55,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often a decode-failure warning may repeat.
 const WARN_EVERY: Duration = Duration::from_secs(5);
+
+/// How long a failed startup waits for the stderr drain to reach EOF before quoting the tail.
+///
+/// Only on the failure path, and only until the drain says it is done: the child is already gone,
+/// so this is the time it takes one task to be polled, not a deadline anything normal waits on.
+const STDERR_SETTLE: Duration = Duration::from_millis(250);
 
 /// A serialized writer over the child's stdin.
 ///
@@ -153,6 +159,10 @@ pub(super) struct Transport {
     expected_stop: Arc<AtomicBool>,
     reader: JoinHandle<()>,
     stderr: Option<JoinHandle<()>>,
+    /// The child's own last words, kept for a startup failure to quote.
+    stderr_tail: StderrTail,
+    /// Whether the stderr drain has reached EOF, so the tail is final.
+    stderr_done: Arc<AtomicBool>,
 }
 
 impl Transport {
@@ -190,7 +200,15 @@ impl Transport {
         };
         let reader = tokio::spawn(read_loop(stdout, shared));
         // stderr is drained from the moment of spawn: an undrained pipe is a deadlock.
-        let stderr = stderr.map(|stderr| tokio::spawn(drain_stderr(stderr)));
+        let stderr_tail = StderrTail::default();
+        let stderr_done = Arc::new(AtomicBool::new(false));
+        let stderr = stderr.map(|stderr| {
+            tokio::spawn(drain_stderr(
+                stderr,
+                stderr_tail.clone(),
+                Arc::clone(&stderr_done),
+            ))
+        });
 
         Self {
             writer,
@@ -200,6 +218,8 @@ impl Transport {
             expected_stop,
             reader,
             stderr,
+            stderr_tail,
+            stderr_done,
         }
     }
 
@@ -236,12 +256,67 @@ impl Transport {
 
     /// Whether the child is still running.
     pub(super) async fn is_alive(&self) -> bool {
-        let mut child = self.child.lock().await;
-        match child.as_mut() {
-            Some(process) => matches!(process.try_wait(), Ok(None)),
-            None => false,
+        matches!(self.reaped().await, Liveness::Alive)
+    }
+
+    /// The exit code of a child that has already exited.
+    pub(super) async fn exit_code(&self) -> Option<i32> {
+        match self.reaped().await {
+            Liveness::Exited(code) => code,
+            Liveness::Alive | Liveness::Gone => None,
         }
     }
+
+    /// Reaps the child without blocking, logging a `try_wait` that failed outright.
+    async fn reaped(&self) -> Liveness {
+        let mut child = self.child.lock().await;
+        match child.as_mut() {
+            Some(process) => match process.try_wait() {
+                Ok(Some(status)) => Liveness::Exited(process::exit_code(&status)),
+                Ok(None) => Liveness::Alive,
+                Err(error) => {
+                    // An unreapable child is a leaked process; silence here is what made it
+                    // invisible.
+                    tracing::warn!(
+                        target: "fleet::agents::claude",
+                        %error,
+                        "could not read the Claude child's exit status"
+                    );
+                    Liveness::Gone
+                }
+            },
+            None => Liveness::Gone,
+        }
+    }
+
+    /// The child's stderr tail, once the drain has reached EOF or the grace has passed.
+    ///
+    /// Read from a shared buffer rather than by joining the drain task, so `Drop` aborting that
+    /// task cannot take the child's own explanation with it.
+    ///
+    /// Only the startup-failure path reads it, and it is the same text `drain_stderr` already
+    /// logs verbatim: a child that died before its first turn has no transcript to leak.
+    ///
+    /// Only the startup-failure path reads it, and it is the same text `drain_stderr` already
+    /// logs verbatim: a child that died before its first turn has no transcript to leak.
+    pub(super) async fn stderr_tail(&self) -> Option<String> {
+        let deadline = Instant::now() + STDERR_SETTLE;
+        while !self.stderr_done.load(Ordering::Acquire) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.stderr_tail.text()
+    }
+}
+
+/// What a non-blocking reap found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    /// The child is still running.
+    Alive,
+    /// The child exited, with this code when one was readable.
+    Exited(Option<i32>),
+    /// There is no child, or its status can no longer be read.
+    Gone,
 }
 
 impl Drop for Transport {
@@ -304,7 +379,16 @@ async fn read_loop(mut stdout: Box<dyn tokio::io::AsyncRead + Send + Unpin>, sha
             Some(process) => match process.try_wait() {
                 Ok(Some(status)) => process::exit_code(&status),
                 Ok(None) => process::terminate(process, process::TERMINATE_GRACE).await,
-                Err(_) => None,
+                Err(error) => {
+                    // The child is unreapable, so its exit code is lost; without this line so is
+                    // the fact that one is still out there holding the worktree.
+                    tracing::warn!(
+                        target: "fleet::agents::claude",
+                        %error,
+                        "could not read the Claude child's exit status after stdout EOF"
+                    );
+                    None
+                }
             },
             None => None,
         }
@@ -524,8 +608,12 @@ async fn write_loop(
     }
 }
 
-/// Drains stderr into the log, one line at a time, and never blocks the protocol.
-async fn drain_stderr(stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>) {
+/// Drains stderr into the log and the bounded tail, and never blocks the protocol.
+async fn drain_stderr(
+    stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+    tail: StderrTail,
+    done: Arc<AtomicBool>,
+) {
     use tokio::io::AsyncBufReadExt as _;
 
     let mut lines = tokio::io::BufReader::new(stderr).lines();
@@ -533,8 +621,10 @@ async fn drain_stderr(stderr: Box<dyn tokio::io::AsyncRead + Send + Unpin>) {
         if line.trim().is_empty() {
             continue;
         }
+        tail.push(&line);
         tracing::warn!(target: "fleet::agents::claude", "{line}");
     }
+    done.store(true, Ordering::Release);
 }
 
 #[cfg(test)]

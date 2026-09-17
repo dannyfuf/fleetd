@@ -1,6 +1,6 @@
 //! §3.8.7 Help (`?`) — every context side by side, grouped by mode.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fleet_ui_kit::{Icon, TextRole, prelude::*, styled_with};
 use gpui::{
@@ -185,6 +185,14 @@ const GROUPS: &[(&str, &[&str])] = &[
             "Agent > Terminal",
             "Agent > Prefix",
             "Agent > Scroll",
+        ],
+    ),
+    // A native thread is not the popup: it is the Workspace's selected tab, it keeps a composer
+    // instead of a PTY, and it repeats the Workspace session rows. Listing the two under one
+    // head told the reader that `^s q` hides a popup that is not open.
+    (
+        "Agent thread (^s)",
+        &[
             "Agent > AgentIdle",
             "Agent > AgentWorking",
             "Agent > AgentDecision > AgentPermission",
@@ -231,38 +239,77 @@ const GROUPS: &[(&str, &[&str])] = &[
 /// merging on the label alone produced rows like `⏎ / y / Y accept` out of four different
 /// dialogs' `Accept` actions, and such a row is accurate in none of them.
 #[must_use]
+fn merge_rows<'a>(
+    specs: impl Iterator<Item = &'a keymap::BindingSpec>,
+) -> Vec<(gpui::SharedString, gpui::SharedString)> {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for spec in specs {
+        let label = humanize(spec.action);
+        let keys = pretty_keys(spec.keys);
+        match rows.iter_mut().find(|(_, existing)| existing == &label) {
+            Some((existing_keys, _)) => {
+                if !existing_keys.split(" / ").any(|key| key == keys) {
+                    existing_keys.push_str(" / ");
+                    existing_keys.push_str(&keys);
+                }
+            }
+            None => rows.push((keys, label)),
+        }
+    }
+    rows.into_iter()
+        .map(|(keys, label)| (keys.into(), label.into()))
+        .collect()
+}
+
+#[must_use]
 fn groups() -> Vec<Group> {
     let table = keymap::table();
+    let shared = keymap::shared_tables();
     GROUPS
         .iter()
         .map(|(title, contexts)| {
+            // A table registered against a whole family of contexts is listed once, under the
+            // family, not repeated beneath each of its members: the six native agent-thread
+            // sub-modes share thirty-odd `^s` rows, and printing them six times turned an
+            // 880 px card into a wall a reader cannot find anything in (§3.8.7).
+            let families: Vec<&keymap::SharedTable> = shared
+                .iter()
+                .filter(|family| {
+                    family
+                        .contexts
+                        .iter()
+                        .all(|context| contexts.contains(context))
+                })
+                .collect();
+            let hoisted: HashSet<(&str, &str)> = families
+                .iter()
+                .flat_map(|family| {
+                    family
+                        .contexts
+                        .iter()
+                        .flat_map(|context| family.rows.iter().map(move |row| (*context, row.keys)))
+                })
+                .collect();
             let multi = contexts.len() > 1;
             let mut sections: Vec<Section> = Vec::new();
             for context in *contexts {
-                let mut rows: Vec<(String, String)> = Vec::new();
-                for spec in table.iter().filter(|spec| spec.context == *context) {
-                    let label = humanize(spec.action);
-                    let keys = pretty_keys(spec.keys);
-                    match rows.iter_mut().find(|(_, existing)| existing == &label) {
-                        Some((existing_keys, _)) => {
-                            if !existing_keys.split(" / ").any(|key| key == keys) {
-                                existing_keys.push_str(" / ");
-                                existing_keys.push_str(&keys);
-                            }
-                        }
-                        None => rows.push((keys, label)),
-                    }
-                }
+                let rows = merge_rows(table.iter().filter(|spec| {
+                    spec.context == *context && !hoisted.contains(&(*context, spec.keys))
+                }));
                 if rows.is_empty() {
                     continue;
                 }
                 sections.push(Section {
                     context,
                     title: multi.then(|| context_label(context).into()),
-                    rows: rows
-                        .into_iter()
-                        .map(|(keys, label)| (keys.into(), label.into()))
-                        .collect(),
+                    rows,
+                });
+            }
+            for family in families {
+                sections.push(Section {
+                    context: family.contexts[0],
+                    title: Some(family.label.into()),
+                    rows: merge_rows(family.rows.iter()),
                 });
             }
             Group { title, sections }
@@ -322,9 +369,15 @@ fn column_heights(heights: &[usize], cuts: &[usize]) -> Vec<usize> {
 }
 
 fn prepared_columns(active_group: Option<&str>) -> &'static [Vec<Group>] {
-    static LAYOUTS: std::sync::OnceLock<[Vec<Vec<Group>>; 3]> = std::sync::OnceLock::new();
+    static LAYOUTS: std::sync::OnceLock<[Vec<Vec<Group>>; 4]> = std::sync::OnceLock::new();
     let layouts = LAYOUTS.get_or_init(|| {
-        [None, Some("Terminal (^s)"), Some("Agent popup (^s)")].map(|active| {
+        [
+            None,
+            Some("Terminal (^s)"),
+            Some("Agent popup (^s)"),
+            Some("Agent thread (^s)"),
+        ]
+        .map(|active| {
             let mut groups = groups();
             if let Some(index) =
                 active.and_then(|title| groups.iter().position(|group| group.title == title))
@@ -338,6 +391,7 @@ fn prepared_columns(active_group: Option<&str>) -> &'static [Vec<Group>] {
     &layouts[match active_group {
         Some("Terminal (^s)") => 1,
         Some("Agent popup (^s)") => 2,
+        Some("Agent thread (^s)") => 3,
         _ => 0,
     }]
 }
@@ -399,6 +453,8 @@ pub(crate) fn render(
     let app = state.read(cx);
     let active_group = if app.agent_popup.is_some() {
         Some("Agent popup (^s)")
+    } else if app.active_agent_thread().is_some() {
+        Some("Agent thread (^s)")
     } else if matches!(app.screen, Screen::Workspace { .. }) {
         Some("Terminal (^s)")
     } else {
@@ -566,8 +622,48 @@ mod tests {
         assert!(covered > 100, "the help lost rows: {covered}");
     }
 
+    /// A native agent thread is its own group, and the rows its six sub-modes share are listed
+    /// once under the family rather than repeated beneath each of them.
+    ///
+    /// Printing the product per sub-mode put 246 rows in one column of an 880 px card — the same
+    /// thirty-odd `^s` rows six times over, which is a wall rather than a reference.
     #[test]
-    fn the_six_groups_are_laid_over_three_balanced_columns() {
+    fn the_agent_thread_lists_its_shared_rows_once() {
+        let group = groups()
+            .into_iter()
+            .find(|group| group.title == "Agent thread (^s)")
+            .expect("the native thread has its own group");
+        let hub: Vec<&Section> = group
+            .sections
+            .iter()
+            .filter(|section| section.rows.iter().any(|(keys, _)| keys.as_ref() == "^s s"))
+            .collect();
+        assert_eq!(hub.len(), 1, "`^s s` is listed once, not once per sub-mode");
+        assert_eq!(
+            hub[0].title.as_deref(),
+            Some("any mode: session"),
+            "and under the family it applies to"
+        );
+        assert!(
+            group.row_count() < 100,
+            "the group is a reference, not a wall: {}",
+            group.row_count()
+        );
+        assert!(
+            group
+                .sections
+                .iter()
+                .any(|section| section.context == "Agent > AgentNativeScroll"
+                    && section
+                        .rows
+                        .iter()
+                        .any(|(_, label)| label.contains("scroll"))),
+            "each sub-mode still lists what only it binds"
+        );
+    }
+
+    #[test]
+    fn the_mode_groups_are_laid_over_three_balanced_columns() {
         let packed = columns(groups());
         assert_eq!(packed.len(), COLUMNS);
         assert!(

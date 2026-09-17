@@ -357,6 +357,13 @@ pub(crate) fn classify_agent(body: &RequestBody, resolver: &dyn Resolver) -> Tar
         | AgentStop { thread } => resolver
             .host_of_thread(thread)
             .map_or(Target::Local, Target::Host),
+        // The two account verbs stay **local**, unlike every other thread mutation. The sign-in
+        // Codex starts is a loopback callback on whichever daemon runs the harness, so forwarding
+        // one to the owner would hand this machine's browser a URL only the owner's loopback can
+        // answer. Keeping it local is what makes `refuse_if_mirrored` reachable: the manager
+        // names the owner host and tells the user to sign in there
+        // (`docs/NATIVE-AGENTS.md` §10).
+        AgentAccountLogin { .. } | AgentAccountLogout { .. } => Target::Local,
         AgentThreadList => agent_list_target(std::iter::empty()),
         _ => Target::Unsupported("not an agent request"),
     }

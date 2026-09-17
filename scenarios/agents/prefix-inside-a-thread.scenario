@@ -1,6 +1,7 @@
-# docs/KEYMAP.md §Native agent thread — agent tabs retain their controls plus Workspace tab
-#   selection (`^s 1`–`9`) and MRU (`^s Tab`, `^s w`).
-# docs/KEYMAP.md §Shadowing — `^s s` stays unbound inside an agent tab.
+# docs/KEYMAP.md §Native agent thread — an agent tab keeps its own controls and repeats the whole
+#   Workspace session table: selection (`^s 1`–`9`), MRU (`^s Tab`, `^s w`) and `^s s` to the Hub.
+# docs/KEYMAP.md §Native agent thread — an unbound `^s <key>` is swallowed with a toast and never
+#   reaches the composer.
 # docs/DESIGN-SYSTEM.md §4 — a picker with nothing to offer draws nothing
 fixture: agents
 await idle
@@ -10,10 +11,21 @@ key ctrl-s a
 await agents.threads[0].provider == claude 20000
 assert focused == agents.composer
 await idle 30000
+
+# An unbound `^s` second key runs nothing and — the regression this file exists for — types
+# nothing into the draft: gpui replays an unmatched sequence as input, so leaving the chord to it
+# put a stray character in the composer. The oracle is the tab label below, which is this thread's
+# first message and would carry the stray `q` with it.
+key ctrl-s q
+await toasts[0] exists 5000
+assert toasts[0].text ~= "not bound here"
+assert screen == Workspace && mode == Agent && key_contexts[1] == AgentIdle
+
 type what does this crate do
 key enter
 await agents.threads[0].state == working 20000
 await agents.threads[0].state == idle 40000
+assert lists.tabs.selected.label == "what does this crate do"
 
 # `^s [` freezes the tail and enters scroll mode; `q` leaves it and re-arms the follow.
 key ctrl-s [
@@ -54,10 +66,16 @@ key ctrl-s w
 wait 200
 assert screen == Workspace && mode == Agent && focused == agents.composer
 
-# `^s s` is a Workspace prefix combination, and is not bound inside an agent tab: it must not
-# take the user back to the Hub.
+# `^s s` is a Workspace session row, and an agent tab repeats the session table: it leaves for the
+# Hub with the thread still running, exactly as it does over a terminal. `o` comes straight back
+# to the same worktree, and its agent tab is still the selected one.
 key ctrl-s s
-assert screen == Workspace && mode == Agent && key_contexts[0] == Agent
+await screen == Hub 10000
+assert key_contexts[0] == Hub
+key o
+await screen == Workspace 20000
+await mode == Agent 10000
+assert key_contexts[1] == AgentIdle
 
 # `^s F` is the terminal fallback: the floating PTY popup over the same worktree.
 key ctrl-s F

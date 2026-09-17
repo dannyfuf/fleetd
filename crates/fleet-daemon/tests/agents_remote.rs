@@ -760,7 +760,9 @@ done
     ));
     let config = ConfigStore::new(home, files.clone());
     let mut effective = config.load().await.expect("remote config");
-    effective.agent_commands.claude = script.display().to_string();
+    // `agentBinaries`, not `agentCommands`: a native thread is `execve`'d by the daemon, and the
+    // PTY line is a different setting entirely.
+    effective.agent_binaries.claude = script.display().to_string();
     config.save(effective).await.expect("save remote config");
 
     let state = StateStore::new(home, files, Arc::new(SystemClock));

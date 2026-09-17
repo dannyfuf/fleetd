@@ -290,7 +290,7 @@ pub trait AgentProvider: Send {
 }
 
 pub fn spawn_provider(kind: AgentKind, req: &StartRequest,
-    commands: &fleet_core::config::AgentCommands) -> anyhow::Result<Box<dyn AgentProvider>>;
+    binaries: &fleet_core::config::AgentBinaries) -> anyhow::Result<Box<dyn AgentProvider>>;
 ```
 
 The channel carries `ProviderEvent` rather than a bare `AgentEvent` because §11 of
@@ -300,7 +300,9 @@ event" — as the mitigation for protocol drift, and only the adapter knows that
 drain has to take that same gate, so a bounded channel that filled during a streaming turn would
 deadlock the verb against its own drain. The factory spawns nothing — `AgentProvider::start` owns
 the transport, so a launch failure arrives as a typed `ProviderError` the manager turns into the
-terminal fallback — and it reads each provider's command line from `config.agentCommands`.
+terminal fallback — and it reads each provider's executable from `config.agentBinaries`, the
+command the daemon runs with **no shell**, never from `config.agentCommands`, which is the shell
+line a PTY pane types.
 
 `ProviderError = Unavailable { reason: String } | Protocol { message: String } |
 Exited { code: Option<i32> } | Timeout { what: String }`. `AgentSessionManager` maps
@@ -546,7 +548,7 @@ above are the current truth.
 | --- | --- |
 | `fleet-core` events | `AgentEvent::MetadataChanged { title, mode, model }` |
 | `fleet-core` projection | `ThreadProjection::{last_completed_seq, last_nonterminal_seq}`, `ThreadProjection::accepts`, `TurnFooter`, `TurnRecord::footer`, `AgentThreadSummary::{last_completed_seq, last_nonterminal_seq, attention_for}` |
-| `fleet-daemon` providers | `ProviderEvent::new`, `exit_code`, `ProviderSink`, unbounded `ProviderEvents`, `spawn_provider(kind, &StartRequest, &AgentCommands)` |
+| `fleet-daemon` providers | `ProviderEvent::new`, `exit_code`, `ProviderSink`, unbounded `ProviderEvents`, `spawn_provider(kind, &StartRequest, &AgentBinaries)` |
 | `fleet-daemon` store | `AGENT_LOG_VERSION`, `AgentStore::truncate_after` |
 | `fleet-daemon` manager | `AgentSessionManager::new` takes `Arc<ConfigStore>`; `thread.rs` holds the per-thread runtime |
 | `fleet-client` | `MirrorOutcome::{Duplicate, Rejected}`, `install_snapshot(…, &[SeqEvent])`, `AgentMirror::apply_or_resync`, `AgentEvents` and `Client::agent_events` |

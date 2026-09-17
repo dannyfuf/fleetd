@@ -166,6 +166,12 @@ impl Services {
             RequestBody::AgentSetModel { thread, model } => {
                 self.agent_response(self.agents.set_model(thread, model).await)
             }
+            RequestBody::AgentAccountLogin { thread } => {
+                self.agent_response(self.agents.account_login(thread).await)
+            }
+            RequestBody::AgentAccountLogout { thread } => {
+                self.agent_response(self.agents.account_logout(thread).await)
+            }
             RequestBody::AgentMarkSeen { thread, seq } => {
                 self.agent_response(self.agents.mark_seen(thread, seq).await)
             }

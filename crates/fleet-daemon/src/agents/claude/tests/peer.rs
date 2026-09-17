@@ -123,3 +123,50 @@ async fn stop_finishes_against_a_child_that_ignores_sigterm() {
     stopped.unwrap_or_else(|error| panic!("shutdown: {error}"));
     drop(events);
 }
+
+/// A configured binary that is not Claude at all.
+///
+/// `agentBinaries.claude = "cc"` resolves to the C compiler, which rejects Fleet's launch line
+/// and dies inside the spawn window. The handshake error has to carry the configured command,
+/// the exit code and the child's own complaint — without them the user is told only "the process
+/// exited during startup" and is pointed at a binary Fleet never ran.
+#[tokio::test]
+async fn a_child_that_dies_at_startup_reports_its_command_code_and_stderr() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory =
+        tempfile::tempdir().unwrap_or_else(|error| panic!("startup fixture dir: {error}"));
+    let script = directory.path().join("cc");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"cc: error: unrecognized command-line option '--output-format'\" >&2\n\
+         exit 1\n",
+    )
+    .unwrap_or_else(|error| panic!("write the fake binary: {error}"));
+    let mut permissions = std::fs::metadata(&script)
+        .unwrap_or_else(|error| panic!("stat the fake binary: {error}"))
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions)
+        .unwrap_or_else(|error| panic!("chmod the fake binary: {error}"));
+
+    let command = script.to_string_lossy().into_owned();
+    let mut harness = harness(command.clone());
+    let events = harness.events();
+    let message = harness
+        .open(OpenSession {
+            start: start_request(),
+        })
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("a child that exits at once cannot open a session"))
+        .to_string();
+    assert!(message.contains(&command), "{message}");
+    assert!(message.contains("exited with code 1"), "{message}");
+    assert!(
+        message.contains("unrecognized command-line option"),
+        "{message}"
+    );
+    drop(events);
+}

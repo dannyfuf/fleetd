@@ -404,6 +404,9 @@ impl ThreadProjection {
                     self.fail_active_turn(ev.at, message);
                 }
             }
+            AgentEvent::AccountChanged { account } => {
+                self.account = Some(account.clone());
+            }
             AgentEvent::Notice(text) => {
                 // §5 gives the notice its own transcript row, so it has to survive in the
                 // projection the rows are built from rather than only in the log.

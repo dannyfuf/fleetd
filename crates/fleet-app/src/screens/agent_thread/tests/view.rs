@@ -982,3 +982,114 @@ fn footer_has_revert(view: &gpui::Entity<AgentThreadView>, cx: &gpui::App) -> bo
         _ => false,
     })
 }
+
+/// Collects every `AgentThreadEvent` a view emits, including the ones that are not commands.
+fn event_recorder(
+    view: &gpui::Entity<AgentThreadView>,
+    cx: &mut TestAppContext,
+) -> Rc<RefCell<Vec<AgentThreadEvent>>> {
+    let events: Rc<RefCell<Vec<AgentThreadEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let seen = Rc::clone(&events);
+    cx.update(|cx| {
+        cx.subscribe(view, move |_, event: &AgentThreadEvent, _| {
+            seen.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    events
+}
+
+/// The `/` rows a view offers, in order.
+fn command_rows(view: &gpui::Entity<AgentThreadView>, cx: &mut TestAppContext) -> Vec<String> {
+    view.update(cx, |view, cx| view.open_picker(PickerKind::Commands, cx));
+    view.read_with(cx, |view, _| {
+        view.picker
+            .as_ref()
+            .into_iter()
+            .flat_map(|picker| picker.matches())
+            .map(|candidate| candidate.label.to_string())
+            .collect()
+    })
+}
+
+/// `/login` and `/logout` are offered where they do something, and nowhere else.
+#[gpui::test]
+fn the_account_commands_are_listed_for_codex_and_not_for_claude(cx: &mut TestAppContext) {
+    let mut codex = projection();
+    codex.provider = AgentKind::Codex;
+    let codex = cx.new(|cx| AgentThreadView::new(codex, cx));
+    let rows = command_rows(&codex, cx);
+    assert_eq!(
+        rows,
+        ["model", "plan", "default", "compact", "login", "logout"]
+    );
+
+    // Claude publishes no account surface, and DESIGN-SYSTEM §4 does not list a command that
+    // would answer "unsupported".
+    let claude = cx.new(|cx| AgentThreadView::new(projection(), cx));
+    let rows = command_rows(&claude, cx);
+    assert_eq!(rows, ["model", "plan", "default", "compact"]);
+}
+
+/// Accepting `/login` asks the workspace for the sign-in and deletes its own trigger text.
+#[gpui::test]
+fn accepting_login_requests_the_sign_in_and_clears_the_trigger(cx: &mut TestAppContext) {
+    let mut codex = projection();
+    codex.provider = AgentKind::Codex;
+    let view = cx.new(|cx| AgentThreadView::new(codex, cx));
+    let events = event_recorder(&view, cx);
+
+    view.update(cx, |view, cx| {
+        let input = view.input().clone();
+        input.update(cx, |input, cx| input.set_text("/login", cx));
+        view.open_picker(PickerKind::Commands, cx);
+        // `⏎` on the highlighted row, which is the one the query narrowed to first.
+        view.send(cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, AgentThreadEvent::AccountLogin)),
+        "{:?}",
+        events.borrow()
+    );
+    view.read_with(cx, |view, cx| {
+        assert!(
+            view.input().read(cx).text().is_empty(),
+            "a built-in sends nothing, so its trigger text goes with it"
+        );
+    });
+}
+
+/// Accepting `/logout` dispatches the mutation and deletes its own trigger text.
+#[gpui::test]
+fn accepting_logout_dispatches_the_mutation_and_clears_the_trigger(cx: &mut TestAppContext) {
+    let mut codex = projection();
+    codex.provider = AgentKind::Codex;
+    let thread = codex.thread;
+    let view = cx.new(|cx| AgentThreadView::new(codex, cx));
+    let commands = recorder(&view, cx);
+
+    view.update(cx, |view, cx| {
+        let input = view.input().clone();
+        input.update(cx, |input, cx| input.set_text("/logout", cx));
+        view.open_picker(PickerKind::Commands, cx);
+        view.send(cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        commands.borrow().iter().any(|command| matches!(
+            command,
+            BridgeCommand::AgentAccountLogout { thread: target } if *target == thread
+        )),
+        "{:?}",
+        commands.borrow()
+    );
+    view.read_with(cx, |view, cx| {
+        assert!(view.input().read(cx).text().is_empty());
+    });
+}

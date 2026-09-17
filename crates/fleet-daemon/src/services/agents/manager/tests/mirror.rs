@@ -290,9 +290,19 @@ async fn a_mutation_for_a_mirrored_thread_is_never_applied_locally() {
                 },
             )
             .await,
+        // Signing in is refused for a sharper reason than ordering: the sign-in Codex starts is
+        // a loopback callback on the *owner* host, so a browser opened here comes back to the
+        // wrong machine.
+        harness.manager.account_login(owner.thread).await,
+        harness.manager.account_logout(owner.thread).await,
     ] {
         let error = refusal.expect_err("every mutation on a mirrored thread is refused");
         assert_eq!(error.kind, ErrorKind::Remote);
+        assert!(
+            error.message.contains("dev-box"),
+            "the refusal names the host that can answer it: {}",
+            error.message
+        );
     }
     assert_eq!(held(&harness, owner.thread).await, held_before);
 }

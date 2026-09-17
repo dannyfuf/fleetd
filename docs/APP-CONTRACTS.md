@@ -44,7 +44,11 @@ The agent thread follows the same split:
 `screens/agent_thread/{rows/,decisions,composer,presentation,picker,actions}` prepare,
 `state/agents.rs` holds the per-worktree tab order and the client mirror, and the view itself
 issues no I/O — it emits `AgentThreadEvent`, which `screens/workspace/agent.rs` relays as
-`BridgeCommand`s. `rows/` is the flat row projection (`NATIVE-AGENTS.md` §5): a turn is an
+`BridgeCommand`s. Three of those events are **not** fire-and-forget, because their answer is
+state the surface reads rather than a mutation to forget: `LoadOlder` prepends a page,
+`RefreshCheckpoints` decides whether `[u]` is drawn at all, and `AccountLogin` carries the
+sign-in URL the workspace opens in a browser. `rows/` is the flat row projection
+(`NATIVE-AGENTS.md` §5): a turn is an
 emergent run of rows, never a container, and every row is memoised behind a revision key so a
 stream chunk never re-runs grouping, folding or summarization.
 
@@ -139,7 +143,8 @@ Do not re-implement these; they arrive as `AppState` changes:
   escape, and `q` closing the Jobs panel;
 * the whole quit flow, `ctrl-q` and `ctrl-shift-q`, including `W` never-warn;
 * the daemon surfaces of §3.12 and the `Daemon > Down` / `Daemon > Banner` keys;
-* the one-shot prefix: entering it, and leaving it on the very next key;
+* the one-shot prefix: entering it, and leaving it on the very next key — including the `^s`
+  chord of a native agent tab, which the shell's keystroke interceptor takes whole;
 * pane focus (`h`/`l`/`Tab`), screen switching (`p`, `gw`, `gp`), `i`, `H`, scroll-mode entry
   and exit.
 
@@ -183,6 +188,12 @@ is always `Fleet`.
 Two consequences worth knowing:
 
 * A deeper context wins, so `Hub > Prs`'s `l` (next PR tab) beats `Hub`'s `l` (next pane).
+* Inside a native agent tab, `^s` never reaches gpui's two-key matcher. The shell's keystroke
+  interceptor consumes it, resolves the second key against the *live* chain through
+  `keymap::chord_action_for_chain`, and consumes that key too — running its row, or toasting
+  `^s <key> is not bound here`. gpui replays the keystrokes of a sequence that matched nothing as
+  *input*, which over a text composer typed a stray character; the rows stay in `keymap::table()`
+  because that is what the Help overlay and this contract are read from.
 * gpui's `>` is a **subsequence** test over the rendered chain, not a parent test. An embedded
   view therefore may not reuse any context word this table uses: `crates/fleet-lazygit` renames
   its overlay words to `LgDialog` / `LgConfirm` / `LgHelp` for exactly that reason, and the

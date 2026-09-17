@@ -10,14 +10,32 @@
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
-use fleet_core::agents::{
-    AgentKind, ApprovalPolicy, PermissionMode, SandboxPolicy, StartRequest, ThreadId,
+use fleet_core::{
+    agents::{
+        AccountStatus, AgentEvent, AgentKind, ApprovalPolicy, PermissionMode, SandboxPolicy,
+        StartRequest, ThreadId,
+    },
+    config::AgentBinaries,
 };
 use fleet_daemon::agents::harness::{self, OpenSession, ShutdownReason, probe::ProbeCache};
 
+/// The `config.agentBinaries` section this suite runs against.
+///
+/// The packaged default, so the opt-in run behaves exactly as it always did. It is a value
+/// rather than a constant because the thing being exercised *is* the configured entry: point it
+/// at a wrapper here and every test below follows, which is the only way this suite stays honest
+/// about the path a real user's config takes.
+fn binaries() -> AgentBinaries {
+    AgentBinaries::default()
+}
+
 fn config(kind: AgentKind) -> harness::HarnessConfig {
+    config_for(&binaries(), kind)
+}
+
+fn config_for(binaries: &AgentBinaries, kind: AgentKind) -> harness::HarnessConfig {
     harness::HarnessConfig {
-        command: kind.executable().to_owned(),
+        command: binaries.binary(kind).to_owned(),
         home: None,
         env: BTreeMap::new(),
         attachments_dir: None,
@@ -46,10 +64,11 @@ fn request(kind: AgentKind, worktree: PathBuf) -> StartRequest {
 /// The installed binary reports a version Fleet accepts, and the probe is cached.
 #[tokio::test]
 async fn both_installed_harnesses_probe() {
+    let binaries = binaries();
     let probes = ProbeCache::new();
     for kind in [AgentKind::Claude, AgentKind::Codex] {
         let probed = probes
-            .probe(kind, &config(kind))
+            .probe(kind, &config_for(&binaries, kind))
             .await
             .unwrap_or_else(|error| panic!("{kind:?} must probe: {error}"));
         assert_eq!(probed.kind, kind);
@@ -57,7 +76,37 @@ async fn both_installed_harnesses_probe() {
             probed.version.major > 0 || probed.version.minor > 0,
             "{probed:?}"
         );
+        // The identity check is not a formality against the real binary either: its own
+        // `--version` line is what has to name the product.
+        let expected = match kind {
+            AgentKind::Claude => "Claude Code",
+            AgentKind::Codex => "codex",
+        };
+        assert!(
+            probed
+                .reported
+                .to_ascii_lowercase()
+                .contains(&expected.to_ascii_lowercase()),
+            "{probed:?}"
+        );
     }
+}
+
+/// A configured binary that is not the harness is refused, however well its version parses.
+#[tokio::test]
+async fn a_configured_binary_that_is_not_the_harness_is_refused() {
+    let binaries = AgentBinaries {
+        claude: "/bin/echo".to_owned(),
+        ..binaries()
+    };
+    let reason = ProbeCache::new()
+        .probe(AgentKind::Claude, &config_for(&binaries, AgentKind::Claude))
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("`/bin/echo` is not Claude Code"))
+        .to_string();
+    assert!(reason.contains("/bin/echo"), "{reason}");
+    assert!(reason.contains("is not Claude Code"), "{reason}");
 }
 
 /// `codex app-server` completes the real handshake and starts a thread, and Fleet tears it down.
@@ -83,6 +132,26 @@ async fn codex_completes_the_real_handshake() {
         "the resume cursor is the thread id and is durable before any turn"
     );
     assert!(codex.capabilities().version.minor > 0);
+    // The handshake reads the account, and the read is **read-only**: nothing here signs in or
+    // out, because this test runs against the developer's own Codex install. A machine with no
+    // OpenAI account configured reports `SignedOut`, which is just as valid an answer — what is
+    // asserted is that the signal arrives at all, and that it never carries a secret.
+    let mut account = None;
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::AccountChanged { account: status } = event.event {
+            account = Some(status);
+        }
+    }
+    let account = account.unwrap_or_else(|| {
+        panic!("the handshake publishes the account Codex reported, signed in or not")
+    });
+    if let AccountStatus::SignedIn(info) = &account {
+        assert!(
+            info.label().is_none_or(|label| !label.is_empty()),
+            "a label is a real label or no label at all: {info:?}"
+        );
+    }
+
     codex
         .shutdown(ShutdownReason::User)
         .await

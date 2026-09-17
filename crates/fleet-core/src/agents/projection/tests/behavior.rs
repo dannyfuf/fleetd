@@ -372,3 +372,76 @@ fn gate_resolution_and_plan_answers_do_not_mutate_unrelated_turn_state() {
     assert_eq!(projection.turn, TurnState::None);
     assert!(projection.gates.is_empty());
 }
+
+/// The account lands on the projection, and the latest report wins.
+///
+/// It is `Option` for a reason the next assertion pins: a thread that has never heard about an
+/// account is `None`, which reads as *unknown* and not as *signed out* — the two say different
+/// things to the user and only one of them earns a metadata segment.
+#[test]
+fn the_account_is_projected_and_absent_until_a_harness_reports_one() {
+    let mut projection = projection();
+    let mut events = EventBuilder::new();
+    assert_eq!(
+        projection.account, None,
+        "a thread nothing reported an account for is unknown, not signed out"
+    );
+
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::AccountChanged {
+            account: AccountStatus::SignedOut,
+        },
+    );
+    assert_eq!(projection.account, Some(AccountStatus::SignedOut));
+
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::AccountChanged {
+            account: AccountStatus::SignedIn(AccountInfo {
+                kind: AccountKind::ChatGpt {
+                    email: Some("dev@example.com".to_owned()),
+                    plan: Some("business".to_owned()),
+                },
+            }),
+        },
+    );
+    let Some(AccountStatus::SignedIn(info)) = projection.account.as_ref() else {
+        panic!("the later report wins: {:?}", projection.account);
+    };
+    assert_eq!(info.label(), Some("dev@example.com"));
+}
+
+/// A projection written before the field existed still decodes, and decodes as *unknown*.
+#[test]
+fn a_projection_without_the_account_field_still_decodes() {
+    let stored = r#"{
+        "thread": "11111111-2222-4333-8444-555555555555",
+        "worktree": "acme/api#native-agents",
+        "provider": "codex",
+        "title": "Codex",
+        "session": {"type": "ready"},
+        "turn": {"type": "none"},
+        "gates": [],
+        "items": [],
+        "turns": [],
+        "backgroundTasks": [],
+        "lastSeq": 4,
+        "lastActivity": null,
+        "cumulativeUsage": {"inputTokens":0,"outputTokens":0,"reasoningTokens":0,
+            "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":0,
+            "webSearchRequests":0,"toolUses":0},
+        "cumulativeCostUsd": null,
+        "contextPct": 0.0,
+        "model": null,
+        "mode": "ask",
+        "exitCode": null,
+        "retrying": null
+    }"#;
+    let projection: ThreadProjection =
+        serde_json::from_str(stored).unwrap_or_else(|error| panic!("legacy projection: {error}"));
+
+    assert_eq!(projection.account, None);
+}
