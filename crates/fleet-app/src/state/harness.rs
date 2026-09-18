@@ -109,6 +109,7 @@ pub struct JobSnapshot {
 pub struct AgentsSnapshot {
     pub popup: Option<String>,
     pub threads: Vec<AgentThreadSnapshot>,
+    pub delegations: Vec<DelegationSnapshot>,
     pub decision: Option<AgentDecisionSnapshot>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -119,6 +120,17 @@ pub struct AgentThreadSnapshot {
     pub unread: bool,
     pub pending_gate: Option<String>,
     pub decision: Option<AgentThreadDecisionSnapshot>,
+    pub parent: Option<String>,
+    pub attached: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DelegationSnapshot {
+    pub id: String,
+    pub status: &'static str,
+    pub caller: String,
+    pub child: String,
+    pub delivery: &'static str,
+    pub headline: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentThreadDecisionSnapshot {

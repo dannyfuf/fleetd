@@ -143,6 +143,9 @@ fn folds(
     if matches!(item.kind, ItemKind::Error { .. }) {
         return false;
     }
+    if matches!(&item.kind, ItemKind::Delegation { status, .. } if status.is_live()) {
+        return false;
+    }
     // Workflows outlive their launching turn: folding the roster when the turn settles makes a
     // still-running fleet invisible.
     if live_subagents.contains(&item.id) {

@@ -21,9 +21,9 @@ use fleet_core::{
 
 use super::{
     AgentThreadDecisionSnapshot, AgentThreadSnapshot, AgentsSnapshot, CursorSnapshot,
-    DaemonSnapshot, DialogSnapshot, HarnessProjection, IdleSnapshot, JobSnapshot, ListSnapshot,
-    RowSnapshot, SNAPSHOT_VERSION, TerminalSnapshot, ToastSnapshot, UiSnapshot, ViewportSnapshot,
-    WindowSnapshot,
+    DaemonSnapshot, DelegationSnapshot, DialogSnapshot, HarnessProjection, IdleSnapshot,
+    JobSnapshot, ListSnapshot, RowSnapshot, SNAPSHOT_VERSION, TerminalSnapshot, ToastSnapshot,
+    UiSnapshot, ViewportSnapshot, WindowSnapshot,
 };
 use crate::presentation::DisplayedHub;
 use crate::state::{
@@ -41,6 +41,8 @@ use crate::state::{
 struct ProjectionKey {
     derived: Derived,
     snapshot_revision: u64,
+    delegations_revision: u64,
+    attached_revision: u64,
     board_revision: u64,
     link_generation: u64,
     scope: RepoScope,
@@ -172,6 +174,8 @@ impl AppState {
         ProjectionKey {
             derived: self.derived(),
             snapshot_revision: self.snapshot_revision,
+            delegations_revision: self.agents.delegations_revision(),
+            attached_revision: self.agents.attached_revision(),
             board_revision: self.board.revision,
             link_generation: self.link_generation,
             scope: self.scope.clone(),
@@ -427,7 +431,22 @@ impl AppState {
                                 has_diff: decision.has_diff,
                             }
                         }),
+                        parent: summary.parent.map(|parent| parent.to_string()),
+                        attached: self.agents.is_attached(summary.thread),
                     }
+                })
+                .collect(),
+            delegations: self
+                .agents
+                .delegations()
+                .into_iter()
+                .map(|delegation| DelegationSnapshot {
+                    id: delegation.id.to_string(),
+                    status: delegation.status.word(),
+                    caller: delegation.caller.to_string(),
+                    child: delegation.child.to_string(),
+                    delivery: delegation.delivery.word(),
+                    headline: delegation.headline.clone(),
                 })
                 .collect(),
             decision: agents::decision_snapshot(self),
@@ -671,7 +690,14 @@ impl AppState {
                     row: RowSnapshot {
                         id: summary.thread.to_string(),
                         label: summary.title.clone(),
-                        badges: vec![provider_name(summary.provider).to_owned()],
+                        badges: if summary.parent.is_some() {
+                            vec![
+                                provider_name(summary.provider).to_owned(),
+                                "child".to_owned(),
+                            ]
+                        } else {
+                            vec![provider_name(summary.provider).to_owned()]
+                        },
                         marks: vec![
                             attention_name(self.agents.attention(summary.thread)).to_owned(),
                         ],

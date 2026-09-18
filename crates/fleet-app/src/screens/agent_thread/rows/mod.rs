@@ -16,14 +16,14 @@ use std::{
 };
 
 use fleet_core::agents::{
-    CheckpointKind, CheckpointRecord, GateId, Item, ItemId, ItemStatus, NoticeRecord, SessionState,
-    ThreadProjection, TurnId, TurnRecord, TurnState,
+    CheckpointKind, CheckpointRecord, Delegation, DelegationId, GateId, Item, ItemId, ItemStatus,
+    NoticeRecord, SessionState, ThreadProjection, TurnId, TurnRecord, TurnState,
 };
 use fleet_ui_kit::{
     EmptyRow, ErrorRow, NoticeRow, TranscriptRow, TranscriptRowId, TranscriptRowKind, WorkingPhase,
     WorkingRow, format_compacted, format_resumed, format_retrying,
 };
-use gpui::SharedString;
+use gpui::{App, SharedString};
 
 pub(crate) mod fold;
 pub(crate) mod group;
@@ -96,6 +96,8 @@ pub(crate) struct ResolvedGate {
 pub(crate) struct RowInputs<'a> {
     /// The projection the rows describe.
     pub(crate) projection: &'a ThreadProjection,
+    /// Durable delegation records, keyed by the identity carried by caller transcript items.
+    pub(crate) delegations: &'a HashMap<DelegationId, Delegation>,
     /// Items, groups (keyed by their first member) and plans the user expanded.
     pub(crate) expanded: &'a HashSet<ItemId>,
     /// Turns whose `worked …` fold the user opened.
@@ -247,6 +249,33 @@ pub(crate) fn build_rows(inputs: &RowInputs<'_>) -> BuiltRows {
         );
     }
     built
+}
+
+impl super::AgentThreadView {
+    /// Delegation addressed by the transcript's focused row, for attach/cancel/copy dispatch.
+    pub(crate) fn focused_delegation(&self, cx: &App) -> Option<DelegationId> {
+        let list = self.transcript.read(cx);
+        let row = list.rows().get(list.focused_row()?)?;
+        if !matches!(
+            row.kind,
+            TranscriptRowKind::Delegation(_) | TranscriptRowKind::DelegationResult(_)
+        ) {
+            return None;
+        }
+        let RowTarget::Item(item) = self.targets.get(&row.id.key()).copied()? else {
+            return None;
+        };
+        let item = self
+            .projection
+            .items
+            .iter()
+            .find(|entry| entry.id == item)?;
+        match &item.kind {
+            fleet_core::agents::ItemKind::Delegation { id, .. } => Some(*id),
+            fleet_core::agents::ItemKind::UserMessage { origin, .. } => origin.delegation(),
+            _ => None,
+        }
+    }
 }
 
 /// The settled gate records of one turn, at the position the decision was asked.

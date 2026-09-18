@@ -25,7 +25,8 @@ use std::{
 };
 
 use fleet_core::agents::{
-    GateId, ItemId, ItemKind, Seq, ThreadId, ThreadProjection, TurnId, UserInput,
+    Delegation, DelegationId, GateId, ItemId, ItemKind, Seq, ThreadId, ThreadProjection, TurnId,
+    UserInput,
 };
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
@@ -127,6 +128,8 @@ struct RowsKey {
     pending_rev: u32,
     /// Bumps when the checkpoint listing changes, because a turn footer gains or loses `[u]`.
     checkpoints_rev: u64,
+    /// Bumps when a durable delegation record changes independently of the caller projection.
+    delegations_rev: u64,
     /// Which composer mode is live, because the plan-ready reminder depends on it.
     mode: ComposerMode,
 }
@@ -147,6 +150,10 @@ pub struct AgentThreadView {
     targets: HashMap<SharedString, RowTarget>,
     /// Where each streaming item's row sits, so a `ContentDelta` rewrites exactly one row.
     row_of_item: HashMap<ItemId, usize>,
+    /// Durable delegation records used by caller rows, refreshed from the app mirror.
+    delegations: HashMap<DelegationId, Delegation>,
+    /// App-mirror revision paired with `delegations` for the row memo key.
+    delegations_rev: u64,
     /// The prepared decisions, in creation order; the kit applies the priority ladder.
     decisions: Vec<Decision>,
     /// The prepared metadata strip and its per-width fit memo.
@@ -264,6 +271,8 @@ impl AgentThreadView {
             rows_key: None,
             targets: HashMap::new(),
             row_of_item: HashMap::new(),
+            delegations: HashMap::new(),
+            delegations_rev: 0,
             decisions: Vec::new(),
             metadata: Vec::new(),
             trailing: Vec::new(),

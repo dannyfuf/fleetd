@@ -144,7 +144,13 @@ impl AppState {
         match event {
             BridgeEvent::Nudge => {}
             BridgeEvent::Capabilities(capabilities) => {
+                let supports_delegations = capabilities
+                    .iter()
+                    .any(|capability| capability == fleet_proto::AGENT_DELEGATION_CAPABILITY);
                 self.daemon_capabilities = capabilities.into_iter().collect();
+                if !supports_delegations {
+                    self.agents.seed_delegations(Vec::new());
+                }
             }
             BridgeEvent::EffectiveConfig(config) => {
                 self.terminal_config = config.terminal;
@@ -161,6 +167,7 @@ impl AppState {
                 self.apply_snapshot(*snapshot, now);
             }
             BridgeEvent::AgentSeenCursors(cursors) => self.agents.seed_seen(&cursors),
+            BridgeEvent::Delegations(delegations) => self.agents.seed_delegations(delegations),
             BridgeEvent::ConnectFailed {
                 message,
                 log_tail,
@@ -290,8 +297,7 @@ impl AppState {
                 self.notify_agent_attention(now);
             }
             Event::AgentSummary(summary) => self.apply_agent_summary(summary, now),
-            // Phase 4 replaces this fallback with delegation state updates.
-            Event::DelegationChanged(_) => {}
+            Event::DelegationChanged(delegation) => self.agents.apply_delegation(delegation),
             // Backpressure dropped this connection's tail for one thread. Re-opening from the
             // cursor the daemon names is the whole repair, and it is never a silent drop.
             Event::AgentResync { thread, from_seq } => {

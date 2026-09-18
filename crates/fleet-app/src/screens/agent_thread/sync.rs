@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fleet_core::agents::{Applied, ItemKind, StreamKind, ThreadProjection, TurnState};
+use fleet_core::agents::{Applied, Delegation, ItemKind, StreamKind, ThreadProjection, TurnState};
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{ActiveTheme, TranscriptRowKind};
 use gpui::{Context, SharedString, prelude::*};
@@ -25,6 +25,26 @@ use super::{
 };
 
 impl AgentThreadView {
+    /// Refreshes the durable delegation join independently of the caller's event projection.
+    pub(crate) fn sync_delegations(
+        &mut self,
+        delegations: Vec<Delegation>,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.delegations_rev == revision {
+            return;
+        }
+        self.delegations = delegations
+            .into_iter()
+            .map(|delegation| (delegation.id, delegation))
+            .collect();
+        self.delegations_rev = revision;
+        self.refresh_rows();
+        self.install_rows(cx);
+        cx.notify();
+    }
+
     /// Replaces the daemon projection wholesale, which a thread switch does.
     pub fn set_projection(&mut self, projection: ThreadProjection, cx: &mut Context<Self>) {
         self.flush_reveal(cx);
@@ -252,6 +272,7 @@ impl AgentThreadView {
                 let items = std::collections::HashMap::from([(source.id, source)]);
                 let inputs = RowInputs {
                     projection: &self.projection,
+                    delegations: &self.delegations,
                     expanded: &self.expanded,
                     unfolded: &self.unfolded,
                     expanded_gates: &self.expanded_gates,
@@ -299,6 +320,7 @@ impl AgentThreadView {
             unfolded_rev: self.unfolded_rev,
             pending_rev: self.pending_rev,
             checkpoints_rev: self.checkpoints_rev,
+            delegations_rev: self.delegations_rev,
             mode: self.composer_mode(),
         };
         if self.rows_key.as_ref() == Some(&key) {
@@ -307,6 +329,7 @@ impl AgentThreadView {
         let worktree = self.projection.worktree.slug().to_owned();
         let built = build_rows(&RowInputs {
             projection: &self.projection,
+            delegations: &self.delegations,
             expanded: &self.expanded,
             unfolded: &self.unfolded,
             expanded_gates: &self.expanded_gates,

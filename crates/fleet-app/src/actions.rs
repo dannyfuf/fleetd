@@ -320,6 +320,8 @@ pub mod native_agent {
             Refine,
             /// `Enter` on a focused row — expand or collapse it.
             ExpandRow,
+            /// `Enter` on a delegation row or result card — attach its child thread.
+            AttachChild,
             /// `u` — revert the focused edit, or this turn on a footer.
             Revert,
             /// `o` — open the focused row's file in the editor.
@@ -328,7 +330,9 @@ pub mod native_agent {
             CopyRow,
             /// `d` — open the diff of a focused edit row or turn footer.
             DiffRow,
-            /// `ctrl-s x` — close the native agent tab.
+            /// `x` — cancel the delegation on the focused row or result card.
+            CancelDelegation,
+            /// `ctrl-s x` — close a caller tab, or detach a child tab.
             CloseTab,
             /// `ctrl-s F` — open the PTY agent session instead (migration fallback).
             TerminalFallback,
@@ -398,6 +402,10 @@ pub mod prefix {
             LastSession,
             /// `ctrl-s W` — the session switcher: the palette pre-filtered to sessions.
             SessionSwitcher,
+            /// `ctrl-s u` — select the caller of the current child thread.
+            UpToCaller,
+            /// `ctrl-s d` — open the agent picker.
+            AgentsPicker,
             /// `ctrl-s c` — new terminal tab.
             NewTerminal,
             /// `ctrl-s x` — close the current terminal.

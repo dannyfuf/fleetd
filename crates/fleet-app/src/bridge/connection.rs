@@ -139,6 +139,16 @@ pub(super) async fn refresh_agent_seen(
     Ok(Some(cursors))
 }
 
+/// Reads the delegation census only from a daemon that advertised the wire family.
+pub(super) async fn refresh_delegations(
+    client: &Client,
+) -> Result<Option<Vec<Delegation>>, ProtoError> {
+    if !client.supports_capability(fleet_proto::AGENT_DELEGATION_CAPABILITY) {
+        return Ok(None);
+    }
+    client.delegation_list(None).await.map(Some)
+}
+
 /// Connects, spawning fleetd when the socket is dead, and reads the first snapshot.
 pub(super) async fn open(
     home: &Path,
@@ -178,6 +188,31 @@ pub(super) async fn open(
             {
                 return Err(Failure {
                     message: "the app stopped receiving native-agent cursors".to_owned(),
+                    log_tail: Vec::new(),
+                    stale_socket: false,
+                    cause: FailureCause::Unavailable,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(Failure {
+                message: error.message,
+                log_tail: log_tail(home).await,
+                stale_socket: false,
+                cause: FailureCause::Unavailable,
+            });
+        }
+    }
+    match refresh_delegations(&client).await {
+        Ok(Some(delegations)) => {
+            if events
+                .send(BridgeEvent::Delegations(delegations))
+                .await
+                .is_err()
+            {
+                return Err(Failure {
+                    message: "the app stopped receiving native-agent delegations".to_owned(),
                     log_tail: Vec::new(),
                     stale_socket: false,
                     cause: FailureCause::Unavailable,

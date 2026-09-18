@@ -19,8 +19,8 @@ use async_channel::{Receiver, Sender};
 use fleet_client::{AgentWindowRequest, Client, ensure_daemon};
 use fleet_core::{
     agents::{
-        AgentKind, AgentThreadSummary, GateAnswer, GateId, ItemId, ModelSelection, PermissionMode,
-        Seq, SeqEvent, StreamKind, ThreadId, UserInput,
+        AgentKind, AgentThreadSummary, Delegation, GateAnswer, GateId, ItemId, ModelSelection,
+        PermissionMode, Seq, SeqEvent, StreamKind, ThreadId, UserInput,
     },
     config::Config,
     ids::WorktreeId,
@@ -103,6 +103,8 @@ pub enum BridgeEvent {
     AgentSummary(AgentThreadSummary),
     /// Persisted cursors belonging to this installation, refreshed after Hello/reconnect.
     AgentSeenCursors(Vec<(ThreadId, Seq)>),
+    /// Capability-gated delegation census fetched after Hello/reconnect.
+    Delegations(Vec<Delegation>),
     /// The daemon answered and sent its first snapshot (§3.12 A resolved).
     Connected(Box<Snapshot>),
     /// The daemon could not be started (§3.12 B).

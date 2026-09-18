@@ -3,8 +3,8 @@ use super::*;
 use fleet_client::{AgentMirror, MirrorOutcome, PageOutcome};
 use fleet_core::{
     agents::{
-        AgentThreadSummary, Applied, Attention, AttentionKind, Seq, SeqEvent, ThreadId,
-        ThreadProjection,
+        AgentThreadSummary, Applied, Attention, AttentionKind, Delegation, DelegationId, Seq,
+        SeqEvent, ThreadId, ThreadProjection,
     },
     ids::WorktreeId,
 };
@@ -43,6 +43,16 @@ impl AgentCounts {
 pub struct AgentThreads {
     /// Daemon summaries in snapshot order; the tab strip inherits that order.
     summaries: Vec<AgentThreadSummary>,
+    /// Durable caller-to-child records, replaced by the capability-gated seed after Hello.
+    delegations: HashMap<DelegationId, Delegation>,
+    /// Delegation ids in creation order, independent of hash-map iteration order.
+    delegation_order: Vec<DelegationId>,
+    /// Invalidates transcript rows and harness snapshots when a delegation changes.
+    delegations_revision: u64,
+    /// Child threads this window chose to show in a tab strip.
+    attached: HashSet<ThreadId>,
+    /// Invalidates tab projections when the local attached/closed choice changes.
+    attached_revision: u64,
     /// Projections of the threads this client has opened.
     mirror: AgentMirror,
     /// The agent tab selected in each worktree's workspace, when one is.
@@ -96,12 +106,56 @@ impl AgentThreads {
     /// still counts it in the context bar, but this window has put it away.
     #[must_use]
     pub fn of_worktree(&self, worktree: &WorktreeId) -> Vec<&AgentThreadSummary> {
-        self.summaries
-            .iter()
-            .filter(|summary| {
-                &summary.worktree == worktree && !self.closed.contains(&summary.thread)
-            })
-            .collect()
+        let mut visible = Vec::new();
+        let mut included = HashSet::new();
+
+        for caller in self.summaries.iter().filter(|summary| {
+            &summary.worktree == worktree
+                && summary.parent.is_none()
+                && !self.closed.contains(&summary.thread)
+        }) {
+            visible.push(caller);
+            included.insert(caller.thread);
+            self.append_attached_children(caller.thread, worktree, &mut included, &mut visible);
+        }
+
+        // A child delegated into another worktree appears in that worktree once attached even
+        // though its caller is not one of that strip's roots.
+        for child in self.summaries.iter().filter(|summary| {
+            &summary.worktree == worktree
+                && summary.parent.is_some()
+                && self.attached.contains(&summary.thread)
+                && !self.closed.contains(&summary.thread)
+        }) {
+            if !included.insert(child.thread) {
+                continue;
+            }
+            visible.push(child);
+            self.append_attached_children(child.thread, worktree, &mut included, &mut visible);
+        }
+
+        visible
+    }
+
+    fn append_attached_children<'a>(
+        &'a self,
+        caller: ThreadId,
+        worktree: &WorktreeId,
+        included: &mut HashSet<ThreadId>,
+        visible: &mut Vec<&'a AgentThreadSummary>,
+    ) {
+        for child in self.summaries.iter().filter(|summary| {
+            summary.parent == Some(caller)
+                && &summary.worktree == worktree
+                && self.attached.contains(&summary.thread)
+                && !self.closed.contains(&summary.thread)
+        }) {
+            if !included.insert(child.thread) {
+                continue;
+            }
+            visible.push(child);
+            self.append_attached_children(child.thread, worktree, included, visible);
+        }
     }
 
     /// Whether this window has closed the thread's tab.
@@ -114,7 +168,156 @@ impl AgentThreads {
     ///
     /// Returns whether the strip actually changed.
     pub fn close(&mut self, thread: ThreadId) -> bool {
-        self.closed.insert(thread)
+        let changed = self.closed.insert(thread);
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// Whether this thread currently belongs to its worktree's tab strip.
+    #[must_use]
+    pub fn is_attached(&self, thread: ThreadId) -> bool {
+        self.summary(thread).is_some_and(|summary| {
+            if summary.parent.is_some() {
+                self.attached.contains(&thread) && !self.closed.contains(&thread)
+            } else {
+                !self.closed.contains(&thread)
+            }
+        })
+    }
+
+    /// Shows a delegated child in its worktree and clears a stale local close marker.
+    pub fn attach(&mut self, thread: ThreadId) -> bool {
+        let mut changed = self.closed.remove(&thread);
+        if self.caller_of(thread).is_some() {
+            changed |= self.attached.insert(thread);
+        }
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// Hides a delegated child without changing the daemon-owned thread.
+    pub fn detach(&mut self, thread: ThreadId) -> bool {
+        let changed = self.attached.remove(&thread);
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// Reopens a caller tab previously hidden with `close`.
+    pub fn reopen(&mut self, thread: ThreadId) -> bool {
+        let changed = self.closed.remove(&thread);
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// The parent declared by one thread's summary.
+    #[must_use]
+    pub fn caller_of(&self, thread: ThreadId) -> Option<ThreadId> {
+        self.summary(thread).and_then(|summary| summary.parent)
+    }
+
+    /// Direct children of a caller in daemon creation order.
+    #[must_use]
+    pub fn children_of(&self, caller: ThreadId) -> Vec<&AgentThreadSummary> {
+        self.summaries
+            .iter()
+            .filter(|summary| summary.parent == Some(caller))
+            .collect()
+    }
+
+    /// One durable delegation record.
+    #[must_use]
+    pub fn delegation(&self, id: DelegationId) -> Option<&Delegation> {
+        self.delegations.get(&id)
+    }
+
+    /// Delegations spawned by one caller, oldest first.
+    #[must_use]
+    pub fn delegations_of_caller(&self, caller: ThreadId) -> Vec<&Delegation> {
+        self.delegation_order
+            .iter()
+            .filter_map(|id| self.delegations.get(id))
+            .filter(|delegation| delegation.caller == caller)
+            .collect()
+    }
+
+    /// The delegation that owns a child thread.
+    #[must_use]
+    pub fn delegation_of_child(&self, child: ThreadId) -> Option<&Delegation> {
+        self.delegation_order
+            .iter()
+            .filter_map(|id| self.delegations.get(id))
+            .find(|delegation| delegation.child == child)
+    }
+
+    /// Every delegation in creation order, for stable harness projection.
+    #[must_use]
+    pub(crate) fn delegations(&self) -> Vec<&Delegation> {
+        self.delegation_order
+            .iter()
+            .filter_map(|id| self.delegations.get(id))
+            .collect()
+    }
+
+    /// Generation consumed by transcript and harness projection keys.
+    #[must_use]
+    pub const fn delegations_revision(&self) -> u64 {
+        self.delegations_revision
+    }
+
+    /// Generation consumed by tab-strip and harness projection keys.
+    #[must_use]
+    pub const fn attached_revision(&self) -> u64 {
+        self.attached_revision
+    }
+
+    /// Replaces the capability-gated delegation census received after Hello.
+    pub fn seed_delegations(&mut self, mut list: Vec<Delegation>) {
+        list.sort_by_key(|delegation| (delegation.created, delegation.id));
+        let next_order = list
+            .iter()
+            .map(|delegation| delegation.id)
+            .collect::<Vec<_>>();
+        let next = list
+            .into_iter()
+            .map(|delegation| (delegation.id, delegation))
+            .collect::<HashMap<_, _>>();
+        if self.delegations == next && self.delegation_order == next_order {
+            return;
+        }
+        self.delegations = next;
+        self.delegation_order = next_order;
+        self.delegations_revision = self.delegations_revision.wrapping_add(1);
+    }
+
+    /// Applies one changed delegation, advancing the row generation only for a real change.
+    pub fn apply_delegation(&mut self, delegation: Delegation) {
+        if self.delegations.get(&delegation.id) == Some(&delegation) {
+            return;
+        }
+        let id = delegation.id;
+        let is_new = !self.delegations.contains_key(&id);
+        self.delegations.insert(id, delegation);
+        if is_new {
+            self.delegation_order.push(id);
+            self.delegation_order.sort_by_key(|id| {
+                self.delegations
+                    .get(id)
+                    .map(|delegation| (delegation.created, delegation.id))
+            });
+        }
+        self.delegations_revision = self.delegations_revision.wrapping_add(1);
+    }
+
+    fn bump_attached_revision(&mut self) {
+        self.attached_revision = self.attached_revision.wrapping_add(1);
     }
 
     /// One thread's summary.
@@ -154,10 +357,11 @@ impl AgentThreads {
     /// Windows from one installation share that identity; separate installations do not.
     #[must_use]
     pub fn attention(&self, thread: ThreadId) -> Attention {
-        let Some(summary) = self.summary(thread) else {
-            return Attention::Idle;
-        };
-        let seen = self.seen(thread);
+        self.attention_in(thread, &self.summaries)
+    }
+
+    fn own_attention(&self, summary: &AgentThreadSummary) -> Attention {
+        let seen = self.seen(summary.thread);
         match summary.attention_for(seen) {
             // A cursor at the tail is the tab the user is looking at, whatever the last stored
             // completion sequence was.
@@ -170,11 +374,38 @@ impl AgentThreads {
         }
     }
 
+    fn attention_in(&self, thread: ThreadId, summaries: &[AgentThreadSummary]) -> Attention {
+        let Some(summary) = summaries.iter().find(|summary| summary.thread == thread) else {
+            return Attention::Idle;
+        };
+        let own = self.own_attention(summary);
+        summaries
+            .iter()
+            .filter(|child| child.parent == Some(thread))
+            .filter_map(|child| match self.own_attention(child) {
+                Attention::NeedsYou(
+                    kind @ (AttentionKind::Permission
+                    | AttentionKind::Question
+                    | AttentionKind::Plan),
+                ) => Some(Attention::NeedsYou(kind)),
+                Attention::Working | Attention::Waiting => Some(Attention::Working),
+                Attention::NeedsYou(AttentionKind::Finished)
+                | Attention::Failed
+                | Attention::Unread
+                | Attention::Idle => None,
+            })
+            .fold(own, std::cmp::max)
+    }
+
     /// The §3.3 counters the context bar shows, including the thread on the current tab.
     #[must_use]
     pub fn counts(&self) -> AgentCounts {
         let mut counts = AgentCounts::default();
-        for summary in &self.summaries {
+        for summary in self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_none())
+        {
             match self.attention(summary.thread) {
                 Attention::NeedsYou(_) => counts.needs_you += 1,
                 Attention::Failed => counts.failed += 1,
@@ -311,7 +542,10 @@ impl AgentThreads {
             matches!(projection.turn, fleet_core::agents::TurnState::Running(_))
                 || projection.session == fleet_core::agents::SessionState::Running
                 || !projection.background_tasks.is_empty()
-        })
+        }) || self
+            .delegations_of_caller(thread)
+            .iter()
+            .any(|delegation| delegation.status.is_live())
     }
 
     /// Whether a thread's event stream must be re-opened before deltas may be applied.
@@ -579,7 +813,8 @@ impl AgentThreads {
     pub fn seed(&mut self, threads: &[AgentThreadSummary]) {
         self.notified = threads
             .iter()
-            .map(|summary| (summary.thread, summary.attention))
+            .filter(|summary| summary.parent.is_none())
+            .map(|summary| (summary.thread, self.attention_in(summary.thread, threads)))
             .collect();
     }
 
@@ -607,6 +842,13 @@ impl AgentThreads {
             .retain(|thread, _| live.contains(thread));
         self.reported.retain(|thread, _| live.contains(thread));
         self.active.retain(|_, thread| live.contains(thread));
+        let attached_before = self.attached.len();
+        let closed_before = self.closed.len();
+        self.attached.retain(|thread| live.contains(thread));
+        self.closed.retain(|thread| live.contains(thread));
+        if self.attached.len() != attached_before || self.closed.len() != closed_before {
+            self.bump_attached_revision();
+        }
         if self
             .focus_composer
             .is_some_and(|thread| !live.contains(&thread))
@@ -627,21 +869,12 @@ impl AgentThreads {
     /// each fires once per entry, so a thread that stays blocked does not notify on every event.
     pub fn attention_edges(&mut self) -> Vec<(String, Attention)> {
         let mut edges = Vec::new();
-        for summary in &self.summaries {
-            let seen = self
-                .mirror
-                .last_seen
-                .get(&summary.thread)
-                .copied()
-                .unwrap_or_default();
-            let attention = match summary.attention_for(seen) {
-                Attention::NeedsYou(AttentionKind::Finished) | Attention::Unread
-                    if seen >= summary.last_seq =>
-                {
-                    Attention::Idle
-                }
-                attention => attention,
-            };
+        for summary in self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_none())
+        {
+            let attention = self.attention(summary.thread);
             let previous = self.notified.insert(summary.thread, attention);
             if previous == Some(attention) {
                 continue;

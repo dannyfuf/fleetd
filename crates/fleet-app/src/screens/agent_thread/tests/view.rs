@@ -4,15 +4,16 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use fleet_core::agents::{
-    AgentKind, Applied, GateAnswer, ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice,
-    ReasoningEffortDescriptor, SessionState, StreamKind, ToolKind, TurnId, TurnOutcome, TurnState,
+    AgentKind, Applied, DelegationStatus, GateAnswer, ItemStatus, ModelDescriptor, ModelSelection,
+    PermissionChoice, ReasoningEffortDescriptor, SessionState, StreamKind, ToolKind, TurnId,
+    TurnOutcome, TurnState,
 };
 use fleet_ui_kit::{TranscriptRowId, TranscriptRowKind};
 use gpui::{AppContext as _, EntityInputHandler as _, TestAppContext};
 
 use super::fixtures::{
-    assistant, command, edit, permission_gate, projection, question, question_gate, running_turn,
-    settled_turn, tool, user,
+    assistant, command, delegation_item, delegation_record, edit, permission_gate, projection,
+    question, question_gate, running_turn, settled_turn, tool, user,
 };
 use crate::{
     bridge::BridgeCommand,
@@ -680,6 +681,45 @@ fn toggling_a_row_reuses_every_row_it_did_not_touch(cx: &mut TestAppContext) {
     assert_eq!(
         splice.count, 1,
         "the group header above it kept its identity"
+    );
+}
+
+/// A `DelegationChanged` is not a projection event: it arrives on the app mirror and must rewrite
+/// exactly the delegation's own row, so a child reporting progress cannot re-run the caller's
+/// grouping or cost every other row its measured height.
+#[gpui::test]
+fn a_changed_delegation_rewrites_one_row_and_reuses_every_other(cx: &mut TestAppContext) {
+    let turn = TurnId::new();
+    let record = delegation_record(DelegationStatus::Running);
+    let prompt = user(turn, "delegate the reducer");
+    let mut base = projection();
+    base.items = vec![
+        prompt.clone(),
+        delegation_item(turn, &record),
+        assistant(turn, "on it", ItemStatus::Completed),
+    ];
+    base.turns = vec![running_turn(turn, prompt.id)];
+
+    let view = cx.new(|cx| AgentThreadView::new(base, cx));
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![record.clone()], 1, cx);
+    });
+    let before = view.read_with(cx, |view, _| view.rows().to_vec());
+
+    let settled = fleet_core::agents::Delegation {
+        status: DelegationStatus::Succeeded,
+        ..record
+    };
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![settled], 2, cx);
+    });
+    let after = view.read_with(cx, |view, _| view.rows().to_vec());
+
+    assert_eq!(before.len(), after.len());
+    let splice = fleet_ui_kit::diff_rows(&before, &after).expect("the delegation row changed");
+    assert_eq!(
+        splice.count, 1,
+        "every other row kept its identity and its height"
     );
 }
 

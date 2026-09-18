@@ -1,6 +1,10 @@
 use std::time::Instant;
 
 use fleet_core::{
+    agents::{
+        AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, Seq,
+        ThreadId, ThreadProjection, TurnId,
+    },
     ids::TerminalId,
     model::Worktree,
     sessions::{SessionKind, Terminal as SessionTerminal, TerminalKind, TerminalStatus},
@@ -56,7 +60,7 @@ fn serialized_shape_is_pinned() {
             "version":1,"screen":"Hub","mode":"Normal","hub_pane":"List","hub_tab":"Worktrees","overlay":null,
             "key_contexts":["Hub","Worktrees"],"focused":"worktrees.row[0]","lists":{},"dialog":null,"toasts":[],
             "sticky_error":null,"jobs":[],
-            "agents":{"popup":null,"threads":[],"decision":null},"terminal":null,"targets":{},
+            "agents":{"popup":null,"threads":[],"delegations":[],"decision":null},"terminal":null,"targets":{},
             "daemon":{"link":"starting","attempt":0,"dismissed":false,"restarted":false},
             "idle":{"idle":false,"in_flight_requests":0,"running_jobs":0,"pending_frame":false,"live_toast_timers":0,"armed_debounces":0,"settling_mutations":0,"link_opening":true},
             "window":{"bounds":{"x":0.0,"y":0.0,"w":0.0,"h":0.0},"scale_factor":0.0,"title":"","frame":0}
@@ -421,6 +425,113 @@ fn tabs_list_the_session_terminals() {
     assert_eq!(tabs.rows[1].marks, vec!["unseen".to_owned()]);
     assert_eq!(tabs.selected.as_ref().map(|row| row.id.as_str()), Some("1"));
     assert_eq!(dump.focused.as_deref(), Some("tabs.tab[0]"));
+}
+
+#[test]
+fn native_children_and_delegations_are_additive_snapshot_fields() {
+    let now = Instant::now();
+    let mut state = state();
+    let worktree: fleet_core::ids::WorktreeId = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let caller = ThreadId::new();
+    let child = ThreadId::new();
+    let mut caller_projection = ThreadProjection::new(caller, worktree.clone(), AgentKind::Claude);
+    caller_projection.title = "coordinate release".to_owned();
+    let mut child_projection = ThreadProjection::new(child, worktree, AgentKind::Codex);
+    child_projection.parent = Some(caller);
+    child_projection.title = "inspect reducer".to_owned();
+    let mut snapshot = test_support::snapshot();
+    snapshot
+        .sessions
+        .push(test_support::session_with("buk/payroll#feat", &[]));
+    snapshot.agent_threads = vec![
+        caller_projection.summary(Seq::default()),
+        child_projection.summary(Seq::default()),
+    ];
+    state.apply_snapshot(snapshot, now);
+    state.screen = Screen::Workspace {
+        session: "buk/payroll#feat"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+    };
+    assert!(state.agents.attach(child));
+    let record = Delegation {
+        id: DelegationId::new(),
+        caller,
+        caller_turn: TurnId::new(),
+        caller_item: ItemId::new(),
+        child,
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "inspect reducer".to_owned(),
+        expectation: "report the invariant".to_owned(),
+        eager: false,
+        status: DelegationStatus::Running,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: DeliveryState::Pending,
+        created: chrono::DateTime::UNIX_EPOCH,
+        finished: None,
+        headline: Some("reading state transitions".to_owned()),
+    };
+    state.agents.seed_delegations(vec![record.clone()]);
+
+    let before = state.harness_projection();
+    let child_snapshot = before
+        .snapshot
+        .agents
+        .threads
+        .iter()
+        .find(|thread| thread.id == child.to_string())
+        .expect("child snapshot");
+    assert_eq!(
+        child_snapshot.parent.as_deref(),
+        Some(caller.to_string().as_str())
+    );
+    assert!(child_snapshot.attached);
+    assert_eq!(before.snapshot.agents.delegations.len(), 1);
+    assert_eq!(before.snapshot.agents.delegations[0].status, "working");
+    assert_eq!(before.snapshot.agents.delegations[0].delivery, "pending");
+    assert_eq!(
+        before
+            .snapshot
+            .lists
+            .get("tabs")
+            .and_then(|tabs| tabs.rows.iter().find(|row| row.id == child.to_string()))
+            .map(|row| row.badges.clone()),
+        Some(vec!["codex".to_owned(), "child".to_owned()])
+    );
+
+    assert!(state.agents.detach(child));
+    let detached = state.harness_projection();
+    assert!(detached.revision > before.revision);
+    assert!(
+        !detached
+            .snapshot
+            .agents
+            .threads
+            .iter()
+            .find(|thread| thread.id == child.to_string())
+            .expect("child snapshot")
+            .attached
+    );
+    assert!(
+        detached
+            .snapshot
+            .lists
+            .get("tabs")
+            .is_some_and(|tabs| tabs.rows.iter().all(|row| row.id != child.to_string()))
+    );
+
+    let mut finished = record;
+    finished.status = DelegationStatus::Succeeded;
+    state.agents.apply_delegation(finished);
+    let completed = state.harness_projection();
+    assert!(completed.revision > detached.revision);
+    assert_eq!(completed.snapshot.agents.delegations[0].status, "done");
 }
 
 #[test]

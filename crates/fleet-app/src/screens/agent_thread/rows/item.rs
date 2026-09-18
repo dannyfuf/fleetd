@@ -5,13 +5,14 @@
 //! its body. The row renderer receives prepared values and composes them.
 
 use fleet_core::agents::{
-    Attachment, AttachmentSource, GateAnswer, GateKind, Item, ItemId, ItemKind, ItemStatus,
-    OpenGate, PermissionChoice, ToolCall, ToolKind,
+    Attachment, AttachmentSource, Delegation, DelegationStatus, GateAnswer, GateKind, Item, ItemId,
+    ItemKind, ItemStatus, MessageOrigin, OpenGate, PermissionChoice, ToolCall, ToolKind,
 };
 use fleet_ui_kit::{
-    AssistantMetaRow, AssistantRow, DiffRow, ErrorRow, GateOutcome, GateRow, Icon, NoticeRow,
-    PlanRow, ReasoningRow, SubagentRow, ToolRow, ToolRowState, TranscriptRow, TranscriptRowId,
-    TranscriptRowKind, UserRow, UserRowState, format_exit, parse_markdown_document,
+    AssistantMetaRow, AssistantRow, DelegationResultCard, DelegationRow, DelegationRowStatus,
+    DiffRow, ErrorRow, GateOutcome, GateRow, Icon, PlanRow, ReasoningRow, SubagentRow, ToolRow,
+    ToolRowState, TranscriptRow, TranscriptRowId, TranscriptRowKind, UserRow, UserRowState,
+    format_duration, format_exit, parse_markdown_document,
 };
 use gpui::SharedString;
 use std::rc::Rc;
@@ -23,6 +24,9 @@ const USER_COLLAPSE_CHARS: usize = 600;
 
 /// …or this many lines (`MAX_COLLAPSED_USER_MESSAGE_LINES`).
 const USER_COLLAPSE_LINES: usize = 8;
+
+/// A delivered child result previews at most eight lines while collapsed.
+const DELEGATION_RESULT_COLLAPSE_LINES: usize = 8;
 
 /// A plan card fades out past this many characters.
 const PLAN_COLLAPSE_CHARS: usize = 900;
@@ -49,14 +53,27 @@ pub(crate) fn rows_for(
     let id = TranscriptRowId::Item(SharedString::from(item.id.to_string()));
     let expanded = inputs.is_expanded(item.id);
     match &item.kind {
-        // Phase 4 replaces this fallback for delegation-origin messages with the result card.
         ItemKind::UserMessage {
             text,
             attachments,
             steered,
-            origin: _,
+            origin,
         } => {
             let text = text.as_str();
+            if let MessageOrigin::Delegation { id: delegation } = origin {
+                return vec![(
+                    TranscriptRow::new(
+                        id,
+                        TranscriptRowKind::DelegationResult(delegation_result_card(
+                            inputs,
+                            *delegation,
+                            text,
+                            expanded,
+                        )),
+                    ),
+                    Some(RowTarget::Item(item.id)),
+                )];
+            }
             vec![(
                 TranscriptRow::new(
                     id,
@@ -158,25 +175,22 @@ pub(crate) fn rows_for(
             ),
             Some(RowTarget::Item(item.id)),
         )],
-        // Phase 4 replaces this plain notice with the native delegation row.
         ItemKind::Delegation {
+            id: delegation,
             provider,
-            child,
             status,
             ..
         } => vec![(
             TranscriptRow::new(
                 id,
-                TranscriptRowKind::Notice(NoticeRow {
-                    text: SharedString::from(format!(
-                        "{} subagent {} - {}",
-                        provider.executable(),
-                        child,
-                        status.word()
-                    )),
-                }),
+                TranscriptRowKind::Delegation(delegation_row(
+                    inputs,
+                    *delegation,
+                    *provider,
+                    *status,
+                )),
             ),
-            None,
+            Some(RowTarget::Item(item.id)),
         )],
         ItemKind::Tool(call) => {
             let mut rows = vec![(
@@ -203,6 +217,87 @@ pub(crate) fn rows_for(
             }
             rows
         }
+    }
+}
+
+/// One durable child link, preferring the current delegation record over the item's snapshot.
+fn delegation_row(
+    inputs: &RowInputs<'_>,
+    id: fleet_core::agents::DelegationId,
+    fallback_provider: fleet_core::agents::AgentKind,
+    fallback_status: DelegationStatus,
+) -> DelegationRow {
+    let delegation = inputs.delegations.get(&id);
+    let provider = delegation.map_or(fallback_provider, |record| record.provider);
+    let status = delegation.map_or(fallback_status, |record| record.status);
+    DelegationRow {
+        provider: SharedString::new_static(provider.executable()),
+        title: SharedString::from(
+            delegation
+                .map(|record| first_line(&record.brief))
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| "subagent".to_owned()),
+        ),
+        status: delegation_status(status),
+        headline: delegation
+            .and_then(|record| record.headline.as_deref())
+            .map(SharedString::new),
+        elapsed: delegation.map_or_else(SharedString::default, delegation_elapsed),
+        hint: SharedString::new_static("⏎ attach"),
+    }
+}
+
+/// A result delivered back into the caller, still linked to the child that produced it.
+fn delegation_result_card(
+    inputs: &RowInputs<'_>,
+    id: fleet_core::agents::DelegationId,
+    text: &str,
+    expanded: bool,
+) -> DelegationResultCard {
+    let delegation = inputs.delegations.get(&id);
+    let header = delegation.map_or_else(
+        || "subagent finished".to_owned(),
+        |record| {
+            let files = record
+                .result
+                .as_ref()
+                .map_or(0, |result| result.files_changed.len());
+            let noun = if files == 1 { "file" } else { "files" };
+            format!(
+                "{} finished · {} · {} · {files} {noun}",
+                record.provider.executable(),
+                record.status.word(),
+                delegation_elapsed(record)
+            )
+        },
+    );
+    DelegationResultCard {
+        header: SharedString::from(header),
+        body: Rc::new(parse_markdown_document(text)),
+        collapsible: text.lines().count() > DELEGATION_RESULT_COLLAPSE_LINES,
+        expanded,
+        hint: SharedString::new_static("⏎ attach"),
+    }
+}
+
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().trim().to_owned()
+}
+
+fn delegation_elapsed(record: &Delegation) -> SharedString {
+    let millis = record.elapsed(chrono::Utc::now()).num_milliseconds().max(0);
+    format_duration(u64::try_from(millis).unwrap_or_default())
+}
+
+const fn delegation_status(status: DelegationStatus) -> DelegationRowStatus {
+    match status {
+        DelegationStatus::Starting => DelegationRowStatus::Starting,
+        DelegationStatus::Running | DelegationStatus::Settling => DelegationRowStatus::Working,
+        DelegationStatus::Blocked => DelegationRowStatus::Blocked,
+        DelegationStatus::Succeeded => DelegationRowStatus::Done,
+        DelegationStatus::Incomplete => DelegationRowStatus::Incomplete,
+        DelegationStatus::Failed => DelegationRowStatus::Failed,
+        DelegationStatus::Cancelled => DelegationRowStatus::Cancelled,
     }
 }
 

@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, TimeZone, Utc};
 use fleet_core::{
     agents::{
-        AgentKind, FileDelta, GateId, GateKind, Item, ItemId, ItemKind, ItemStatus, OpenGate,
-        PermissionChoice, PermissionOption, ProviderOptionId, Question, QuestionOption, Seq,
-        ThreadId, ThreadProjection, ToolCall, ToolDiff, ToolKind, TurnEnd, TurnId, TurnOutcome,
-        TurnRecord, Usage,
+        AgentKind, Delegation, DelegationId, DelegationResult, DelegationStatus, DeliveryState,
+        FileDelta, GateId, GateKind, Item, ItemId, ItemKind, ItemStatus, OpenGate,
+        PermissionChoice, PermissionOption, ProviderOptionId, Question, QuestionOption,
+        ResultSource, Seq, ThreadId, ThreadProjection, ToolCall, ToolDiff, ToolKind, TurnEnd,
+        TurnId, TurnOutcome, TurnRecord, Usage,
     },
     ids::WorktreeId,
 };
@@ -150,6 +151,61 @@ pub(super) fn subagent(turn: TurnId, status: ItemStatus) -> Item {
     )
 }
 
+pub(super) fn delegation_record(status: DelegationStatus) -> Delegation {
+    Delegation {
+        id: DelegationId::new(),
+        caller: ThreadId::new(),
+        caller_turn: TurnId::new(),
+        caller_item: ItemId::new(),
+        child: ThreadId::new(),
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "verify the payroll reducer\nignore this second line".to_owned(),
+        expectation: "report the failing cases".to_owned(),
+        eager: false,
+        status,
+        status_payload: None,
+        result: Some(DelegationResult {
+            text: "done".to_owned(),
+            files_changed: vec!["src/lib.rs".to_owned(), "src/tests.rs".to_owned()],
+            source: ResultSource::Reported,
+            elided: false,
+        }),
+        nudges: 0,
+        recoveries: 0,
+        delivery: DeliveryState::Pending,
+        created: at(0),
+        finished: Some(at(840)),
+        headline: Some("checking the Windows failure".to_owned()),
+    }
+}
+
+pub(super) fn delegation_item(turn: TurnId, record: &Delegation) -> Item {
+    item(
+        turn,
+        ItemKind::Delegation {
+            id: record.id,
+            provider: AgentKind::Claude,
+            child: record.child,
+            status: DelegationStatus::Starting,
+        },
+        ItemStatus::Completed,
+    )
+}
+
+pub(super) fn delegation_result(turn: TurnId, record: &Delegation, text: &str) -> Item {
+    item(
+        turn,
+        ItemKind::UserMessage {
+            text: text.to_owned(),
+            attachments: Vec::new(),
+            steered: false,
+            origin: fleet_core::agents::MessageOrigin::Delegation { id: record.id },
+        },
+        ItemStatus::Completed,
+    )
+}
+
 pub(super) fn running_turn(id: TurnId, user_item: ItemId) -> TurnRecord {
     TurnRecord {
         id,
@@ -263,6 +319,8 @@ pub(super) struct Locals {
     pub(super) resolved: Vec<ResolvedGate>,
     pub(super) pending: Vec<PendingSend>,
     pub(super) checkpoints: HashMap<TurnId, fleet_proto::agents::CheckpointId>,
+    pub(super) delegations:
+        HashMap<fleet_core::agents::DelegationId, fleet_core::agents::Delegation>,
 }
 
 impl Locals {
@@ -288,6 +346,11 @@ impl Locals {
         self
     }
 
+    pub(super) fn delegation(mut self, delegation: Delegation) -> Self {
+        self.delegations.insert(delegation.id, delegation);
+        self
+    }
+
     pub(super) fn resolve(mut self, resolved: ResolvedGate) -> Self {
         self.resolved.push(resolved);
         self
@@ -301,6 +364,7 @@ impl Locals {
     pub(super) fn inputs<'a>(&'a self, projection: &'a ThreadProjection) -> RowInputs<'a> {
         RowInputs {
             projection,
+            delegations: &self.delegations,
             expanded: &self.expanded,
             unfolded: &self.unfolded,
             expanded_gates: &self.expanded_gates,

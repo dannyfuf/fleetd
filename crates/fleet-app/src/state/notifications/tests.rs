@@ -1,6 +1,8 @@
 use super::*;
 use crate::state::test_support::*;
-use fleet_core::agents::AttentionKind;
+use fleet_core::agents::{
+    AgentKind, AgentThreadSummary, Attention, AttentionKind, Seq, ThreadId, ThreadProjection,
+};
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -238,6 +240,54 @@ fn a_full_snapshot_recovers_a_missed_attention_event() {
     assert_eq!(
         state.toasts[0].toast.text.as_ref(),
         "payroll/feat: asks a question"
+    );
+    assert_eq!(plays.load(Ordering::SeqCst), 1);
+}
+
+fn native_summary(
+    thread: ThreadId,
+    parent: Option<ThreadId>,
+    title: &str,
+    attention: Attention,
+) -> AgentThreadSummary {
+    let worktree = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut projection = ThreadProjection::new(thread, worktree, AgentKind::Claude);
+    projection.parent = parent;
+    projection.title = title.to_owned();
+    projection.last_seq = Seq(1);
+    let mut summary = projection.summary(Seq::default());
+    summary.attention = attention;
+    summary
+}
+
+#[test]
+fn a_child_attention_edge_notifies_on_the_caller() {
+    let now = Instant::now();
+    let (mut state, plays) = state_with_recording_sound(now);
+    let caller = native_summary(ThreadId::new(), None, "coordinate release", Attention::Idle);
+    let child = native_summary(
+        ThreadId::new(),
+        Some(caller.thread),
+        "inspect reducer",
+        Attention::Idle,
+    );
+    let mut initial = snapshot();
+    initial.agent_threads = vec![caller.clone(), child.clone()];
+    state.apply_bridge_event(BridgeEvent::Connected(Box::new(initial)), now);
+
+    let mut blocked = child;
+    blocked.attention = Attention::NeedsYou(AttentionKind::Question);
+    state.apply_bridge_event(
+        BridgeEvent::AgentSummary(blocked),
+        now + Duration::from_secs(1),
+    );
+
+    assert_eq!(state.toasts.len(), 1);
+    assert_eq!(
+        state.toasts[0].toast.text.as_ref(),
+        "claude — coordinate release: asks a question"
     );
     assert_eq!(plays.load(Ordering::SeqCst), 1);
 }

@@ -261,6 +261,8 @@ const AGENT_SESSION_ROWS: &[SharedRow] = &[
     ("ctrl-s l", || Box::new(prefix::NextTab)),
     ("ctrl-s n", || Box::new(prefix::NextTab)),
     ("ctrl-s W", || Box::new(prefix::SessionSwitcher)),
+    ("ctrl-s u", || Box::new(prefix::UpToCaller)),
+    ("ctrl-s d", || Box::new(prefix::AgentsPicker)),
     ("ctrl-s c", || Box::new(prefix::NewTerminal)),
     ("ctrl-s y", || Box::new(prefix::CopyWorktreePath)),
     ("ctrl-s z", || Box::new(prefix::ToggleZoom)),
@@ -567,6 +569,8 @@ key_table! {
     "tab",          "Workspace > Prefix" => prefix::LastTab;
     "w",            "Workspace > Prefix" => prefix::LastSession;
     "W",            "Workspace > Prefix" => prefix::SessionSwitcher;
+    "u",            "Workspace > Prefix" => prefix::UpToCaller;
+    "d",            "Workspace > Prefix" => prefix::AgentsPicker;
     "c",            "Workspace > Prefix" => prefix::NewTerminal;
     "x",            "Workspace > Prefix" => prefix::CloseTerminal;
     "r",            "Workspace > Prefix" => prefix::RestartCommand;
@@ -709,7 +713,7 @@ key_table! {
     "ctrl-s x",      "Agent > AgentNativeScroll" => native_agent::CloseTab;
     "ctrl-s F",      "Agent > AgentNativeScroll" => native_agent::TerminalFallback;
 
-    // Row focus: entered only under `AgentNativeScroll`, which is what finally makes these five
+    // Row focus: entered only under `AgentNativeScroll`, which is what finally makes these six
     // fire and retires the long-standing caveat that `Agent > AgentRow` was bound, handled and
     // never entered.
     "enter",         "Agent > AgentNativeScroll > AgentRow" => native_agent::ExpandRow;
@@ -717,6 +721,7 @@ key_table! {
     "o",             "Agent > AgentNativeScroll > AgentRow" => native_agent::OpenInEditor;
     "y",             "Agent > AgentNativeScroll > AgentRow" => native_agent::CopyRow;
     "d",             "Agent > AgentNativeScroll > AgentRow" => native_agent::DiffRow;
+    "x",             "Agent > AgentNativeScroll > AgentRow" => native_agent::CancelDelegation;
 
     // §6.2: the keys are bare letters in a derived context so they cannot fire anywhere else,
     // and **`⏎` is not bound on an approval** — a queued Return keystroke must never approve a
@@ -1178,7 +1183,9 @@ mod tests {
 
     #[test]
     fn live_prefix_resolution_uses_the_authoritative_table() {
-        for keys in ["s", "S", "ctrl-s", "1", "tab", "W", "[", "]", "escape"] {
+        for keys in [
+            "s", "S", "ctrl-s", "1", "tab", "W", "u", "d", "[", "]", "escape",
+        ] {
             let keystroke = Keystroke::parse(keys)
                 .unwrap_or_else(|error| panic!("invalid test key {keys:?}: {error}"));
             let action = action_for_keystroke("Workspace > Prefix", &keystroke)
@@ -1193,7 +1200,7 @@ mod tests {
         assert!(
             action_for_keystroke(
                 "Workspace > Prefix",
-                &Keystroke::parse("d").unwrap_or_else(|error| panic!("{error}"))
+                &Keystroke::parse("b").unwrap_or_else(|error| panic!("{error}"))
             )
             .is_none(),
             "an unknown prefix key is consumed without inventing an action"
@@ -1253,6 +1260,8 @@ mod tests {
             ("ctrl-s l", "prefix::NextTab"),
             ("ctrl-s n", "prefix::NextTab"),
             ("ctrl-s W", "prefix::SessionSwitcher"),
+            ("ctrl-s u", "prefix::UpToCaller"),
+            ("ctrl-s d", "prefix::AgentsPicker"),
             ("ctrl-s c", "prefix::NewTerminal"),
             ("ctrl-s y", "prefix::CopyWorktreePath"),
             ("ctrl-s z", "prefix::ToggleZoom"),
@@ -1310,6 +1319,14 @@ mod tests {
 
         assert_eq!(chord(&["Agent", "AgentIdle"], "s"), Some("prefix::GoHub"));
         assert_eq!(
+            chord(&["Agent", "AgentIdle"], "u"),
+            Some("prefix::UpToCaller")
+        );
+        assert_eq!(
+            chord(&["Agent", "AgentWorking"], "d"),
+            Some("prefix::AgentsPicker")
+        );
+        assert_eq!(
             chord(&["Agent", "AgentWorking", "Daemon", "Banner"], "s"),
             Some("prefix::GoHub"),
             "the daemon banner is appended innermost and owns no `^s` row"
@@ -1328,6 +1345,23 @@ mod tests {
         assert_eq!(chord(&["Agent", "AgentNativeScroll"], "m"), None);
         assert_eq!(chord(&["Workspace", "Terminal"], "s"), None);
         assert_eq!(chord(&["Agent", "AgentIdle"], "q"), None);
+    }
+
+    #[test]
+    fn delegation_row_keeps_expand_and_copy_and_adds_cancel() {
+        let context = "Agent > AgentNativeScroll > AgentRow";
+        for (keys, expected) in [
+            ("enter", "native_agent::ExpandRow"),
+            ("y", "native_agent::CopyRow"),
+            ("x", "native_agent::CancelDelegation"),
+        ] {
+            let stroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(
+                action_for_keystroke(context, &stroke).map(|action| action.name()),
+                Some(expected),
+                "{keys}"
+            );
+        }
     }
 
     #[test]

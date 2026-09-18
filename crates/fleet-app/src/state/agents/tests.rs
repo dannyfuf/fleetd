@@ -2,8 +2,9 @@ use super::*;
 
 use fleet_core::{
     agents::{
-        AgentEvent, AgentKind, GateId, GateKind, PermissionMode, SeqEvent,
-        SessionState as AgentSessionState, ToolKind, TurnState,
+        AgentEvent, AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, GateId,
+        GateKind, ItemId, PermissionMode, SeqEvent, SessionState as AgentSessionState, ToolKind,
+        TurnId, TurnState,
     },
     sessions::SessionKind,
 };
@@ -31,6 +32,41 @@ fn summary(slug: &str, attention: Attention, last_seq: u64) -> AgentThreadSummar
     let mut summary = projection.summary(Seq::default());
     summary.attention = attention;
     summary
+}
+
+fn child_summary(
+    slug: &str,
+    attention: Attention,
+    last_seq: u64,
+    parent: ThreadId,
+) -> AgentThreadSummary {
+    let mut child = summary(slug, attention, last_seq);
+    child.parent = Some(parent);
+    child
+}
+
+fn delegation(caller: ThreadId, child: ThreadId, status: DelegationStatus) -> Delegation {
+    Delegation {
+        id: DelegationId::new(),
+        caller,
+        caller_turn: TurnId::new(),
+        caller_item: ItemId::new(),
+        child,
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "inspect the reducer".to_owned(),
+        expectation: "report the invariant".to_owned(),
+        eager: false,
+        status,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: DeliveryState::Pending,
+        created: chrono::DateTime::UNIX_EPOCH,
+        finished: None,
+        headline: None,
+    }
 }
 
 fn populated(threads: Vec<AgentThreadSummary>) -> Snapshot {
@@ -137,6 +173,139 @@ fn a_worktrees_tabs_are_its_own_threads_in_snapshot_order() {
             .collect::<Vec<_>>(),
         vec![first.thread, second.thread]
     );
+}
+
+#[test]
+fn children_join_the_strip_only_while_attached_and_follow_their_caller() {
+    let caller = summary("feat", Attention::Idle, 1);
+    let first = child_summary("feat", Attention::Idle, 1, caller.thread);
+    let second = child_summary("feat", Attention::Idle, 1, caller.thread);
+    let mut state = state_with(vec![first.clone(), caller.clone(), second.clone()]);
+
+    assert_eq!(
+        state
+            .agents
+            .of_worktree(&worktree("feat"))
+            .iter()
+            .map(|summary| summary.thread)
+            .collect::<Vec<_>>(),
+        vec![caller.thread]
+    );
+    assert!(state.agents.attach(second.thread));
+    assert!(state.agents.attach(first.thread));
+    assert_eq!(
+        state
+            .agents
+            .of_worktree(&worktree("feat"))
+            .iter()
+            .map(|summary| summary.thread)
+            .collect::<Vec<_>>(),
+        vec![caller.thread, first.thread, second.thread],
+        "children retain daemon creation order rather than attachment order"
+    );
+    assert!(state.agents.detach(first.thread));
+    assert!(!state.agents.is_attached(first.thread));
+    assert_eq!(
+        state
+            .agents
+            .of_worktree(&worktree("feat"))
+            .iter()
+            .map(|summary| summary.thread)
+            .collect::<Vec<_>>(),
+        vec![caller.thread, second.thread]
+    );
+}
+
+#[test]
+fn reopen_clears_a_callers_local_close_marker() {
+    let caller = summary("feat", Attention::Idle, 1);
+    let mut state = state_with(vec![caller.clone()]);
+    assert!(state.agents.close(caller.thread));
+    assert!(state.agents.of_worktree(&worktree("feat")).is_empty());
+    assert!(state.agents.reopen(caller.thread));
+    assert!(state.agents.is_attached(caller.thread));
+    assert_eq!(state.agents.of_worktree(&worktree("feat")).len(), 1);
+}
+
+#[test]
+fn delegation_changes_are_indexed_and_advance_the_revision_once() {
+    let caller = ThreadId::new();
+    let child = ThreadId::new();
+    let mut agents = AgentThreads::default();
+    let mut record = delegation(caller, child, DelegationStatus::Starting);
+    let id = record.id;
+
+    agents.seed_delegations(vec![record.clone()]);
+    let seeded = agents.delegations_revision();
+    assert_eq!(agents.delegation(id), Some(&record));
+    assert_eq!(agents.delegations_of_caller(caller), vec![&record]);
+    assert_eq!(agents.delegation_of_child(child), Some(&record));
+    agents.apply_delegation(record.clone());
+    assert_eq!(agents.delegations_revision(), seeded);
+
+    record.status = DelegationStatus::Running;
+    agents.apply_delegation(record.clone());
+    assert_eq!(agents.delegations_revision(), seeded + 1);
+    assert_eq!(agents.delegation(id), Some(&record));
+}
+
+#[test]
+fn child_attention_bubbles_to_the_caller_without_being_cleared_by_viewing_it() {
+    let caller = summary("feat", Attention::Idle, 4);
+    let child = child_summary(
+        "feat",
+        Attention::NeedsYou(AttentionKind::Question),
+        5,
+        caller.thread,
+    );
+    let mut state = state_with(vec![caller.clone(), child]);
+
+    assert_eq!(
+        state.agents.attention(caller.thread),
+        Attention::NeedsYou(AttentionKind::Question)
+    );
+    state.agents.mark_seen(caller.thread, Seq(4));
+    assert_eq!(
+        state.agents.attention(caller.thread),
+        Attention::NeedsYou(AttentionKind::Question),
+        "the child's cursor, not the caller's, controls the child signal"
+    );
+}
+
+#[test]
+fn working_children_fold_into_the_caller_count_but_finished_children_do_not() {
+    let caller = summary("feat", Attention::Idle, 1);
+    let working = child_summary("feat", Attention::Working, 2, caller.thread);
+    let finished = child_summary(
+        "feat",
+        Attention::NeedsYou(AttentionKind::Finished),
+        3,
+        caller.thread,
+    );
+    let state = state_with(vec![caller.clone(), working, finished]);
+
+    assert_eq!(state.agents.attention(caller.thread), Attention::Working);
+    assert_eq!(
+        state.agents.counts(),
+        AgentCounts {
+            working: 1,
+            ..AgentCounts::default()
+        },
+        "children contribute through their caller rather than becoming extra chips"
+    );
+}
+
+#[test]
+fn a_live_delegation_keeps_its_caller_working() {
+    let caller = summary("feat", Attention::Idle, 1);
+    let child = child_summary("feat", Attention::Idle, 1, caller.thread);
+    let mut state = state_with(vec![caller.clone(), child.clone()]);
+    state.agents.seed_delegations(vec![delegation(
+        caller.thread,
+        child.thread,
+        DelegationStatus::Blocked,
+    )]);
+    assert!(state.agents.is_working(caller.thread));
 }
 
 #[test]

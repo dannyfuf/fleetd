@@ -1,16 +1,21 @@
 //! The flat row projection: emission order, the fold table, grouping and the live row.
 
 use fleet_core::agents::{
-    AgentKind, CheckpointKind, CheckpointRecord, ItemStatus, NoticeRecord, PermissionChoice, Seq,
-    SessionState, ToolKind, TurnId, TurnOutcome, TurnState,
+    AgentKind, CheckpointKind, CheckpointRecord, DelegationStatus, ItemStatus, NoticeRecord,
+    PermissionChoice, Seq, SessionState, ToolKind, TurnId, TurnOutcome, TurnState,
 };
-use fleet_ui_kit::{GateOutcome, ToolRowState, TranscriptRowId, TranscriptRowKind, WorkingPhase};
+use fleet_ui_kit::{
+    DelegationRowStatus, GateOutcome, ToolRowState, TranscriptRowId, TranscriptRowKind,
+    WorkingPhase,
+};
 
 use super::fixtures::{
-    Locals, assistant, command, edit, item, pending, permission_gate, plan, projection, question,
-    question_gate, reasoning, running_turn, settled_turn, subagent, tool, user,
+    Locals, assistant, command, delegation_item, delegation_record, delegation_result, edit, item,
+    pending, permission_gate, plan, projection, question, question_gate, reasoning, running_turn,
+    settled_turn, subagent, tool, user,
 };
 use crate::screens::agent_thread::rows::{ResolvedGate, build_rows, fold, group, live};
+use crate::screens::agent_thread::{RowsKey, composer::ComposerMode};
 
 /// The kind names of a built row list, for an assertion that reads as the transcript does.
 fn kinds(rows: &[fleet_ui_kit::TranscriptRow]) -> Vec<&'static str> {
@@ -47,6 +52,84 @@ fn an_empty_idle_thread_shows_only_its_invitation() {
     let built = build_rows(&locals.inputs(&projection));
 
     assert_eq!(kinds(&built.rows), ["empty"]);
+}
+
+#[test]
+fn rows_key_equality_includes_the_delegations_revision() {
+    let key = RowsKey {
+        thread: fleet_core::agents::ThreadId::new(),
+        last_seq: Seq(9),
+        expanded_rev: 1,
+        unfolded_rev: 2,
+        pending_rev: 3,
+        checkpoints_rev: 4,
+        delegations_rev: 5,
+        mode: ComposerMode::Normal,
+    };
+    let mut changed = key.clone();
+    changed.delegations_rev += 1;
+
+    assert_ne!(key, changed);
+    assert_eq!(key, key.clone());
+}
+
+#[test]
+fn delegation_row_projects_each_status_from_the_durable_map() {
+    let cases = [
+        (DelegationStatus::Starting, DelegationRowStatus::Starting),
+        (DelegationStatus::Running, DelegationRowStatus::Working),
+        (DelegationStatus::Blocked, DelegationRowStatus::Blocked),
+        (DelegationStatus::Settling, DelegationRowStatus::Working),
+        (DelegationStatus::Succeeded, DelegationRowStatus::Done),
+        (
+            DelegationStatus::Incomplete,
+            DelegationRowStatus::Incomplete,
+        ),
+        (DelegationStatus::Failed, DelegationRowStatus::Failed),
+        (DelegationStatus::Cancelled, DelegationRowStatus::Cancelled),
+    ];
+    for (status, expected) in cases {
+        let record = delegation_record(status);
+        let mut projection = projection();
+        projection.items = vec![delegation_item(TurnId::new(), &record)];
+        let locals = Locals::default().delegation(record);
+
+        let built = build_rows(&locals.inputs(&projection));
+        let TranscriptRowKind::Delegation(row) = &built.rows[0].kind else {
+            panic!("the native child is a delegation row");
+        };
+        assert_eq!(row.status, expected);
+        assert_eq!(row.provider, "codex", "the durable record wins");
+        assert_eq!(row.title, "verify the payroll reducer");
+        assert_eq!(
+            row.headline.as_deref(),
+            Some("checking the Windows failure")
+        );
+        assert_eq!(row.elapsed, "14m");
+        assert_eq!(row.hint, "⏎ attach");
+    }
+}
+
+#[test]
+fn delegation_result_card_collapses_after_eight_lines() {
+    let record = delegation_record(DelegationStatus::Succeeded);
+    let turn = TurnId::new();
+    let mut projection = projection();
+    projection.items = vec![delegation_result(
+        turn,
+        &record,
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine",
+    )];
+    let locals = Locals::default().delegation(record);
+
+    let built = build_rows(&locals.inputs(&projection));
+    let TranscriptRowKind::DelegationResult(card) = &built.rows[0].kind else {
+        panic!("a delivered child result is a result card");
+    };
+    assert_eq!(card.header, "codex finished · done · 14m · 2 files");
+    assert!(card.collapsible);
+    assert!(!card.expanded);
+    assert_eq!(card.hint, "⏎ attach");
 }
 
 #[test]
