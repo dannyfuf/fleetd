@@ -16,6 +16,7 @@ await idle 30000
 type apply the README fix
 key enter
 await agents.threads[0].pending_gate == permission 30000
+await agents.threads[0].state == needs_you 30000
 assert key_contexts[2] == AgentPermission && agents.threads[0].state == needs_you
 shot approval
 

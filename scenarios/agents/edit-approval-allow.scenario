@@ -19,6 +19,7 @@ key enter
 
 # The turn stops at the file-change approval. A gate owns the keyboard in the frame it appears.
 await agents.threads[0].pending_gate == permission 30000
+await agents.threads[0].state == needs_you 30000
 assert agents.threads[0].state == needs_you && lists.tabs.selected.marks[0] == needs_you
 assert key_contexts[1] == AgentDecision && key_contexts[2] == AgentPermission
 assert toasts[0].text ~= "needs permission"

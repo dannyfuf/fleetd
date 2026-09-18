@@ -211,6 +211,7 @@ struct Stage {
     daemon: Option<Daemon>,
     app: Option<Child>,
     client: Option<Client>,
+    environment: Option<HarnessEnv>,
     /// Jobs a `job` line submitted; a long-running one has to be told to stop.
     injections: Vec<Injection>,
 }
@@ -220,6 +221,15 @@ impl Stage {
     /// than propagating problems so every later step still runs.
     async fn teardown(&mut self) -> Vec<String> {
         let mut problems = Vec::new();
+        // A scripted provider may still have a shell command sleeping after the scenario's last
+        // assertion. Block its fixture `fleet` shim before the owned daemon exits, otherwise a
+        // late `fleet subagent complete` auto-starts a replacement daemon behind the runner's
+        // back and leaves it holding this run directory.
+        if let Some(environment) = &self.environment
+            && let Err(error) = environment.stop_fleet_cli()
+        {
+            problems.push(format!("stop late Fleet CLI calls: {error:#}"));
+        }
         // A long-running injected hook polls for a file and gives up after a minute; telling it
         // to stop now is what keeps it from outliving the run that submitted it.
         for injection in self.injections.drain(..) {
@@ -510,6 +520,7 @@ async fn execute(
     let run_id = run_dir.run_id();
     let environment =
         HarnessEnv::new(run_dir).context("prepare the hermetic harness environment")?;
+    stage.environment = Some(environment.clone());
     // The preset seeds FLEET_HOME, so it is applied before fleetd and Fleet read it.
     let fixture = fixture::apply_preset(scenario.fixture, &environment)
         .await

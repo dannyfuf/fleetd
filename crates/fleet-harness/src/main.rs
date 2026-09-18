@@ -30,7 +30,8 @@ enum Commands {
         /// processes and display lanes unconditionally either way.
         #[arg(long)]
         keep: bool,
-        /// Write artifacts here instead of under /tmp/fleet-harness/.
+        /// Write artifacts here instead of under the platform temporary directory's
+        /// fleet-harness/ folder.
         #[arg(long)]
         run_dir: Option<PathBuf>,
         /// Keep going after a failed line instead of stopping the scenario.

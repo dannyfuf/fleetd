@@ -38,9 +38,17 @@ pub fn install(
 fn install_fleet(environment: &HarnessEnv) -> anyhow::Result<PathBuf> {
     let home = crate::agent::shell_word(&environment.fleet_home)?;
     let app = crate::agent::shell_word(&fleet_app())?;
+    let stop = crate::agent::shell_word(&environment.fleet_cli_stop_path())?;
     environment.install_fake(
         "fleet",
-        &format!("#!/bin/sh\nFLEET_HOME={home} exec {app} \"$@\"\n"),
+        &format!(
+            "#!/bin/sh\n\
+             if [ -e {stop} ]; then\n\
+               echo 'fleet harness teardown has begun; refusing daemon autostart' >&2\n\
+               exit 75\n\
+             fi\n\
+             FLEET_HOME={home} exec {app} \"$@\"\n"
+        ),
     )
 }
 

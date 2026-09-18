@@ -12,7 +12,7 @@ type ask a child which path to inspect
 key enter
 await agents.delegations[0].status == working 30000
 await agents.delegations[0].status == blocked 30000
-assert agents.threads[1].provider == claude && agents.threads[1].pending_gate exists
-assert lists.tabs.selected.badges[0] == codex && lists.tabs.selected.marks[0] == needs_you
+await agents.threads[1].provider == claude && agents.threads[1].pending_gate exists 30000
+await lists.tabs.selected.badges[0] == codex && lists.tabs.selected.marks[0] == needs_you 30000
 dump blocked-child
 quit
