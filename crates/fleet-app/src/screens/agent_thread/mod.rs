@@ -242,6 +242,8 @@ pub struct AgentThreadView {
     reveal_running: bool,
     #[cfg(test)]
     patched_rows: usize,
+    #[cfg(test)]
+    row_builds: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -329,6 +331,8 @@ impl AgentThreadView {
             reveal_running: false,
             #[cfg(test)]
             patched_rows: 0,
+            #[cfg(test)]
+            row_builds: 0,
             _subscriptions: subscriptions,
         };
         view.prepare(cx);
@@ -372,6 +376,12 @@ impl AgentThreadView {
     #[cfg(test)]
     pub(crate) fn patched_rows(&self) -> usize {
         self.patched_rows
+    }
+
+    /// Number of full grouping projections performed by this view.
+    #[cfg(test)]
+    pub(crate) fn row_builds(&self) -> usize {
+        self.row_builds
     }
 
     /// The prepared decisions, newest gate last.

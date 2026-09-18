@@ -123,14 +123,7 @@ pub(super) fn attach_delegation_child(
         .delegation(delegation)
         .map(|record| record.child)?;
     state.update(cx, |app, cx| {
-        let worktree = app
-            .agents
-            .summary(child)
-            .map(|summary| summary.worktree.clone());
-        app.agents.attach(child);
-        if let Some(worktree) = worktree {
-            app.agents.activate(worktree, child);
-        }
+        app.select_agent_thread(child);
         cx.notify();
     });
     Some(child)
@@ -233,6 +226,13 @@ fn create_thread(
             return;
         }
     };
+    if !state.read(cx).workspace_has_tab_capacity(&worktree) {
+        state.update(cx, |app, cx| {
+            app.notify_workspace_tab_limit();
+            cx.notify();
+        });
+        return;
+    }
     let reply = bridge.request_agent(BridgeCommand::AgentThreadCreate {
         worktree,
         provider,
@@ -249,9 +249,11 @@ fn create_thread(
                 let thread = summary.thread;
                 state.update(cx, |app, cx| {
                     app.agents.apply_summary(summary);
+                    if !app.select_agent_thread(thread) {
+                        app.agents.close(thread);
+                    }
                     cx.notify();
                 });
-                activate_agent_tab(&state, thread, cx);
             }
             Ok(Err(error)) => state.update(cx, |app, cx| {
                 record_mutation_failure(app, create_failure(&error.message));
@@ -344,15 +346,7 @@ impl WorkspaceScreen {
                 }
                 AgentThreadEvent::SelectThread(thread) => {
                     relay_state.update(cx, |app, cx| {
-                        let Some(worktree) = app
-                            .agents
-                            .summary(*thread)
-                            .map(|summary| summary.worktree.clone())
-                        else {
-                            return;
-                        };
-                        app.agents.attach(*thread);
-                        app.agents.activate(worktree, *thread);
+                        app.select_agent_thread(*thread);
                         cx.notify();
                     });
                 }

@@ -55,23 +55,23 @@ impl WorkspaceScreen {
             SessionKind::Agent { .. } => None,
         };
         let agents = threads_of(app, session);
-        let mut tabs = self.local.borrow_mut().state.tab_labels.tabs(
-            session,
-            status,
-            model.terminal,
-            &app.renamed_terminals,
-        );
+        let mut local = self.local.borrow_mut();
+        let labels = &mut local.state.tab_labels;
+        let mut tabs = labels.tabs(session, status, model.terminal, &app.renamed_terminals);
         let first_agent = tabs.len();
         let selected = active_target(model);
+        labels.retain_agents(&agents);
         for (offset, summary) in agents.iter().enumerate() {
             let active = selected == Some(workspace_tabs::TabTarget::Agent(summary.thread));
-            tabs.push(workspace_tabs::agent_tab(
+            tabs.push(labels.agent_tab(
                 summary,
                 first_agent + offset + 1,
                 app.agents.attention(summary.thread),
                 active,
+                app.agents.summaries_revision(),
             ));
         }
+        drop(local);
         let active = workspace_tabs::active_position(session, &agents, selected);
 
         let (new_request, new_bridge, new_state) =

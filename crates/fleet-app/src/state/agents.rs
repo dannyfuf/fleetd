@@ -26,18 +26,8 @@ pub struct AgentCounts {
     pub failed: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct DerivedKey {
-    summaries: u64,
-    seen: u64,
-    delegations: u64,
-    attachments: u64,
-}
-
 #[derive(Debug, Default)]
 struct AgentDerived {
-    key: DerivedKey,
-    ready: bool,
     attention: HashMap<ThreadId, Attention>,
     counts: AgentCounts,
     strip_offsets: HashMap<ThreadId, usize>,
@@ -116,8 +106,8 @@ pub struct AgentThreads {
     last_applied: HashMap<ThreadId, Applied>,
     /// Threads whose authoritative projection was replaced outside the live event stream.
     projection_replaced: HashSet<ThreadId>,
-    /// Derived foreground data, rebuilt at most once for each authoritative revision tuple.
-    derived: RefCell<AgentDerived>,
+    /// Prepared foreground data. Render getters only read this cache.
+    derived: AgentDerived,
 }
 
 impl AgentThreads {
@@ -127,62 +117,34 @@ impl AgentThreads {
         &self.summaries
     }
 
+    /// Scalar generation for consumers whose projection depends on the summary census.
+    #[must_use]
+    pub const fn summaries_revision(&self) -> u64 {
+        self.summaries_revision
+    }
+
+    /// Scalar generation for consumers whose projection depends on installation-local cursors.
+    #[must_use]
+    pub const fn seen_revision(&self) -> u64 {
+        self.seen_revision
+    }
+
     /// The threads of one worktree, which are that workspace's agent tabs.
     ///
     /// A thread the user closed with `^s x` is not one of them: the daemon still lists it, and
     /// still counts it in the context bar, but this window has put it away.
     #[must_use]
     pub fn of_worktree(&self, worktree: &WorktreeId) -> Vec<&AgentThreadSummary> {
-        let mut visible = Vec::new();
-        let mut included = HashSet::new();
-
-        for caller in self.summaries.iter().filter(|summary| {
-            &summary.worktree == worktree
-                && summary.parent.is_none()
-                && !self.closed.contains(&summary.thread)
-        }) {
-            visible.push(caller);
-            included.insert(caller.thread);
-            self.append_attached_children(caller.thread, worktree, &mut included, &mut visible);
-        }
-
-        // A child delegated into another worktree appears in that worktree once attached even
-        // though its caller is not one of that strip's roots.
-        for child in self.summaries.iter().filter(|summary| {
-            &summary.worktree == worktree
-                && summary.parent.is_some()
-                && self.attached.contains(&summary.thread)
-                && !self.closed.contains(&summary.thread)
-        }) {
-            if !included.insert(child.thread) {
-                continue;
-            }
-            visible.push(child);
-            self.append_attached_children(child.thread, worktree, &mut included, &mut visible);
-        }
-
+        let mut visible = self
+            .summaries
+            .iter()
+            .filter(|summary| {
+                &summary.worktree == worktree
+                    && self.derived.strip_offsets.contains_key(&summary.thread)
+            })
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|summary| self.derived.strip_offsets[&summary.thread]);
         visible
-    }
-
-    fn append_attached_children<'a>(
-        &'a self,
-        caller: ThreadId,
-        worktree: &WorktreeId,
-        included: &mut HashSet<ThreadId>,
-        visible: &mut Vec<&'a AgentThreadSummary>,
-    ) {
-        for child in self.summaries.iter().filter(|summary| {
-            summary.parent == Some(caller)
-                && &summary.worktree == worktree
-                && self.attached.contains(&summary.thread)
-                && !self.closed.contains(&summary.thread)
-        }) {
-            if !included.insert(child.thread) {
-                continue;
-            }
-            visible.push(child);
-            self.append_attached_children(child.thread, worktree, included, visible);
-        }
     }
 
     /// Whether this window has closed the thread's tab.
@@ -358,6 +320,7 @@ impl AgentThreads {
 
     fn bump_attached_revision(&mut self) {
         self.attached_revision = self.attached_revision.wrapping_add(1);
+        self.prepare_strip_offsets();
     }
 
     /// One thread's summary.
@@ -402,9 +365,7 @@ impl AgentThreads {
     /// Windows from one installation share that identity; separate installations do not.
     #[must_use]
     pub fn attention(&self, thread: ThreadId) -> Attention {
-        self.ensure_derived();
         self.derived
-            .borrow()
             .attention
             .get(&thread)
             .copied()
@@ -451,37 +412,46 @@ impl AgentThreads {
     /// The §3.3 counters the context bar shows, including the thread on the current tab.
     #[must_use]
     pub fn counts(&self) -> AgentCounts {
-        self.ensure_derived();
-        self.derived.borrow().counts
+        self.derived.counts
     }
 
     /// Zero-based position among the native tabs of this thread's worktree.
     #[must_use]
     pub fn strip_offset(&self, thread: ThreadId) -> Option<usize> {
-        self.ensure_derived();
-        self.derived.borrow().strip_offsets.get(&thread).copied()
+        self.derived.strip_offsets.get(&thread).copied()
     }
 
-    fn ensure_derived(&self) {
-        let key = DerivedKey {
-            summaries: self.summaries_revision,
-            seen: self.seen_revision,
-            delegations: self.delegations_revision,
-            attachments: self.attached_revision,
-        };
-        if self.derived.borrow().ready && self.derived.borrow().key == key {
-            return;
-        }
-        let attention = self
+    fn prepare_attention_counts(&mut self) {
+        let own = self
             .summaries
             .iter()
-            .map(|summary| {
-                (
-                    summary.thread,
-                    self.attention_in(summary.thread, &self.summaries),
-                )
-            })
+            .map(|summary| (summary.thread, self.own_attention(summary)))
             .collect::<HashMap<_, _>>();
+        let mut attention = own.clone();
+        for child in self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_some())
+        {
+            let Some(parent) = child.parent else {
+                continue;
+            };
+            let propagated = match own.get(&child.thread).copied().unwrap_or(Attention::Idle) {
+                Attention::NeedsYou(
+                    kind @ (AttentionKind::Permission
+                    | AttentionKind::Question
+                    | AttentionKind::Plan),
+                ) => Attention::NeedsYou(kind),
+                Attention::Working | Attention::Waiting => Attention::Working,
+                Attention::NeedsYou(AttentionKind::Finished)
+                | Attention::Failed
+                | Attention::Unread
+                | Attention::Idle => continue,
+            };
+            attention
+                .entry(parent)
+                .and_modify(|current| *current = std::cmp::max(*current, propagated));
+        }
         let mut counts = AgentCounts::default();
         for summary in self
             .summaries
@@ -499,23 +469,61 @@ impl AgentThreads {
                 Attention::Unread | Attention::Idle => {}
             }
         }
-        let mut strip_offsets = HashMap::new();
-        let mut worktrees = HashSet::new();
+        self.derived.attention = attention;
+        self.derived.counts = counts;
+    }
+
+    fn prepare_strip_offsets(&mut self) {
+        let worktree_of = self
+            .summaries
+            .iter()
+            .map(|summary| (summary.thread, summary.worktree.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut children = HashMap::<ThreadId, Vec<ThreadId>>::new();
         for summary in &self.summaries {
-            if worktrees.insert(summary.worktree.clone()) {
-                for (offset, visible) in self.of_worktree(&summary.worktree).into_iter().enumerate()
-                {
-                    strip_offsets.insert(visible.thread, offset);
+            if let Some(parent) = summary.parent {
+                children.entry(parent).or_default().push(summary.thread);
+            }
+        }
+        let mut strip_offsets = HashMap::new();
+        let mut next_by_worktree = HashMap::<WorktreeId, usize>::new();
+        let mut roots = self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_none() && !self.closed.contains(&summary.thread))
+            .map(|summary| summary.thread)
+            .collect::<Vec<_>>();
+        roots.extend(self.summaries.iter().filter_map(|summary| {
+            (summary.parent.is_some()
+                && self.attached.contains(&summary.thread)
+                && !self.closed.contains(&summary.thread))
+            .then_some(summary.thread)
+        }));
+        for root in roots {
+            let mut stack = vec![root];
+            while let Some(thread) = stack.pop() {
+                let Some(worktree) = worktree_of.get(&thread) else {
+                    continue;
+                };
+                if strip_offsets.contains_key(&thread) {
+                    continue;
+                }
+                let offset = next_by_worktree.entry(worktree.clone()).or_default();
+                strip_offsets.insert(thread, *offset);
+                *offset += 1;
+                if let Some(descendants) = children.get(&thread) {
+                    for child in descendants.iter().rev() {
+                        if worktree_of.get(child) == Some(worktree)
+                            && self.attached.contains(child)
+                            && !self.closed.contains(child)
+                        {
+                            stack.push(*child);
+                        }
+                    }
                 }
             }
         }
-        *self.derived.borrow_mut() = AgentDerived {
-            key,
-            ready: true,
-            attention,
-            counts,
-            strip_offsets,
-        };
+        self.derived.strip_offsets = strip_offsets;
     }
 
     /// The agent tab selected in a worktree's workspace.
@@ -914,6 +922,8 @@ impl AgentThreads {
         };
         if changed {
             self.summaries_revision = self.summaries_revision.wrapping_add(1);
+            self.prepare_attention_counts();
+            self.prepare_strip_offsets();
         }
     }
 
@@ -922,6 +932,7 @@ impl AgentThreads {
         if self.seen(thread) != seq {
             self.mirror.mark_seen(thread, seq);
             self.seen_revision = self.seen_revision.wrapping_add(1);
+            self.prepare_attention_counts();
         }
     }
 
@@ -1023,6 +1034,8 @@ impl AgentThreads {
         {
             self.composer_focused = None;
         }
+        self.prepare_attention_counts();
+        self.prepare_strip_offsets();
     }
 
     /// The threads that just entered an attention worth a notification, and their tab labels.

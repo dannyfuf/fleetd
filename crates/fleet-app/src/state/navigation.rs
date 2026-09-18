@@ -1,5 +1,9 @@
 use super::*;
 
+/// Numeric workspace shortcuts address one combined strip, capped at their nine positions.
+pub const WORKSPACE_TAB_LIMIT: usize = 9;
+pub const WORKSPACE_TAB_LIMIT_NOTICE: &str = "nine tabs already open · close or detach one first";
+
 /// Which pane of the Hub owns the cursor. The detail panel is never in the cycle (§1.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubPane {
@@ -683,7 +687,7 @@ impl AppState {
         let Some(summary) = self.agents.summary(thread).cloned() else {
             return false;
         };
-        let Some(session) = self.snapshot.as_ref().and_then(|snapshot| {
+        let session = self.snapshot.as_ref().and_then(|snapshot| {
             snapshot.sessions.iter().find_map(|session| {
                 matches!(
                     &session.kind,
@@ -692,11 +696,19 @@ impl AppState {
                 )
                 .then(|| session.id.clone())
             })
-        }) else {
+        });
+        if self.snapshot.is_some() && session.is_none() {
             return false;
-        };
+        }
 
-        crate::presentation::enter_session(self, session);
+        if !self.agents.is_attached(thread) && !self.workspace_has_tab_capacity(&summary.worktree) {
+            self.toast_short(WORKSPACE_TAB_LIMIT_NOTICE, Icon::Info, Instant::now());
+            return false;
+        }
+
+        if let Some(session) = session {
+            crate::presentation::enter_session(self, session);
+        }
         if summary.parent.is_some() {
             self.agents.attach(thread);
         } else {
@@ -704,6 +716,27 @@ impl AppState {
         }
         self.agents.activate(summary.worktree, thread);
         true
+    }
+
+    /// Whether another terminal or native thread fits in this worktree's combined strip.
+    #[must_use]
+    pub fn workspace_has_tab_capacity(&self, worktree: &WorktreeId) -> bool {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot.sessions.iter().find(
+                    |session| matches!(&session.kind, SessionKind::Worktree(id) if id == worktree),
+                )
+            })
+            .is_none_or(|session| {
+                session.terminals.len() + self.agents.of_worktree(worktree).len()
+                    < WORKSPACE_TAB_LIMIT
+            })
+    }
+
+    /// Shows the shared capacity feedback used by every creation and attachment path.
+    pub fn notify_workspace_tab_limit(&mut self) {
+        self.toast_short(WORKSPACE_TAB_LIMIT_NOTICE, Icon::Info, Instant::now());
     }
 
     /// The session shown by the Workspace, when that is the current screen.

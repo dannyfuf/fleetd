@@ -57,8 +57,8 @@ pub use jobs_filter::JobFilter;
 use navigation::clamp_cursor;
 pub use navigation::{
     AgentPopupMode, AgentPopupState, AgentPopupTransition, Cursors, FilterEscape, FilterState,
-    HubPane, HubTab, Mode, Mru, Overlay, RepoScope, Screen, TerminalMode, filter_escape, half_page,
-    move_cursor,
+    HubPane, HubTab, Mode, Mru, Overlay, RepoScope, Screen, TerminalMode, WORKSPACE_TAB_LIMIT,
+    WORKSPACE_TAB_LIMIT_NOTICE, filter_escape, half_page, move_cursor,
 };
 pub use notifications::{
     LiveToast, StickyError, dwell_for, expire_toasts, latest_failed_job, running_jobs,

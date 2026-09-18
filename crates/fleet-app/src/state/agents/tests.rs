@@ -118,7 +118,7 @@ fn the_context_bar_counts_every_thread_in_the_snapshot() {
 }
 
 #[test]
-fn attention_counts_and_strip_offsets_share_revision_keyed_derived_data() {
+fn attention_counts_and_strip_offsets_are_prepared_before_render_reads() {
     let caller = summary("cache", Attention::Working, 4);
     let child = child_summary("cache", Attention::Idle, 1, caller.thread);
     let mut agents = AgentThreads::default();
@@ -128,19 +128,22 @@ fn attention_counts_and_strip_offsets_share_revision_keyed_derived_data() {
     assert_eq!(agents.attention(caller.thread), Attention::Working);
     assert_eq!(agents.counts().working, 1);
     assert_eq!(agents.strip_offset(child.thread), Some(1));
-    let first = agents.derived.borrow().key;
-    assert!(agents.derived.borrow().ready);
+    let first_attention = agents.derived.attention.clone();
+    let first_counts = agents.derived.counts;
+    let first_offsets = agents.derived.strip_offsets.clone();
 
     let _same = (
         agents.attention(caller.thread),
         agents.counts(),
         agents.strip_offset(child.thread),
     );
-    assert_eq!(agents.derived.borrow().key, first);
+    assert_eq!(agents.derived.attention, first_attention);
+    assert_eq!(agents.derived.counts, first_counts);
+    assert_eq!(agents.derived.strip_offsets, first_offsets);
 
     agents.mark_seen(caller.thread, Seq(4));
-    let _refreshed = agents.attention(caller.thread);
-    assert_ne!(agents.derived.borrow().key, first);
+    assert_eq!(agents.attention(caller.thread), Attention::Working);
+    assert_eq!(agents.derived.strip_offsets, first_offsets);
 }
 
 #[test]

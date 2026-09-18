@@ -771,10 +771,7 @@ impl WorkspaceScreen {
 pub(super) fn up_to_caller(app: &mut AppState) -> Option<ThreadId> {
     let child = app.active_agent_thread()?;
     let caller = app.agents.caller_of(child)?;
-    let worktree = app.agents.summary(caller)?.worktree.clone();
-    app.agents.attach(caller);
-    app.agents.activate(worktree, caller);
-    Some(caller)
+    app.select_agent_thread(caller).then_some(caller)
 }
 
 /// Asks fleetd for a plain shell tab in the session's worktree path.
@@ -791,6 +788,25 @@ pub(super) fn request_shell_tab(
         RequestBody::NewTerminal { session, .. } => session.clone(),
         _ => return,
     };
+    let capacity = state.read(cx).snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == originating_session)
+            .and_then(|session| match &session.kind {
+                SessionKind::Worktree(worktree) => {
+                    Some(state.read(cx).workspace_has_tab_capacity(worktree))
+                }
+                SessionKind::Agent { .. } => None,
+            })
+    });
+    if capacity == Some(false) {
+        state.update(cx, |app, cx| {
+            app.notify_workspace_tab_limit();
+            cx.notify();
+        });
+        return;
+    }
     let reply = bridge.request(request);
     let state = state.clone();
     let bridge = bridge.clone();

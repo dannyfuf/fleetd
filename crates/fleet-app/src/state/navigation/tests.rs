@@ -552,6 +552,31 @@ fn selecting_a_hidden_child_attaches_it_before_activation() {
 }
 
 #[test]
+fn selecting_a_hidden_child_respects_the_combined_nine_tab_limit() {
+    let (mut state, caller, child, _) = native_selection_state();
+    let terminals = session_with("widgets/capacity", &[1, 2, 3, 4, 5, 6, 7, 8]).terminals;
+    let snapshot = state.snapshot.as_mut().expect("snapshot");
+    snapshot.sessions[0].terminals = terminals;
+
+    assert_eq!(state.agents.of_worktree(&caller.worktree).len(), 1);
+    assert!(!state.select_agent_thread(child.thread));
+    assert!(!state.agents.is_attached(child.thread));
+    assert_eq!(
+        state
+            .toasts
+            .last()
+            .expect("capacity feedback")
+            .toast
+            .text
+            .as_ref(),
+        WORKSPACE_TAB_LIMIT_NOTICE,
+    );
+
+    assert!(state.select_agent_thread(caller.thread));
+    assert_eq!(state.active_agent_thread(), Some(caller.thread));
+}
+
+#[test]
 fn selecting_a_closed_caller_reopens_it() {
     let (mut state, caller, _, _) = native_selection_state();
     assert!(state.agents.close(caller.thread));

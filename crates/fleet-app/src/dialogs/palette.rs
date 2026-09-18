@@ -1,7 +1,9 @@
 //! §3.9 Command palette (`:`) — *jump to anything by name, or do the thing whose key I do not
 
+#[cfg(test)]
+use fleet_core::agents::Seq;
 use fleet_core::{
-    agents::{AgentThreadSummary, Attention, AttentionKind, Seq, ThreadId},
+    agents::{AgentThreadSummary, Attention, AttentionKind, ThreadId},
     ids::{CardId, ContextId, JobId, RepoId, SessionId, WorktreeId},
     sessions::{AgentActivity, SessionKind, SessionState},
 };
@@ -31,6 +33,7 @@ use crate::{
 pub const ROW_CAP: usize = 10;
 /// How many rows each section shows on an empty query (§3.9 "States").
 pub const IDLE_ROWS: usize = 5;
+const ATTENTION_MARK_SIZE: f32 = 16.0;
 
 /// The palette's draft.
 #[derive(Debug, Clone, Default)]
@@ -60,8 +63,9 @@ pub struct PaletteState {
 struct PreparedKey {
     /// `AppState::snapshot_revision`: sessions, worktrees, repos, jobs and contexts.
     snapshot: u64,
-    /// Native-thread summaries plus this installation's cached seen cursors.
-    agents: Vec<(ThreadId, Seq, Seq)>,
+    /// Native-thread summary and installation-local cursor generations.
+    agent_summaries: u64,
+    agent_seen: u64,
     /// The local tab-set choice is independent of the daemon snapshot.
     attached: u64,
     /// `BoardState::revision`: a card edit never lands through a snapshot.
@@ -95,15 +99,8 @@ impl PreparedKey {
     ) -> Self {
         Self {
             snapshot: state.snapshot_revision,
-            agents: state
-                .agents
-                .summaries()
-                .iter()
-                .map(|summary| {
-                    let seen = state.agents.seen(summary.thread);
-                    (summary.thread, summary.last_seq, seen)
-                })
-                .collect(),
+            agent_summaries: state.agents.summaries_revision(),
+            agent_seen: state.agents.seen_revision(),
             attached: state.agents.attached_revision(),
             board: state.board.revision,
             board_focus: state.board.focus,
@@ -1296,6 +1293,12 @@ pub(super) fn render(
 }
 
 fn attention_mark(index: usize, attention: Attention) -> AnyElement {
+    if !attention_has_visible_mark(attention) {
+        return div()
+            .w(px(ATTENTION_MARK_SIZE))
+            .h(px(ATTENTION_MARK_SIZE))
+            .into_any_element();
+    }
     match attention {
         Attention::Working | Attention::Waiting => Spinner::new(("palette-agent", index))
             .size(IconSize::Small)
@@ -1308,12 +1311,15 @@ fn attention_mark(index: usize, attention: Attention) -> AnyElement {
             .size(IconSize::Small)
             .tone(Tone::Danger)
             .into_any_element(),
-        Attention::Idle => Icon::CircleCheck
-            .el()
-            .size(IconSize::Small)
-            .tone(Tone::Muted)
+        Attention::Idle => div()
+            .w(px(ATTENTION_MARK_SIZE))
+            .h(px(ATTENTION_MARK_SIZE))
             .into_any_element(),
     }
+}
+
+const fn attention_has_visible_mark(attention: Attention) -> bool {
+    !matches!(attention, Attention::Idle)
 }
 
 fn visible_rows(rows: &[Entry], cursor: usize, windowed: bool) -> (&[Entry], usize) {
@@ -2005,6 +2011,26 @@ mod tests {
             rows.iter()
                 .all(|row| row.section == PaletteSectionKind::Agents)
         );
+    }
+
+    #[test]
+    fn idle_agent_attention_has_no_picker_glyph() {
+        assert!(!attention_has_visible_mark(Attention::Idle));
+        assert!(attention_has_visible_mark(Attention::Working));
+        assert!(attention_has_visible_mark(Attention::Failed));
+    }
+
+    #[test]
+    fn prepared_key_uses_scalar_agent_revisions() {
+        let (mut state, summaries) = agents_picker_state();
+        let first = PreparedKey::new(&state, String::new(), None, None);
+        let same = PreparedKey::new(&state, String::new(), None, None);
+        assert_eq!(first, same);
+
+        state.agents.mark_seen(summaries[0].thread, Seq(1));
+        let seen = PreparedKey::new(&state, String::new(), None, None);
+        assert_eq!(seen.agent_summaries, first.agent_summaries);
+        assert_ne!(seen.agent_seen, first.agent_seen);
     }
 
     #[test]

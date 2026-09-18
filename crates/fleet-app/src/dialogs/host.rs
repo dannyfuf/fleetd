@@ -240,12 +240,7 @@ pub(crate) fn open_agent_thread_worktree<T: SessionTransport>(
             match result {
                 Ok(Ok(ResponseBody::Session(session))) => state.update(cx, |app, cx| {
                     crate::presentation::enter_session(app, session.id);
-                    if app.agents.caller_of(thread).is_some() {
-                        app.agents.attach(thread);
-                    } else {
-                        app.agents.reopen(thread);
-                    }
-                    app.agents.activate(worktree, thread);
+                    app.select_agent_thread(thread);
                     cx.notify();
                 }),
                 Ok(Ok(_)) => report_session_failure(
