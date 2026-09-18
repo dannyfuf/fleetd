@@ -10,6 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
+    agents::{AgentKind, PermissionMode},
     ids::{HostId, LOCAL_HOST},
     model::{HostConfigEntry, Hosts},
     sleep::{KeepAliveRule, default_keep_alive_rules},
@@ -189,6 +190,49 @@ impl AgentBinaries {
     }
 }
 
+/// Defaults applied by the daemon when a new native thread omits its controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NativeAgentDefaults {
+    /// Default permission policy. New installations intentionally default to full access.
+    pub mode: PermissionMode,
+    /// Optional harness-native model identifier.
+    pub model: Option<String>,
+    /// Optional harness-native reasoning effort.
+    pub effort: Option<String>,
+}
+
+impl Default for NativeAgentDefaults {
+    fn default() -> Self {
+        Self {
+            mode: PermissionMode::FullAccess,
+            model: None,
+            effort: None,
+        }
+    }
+}
+
+/// Per-harness defaults for newly created native-agent threads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NativeAgentsConfig {
+    /// Claude Code defaults.
+    pub claude: NativeAgentDefaults,
+    /// Codex app-server defaults.
+    pub codex: NativeAgentDefaults,
+}
+
+impl NativeAgentsConfig {
+    /// Returns defaults for one harness.
+    #[must_use]
+    pub const fn for_kind(&self, kind: AgentKind) -> &NativeAgentDefaults {
+        match kind {
+            AgentKind::Claude => &self.claude,
+            AgentKind::Codex => &self.codex,
+        }
+    }
+}
+
 fn default_claude_binary() -> String {
     "claude".to_owned()
 }
@@ -354,6 +398,9 @@ pub struct Config {
     /// Executables the daemon runs directly for native agent threads.
     #[serde(default)]
     pub agent_binaries: AgentBinaries,
+    /// Per-harness defaults for newly created native-agent threads.
+    #[serde(default)]
+    pub native_agents: NativeAgentsConfig,
     /// Ordered terminal layout.
     pub windows: Vec<WindowConfig>,
     /// Terminal sleep policy.
@@ -407,6 +454,7 @@ pub fn default_config(home: impl AsRef<Path>) -> Config {
             opencode: "opencode".to_owned(),
         },
         agent_binaries: AgentBinaries::default(),
+        native_agents: NativeAgentsConfig::default(),
         windows: vec![
             WindowConfig {
                 name: "nvim".to_owned(),
@@ -538,6 +586,30 @@ impl Config {
 
 /// Validates cross-field and non-empty constraints in a complete configuration.
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
+    for kind in [AgentKind::Claude, AgentKind::Codex] {
+        let defaults = config.native_agents.for_kind(kind);
+        if !kind.supported_modes().contains(&defaults.mode) {
+            return Err(ConfigError::Validation(format!(
+                "nativeAgents.{}.mode is not supported by {}",
+                kind.executable(),
+                kind.display_name()
+            )));
+        }
+        if defaults
+            .model
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+            || defaults
+                .effort
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "nativeAgents.{} model and effort must be non-empty when present",
+                kind.executable()
+            )));
+        }
+    }
     if config.terminal.scrollback_bytes == 0
         || !(1..=50).contains(&config.terminal.scroll_lines_per_step)
     {
@@ -725,6 +797,10 @@ mod tests {
             "agent": "claude",
             "agentCommands": {"claude": "claude", "codex": "codex", "opencode": "opencode"},
             "agentBinaries": {"claude": "claude", "codex": "codex"},
+            "nativeAgents": {
+                "claude": {"mode":"full_access","model":null,"effort":null},
+                "codex": {"mode":"full_access","model":null,"effort":null}
+            },
             "windows": [
                 {"name": "nvim", "command": "nvim ."},
                 {"name": "cc", "command": "{agent}"},
@@ -919,6 +995,28 @@ mod tests {
         let decoded: Config =
             serde_json::from_value(json).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded.agent_binaries, config.agent_binaries);
+    }
+
+    #[test]
+    fn native_agent_defaults_are_yolo_when_the_section_is_absent() {
+        let config = merge_config("/tmp/fleet", json!({}))
+            .unwrap_or_else(|error| panic!("default config should load: {error}"));
+        for defaults in [&config.native_agents.claude, &config.native_agents.codex] {
+            assert_eq!(defaults.mode, PermissionMode::FullAccess);
+            assert!(defaults.model.is_none());
+            assert!(defaults.effort.is_none());
+        }
+    }
+
+    #[test]
+    fn native_agent_defaults_reject_modes_the_harness_does_not_support() {
+        let error = merge_config(
+            "/tmp/fleet",
+            json!({"nativeAgents": {"codex": {"mode": "auto"}}}),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("Codex must reject Claude's auto mode"));
+        assert!(error.to_string().contains("nativeAgents.codex.mode"));
     }
 
     #[test]

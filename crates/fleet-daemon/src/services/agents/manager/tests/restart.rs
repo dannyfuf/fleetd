@@ -8,6 +8,55 @@
 use super::*;
 
 #[tokio::test]
+async fn codex_resume_rebuilds_turn_controls_from_the_persisted_mode() {
+    let harness = Harness::start(full()).await;
+    let ResponseBody::AgentThreadCreated(summary) = harness
+        .manager
+        .create(
+            harness.worktree.clone(),
+            AgentKind::Codex,
+            None,
+            Some(PermissionMode::FullAccess),
+            Some("codex-thread-1".to_owned()),
+            None,
+        )
+        .await
+        .expect("create Codex thread")
+    else {
+        panic!("create returned the wrong response")
+    };
+    let turn = TurnId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn,
+            user_item: ItemId::new(),
+        })
+        .await;
+    harness
+        .settle(summary.thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(turn)
+        })
+        .await;
+
+    let restarted = harness.restart().await;
+    restarted
+        .open(&open_body(summary.thread))
+        .await
+        .expect("resume Codex thread");
+    let request = harness
+        .script
+        .start_requests()
+        .into_iter()
+        .last()
+        .expect("the resumed provider was started");
+    assert_eq!(request.provider, AgentKind::Codex);
+    assert_eq!(request.mode, PermissionMode::FullAccess);
+    assert_eq!(request.sandbox, SandboxPolicy::DangerFullAccess);
+    assert_eq!(request.approval_policy, ApprovalPolicy::Never);
+}
+
+#[tokio::test]
 async fn restart_recovery_never_advances_memory_past_a_log_it_could_not_write() {
     // The database path's parent is a *file*, so the store cannot be opened and every append
     // fails. §6 makes the log what the reducer wrote before the event became visible: a

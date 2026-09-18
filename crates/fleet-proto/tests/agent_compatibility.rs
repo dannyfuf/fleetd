@@ -6,7 +6,7 @@
 //! three things the round trips cannot:
 //!
 //! 1. **Every request, response, and event in the family**, so the windowed open cannot silently
-//!    change the shape a version-7 peer receives.
+//!    change the shape introduced by version 7.
 //! 2. **One `SeqEvent` golden per [`AgentEvent`] variant.** That set protects the *persisted log*,
 //!    not just the wire: `agent_events.payload` is this exact serialization, so a rename here is a
 //!    transcript that no longer decodes on the next daemon start.
@@ -82,6 +82,24 @@ fn agent_request_wire_goldens() {
     for (request, golden) in request_goldens() {
         assert_frame(request, golden);
     }
+}
+
+#[test]
+fn agent_thread_create_omits_mode_for_daemon_defaults() {
+    assert_frame(
+        Request {
+            id: 30,
+            body: RequestBody::AgentThreadCreate {
+                worktree: worktree(),
+                provider: AgentKind::Claude,
+                model: None,
+                mode: None,
+                resume_cursor: None,
+                title: None,
+            },
+        },
+        r#"{"id":30,"body":{"type":"agent_thread_create","worktree":"acme/api#native-agents","provider":"claude","model":null,"resume_cursor":null,"title":null}}"#,
+    );
 }
 
 #[test]
@@ -347,7 +365,7 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                     worktree: worktree(),
                     provider: AgentKind::Codex,
                     model: Some(model()),
-                    mode: PermissionMode::Ask,
+                    mode: Some(PermissionMode::Ask),
                     resume_cursor: Some("thread-1".to_owned()),
                     title: Some("native agents".to_owned()),
                 },

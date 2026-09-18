@@ -239,21 +239,16 @@ impl AgentThreadView {
         let model_changed = model
             .as_ref()
             .is_some_and(|model| self.projection.model.as_ref() != Some(model));
-        let mode_changed = wire_mode != self.projection.mode
-            && !matches!(
-                (self.projection.mode, wire_mode),
-                (PermissionMode::Plan, _) | (_, PermissionMode::Plan)
-            );
+        let mode_changed = wire_mode != self.projection.mode;
+        let controls_ride_the_turn = self.projection.provider == AgentKind::Codex;
         let restart = restart_with_resume(RestartInputs {
             mode_changed,
             cwd_changed: false,
             instance_changed: false,
             model_changed,
-            // Nothing has probed the harness yet, so the conservative answer is the truthful
-            // one: a control Fleet cannot prove is live is treated as a restart.
-            can_switch_model: false,
-            controls_ride_the_turn: self.projection.provider
-                == fleet_core::agents::AgentKind::Codex,
+            // Codex declares both controls in place; Claude's are launch flags.
+            can_switch_model: controls_ride_the_turn,
+            controls_ride_the_turn,
         });
         if model_changed || mode_changed {
             // One structured line with every input to the decision. The first time a user
@@ -280,7 +275,7 @@ impl AgentThreadView {
             );
         }
         if wire_mode != self.projection.mode {
-            if mode_changed {
+            if restart {
                 self.publish_starting(cx);
             }
             self.dispatch(
@@ -491,10 +486,11 @@ impl AgentThreadView {
                 .collect(),
             PickerKind::Models => self.model_candidates(),
             PickerKind::Traits => self.trait_candidates(),
-            PickerKind::Access => ACCESS_LADDER
+            PickerKind::Access => self
+                .modes
                 .iter()
-                .filter(|(mode, _)| *mode != self.controls.access(self.projection.mode))
-                .map(|(_, label)| PickerCandidate::plain((*label).to_owned()))
+                .filter(|mode| **mode != self.controls.wire_mode(self.projection.mode))
+                .map(|mode| PickerCandidate::plain(mode_label(*mode).to_owned()))
                 .collect(),
         }
     }
@@ -674,11 +670,21 @@ impl AgentThreadView {
     }
 
     /// Records the access ladder, which takes effect at the next send.
-    fn pick_access(&mut self, label: &str, cx: &mut Context<Self>) {
-        let Some((mode, _)) = ACCESS_LADDER.iter().find(|(_, name)| *name == label) else {
+    pub(crate) fn pick_access(&mut self, label: &str, cx: &mut Context<Self>) {
+        let Some(mode) = self
+            .modes
+            .iter()
+            .copied()
+            .find(|mode| mode_label(*mode) == label)
+        else {
             return;
         };
-        self.controls.set_access(*mode);
+        if mode == PermissionMode::Plan {
+            self.controls.set_interaction(InteractionMode::Plan);
+        } else {
+            self.controls.set_interaction(InteractionMode::Build);
+            self.controls.set_access(mode);
+        }
         self.prepare(cx);
         cx.notify();
     }
@@ -993,19 +999,3 @@ impl AgentThreadView {
         self.transcript.update(cx, TranscriptList::scroll_to_end);
     }
 }
-
-/// The access ladder `^s t` offers, which is a presentation over the harness's own axes.
-///
-/// Plan mode is deliberately absent: it is the **other** axis, toggled with `⇧⇥`, and offering
-/// it here would let one picker silently change two things.
-pub(crate) const ACCESS_LADDER: &[(PermissionMode, &str)] = &[
-    (PermissionMode::Ask, mode_label(PermissionMode::Ask)),
-    (
-        PermissionMode::AcceptEdits,
-        mode_label(PermissionMode::AcceptEdits),
-    ),
-    (
-        PermissionMode::FullAccess,
-        mode_label(PermissionMode::FullAccess),
-    ),
-];

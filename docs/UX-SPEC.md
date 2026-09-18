@@ -832,8 +832,9 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 **Copy is fixed.** `allow once` · `allow for this session` — the effective scope is always spelled
 out and the word "always" is never used on a command or a file change, on either harness. The
 permission mode reads `asks before edits` · `accepts edits` · `plans before editing` ·
-`full access`, and Build ⇄ Plan is a **separate axis** shown as its own `build` / `plan` segment:
-leaving plan mode restores the base access ladder rather than a hardcoded default.
+`auto-approves safe actions` · `denies unlisted tools` · `full access`; each picker shows only
+the modes in that session's `capabilities.modes`, in declared order. Build ⇄ Plan uses the same
+Plan value as the picker rather than creating a second planning concept.
 
 **Color is semantic** (§1.4 unchanged): green = alive, amber = needs you or cannot verify, red =
 broken, gray = everything else *including progress*, blue = where you are and never a state.
@@ -1301,7 +1302,7 @@ Each section shows a faint trailing `edit in config.json` **once**, not per row.
 
 | Section | Rows |
 | --- | --- |
-| **General** | `Agent ◂ claude ▸` · `Claude command [claude]` · `Codex command [codex]` · `Claude binary [claude]` · `Codex binary [codex]`. The two *command* rows are the shell lines a terminal pane types; the two *binary* rows are what the daemon runs for a native thread, with no shell — each carries that as its sub-label |
+| **General** | `Agent ◂ claude ▸` · `Claude command [claude]` · `Codex command [codex]` · `Claude binary [claude]` · `Codex binary [codex]` · per-harness `Default access`, `Default model`, and `Default effort`. Access cycles only that harness's supported modes; model/effort are optional text, effort applies with a configured model, and blank means harness default. The two *command* rows are the shell lines a terminal pane types; the two *binary* rows are what the daemon runs for a native thread, with no shell — each carries that as its sub-label. Both native access defaults start at `full access`; new-thread requests omit mode/model and the daemon resolves them. |
 | **Sleep** | `Sleep on switch [x]` · `Grace ms [2000]` (editable, clamped ≥ 0) · rule list, each `[x] <label>  <kind>  <pattern>` **plus a live match count** `claude — matching 2 processes now` · invalid regex → red `invalid pattern — rule is skipped` |
 | **Jobs & warnings** | `Warn before quitting with running jobs [x]` · `Keep finished jobs for ◂ 10 min ▸` · `Trash retention ◂ 10 min ▸` |
 | **Pool** | `Hot pool size ◂ 1 ▸` · `Freshness ms [60000]` · `Refresh interval ms [300000]` · read-only `prepared copies: 1/1 ready` |

@@ -7,7 +7,7 @@
 //!   alone, a tool needing approval produces **no** `control_request` — it produces
 //!   `{"type":"system","subtype":"permission_denied",…}` and the tool is silently refused. Fleet
 //!   would show no card and the user an inexplicable denial.
-//! - **`--effort` is real in 2.1.266** and is **not** echoed on `system/init`, so Fleet must
+//! - **`--effort` is real in 2.1.275** and is **not** echoed on `system/init`, so Fleet must
 //!   remember what it launched with.
 //! - **`system/init.permissionMode` is advisory**: `manual` comes back as `"default"`.
 //!
@@ -36,7 +36,7 @@ pub struct Launch<'a> {
 
 /// The `--permission-mode` value for a Fleet mode.
 ///
-/// 2.1.266 accepts six values (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`,
+/// 2.1.275 accepts six values (`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`,
 /// `plan`). `Ask` is `manual`: "ask before everything" is exactly what that value means, and the
 /// value the ground-truth capture was taken with.
 #[must_use]
@@ -45,6 +45,8 @@ pub const fn permission_mode_to_wire(mode: PermissionMode) -> &'static str {
         PermissionMode::Ask => "manual",
         PermissionMode::AcceptEdits => "acceptEdits",
         PermissionMode::Plan => "plan",
+        PermissionMode::Auto => "auto",
+        PermissionMode::DontAsk => "dontAsk",
         PermissionMode::FullAccess => "bypassPermissions",
     }
 }
@@ -58,7 +60,9 @@ pub fn permission_mode_from_wire(mode: &str) -> PermissionMode {
     match mode {
         "acceptEdits" => PermissionMode::AcceptEdits,
         "plan" => PermissionMode::Plan,
-        "bypassPermissions" | "dontAsk" => PermissionMode::FullAccess,
+        "auto" => PermissionMode::Auto,
+        "dontAsk" => PermissionMode::DontAsk,
+        "bypassPermissions" => PermissionMode::FullAccess,
         _ => PermissionMode::Ask,
     }
 }
@@ -257,7 +261,7 @@ mod tests {
 
     #[test]
     fn every_mode_maps_to_a_value_the_cli_accepts() {
-        // The six values 2.1.266 accepts; `default` is not one of them.
+        // The six values 2.1.275 accepts; `default` is not one of them.
         let accepted = [
             "acceptEdits",
             "auto",
@@ -270,10 +274,32 @@ mod tests {
             PermissionMode::Ask,
             PermissionMode::AcceptEdits,
             PermissionMode::Plan,
+            PermissionMode::Auto,
+            PermissionMode::DontAsk,
             PermissionMode::FullAccess,
         ] {
             let wire = permission_mode_to_wire(mode);
-            assert!(accepted.contains(&wire), "{wire} is not a 2.1.266 mode");
+            assert!(accepted.contains(&wire), "{wire} is not a 2.1.275 mode");
         }
+    }
+
+    #[test]
+    fn full_access_uses_the_verified_non_redundant_flag() {
+        let mut request = start();
+        request.mode = PermissionMode::FullAccess;
+        let args = built(&request, None, "");
+        let mode = args
+            .iter()
+            .position(|arg| arg == "--permission-mode")
+            .unwrap_or_else(|| panic!("missing permission mode"));
+        assert_eq!(
+            args.get(mode + 1).map(String::as_str),
+            Some("bypassPermissions")
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
     }
 }

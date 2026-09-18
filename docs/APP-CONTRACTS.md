@@ -8,7 +8,7 @@ each other**: what the shell owns, what a screen owns, and what crosses between 
 These seams are stable on purpose: changing a signature here changes every screen, so change it
 deliberately and update this document in the same pass.
 
-The daemon wire protocol is version 7. Hello includes a defaultable `HelloClient` (`app`, `cli`,
+The daemon wire protocol is version 8. Hello includes a defaultable `HelloClient` (`app`, `cli`,
 or `proxy`, plus an optional forwarding host id); its response envelope includes a stable daemon
 id, optional build commit, and capabilities including `remote-machines`. Host snapshots include
 provider, remote version, link state, resolved address, and optional agent-binary availability.
@@ -371,7 +371,7 @@ keeps the ordinary global notification path.
 
 ### IPC and CLI compatibility
 
-Daemon IPC is version **7**. Rust field names are shown below; serde renders them as camelCase on
+Daemon IPC is version **8**. Rust field names are shown below; serde renders them as camelCase on
 the wire. The mandatory first request is `Hello { protocol, client: HelloClient }`, where
 `client.kind` is `app`, `cli`, or `proxy`, `client.host_id` optionally identifies the forwarding
 daemon, and `client.client_id` is the optional stable per-install UUID stored at

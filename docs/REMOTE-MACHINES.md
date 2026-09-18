@@ -65,9 +65,9 @@ every remote argv executes locally as `run ++ argv`. Legacy is probe-only. Prese
 entries must be nonempty. `defaultHost` is `local` or a configured id; `Config::default_host()`
 returns `None` for local and the configured `HostId` otherwise.
 
-## 3. Protocol v7
+## 3. Protocol v8
 
-`PROTOCOL_VERSION` is 7. `Hello { protocol, client: HelloClient }` defaults the client to
+`PROTOCOL_VERSION` is 8. `Hello { protocol, client: HelloClient }` defaults the client to
 `ClientKind::App`; kinds are `App | Cli | Proxy`, with optional `host_id` and a defaulted
 `capabilities: Vec<String>` — the peer's own, by the same names the daemon advertises. A proxy
 names them too, because it decodes the owner's events before forwarding them. `HelloResponse` retains
@@ -76,6 +76,11 @@ the correlated response and capabilities and adds `daemon_id: String` (persisted
 `daemon-id.invalid` and a fresh identity is minted, with both ids logged, rather than aborting
 startup) plus `build_commit: Option<String>`. Capability `remote-machines` marks
 federation support.
+
+Version 8 is a lockstep boundary for native-agent default controls. Version 7 required
+`AgentThreadCreate.mode` and knew only four permission values; version 8 permits omission so the
+daemon can resolve per-harness defaults and adds Claude's `auto` and `dont_ask`. The exact Hello
+check rejects either mixed-version direction before an incompatible request is routed.
 
 Capabilities advertised by this build are `prune.reviewed_ids`, `remote-machines`, and the six of
 `fleet_proto::AGENT_CAPABILITIES` — `agent.window`, `agent.sync_marker`, `agent.resync`,

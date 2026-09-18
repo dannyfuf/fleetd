@@ -18,7 +18,7 @@ use crate::{
     views::workspace_tabs::TabTarget,
 };
 use fleet_core::{
-    agents::{AgentKind, AgentThreadSummary, Applied, PermissionMode, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, Applied, ThreadId},
     ids::WorktreeId,
 };
 
@@ -172,7 +172,7 @@ fn create_thread(
         worktree,
         provider,
         model: None,
-        mode: PermissionMode::Ask,
+        mode: None,
         resume_cursor: None,
         title: None,
     });
@@ -316,10 +316,12 @@ impl WorkspaceScreen {
             let applied = app.agents.last_applied(thread).unwrap_or(&structural);
             let commands = app.agents.commands(thread);
             let skills = app.agents.skills(thread);
+            let modes = app.agents.modes(thread);
             if let Some(projection) = app.agents.projection(thread) {
                 view.update(cx, |view, cx| {
                     view.set_commands(commands);
                     view.set_skills(skills);
+                    view.set_modes(modes);
                     view.sync(projection, applied, cx);
                 });
             }

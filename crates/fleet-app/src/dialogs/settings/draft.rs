@@ -175,8 +175,26 @@ pub fn cycle(config: &mut Config, id: &RowId, delta: isize) {
                 .copied()
                 .unwrap_or(config.hot_pool_size);
         }
+        RowId::ClaudeDefaultMode => cycle_mode(config, AgentKind::Claude, delta),
+        RowId::CodexDefaultMode => cycle_mode(config, AgentKind::Codex, delta),
         _ => {}
     }
+}
+
+fn cycle_mode(config: &mut Config, kind: AgentKind, delta: isize) {
+    let modes = kind.supported_modes();
+    let defaults = match kind {
+        AgentKind::Claude => &mut config.native_agents.claude,
+        AgentKind::Codex => &mut config.native_agents.codex,
+    };
+    let index = modes
+        .iter()
+        .position(|mode| *mode == defaults.mode)
+        .unwrap_or(0);
+    defaults.mode = modes
+        .get(step(index, delta, modes.len()))
+        .copied()
+        .unwrap_or(defaults.mode);
 }
 
 pub(super) fn stepped_duration(current: u64, delta: isize) -> u64 {
@@ -198,6 +216,10 @@ pub fn commit_value(config: &mut Config, id: &RowId, raw: &str) -> bool {
         RowId::CodexCommand => config.agent_commands.codex = raw.to_owned(),
         RowId::ClaudeBinary => config.agent_binaries.claude = raw.to_owned(),
         RowId::CodexBinary => config.agent_binaries.codex = raw.to_owned(),
+        RowId::ClaudeDefaultModel => config.native_agents.claude.model = optional(raw),
+        RowId::ClaudeDefaultEffort => config.native_agents.claude.effort = optional(raw),
+        RowId::CodexDefaultModel => config.native_agents.codex.model = optional(raw),
+        RowId::CodexDefaultEffort => config.native_agents.codex.effort = optional(raw),
         RowId::GraceMs => {
             let Some(value) = number(0) else { return false };
             config.sleep.grace_ms = value;
@@ -239,6 +261,11 @@ pub fn commit_value(config: &mut Config, id: &RowId, raw: &str) -> bool {
     true
 }
 
+fn optional(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 /// The row the cursor is on, if any.
 pub(super) fn focused_row(state: &Entity<AppState>, cx: &mut App) -> Option<FocusedSetting> {
     read_host(state, cx, |host, _| host.settings.focused_row())
@@ -273,6 +300,12 @@ impl SettingsState {
                 CodexCommand,
                 ClaudeBinary,
                 CodexBinary,
+                ClaudeDefaultMode,
+                ClaudeDefaultModel,
+                ClaudeDefaultEffort,
+                CodexDefaultMode,
+                CodexDefaultModel,
+                CodexDefaultEffort,
             ],
             Section::Sleep => {
                 return match self.row {
@@ -309,6 +342,33 @@ impl SettingsState {
             RowId::CodexCommand => RowKind::Text(config.agent_commands.codex.clone()),
             RowId::ClaudeBinary => RowKind::Text(config.agent_binaries.claude.clone()),
             RowId::CodexBinary => RowKind::Text(config.agent_binaries.codex.clone()),
+            RowId::ClaudeDefaultModel => RowKind::Text(
+                config
+                    .native_agents
+                    .claude
+                    .model
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            RowId::ClaudeDefaultEffort => RowKind::Text(
+                config
+                    .native_agents
+                    .claude
+                    .effort
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            RowId::CodexDefaultModel => {
+                RowKind::Text(config.native_agents.codex.model.clone().unwrap_or_default())
+            }
+            RowId::CodexDefaultEffort => RowKind::Text(
+                config
+                    .native_agents
+                    .codex
+                    .effort
+                    .clone()
+                    .unwrap_or_default(),
+            ),
             RowId::GraceMs => number(config.sleep.grace_ms, 0),
             RowId::HotFreshnessMs => number(
                 i64::try_from(config.hot_freshness_ms).unwrap_or(i64::MAX),
@@ -323,6 +383,12 @@ impl SettingsState {
             RowId::StatusRefreshMs => number(config.ui.status_refresh_ms, 500),
             RowId::RemoteStatusRefreshMs => number(config.ui.remote_status_refresh_ms, 500),
             RowId::Agent => choice(agent_name(config.agent), AGENTS, agent_name(config.agent)),
+            RowId::ClaudeDefaultMode => {
+                mode_choice(AgentKind::Claude, config.native_agents.claude.mode)
+            }
+            RowId::CodexDefaultMode => {
+                mode_choice(AgentKind::Codex, config.native_agents.codex.mode)
+            }
             RowId::CloneProtocol => choice(
                 protocol_name(config.github.clone_protocol),
                 PROTOCOLS,
@@ -340,6 +406,16 @@ impl SettingsState {
         };
         Some(FocusedSetting { id, kind })
     }
+}
+
+fn mode_choice(kind: AgentKind, mode: PermissionMode) -> RowKind {
+    let labels = kind
+        .supported_modes()
+        .iter()
+        .map(|mode| crate::screens::agent_thread::presentation::mode_label(*mode))
+        .collect::<Vec<_>>();
+    let current = crate::screens::agent_thread::presentation::mode_label(mode);
+    choice(current, &labels, current)
 }
 
 /// `j` / `k` move the cursor — unless a text input has it, where they type (§3.8.6).

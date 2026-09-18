@@ -148,7 +148,7 @@ pub(crate) fn submit_gate(
     Ok(())
 }
 
-/// Build ⇄ Plan, which is a **different axis** from the access mode (§7.1).
+/// Build ⇄ Plan interaction state, projected onto the same wire mode as the picker (§7.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum InteractionMode {
     /// The harness executes.
@@ -173,7 +173,7 @@ pub(crate) struct ControlDraft {
     /// True only when a human picked the model in the composer. A seeded selection may be
     /// replaced by a later seed; a human's pick never is.
     explicit: bool,
-    /// The access ladder, which is **not** plan mode.
+    /// The non-plan access mode restored when interaction returns to Build.
     access: Option<PermissionMode>,
     /// Build ⇄ Plan.
     interaction: Option<InteractionMode>,
@@ -249,7 +249,7 @@ impl ControlDraft {
 
     /// The one mode the wire carries, composed from the two axes Fleet keeps apart.
     ///
-    /// `PermissionMode` is a four-value ladder with `Plan` inside it, so the *presentation* keeps
+    /// `PermissionMode` includes `Plan`, so the *presentation* keeps
     /// access and interaction orthogonal and collapses them exactly here — which is also what
     /// makes leaving plan mode restore the **base** access ladder rather than a hardcoded
     /// default (§6.4).
@@ -287,7 +287,7 @@ pub(crate) struct RestartInputs {
 /// Whether the next send has to restart the harness with its resume cursor.
 #[must_use]
 pub(crate) const fn restart_with_resume(inputs: RestartInputs) -> bool {
-    inputs.mode_changed
+    (inputs.mode_changed && !inputs.controls_ride_the_turn)
         || inputs.cwd_changed
         || inputs.instance_changed
         || (inputs.model_changed && !inputs.can_switch_model)

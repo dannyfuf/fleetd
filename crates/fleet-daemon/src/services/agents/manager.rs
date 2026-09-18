@@ -30,10 +30,10 @@ use chrono::Utc;
 use fleet_core::{
     agents::{
         AgentEvent, AgentKind, AgentThreadSummary, ApprovalPolicy, CheckpointKind, GateResolver,
-        HarnessCapabilities, ItemId, ItemStatus, SandboxPolicy, SessionState, StartRequest,
-        ThreadId, TurnId, TurnState, UserInput,
+        HarnessCapabilities, ItemId, ItemStatus, PermissionMode, SandboxPolicy, SessionState,
+        StartRequest, ThreadId, TurnId, TurnState, UserInput,
     },
-    config::AgentBinaries,
+    config::{AgentBinaries, NativeAgentDefaults, NativeAgentsConfig},
     ids::{HostId, WorktreeId},
 };
 use fleet_proto::{
@@ -62,6 +62,9 @@ use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
 /// remote link is the source of a stall, which is precisely the question a latency budget asks.
 /// Well above the 16 ms merge tick so a normal turn logs nothing.
 const EMISSION_SKEW_FLOOR: Duration = Duration::from_millis(250);
+
+/// User-facing explanation attached to a thread whose configured defaults could not be read.
+const CONFIG_FALLBACK_NOTICE: &str = "Fleet could not read native-agent settings; this thread started in ask mode with no configured model or effort.";
 
 type ProviderFactory = dyn Fn(AgentKind, &StartRequest, &AgentBinaries) -> anyhow::Result<Box<dyn AgentProvider>>
     + Send
@@ -236,14 +239,32 @@ impl AgentSessionManager {
     /// executables are what the user would have gotten anyway, and the launch failure the
     /// adapter reports next is more actionable than a config error here.
     async fn agent_binaries(&self) -> AgentBinaries {
+        self.native_agent_settings().await.0
+    }
+
+    /// Configured executables and per-harness defaults, loaded from one effective snapshot.
+    async fn native_agent_settings(
+        &self,
+    ) -> (AgentBinaries, NativeAgentsConfig, Option<&'static str>) {
         let Some(config) = self.inner.config.as_ref() else {
-            return AgentBinaries::default();
+            return (
+                AgentBinaries::default(),
+                NativeAgentsConfig::default(),
+                None,
+            );
         };
         match config.load().await {
-            Ok(config) => config.agent_binaries,
+            Ok(config) => (config.agent_binaries, config.native_agents, None),
             Err(error) => {
-                tracing::warn!(%error, "could not read agent binaries; using defaults");
-                AgentBinaries::default()
+                tracing::warn!(
+                    %error,
+                    "could not read native-agent settings; using safe permission defaults and default executables"
+                );
+                (
+                    AgentBinaries::default(),
+                    fail_closed_native_agents(),
+                    Some(CONFIG_FALLBACK_NOTICE),
+                )
             }
         }
     }
@@ -385,8 +406,8 @@ impl AgentSessionManager {
             resume_cursor: cursor,
             fork: false,
             env: BTreeMap::new(),
-            sandbox: SandboxPolicy::default(),
-            approval_policy: ApprovalPolicy::default(),
+            sandbox: controls_for_mode(record.mode).0,
+            approval_policy: controls_for_mode(record.mode).1,
             permission_profile: None,
             title: Some(record.title),
         };
@@ -693,6 +714,34 @@ impl AgentSessionManager {
         apply_event(&self.inner, runtime, operation, event, raw)
             .await
             .map_err(apply_error)
+    }
+}
+
+/// Safe controls for a new thread when the configured defaults cannot be trusted.
+fn fail_closed_native_agents() -> NativeAgentsConfig {
+    let defaults = NativeAgentDefaults {
+        mode: PermissionMode::Ask,
+        model: None,
+        effort: None,
+    };
+    NativeAgentsConfig {
+        claude: defaults.clone(),
+        codex: defaults,
+    }
+}
+
+fn controls_for_mode(mode: fleet_core::agents::PermissionMode) -> (SandboxPolicy, ApprovalPolicy) {
+    use fleet_core::agents::PermissionMode;
+
+    match mode {
+        PermissionMode::Ask | PermissionMode::Plan => {
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::Untrusted)
+        }
+        PermissionMode::AcceptEdits => (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+        PermissionMode::FullAccess => (SandboxPolicy::DangerFullAccess, ApprovalPolicy::Never),
+        PermissionMode::Auto | PermissionMode::DontAsk => {
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::Untrusted)
+        }
     }
 }
 

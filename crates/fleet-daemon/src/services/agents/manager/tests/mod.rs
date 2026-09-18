@@ -63,6 +63,7 @@ enum FakeCall {
 /// Shared control surface for every provider the factory hands to the manager.
 struct FakeScript {
     calls: StdMutex<Vec<FakeCall>>,
+    start_requests: StdMutex<Vec<StartRequest>>,
     senders: StdMutex<Vec<ProviderSink>>,
     capabilities: HarnessCapabilities,
     unavailable: AtomicBool,
@@ -75,6 +76,8 @@ struct FakeScript {
     active_turn: StdMutex<Option<TurnId>>,
     /// Makes every control change cost a restart, as Claude's launch flags do.
     restarts_on_control: AtomicBool,
+    /// Makes replacement startup fail after the old provider generation has been retired.
+    restart_fails: AtomicBool,
     /// The cursor every started provider reports, as the real adapters do at `start`.
     cursor: StdMutex<Option<String>>,
 }
@@ -83,12 +86,14 @@ impl FakeScript {
     fn new(capabilities: HarnessCapabilities) -> Arc<Self> {
         Arc::new(Self {
             calls: StdMutex::new(Vec::new()),
+            start_requests: StdMutex::new(Vec::new()),
             senders: StdMutex::new(Vec::new()),
             capabilities,
             unavailable: AtomicBool::new(false),
             stop_fails: AtomicBool::new(false),
             active_turn: StdMutex::new(None),
             restarts_on_control: AtomicBool::new(false),
+            restart_fails: AtomicBool::new(false),
             cursor: StdMutex::new(None),
         })
     }
@@ -112,6 +117,13 @@ impl FakeScript {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    fn start_requests(&self) -> Vec<StartRequest> {
+        self.start_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The turn the scripted harness is running, if any.
@@ -173,6 +185,11 @@ impl AgentProvider for FakeProvider {
     }
 
     async fn start(&mut self, req: StartRequest) -> ProviderResult<()> {
+        self.script
+            .start_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(req.clone());
         self.script
             .record(FakeCall::Start(req.thread, req.resume_cursor));
         Ok(())
@@ -241,6 +258,11 @@ impl AgentProvider for FakeProvider {
 
     async fn restart(&mut self, plan: &RestartPlan, _change: &RuntimeChange) -> ProviderResult<()> {
         self.script.record(FakeCall::Restart(plan.resume));
+        if self.script.restart_fails.load(Ordering::SeqCst) {
+            return Err(ProviderError::Unavailable {
+                reason: "the replacement provider failed to open".to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -289,6 +311,7 @@ struct Harness {
     events: BroadcastBus,
     worktrees: Worktrees,
     worktree: WorktreeId,
+    config: Arc<ConfigStore>,
     script: Arc<FakeScript>,
 }
 
@@ -370,7 +393,7 @@ impl Harness {
             FleetHome::new(&home).agents_db_path(),
             events.clone(),
             worktrees.clone(),
-            None,
+            Some(Arc::clone(&config)),
             factory(&script),
         );
         Self {
@@ -380,6 +403,7 @@ impl Harness {
             events,
             worktrees,
             worktree,
+            config,
             script,
         }
     }
@@ -395,7 +419,7 @@ impl Harness {
             FleetHome::new(&self.home).agents_db_path(),
             self.events.clone(),
             self.worktrees.clone(),
-            None,
+            Some(Arc::clone(&self.config)),
             factory(&self.script),
         );
         manager.clone().repair().await;
@@ -409,7 +433,7 @@ impl Harness {
                 self.worktree.clone(),
                 AgentKind::Claude,
                 None,
-                PermissionMode::Ask,
+                Some(PermissionMode::Ask),
                 resume_cursor,
                 None,
             )
@@ -535,6 +559,7 @@ fn full() -> HarnessCapabilities {
         },
         mode_switch: ControlCost::InPlace,
         model_switch: ControlCost::InPlace,
+        modes: AgentKind::Claude.supported_modes().to_vec(),
         ..HarnessCapabilities::default()
     }
 }

@@ -159,6 +159,7 @@ impl MockPeer {
              while IFS= read -r line; do\n\
              \x20 printf '%s\\n' \"$line\" >> \"$DIR/record.ndjson\"\n\
              \x20 id=$(printf '%s' \"$line\" | sed -n 's/^{{\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+             \x20 if [ -z \"$id\" ]; then id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p'); fi\n\
              \x20 method=$(printf '%s' \"$line\" | sed -n 's/.*\"method\":\"\\([^\"]*\\)\".*/\\1/p')\n\
              \x20 subtype=$(printf '%s' \"$line\" | sed -n 's/.*\"subtype\":\"\\([^\"]*\\)\".*/\\1/p')\n\
              \x20 case \"$method$subtype\" in\n\

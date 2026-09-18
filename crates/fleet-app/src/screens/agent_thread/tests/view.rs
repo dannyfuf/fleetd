@@ -82,6 +82,124 @@ fn codex_effort_picker_uses_discovered_descriptions_and_empty_catalogues_draw_no
 }
 
 #[gpui::test]
+fn claude_effort_picker_uses_the_discovered_catalogue(cx: &mut TestAppContext) {
+    let mut claude = projection();
+    claude.provider = AgentKind::Claude;
+    claude.model = Some(ModelSelection {
+        model: "fable[1m]".to_owned(),
+        effort: Some("high".to_owned()),
+        provider: None,
+    });
+    claude.models = vec![ModelDescriptor {
+        id: "fable[1m]".to_owned(),
+        display_name: "Fable".to_owned(),
+        efforts: ["low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .map(|id| ReasoningEffortDescriptor {
+                id: id.to_owned(),
+                description: String::new(),
+            })
+            .collect(),
+        default_effort: None,
+    }];
+    let view = cx.new(|cx| AgentThreadView::new(claude, cx));
+    view.update(cx, |view, cx| view.open_picker(PickerKind::Traits, cx));
+    view.read_with(cx, |view, _| {
+        let labels = view
+            .picker
+            .as_ref()
+            .into_iter()
+            .flat_map(|picker| picker.matches())
+            .map(|candidate| candidate.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["low", "medium", "high", "xhigh", "max"]);
+    });
+}
+
+#[gpui::test]
+fn claude_default_selector_keeps_the_effort_picker_populated_after_init(cx: &mut TestAppContext) {
+    let mut claude = projection();
+    claude.provider = AgentKind::Claude;
+    claude.model = Some(ModelSelection {
+        model: "default".to_owned(),
+        effort: None,
+        provider: None,
+    });
+    claude.models = vec![ModelDescriptor {
+        id: "default".to_owned(),
+        display_name: "Default (recommended)".to_owned(),
+        efforts: ["low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .map(|id| ReasoningEffortDescriptor {
+                id: id.to_owned(),
+                description: String::new(),
+            })
+            .collect(),
+        default_effort: None,
+    }];
+
+    let view = cx.new(|cx| AgentThreadView::new(claude, cx));
+    view.update(cx, |view, cx| view.open_picker(PickerKind::Traits, cx));
+    view.read_with(cx, |view, _| {
+        let labels = view
+            .picker
+            .as_ref()
+            .into_iter()
+            .flat_map(|picker| picker.matches())
+            .map(|candidate| candidate.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["low", "medium", "high", "xhigh", "max"]);
+    });
+}
+
+#[gpui::test]
+fn access_picker_follows_harness_order_and_plan_uses_interaction_state(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
+    let view = cx.new(|cx| AgentThreadView::new(projection(), cx));
+    let commands = recorder(&view, cx);
+    view.update(cx, |view, cx| {
+        view.set_modes(AgentKind::Claude.supported_modes().to_vec());
+        view.open_picker(PickerKind::Access, cx);
+    });
+    view.read_with(cx, |view, _| {
+        let labels = view
+            .picker
+            .as_ref()
+            .into_iter()
+            .flat_map(|picker| picker.matches())
+            .map(|candidate| candidate.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "accepts edits",
+                "plans before editing",
+                "auto-approves safe actions",
+                "denies unlisted tools",
+                "full access",
+            ]
+        );
+    });
+
+    view.update(cx, |view, cx| {
+        view.pick_access("plans before editing", cx);
+        let input = view.input().clone();
+        input.update(cx, |input, cx| {
+            input.set_text("plan it", cx);
+            input.submit(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(commands.borrow().iter().any(|command| matches!(
+        command,
+        BridgeCommand::AgentSetMode {
+            mode: fleet_core::agents::PermissionMode::Plan,
+            ..
+        }
+    )));
+}
+
+#[gpui::test]
 fn decision_observable_comes_from_the_prepared_drawer_and_joined_item(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
     let turn = TurnId::new();
@@ -724,6 +842,7 @@ fn a_question_binds_the_composer_to_the_active_answer(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn plan_mode_takes_effect_at_the_next_send_and_restores_the_base_mode(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(fleet_ui_kit::Theme::dark()));
     let mut base = projection();
     base.mode = fleet_core::agents::PermissionMode::FullAccess;
     let view = cx.new(|cx| AgentThreadView::new(base, cx));
