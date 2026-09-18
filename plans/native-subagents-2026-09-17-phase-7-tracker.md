@@ -32,6 +32,9 @@
 - 2026-09-18 — Corrected the harness run root and prune target to honor `TMPDIR`; default names now shorten long scenario stems enough to preserve the Unix-socket limit under that root.
 - 2026-09-18 — Teardown now disables the fixture `fleet` shim before stopping the owned daemon, preventing a late scripted `subagent complete` from auto-starting an unowned replacement.
 - 2026-09-18 — The round-2 smoke audit passed the complete 55-scenario corpus in the virtual lane and reconciled the remaining UX copy with the shipped Claude/Codex and native-pane behavior.
+- 2026-09-18 — The round-3 smoke audit passed all 55 scenarios in the virtual lane and `make doctor` passed with this worktree's `fleet` on `PATH` and an isolated `FLEET_HOME`; the shared default home was already served by a protocol-8 daemon while this checkout speaks protocol 7.
+- 2026-09-18 — The round-3 cross-document audit reconciled §13–§15, KEYMAP, UX, harness, protocol-golden and development-command documentation with the shipped code and scenarios.
+- 2026-09-18 — Round-3 final verification passed: `make lint`, `cargo check --workspace --all-targets`, and `make test`.
 
 ## Follow-ups
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

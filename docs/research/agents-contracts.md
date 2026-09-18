@@ -1,23 +1,16 @@
 # Native agents contract reference
 
-This document preserves the Stage 0 public-API freeze and the later additive delegation contract:
-names, signatures, serialized shapes, and module paths. The delegation value/request/response/event
-shapes are current and are pinned byte-for-byte by
-`crates/fleet-proto/tests/agent_compatibility.rs`. Earlier native-agent shapes remain here as
-archaeology and are explicitly superseded by the notice below; they are not a second statement of
-the shipped API. All domain and wire enums use Serde `snake_case` variant names; struct fields use
-`camelCase` unless a declaration says otherwise.
+This document is the compact public-API and serialized-shape reference for native agents and
+delegations: names, signatures, wire shapes, and module paths. The `fleet-core` and `fleet-proto`
+shapes below are current and are pinned byte-for-byte by
+`crates/fleet-proto/tests/agent_compatibility.rs`; a disagreement with those goldens is a bug.
+All domain and wire enums use Serde `snake_case` variant names, and struct fields use `camelCase`,
+unless a declaration below says otherwise.
 
-> **Superseded by the native-agents rewrite, phase by phase.** This file records the public API
-> of the Claude Code + OpenCode implementation. Phase 1 replaced the `fleet-core::agents` half of
-> it: `AgentKind` is `Claude | Codex`, `Capabilities` became `HarnessCapabilities` with a
-> `ControlCost` per control, `SessionStarted`/`TurnCompleted`/`Checkpoint` became
-> `SessionConfigured`/`TurnSettled`/`Compacted`, `ItemStatus` is
-> `InProgress | Completed | Failed | Denied | Stopped`, `StreamKind` carries the two reasoning
-> channels with a part index, `Item` carries a typed per-kind `ItemKind` payload instead of seven
-> `Option<String>` slots, and `TurnState` is `None | Running | Settled`. Read
-> `docs/NATIVE-AGENTS.md` §3 for what those are now; the sections below are accurate only where
-> this notice does not contradict them.
+> **History note.** The initiative began as a Claude Code + OpenCode freeze. The shipped rewrite
+> replaced OpenCode with Codex and replaced the original optional-field transcript model with the
+> typed shapes recorded below. The implementation-inventory sections retain a few explicitly
+> marked pre-rewrite entries for archaeology; they are not wire contracts.
 >
 > Phase 5a replaced the `fleet-ui-kit` half. `components/agent/decision_card.rs` is gone:
 > approvals and questions live in a `DecisionDock` docked to the composer (`decision.rs` +
@@ -95,23 +88,35 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
 
 ### State — `crates/fleet-core/src/agents/state.rs`
 
-- `AgentKind = Claude | OpenCode`; `executable(self) -> &'static str` gives `claude` or
-  `opencode`, and `display_name(self) -> &'static str` gives UI copy. Conversions preserve the
-  legacy `fleet_core::config::Agent` terminal-popup API.
-- `SessionState = Starting | Ready | Running | Stopped | Error`; the default is `Ready`.
+- `AgentKind = Claude | Codex`; `executable(self) -> &'static str` gives `claude` or `codex`, and
+  `display_name(self) -> &'static str` gives `Claude` or `Codex`.
+- `WaitingReason = UsageLimit { window: String, resets_at: DateTime<Utc> }` is an adjacently
+  tagged reason. `SessionState = Starting | Ready | Running | Waiting(WaitingReason) | Stopped |
+  Error`; the default is `Ready`.
 - `StopCause = User | ProviderExit` serializes as `user | provider_exit`. It is kept on the
   durable thread record so an intentional Stop is distinguishable from a provider crash.
-- `TurnState = None | Running(TurnId) | Completed(TurnId, TurnOutcome) |
-  Interrupted(TurnId) | Failed(TurnId)`; the default is `None`.
+- `TurnState = None | Running(TurnId) | Settled(TurnId, TurnOutcome)`; the default is `None`.
 - `AttentionKind = Permission | Question | Plan | Finished`.
-- `Attention = NeedsYou(AttentionKind) | Failed | Working | Unread | Idle` implements total
-  ordering. `rank(self) -> u8` is exactly: permission 8, question 7, plan 6, finished 5,
-  failed 4, working 3, unread 2, idle 1.
+- `Attention = NeedsYou(AttentionKind) | Working | Waiting | Failed | Unread | Idle` implements
+  total ordering. `rank(self) -> u8` is exactly: permission 8, question 7, plan 6, working 5,
+  waiting 4, failed 3, finished 2, unread 1, idle 0.
 - `PermissionMode = Ask | AcceptEdits | Plan | FullAccess`; the default is `Ask`.
 - `ModelSelection { model: String, effort: Option<String>, provider: Option<String> }` carries
   provider-native model coordinates.
-- `Capabilities { resume: bool, fork: bool, steer: bool, interrupt: bool, modes: bool,
-  models: bool }` declares adapter support; all fields default false.
+- `ReasoningEffortDescriptor { id, description }` and `ModelDescriptor { id, display_name,
+  efforts, default_effort }` preserve the harness's model catalogue and copy.
+- `ControlCost = InPlace | RestartWithResume | NotSupported`; `ResumeSupport = None | ByCursor {
+  fork }`; `SteerSupport = None | Implicit | Explicit { compare_and_swap }`; and
+  `InterruptSupport = HardClose | Receipted { cancel_queued }` describe control truthfully rather
+  than flattening it to booleans.
+- `SandboxAxes = One | Three` and `ReasoningChannels = One | Two` name the two harness shapes.
+  `HarnessCapabilities { version: semver::Version, resume, steer, interrupt, history_readback,
+  native_compaction, turn_diff, attention_flags, async_questions, secret_answers, sandbox_axes,
+  reasoning_channels, live_context_meter, model_switch, effort_switch, mode_switch,
+  declared: BTreeSet<String> }` is camel-case and defaulted as a whole.
+- `AccountStatus = SignedOut | SignedIn(AccountInfo)` and `AccountInfo { kind: AccountKind }` are
+  adjacently tagged/camel-case respectively. `AccountKind = ChatGpt { email, plan } | ApiKey |
+  Other(String)` is adjacently tagged; the `ChatGpt` wire tag is exactly `chatgpt`.
 
 ### Provider input — `crates/fleet-core/src/agents/provider.rs`
 
@@ -120,7 +125,11 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
   ordered user attachment.
 - `StartRequest { thread: ThreadId, worktree_path: PathBuf, provider: AgentKind,
   model: Option<ModelSelection>, mode: PermissionMode, resume_cursor: Option<String>,
-  title: Option<String> }` fully describes a provider launch or resume.
+  fork: bool, env: BTreeMap<String, String>, sandbox: SandboxPolicy, approval_policy:
+  ApprovalPolicy, permission_profile: Option<String>, title: Option<String> }` fully describes a
+  provider launch or resume. `SandboxPolicy = ReadOnly | WorkspaceWrite | DangerFullAccess` and
+  `ApprovalPolicy = Untrusted | OnRequest | Never | Granular(BTreeMap<String, bool>)` use
+  kebab-case variant tags.
 - `UserInput { text: String, attachments: Vec<Attachment>, item: Option<ItemId>, origin:
   MessageOrigin }` is a submitted or steered prompt. `item` is omitted when absent; the default
   `origin: User` is omitted for byte compatibility.
@@ -129,22 +138,26 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
 
 - `ToolKind = Read | Edit | Write | Bash | Search | Grep | Fetch | Agent | Todo | Skill |
   Mcp { server: String } | Unknown { name: String }` is the normalized tool taxonomy.
-- `ItemKind = UserMessage { text: String, attachments: Vec<Attachment> } | AssistantText |
-  Thinking | Tool { kind: ToolKind, name: String, input: serde_json::Value } |
-  Subagent { name: String, description: String } | Error` drives transcript projection.
+- `ToolCall { kind, name, input, summary, result, output, diff, exit_code, duration_ms, extra }`
+  keeps structured tool data. `ToolPatch` carries an `Option` replacement for each of those
+  fields.
+- `ItemKind = UserMessage { text, attachments, steered, origin } | AssistantText { text } |
+  Reasoning { summary: BTreeMap<u32, String>, raw: BTreeMap<u32, String> } | Tool(Box<ToolCall>) |
+  Subagent { name, description, result } | Plan { text } | Error { message } | Delegation { id,
+  provider, child, status }` drives transcript projection.
 - `MessageOrigin = User | Delegation { id: DelegationId }` uses the tagged
   `{ "type": snake_case, "data": ... }` shape. `User` is the default and is omitted from a
   `UserMessage`; a delegated result keeps its delegation id on the message.
-- The rewrite's `ItemKind::UserMessage` additionally carries `origin: MessageOrigin` after
-  `steered`. `ItemKind::Delegation { id: DelegationId, provider: AgentKind, child: ThreadId,
-  status: DelegationStatus }` is the caller transcript item, and
-  `ItemPayloadPatch::Delegation { status: DelegationStatus }` changes only its lifecycle.
+- `ItemPayloadPatch` mirrors the replaceable fields of every `ItemKind`: `UserMessage { text,
+  attachments, steered }`, `AssistantText { text }`, `Reasoning { summary, raw }`,
+  `Tool(Box<ToolPatch>)`, `Subagent { name, description, result }`, `Plan { text }`, `Error {
+  message }`, and `Delegation { status }`. `ItemPatch { payload: Option<ItemPayloadPatch>, status:
+  Option<ItemStatus> }` wraps those variant-specific replacements and lifecycle state.
 - `ToolDiff { path: PathBuf, added: u64, removed: u64, unified: String }` carries a complete
   inline unified diff and counts.
 - `Item { id: ItemId, turn: TurnId, parent: Option<ItemId>, kind: ItemKind, status: ItemStatus,
-  text: Option<String>, summary: Option<String>, result: Option<String>, output: Option<String>,
-  diff: Option<ToolDiff>, children: Vec<ItemId>, started: DateTime<Utc>,
-  ended: Option<DateTime<Utc>> }` is the current ordered transcript item.
+  children: Vec<ItemId>, started: DateTime<Utc>, ended: Option<DateTime<Utc>> }` is the current
+  ordered transcript item; payload fields live only inside `kind`.
 
 ### Gates — `crates/fleet-core/src/agents/gates.rs`
 
@@ -152,24 +165,27 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
 - `PermissionChoice = AllowOnce | AllowSession | AllowDirectory | Deny | Edit | DenyAndStop`.
 - `PermissionOption { id: ProviderOptionId, label: PermissionChoice }` preserves exact provider
   option mapping while presenting normalized semantics.
-- `QuestionOption { label: String, description: String }` is one provider question choice.
-- `Question { text: String, header: String, options: Vec<QuestionOption>, multi_select: bool,
-  allow_other: bool }` preserves both Claude and OpenCode question shapes.
-- `GateKind = Permission { tool: ToolKind, title: String, payload: String,
+- `QuestionOption { id: ProviderOptionId, label: String, description: String }` is one provider
+  question choice.
+- `Question { id: String, header: String, prompt: String, options: Vec<QuestionOption>,
+  multi_select: bool, allows_other: bool, is_secret: bool, blocking: bool }` preserves both
+  harnesses' question shapes. `blocking` defaults true; the other booleans default false.
+- `GateKind = Permission { item: Option<ItemId>, tool: ToolKind, title: String, payload: String,
   rationale: Option<String>, options: Vec<PermissionOption> } |
   Question { questions: Vec<Question> } | Plan { markdown: String, steps: Vec<String> }`.
 - `PlanAnswer = Approve | AskForChanges { note: String }`.
 - `GateAnswer = Permission { choice: PermissionChoice, edited_payload: Option<String> } |
   Question { answers: Vec<Vec<String>> } | Plan(PlanAnswer)`.
 - `GateResolver = User | Auto | Timeout | ProviderClosed` names the authoritative closer.
-- `OpenGate { id: GateId, turn: Option<TurnId>, kind: GateKind, opened_seq: Seq }` is one
-  actionable projected gate.
+- `OpenGate { id: GateId, turn: Option<TurnId>, kind: GateKind, opened_seq: Seq, blocked_since:
+  Option<DateTime<Utc>> }` is one actionable projected gate. The last field was added so turn
+  footers can subtract time parked on overlapping user gates.
 
 ### Events — `crates/fleet-core/src/agents/event.rs`
 
-- `SessionInfo { provider: AgentKind, resume_cursor: Option<String>,
-  model: Option<ModelSelection>, mode: PermissionMode, tools: Vec<String>, commands: Vec<String>,
-  skills: Vec<String> }` is normalized initialization metadata.
+- `SessionInfo { provider: AgentKind, resume_cursor: Option<String>, model:
+  Option<ModelSelection>, mode: PermissionMode, tools: Vec<String>, commands: Vec<String>, skills:
+  Vec<String> }` is the compact initialization metadata value.
 - `Usage { input_tokens: u64, output_tokens: u64, reasoning_tokens: u64,
   cache_read_tokens: u64, cache_write_tokens: u64, total_tokens: u64,
   web_search_requests: u64, tool_uses: u64, extra: BTreeMap<String, serde_json::Value> }`
@@ -178,46 +194,55 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
 - `TurnOutcome = Completed | Error { message: Option<String> } | Interrupted | Denied |
   MaxTurns | BudgetExhausted | Other { reason: String }` preserves provider terminal reasons.
 - `AbortReason = User | SessionStopped | ProviderExited | Timeout | Superseded | Other(String)`.
-- `ItemPatch { text: Option<String>, input: Option<Value>, summary: Option<String>,
-  result: Option<String>, output: Option<String>, diff: Option<ToolDiff>,
-  status: Option<ItemStatus> }` replaces cumulative fields on an existing item.
-- `StreamKind = AssistantText | Reasoning | ToolOutput` selects an append-only content channel.
+- `ItemPatch` has the typed payload/status shape described under Items rather than a flat set of
+  optional strings.
+- `StreamKind = AssistantText | ReasoningSummary { part: u32 } | ReasoningRaw { part: u32 } |
+  CommandOutput | PlanText` selects an append-only content channel.
 - `CheckpointKind = CompactBoundary { before: u64, after: Option<u64> } |
   Resumed { age_ms: u64 }` records transcript observability boundaries.
-- `ItemStatus = Pending | Running | Done | Error | Denied`; the default is `Pending`.
+- `ItemStatus = InProgress | Completed | Failed | Denied | Stopped`; the default is `InProgress`.
 
 `AgentEvent` is internally tagged as `{ "type": snake_case, "data": ... }` and has these exact
 variants:
 
 ```rust
-SessionStarted { provider: AgentKind, resume_cursor: Option<String>,
-    model: Option<ModelSelection>, mode: PermissionMode, tools: Vec<String>,
-    commands: Vec<String>, skills: Vec<String> }
+SessionConfigured { provider: AgentKind, resume_cursor: Option<String>,
+    model: Option<ModelSelection>, models: Vec<ModelDescriptor>, mode: PermissionMode,
+    tools: Vec<String>, commands: Vec<String>, skills: Vec<String> }
 MetadataChanged { title: Option<String>, mode: Option<PermissionMode>,
-    model: Option<ModelSelection> }
+    model: Option<ModelSelection>, skills: Option<Vec<String>> }
 SessionStateChanged(SessionState)
+SessionActivity { phase: String }
 SessionExited { code: Option<i32>, expected: bool }
 TurnStarted { turn: TurnId, user_item: ItemId }
-TurnCompleted { turn: TurnId, outcome: TurnOutcome, usage: Usage,
+TurnSettled { turn: TurnId, outcome: TurnOutcome, usage: Usage,
     duration_ms: u64, files_changed: Vec<FileDelta> }
 TurnAborted { turn: TurnId, reason: AbortReason }
+TurnDiff { turn: TurnId, unified: String, files_changed: Vec<FileDelta> }
+PlanSteps { turn: TurnId, steps: Vec<String> }
 ItemStarted { turn: TurnId, item: ItemId, kind: ItemKind, parent: Option<ItemId> }
 ContentDelta { item: ItemId, stream: StreamKind, delta: String }
 ItemUpdated { item: ItemId, patch: ItemPatch }
 ItemCompleted { item: ItemId, status: ItemStatus }
 GateOpened { gate: GateId, turn: Option<TurnId>, kind: GateKind }
 GateResolved { gate: GateId, answer: GateAnswer, by: GateResolver }
+GateWithdrawn { gate: GateId }
+PlanProposed { gate: GateId, turn: TurnId, markdown: String, steps: Vec<String> }
 TokenUsage { turn: TurnId, usage: Usage, context_pct: f32, cost_usd: Option<f64> }
-Checkpoint(CheckpointKind)
+RateLimits { limits: serde_json::Value }
+Compacted(CheckpointKind)
 Retrying { attempt: u32, retry_in_ms: u64, reason: String }
+ModelRerouted { from: String, to: String, reason: String }
 RuntimeError { fatal: bool, message: String }
+AccountChanged { account: AccountStatus }
 Notice(String)
+Unknown { method: String }
 ```
 
 `MetadataChanged` carries a post-start change to projected session metadata: the reducer applies
 the fields that are `Some`, and each is omitted from the JSON when `None`. It exists because mode,
-model and `Session.title` are rendered state, and §3/§6 make the event log the only way a client
-learns about a change to them.
+model, skills and `Session.title` are rendered state, and §3/§6 make the event log the only way a
+client learns about a change to them.
 
 `SeqEvent { seq: Seq, at: DateTime<Utc>, raw: Option<String>, event: AgentEvent }` is the durable,
 time-stamped reducer input. `raw` retains only a provider event/type name for diagnostics.
@@ -226,8 +251,9 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
 
 - `TurnEnd { outcome: TurnOutcome, usage: Usage, duration_ms: u64,
   files_changed: Vec<FileDelta> }` stores terminal facts.
-- `TurnRecord { id: TurnId, user_item: ItemId, started_at: DateTime<Utc>,
-  ended: Option<TurnEnd> }` stores one chronological user turn.
+- `TurnRecord { id: TurnId, user_item: Option<ItemId>, started_at: DateTime<Utc>,
+  ended: Option<TurnEnd>, blocked_ms: u64 }` stores one chronological user turn. `blocked_ms` is
+  omitted at zero and is subtracted from the provider's wall-clock duration in the footer.
   `TurnRecord::footer(&self) -> Option<TurnFooter>` is `Some` only for a settled turn.
 - `TurnFooter { duration_ms: u64, tokens: u64, files_changed: usize, added: u64, removed: u64 }`
   is the §5 turn-footer row's data, summed in the reducer rather than in a view, so the CLI and
@@ -245,7 +271,8 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
   notices: Vec<NoticeRecord>, last_seq: Seq, last_completed_seq: Option<Seq>,
   last_nonterminal_seq: Option<Seq>, last_activity: Option<DateTime<Utc>>,
   cumulative_usage: Usage, cumulative_cost_usd: Option<f64>, context_pct: f32,
-  model: Option<ModelSelection>, mode: PermissionMode, exit_code: Option<i32>,
+  model: Option<ModelSelection>, models: Vec<ModelDescriptor>, skills: Vec<String>,
+  mode: PermissionMode, account: Option<AccountStatus>, exit_code: Option<i32>,
   retrying: Option<RetryState> }` is materialized state. `last_completed_seq` is the sequence of
   the newest turn-settling event and `last_nonterminal_seq` the newest event that is *not* one, so
   `Finished` and `Unread` can be told apart from a cursor alone without re-walking the transcript.
@@ -256,7 +283,7 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
   Attention` derives the badge; and `summary(&self, Seq) -> AgentThreadSummary` creates compact
   client state.
 - `AgentThreadSummary { thread: ThreadId, parent: Option<ThreadId>, worktree: WorktreeId,
-  provider: AgentKind,
+  host: Option<HostId>, provider: AgentKind,
   title: String, attention: Attention, session: SessionState, turn: TurnState, last_seq: Seq,
   last_activity: Option<DateTime<Utc>>, last_completed_seq: Option<Seq>,
   last_nonterminal_seq: Option<Seq>, exit_code: Option<i32> }` backs snapshots and tabs.
@@ -268,7 +295,8 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
   `parent` is defaulted and omitted when absent in both the projection and summary, and
   `summary()` copies it from the projection.
 - `ProjectionError = WrongTurn(TurnId) | UnknownItem(ItemId) | UnknownGate(GateId) |
-  OutOfOrder { expected: Seq, got: Seq }` is the stable rejected-transition error.
+  WrongStream(ItemId, StreamKind) | OutOfOrder { expected: Seq, got: Seq }` is the stable
+  rejected-transition error.
 
 ## `fleet-proto`
 
@@ -280,10 +308,14 @@ The new `RequestBody` variants are:
 
 ```rust
 AgentThreadList
+AgentSeenCursors
 AgentThreadCreate { worktree: WorktreeId, provider: AgentKind,
     model: Option<ModelSelection>, mode: PermissionMode,
     resume_cursor: Option<String>, title: Option<String> }
-AgentThreadOpen { thread: ThreadId, from_seq: Option<Seq> }
+AgentThreadOpen { thread: ThreadId, from_seq: Option<Seq>, after_seq: Option<Seq>,
+    turn_limit: Option<u32>, before_cursor: Option<String>, request_sync_marker: bool }
+AgentItemBody { thread: ThreadId, item: ItemId, stream: StreamKind,
+    offset: u64, limit: u32 }
 AgentThreadClose { thread: ThreadId }
 AgentSend { thread: ThreadId, input: UserInput }
 AgentInterrupt { thread: ThreadId }
@@ -292,6 +324,10 @@ AgentSetMode { thread: ThreadId, mode: PermissionMode }
 AgentSetModel { thread: ThreadId, model: ModelSelection }
 AgentMarkSeen { thread: ThreadId, seq: Seq }
 AgentStop { thread: ThreadId }
+AgentAccountLogin { thread: ThreadId }
+AgentAccountLogout { thread: ThreadId }
+AgentCheckpoints { thread: ThreadId }
+AgentRevert { thread: ThreadId, checkpoint: CheckpointId }
 DelegationRun { caller: ThreadId, provider: AgentKind, brief: String,
     expectation: String, worktree: Option<WorktreeId>, mode: Option<PermissionMode>,
     model: Option<ModelSelection>, title: Option<String>, eager: bool }
@@ -304,7 +340,10 @@ DelegationWait { delegation: DelegationId, timeout_ms: u64 }
 ```
 
 `AgentThreadCreate` intentionally carries published `WorktreeId`; the daemon resolves the trusted,
-canonical `StartRequest::worktree_path` through its worktree service.
+canonical `StartRequest::worktree_path` through its worktree service. The five window fields on
+`AgentThreadOpen`, plus `AgentItemBody`, are sent only after their capability is negotiated;
+`from_seq` retains the legacy cursor meaning and field name. Account and checkpoint mutations are
+likewise gated by `agent.account` and `agent.checkpoints`.
 
 The six `Delegation*` request variants are defined in phase 2 and served from phase 3. Their
 optional fields and false booleans are defaulted and omitted. `DelegationRun` and
@@ -317,26 +356,30 @@ snake-case spellings above, including `timeout_ms`.
 ### Responses, events, snapshot
 
 - `crates/fleet-proto/src/response.rs`: `ResponseBody` adds
-  `AgentThreads(Vec<AgentThreadSummary>)`, `AgentThreadCreated(AgentThreadSummary)`,
-  `AgentThreadSnapshot { projection: ThreadProjection, events_after: Vec<SeqEvent> }`, and
-  `AgentAck`.
+  `AgentThreads(Vec<AgentThreadSummary>)`, `AgentSeenCursors(Vec<AgentSeenCursor>)`,
+  `AgentThreadCreated(AgentThreadSummary)`, `AgentThreadSnapshot { projection:
+  ThreadProjection, events_after: Vec<SeqEvent> }`, `AgentThreadWindow(Box<AgentThreadWindow>)`,
+  `AgentItemBodyChunk { thread, item, stream, offset, total, text }`, `AgentAck`,
+  `AgentAccountLogin { auth_url }`, `AgentCheckpoints(Vec<TurnCheckpoint>)`, and
+  `AgentReverted(AgentRevertReport)`.
 - The delegation responses are `DelegationStarted { delegation: Delegation, warning:
   Option<String> }`, `Delegations(Vec<Delegation>)`, and `Delegation(Delegation)`. Run uses the
   first, list the second, and complete/get/cancel/wait the third. `warning` is defaulted and
   omitted when absent.
 - `crates/fleet-proto/src/event.rs`: `EventKind` adds `Agent` and `AgentSummary`; `Event` adds
-  `Agent { thread: ThreadId, event: SeqEvent }` and `AgentSummary(AgentThreadSummary)`.
+  `Agent { thread: ThreadId, event: SeqEvent }`, `AgentSummary(AgentThreadSummary)`,
+  `AgentResync { thread, from_seq }`, `AgentSynchronized { thread }`, and `AgentWindow { thread }`.
   `pub type EventBody = Event` is the compatibility name for the event payload enum.
 - `Event::DelegationChanged(Delegation)` belongs to the `AgentSummary` subscription family and
   is emitted only when the receiving peer advertises `agent.delegation`.
 - `crates/fleet-proto/src/snapshot.rs`: `Snapshot::agent_threads: Vec<AgentThreadSummary>` is
   `#[serde(default)]`, so protocol-v4 snapshot JSON still deserializes.
 
-`AGENT_DELEGATION_CAPABILITY` in `crates/fleet-proto/src/lib.rs` is exactly
-`"agent.delegation"`. Phase 2 deliberately leaves it out of `AGENT_CAPABILITIES`; phase 3 adds it
-when the daemon serves all six verbs. `DelegationRun` uses the harness-start client timeout, and
-`DelegationWait { timeout_ms, .. }` uses `timeout_ms + 15 seconds` so the transport outlives the
-service deadline.
+`AGENT_CAPABILITIES` advertises nine strings in order: `agent.window`, `agent.sync_marker`,
+`agent.resync`, `agent.item_body`, `agent.checkpoints`, `agent.codex`, `agent.seen`,
+`agent.account`, and `agent.delegation`. `DelegationRun` uses the harness-start client timeout,
+and `DelegationWait { timeout_ms, .. }` uses `timeout_ms + 15 seconds` so the transport outlives
+the service deadline.
 
 ## `fleet-daemon`
 
@@ -344,8 +387,8 @@ service deadline.
 
 > **Replaced by the harness rewrite.** The real adapters live in `crates/fleet-daemon/src/agents/`
 > behind the `Harness` trait of `NATIVE-AGENTS.md` §3.1; `providers/mod.rs` is now the single
-> bridge between that trait and the verbs the manager speaks, and `providers/{claude,opencode}/**`
-> are deleted. The current shape is below; the paragraphs after it that discuss the channel and
+> bridge between that trait and the verbs the manager speaks, and the former provider-specific
+> manager adapters are deleted. The current shape is below; the paragraphs after it that discuss the channel and
 > `ProviderError` are still accurate.
 
 ```rust
@@ -376,6 +419,7 @@ pub trait AgentProvider: Send {
     async fn apply_runtime(&mut self, change: RuntimeChange) -> ProviderResult<RuntimeApplied>;
     // Performed by the manager at a turn boundary, never by the adapter.
     async fn restart(&mut self, plan: &RestartPlan, change: &RuntimeChange) -> ProviderResult<()>;
+    async fn account(&mut self, op: AccountOp) -> ProviderResult<AccountOutcome>;
     async fn stop(&mut self) -> ProviderResult<()>;
     fn events(&mut self) -> ProviderEvents;
 }
@@ -670,18 +714,22 @@ stack, so `fleet-ui-kit` gains no `fleet-git` dependency: the payload rows come 
 ## `fleet-app`
 
 - `bridge.rs`: `BridgeEvent` adds `Agent { thread: ThreadId, event: SeqEvent }` and
-  `AgentSummary(AgentThreadSummary)`. `BridgeCommand` mirrors all eleven `RequestBody` agent
-  variants and converts losslessly with `From<BridgeCommand> for RequestBody`.
+  `AgentSummary(AgentThreadSummary)`, plus seen-cursor and delegation census refreshes.
+  `BridgeCommand` mirrors the complete native-agent `RequestBody` command family and converts
+  losslessly with `From<BridgeCommand> for RequestBody`.
   `Bridge::send_agent(BridgeCommand)` is fire-and-forget and
   `Bridge::request_agent(BridgeCommand) -> Receiver<Result<ResponseBody, ProtoError>>` is typed.
-- `actions.rs`: module `native_agent` declares `Send`, `PlanMode`, `Commands`, `Files`,
-  `History`, `HistoryNext`, `Model`, `Scroll`, `ScrollLineDown`, `ScrollLineUp`,
+- `actions.rs`: module `native_agent` declares `Send`, `Steer`, `SendBackground`, `PlanMode`,
+  `Commands`, `Skills`, `Files`, `History`, `HistoryNext`, `Model`, `Traits`, `AccessMode`,
+  `Scroll`, `ScrollLineDown`, `ScrollLineUp`,
   `ScrollHalfPageDown`, `ScrollHalfPageUp`, `ScrollPageDown`, `ScrollPageUp`, `ScrollTop`,
-  `ScrollBottom`, `ScrollExit`, `NewClaude`, `NewOpenCode`, `Stop`, `Queue`, `AllowOnce`,
+  `ScrollBottom`, `ScrollExit`, `NewClaude`, `NewCodex`, `Stop`, `AllowOnce`,
   `AllowSession`, `Deny`, `EditCommand`, `DenyAndStop`, `Choose1`, `Choose2`, `Choose3`,
-  `Choose4`, `Toggle`, `Answer`, `ApprovePlan`, `AskChanges`, `ViewPlan`, `ExpandRow`, `Revert`,
-  `OpenInEditor`, `CloseTab`, and `TerminalFallback`. There is no `Newline` action: `⇧⏎` belongs
-  to the composer, and binding it here consumed the key from the buffer that already owns it.
+  `Choose4`, `Choose5`, `Toggle`, `Answer`, `Previous`, `Implement`, `Refine`, `ExpandRow`,
+  `AttachChild`, `Revert`, `OpenInEditor`, `CopyRow`, `DiffRow`, `CancelDelegation`, `CloseTab`,
+  `TerminalFallback`, `SelectTab1` through `SelectTab9`, `LastTab`, and `LastSession`. There is no
+  `Newline` action: `⇧⏎` belongs to the composer, and binding it here consumed the key from the
+  buffer that already owns it.
 - `keymap.rs`: the root `Agent` context has `AgentIdle`, `AgentWorking`, `AgentNativeScroll` and
   `AgentDecision`; decision routing uses child contexts `AgentPermission`, `AgentQuestion`, and
   `AgentPlan` to avoid key collisions. Focused transcript rows use `AgentRow`. `/`, `@` and `⇧⏎`
@@ -709,11 +757,11 @@ stack, so `fleet-ui-kit` gains no `fleet-git` dependency: the payload rows come 
 ## `fleet-cli`
 
 `fleet agent` is a subcommand group in `crates/fleet-cli/src/args.rs`, implemented in
-`commands/agents.rs`: `list`, `new <WORKTREE> --provider <claude|opencode> [--model M]
+`commands/agents.rs`: `list`, `new <WORKTREE> --provider <claude|codex> [--model M]
 [--mode ask|accept-edits|plan|full-access]`, `send <THREAD> <TEXT>`,
 `respond <THREAD> <GATE> <ANSWER…>`, `interrupt <THREAD>`, `stop <THREAD>`,
-`tail <THREAD> [--replay]`, and `terminal [claude|opencode]` — the last being the former
-`fleet agent [claude|opencode]`, kept under its own verb as the §10 PTY fallback. Read-only verbs
+`tail <THREAD> [--replay]`, and `terminal [claude|codex]` — the last being the former
+`fleet agent [claude|codex]`, kept under its own verb as the §10 PTY fallback. Read-only verbs
 open with `Some(Seq(0))` so looking at a thread never triggers the §6 lazy resume.
 
 `fleet subagent` is implemented in `commands/subagents.rs`. Every verb accepts `--json`; human

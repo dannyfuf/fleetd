@@ -491,7 +491,7 @@ pub struct AgentNewArgs {
     /// Structured provider to launch.
     #[arg(long, value_enum)]
     pub provider: AgentChoice,
-    /// Provider-native model, optionally `provider/model` for OpenCode.
+    /// Provider-native model, optionally qualified as `provider/model` when supported.
     #[arg(long)]
     pub model: Option<String>,
     /// Initial permission or plan mode.

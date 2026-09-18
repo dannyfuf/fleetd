@@ -30,6 +30,7 @@
 - 2026-09-18 — Missing-caller repair runs idempotently before every drain because the worker has no distinct post-start hook.
 - 2026-09-18 — Restart coverage uses the manager scripted harness at the valid running boundary and cfg(test)-only helper visibility.
 - 2026-09-18 — The round-2 §15.6 audit reverified resume-once, missing-caller repair, exact-once delivery and depth-first cancellation coverage.
+- 2026-09-18 — The round-3 recovery audit rechecked resume-once, missing-caller repair, exact-once delivery and descendant-first cancellation against the passing service tests and §15.6.
 
 ## Follow-ups
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

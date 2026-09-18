@@ -36,6 +36,7 @@
 - 2026-09-18 — Fixed durable-delegation/caller-item ordering in the app and added the permitted harness snapshot fields and fixtures.
 - 2026-09-18 — Corrected KEYMAP wording: Enter attaches on delegation rows, while result-card Enter expands and only delegation rows cancel.
 - 2026-09-18 — The final full virtual-lane corpus passed, including every delegation row, card, attachment and attention scenario.
+- 2026-09-18 — The round-3 virtual-lane corpus passed all 55 scenarios; the UX component inventory was reconciled with the shipped decision dock, composer triggers and delegation surfaces.
 
 ## Follow-ups
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

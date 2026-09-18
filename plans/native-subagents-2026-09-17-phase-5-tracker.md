@@ -29,6 +29,7 @@
 ## Notes / decisions log
 - 2026-09-18 — Fixed cross-worktree picker selection to ensure the destination session before attach; the specialized two-worktree preset avoids duplicating `other`.
 - 2026-09-18 — The final full virtual-lane corpus passed, including all three `AGENTS` picker paths.
+- 2026-09-18 — The round-3 audit reverified the `AGENTS` picker ordering and all attach/reopen/cross-worktree paths in the 55-scenario virtual-lane pass.
 
 ## Follow-ups
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

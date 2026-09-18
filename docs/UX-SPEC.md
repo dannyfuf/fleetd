@@ -442,7 +442,7 @@ confirm — i.e. exactly where it changes a decision.
 | Degraded | `triangle-alert` amber glyph + `⚠ hooks failed` chip; cleared by a successful re-run of the hooks job or by `d` on the chip in the detail panel |
 
 **Icons:** `circle-dot`, `circle`, `moon`, `dot`, `circle-help`, `triangle-alert`, `file-pen`,
-`cloud`, `cloud-off`, `zap`, `bot` (claude/opencode keep-alive), `server` (`:port` keep-alive),
+`cloud`, `cloud-off`, `zap`, `bot` (Claude/Codex keep-alive), `server` (`:port` keep-alive),
 `loader-circle`, `git-pull-request`, `git-pull-request-draft`, `git-merge`, `circle-x`,
 `message-square-warning`, `clock`, `circle-check`, `eye`.
 
@@ -731,7 +731,7 @@ delegation row or `^s d`, but consumes no strip slot. `^s x` closes a caller tab
 detaches a child tab without stopping or deleting that child.
 
 **Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`, `circle-check`, `loader-circle`,
-`zap`, `bot`, `sparkles` (opencode), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
+`zap`, `bot` (Claude), `sparkles` (Codex), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
 `chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
 
 The default third tab (`lg`) is a native tab: Fleet's own git UI (`crates/fleet-lazygit`) drawn
@@ -874,15 +874,16 @@ denied, exited), `triangle-alert` (error card), `circle-arrow-down` (jump to lat
 `sparkles` on the tab and the `needs you` chip. The composer's `❯` is a glyph, not an icon.
 
 **Keyboard:** `docs/KEYMAP.md` § *Native agent thread* is authoritative. In short: `⏎` send ·
-`⇧⏎` newline · `⇧⇥` mode · `/` commands · `@` files · `↑` history · `^s m` model · `esc`
+`⇧⏎` newline · `⇧⇥` mode · `/` commands · `@` files · `$` skills · `↑` history · `^s m` model ·
+`^s e` reasoning / traits · `^s t` access mode · `esc`
 interrupt while working · `^s [` scroll · `^s x` close a caller or detach a child · `^s u`
 select the caller · `^s d` open the `AGENTS` picker · `^s a`/`^s A` new thread · `^s F` the
 PTY fallback. With a delegation row focused, `Enter` attaches and selects its child and `x`
 cancels the delegation; with a result card focused, `Enter` expands or collapses its body without
-attaching the child. `y` copies the delegation id from either row. A decision card takes `y` /
+attaching the child. `y` copies the delegation id from either row. A decision drawer takes `y` /
 `a` / `n` / `e` / `esc`
-(permission), `1`–`4` /
-`space` / `⏎` (question), `y` / `n` / `⏎` (plan).
+(permission), `1`–`5` / `space` / `⏎` / `p` (question), and `y` / `n` / `⏎` on the plan's
+composer context (implement / refine / send the current draft).
 
 ---
 
@@ -1706,7 +1707,7 @@ version-1 config/state and older IPC payloads remain readable.
 | C7 | `Snapshot { generated_at: Timestamp }` | The `stale · <age>` header stamp (§1.3, §3.12). |
 | C8 | `WorktreeStatus.session` must be set to `unknown` — **never `none`** — whenever the local status observation fails, matching the remote path | Directly retires the §9 defect. This is a daemon behavior requirement, not a type change. |
 | C9 | `PruneWorktrees { …, ids: Option<Vec<WorktreeId>> }`, defaulted and omitted when absent | `None` preserves legacy repo-scoped discovery; confirm commits `Some(exact displayed DELETE ids)`, and daemon reinspection may shrink but never expand that authority. |
-| C10 | `Snapshot { agent_threads: Vec<AgentThreadSummary> }` (`#[serde(default)]`), the eleven `Agent*` requests with their `AgentThreads` / `AgentThreadCreated` / `AgentThreadSnapshot` / `AgentAck` answers, and the `Agent` / `AgentSummary` events | §3.6.0's tab marks, §2.3's agent chips and the session-header word are all one derived `Attention` carried in the summary, so the strip, the header and the chips cannot disagree. `AgentMarkSeen` is what clears a finished turn's amber dot. IPC becomes version 6; the defaulted snapshot field keeps version-4 payloads readable. |
+| C10 | `Snapshot { agent_threads: Vec<AgentThreadSummary> }` (`#[serde(default)]`), the capability-gated native-agent request family with its thread, window, body, account, checkpoint and acknowledgement answers, and the `Agent` / `AgentSummary` synchronization events | §3.6.0's tab marks, §2.3's agent chips and the session-header word are all one derived `Attention` carried in the summary, so the strip, the header and the chips cannot disagree. `AgentMarkSeen` is what clears a finished turn's amber dot. IPC is version 7; the defaulted snapshot field keeps version-4 payloads readable. |
 | C11 | Optional/defaulted `AttentionKind` on terminal `SetAgentActivity`, `AgentActivityChanged`, `Terminal.agent_attention`, and `WorktreeWindowStatus.agent_attention` | PTY hooks and native threads share permission/question/plan/finished vocabulary. Silence-driven idle remains status-only; hook attention alone can notify. |
 
 ---
@@ -1851,8 +1852,8 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | `ToolRow` | The 30 px `glyph · 60 px kind · summary · result` row, with nested children and a bounded expanded body | §3.6.0 |
 | `DelegationRow` | Two-line live/terminal child summary with provider, status mark, headline, elapsed time and attach hint; never fold-grouped | §3.6.0 |
 | `DelegationResultCard` | Delivered child result in Markdown, collapsed to eight lines and expandable with the shared fold affordance | §3.6.0 |
-| `DecisionCard` | Permission / question / plan card with the amber left bar; owns the key vocabulary, not the key event | §3.6.0 |
-| `MultilineInput` | The docked composer: wrapping, IME, paste, `↑` history, `⏎`/`⇧⏎`, `/` and `@` triggers | §3.6.0 |
+| `DecisionDock` | The docked permission / question drawer with the amber left bar; owns the decision and key-hint vocabulary, while plans remain transcript rows whose verbs ride on the composer | §3.6.0 |
+| `MultilineInput` | The docked composer: wrapping, IME, paste, `↑` history, `⏎`/`⇧⏎`, `/`, `@` and `$` triggers | §3.6.0 |
 | `MetadataRow` / targeted `MetadataSegment` | Width-aware metadata whose opaque optional target renders in link tone, takes a focus ring and activates through click or `Enter`; used by a child's pinned caller segment | §3.6.0 |
 | `Markdown` | Assistant prose parsed from a stream, stable under growth | §3.6.0 |
 | `DiffView` (`fleet-lazygit`) | Inline unified diff under an edit row, ADR 0005 rows with the semantic diff washes | §3.6.0 |
