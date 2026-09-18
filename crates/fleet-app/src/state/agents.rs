@@ -85,6 +85,10 @@ pub struct AgentThreads {
     /// §12 puts row focus **inside** scroll mode, which is what finally makes `⏎`/`u`/`o`/`y`/`d`
     /// fire: the `AgentRow` context is only ever on the chain under `AgentNativeScroll`.
     row_focus: HashSet<ThreadId>,
+    /// Focused transcript row kind per mounted thread, for harness assertions.
+    focused_rows: HashMap<ThreadId, &'static str>,
+    /// Expanded delegation-result cards per mounted thread, for harness assertions.
+    expanded_result_cards: HashMap<ThreadId, u32>,
     /// The one agent tab whose composer must take focus after its next mounted frame.
     focus_composer: Option<ThreadId>,
     /// The active thread whose mounted composer most recently proved it held focus.
@@ -303,6 +307,8 @@ impl AgentThreads {
             return;
         }
         let id = delegation.id;
+        let caller = delegation.caller;
+        let caller_item = delegation.caller_item;
         let is_new = !self.delegations.contains_key(&id);
         self.delegations.insert(id, delegation);
         if is_new {
@@ -312,6 +318,17 @@ impl AgentThreads {
                     .get(id)
                     .map(|delegation| (delegation.created, delegation.id))
             });
+        }
+        if self
+            .mirror
+            .projections
+            .get(&caller)
+            .is_some_and(|projection| !projection.items.iter().any(|item| item.id == caller_item))
+        {
+            // `DelegationChanged` and the caller's item event travel independently. If this
+            // window observed the durable record first, re-open its caller window so the row
+            // cannot stay absent after a brief event-stream race.
+            self.resync.insert(caller);
         }
         self.delegations_revision = self.delegations_revision.wrapping_add(1);
     }
@@ -693,6 +710,38 @@ impl AgentThreads {
         self.row_focus.contains(&thread)
     }
 
+    /// Mirrors the focused transcript row's stable harness vocabulary.
+    pub(crate) fn set_focused_row(
+        &mut self,
+        thread: ThreadId,
+        focused: Option<&'static str>,
+    ) -> bool {
+        match focused {
+            Some(focused) => self.focused_rows.insert(thread, focused) != Some(focused),
+            None => self.focused_rows.remove(&thread).is_some(),
+        }
+    }
+
+    /// Focused transcript row kind, when scroll mode carries row focus.
+    #[must_use]
+    pub(crate) fn focused_row(&self, thread: ThreadId) -> Option<&'static str> {
+        self.focused_rows.get(&thread).copied()
+    }
+
+    /// Mirrors how many delegation-result cards this view has expanded.
+    pub(crate) fn set_expanded_result_cards(&mut self, thread: ThreadId, count: u32) -> bool {
+        self.expanded_result_cards.insert(thread, count) != Some(count)
+    }
+
+    /// Expanded delegation-result cards in one mounted thread view.
+    #[must_use]
+    pub(crate) fn expanded_result_cards(&self, thread: ThreadId) -> u32 {
+        self.expanded_result_cards
+            .get(&thread)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Clears the flag while one open request is in flight, so a frame cannot spam the daemon.
     pub fn clear_resync(&mut self, thread: ThreadId) {
         self.resync.remove(&thread);
@@ -836,6 +885,9 @@ impl AgentThreads {
         self.resume_from.retain(|thread, _| live.contains(thread));
         self.last_applied.retain(|thread, _| live.contains(thread));
         self.row_focus.retain(|thread| live.contains(thread));
+        self.focused_rows.retain(|thread, _| live.contains(thread));
+        self.expanded_result_cards
+            .retain(|thread, _| live.contains(thread));
         self.composing.retain(|thread| live.contains(thread));
         self.scrolling.retain(|thread| live.contains(thread));
         self.question_cursor

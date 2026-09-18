@@ -25,8 +25,8 @@ use std::{
 };
 
 use fleet_core::agents::{
-    Delegation, DelegationId, GateId, ItemId, ItemKind, Seq, ThreadId, ThreadProjection, TurnId,
-    UserInput,
+    AgentThreadSummary, Delegation, DelegationId, GateId, ItemId, ItemKind, Seq, ThreadId,
+    ThreadProjection, TurnId, UserInput,
 };
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
@@ -70,6 +70,8 @@ pub(crate) enum AgentThreadEvent {
     OpenInEditor(String),
     /// Copy text to the clipboard.
     Copy(String),
+    /// Attach and select another native thread named by prepared chrome.
+    SelectThread(ThreadId),
     /// Say something short to the user, as a transient toast.
     Notice(SharedString),
     /// The reader reached the oldest row this client holds: load the page behind it.
@@ -152,6 +154,8 @@ pub struct AgentThreadView {
     row_of_item: HashMap<ItemId, usize>,
     /// Durable delegation records used by caller rows, refreshed from the app mirror.
     delegations: HashMap<DelegationId, Delegation>,
+    /// Child titles joined from daemon summaries, keyed by their delegation.
+    delegation_titles: HashMap<DelegationId, String>,
     /// App-mirror revision paired with `delegations` for the row memo key.
     delegations_rev: u64,
     /// The prepared decisions, in creation order; the kit applies the priority ladder.
@@ -161,6 +165,10 @@ pub struct AgentThreadView {
     trailing: Vec<MetadataSegment>,
     metadata_fit: MetadataFit,
     metadata_rev: u32,
+    /// This delegated thread's caller, prepared by the workspace from the app mirror.
+    caller: Option<AgentThreadSummary>,
+    /// The caller's one-based combined-strip index, absent while its tab is hidden.
+    caller_index: Option<usize>,
 
     /// One inline diff surface per item that carries a patch, keyed by the row's item id.
     ///
@@ -272,12 +280,15 @@ impl AgentThreadView {
             targets: HashMap::new(),
             row_of_item: HashMap::new(),
             delegations: HashMap::new(),
+            delegation_titles: HashMap::new(),
             delegations_rev: 0,
             decisions: Vec::new(),
             metadata: Vec::new(),
             trailing: Vec::new(),
             metadata_fit: MetadataFit::new(),
             metadata_rev: 0,
+            caller: None,
+            caller_index: None,
             diffs,
             expanded: HashSet::new(),
             unfolded: HashSet::new(),

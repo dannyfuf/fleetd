@@ -14,7 +14,8 @@ use crate::{
     bridge::Bridge,
     dialogs::{
         ConfirmRequest, DialogHost, Dialogs, SessionTransport, clear_all, notify,
-        open_agent_session, open_worktree, request_confirm, step, type_into, with_host,
+        open_agent_session, open_agent_thread_worktree, open_worktree, request_confirm, step,
+        type_into, with_host,
     },
     keymap,
     presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
@@ -1425,11 +1426,19 @@ fn run_selected<T: SessionTransport>(
     });
     match entry.run {
         Run::OpenAgentThread(thread) => {
-            state.update(cx, |app, cx| {
+            let worktree = state.update(cx, |app, cx| {
                 if app.select_agent_thread(thread) {
                     cx.notify();
+                    None
+                } else {
+                    app.agents
+                        .summary(thread)
+                        .map(|summary| summary.worktree.clone())
                 }
             });
+            if let Some(worktree) = worktree {
+                open_agent_thread_worktree(worktree, thread, state, transport, cx);
+            }
         }
         Run::OpenSession { agent, .. } => open_agent_session(agent, state, transport, cx),
         Run::OpenWorktree(id) => open_worktree(id, state, transport, cx),

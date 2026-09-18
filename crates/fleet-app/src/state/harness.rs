@@ -122,6 +122,10 @@ pub struct AgentThreadSnapshot {
     pub decision: Option<AgentThreadDecisionSnapshot>,
     pub parent: Option<String>,
     pub attached: bool,
+    pub delegation_rows: u32,
+    pub result_cards: u32,
+    pub focused_row: Option<&'static str>,
+    pub expanded_result_cards: u32,
 }
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DelegationSnapshot {

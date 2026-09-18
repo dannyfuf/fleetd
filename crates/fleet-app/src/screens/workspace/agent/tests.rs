@@ -199,7 +199,7 @@ fn focused_caller_view(
     let view = cx.new(|cx| AgentThreadView::new(projection, cx));
     let delegations = vec![record.clone()];
     view.update(cx, |view, cx| {
-        view.sync_delegations(delegations, 1, cx);
+        view.sync_delegations(delegations, HashMap::new(), 1, cx);
         view.set_scroll_mode(true, cx);
         // Row focus is what makes `⏎` / `x` / `y` fire, and it needs no laid-out window.
         view.move_row_focus(0, cx);

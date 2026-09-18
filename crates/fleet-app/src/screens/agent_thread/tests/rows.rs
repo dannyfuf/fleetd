@@ -111,6 +111,23 @@ fn delegation_row_projects_each_status_from_the_durable_map() {
 }
 
 #[test]
+fn delegation_row_prefers_the_child_summary_title_to_the_brief() {
+    let record = delegation_record(DelegationStatus::Running);
+    let mut projection = projection();
+    projection.items = vec![delegation_item(TurnId::new(), &record)];
+    let mut locals = Locals::default().delegation(record.clone());
+    locals
+        .delegation_titles
+        .insert(record.id, "windows reducer audit".to_owned());
+
+    let built = build_rows(&locals.inputs(&projection));
+    let TranscriptRowKind::Delegation(row) = &built.rows[0].kind else {
+        panic!("the native child is a delegation row");
+    };
+    assert_eq!(row.title, "windows reducer audit");
+}
+
+#[test]
 fn delegation_result_card_collapses_after_eight_lines() {
     let record = delegation_record(DelegationStatus::Succeeded);
     let turn = TurnId::new();

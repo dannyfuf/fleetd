@@ -1,7 +1,7 @@
 //! The wiring only an entity graph can show: what a stream chunk splices, which frame a gate
 //! takes the keyboard in, the `esc` cascade, scroll mode, and what a closed tab releases.
 
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use fleet_core::agents::{
     AgentKind, Applied, DelegationStatus, GateAnswer, ItemStatus, ModelDescriptor, ModelSelection,
@@ -108,6 +108,30 @@ fn decision_observable_comes_from_the_prepared_drawer_and_joined_item(cx: &mut T
         assert_eq!(decision.paths, ["README.md"]);
         assert!(decision.has_diff);
         assert!(decision.title.contains("codex"));
+    });
+}
+
+#[gpui::test]
+fn child_context_prepares_the_caller_jump_before_render(cx: &mut TestAppContext) {
+    let mut caller_projection = projection();
+    caller_projection.title = "design".to_owned();
+    let caller = caller_projection.summary(fleet_core::agents::Seq::default());
+    let target = caller.thread.to_string();
+    let view = cx.new(|cx| AgentThreadView::new(projection(), cx));
+
+    view.update(cx, |view, cx| {
+        view.sync_caller(Some(caller), Some(3), cx);
+    });
+
+    view.read_with(cx, |view, _| {
+        let segment = view
+            .metadata
+            .first()
+            .unwrap_or_else(|| panic!("the caller jump should lead the prepared metadata"));
+        assert_eq!(segment.text.as_ref(), "for [3] claude — design");
+        assert_eq!(segment.target.as_deref(), Some(target.as_str()));
+        assert!(!segment.collapsible);
+        assert_eq!(view.caller_index, Some(3));
     });
 }
 
@@ -702,7 +726,7 @@ fn a_changed_delegation_rewrites_one_row_and_reuses_every_other(cx: &mut TestApp
 
     let view = cx.new(|cx| AgentThreadView::new(base, cx));
     view.update(cx, |view, cx| {
-        view.sync_delegations(vec![record.clone()], 1, cx);
+        view.sync_delegations(vec![record.clone()], HashMap::new(), 1, cx);
     });
     let before = view.read_with(cx, |view, _| view.rows().to_vec());
 
@@ -711,7 +735,7 @@ fn a_changed_delegation_rewrites_one_row_and_reuses_every_other(cx: &mut TestApp
         ..record
     };
     view.update(cx, |view, cx| {
-        view.sync_delegations(vec![settled], 2, cx);
+        view.sync_delegations(vec![settled], HashMap::new(), 2, cx);
     });
     let after = view.read_with(cx, |view, _| view.rows().to_vec());
 

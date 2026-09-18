@@ -25,7 +25,7 @@ use super::{
     JobSnapshot, ListSnapshot, RowSnapshot, SNAPSHOT_VERSION, TerminalSnapshot, ToastSnapshot,
     UiSnapshot, ViewportSnapshot, WindowSnapshot,
 };
-use crate::presentation::DisplayedHub;
+use crate::presentation::{DisplayedHub, selected_worktree_id};
 use crate::state::{
     AgentPopupMode, AppState, BoardFocus, Cursors, DaemonLink, FilterState, HubPane, HubTab,
     JobsPanelMirror, LiveToast, Mode, Overlay, RepoScope, Screen, StickyError, running_jobs,
@@ -433,6 +433,44 @@ impl AppState {
                         }),
                         parent: summary.parent.map(|parent| parent.to_string()),
                         attached: self.agents.is_attached(summary.thread),
+                        delegation_rows: self
+                            .agents
+                            .projection(summary.thread)
+                            .map_or(0, |projection| {
+                                saturating_u32(
+                                    projection
+                                        .items
+                                        .iter()
+                                        .filter(|item| {
+                                            matches!(item.kind, fleet_core::agents::ItemKind::Delegation { .. })
+                                        })
+                                        .count(),
+                                )
+                            }),
+                        result_cards: self
+                            .agents
+                            .projection(summary.thread)
+                            .map_or(0, |projection| {
+                                saturating_u32(
+                                    projection
+                                        .items
+                                        .iter()
+                                        .filter(|item| {
+                                            matches!(
+                                                &item.kind,
+                                                fleet_core::agents::ItemKind::UserMessage {
+                                                    origin: fleet_core::agents::MessageOrigin::Delegation { .. },
+                                                    ..
+                                                }
+                                            )
+                                        })
+                                        .count(),
+                                )
+                            }),
+                        focused_row: self.agents.focused_row(summary.thread),
+                        expanded_result_cards: self
+                            .agents
+                            .expanded_result_cards(summary.thread),
                     }
                 })
                 .collect(),
@@ -543,6 +581,17 @@ impl AppState {
                         .map(|row| row.row.clone()),
                     rows: tabs.rows.iter().map(|row| row.row.clone()).collect(),
                     filter: String::new(),
+                },
+            );
+        }
+        if matches!(self.overlay, Some(Overlay::Palette)) {
+            let rows = self.palette_rows();
+            lists.insert(
+                "palette".to_owned(),
+                ListSnapshot {
+                    selected: None,
+                    rows,
+                    filter: "agents".to_owned(),
                 },
             );
         }
@@ -707,6 +756,69 @@ impl AppState {
             }
         }
         TabRows { rows, selected }
+    }
+
+    /// Native-thread rows exposed while the agent picker owns the palette.
+    fn palette_rows(&self) -> Vec<RowSnapshot> {
+        let current = selected_worktree_id(self);
+        let summaries = self.agents.summaries();
+        let callers: Vec<_> = summaries
+            .iter()
+            .filter(|summary| {
+                summary.parent.is_none()
+                    && current
+                        .as_ref()
+                        .is_none_or(|worktree| &summary.worktree == worktree)
+            })
+            .collect();
+        let caller_ids: HashSet<_> = callers.iter().map(|summary| summary.thread).collect();
+        let children: Vec<_> = summaries
+            .iter()
+            .filter(|summary| {
+                summary
+                    .parent
+                    .is_some_and(|parent| caller_ids.contains(&parent))
+            })
+            .collect();
+
+        callers
+            .into_iter()
+            .chain(children.iter().copied().filter(|summary| {
+                current
+                    .as_ref()
+                    .is_none_or(|worktree| &summary.worktree == worktree)
+            }))
+            .chain(children.iter().copied().filter(|summary| {
+                current
+                    .as_ref()
+                    .is_some_and(|worktree| &summary.worktree != worktree)
+            }))
+            .map(|summary| {
+                let child = summary.parent.is_some();
+                let attached = self.agents.is_attached(summary.thread);
+                let other_worktree =
+                    child && current.as_ref().is_some_and(|id| id != &summary.worktree);
+                let mut label = crate::screens::agent_thread::presentation::tab_title(summary);
+                if other_worktree {
+                    label.push_str(" · ");
+                    label.push_str(summary.worktree.as_str());
+                }
+                RowSnapshot {
+                    id: summary.thread.to_string(),
+                    label,
+                    badges: vec![
+                        provider_name(summary.provider).to_owned(),
+                        if child { "child" } else { "caller" }.to_owned(),
+                        summary.worktree.as_str().to_owned(),
+                    ],
+                    marks: vec![
+                        attention_name(self.agents.attention(summary.thread)).to_owned(),
+                        if attached || !child { "go" } else { "attach" }.to_owned(),
+                        if attached { "attached" } else { "hidden" }.to_owned(),
+                    ],
+                }
+            })
+            .collect()
     }
 
     fn terminal_row(&self, terminal: &SessionTerminal) -> RowSnapshot {

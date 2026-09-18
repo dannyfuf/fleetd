@@ -241,8 +241,11 @@ impl RenderOnce for MetadataRow {
             let Some(target) = segment.target.clone() else {
                 return content.into_any_element();
             };
+            let accessible_name = segment.text.clone();
             let ring = FocusRing::cursor_row(true).content(div().min_w_0().child(content));
             if let Some(handler) = on_target.clone() {
+                let click_handler = Rc::clone(&handler);
+                let click_target = target.clone();
                 div()
                     .when_else(
                         segment.collapsible,
@@ -252,7 +255,17 @@ impl RenderOnce for MetadataRow {
                     .id(("metadata-target", index))
                     .tab_index(isize::try_from(index).unwrap_or(isize::MAX))
                     .cursor_pointer()
-                    .on_click(move |_, window, cx| handler(target.clone(), window, cx))
+                    .role(gpui::Role::Button)
+                    .aria_label(accessible_name)
+                    .on_click(move |_, window, cx| {
+                        click_handler(click_target.clone(), window, cx);
+                    })
+                    .on_key_down(move |event, window, cx| {
+                        if event.keystroke.key == "enter" {
+                            handler(target.clone(), window, cx);
+                            cx.stop_propagation();
+                        }
+                    })
                     .child(ring)
                     .into_any_element()
             } else {

@@ -341,6 +341,20 @@ impl WorkspaceScreen {
                 AgentThreadEvent::Copy(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 }
+                AgentThreadEvent::SelectThread(thread) => {
+                    relay_state.update(cx, |app, cx| {
+                        let Some(worktree) = app
+                            .agents
+                            .summary(*thread)
+                            .map(|summary| summary.worktree.clone())
+                        else {
+                            return;
+                        };
+                        app.agents.attach(*thread);
+                        app.agents.activate(worktree, *thread);
+                        cx.notify();
+                    });
+                }
                 AgentThreadEvent::Notice(text) => {
                     let text = text.clone();
                     relay_state.update(cx, |app, cx| {
@@ -380,13 +394,29 @@ impl WorkspaceScreen {
                 .delegations_of_caller(thread)
                 .into_iter()
                 .cloned()
+                .collect::<Vec<_>>();
+            let delegation_titles = delegations
+                .iter()
+                .filter_map(|delegation| {
+                    let summary = app.agents.summary(delegation.child)?;
+                    let title = summary.title.trim();
+                    (!title.is_empty()
+                        && !title.eq_ignore_ascii_case(summary.provider.executable())
+                        && !title.eq_ignore_ascii_case(summary.provider.display_name()))
+                    .then(|| (delegation.id, title.to_owned()))
+                })
                 .collect();
             let delegations_revision = app.agents.delegations_revision();
+            let caller = caller_context(app, thread);
             if let Some(projection) = app.agents.projection(thread) {
                 view.update(cx, |view, cx| {
                     view.set_commands(commands);
                     view.set_skills(skills);
-                    view.sync_delegations(delegations, delegations_revision, cx);
+                    let (caller, caller_index) = caller
+                        .map(|(summary, index)| (Some(summary), index))
+                        .unwrap_or((None, None));
+                    view.sync_caller(caller, caller_index, cx);
+                    view.sync_delegations(delegations, delegation_titles, delegations_revision, cx);
                     view.sync(projection, applied, cx);
                 });
             }
@@ -676,7 +706,7 @@ impl WorkspaceScreen {
                 let Some(view) = active_view(&views, &view_state, cx) else {
                     return;
                 };
-                if let Some(delegation) = view.read(cx).focused_delegation(cx) {
+                if let Some(delegation) = view.read(cx).focused_delegation_link(cx) {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(delegation.to_string()));
                 } else {
                     view.update(cx, |view, cx| {
@@ -874,6 +904,25 @@ impl WorkspaceScreen {
     }
 }
 
+/// The caller summary and its live one-based strip index for child-specific chrome.
+fn caller_context(app: &AppState, child: ThreadId) -> Option<(AgentThreadSummary, Option<usize>)> {
+    let caller = app.agents.caller_of(child)?;
+    let summary = app.agents.summary(caller)?.clone();
+    let index = app.active_session().and_then(|session| {
+        let SessionKind::Worktree(worktree) = &session.kind else {
+            return None;
+        };
+        if worktree != &summary.worktree {
+            return None;
+        }
+        threads_of(app, session)
+            .iter()
+            .position(|candidate| candidate.thread == caller)
+            .map(|position| session.terminals.len() + position + 1)
+    });
+    Some((summary, index))
+}
+
 /// Hides the active delegated child without touching the daemon-owned thread.
 pub(super) fn detach_active_child_tab(app: &mut AppState) -> Option<ThreadId> {
     let child = app.active_agent_thread()?;
@@ -912,7 +961,7 @@ fn agent_tab_may_take_focus(app: &AppState, thread: ThreadId) -> bool {
 }
 
 /// Focuses the selected tab's mode owner.
-fn focus_agent_tab(
+pub(super) fn focus_agent_tab(
     view: &Entity<AgentThreadView>,
     scrolling: bool,
     decision: bool,
@@ -933,7 +982,7 @@ fn focus_agent_tab(
     view.update(cx, |view, cx| view.focus_composer(window, cx));
 }
 
-fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
+pub(super) fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
     (
         app.agents.is_scrolling(thread),
         app.agent_context_chain()
@@ -942,7 +991,7 @@ fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
 }
 
 /// Mirrors the mounted focus tree into the harness-only vocabulary.
-fn record_composer_focus(
+pub(super) fn record_composer_focus(
     view: &Entity<AgentThreadView>,
     thread: ThreadId,
     state: &Entity<AppState>,
@@ -1004,6 +1053,8 @@ pub(super) fn relay_view_state(
     let scrolling = view.read(cx).is_scrolling();
     let question_cursor = view.read(cx).question_cursor();
     let decision = view.read(cx).decision_observable();
+    let focused_row = view.read(cx).focused_row_kind(cx);
+    let expanded_result_cards = view.read(cx).expanded_result_cards();
     // §12: the `AgentRow` context is derived from whether a row actually carries the focus ring,
     // so `⏎`/`u`/`o`/`y`/`d` are bound exactly when there is a row for them to act on.
     let row_focus = scrolling && view.read(cx).transcript().read(cx).focused_row().is_some();
@@ -1012,6 +1063,10 @@ pub(super) fn relay_view_state(
         changed |= app.agents.set_scrolling(thread, scrolling);
         changed |= app.agents.set_question_cursor(thread, question_cursor);
         changed |= app.agents.set_row_focus(thread, row_focus);
+        changed |= app.agents.set_focused_row(thread, focused_row);
+        changed |= app
+            .agents
+            .set_expanded_result_cards(thread, expanded_result_cards);
         changed |= app.agents.set_decision(thread, decision);
         if changed {
             cx.notify();

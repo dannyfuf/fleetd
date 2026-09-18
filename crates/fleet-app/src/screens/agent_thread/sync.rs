@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fleet_core::agents::{Applied, Delegation, ItemKind, StreamKind, ThreadProjection, TurnState};
+use fleet_core::agents::{
+    AgentThreadSummary, Applied, Delegation, ItemKind, StreamKind, ThreadProjection, TurnState,
+};
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{ActiveTheme, TranscriptRowKind};
 use gpui::{Context, SharedString, prelude::*};
@@ -25,20 +27,42 @@ use super::{
 };
 
 impl AgentThreadView {
+    /// Refreshes the child-specific caller chrome prepared by the owning workspace.
+    pub(crate) fn sync_caller(
+        &mut self,
+        caller: Option<AgentThreadSummary>,
+        caller_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.caller == caller && self.caller_index == caller_index {
+            return;
+        }
+        self.caller = caller;
+        self.caller_index = caller_index;
+        self.refresh_metadata();
+        self.sync_composer(cx);
+        cx.notify();
+    }
+
     /// Refreshes the durable delegation join independently of the caller's event projection.
     pub(crate) fn sync_delegations(
         &mut self,
         delegations: Vec<Delegation>,
+        titles: std::collections::HashMap<fleet_core::agents::DelegationId, String>,
         revision: u64,
         cx: &mut Context<Self>,
     ) {
-        if self.delegations_rev == revision {
+        if self.delegations_rev == revision && self.delegation_titles == titles {
             return;
         }
         self.delegations = delegations
             .into_iter()
             .map(|delegation| (delegation.id, delegation))
             .collect();
+        if self.delegation_titles != titles {
+            self.delegation_titles = titles;
+            self.rows_key = None;
+        }
         self.delegations_rev = revision;
         self.refresh_rows();
         self.install_rows(cx);
@@ -273,6 +297,7 @@ impl AgentThreadView {
                 let inputs = RowInputs {
                     projection: &self.projection,
                     delegations: &self.delegations,
+                    delegation_titles: &self.delegation_titles,
                     expanded: &self.expanded,
                     unfolded: &self.unfolded,
                     expanded_gates: &self.expanded_gates,
@@ -330,6 +355,7 @@ impl AgentThreadView {
         let built = build_rows(&RowInputs {
             projection: &self.projection,
             delegations: &self.delegations,
+            delegation_titles: &self.delegation_titles,
             expanded: &self.expanded,
             unfolded: &self.unfolded,
             expanded_gates: &self.expanded_gates,
@@ -379,7 +405,17 @@ impl AgentThreadView {
 
     /// Rebuilds the metadata strip and bumps the fit memo's revision.
     fn refresh_metadata(&mut self) {
-        let metadata = presentation::metadata_segments(&self.projection, self.interaction_mode());
+        let mut metadata = Vec::new();
+        if let Some(caller) = &self.caller {
+            metadata.push(presentation::caller_metadata_segment(
+                caller,
+                self.caller_index,
+            ));
+        }
+        metadata.extend(presentation::metadata_segments(
+            &self.projection,
+            self.interaction_mode(),
+        ));
         let trailing = presentation::trailing_segments(&self.projection);
         if metadata == self.metadata && trailing == self.trailing {
             return;
@@ -403,6 +439,10 @@ impl AgentThreadView {
         let payload = self.approval_payload();
         let placeholder = match self.host.as_ref().filter(|_| unreachable) {
             Some(host) => unreachable_placeholder(&host.name),
+            None if matches!(mode, ComposerMode::Normal) => self.caller_index.map_or_else(
+                || composer_placeholder(mode, self.projection.provider, None, choice_only),
+                presentation::child_composer_placeholder,
+            ),
             None => composer_placeholder(
                 mode,
                 self.projection.provider,

@@ -481,16 +481,32 @@ impl WorkspaceScreen {
         };
         let root = {
             let state = state.clone();
-            root.on_action(move |_: &prefix::UpToCaller, _window, cx| {
-                state.update(cx, |app, cx| {
+            let views = Rc::clone(&self.agent_views);
+            root.on_action(move |_: &prefix::UpToCaller, window, cx| {
+                let caller = state.update(cx, |app, cx| {
                     app.leave_prefix();
-                    if up_to_caller(app).is_some() {
+                    let caller = up_to_caller(app);
+                    if caller.is_some() {
                         cx.notify();
                     } else {
                         app.toast_short("^s u is not bound here", Icon::Info, Instant::now());
                         cx.notify();
                     }
+                    caller
                 });
+                let Some(caller) = caller else { return };
+                let Some(view) = views.borrow().get(&caller).map(|tab| tab.view.clone()) else {
+                    return;
+                };
+                let (scrolling, decision) = agent_tab_focus_mode(state.read(cx), caller);
+                focus_agent_tab(&view, scrolling, decision, window, cx);
+                record_composer_focus(&view, caller, &state, window, cx);
+            })
+        };
+        let root = {
+            let state = state.clone();
+            root.on_action(move |_: &prefix::AgentsPicker, _window, cx| {
+                dialogs::open_agents_picker(&state, cx);
             })
         };
         {

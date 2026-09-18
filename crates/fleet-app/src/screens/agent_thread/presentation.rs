@@ -88,7 +88,6 @@ pub(crate) fn tab_title(summary: &AgentThreadSummary) -> String {
 /// the contract's middle dot, while retaining its opaque thread target so activation can attach
 /// it before selection.
 #[must_use]
-#[cfg(test)]
 pub(crate) fn caller_metadata_segment(
     caller: &AgentThreadSummary,
     caller_index: Option<usize>,
@@ -103,7 +102,6 @@ pub(crate) fn caller_metadata_segment(
 
 /// The ordinary composer prompt of a delegated child.
 #[must_use]
-#[cfg(test)]
 pub(crate) fn child_composer_placeholder(caller_index: usize) -> String {
     format!("Steering a subagent of [{caller_index}]. It reports to its caller when it finishes.")
 }

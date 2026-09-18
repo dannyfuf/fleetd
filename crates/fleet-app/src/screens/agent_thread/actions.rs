@@ -773,6 +773,7 @@ impl AgentThreadView {
                 }
                 self.expanded_rev = self.expanded_rev.wrapping_add(1);
             }
+            Some(RowTarget::Delegation(_)) => return,
             None => return,
         }
         self.prepare(cx);

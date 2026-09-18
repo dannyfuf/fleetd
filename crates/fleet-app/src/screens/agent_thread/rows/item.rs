@@ -190,7 +190,7 @@ pub(crate) fn rows_for(
                     *status,
                 )),
             ),
-            Some(RowTarget::Item(item.id)),
+            Some(RowTarget::Delegation(*delegation)),
         )],
         ItemKind::Tool(call) => {
             let mut rows = vec![(
@@ -221,7 +221,7 @@ pub(crate) fn rows_for(
 }
 
 /// One durable child link, preferring the current delegation record over the item's snapshot.
-fn delegation_row(
+pub(crate) fn delegation_row(
     inputs: &RowInputs<'_>,
     id: fleet_core::agents::DelegationId,
     fallback_provider: fleet_core::agents::AgentKind,
@@ -233,8 +233,12 @@ fn delegation_row(
     DelegationRow {
         provider: SharedString::new_static(provider.executable()),
         title: SharedString::from(
-            delegation
-                .map(|record| first_line(&record.brief))
+            inputs
+                .delegation_titles
+                .get(&id)
+                .filter(|title| !title.trim().is_empty())
+                .cloned()
+                .or_else(|| delegation.map(|record| first_line(&record.brief)))
                 .filter(|title| !title.is_empty())
                 .unwrap_or_else(|| "subagent".to_owned()),
         ),

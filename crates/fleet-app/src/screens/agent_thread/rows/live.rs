@@ -40,7 +40,7 @@ fn subsumable(item: &Item) -> bool {
         | ItemKind::Subagent { .. }
         | ItemKind::Plan { .. }
         | ItemKind::Error { .. }
-        // Phase 4 replaces this fallback when native delegation rows own their live treatment.
+        // A delegation is its own live status row and must never disappear behind tool activity.
         | ItemKind::Delegation { .. } => false,
     }
 }

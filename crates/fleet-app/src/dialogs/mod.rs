@@ -31,8 +31,8 @@ pub(crate) use crate::state::move_cursor as step;
 pub use confirm::ConfirmRequest;
 pub use host::{ActiveDialog, request_confirm, request_edit_hooks};
 pub(crate) use host::{
-    DialogHost, SessionTransport, notify, open_agent_session, open_session, open_worktree,
-    read_host, retain_task, with_host,
+    DialogHost, SessionTransport, notify, open_agent_session, open_agent_thread_worktree,
+    open_agents_picker, open_session, open_worktree, read_host, retain_task, with_host,
 };
 pub(crate) use input::{clear_all, field, type_into, typed_char};
 pub(crate) use settings::editor_command;

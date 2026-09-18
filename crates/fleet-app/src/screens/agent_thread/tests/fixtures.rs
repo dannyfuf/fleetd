@@ -321,6 +321,7 @@ pub(super) struct Locals {
     pub(super) checkpoints: HashMap<TurnId, fleet_proto::agents::CheckpointId>,
     pub(super) delegations:
         HashMap<fleet_core::agents::DelegationId, fleet_core::agents::Delegation>,
+    pub(super) delegation_titles: HashMap<fleet_core::agents::DelegationId, String>,
 }
 
 impl Locals {
@@ -365,6 +366,7 @@ impl Locals {
         RowInputs {
             projection,
             delegations: &self.delegations,
+            delegation_titles: &self.delegation_titles,
             expanded: &self.expanded,
             unfolded: &self.unfolded,
             expanded_gates: &self.expanded_gates,
