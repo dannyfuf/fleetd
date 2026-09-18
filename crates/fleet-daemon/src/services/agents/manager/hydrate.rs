@@ -35,7 +35,7 @@ use fleet_proto::error::ProtoError;
 
 use super::{
     AgentSessionManager, AgentThreadRecord, ManagerInner,
-    apply::{closed_gate_answer, update_record},
+    apply::{closed_gate_answer, publish_summary, update_record},
     not_found, storage_error,
     thread::ThreadRuntime,
 };
@@ -147,6 +147,12 @@ async fn hydrate(
             if let Err(error) = inner.store()?.write_record(&record).await {
                 tracing::warn!(thread = %record.thread, %error, "could not persist native-agent restart recovery");
             }
+            if !orphaned(&projection) {
+                publish_summary(
+                    inner,
+                    projection.summary(fleet_core::agents::Seq::default()),
+                );
+            }
         }
     }
     Ok(ThreadRuntime::new(projection, record, owner))
@@ -240,7 +246,9 @@ pub(super) async fn recover_orphan(
             return;
         }
     }
-    if record.resume_cursor.is_some() {
+    // A thread with no cursor and no turn lost nothing: `resume_if_stopped` starts it over on the
+    // next open or send, so it is `Stopped` like any resumable thread rather than `Error`.
+    if record.resume_cursor.is_some() || projection.turns.is_empty() {
         if let TurnState::Running(turn) = projection.turn
             && !append_recovery(
                 inner,

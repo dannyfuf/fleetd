@@ -5,7 +5,7 @@ mod streaming;
 
 use requests::{
     account_login, close_agent_tab, load_older_page, mark_seen, open_in_editor,
-    open_terminal_fallback, open_thread, refresh_checkpoints, resend_seen_cursors,
+    open_terminal_fallback, open_thread, refresh_checkpoints, resend_seen_cursors, send_turn,
 };
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
     views::workspace_tabs::TabTarget,
 };
 use fleet_core::{
-    agents::{AgentKind, AgentThreadSummary, Applied, DelegationId, PermissionMode, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, Applied, DelegationId, ThreadId},
     ids::WorktreeId,
 };
 
@@ -237,7 +237,7 @@ fn create_thread(
         worktree,
         provider,
         model: None,
-        mode: PermissionMode::Ask,
+        mode: None,
         resume_cursor: None,
         title: None,
     });
@@ -325,6 +325,11 @@ impl WorkspaceScreen {
             subscriptions.extend(observe_composer_focus(&view, thread, state, window, cx));
             let (relay_bridge, relay_state) = (bridge.clone(), state.clone());
             subscriptions.push(cx.subscribe(&view, move |view, event, cx| match event {
+                // A send is the one command whose refusal the view has to hear about: the
+                // optimistic bubble it drew is otherwise `sending` for good.
+                AgentThreadEvent::Command(command @ BridgeCommand::AgentSend { input, .. }) => {
+                    send_turn(&relay_bridge, &view, command.clone(), input.item, cx);
+                }
                 AgentThreadEvent::Command(command) => relay_bridge.send_agent(command.clone()),
                 // The one answer that has to come back into the view: `[u]` is drawn from it.
                 AgentThreadEvent::RefreshCheckpoints => {
@@ -407,10 +412,12 @@ impl WorkspaceScreen {
                 .collect();
             let delegations_revision = app.agents.delegations_revision();
             let caller = caller_context(app, thread);
+            let modes = app.agents.modes(thread);
             if let Some(projection) = app.agents.projection(thread) {
                 view.update(cx, |view, cx| {
                     view.set_commands(commands);
                     view.set_skills(skills);
+                    view.set_modes(modes);
                     let (caller, caller_index) = caller
                         .map(|(summary, index)| (Some(summary), index))
                         .unwrap_or((None, None));
@@ -432,13 +439,10 @@ impl WorkspaceScreen {
         });
         view.update(cx, |view, cx| view.set_host(host, cx));
         self.offer_worktree_files(model, thread, cx);
-        // A resync is requested exactly once per detected gap (§6, client reconnect).
+        // A resync is requested exactly once per detected gap (§6, client reconnect). The cursor
+        // is the daemon-declared one when it named a drop, else the projection's own `last_seq`.
         if state.read(cx).agents.needs_resync(thread) {
-            let from = state
-                .read(cx)
-                .agents
-                .projection(thread)
-                .map(|projection| projection.last_seq);
+            let from = state.read(cx).agents.resume_from(thread);
             open_thread(bridge, state, thread, from, cx);
         }
         if model.overlay_open {

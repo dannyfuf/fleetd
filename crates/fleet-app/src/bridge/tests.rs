@@ -195,6 +195,107 @@ impl Drop for TestDaemon {
     }
 }
 
+/// A composer send emits its changed controls first. Those fire-and-forget requests and the
+/// reply-bearing send must share one FIFO lane, or the new turn can start before a Claude restart
+/// control reaches the daemon and turn a valid boundary change into a mid-turn conflict.
+#[tokio::test]
+async fn an_agent_send_waits_for_the_preceding_control_acknowledgement() {
+    let (observed, observations) = async_channel::unbounded();
+    let (release, wait_for_release) = std::sync::mpsc::channel();
+    let daemon = TestDaemon::start(move |body| match body {
+        RequestBody::AgentSetModel { .. } => {
+            observed
+                .send_blocking("control")
+                .unwrap_or_else(|error| panic!("record control request: {error}"));
+            wait_for_release
+                .recv()
+                .unwrap_or_else(|error| panic!("release control acknowledgement: {error}"));
+            Some(ResponseBody::Ack)
+        }
+        RequestBody::AgentSend { .. } => {
+            observed
+                .send_blocking("send")
+                .unwrap_or_else(|error| panic!("record send request: {error}"));
+            Some(ResponseBody::Ack)
+        }
+        _ => Some(ResponseBody::Ack),
+    });
+    let client = Client::connect(daemon.home.path())
+        .await
+        .unwrap_or_else(|error| panic!("connect test client: {error}"));
+    let (requests, request_rx) = async_channel::unbounded();
+    let (events, _event_rx) = async_channel::unbounded();
+    let worker = tokio::spawn(requests::run(
+        request_rx,
+        events,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(SettleCounter::default()),
+    ));
+    let thread = ThreadId::new();
+    requests
+        .send(requests::Request::Command {
+            client: Some(client.clone()),
+            body: Box::new(RequestBody::AgentSetModel {
+                thread,
+                model: fleet_core::agents::ModelSelection {
+                    model: "claude-opus-5".to_owned(),
+                    effort: Some("high".to_owned()),
+                    provider: None,
+                },
+            }),
+            reply: None,
+            in_flight: InFlight::untracked(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("enqueue control: {error}"));
+    let (reply, answer) = async_channel::bounded(1);
+    requests
+        .send(requests::Request::Command {
+            client: Some(client),
+            body: Box::new(RequestBody::AgentSend {
+                thread,
+                input: fleet_core::agents::UserInput {
+                    text: "explain this crate".to_owned(),
+                    attachments: Vec::new(),
+                    item: Some(fleet_core::agents::ItemId::new()),
+                    ..fleet_core::agents::UserInput::default()
+                },
+            }),
+            reply: Some(reply),
+            in_flight: InFlight::untracked(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("enqueue send: {error}"));
+
+    let first = observations
+        .recv()
+        .await
+        .unwrap_or_else(|error| panic!("observe first request: {error}"));
+    release
+        .send(())
+        .unwrap_or_else(|error| panic!("release control response: {error}"));
+    assert_eq!(first, "control", "the send overtook its pending control");
+    assert_eq!(
+        observations
+            .recv()
+            .await
+            .unwrap_or_else(|error| panic!("observe second request: {error}")),
+        "send"
+    );
+    assert!(matches!(
+        answer
+            .recv()
+            .await
+            .unwrap_or_else(|error| panic!("receive send acknowledgement: {error}")),
+        Ok(ResponseBody::Ack)
+    ));
+
+    drop(requests);
+    worker
+        .await
+        .unwrap_or_else(|error| panic!("join request worker: {error}"));
+}
+
 fn empty_snapshot() -> Snapshot {
     Snapshot {
         boards: Vec::new(),

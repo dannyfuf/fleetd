@@ -161,7 +161,7 @@ impl Harness {
                 self.worktree.clone(),
                 AgentKind::Claude,
                 None,
-                PermissionMode::Ask,
+                Some(PermissionMode::Ask),
                 None,
                 None,
             )
@@ -639,6 +639,33 @@ async fn run_carries_the_token_and_seeds_both_transcripts() {
         .await;
     assert!(child_input.contains(&delegation.brief));
     assert!(child_input.contains(&delegation.expectation));
+}
+
+#[tokio::test(start_paused = true)]
+async fn omitted_mode_uses_the_selected_harness_default() {
+    let harness = Harness::start().await;
+    let mut config = harness.config.load().await.expect("load test config");
+    config.native_agents.claude.mode = PermissionMode::Plan;
+    harness
+        .config
+        .save(config)
+        .await
+        .expect("save delegated-agent default");
+    let (caller, _) = harness.running_caller().await;
+
+    let (delegation, _) = started(
+        harness
+            .run(request(caller))
+            .await
+            .expect("start delegation with configured mode"),
+    );
+    let child = harness
+        .wait_for(delegation.child, |projection| {
+            projection.mode == PermissionMode::Plan
+        })
+        .await;
+
+    assert_eq!(child.mode, PermissionMode::Plan);
 }
 
 #[tokio::test(start_paused = true)]

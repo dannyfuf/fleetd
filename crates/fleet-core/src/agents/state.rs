@@ -19,6 +19,27 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// Permission modes this harness accepts, in native-picker order.
+    #[must_use]
+    pub const fn supported_modes(self) -> &'static [PermissionMode] {
+        match self {
+            Self::Claude => &[
+                PermissionMode::Ask,
+                PermissionMode::AcceptEdits,
+                PermissionMode::Plan,
+                PermissionMode::Auto,
+                PermissionMode::DontAsk,
+                PermissionMode::FullAccess,
+            ],
+            Self::Codex => &[
+                PermissionMode::Ask,
+                PermissionMode::AcceptEdits,
+                PermissionMode::Plan,
+                PermissionMode::FullAccess,
+            ],
+        }
+    }
+
     /// The default executable name for this harness.
     #[must_use]
     pub const fn executable(self) -> &'static str {
@@ -166,6 +187,10 @@ pub enum PermissionMode {
     AcceptEdits,
     /// Produce and approve a plan before execution.
     Plan,
+    /// Let Claude approve actions it classifies as safe.
+    Auto,
+    /// Deny tools that are not already allowed instead of asking.
+    DontAsk,
     /// Auto-allow supported harness operations.
     FullAccess,
 }
@@ -316,6 +341,8 @@ pub struct HarnessCapabilities {
     pub effort_switch: ControlCost,
     /// Cost of switching interaction/access mode.
     pub mode_switch: ControlCost,
+    /// Permission modes this harness supports, in picker order.
+    pub modes: Vec<PermissionMode>,
     /// Raw capability strings published by the harness.
     pub declared: BTreeSet<String>,
 }
@@ -339,6 +366,7 @@ impl Default for HarnessCapabilities {
             model_switch: ControlCost::NotSupported,
             effort_switch: ControlCost::NotSupported,
             mode_switch: ControlCost::NotSupported,
+            modes: Vec::new(),
             declared: BTreeSet::new(),
         }
     }

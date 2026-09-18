@@ -10,8 +10,8 @@ use super::{
     usage::{add_usage, aggregate_usage, subtract_usage},
 };
 use crate::agents::{
-    AgentEvent, GateKind, Item, ItemKind, ItemStatus, OpenGate, SeqEvent, SessionState, TurnId,
-    TurnOutcome, TurnState, Usage, sticky_outcome,
+    AbortReason, AgentEvent, GateKind, Item, ItemKind, ItemStatus, OpenGate, SeqEvent,
+    SessionState, TurnId, TurnOutcome, TurnState, Usage, sticky_outcome,
 };
 
 impl ThreadProjection {
@@ -128,6 +128,7 @@ impl ThreadProjection {
                 );
                 record.ended = Some(TurnEnd {
                     outcome: settled_outcome.clone(),
+                    abort_reason: None,
                     usage: usage.clone(),
                     duration_ms: *duration_ms,
                     files_changed: files_changed.clone(),
@@ -138,11 +139,17 @@ impl ThreadProjection {
                 self.turn = TurnState::Settled(*turn, settled_outcome);
                 self.retrying = None;
             }
-            AgentEvent::TurnAborted { turn, reason: _ } => {
+            AgentEvent::TurnAborted { turn, reason } => {
                 self.require_active_turn(*turn)?;
                 let usage = self.active_turn_usage();
                 self.close_open_items(*turn, ev.at);
-                self.finish_failed_turn(*turn, ev.at, TurnOutcome::Interrupted, usage);
+                self.finish_failed_turn(
+                    *turn,
+                    ev.at,
+                    TurnOutcome::Interrupted,
+                    Some(reason.clone()),
+                    usage,
+                );
                 self.cumulative_usage = aggregate_usage(&self.turns);
                 self.turn = TurnState::Settled(*turn, TurnOutcome::Interrupted);
                 self.retrying = None;
@@ -459,6 +466,7 @@ impl ThreadProjection {
             TurnOutcome::Error {
                 message: Some(message.to_owned()),
             },
+            None,
             usage,
         );
         self.cumulative_usage = aggregate_usage(&self.turns);
@@ -475,6 +483,7 @@ impl ThreadProjection {
         turn: TurnId,
         at: DateTime<Utc>,
         outcome: TurnOutcome,
+        abort_reason: Option<AbortReason>,
         usage: Usage,
     ) {
         let Some(index) = self.turn_position(turn) else {
@@ -489,6 +498,7 @@ impl ThreadProjection {
             .max(0) as u64;
         record.ended = Some(TurnEnd {
             outcome,
+            abort_reason,
             usage,
             duration_ms,
             files_changed: Vec::new(),

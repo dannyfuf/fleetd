@@ -151,7 +151,9 @@ job success|failure|long|repeat <count>
 `daemon …`, `socket remove` and `job …` are runner-side operations, never app commands. `job`
 submits a real daemon job of the named shape through the run's own client, because the job
 registry is in memory and nothing seeded before the run survives into it; `long` is stopped at
-teardown. A directory
+teardown. `daemon restart` stops fleetd the way `fleet daemon restart` does — the PTY holders
+stay up and the replacement adopts the same sessions — so a scenario can prove what a restart
+keeps; `daemon kill` is the crash. A directory
 run recursively executes scenario files in lexical order. Unless `--continue-on-failure` is set,
 the first failed line stops the scenario and triggers `failure-NNN` shot/dump evidence.
 

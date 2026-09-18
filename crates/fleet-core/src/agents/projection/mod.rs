@@ -50,6 +50,9 @@ mod tests;
 pub struct TurnEnd {
     /// Provider-authoritative outcome.
     pub outcome: TurnOutcome,
+    /// Why an interrupted turn was aborted, when the event log recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort_reason: Option<super::AbortReason>,
     /// Normalized per-turn usage.
     pub usage: Usage,
     /// Provider-reported duration.

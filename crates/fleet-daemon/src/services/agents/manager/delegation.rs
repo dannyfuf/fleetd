@@ -138,6 +138,27 @@ impl AgentSessionManager {
         Ok(record)
     }
 
+    /// Clears a thread's durable resume cursor to model a legacy cursorless record in tests.
+    #[cfg(test)]
+    pub(crate) async fn clear_resume_cursor(&self, thread: ThreadId) -> Result<(), ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        let _operation = runtime.operation.lock().await;
+        let record = {
+            let mut state = runtime
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.record.resume_cursor = None;
+            state.record.clone()
+        };
+        self.inner
+            .store()
+            .map_err(super::storage_error)?
+            .write_record(&record)
+            .await
+            .map_err(super::storage_error)
+    }
+
     /// One thread's reducer state, hydrating it if this is its first use.
     pub async fn projection(&self, thread: ThreadId) -> Result<ThreadProjection, ProtoError> {
         let runtime = self.runtime(thread).await?;

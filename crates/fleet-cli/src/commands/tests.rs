@@ -979,6 +979,33 @@ fn every_subagent_verb_parses_its_flags_defaults_and_ceiling() {
 }
 
 #[test]
+fn subagent_run_accepts_every_shared_permission_mode() {
+    use crate::args::{AgentModeChoice, SubagentCommand};
+
+    for (argument, expected) in [
+        ("ask", AgentModeChoice::Ask),
+        ("accept-edits", AgentModeChoice::AcceptEdits),
+        ("plan", AgentModeChoice::Plan),
+        ("auto", AgentModeChoice::Auto),
+        ("dont-ask", AgentModeChoice::DontAsk),
+        ("full-access", AgentModeChoice::FullAccess),
+    ] {
+        let SubagentCommand::Run(run) = parse_subagent(&[
+            "run",
+            "--provider",
+            "claude",
+            "--expect",
+            "tests pass",
+            "--mode",
+            argument,
+        ]) else {
+            panic!("expected a subagent run command");
+        };
+        assert_eq!(run.mode, Some(expected));
+    }
+}
+
+#[test]
 fn subagent_complete_names_each_environment_variable_the_child_is_missing() {
     use crate::args::{SubagentCommand, SubagentCompleteArgs};
 

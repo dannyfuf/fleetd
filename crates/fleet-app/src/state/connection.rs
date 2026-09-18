@@ -165,6 +165,7 @@ impl AppState {
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
                 self.apply_snapshot(*snapshot, now);
+                self.agents.resync_installed();
             }
             BridgeEvent::AgentSeenCursors(cursors) => self.agents.seed_seen(&cursors),
             BridgeEvent::Delegations(delegations) => self.agents.seed_delegations(delegations),
@@ -238,6 +239,7 @@ impl AppState {
                 self.watches.reconnect();
                 self.seed_agent_activity(&snapshot, now);
                 self.apply_snapshot(*snapshot, now);
+                self.agents.resync_installed();
             }
             BridgeEvent::Daemon(event) => self.apply_daemon_event(*event, now),
             BridgeEvent::Agent { thread, event } => {

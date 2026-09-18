@@ -227,7 +227,7 @@ impl Client {
         worktree: WorktreeId,
         provider: AgentKind,
         model: Option<ModelSelection>,
-        mode: PermissionMode,
+        mode: Option<PermissionMode>,
         resume_cursor: Option<String>,
         title: Option<String>,
     ) -> Result<AgentThreadSummary> {

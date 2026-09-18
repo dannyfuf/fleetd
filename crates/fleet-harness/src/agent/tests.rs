@@ -521,6 +521,41 @@ fn a_claude_interrupt_is_receipted_and_aborts_the_turn_it_arrives_in() {
     );
 }
 
+#[test]
+fn claude_initialize_reports_the_scripted_models_and_effort_ladder() {
+    let initialize = json!({
+        "type": "control_request",
+        "request_id": "init-1",
+        "request": {"subtype": "initialize"},
+    });
+    let (frames, _) = drive(
+        Provider::Claude,
+        &starter("two-turns.json"),
+        &[initialize, claude_prompt("go")],
+    );
+    let response = of_type(&frames, "control_response")
+        .into_iter()
+        .find(|frame| {
+            frame
+                .pointer("/response/request_id")
+                .and_then(Value::as_str)
+                == Some("init-1")
+        })
+        .unwrap_or_else(|| panic!("initialize must return the scripted catalogue"));
+    assert_eq!(
+        response
+            .pointer("/response/response/models/0/value")
+            .and_then(Value::as_str),
+        Some("scripted-sonnet")
+    );
+    assert_eq!(
+        response
+            .pointer("/response/response/models/0/supportedEffortLevels/2")
+            .and_then(Value::as_str),
+        Some("high")
+    );
+}
+
 // ----------------------------------------------------------------------- Codex
 
 /// The client frames that open a Codex thread.

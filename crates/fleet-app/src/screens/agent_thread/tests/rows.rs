@@ -1,8 +1,8 @@
 //! The flat row projection: emission order, the fold table, grouping and the live row.
 
 use fleet_core::agents::{
-    AgentKind, CheckpointKind, CheckpointRecord, DelegationStatus, ItemStatus, NoticeRecord,
-    PermissionChoice, Seq, SessionState, ToolKind, TurnId, TurnOutcome, TurnState,
+    AbortReason, AgentKind, CheckpointKind, CheckpointRecord, DelegationStatus, ItemStatus,
+    NoticeRecord, PermissionChoice, Seq, SessionState, ToolKind, TurnId, TurnOutcome, TurnState,
 };
 use fleet_ui_kit::{
     DelegationRowStatus, GateOutcome, Icon, ToolRowState, TranscriptRowId, TranscriptRowKind,
@@ -719,36 +719,47 @@ fn the_footer_and_the_fold_both_drop_the_time_the_turn_stood_on_a_gate() {
 }
 
 #[test]
-fn an_interrupted_turn_says_you_stopped_and_raises_no_error() {
-    let turn = TurnId::new();
-    let prompt = user(turn, "go");
-    let mut projection = projection();
-    projection.items = vec![
-        prompt.clone(),
-        tool(turn, ToolKind::Read, ItemStatus::Completed, "a.rs"),
-        assistant(turn, "partial", ItemStatus::Completed),
-    ];
-    projection.turns = vec![settled_turn(turn, prompt.id, TurnOutcome::Interrupted)];
-    projection.turn = TurnState::Settled(turn, TurnOutcome::Interrupted);
+fn an_interrupted_turn_distinguishes_a_user_stop_from_a_provider_exit() {
+    for (reason, fold_copy, footer_copy) in [
+        (AbortReason::User, "you stopped after 48s", "stopped"),
+        (AbortReason::ProviderExited, "cut off after 48s", "cut off"),
+    ] {
+        let turn = TurnId::new();
+        let prompt = user(turn, "go");
+        let mut projection = projection();
+        projection.items = vec![
+            prompt.clone(),
+            tool(turn, ToolKind::Read, ItemStatus::Completed, "a.rs"),
+            assistant(turn, "partial", ItemStatus::Completed),
+        ];
+        let mut record = settled_turn(turn, prompt.id, TurnOutcome::Interrupted);
+        record
+            .ended
+            .as_mut()
+            .expect("the test turn is settled")
+            .abort_reason = Some(reason);
+        projection.turns = vec![record];
+        projection.turn = TurnState::Settled(turn, TurnOutcome::Interrupted);
 
-    let locals = Locals::default();
-    let built = build_rows(&locals.inputs(&projection));
+        let locals = Locals::default();
+        let built = build_rows(&locals.inputs(&projection));
 
-    let TranscriptRowKind::TurnFold(fold) = &built.rows[1].kind else {
-        panic!("the fold is second");
-    };
-    assert_eq!(fold.label, "you stopped after 48s");
-    assert!(
-        !kinds(&built.rows).contains(&"error"),
-        "a stop is not a failure"
-    );
-    let TranscriptRowKind::TurnFooter(footer) = &built.rows[4].kind else {
-        panic!("the footer closes the turn");
-    };
-    assert_eq!(
-        footer.segments.first().map(ToString::to_string).as_deref(),
-        Some("stopped")
-    );
+        let TranscriptRowKind::TurnFold(fold) = &built.rows[1].kind else {
+            panic!("the fold is second");
+        };
+        assert_eq!(fold.label, fold_copy);
+        assert!(
+            !kinds(&built.rows).contains(&"error"),
+            "an interrupted turn is not a failure"
+        );
+        let TranscriptRowKind::TurnFooter(footer) = &built.rows[4].kind else {
+            panic!("the footer closes the turn");
+        };
+        assert_eq!(
+            footer.segments.first().map(ToString::to_string).as_deref(),
+            Some(footer_copy)
+        );
+    }
 }
 
 #[test]

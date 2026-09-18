@@ -68,6 +68,7 @@ pub(super) fn open_thread(
     let reply = bridge.request_agent(BridgeCommand::AgentThreadOpen { thread, window });
     // One request is in flight from here: the flag comes back only if the reply is a gap.
     state.update(cx, |app, _| app.agents.clear_resync(thread));
+    let bridge = bridge.clone();
     let state = state.clone();
     cx.spawn(async move |cx| {
         let answer = reply.recv().await;
@@ -85,6 +86,16 @@ pub(super) fn open_thread(
                 app.agents.install_window(&window);
                 cx.notify();
             }),
+            // A cursor the daemon no longer holds — a log trimmed on hydrate, another home — is
+            // not the user's problem: one fresh bounded open replaces the catch-up (§9.2).
+            Ok(Err(error)) if from_seq.is_some() => {
+                tracing::debug!(
+                    %thread,
+                    error = %error.message,
+                    "catch-up open refused; re-opening the newest window instead"
+                );
+                open_thread(&bridge, &state, thread, None, cx);
+            }
             Ok(Err(error)) => state.update(cx, |app, cx| {
                 record_mutation_failure(app, format!("agent thread: {}", error.message));
                 cx.notify();
@@ -170,6 +181,40 @@ pub(super) fn refresh_checkpoints(
                 view.update(cx, |view, cx| view.install_checkpoints(&checkpoints, cx));
             }
         });
+    })
+    .detach();
+}
+
+/// `⏎`: sends the turn, and tells the view when the daemon refused it.
+///
+/// An ack changes nothing here — the bubble is reconciled by the projection, by id — but a
+/// refusal (`not live`, a harness that would not take the prompt, the transport deadline) is
+/// the one answer the view cannot learn any other way, and a bubble stuck at `sending` is the
+/// thread reading `working` for as long as the tab stays open.
+pub(super) fn send_turn(
+    bridge: &Bridge,
+    view: &Entity<AgentThreadView>,
+    command: BridgeCommand,
+    item: Option<fleet_core::agents::ItemId>,
+    cx: &mut App,
+) {
+    let Some(item) = item else {
+        // Nothing to mark failed: only the composer's own sends carry an id.
+        bridge.send_agent(command);
+        return;
+    };
+    let reply = bridge.request_agent(command);
+    let view = view.downgrade();
+    cx.spawn(async move |cx| {
+        let reason = match reply.recv().await {
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => error.message,
+            Err(_) => "the Fleet daemon bridge closed before answering".to_owned(),
+        };
+        tracing::warn!(%item, reason, "the daemon refused an agent send");
+        // A closed tab has no bubble left to mark, which is the one way this update fails.
+        view.update(cx, |view, cx| view.send_failed(item, &reason, cx))
+            .ok();
     })
     .detach();
 }

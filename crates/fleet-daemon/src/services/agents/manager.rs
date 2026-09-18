@@ -31,10 +31,10 @@ use chrono::Utc;
 use fleet_core::{
     agents::{
         AgentEvent, AgentKind, AgentThreadSummary, ApprovalPolicy, CheckpointKind, GateResolver,
-        HarnessCapabilities, ItemId, ItemStatus, SandboxPolicy, SessionState, StartRequest,
-        ThreadId, TurnId, TurnState, UserInput,
+        HarnessCapabilities, ItemId, ItemStatus, PermissionMode, SandboxPolicy, SessionState,
+        StartRequest, ThreadId, TurnId, TurnState, UserInput,
     },
-    config::AgentBinaries,
+    config::{AgentBinaries, NativeAgentDefaults, NativeAgentsConfig},
     ids::{HostId, WorktreeId},
 };
 use fleet_proto::{
@@ -76,6 +76,9 @@ use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
 /// remote link is the source of a stall, which is precisely the question a latency budget asks.
 /// Well above the 16 ms merge tick so a normal turn logs nothing.
 const EMISSION_SKEW_FLOOR: Duration = Duration::from_millis(250);
+
+/// User-facing explanation attached to a thread whose configured defaults could not be read.
+const CONFIG_FALLBACK_NOTICE: &str = "Fleet could not read native-agent settings; this thread started in ask mode with no configured model or effort.";
 
 type ProviderFactory = dyn Fn(AgentKind, &StartRequest, &AgentBinaries) -> anyhow::Result<Box<dyn AgentProvider>>
     + Send
@@ -259,14 +262,32 @@ impl AgentSessionManager {
     /// executables are what the user would have gotten anyway, and the launch failure the
     /// adapter reports next is more actionable than a config error here.
     async fn agent_binaries(&self) -> AgentBinaries {
+        self.native_agent_settings().await.0
+    }
+
+    /// Configured executables and per-harness defaults, loaded from one effective snapshot.
+    async fn native_agent_settings(
+        &self,
+    ) -> (AgentBinaries, NativeAgentsConfig, Option<&'static str>) {
         let Some(config) = self.inner.config.as_ref() else {
-            return AgentBinaries::default();
+            return (
+                AgentBinaries::default(),
+                NativeAgentsConfig::default(),
+                None,
+            );
         };
         match config.load().await {
-            Ok(config) => config.agent_binaries,
+            Ok(config) => (config.agent_binaries, config.native_agents, None),
             Err(error) => {
-                tracing::warn!(%error, "could not read agent binaries; using defaults");
-                AgentBinaries::default()
+                tracing::warn!(
+                    %error,
+                    "could not read native-agent settings; using safe permission defaults and default executables"
+                );
+                (
+                    AgentBinaries::default(),
+                    fail_closed_native_agents(),
+                    Some(CONFIG_FALLBACK_NOTICE),
+                )
             }
         }
     }
@@ -315,16 +336,18 @@ impl AgentSessionManager {
             .map_err(storage_error)
     }
 
-    /// Resumes a thread whose provider is gone but whose cursor can bring it back.
+    /// Resumes a thread whose provider is gone but whose cursor can bring it back — or, for a
+    /// thread that never started a turn, starts it over.
     ///
-    /// A thread with no cursor, or one that already has a provider, is left exactly as it is.
+    /// A thread with turns and no cursor, or one that already has a provider, is left exactly
+    /// as it is.
     async fn resume_if_stopped(&self, runtime: &ThreadRuntime) -> Result<(), ProtoError> {
         let resumable = {
             let state = runtime
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.record.resume_cursor.is_some()
+            (state.record.resume_cursor.is_some() || state.projection.turns.is_empty())
                 && matches!(
                     state.projection.session,
                     SessionState::Stopped | SessionState::Error | SessionState::Starting
@@ -355,7 +378,7 @@ impl AgentSessionManager {
         if runtime.provider.lock().await.is_some() {
             return Ok(());
         }
-        let (record, age_ms) = {
+        let (record, age_ms, fresh) = {
             let state = runtime
                 .state
                 .lock()
@@ -364,12 +387,32 @@ impl AgentSessionManager {
                 .signed_duration_since(state.record.last_activity)
                 .num_milliseconds()
                 .max(0) as u64;
-            (state.record.clone(), age_ms)
+            (
+                state.record.clone(),
+                age_ms,
+                state.projection.turns.is_empty(),
+            )
         };
-        let cursor = record
-            .resume_cursor
-            .clone()
-            .ok_or_else(|| conflict("agent thread has no resume cursor"))?;
+        // A thread that never started a turn has nothing to resume: the harness never wrote a
+        // conversation for its cursor, and asking it to resume one it does not have is how a
+        // never-prompted thread used to die on the first restart. It starts over instead.
+        let cursor = if fresh {
+            None
+        } else {
+            Some(
+                record
+                    .resume_cursor
+                    .clone()
+                    .ok_or_else(|| conflict("agent thread has no resume cursor"))?,
+            )
+        };
+        tracing::info!(
+            target: "fleet::agents",
+            thread = %record.thread,
+            provider = %record.provider.display_name(),
+            mode = if fresh { "fresh" } else { "resume" },
+            "agent thread resuming"
+        );
         let path = self
             .inner
             .worktrees
@@ -401,17 +444,18 @@ impl AgentSessionManager {
         } else {
             BTreeMap::new()
         };
+        let (sandbox, approval_policy) = controls_for_mode(record.mode);
         let request = StartRequest {
             thread: record.thread,
             worktree_path: path,
             provider: record.provider,
             model: record.model,
             mode: record.mode,
-            resume_cursor: Some(cursor),
+            resume_cursor: cursor,
             fork: false,
             env,
-            sandbox: SandboxPolicy::default(),
-            approval_policy: ApprovalPolicy::default(),
+            sandbox,
+            approval_policy,
             permission_profile: None,
             title: Some(record.title),
         };
@@ -742,6 +786,34 @@ impl AgentSessionManager {
         apply_event(&self.inner, runtime, operation, event, raw)
             .await
             .map_err(apply_error)
+    }
+}
+
+/// Safe controls for a new thread when the configured defaults cannot be trusted.
+fn fail_closed_native_agents() -> NativeAgentsConfig {
+    let defaults = NativeAgentDefaults {
+        mode: PermissionMode::Ask,
+        model: None,
+        effort: None,
+    };
+    NativeAgentsConfig {
+        claude: defaults.clone(),
+        codex: defaults,
+    }
+}
+
+fn controls_for_mode(mode: fleet_core::agents::PermissionMode) -> (SandboxPolicy, ApprovalPolicy) {
+    use fleet_core::agents::PermissionMode;
+
+    match mode {
+        PermissionMode::Ask | PermissionMode::Plan => {
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::Untrusted)
+        }
+        PermissionMode::AcceptEdits => (SandboxPolicy::WorkspaceWrite, ApprovalPolicy::OnRequest),
+        PermissionMode::FullAccess => (SandboxPolicy::DangerFullAccess, ApprovalPolicy::Never),
+        PermissionMode::Auto | PermissionMode::DontAsk => {
+            (SandboxPolicy::ReadOnly, ApprovalPolicy::Untrusted)
+        }
     }
 }
 

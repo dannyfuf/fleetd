@@ -16,7 +16,8 @@ use fleet_proto::error::ProtoError;
 use crate::agents::harness::RuntimeChange;
 
 use super::{
-    AgentSessionManager, Serialized, ThreadRuntime, conflict, provider_error, runtime_inflight,
+    AgentSessionManager, Serialized, ThreadRuntime, conflict, provider_error, publish_applied,
+    runtime_inflight,
 };
 
 impl AgentSessionManager {
@@ -92,6 +93,12 @@ impl AgentSessionManager {
             )));
         }
         drop(provider_slot);
+        // The retired harness cannot answer a gate after its event stream is cut over to the
+        // replacement generation. Questions may outlive their turn, so close them durably before
+        // restart instead of relying on teardown frames the provider boundary intentionally hides.
+        for applied in self.settle_open_gates(runtime, operation).await? {
+            publish_applied(&self.inner, runtime, applied);
+        }
         self.apply_one(
             runtime,
             operation,
@@ -104,6 +111,13 @@ impl AgentSessionManager {
             .as_mut()
             .ok_or_else(|| conflict(format!("agent thread {thread} is not live")))?;
         let restarted = provider.restart(&plan, &change).await;
+        if restarted.is_err() {
+            // A failed restart has already retired the old harness generation. Keeping this
+            // provider in the slot would retain its event sender while leaving no usable
+            // harness or forwarder behind, so neither stream closure nor lazy resume could
+            // recover the thread. Emptying the slot makes the recorded Error resumable.
+            provider_slot.take();
+        }
         drop(provider_slot);
         match restarted {
             Ok(()) => {

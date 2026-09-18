@@ -228,7 +228,8 @@ pub struct AgentThreadWindow {
     /// Calling installation's persisted read cursor, when `agent.seen` was negotiated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_seq: Option<Seq>,
-    /// Ordered events after `head_seq`, when the daemon chose the replay path over a window.
+    /// Ordered events after the resume cursor, up to `head_seq`, when the daemon chose the
+    /// replay path over a window; a replay carries no transcript beside them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events_after: Vec<fleet_core::agents::SeqEvent>,
     /// Whether the owner has confirmed this content.

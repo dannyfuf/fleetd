@@ -27,9 +27,10 @@ pub use decision::{
 };
 pub use decision_dock::DecisionDock;
 pub use format::{
-    MINUS, format_compacted, format_cost, format_counter, format_duration, format_exit,
-    format_file_delta, format_files_changed, format_resumed, format_retrying, format_stopped_after,
-    format_thought, format_token_count, format_worked, format_working, turn_footer_segments,
+    MINUS, format_compacted, format_cost, format_counter, format_cut_off_after, format_duration,
+    format_exit, format_file_delta, format_files_changed, format_resumed, format_retrying,
+    format_stopped_after, format_thought, format_token_count, format_worked, format_working,
+    turn_footer_segments,
 };
 pub use group::{ToolGroupCounts, format_group_summary};
 pub use metadata_row::{

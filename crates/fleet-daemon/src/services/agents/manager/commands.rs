@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use chrono::Utc;
 use fleet_core::{
     agents::{
-        AbortReason, AgentEvent, AgentKind, ApprovalPolicy, ControlCost, DelegationId, GateAnswer,
-        GateId, ModelSelection, PermissionMode, SandboxPolicy, Seq, StartRequest, SteerSupport,
-        ThreadId, ThreadProjection, TurnId, TurnState, UserInput,
+        AbortReason, AgentEvent, AgentKind, ControlCost, DelegationId, GateAnswer, GateId,
+        ModelSelection, PermissionMode, Seq, StartRequest, SteerSupport, ThreadId,
+        ThreadProjection, TurnId, TurnState, UserInput,
     },
     ids::WorktreeId,
 };
@@ -30,8 +30,8 @@ use crate::agents::harness::{AccountOp, AccountOutcome, RuntimeChange};
 use super::{
     AgentSessionManager, AgentThreadRecord, SubmissionState, ThreadRuntime,
     apply::{publish_applied, runtime_inflight},
-    conflict, daemon_error, hydrate, not_found, provider_error, provider_factory_error,
-    provider_start_error, storage_error, validation,
+    conflict, controls_for_mode, daemon_error, hydrate, not_found, provider_error,
+    provider_factory_error, provider_start_error, storage_error, validation,
     window::OpenRequest,
 };
 
@@ -50,8 +50,8 @@ pub struct CreateOptions {
     pub provider: AgentKind,
     /// Model selection, or the harness default.
     pub model: Option<ModelSelection>,
-    /// Permission mode the session starts under.
-    pub mode: PermissionMode,
+    /// Permission-mode override, or the selected harness's configured default.
+    pub mode: Option<PermissionMode>,
     /// Cursor to resume an existing harness session from.
     pub resume_cursor: Option<String>,
     /// Title, or the provider's display name.
@@ -71,7 +71,7 @@ pub struct CreateOptions {
 impl CreateOptions {
     /// The options a plain `AgentThreadCreate` carries: no parent, no delegation, no environment.
     #[must_use]
-    pub fn new(worktree: WorktreeId, provider: AgentKind, mode: PermissionMode) -> Self {
+    pub fn new(worktree: WorktreeId, provider: AgentKind, mode: Option<PermissionMode>) -> Self {
         Self {
             thread: None,
             worktree,
@@ -95,7 +95,7 @@ impl AgentSessionManager {
         worktree: WorktreeId,
         provider_kind: AgentKind,
         model: Option<ModelSelection>,
-        mode: PermissionMode,
+        mode: Option<PermissionMode>,
         resume_cursor: Option<String>,
         title: Option<String>,
     ) -> Result<ResponseBody, ProtoError> {
@@ -148,6 +148,29 @@ impl AgentSessionManager {
             .map(PathBuf::from)
             .map_err(daemon_error)?;
         let thread = thread.unwrap_or_else(ThreadId::new);
+        let (binaries, native_agents, config_notice) = self.native_agent_settings().await;
+        let defaults = native_agents.for_kind(provider_kind);
+        let mode = mode.unwrap_or(defaults.mode);
+        if !provider_kind.supported_modes().contains(&mode) {
+            return Err(validation(format!(
+                "{} does not support permission mode {mode:?}",
+                provider_kind.display_name()
+            )));
+        }
+        let model = match model {
+            Some(mut selection) => {
+                if selection.effort.is_none() {
+                    selection.effort.clone_from(&defaults.effort);
+                }
+                Some(selection)
+            }
+            None => defaults.model.as_ref().map(|model| ModelSelection {
+                model: model.clone(),
+                effort: defaults.effort.clone(),
+                provider: None,
+            }),
+        };
+        let (sandbox, approval_policy) = controls_for_mode(mode);
         let request = StartRequest {
             thread,
             worktree_path: path,
@@ -157,12 +180,11 @@ impl AgentSessionManager {
             resume_cursor: resume_cursor.clone(),
             fork: false,
             env: extra_env,
-            sandbox: SandboxPolicy::default(),
-            approval_policy: ApprovalPolicy::default(),
+            sandbox,
+            approval_policy,
             permission_profile: None,
             title: title.clone(),
         };
-        let binaries = self.agent_binaries().await;
         let command = binaries.binary(provider_kind).to_owned();
         let worktree_path = request.worktree_path.clone();
         let mut provider = (self.inner.provider_factory)(provider_kind, &request, &binaries)
@@ -173,8 +195,20 @@ impl AgentSessionManager {
             provider_start_error(provider_kind, &command, &worktree_path, error)
         })?;
         let provider_events = provider.events();
+        // The adapter's own cursor, durable before the harness has said anything: Claude only
+        // publishes `system/init` with the first prompt, and a thread the daemon loses before
+        // then must still be the same thread when it comes back.
+        let resume_cursor = provider.resume_cursor().or(resume_cursor);
         let created = Utc::now();
         let resolved_title = title.unwrap_or_else(|| provider_kind.display_name().to_owned());
+        tracing::info!(
+            target: "fleet::agents",
+            %thread,
+            provider = %provider_kind.display_name(),
+            worktree = %worktree_path.display(),
+            has_cursor = resume_cursor.is_some(),
+            "agent thread created"
+        );
         let record = AgentThreadRecord {
             thread,
             parent,
@@ -225,6 +259,25 @@ impl AgentSessionManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(thread, runtime.clone());
+        if let Some(notice) = config_notice {
+            let operation = runtime.operation.lock().await;
+            if let Err(error) = self
+                .apply_one(
+                    &runtime,
+                    &operation,
+                    AgentEvent::Notice(notice.to_owned()),
+                    Some("config_fallback".to_owned()),
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "fleet::agents",
+                    %error,
+                    %thread,
+                    "could not record the native-agent configuration fallback notice",
+                );
+            }
+        }
         drop(self.spawn_event_task(runtime.clone(), provider_events, provider_generation));
         let summary = runtime
             .state
@@ -641,6 +694,12 @@ impl AgentSessionManager {
         if provider.capabilities().mode_switch == ControlCost::NotSupported {
             return Err(conflict(format!(
                 "{} does not support changing mode",
+                provider.kind().display_name()
+            )));
+        }
+        if !provider.capabilities().modes.contains(&mode) {
+            return Err(validation(format!(
+                "{} does not support permission mode {mode:?}",
                 provider.kind().display_name()
             )));
         }

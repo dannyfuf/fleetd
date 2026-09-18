@@ -17,8 +17,8 @@ OpenCode is deleted (ADR 0014).
 
 Sources this was distilled from:
 
-- **The installed harnesses, captured live** on 2026-09-10: `claude 2.1.266` and
-  `codex-cli 0.147.0`. `research/harness-protocols.md` and
+- **The installed harnesses, captured live** on 2026-09-17: `claude 2.1.275` and
+  `codex-cli 0.154.0`. `research/harness-protocols.md` and
   `research/harness-codex-app-server.md` are the wire references, and they outrank any SDK
   typing or vendored schema. Regenerate the Codex protocol with
   `codex app-server generate-json-schema --out <dir> --experimental`.
@@ -164,6 +164,9 @@ pub async fn spawn(kind: HarnessKind, cfg: &HarnessConfig, probe: &ProbeCache)
 ```
 
 Construction is a free function because the failure modes differ before a process exists.
+
+On Linux every probe and session child installs `PR_SET_PDEATHSIG(SIGKILL)` and verifies that its
+parent did not change across fork/exec; macOS has no parent-death signal and relies on stdin EOF.
 
 **Which binary.** `HarnessConfig.command` comes from `config.agentBinaries.{claude,codex}` — the
 executable the daemon `execve`s, with **no shell**. It is deliberately *not* `config.agentCommands`,
@@ -316,13 +319,19 @@ Transition rules, each closing a real race:
    turn that launched it and remains live in the projection until its own terminal event.
 4. Gates are independent of turns. A gate closes only on `GateResolved` or `GateWithdrawn`.
 5. Stream or process loss is `SessionExited { expected: false }` plus `RuntimeError`, which makes
-   the turn `Failed`. Never inferred success.
+   the turn `Failed`. Never inferred success. Restart recovery is the explicit exception: it
+   follows rule 9 and aborts a resumable orphan as `Interrupted` before leaving it `Stopped`.
 6. A user message sent while running is **steering**, dispatched immediately. There is no queue
    and no `QueuedMessage` row — see §7.2.
 7. Attention derives from gates, then work, then failure, then fresh completion.
 8. **Settlement is sticky.** `Interrupted` never downgrades to `Completed`; `Failed` never
    downgrades. This is what makes "the user pressed Stop and the turn completed anyway" render
    correctly.
+9. **A thread whose provider is gone comes back lazily, on the next open or send.** A thread with
+   a resume cursor and at least one turn is resumed from that cursor. A thread that never started
+   a turn has nothing to resume — the harness never wrote a conversation for its cursor — so it is
+   `Stopped` after a daemon restart, not `Error`, and the next open or send **starts it over**
+   with a fresh launch. Only a thread with turns and no cursor stays `Error`.
 
 One pure function, ~30 lines and unit-tested, guards the whole class of "the UI says it is still
 running / it says it finished but it did not" bugs:
@@ -369,7 +378,7 @@ claude -p
 
 Three flags carry corrections to the previous revision of this document:
 
-- **`--effort` is real in 2.1.266.** The old claim that Claude has no reasoning ladder — and the
+- **`--effort` is real in 2.1.275.** The old claim that Claude has no reasoning ladder — and the
   three-segment metadata row sized around it — is dead. Effort is a launch flag and is **not**
   echoed on `system/init`, so Fleet must remember what it launched with.
 - **`--permission-prompt-tool stdio` is not optional.** With `--permission-prompts host` alone, a
@@ -392,11 +401,42 @@ still wins.
 
 The binary is `config.agentBinaries.claude`, not `config.agentCommands.claude` (§3.1).
 
+Before the first prompt Fleet sends an `initialize` control request and reads `models`; if that
+answer is empty it retries with `list_models`, then falls back to the adapter's four-model static
+catalogue with a warning. The live 2.1.275 response identifies a selectable model by `value`, a
+label by `displayName`, and its legal effort ladder by `supportedEffortLevels`. Fleet publishes
+that normalized catalogue in `SessionConfigured`, so Claude uses the same `^s m` / `^s e`
+picker path as Codex. Because `system/init.model` is a resolved id rather than a selectable
+`value`, the adapter retains the `value` → `resolvedModel` aliases and publishes the selectable id
+again (including `default` and `[1m]` variants); the raw resolved id remains internal for matching
+`modelUsage`.
+
 Handshake is `system/init`. Fleet reads six fields: `session_id` (**the resume cursor**, persisted
 before any turn), `capabilities` (the version gate), `model`, `permissionMode` (advisory), the
 `tools`/`slash_commands`/`skills`/`agents`/`mcp_servers` vocabularies for the composer's `/`, `@`
 and `$` menus — **per session, discovered here, never hardcoded** — and `claude_code_version` for
 the log.
+
+**`system/init` arrives with the first prompt, and again with every later one** (observed live on
+2.1.275: one init per turn). Three consequences, each implemented:
+
+- `open` does not wait for it. The barrier is "the child survived its spawn window", and a child
+  that did is accepting input, so the adapter publishes `SessionStateChanged(Ready)` at open and
+  `system/init` re-affirms it later. Without this a fresh thread read `starting…` — the working
+  spinner — until the user typed, which is indistinguishable from a hang.
+- The cursor is durable from `create`: the adapter mints the session id it launches with, hands it
+  back as `SessionOpened.resume_cursor`, and the manager writes it into the thread record before
+  the harness has said a word. A daemon that goes away between the first prompt and init still
+  comes back to the same conversation.
+- Repeated inits configure the session **once**: the mapper ignores every init after the first,
+  and the cursor keeps following durable frames as before.
+
+`--resume <cursor>` for a session the CLI never wrote a conversation for prints `No conversation
+found with session ID`, emits one `result` with `is_error: true` and exits 0. The manager never
+asks for that (§3.3 rule 9: a thread with no turn starts over), and the adapter catches the case
+anyway: a `--resume` child that dies inside the spawn window with that sentence on stderr is
+relaunched **once** with `--session-id <the same cursor>`, so the thread keeps the cursor the store
+already holds.
 
 Frames not in the previous revision, all observed live: `system/status` (a truthful spinner
 sub-label, never a terminal), `system/thinking_tokens` (a live reasoning-token counter that lets
@@ -484,7 +524,7 @@ link — `rawResponseItem/completed` alone roughly doubles the byte volume of a 
 debug data. The suppression list (realtime/audio, fs, process, fuzzy search, raw response items,
 moderation metadata, Windows sandbox) is a golden-tested constant.
 
-Of the 133 client methods codex-cli 0.147.0 declares, Fleet uses nineteen: `initialize`,
+From the codex-cli 0.154.0 schema Fleet uses these methods: `initialize`,
 `thread/start`, `thread/resume`, `thread/read`, `thread/items/list`, `turn/start`, `turn/steer`,
 `turn/interrupt`, `thread/settings/update`, `thread/compact/start`, `thread/fork`,
 `thread/unsubscribe`, `model/list` (**cursor-paginated — loop on `nextCursor`**), `skills/list`,
@@ -565,6 +605,16 @@ The file-change approval **carries no diff and no paths**. The changes live on t
 item named by `itemId`. Fleet joins on `itemId`, shows a loading state if the item has not
 arrived, and never renders `reason` as if it were the change.
 
+**Codex's stderr is a signal, deduplicated.** `app-server` writes structured log lines to stderr;
+only `ERROR` lines are surfaced, and each distinct failure is surfaced **once per process** — the
+fingerprint drops the `url:`, `cf-ray:` and `request id:` segments that change between repeats, so
+the background model refresh Codex retries every three minutes on a dead token is one transcript
+row, not one every three minutes (the shipped store had 906 of them). A line naming a `401
+Unauthorized`, a `token_revoked`, or an invalidated authentication token is **the signed-out
+signal**: `account/read` still answers the cached account after a revocation, so this line is the
+only thing that tells Fleet every turn is about to be refused. It publishes
+`AccountChanged { SignedOut }` and the one `/login` notice, and never the raw sentence.
+
 ### 4.3 Divergence — where normalisation would lose something
 
 The full 48-row table is in the harness spec; these are the rows where flattening the two
@@ -574,7 +624,7 @@ into the UI rather than pretending it away.
 | Axis | Claude Code | Codex | Fleet |
 | --- | --- | --- | --- |
 | "Always allow" scope | real, via `updatedPermissions` with a persistent destination | **not expressible** for exec/file approvals; survives only in MCP elicitation `_meta.persist` | the button is offered on Claude and **absent** on Codex. Advertising a button that silently means something weaker is the worse outcome. |
-| Auto-approval by the harness | — | `approvalsReviewer: "auto_review"`, a risk-assessing subagent, plus `item/autoApprovalReview/*` rows | Fleet's "Auto" mode means **materially different things**. The mode picker's help text differs per harness. Collapsing this would be a safety misrepresentation. |
+| Auto-approval by the harness | `--permission-mode auto`, labelled `auto-approves safe actions` | Codex can expose `auto_review` internally, but the normalized picker does not advertise an Auto mode | capability-declared mode lists prevent one harness's semantics leaking into the other. |
 | Extra approval kinds | — | network-policy amendment, execpolicy amendment, permission-profile widening | implemented on Codex; the affordances simply do not appear on Claude. |
 | Question secrecy | — | `isSecret: bool` | masked input, never persisted, never logged. Dropping it writes a credential into SQLite. |
 | Non-blocking questions | — | `isBlocking: false`, plus async `agentMessage.questions` that never end the turn | must not mark the thread "needs you", must stay answerable after settlement. |
@@ -598,7 +648,7 @@ allowed to make the UI more truthful and is forbidden from changing the state ma
 
 | Signal | Claude Code | Codex | Hints that must NOT be treated as authoritative |
 | --- | --- | --- | --- |
-| Session ready | `system/init` | `initialize` result **and** `thread/start`/`resume` result | process spawn succeeding |
+| Session ready | the child surviving its spawn window (`system/init` only lands with the first prompt, and re-affirms `Ready` when it does; §4.1) | `initialize` result **and** `thread/start`/`resume` result | a spawn that has not yet outlived the window |
 | Resume cursor | `session_id` on any **durable** frame | the Codex thread id | any `session_id` on `hook_started`/`hook_progress`/`hook_response` — those are **transient** and adopting one corrupts the cursor |
 | Turn started | Fleet's own `submit` wrote a `user` frame with no turn open; or synthetic | `turn/started`, or the `turn/start` response | `thread/status/changed{active}`, which fires **before** `turn/started`; `session_state_changed{running}` |
 | Streaming text | `content_block_delta{text_delta}` | `item/agentMessage/delta` | `assistant` snapshot frames (they backfill, never stream) |
@@ -631,9 +681,10 @@ nothing. A legacy `applyPatchApproval` ever arriving is a refusal. `availableDec
 degrades to the four-decision default. `optOutNotificationMethods` rejected degrades to
 daemon-side filtering with one warning about event volume over a remote link.
 
-**A version gate is never a `PROTOCOL_VERSION` bump.** Remote links require an exact protocol
-match, so a new harness capability is an additive capability string on the existing handshake.
-Adding Codex must not make a mixed-version fleet unable to connect.
+**A harness version gate is never an IPC `PROTOCOL_VERSION` bump.** Remote links require an exact
+IPC match, so a new harness capability is an additive capability string on the existing handshake.
+An incompatible Fleet request or enum shape is different: it must bump the IPC version, as the
+version-8 default-controls change does in §10.
 
 Both harnesses add fields and enum values without a version bump — Codex demonstrably:
 `rateLimitExceeded` and `misalignmentPolicyViolation` were added to `CodexErrorInfo` after the
@@ -757,6 +808,10 @@ invisible"* (`MessagesTimeline.logic.ts:575`).
 **The duration in the fold is the model's, not the wall clock's.** Every interval a gate stood
 open is the user's time and is subtracted from the harness's figure by the reducer. That is why
 the fold says `worked 22s` on a turn that was on screen for four minutes.
+
+An interrupted turn caused by the user reads `you stopped after 12s` with footer word `stopped`;
+a stopped session reads `stopped after 12s` / `stopped`; a provider-exit abort reads
+`cut off after 12s` / `cut off`. Older records with no abort reason keep the user-stop copy.
 
 Diffs render as their own row under an expanded edit row, so an expanded diff never inflates the
 tool row's own measurement, drawn by `fleet_lazygit::diff_view::DiffView` from unified-diff text
@@ -942,8 +997,9 @@ code change. **Fleet never hardcodes a Codex effort ladder** — the legal set i
 `model/list.supportedReasoningEfforts`, with the harness's own `description` strings.
 `SessionConfigured.models` projects `{ id, display_name, efforts: [{ id, description }],
 default_effort }` through the store and `AgentSessionView`; `^s e` reads only the selected model's
-descriptor and a newly selected model starts at its advertised default. Claude keeps the
-vocabulary it reports at initialization. A later Codex `skills/changed` is a
+descriptor and a newly selected model starts at its advertised default. Claude's current frame
+does not report a default effort, so `None` means the harness default. A later Codex
+`skills/changed` is a
 `MetadataChanged.skills` observation, so `$` refreshes without pretending the session restarted.
 
 | Control | Claude | Codex | Mid-thread? | Mid-turn? | Key |
@@ -953,25 +1009,47 @@ vocabulary it reports at initialization. A later Codex `skills/changed` is a
 | Context window | a `select` that **rewrites the model id** via a suffix (`claude-opus-5[1m]`); also the meter's denominator | not offered | yes | no | `^s e` |
 | Fast mode / service tier | a setting; restarts | `serviceTier`, a `select`; no restart | yes | no | `^s e` |
 | `ultrathink` | **not an effort** — a prompt prefix, skipped when the prompt starts with a slash command | n/a | yes | no | `^s e` |
-| Access mode | one `--permission-mode` | three axes: `approvalPolicy` × `sandbox` × reviewer. **The reviewer is re-sent every time**, or `auto_review` stays sticky | yes — restarts on both | no | `^s t` |
-| Build ⇄ Plan | `--permission-mode plan`, restoring the **base** mode on leaving | a `collaborationMode` block on `turn/start` | yes — **no restart on either** | no | `⇧⇥` |
+| Access mode | one `--permission-mode`; restart with resume | approval/sandbox controls updated in place. **The reviewer is re-sent every time**, or a prior value stays sticky | yes | no | `^s t` |
+| Build ⇄ Plan | `--permission-mode plan`, restoring the **base** mode on leaving; restart with resume | the normalized Plan mode updates approval/sandbox controls in place | yes | no | `⇧⇥` |
 | Compaction | a slash command: send `/compact` as a turn, and synthesise the boundary if the turn settles without one | native `thread/compact/start` | yes | no | — |
 | Instance (same driver) | restarts with resume cursor | same | yes | no | `^s m` |
 | Instance (different driver) | **rejected** — a Claude thread cannot become a Codex thread | same | never | never | — |
 | Account | not offered — Claude has no account method Fleet can drive | `/login` opens Codex's ChatGPT browser flow, `/logout` signs out; no restart, and the account is **process-wide** for that `CODEX_HOME` rather than per thread | yes | no | `/login`, `/logout` |
 
-**Three orthogonal axes Fleet must not collapse into one "mode":** approval policy, sandbox
-policy, permission profile. Claude has one permission mode plus a rule list. Fleet's four-mode
-ladder is a *presentation* over Codex's three axes, not a replacement, and note that "Auto"
-differs from "Auto-accept edits" *only* by the reviewer — `auto_review` is Codex running its own
-risk-assessing subagent in the user's place, which has no Claude equivalent (§4.3).
+The access picker is capability-driven. Claude declares `Ask`, `AcceptEdits`, `Plan`, `Auto`,
+`DontAsk`, `FullAccess`; Codex declares `Ask`, `AcceptEdits`, `Plan`, `FullAccess`. The labels are
+`asks before edits`, `accepts edits`, `plans before editing`, `auto-approves safe actions`,
+`denies unlisted tools`, and `full access`. The daemon rejects a mode absent from the live
+capability list instead of letting an adapter approximate it.
 
-**Nothing applies mid-turn.** Every control writes to a local draft and takes effect at the next
-send; a picker that blocks on a round trip stops feeling instant over an SSH link. Control state
-lives in three tiers: the composer draft (app, per thread, persisted — writing is synchronous and
-repaints one row), a sticky per-instance memory (app, global), and the thread projection (daemon,
-persisted). Before restart work begins, `session = Starting` is published optimistically so the
-tab shows `starting…` in the same frame rather than after the round trip.
+**Three orthogonal Codex axes Fleet must not collapse internally:** approval policy, sandbox
+policy, permission profile. The normalized picker maps Ask/Plan to untrusted + read-only,
+AcceptEdits to on-request + workspace-write, and FullAccess to never + danger-full-access.
+
+**Nothing applies mid-turn.** Every control writes to `ControlDraft`, which is view-local and
+per thread, and takes effect at the next send; it is not sticky global memory and does not survive
+recreating the view. The applied thread projection remains daemon-persisted. On send, controls and
+the message enter one FIFO bridge mutation lane: each control must receive its daemon
+acknowledgement before the message is admitted, so a Claude restart completes at the turn boundary
+instead of racing the new turn. Before Claude restart work begins, `session = Starting` is
+published optimistically so the tab shows `starting…` in the same frame rather than after the round
+trip. The manager first resolves any open gates as provider-closed; restart teardown lifecycle
+events then belong to the retired harness generation and are not projected into the thread
+transcript. If replacement startup or old-process shutdown fails, the manager records `Error` and
+empties the unusable provider slot; the next eligible open or send lazily constructs a new provider
+from the last controls that were actually persisted.
+
+### 7.1.1 Defaults for new threads
+
+`config.nativeAgents.claude` and `.codex` each contain `{ mode, model, effort }`. In a successfully
+loaded configuration, an absent `nativeAgents` section resolves to `{ mode: full_access, model:
+null, effort: null }`, so existing installations keep the documented no-prompts/no-sandbox
+("yolo") default. If the configuration file cannot be read or parsed, new threads instead fail
+closed to `{ mode: ask, model: null, effort: null }` while executable names retain their packaged
+fallbacks, and the daemon both warns and records that degraded choice as a thread notice.
+`AgentThreadCreate.mode` is optional and the app omits it; the daemon resolves omitted mode/model
+from the matching harness defaults and persists the resolved values. Per-thread picks remain
+available through the controls above.
 
 ### 7.2 The composer
 
@@ -992,6 +1070,14 @@ unexpanded (`ClaudeAdapter.ts:1538-1549`).
 The user bubble shows **what the user typed**. Attachment manifests, `@file` expansions and
 Fleet's own prompt prefixes are stripped for display and for `↑` recall, and kept verbatim for
 copy.
+
+**A send the daemon refuses is a failed bubble, never a stuck one.** The optimistic bubble is
+reconciled by its client-minted `ItemId` (§9.2), so what the user typed never has to match what
+the daemon stored. When the `AgentSend` request comes back an error — the thread is not live, the
+harness would not take the prompt, the transport deadline passed — the bubble turns failed, the
+daemon's sentence is said once as a notice, and the composer is free: a failed bubble counts as
+neither work nor an unacknowledged send, so it blocks nothing and spins nothing. There is no retry
+key; the text is one `↑` away.
 
 The composer wraps every logical line to its resolved value-column width, breaking an unbroken
 token at a character boundary rather than widening the panel. Its caret, pointer hit-testing,
@@ -1080,7 +1166,9 @@ is worked through **in the background, one thread at a time**: a thread whose `p
 its `head_seq` is replayed through the same projector a live append uses, and one that cannot be
 replayed is marked `session_state = 'error'` while the daemon starts anyway. Taking the census
 before anything can write is what makes the pass safe — a thread created afterwards can never be in
-it, so a live thread is never mistaken for an orphan of the previous run.
+it, so a live thread is never mistaken for an orphan of the previous run. For each orphan it
+settles, the repair pass also publishes the settled summary so a client that connected before the
+pass reached that thread sees the tab change without opening it.
 
 `index.json` is gone, and with it the whole-file rewrite on every metadata change: a record is one
 upsert on one row, which touches no projected column.
@@ -1156,6 +1244,14 @@ that *is* the server id**, so reconciliation is by id with no temp-id swap and n
 heuristic. "Sending" clears on a **field diff** against a pre-send snapshot — any server-visible
 movement clears it — not on a correlated ack, which a *steer* would never produce.
 
+Every connection replacement — first connect or reconnect, whether fleetd restarted or not —
+re-opens every projection the client still holds from that projection's own `last_seq`. A catch-up
+open never launches a provider; if the daemon no longer has that cursor, the client falls back
+once to a fresh bounded newest-window open. A replay answer — the ladder admitted `(cursor, head]`
+— carries no transcript on purpose and is applied **onto** the projection the cursor came from;
+only a windowed answer replaces a projection, and a replay for a thread the client no longer
+holds is a gap that re-opens the newest window.
+
 ### 9.3 Remote
 
 > **The remote daemon owns the transcript and the sequence. The local daemon is a re-framing proxy
@@ -1196,7 +1292,7 @@ with a test in `services/agents/manager/tests/mirror.rs`:
 | --- | --- |
 | A thread with `owner_host` set may only be appended to from events received on that host's link — two writers on one sequence space is silent corruption | `store::mirror::admits_append`, a pure function asked once on the pre-flight read and again inside the write transaction |
 | No harness process is ever started for a mirrored thread | the owner check in `resume_runtime` and in `create`, plus the orphan-settlement skip in `hydrate` — settling an orphan *appends events*, which is the same violation wearing a different hat |
-| A mutation routes upstream and is never applied locally on optimism | the router classifies by owner, **and** the local manager refuses every mutation on a mirrored thread with `ErrorKind::Remote`, for the window between a daemon start and the owner's first snapshot in which the router's id map is still empty |
+| A mutation routes upstream and is never applied locally on optimism | the router classifies by owner from its id map **and the snapshot mirror as the fallback** — so a verb on a mirrored thread is forwarded even across a local restart, before any list or open re-registers the id, exactly as `host_of_worktree` already resolves a worktree; the local manager's `ErrorKind::Remote` refusal is then the backstop for the narrow window before the owner's first snapshot reaches the mirror, so an optimistic local apply never happens |
 | The mirror never fabricates a `Synchronized` | a mirrored answer carries `synchronized = false` unconditionally, and only the owner's own `Event::AgentSynchronized`, forwarded verbatim, moves a client to `Live` |
 
 The local router drains everything immediately ready from each host link, bounded at **64 events
@@ -1278,10 +1374,12 @@ latency and flush queued prose first.**
 
 ## 10. Protocol additions (`fleet-proto`)
 
-**`PROTOCOL_VERSION` stays at 7.** Everything is additive and gated on a capability string. A bump
-would force every remote daemon to upgrade in lockstep — the daemon matches the version literally
-and remote links require an exact match — and the entire point of the capability mechanism is to
-avoid that.
+**`PROTOCOL_VERSION` is 8.** Windowing, seen cursors and the other independently negotiated verbs
+below remain additive capabilities. The native-agent defaults change is not additive: version 7
+requires `AgentThreadCreate.mode`, whereas version 8 omits it when the daemon should resolve the
+per-harness default, and version 7 cannot decode the new `auto` and `dont_ask` permission values.
+The exact-version Hello therefore rejects both mixed-version directions before either peer can
+misdecode an agent request.
 
 The version-6 agent request family survives in shape. What changes: `AgentThreadOpen` gains
 `turn_limit`, `after_seq`, `before_cursor` and `request_sync_marker`, and answers with a
@@ -1326,8 +1424,8 @@ the harness's own answer to "did this join a turn that was already running?", so
 `snapshot::AgentBinaries` gains `codex`, defaulted, so a host listing and `fleet doctor` report
 the third executable the same way they report the other two (ADR 0014).
 
-Two further additive metadata shapes make provider discovery observable without changing protocol
-7. `SessionConfigured.models` and `AgentSessionView.models` carry each model id, display name,
+Two further metadata shapes were introduced additively in protocol 7.
+`SessionConfigured.models` and `AgentSessionView.models` carry each model id, display name,
 reasoning-effort ids and descriptions, and default effort; empty lists are omitted so the old
 byte-exact goldens remain unchanged. `MetadataChanged.skills` carries a refreshed skill-name list
 after `skills/changed`. Both replay through `ThreadProjection`, and neither invents vocabulary for
@@ -1335,7 +1433,7 @@ a provider that reported none.
 
 `AgentRevert { thread, checkpoint }` restores a worktree from one Fleet checkpoint and answers
 `AgentReverted` with what it put back and what it removed; `AgentCheckpoints { thread }` lists what
-`[u]` may be drawn on. Both are additive on protocol 7 and gated on `agent.checkpoints`, because a
+`[u]` may be drawn on. Both were additive in protocol 7 and gated on `agent.checkpoints`, because a
 client that assumed checkpoints exist would draw `[u]` on every turn footer against a daemon that
 cannot answer — and a daemon without the service refuses with a typed `Unsupported` rather than an
 empty list, which would read as "nothing to revert to". `AgentRevert` joins the per-thread
@@ -1343,8 +1441,8 @@ serialization set for a stronger reason than ordering taste: it rewrites the wor
 turn is editing. `AgentCheckpoints` is a read and joins nothing.
 
 `AgentAccountLogin { thread }` starts a harness sign-in and answers
-`AgentAccountLogin { auth_url }`; `AgentAccountLogout { thread }` answers `AgentAck`. Both are
-additive on protocol 7 and gated on `agent.account`. `RequestBody` is internally tagged with no
+`AgentAccountLogin { auth_url }`; `AgentAccountLogout { thread }` answers `AgentAck`. Both were
+additive in protocol 7 and gated on `agent.account`. `RequestBody` is internally tagged with no
 catch-all arm, so a daemon that predates these two variants cannot decode either frame at all;
 the capability is how a peer asks before it sends. It says the *daemon* serves the verbs — whether
 the **harness** on a given thread does is a second question, answered per thread with
@@ -1471,8 +1569,8 @@ this build does not do**, named here rather than softened in the section that sp
 | --- | --- | --- |
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle` | **done**; `providers/opencode/**` was deleted with it. `ItemKind::UserMessage` later gained `steered` and `UserInput` gained `item`, both additive and both with a producer |
 | 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Owed: `item_attachments` has no writer because attachments are not built |
-| 3 | **Harnesses.** The `Harness` trait and probe; the Claude adapter rewritten against the 2.1.266 wire; the Codex adapter over app-server with generated `wire.rs`/`methods.rs`; the Codex fixtures | **done**: `agents/harness/` is the seam of §3.1 with the probe cache, the NDJSON framing and the SIGTERM→SIGKILL ladder; `agents/claude/**` speaks 2.1.266 with byte-exact argv goldens; `agents/codex/**` speaks app-server with `wire/`+`methods.rs` generated by `scripts/generate-codex-wire.py` from the installed 0.147.0's own schema; fixtures live under `crates/fleet-daemon/tests/fixtures/agents/{claude,codex}/`, and `--features real-agents` exercises both real binaries. The manager reads all three of the adapter's answers: `Submitted::JoinedActive { turn }` or `Submitted::QueuedNew { turn }`, `RuntimeApplied.restart` (performed at a turn boundary by `manager/controls.rs`), and `emitted_at` as a skew log line. Codex binds the caller's turn before the response/notification race, reconciles both halves of its user-message echo, discovers every `model/list` page, projects every model's effort descriptions and default, reads `skills/list`, and publishes refreshes on `skills/changed`; permission gates carry the named item, so file approvals join the exact diff. A direct 0.147.0 catalogue probe reports `low` as `gpt-5.6-sol`'s default and Fleet displays that discovered value. The Codex account surface is complete: `account/read` runs in the handshake and publishes `AccountChanged`, `account/updated` and `account/login/completed` re-read rather than guess, and `/login`/`/logout` drive `account/login/start`, `account/login/cancel` and `account/logout` through one `Harness::account` method whose default refusal is what keeps Claude compiling unchanged. **Owed**: the per-thread raw NDJSON log (`RawRef.offset` is always `None`), `thread/read`/`thread/items/list` cold rehydration (the store replays instead), and per-instance `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (`HarnessConfig.home` is plumbed and nothing sets it — multi-account is out of scope per §14) |
-| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Nine `agent.*` capabilities are advertised and served — `agent.delegation` is the newest, gating the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` adds `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write without changing protocol 7; anonymous and older peers retain validate-only compatibility. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
+| 3 | **Harnesses.** The `Harness` trait and probe; Claude stream-json; Codex app-server; scripted fixtures | **done** against Claude 2.1.275 and Codex 0.154.0. Claude discovers `initialize.models` (with `list_models` and a static fallback), publishes per-model effort ladders, and restarts with resume for every model/effort/mode change. Codex discovers every `model/list` page, sends launch effort through `config.model_reasoning_effort`, and updates effort plus permissions in place. Both adapters publish their supported mode lists. The manager reads the adapter's `Submitted::JoinedActive { turn }` versus `Submitted::QueuedNew { turn }` answer, so a steer is distinguishable from a queued turn. **Owed**: the per-thread raw NDJSON log, Codex cold rehydration from its own store, and per-instance homes (multi-account is out of scope per §14). |
+| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Nine `agent.*` capabilities are advertised and served — `agent.delegation` is the newest, gating the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. Protocol 8 is the later exact-version boundary for defaulted agent creates and the expanded permission enum. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
 | 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer. Deferred scroll refresh no longer borrows list state from inside its own callback; the two-turn `scroll-wheel.scenario` exercises wheel input up and back at a 600-pixel viewport |
 | 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
@@ -1566,7 +1664,9 @@ contract. Rebuilding a thread never deletes or recreates that record.
 `fleet subagent run` is accepted only during a running caller turn. It creates the child with
 `FLEET_DELEGATION=<id>` and `FLEET_DELEGATION_TOKEN=<token>`, inserts the delegation row, appends
 an `ItemKind::Delegation` under that turn, then sends the first message. The default worktree is
-the caller's, the default mode is `FullAccess`, and the default child title is
+the caller's. An omitted mode resolves through the configured default for the selected harness
+(which is `full_access` when unset); `--mode` accepts `ask`, `accept-edits`, `plan`, `auto`,
+`dont-ask`, and `full-access`. The default child title is
 `↳ <provider> — <first line of the brief, cut at 48 characters>`. A caller on a remote mirror is
 refused: phase 3 runs children only on the daemon that owns the caller.
 
@@ -1654,6 +1754,8 @@ caller's durable state:
 | blocked on a gate | leave `Deliver` open until the gate resolves or withdraws |
 | starting, or parked in provider `Waiting` | leave `Deliver` open until the session can accept input |
 | stopped with no resume cursor, or record missing | set `Undeliverable { reason }` and close the row |
+
+Both shipped adapters mint a cursor at start, so the cursorless stopped-caller case is a legacy-record path.
 
 A send that loses a race with a newly-running turn returns `Conflict` and leaves the row open; any
 other send failure is logged and retried. The worker deliberately does **not** mark `Deliver` done

@@ -136,6 +136,12 @@ impl AgentMirror {
     ) -> MirrorOutcome {
         let thread = projection.thread;
         self.projections.insert(thread, projection);
+        self.apply_tail(thread, events_after)
+    }
+
+    /// Applies an ordered tail onto the projection the mirror holds, stopping at the first
+    /// event that is neither applied nor a replay.
+    fn apply_tail(&mut self, thread: ThreadId, events_after: &[SeqEvent]) -> MirrorOutcome {
         for event in events_after {
             match self.apply_event(thread, event) {
                 MirrorOutcome::Applied(_) | MirrorOutcome::Duplicate { .. } => {}
@@ -151,8 +157,32 @@ impl AgentMirror {
     /// [`MirrorOutcome::Gap`] here means the daemon is mid-rebuild — its window applied fewer
     /// events than its tail assumes — and the caller repairs it by resuming from the projection's
     /// own cursor, exactly as it repairs a gap in live delivery.
+    ///
+    /// A cursored open the daemon answered by **replaying** carries the tail `(cursor, head]` and,
+    /// on purpose, no transcript: the client already holds everything before the cursor. Such an
+    /// answer never replaces the projection — installing its empty content at the head would
+    /// wipe the transcript and turn the whole tail into duplicates — it applies the tail onto
+    /// the projection the cursor came from. A replay for a thread this mirror no longer holds is
+    /// a gap, so the caller re-opens without a cursor and gets a window.
     pub fn install_window(&mut self, window: &AgentThreadWindow) -> MirrorOutcome {
         let thread = window.summary.thread;
+        if let Some(first) = window.events_after.first()
+            && window.window.turns.is_empty()
+            && window.window.items.is_empty()
+        {
+            if !self.projections.contains_key(&thread) {
+                return MirrorOutcome::Gap {
+                    expected: Seq(1),
+                    got: first.seq,
+                };
+            }
+            // The page cursor survives a replay: the older history behind the window is still
+            // there, and "load earlier" must keep working after a catch-up.
+            let state = self.windows.entry(thread).or_default();
+            state.head_seq = window.head_seq;
+            state.synchronized = window.synchronized;
+            return self.apply_tail(thread, &window.events_after);
+        }
         self.windows.insert(
             thread,
             WindowState {
@@ -484,6 +514,72 @@ mod tests {
             mirror.older_cursor(thread),
             Some("fat.1.cursor.4"),
             "the page cursor is what makes `load earlier` possible at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replay_answer_applies_its_tail_onto_the_projection_the_cursor_came_from() {
+        let thread = ThreadId::new();
+        let worktree = WorktreeId::try_from("acme/api#feature").expect("worktree");
+        let projection = ThreadProjection::new(thread, worktree, AgentKind::Claude);
+        let mut mirror = AgentMirror::default();
+        mirror.install_snapshot(projection, &[event(Seq(1), "first")]);
+        mirror.windows.insert(
+            thread,
+            WindowState {
+                page: Some(TranscriptPage {
+                    before_cursor: Some("fat.1.cursor.1".to_owned()),
+                    has_more: true,
+                    thread_seq: Seq(1),
+                }),
+                head_seq: Seq(1),
+                synchronized: true,
+            },
+        );
+
+        // The daemon replayed `(1, 3]` and, by design, sent no transcript with it.
+        let mut replay = window_response(thread, Seq(3), Seq(3), true);
+        replay.window = fleet_proto::agents::TranscriptWindow::default();
+        replay.page = None;
+        replay.events_after = vec![event(Seq(2), "second"), event(Seq(3), "third")];
+
+        let outcome = mirror.install_window(&replay);
+
+        assert_eq!(outcome, MirrorOutcome::Applied(Applied::Structural));
+        assert_eq!(mirror.applied_seq(thread), Seq(3));
+        assert_eq!(
+            mirror.projections[&thread].notices.len(),
+            3,
+            "the content before the cursor survives the catch-up"
+        );
+        assert_eq!(
+            mirror.older_cursor(thread),
+            Some("fat.1.cursor.1"),
+            "a replay does not forget where the older history starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replay_answer_for_a_thread_the_mirror_does_not_hold_is_a_gap() {
+        let thread = ThreadId::new();
+        let mut mirror = AgentMirror::default();
+        let mut replay = window_response(thread, Seq(3), Seq(3), true);
+        replay.window = fleet_proto::agents::TranscriptWindow::default();
+        replay.page = None;
+        replay.events_after = vec![event(Seq(2), "second"), event(Seq(3), "third")];
+
+        let outcome = mirror.install_window(&replay);
+
+        assert_eq!(
+            outcome,
+            MirrorOutcome::Gap {
+                expected: Seq(1),
+                got: Seq(2)
+            }
+        );
+        assert!(
+            !mirror.projections.contains_key(&thread),
+            "an empty transcript at the head is never installed as if it were the thread"
         );
     }
 

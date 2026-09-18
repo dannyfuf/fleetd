@@ -1,15 +1,15 @@
 <!-- Distilled from the Claude Agent SDK plus live captures from the installed CLI.
      The OpenCode half (§B) is HISTORICAL: Fleet dropped OpenCode in ADR 0014. -->
 
-# Headless wire protocols: Claude Code 2.1.266
+# Headless wire protocols: Claude Code 2.1.275
 
 Authority over: the Claude Code stream-json surface Fleet's adapter is written against.
 `NATIVE-AGENTS.md` §4.1 fixes the decisions; this file is the reference.
 The Codex reference is [harness-codex-app-server.md](harness-codex-app-server.md).
 
-Verified 2026-09-10 against `claude --version` -> `2.1.266 (Claude Code)`, from a live driven
-session over stdio: handshake, one ordinary turn with a tool call, a real permission gate, and a
-real `AskUserQuestion`.
+Verified through 2026-09-17 against `claude --version` -> `2.1.275 (Claude Code)`, from live
+driven sessions over stdio: handshake/catalogue, ordinary tool calls, a real permission gate,
+and a real `AskUserQuestion`.
 
 §B (OpenCode 1.17.18) is retained **as a historical appendix**. Fleet no longer supports OpenCode
 (ADR 0014); the section is kept because it is the record of what was verified, and deleting
@@ -17,6 +17,35 @@ verified research to tidy a document destroys the evidence the decisions were in
 
 Names and discriminants are case-sensitive. The protocol evolves additively: ignore unknown
 fields and variants, and never reinterpret them.
+
+## 2.1.275 catalogue and full-access check (2026-09-17)
+
+`initialize` now supplies the complete selection catalogue directly. Trimmed from the live
+`control_response` (the omitted models use the same fields):
+
+```json
+{"models":[
+ {"value":"default","resolvedModel":"claude-opus-5[1m]","displayName":"Default (recommended)","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},
+ {"value":"fable[1m]","resolvedModel":"claude-fable-5-1","displayName":"Fable","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},
+ {"value":"sonnet","resolvedModel":"claude-sonnet-5","displayName":"Sonnet","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},
+ {"value":"haiku","resolvedModel":"claude-haiku-4-5-20251001","displayName":"Haiku"}
+]}
+```
+
+`value` is the selector sent back with `--model`; `resolvedModel` is what `system/init.model`
+reports after Claude resolves that selector. Fleet retains this mapping and canonicalizes the init
+value back to `value` before publishing session metadata, including `default` and `[1m]` aliases;
+the raw resolved id remains internal for matching `modelUsage`. This keeps the selected id equal to
+a catalogue descriptor id, which is required for the effort picker. No model in this capture
+declared a default effort. Fleet therefore preserves `default_effort: None`; when a model omits
+`supportedEffortLevels`, Fleet uses no discovered ladder (the adapter's all-empty catalogue
+fallback supplies the CLI ladder).
+
+Full access was driven twice with the same Bash prompt. Both
+`--permission-mode bypassPermissions --dangerously-skip-permissions` and
+`--permission-mode bypassPermissions` alone produced the `fleet-yolo-ok` tool result with no
+`can_use_tool` control request. Fleet keeps only `--permission-mode bypassPermissions`: the extra
+dangerous-skip flag is redundant in 2.1.275.
 
 ## Corrections applied on 2026-09-10 (2.1.263 -> 2.1.266)
 
@@ -248,6 +277,11 @@ type SDKControlInitializeResponse = {
   fast_mode_disabled_reason?:FastModeDisabledReason;
 };
 ```
+
+The live `ModelInfo` fields Fleet consumes are `value`, `displayName`,
+`supportedEffortLevels?: string[]`, and optional `defaultEffort`; all other fields are retained as
+protocol research but do not affect the picker. `list_models` returns the same `{models:[...]}`
+shape and is the fallback when `initialize.models` is empty.
 
 Setter example:
 
@@ -773,7 +807,7 @@ type SessionStatus=
 
 Use these as provider-specific authoritative signals. “Authoritative” means the signal that commits adapter state; earlier events may be used for optimistic UI only.
 
-| Contract event | Claude Code 2.1.266 | OpenCode 1.17.18 (historical) |
+| Contract event | Claude Code 2.1.275 | OpenCode 1.17.18 (historical) |
 |---|---|---|
 | Turn started | Host request is accepted when the NDJSON user line is written. CLI-side start is `system/init` (documented at each turn start), or the first response frame stamped with the submitted `user_message_uuid`; `--replay-user-messages` supplies an explicit stdout user acknowledgement if desired. | `session.status {status:{type:"busy"}}` for the target session. `prompt_async` 204 is admission only; sync request being open is not a wire start signal. |
 | Streaming delta | `stream_event/event.type:"content_block_delta"`; append only `text_delta.text` for assistant text. Buffer `input_json_delta.partial_json` for tool input and route thinking/citation deltas separately. | `message.part.delta {field,delta}` or the newer `session.next.text.delta`/reasoning/tool-input deltas. `message.part.updated.part` is cumulative replacement, not append. |

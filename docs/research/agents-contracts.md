@@ -100,7 +100,10 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
 - `Attention = NeedsYou(AttentionKind) | Working | Waiting | Failed | Unread | Idle` implements
   total ordering. `rank(self) -> u8` is exactly: permission 8, question 7, plan 6, working 5,
   waiting 4, failed 3, finished 2, unread 1, idle 0.
-- `PermissionMode = Ask | AcceptEdits | Plan | FullAccess`; the default is `Ask`.
+- `PermissionMode = Ask | AcceptEdits | Plan | Auto | DontAsk | FullAccess`; the default is
+  `Ask`. Stable serde names are `ask`, `accept_edits`, `plan`, `auto`, `dont_ask`, and
+  `full_access`; the two Claude-native additions are part of the protocol-8 compatibility
+  boundary because older peers cannot decode unknown closed-enum values.
 - `ModelSelection { model: String, effort: Option<String>, provider: Option<String> }` carries
   provider-native model coordinates.
 - `ReasoningEffortDescriptor { id, description }` and `ModelDescriptor { id, display_name,
@@ -113,7 +116,10 @@ SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext toke
   `HarnessCapabilities { version: semver::Version, resume, steer, interrupt, history_readback,
   native_compaction, turn_diff, attention_flags, async_questions, secret_answers, sandbox_axes,
   reasoning_channels, live_context_meter, model_switch, effort_switch, mode_switch,
-  declared: BTreeSet<String> }` is camel-case and defaulted as a whole.
+  modes: Vec<PermissionMode>, declared: BTreeSet<String> }` is camel-case and defaulted as a
+  whole. `modes` is in picker order: Claude publishes `[Ask, AcceptEdits, Plan, Auto, DontAsk,
+  FullAccess]`; Codex publishes `[Ask, AcceptEdits, Plan, FullAccess]`; the vector defaults empty
+  for older payloads.
 - `AccountStatus = SignedOut | SignedIn(AccountInfo)` and `AccountInfo { kind: AccountKind }` are
   adjacently tagged/camel-case respectively. `AccountKind = ChatGpt { email, plan } | ApiKey |
   Other(String)` is adjacently tagged; the `ChatGpt` wire tag is exactly `chatgpt`.
@@ -300,7 +306,12 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
 
 ## `fleet-proto`
 
-`PROTOCOL_VERSION` is **7** in `crates/fleet-proto/src/lib.rs`.
+`PROTOCOL_VERSION` is **8** in `crates/fleet-proto/src/lib.rs`. The daemon and every client require
+an exact Hello match. Version 8 is intentional rather than an additive capability: version 7
+required `AgentThreadCreate.mode`, while version 8 omits it when the daemon should resolve the
+per-harness default; version 7 also cannot decode the new `auto` and `dont_ask` enum values. Thus
+both mixed-version directions fail during Hello with the normal version-mismatch UX, before an
+agent request can be misdecoded.
 
 ### Requests — `crates/fleet-proto/src/request.rs`
 
@@ -310,7 +321,7 @@ The new `RequestBody` variants are:
 AgentThreadList
 AgentSeenCursors
 AgentThreadCreate { worktree: WorktreeId, provider: AgentKind,
-    model: Option<ModelSelection>, mode: PermissionMode,
+    model: Option<ModelSelection>, mode: Option<PermissionMode>,
     resume_cursor: Option<String>, title: Option<String> }
 AgentThreadOpen { thread: ThreadId, from_seq: Option<Seq>, after_seq: Option<Seq>,
     turn_limit: Option<u32>, before_cursor: Option<String>, request_sync_marker: bool }
@@ -340,7 +351,11 @@ DelegationWait { delegation: DelegationId, timeout_ms: u64 }
 ```
 
 `AgentThreadCreate` intentionally carries published `WorktreeId`; the daemon resolves the trusted,
-canonical `StartRequest::worktree_path` through its worktree service. The five window fields on
+canonical `StartRequest::worktree_path` through its worktree service. An omitted model or mode is
+resolved from `config.nativeAgents.<harness>` and the resolved value is persisted. Missing config
+sections default each harness to `{ mode: full_access, model: null, effort: null }`.
+
+The five window fields on
 `AgentThreadOpen`, plus `AgentItemBody`, are sent only after their capability is negotiated;
 `from_seq` retains the legacy cursor meaning and field name. Account and checkpoint mutations are
 likewise gated by `agent.account` and `agent.checkpoints`.
@@ -514,7 +529,7 @@ status columns are derived from thread events.
 Worktrees, Arc<ConfigStore>) -> Self` owns store, event broadcast, trusted worktree lookup, and
 the configured provider command lines. `summaries(&self) -> Vec<AgentThreadSummary>` feeds the
 global snapshot. The following async methods return `Result<ResponseBody, ProtoError>`:
-`list(&self)`, `create(&self, WorktreeId, AgentKind, Option<ModelSelection>, PermissionMode,
+`list(&self)`, `create(&self, WorktreeId, AgentKind, Option<ModelSelection>, Option<PermissionMode>,
 Option<String>, Option<String>)`, `open(&self, ThreadId, Option<Seq>)`, `close(&self, ThreadId)`,
 `send(&self, ThreadId, UserInput)`, `interrupt(&self, ThreadId)`,
 `respond(&self, ThreadId, GateId, GateAnswer)`, `set_mode(&self, ThreadId, PermissionMode)`,
@@ -566,7 +581,7 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
 - `AgentSnapshot { projection: ThreadProjection, events_after: Vec<SeqEvent> }` is the typed open
   response.
 - `Client` methods are `agent_thread_list() -> Result<Vec<AgentThreadSummary>>`,
-  `agent_thread_create(WorktreeId, AgentKind, Option<ModelSelection>, PermissionMode,
+  `agent_thread_create(WorktreeId, AgentKind, Option<ModelSelection>, Option<PermissionMode>,
   Option<String>, Option<String>) -> Result<AgentThreadSummary>`,
   `agent_thread_open(ThreadId, Option<Seq>) -> Result<AgentSnapshot>`,
   `agent_thread_close(ThreadId) -> Result<()>`, `agent_send(ThreadId, UserInput) -> Result<()>`,
@@ -758,7 +773,7 @@ stack, so `fleet-ui-kit` gains no `fleet-git` dependency: the payload rows come 
 
 `fleet agent` is a subcommand group in `crates/fleet-cli/src/args.rs`, implemented in
 `commands/agents.rs`: `list`, `new <WORKTREE> --provider <claude|codex> [--model M]
-[--mode ask|accept-edits|plan|full-access]`, `send <THREAD> <TEXT>`,
+[--mode ask|accept-edits|plan|auto|dont-ask|full-access]`, `send <THREAD> <TEXT>`,
 `respond <THREAD> <GATE> <ANSWER…>`, `interrupt <THREAD>`, `stop <THREAD>`,
 `tail <THREAD> [--replay]`, and `terminal [claude|codex]` — the last being the former
 `fleet agent [claude|codex]`, kept under its own verb as the §10 PTY fallback. Read-only verbs

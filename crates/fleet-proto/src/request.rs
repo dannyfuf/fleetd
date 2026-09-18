@@ -146,8 +146,9 @@ pub enum RequestBody {
         provider: AgentKind,
         /// Optional initial model.
         model: Option<ModelSelection>,
-        /// Initial permission policy.
-        mode: PermissionMode,
+        /// Optional initial permission policy; the daemon resolves an omission from config.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<PermissionMode>,
         /// Optional provider-native cursor to resume.
         resume_cursor: Option<String>,
         /// Optional display title.

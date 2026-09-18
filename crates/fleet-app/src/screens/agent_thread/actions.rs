@@ -100,7 +100,8 @@ impl AgentThreadView {
             return;
         }
 
-        if let Err(refusal) = submit_gate(&text, 0, self.pending.len(), self.is_unreachable()) {
+        if let Err(refusal) = submit_gate(&text, 0, self.pending_in_flight(), self.is_unreachable())
+        {
             self.refuse_send(refusal, text, cx);
             return;
         }
@@ -160,7 +161,7 @@ impl AgentThreadView {
     /// invisible to `fleet agent` — and it re-implemented what both harnesses already do.
     fn dispatch_turn(&mut self, text: String, cx: &mut Context<Self>) {
         let steered = self.is_working();
-        let first = self.projection.turns.is_empty() && self.pending.is_empty();
+        let first = self.projection.turns.is_empty() && self.pending_in_flight() == 0;
         self.input.update(cx, |input, cx| {
             input.push_history(text.clone());
             input.clear(cx);
@@ -197,6 +198,36 @@ impl AgentThreadView {
         });
     }
 
+    /// How many sends are still waiting for the daemon's copy.
+    ///
+    /// A failed bubble is on screen but not in flight: it blocks nothing and spins nothing.
+    pub(crate) fn pending_in_flight(&self) -> usize {
+        self.pending
+            .iter()
+            .filter(|pending| !pending.failed)
+            .count()
+    }
+
+    /// The daemon refused a send: the bubble turns failed, the reason is said once, and the
+    /// composer is free again. Without this the bubble read `sending` forever, the thread kept
+    /// spinning, and every later send was refused as unacknowledged (§7.2).
+    pub(crate) fn send_failed(&mut self, item: ItemId, reason: &str, cx: &mut Context<Self>) {
+        let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|pending| pending.id == item && !pending.failed)
+        else {
+            return;
+        };
+        pending.failed = true;
+        self.pending_rev = self.pending_rev.wrapping_add(1);
+        self.sync_clock();
+        self.notice(format!("message not sent: {reason}"), cx);
+        self.prepare(cx);
+        self.install_rows_for_send(cx);
+        cx.notify();
+    }
+
     /// Dispatches the control draft ahead of the turn, in §B6.4's order.
     ///
     /// Metadata, then the access ladder, then the interaction mode, then the turn. Nothing
@@ -208,21 +239,16 @@ impl AgentThreadView {
         let model_changed = model
             .as_ref()
             .is_some_and(|model| self.projection.model.as_ref() != Some(model));
-        let mode_changed = wire_mode != self.projection.mode
-            && !matches!(
-                (self.projection.mode, wire_mode),
-                (PermissionMode::Plan, _) | (_, PermissionMode::Plan)
-            );
+        let mode_changed = wire_mode != self.projection.mode;
+        let controls_ride_the_turn = self.projection.provider == AgentKind::Codex;
         let restart = restart_with_resume(RestartInputs {
             mode_changed,
             cwd_changed: false,
             instance_changed: false,
             model_changed,
-            // Nothing has probed the harness yet, so the conservative answer is the truthful
-            // one: a control Fleet cannot prove is live is treated as a restart.
-            can_switch_model: false,
-            controls_ride_the_turn: self.projection.provider
-                == fleet_core::agents::AgentKind::Codex,
+            // Codex declares both controls in place; Claude's are launch flags.
+            can_switch_model: controls_ride_the_turn,
+            controls_ride_the_turn,
         });
         if model_changed || mode_changed {
             // One structured line with every input to the decision. The first time a user
@@ -249,7 +275,7 @@ impl AgentThreadView {
             );
         }
         if wire_mode != self.projection.mode {
-            if mode_changed {
+            if restart {
                 self.publish_starting(cx);
             }
             self.dispatch(
@@ -460,10 +486,11 @@ impl AgentThreadView {
                 .collect(),
             PickerKind::Models => self.model_candidates(),
             PickerKind::Traits => self.trait_candidates(),
-            PickerKind::Access => ACCESS_LADDER
+            PickerKind::Access => self
+                .modes
                 .iter()
-                .filter(|(mode, _)| *mode != self.controls.access(self.projection.mode))
-                .map(|(_, label)| PickerCandidate::plain((*label).to_owned()))
+                .filter(|mode| **mode != self.controls.wire_mode(self.projection.mode))
+                .map(|mode| PickerCandidate::plain(mode_label(*mode).to_owned()))
                 .collect(),
         }
     }
@@ -643,11 +670,21 @@ impl AgentThreadView {
     }
 
     /// Records the access ladder, which takes effect at the next send.
-    fn pick_access(&mut self, label: &str, cx: &mut Context<Self>) {
-        let Some((mode, _)) = ACCESS_LADDER.iter().find(|(_, name)| *name == label) else {
+    pub(crate) fn pick_access(&mut self, label: &str, cx: &mut Context<Self>) {
+        let Some(mode) = self
+            .modes
+            .iter()
+            .copied()
+            .find(|mode| mode_label(*mode) == label)
+        else {
             return;
         };
-        self.controls.set_access(*mode);
+        if mode == PermissionMode::Plan {
+            self.controls.set_interaction(InteractionMode::Plan);
+        } else {
+            self.controls.set_interaction(InteractionMode::Build);
+            self.controls.set_access(mode);
+        }
         self.prepare(cx);
         cx.notify();
     }
@@ -963,19 +1000,3 @@ impl AgentThreadView {
         self.transcript.update(cx, TranscriptList::scroll_to_end);
     }
 }
-
-/// The access ladder `^s t` offers, which is a presentation over the harness's own axes.
-///
-/// Plan mode is deliberately absent: it is the **other** axis, toggled with `⇧⇥`, and offering
-/// it here would let one picker silently change two things.
-pub(crate) const ACCESS_LADDER: &[(PermissionMode, &str)] = &[
-    (PermissionMode::Ask, mode_label(PermissionMode::Ask)),
-    (
-        PermissionMode::AcceptEdits,
-        mode_label(PermissionMode::AcceptEdits),
-    ),
-    (
-        PermissionMode::FullAccess,
-        mode_label(PermissionMode::FullAccess),
-    ),
-];

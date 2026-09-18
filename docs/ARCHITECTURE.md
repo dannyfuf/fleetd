@@ -243,7 +243,8 @@ daemon and every client run the *same* function over the same ordered events.
 **Event flow.** `AgentThreadCreate` resolves the published `WorktreeId` to a trusted canonical
 path through `Worktrees`, spawns the adapter named by `config.agentBinaries` — the executable
 the daemon runs with **no shell**, never `config.agentCommands`, which is the shell line a PTY
-pane types — and returns an `AgentThreadSummary`. The adapter's `mpsc` receiver is drained by one task per thread: each
+pane types — resolves omitted model/mode controls from `config.nativeAgents.<harness>`, persists
+the resolved controls, and returns an `AgentThreadSummary`. The adapter's `mpsc` receiver is drained by one task per thread: each
 event is sequenced, appended to the log, reduced, and published as `Event::Agent { thread,
 event }`, with `Event::AgentSummary` whenever the summary changes. `ContentDelta`s are coalesced
 per item on a 16 ms tick before broadcast, so a fast model cannot schedule a render per token.
@@ -318,7 +319,7 @@ modes{alt_screen, mouse, bracketed_paste}, title }`.
 `Cell { text (grapheme), fg, bg, attrs bitflags, width }`.
 Colors are `Default | Palette(u8) | Rgb`; the client resolves palette colors from the theme.
 Scrollback is viewed by asking the daemon to move the viewport offset. Selection/copy happens
-on the client's mirror grid. The wire protocol is version 7; `wrapped` preserves logical lines
+on the client's mirror grid. The wire protocol is version 8; `wrapped` preserves logical lines
 during copy, while `history_epoch` invalidates bounded-history indexes when Ghostty's tracked oldest
 row is discarded, history shrinks, or a column change reflows it, without treating viewport
 movement as eviction. Off-screen
@@ -492,7 +493,7 @@ machine reboot — nothing does — and the next daemon clears their records as 
 
 ## Protocol compatibility
 
-Daemon IPC is version **7**. `Hello { protocol, client }` identifies app, CLI, or proxy peers;
+Daemon IPC is version **8**. `Hello { protocol, client }` identifies app, CLI, or proxy peers;
 the flattened Hello response adds the stable daemon id, optional build commit, and capabilities.
 `HelloClient` carries the peer's own `capabilities`, defaulted and omitted when empty, so an
 older client that names nothing is treated as supporting nothing optional. Federation adds
@@ -504,7 +505,13 @@ daemon links require the same protocol version so routing never crosses incompat
 The `snapshot.revision` capability advertises two additive, defaulted fields: every response
 envelope may carry `snapshotRevision`, sampled after dispatch, and every `Snapshot` may carry
 `revision`, sampled before assembly. The first snapshot revision greater than or equal to a
-response stamp causally covers that request; peers that omit either field retain IPC-v7 behavior.
+response stamp causally covers that request; peers that omit either field retain the legacy
+unstamped behavior.
+
+Version 8 makes native-agent defaults explicit at the compatibility boundary:
+`AgentThreadCreate.mode` became optional and `PermissionMode` gained `auto` and `dont_ask`.
+Those shapes cannot be decoded safely by a version-7 daemon or client, so the exact-version Hello
+check rejects a mixed pair before either side sends an agent request.
 
 The native-agent family grew a **bounded** read without a version bump, gated on six capability
 strings: `agent.window` (windowed transcript reads and backwards pagination), `agent.sync_marker`

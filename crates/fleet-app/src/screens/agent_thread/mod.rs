@@ -25,8 +25,8 @@ use std::{
 };
 
 use fleet_core::agents::{
-    AgentThreadSummary, Delegation, DelegationId, GateId, ItemId, ItemKind, Seq, ThreadId,
-    ThreadProjection, TurnId, UserInput,
+    AgentThreadSummary, Delegation, DelegationId, GateId, ItemId, ItemKind, PermissionMode, Seq,
+    ThreadId, ThreadProjection, TurnId, UserInput,
 };
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
@@ -213,6 +213,8 @@ pub struct AgentThreadView {
     commands: Vec<String>,
     /// Harness skills, which `$` completes.
     skills: Vec<String>,
+    /// Permission modes declared by the live harness, in picker order.
+    modes: Vec<PermissionMode>,
     /// Worktree paths offered by `@`, filled by the workspace.
     files: Vec<String>,
     /// Whether the transcript's tail is frozen (`^s [`).
@@ -252,6 +254,7 @@ impl AgentThreadView {
     #[must_use]
     pub fn new(projection: ThreadProjection, cx: &mut Context<Self>) -> Self {
         let thread = projection.thread;
+        let modes = projection.provider.supported_modes().to_vec();
         let placeholder =
             composer_placeholder(ComposerMode::Normal, projection.provider, None, false);
         let transcript = cx.new(TranscriptList::new);
@@ -317,6 +320,7 @@ impl AgentThreadView {
             picker: None,
             commands: Vec::new(),
             skills: Vec::new(),
+            modes,
             files: Vec::new(),
             scrolling: false,
             stopping: false,
@@ -556,6 +560,13 @@ impl AgentThreadView {
     /// Replaces the harness skills `$` completes.
     pub(crate) fn set_skills(&mut self, skills: Vec<String>) {
         self.skills = skills;
+    }
+
+    /// Replaces the access modes `^s t` offers.
+    pub(crate) fn set_modes(&mut self, modes: Vec<PermissionMode>) {
+        if !modes.is_empty() {
+            self.modes = modes;
+        }
     }
 
     /// Emits one typed command for the workspace to send.

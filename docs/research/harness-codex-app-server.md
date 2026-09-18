@@ -2,15 +2,15 @@
      codex app-server generate-ts          --out <dir> --experimental
      codex app-server generate-json-schema --out <dir> --experimental -->
 
-# Headless wire protocol: Codex app-server 0.147.0
+# Headless wire protocol: Codex app-server 0.154.0
 
 Authority over: the Codex app-server JSON-RPC surface Fleet's adapter is written against.
 `NATIVE-AGENTS.md` §4.2 fixes the decisions; this file is the reference.
 
-Verified 2026-09-10 against:
+Verified through 2026-09-17 against:
 
-- `codex --version` -> `codex-cli 0.147.0`.
-- The generated bindings for that exact binary: 625 types in the `v2` namespace, produced by
+- `codex --version` -> `codex-cli 0.154.0`.
+- The generated bindings for that exact binary, produced by
   `codex app-server generate-ts --out <dir> --experimental`.
 - A live driven session over stdio: handshake, one ordinary turn with a shell tool call, and one
   real failure. Frame sequences below are transcribed from that capture.
@@ -19,6 +19,22 @@ Verified 2026-09-10 against:
 `packages/effect-codex-app-server/src/_generated/`, which is a snapshot of whatever version that
 project pinned. Regenerate against the installed binary whenever the CLI is upgraded and diff this
 document against the result.
+
+### 0.154.0 control-field diff
+
+The generated 0.154.0 schema confirms that reasoning effort is represented differently at the
+three control scopes:
+
+```json
+{"method":"thread/start","params":{"model":"gpt-6-astra","config":{"model_reasoning_effort":"high"}}}
+{"method":"thread/settings/update","params":{"threadId":"…","model":"gpt-6-astra","effort":"high"}}
+{"method":"turn/start","params":{"threadId":"…","model":"gpt-6-astra","effort":"high"}}
+```
+
+`ThreadStartParams` has no top-level `effort`; its open `config` object is the launch-time path.
+`ThreadSettingsUpdateParams` and `TurnStartParams` both have top-level `effort`. The settings frame
+also accepts `approvalPolicy`, `approvalsReviewer`, `sandboxPolicy`, and `permissions`, so Fleet
+re-sends the complete resolved control set there. No existing Fleet frame had to be renamed.
 
 Names and discriminants are case-sensitive. The protocol evolves **additively and without a
 version bump** -- `rateLimitExceeded` and `misalignmentPolicyViolation` were both added to
@@ -356,7 +372,7 @@ Where settings may change:
 
 | Scope | Mechanism |
 | --- | --- |
-| Thread creation | `thread/start` params |
+| Thread creation | `thread/start.config.model_reasoning_effort` (there is no top-level `effort`) |
 | Subsequent turns | `thread/settings/update` — explicitly "for subsequent turns" |
 | One turn only | `turn/start` params (`model`, `effort`, `sandboxPolicy`, `approvalPolicy`, `personality`, …) |
 
@@ -394,11 +410,14 @@ method — a second `user` line during a running turn is coalesced by the CLI in
 | Compaction | `system/compact_boundary` | `thread/compacted` + `contextCompaction` item |
 | Sub-agents | `Task` tool + `task_*` system events | `subAgentActivity` item + `collabAgentToolCall` |
 
-## 9. Live validation (codex-cli 0.147.0)
+## 9. Live validation (codex-cli 0.154.0)
 
-Driven against a real `codex app-server` over stdio: 40 frames, one turn, one shell tool call.
-The capture and its driver script belong under `docs/research/fixtures/agents/codex/` and are a
-follow-up (`NATIVE-AGENTS.md` §13, phase 1).
+The 2026-09-17 isolated-home probe confirmed `initialize`, `model/list`, `thread/start`, and
+`thread/settings/update` accept the shapes above. It selected `gpt-6-astra` with efforts
+`[low, medium, high, xhigh, max, ultra]`; the request used `approvalPolicy:"never"` and
+`sandbox:"danger-full-access"`. The model turn then failed with `401 Unauthorized` because the
+isolated home deliberately contained no credentials, so that probe could not independently
+observe a command execution. The older authenticated capture below remains the tool-call evidence.
 
 ### 9.1 There IS an `initialize` handshake
 

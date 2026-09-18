@@ -243,8 +243,6 @@ impl Harness for CodexHarness {
                     .model
                     .as_ref()
                     .and_then(|model| model.effort.clone()),
-                approval_policy: req.start.approval_policy.clone(),
-                sandbox: req.start.sandbox,
                 permission_profile: req.start.permission_profile.clone(),
                 ..controls
             };

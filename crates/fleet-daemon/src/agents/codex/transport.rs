@@ -16,7 +16,7 @@
 //! - **An unroutable line is a counted warning, not a session kill.**
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -24,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fleet_core::agents::AgentEvent;
+use fleet_core::agents::{AccountStatus, AgentEvent};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -818,9 +818,10 @@ async fn write_error(shared: &Shared, id: &Value, code: i64, message: &'static s
 
 /// Sends one event, or notices that the thread runtime is gone.
 pub(super) fn emit(events: &HarnessSink, event: AgentEvent, raw: Option<&str>) {
-    // Fire-and-forget: the receiver is dropped only when the thread runtime has gone away, which
-    // happens during shutdown and needs no answer here.
-    let _receiver_gone_at_shutdown = events.send(HarnessEvent::now(event, raw.map(RawRef::method)));
+    // Fire-and-forget: the receiver is dropped only when the thread runtime has gone away or this
+    // harness generation was retired for restart; neither case needs an answer here.
+    let _receiver_gone_after_retirement =
+        events.send(HarnessEvent::now(event, raw.map(RawRef::method)));
 }
 
 async fn write_loop(
@@ -876,6 +877,11 @@ async fn classify_stderr(
         "state db missing rollout path for thread",
         "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
     ];
+    // Every ERROR line this process has already surfaced, by fingerprint. Codex repeats a failed
+    // background refresh every few minutes for as long as it lives, and each repeat is the same
+    // fact; one transcript row per fact is the most it earns.
+    let mut surfaced: HashSet<String> = HashSet::new();
+    let mut signed_out = false;
     let mut lines = tokio::io::BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let line = strip_ansi(&line);
@@ -919,10 +925,59 @@ async fn classify_stderr(
             );
             continue;
         }
+        if !surfaced.insert(stderr_fingerprint(&message)) {
+            tracing::debug!(target: "fleet::agents::codex", "{message}");
+            continue;
+        }
+        // A revoked or invalidated token. `account/read` still answers the cached account, so
+        // this line is the only signal Fleet gets that every turn is about to be refused; it is
+        // the signed-out state, once, and never the raw sentence with its request ids.
+        if is_unauthorized(&message) {
+            tracing::warn!(target: "fleet::agents::codex", "{message}");
+            if !signed_out {
+                signed_out = true;
+                emit(
+                    &events,
+                    AgentEvent::AccountChanged {
+                        account: AccountStatus::SignedOut,
+                    },
+                    Some("stderr"),
+                );
+                emit(
+                    &events,
+                    AgentEvent::Notice(account::SIGNED_OUT_NOTICE.to_owned()),
+                    Some("stderr"),
+                );
+            }
+            continue;
+        }
         tracing::warn!(target: "fleet::agents::codex", "{message}");
         emit(&events, AgentEvent::Notice(message), Some("stderr"));
     }
     done.store(true, Ordering::Release);
+}
+
+/// Whether a stderr line says the account's token is no longer accepted.
+fn is_unauthorized(message: &str) -> bool {
+    message.contains("401 Unauthorized")
+        || message.contains("token_revoked")
+        || message.contains("authentication token has been invalidated")
+}
+
+/// The line minus what changes between repeats of the same failure.
+///
+/// Codex's request errors carry a `url:`, a `cf-ray:` and a `request id:` segment that differ
+/// every time; the rest is the fact worth showing once.
+fn stderr_fingerprint(message: &str) -> String {
+    const VOLATILE: [&str; 3] = ["cf-ray:", "request id:", "url:"];
+    message
+        .split(", ")
+        .filter(|segment| {
+            let segment = segment.trim_start();
+            !VOLATILE.iter().any(|prefix| segment.starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Removes ANSI SGR sequences.
@@ -951,6 +1006,74 @@ mod tests {
     #[test]
     fn stderr_classification_drops_everything_below_error() {
         assert_eq!(strip_ansi("\u{1b}[31mboom\u{1b}[0m"), "boom");
+    }
+
+    #[test]
+    fn a_stderr_fingerprint_drops_the_request_ids_and_keeps_the_fact() {
+        let first = "failed to refresh available models: unexpected status 401 Unauthorized: \
+                     Encountered invalidated oauth token for user, failing request, url: \
+                     https://chatgpt.com/backend-api/codex/models?client_version=0.147.0, \
+                     cf-ray: a3c9c52c6fa224f6-SCL, request id: req_ab7a5f7c, auth error: 401, \
+                     auth error code: token_revoked";
+        let second = first
+            .replace("a3c9c52c6fa224f6-SCL", "a3c9c5c7fba43d5e-SCL")
+            .replace("req_ab7a5f7c", "req_412d4664");
+        assert_eq!(stderr_fingerprint(first), stderr_fingerprint(&second));
+        assert!(stderr_fingerprint(first).contains("token_revoked"));
+        assert!(!stderr_fingerprint(first).contains("cf-ray"));
+        assert!(is_unauthorized(first));
+        assert!(!is_unauthorized(
+            "failed to refresh available models: timeout"
+        ));
+    }
+
+    /// The 401 line Codex repeats every three minutes on a revoked token is one signed-out
+    /// signal and one notice, not a transcript row per repeat.
+    #[tokio::test]
+    async fn a_repeated_revoked_token_line_signs_out_once_and_is_never_a_raw_notice() {
+        let line = |ray: &str| {
+            format!(
+                "2026-09-17T19:18:27.360427Z ERROR codex_core::models: failed to refresh \
+                 available models: unexpected status 401 Unauthorized: Encountered invalidated \
+                 oauth token for user, failing request, url: https://chatgpt.com/x, cf-ray: \
+                 {ray}, request id: req_{ray}, auth error: 401, auth error code: token_revoked\n"
+            )
+        };
+        let stderr = format!(
+            "{}{}2026-09-17T19:20:00Z ERROR codex_core::x: something else broke\n\
+             2026-09-17T19:21:00Z ERROR codex_core::x: something else broke\n",
+            line("a"),
+            line("b")
+        );
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let done = Arc::new(AtomicBool::new(false));
+        classify_stderr(
+            Box::new(std::io::Cursor::new(stderr.into_bytes())),
+            events,
+            StderrTail::default(),
+            Arc::clone(&done),
+        )
+        .await;
+        assert!(done.load(Ordering::Acquire));
+        let mut seen = Vec::new();
+        while let Ok(event) = received.try_recv() {
+            seen.push(event.event);
+        }
+        assert!(matches!(
+            seen.first(),
+            Some(AgentEvent::AccountChanged {
+                account: AccountStatus::SignedOut
+            })
+        ));
+        assert!(matches!(
+            seen.get(1),
+            Some(AgentEvent::Notice(notice)) if notice == account::SIGNED_OUT_NOTICE
+        ));
+        assert!(matches!(
+            seen.get(2),
+            Some(AgentEvent::Notice(notice)) if notice == "something else broke"
+        ));
+        assert_eq!(seen.len(), 3, "{seen:?}");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use fleet_core::agents::{
     Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, ItemKind, MessageOrigin,
-    PermissionMode, UserInput,
+    UserInput,
 };
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
@@ -199,7 +199,7 @@ impl DelegationService {
                 worktree: worktree.clone(),
                 provider: request.provider,
                 model: request.model,
-                mode: request.mode.unwrap_or(PermissionMode::FullAccess),
+                mode: request.mode,
                 resume_cursor: None,
                 title: Some(title),
                 parent: Some(caller),

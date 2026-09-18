@@ -51,12 +51,14 @@ pub(super) async fn new(
         AgentChoice::Codex => AgentKind::Codex,
     };
     let model = arguments.model.map(model_selection).transpose()?;
-    let mode = match arguments.mode {
+    let mode = arguments.mode.map(|mode| match mode {
         AgentModeChoice::Ask => PermissionMode::Ask,
         AgentModeChoice::AcceptEdits => PermissionMode::AcceptEdits,
         AgentModeChoice::Plan => PermissionMode::Plan,
+        AgentModeChoice::Auto => PermissionMode::Auto,
+        AgentModeChoice::DontAsk => PermissionMode::DontAsk,
         AgentModeChoice::FullAccess => PermissionMode::FullAccess,
-    };
+    });
     let thread = client
         .agent_thread_create(arguments.worktree, provider, model, mode, None, None)
         .await?;

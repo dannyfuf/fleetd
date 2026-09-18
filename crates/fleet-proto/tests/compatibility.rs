@@ -31,7 +31,7 @@ fn request_wire_goldens() {
                 client: fleet_proto::request::HelloClient::default(),
             },
         },
-        r#"{"id":1,"body":{"type":"hello","protocol":7,"client":{"kind":"app"}}}"#,
+        r#"{"id":1,"body":{"type":"hello","protocol":8,"client":{"kind":"app"}}}"#,
     );
     assert_frame(
         Request {
@@ -45,7 +45,7 @@ fn request_wire_goldens() {
                 },
             },
         },
-        r#"{"id":101,"body":{"type":"hello","protocol":7,"client":{"kind":"app","clientId":"11111111-2222-4333-8444-555555555555","capabilities":["agent.seen"]}}}"#,
+        r#"{"id":101,"body":{"type":"hello","protocol":8,"client":{"kind":"app","clientId":"11111111-2222-4333-8444-555555555555","capabilities":["agent.seen"]}}}"#,
     );
     assert_frame(
         Request {
@@ -177,7 +177,7 @@ fn response_wire_goldens() {
                 server: "fleet-test".to_owned(),
             }),
         },
-        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":7,"server":"fleet-test"}}}}"#,
+        r#"{"id":1,"result":{"Ok":{"type":"hello","data":{"protocol":8,"server":"fleet-test"}}}}"#,
     );
     assert_frame(
         Response {
@@ -271,7 +271,7 @@ fn stamped_hello_and_pong_wire_goldens() {
             daemon_id: "daemon-test".to_owned(),
             build_commit: None,
         },
-        r#"{"id":9,"result":{"Ok":{"type":"hello","data":{"protocol":7,"server":"fleet-test"}}},"snapshotRevision":42,"capabilities":["snapshot.revision"],"daemonId":"daemon-test"}"#,
+        r#"{"id":9,"result":{"Ok":{"type":"hello","data":{"protocol":8,"server":"fleet-test"}}},"snapshotRevision":42,"capabilities":["snapshot.revision"],"daemonId":"daemon-test"}"#,
     );
     assert_frame(
         PongResponse {

@@ -40,7 +40,6 @@ use super::super::{
 pub(crate) struct Harness {
     _directory: tempfile::TempDir,
     log: std::path::PathBuf,
-    cursor_marker: std::path::PathBuf,
     config: Arc<ConfigStore>,
     pub(crate) manager: AgentSessionManager,
     events: BroadcastBus,
@@ -61,10 +60,8 @@ impl Harness {
         std::fs::create_dir_all(&worktree_path).expect("create worktree directory");
 
         let log = home.join("provider-input.ndjson");
-        let cursor_marker = home.join("omit-resume-cursor");
         let executable = home.join("fake-claude");
-        std::fs::write(&executable, provider_script(&log, &cursor_marker))
-            .expect("write fake Claude executable");
+        std::fs::write(&executable, provider_script(&log)).expect("write fake Claude executable");
         let mut permissions = std::fs::metadata(&executable)
             .expect("read fake Claude metadata")
             .permissions();
@@ -140,7 +137,6 @@ impl Harness {
         Self {
             _directory: directory,
             log,
-            cursor_marker,
             config,
             manager,
             events,
@@ -163,7 +159,7 @@ impl Harness {
                 self.worktree.clone(),
                 AgentKind::Claude,
                 None,
-                PermissionMode::Ask,
+                Some(PermissionMode::Ask),
                 None,
                 None,
             )
@@ -382,7 +378,6 @@ impl Harness {
         let Self {
             _directory,
             log,
-            cursor_marker,
             config,
             manager,
             events,
@@ -400,7 +395,6 @@ impl Harness {
         Self {
             _directory,
             log,
-            cursor_marker,
             config,
             manager,
             events,
@@ -411,23 +405,15 @@ impl Harness {
             worktrees,
         }
     }
-
-    pub(crate) fn omit_resume_cursor(&self) {
-        std::fs::write(&self.cursor_marker, b"").expect("write no-cursor marker");
-    }
 }
 
-fn provider_script(log: &std::path::Path, cursor_marker: &std::path::Path) -> String {
+fn provider_script(log: &std::path::Path) -> String {
     format!(
         r##"#!/bin/sh
 case " $* " in
   *" --version "*) printf '%s\n' '2.1.266 (Claude Code)'; exit 0 ;;
 esac
-if [ -f '{}' ]; then
-  printf '%s\n' '{{"type":"system","subtype":"init","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}}'
-else
-  printf '%s\n' '{{"type":"system","subtype":"init","session_id":"worker-cursor","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}}'
-fi
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"worker-cursor","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}}'
 printf 'ENV|%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" >> '{}'
 count=0
 while IFS= read -r line; do
@@ -449,7 +435,6 @@ while IFS= read -r line; do
   esac
 done
 "##,
-        cursor_marker.display(),
         log.display(),
         log.display()
     )

@@ -3,8 +3,8 @@ use super::*;
 use fleet_client::{AgentMirror, MirrorOutcome, PageOutcome};
 use fleet_core::{
     agents::{
-        AgentThreadSummary, Applied, Attention, AttentionKind, Delegation, DelegationId, Seq,
-        SeqEvent, ThreadId, ThreadProjection,
+        AgentThreadSummary, Applied, Attention, AttentionKind, Delegation, DelegationId,
+        PermissionMode, Seq, SeqEvent, ThreadId, ThreadProjection,
     },
     ids::WorktreeId,
 };
@@ -76,6 +76,8 @@ pub struct AgentThreads {
     commands: HashMap<ThreadId, Vec<String>>,
     /// Harness skills, which `$` completes and the projection does not carry either.
     skills: HashMap<ThreadId, Vec<String>>,
+    /// Harness-supported permission modes in picker order.
+    modes: HashMap<ThreadId, Vec<PermissionMode>>,
     /// Prepared drawer observables relayed by mounted thread views.
     decisions: HashMap<ThreadId, PreparedDecisionObservable>,
     /// The cursor a daemon-declared resync must resume from, per thread.
@@ -676,6 +678,18 @@ impl AgentThreads {
         self.resync.insert(thread);
     }
 
+    /// Re-opens every installed projection after a daemon connection is replaced.
+    ///
+    /// Each projection supplies its own `last_seq`; an older daemon-declared cursor belongs to
+    /// the connection that just went away and must not override it.
+    pub fn resync_installed(&mut self) {
+        let installed: Vec<ThreadId> = self.mirror.projections.keys().copied().collect();
+        for thread in installed {
+            self.resync.insert(thread);
+            self.resume_from.remove(&thread);
+        }
+    }
+
     /// Records a daemon-declared drop of this connection's tail for one thread.
     ///
     /// Backpressure is never a stall, never an OOM, and never a silent drop: the daemon names
@@ -694,12 +708,18 @@ impl AgentThreads {
     }
 
     /// The cursor a re-open should resume from, when the daemon named one.
+    ///
+    /// Only a thread with an installed projection resumes from anywhere: a cursor names what
+    /// the projection already holds, and without one the open asks for the newest window.
     #[must_use]
     pub fn resume_from(&self, thread: ThreadId) -> Option<Seq> {
-        self.resume_from.get(&thread).copied().or_else(|| {
-            self.projection(thread)
-                .map(|projection| projection.last_seq)
-        })
+        let projection = self.projection(thread)?;
+        Some(
+            self.resume_from
+                .get(&thread)
+                .copied()
+                .unwrap_or(projection.last_seq),
+        )
     }
 
     /// Marks a thread's catch-up complete, which is the only transition into live.
@@ -739,6 +759,14 @@ impl AgentThreads {
         self.commands
             .insert(thread, window.session.commands.clone());
         self.skills.insert(thread, window.session.skills.clone());
+        self.modes.insert(
+            thread,
+            window
+                .session
+                .capabilities
+                .as_ref()
+                .map_or_else(Vec::new, |capabilities| capabilities.modes.clone()),
+        );
         self.last_applied.insert(thread, Applied::Structural);
         self.projection_replaced.insert(thread);
         match self.mirror.install_window(window) {
@@ -770,6 +798,12 @@ impl AgentThreads {
     #[must_use]
     pub fn skills(&self, thread: ThreadId) -> Vec<String> {
         self.skills.get(&thread).cloned().unwrap_or_default()
+    }
+
+    /// The permission modes the live harness declared, in picker order.
+    #[must_use]
+    pub fn modes(&self, thread: ThreadId) -> Vec<PermissionMode> {
+        self.modes.get(&thread).cloned().unwrap_or_default()
     }
 
     /// The prepared decision currently rendered for one mounted thread.
@@ -1010,6 +1044,7 @@ impl AgentThreads {
         self.notified.retain(|thread, _| live.contains(thread));
         self.commands.retain(|thread, _| live.contains(thread));
         self.skills.retain(|thread, _| live.contains(thread));
+        self.modes.retain(|thread, _| live.contains(thread));
         self.decisions.retain(|thread, _| live.contains(thread));
         self.resume_from.retain(|thread, _| live.contains(thread));
         self.last_applied.retain(|thread, _| live.contains(thread));

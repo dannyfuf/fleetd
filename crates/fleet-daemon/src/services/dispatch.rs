@@ -751,9 +751,10 @@ impl Services {
                 fleet_core::paths::FleetHome::new(self.home.clone()).agents_path(),
                 std::io::Error::other(error.message),
             ),
-            fleet_proto::error::ErrorKind::Tmux
-            | fleet_proto::error::ErrorKind::Remote
-            | fleet_proto::error::ErrorKind::Unknown => DaemonError::Protocol(error.message),
+            fleet_proto::error::ErrorKind::Remote => DaemonError::Remote(error.message),
+            fleet_proto::error::ErrorKind::Tmux | fleet_proto::error::ErrorKind::Unknown => {
+                DaemonError::Protocol(error.message)
+            }
         })
     }
 
@@ -956,5 +957,57 @@ mod tests {
 
         assert!(matches!(error, DaemonError::NotFound(message) if message == "context personal"));
         assert!(remote.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_response_keeps_a_remote_refusal_remote() {
+        use fleet_proto::error::{ErrorKind, ProtoError};
+
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path().join(".fleet");
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let services = Services::new(
+            &home,
+            Arc::new(ConfigStore::new(&home, files.clone())),
+            Arc::new(StateStore::new(&home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(&home)),
+            Adapters::system(files),
+        );
+
+        // A mirrored-thread refusal is `ErrorKind::Remote`. It must stay Remote through the agent
+        // dispatch mapping, so the app shows a clean "remote operation failed:" chip and the
+        // serialized kind is `remote` — not the `unknown`/"protocol error:" it was mis-kinded as.
+        let refusal = ProtoError {
+            kind: ErrorKind::Remote,
+            message:
+                "agent thread t is owned by host dev-box; `send` must be answered by its owner"
+                    .to_owned(),
+        };
+        let error = services
+            .agent_response(Err(refusal.clone()))
+            .expect_err("a refusal is an error");
+        assert!(
+            matches!(&error, DaemonError::Remote(message) if message == &refusal.message),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().starts_with("remote operation failed: "),
+            "{error}"
+        );
+        assert_eq!(ProtoError::from(error).kind, ErrorKind::Remote);
+
+        // The other opaque kinds still fold into Protocol.
+        for kind in [ErrorKind::Tmux, ErrorKind::Unknown] {
+            let error = services
+                .agent_response(Err(ProtoError {
+                    kind,
+                    message: "boom".to_owned(),
+                }))
+                .expect_err("still an error");
+            assert!(matches!(error, DaemonError::Protocol(_)), "{error:?}");
+        }
     }
 }

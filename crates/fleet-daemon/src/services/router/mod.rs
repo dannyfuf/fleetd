@@ -589,7 +589,9 @@ impl Resolver for Router {
         self.ids.host_of_job(id)
     }
     fn host_of_thread(&self, id: &ThreadId) -> Option<HostId> {
-        self.ids.host_of_thread(id)
+        self.ids
+            .host_of_thread(id)
+            .or_else(|| self.mirror.host_of_thread(id))
     }
 }
 

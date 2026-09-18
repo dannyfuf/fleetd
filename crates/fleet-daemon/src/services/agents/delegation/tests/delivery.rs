@@ -172,10 +172,10 @@ async fn user_stop_holds_delivery_until_session_configured() {
     harness.wait_for_delegation_origins(caller, 1).await;
 }
 
+/// Both shipped adapters mint a cursor at start, so this forces the legacy cursorless record.
 #[tokio::test(start_paused = true)]
 async fn stopped_caller_without_a_cursor_becomes_undeliverable() {
     let harness = Harness::start().await;
-    harness.omit_resume_cursor();
     let (caller, delegations) = harness.caller_with_delegations(1, false, true).await;
     tokio::time::resume();
     harness.send(caller, "exit-now").await;
@@ -187,6 +187,11 @@ async fn stopped_caller_without_a_cursor_becomes_undeliverable() {
     harness
         .wait_for_stop_cause(caller, StopCause::ProviderExit)
         .await;
+    harness
+        .manager
+        .clear_resume_cursor(caller)
+        .await
+        .expect("clear the caller's durable resume cursor");
     tokio::time::pause();
 
     drain(&harness.service)

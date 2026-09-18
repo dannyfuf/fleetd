@@ -410,7 +410,7 @@ fn nonempty_worktree_part(
 #[cfg(test)]
 mod tests {
     use fleet_core::{
-        agents::{AgentKind, DelegationId, ThreadId},
+        agents::{AgentKind, DelegationId, ItemId, StreamKind, ThreadId, UserInput},
         ids::{JobId, TerminalId, WorktreeId},
     };
 
@@ -470,11 +470,30 @@ mod tests {
         // forwarding one would hand this machine's browser a URL only the owner's loopback can
         // answer. They stay local and the manager refuses a mirrored thread by name.
         let thread = ThreadId::new();
-        assert_eq!(
-            classify(&RequestBody::AgentStop { thread }, &resolver),
-            Target::Host(host),
-            "the resolver claims every thread, so this is the forwarding baseline"
-        );
+        // Every per-thread mutation the resolver claims is forwarded to the owner. `AgentSend` is
+        // the reported regression: after a restart the ids map is empty and only the mirror knows
+        // the owner, so the resolver must still answer with the host (verified end to end against a
+        // real `Router` in `super::super::create::tests`).
+        for forwarded in [
+            RequestBody::AgentSend {
+                thread,
+                input: UserInput::default(),
+            },
+            RequestBody::AgentStop { thread },
+            RequestBody::AgentItemBody {
+                thread,
+                item: ItemId::new(),
+                stream: StreamKind::AssistantText,
+                offset: 0,
+                limit: 4_096,
+            },
+        ] {
+            assert_eq!(
+                classify(&forwarded, &resolver),
+                Target::Host(host.clone()),
+                "{forwarded:?}"
+            );
+        }
         for local in [
             RequestBody::AgentAccountLogin { thread },
             RequestBody::AgentAccountLogout { thread },

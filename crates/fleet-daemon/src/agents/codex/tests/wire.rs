@@ -35,12 +35,12 @@ fn outbound_frames_are_byte_exact() {
                 ..start_request()
             },
         },
-        &session::TurnControls::from_mode(PermissionMode::Ask),
+        &session::TurnControls::from_mode(PermissionMode::FullAccess),
     );
     assert_eq!(
         canonical(&start),
         canonical_text(
-            r#"{"approvalPolicy":"untrusted","approvalsReviewer":"user","cwd":"/w","model":"gpt-5.1-codex","sandbox":"read-only"}"#
+            r#"{"approvalPolicy":"never","approvalsReviewer":"user","config":{"model_reasoning_effort":"medium"},"cwd":"/w","model":"gpt-5.1-codex","sandbox":"danger-full-access"}"#
         )
     );
 
@@ -116,13 +116,15 @@ fn every_other_outbound_frame_is_byte_exact() {
         thread,
         &session::TurnControls {
             model: Some("gpt-5.1-codex".to_owned()),
+            effort: Some("high".to_owned()),
+            permission_profile: Some("workspace".to_owned()),
             ..session::TurnControls::from_mode(PermissionMode::FullAccess)
         },
     );
     assert_eq!(
         canonical(&settings),
         canonical_text(concat!(
-            r#"{"approvalPolicy":"never","approvalsReviewer":"user","model":"gpt-5.1-codex","#,
+            r#"{"approvalPolicy":"never","approvalsReviewer":"user","effort":"high","model":"gpt-5.1-codex","permissions":"workspace","#,
             r#""sandboxPolicy":{"type":"dangerFullAccess"},"#,
             r#""threadId":"01a089f2-5337-7470-adb1-219e71d62a35"}"#
         ))

@@ -12,7 +12,7 @@ use std::{
 };
 
 use fleet_core::agents::{
-    AgentEvent, ApprovalPolicy, ControlCost, GateAnswer, GateId, HarnessCapabilities,
+    AgentEvent, AgentKind, ApprovalPolicy, ControlCost, GateAnswer, GateId, HarnessCapabilities,
     InterruptSupport, ItemId, ItemStatus, LifecycleKind, ModelSelection, PermissionMode,
     ReasoningChannels, ResumeSupport, SandboxAxes, SandboxPolicy, SteerSupport, TurnId,
     should_apply_lifecycle,
@@ -160,11 +160,9 @@ impl Default for TurnControls {
 impl TurnControls {
     /// The controls one Fleet access mode selects.
     ///
-    /// Fleet's four-mode ladder is a **presentation** over three orthogonal Codex axes —
-    /// approval policy, sandbox policy, permission profile — not a replacement for them, and
-    /// "Auto" differs from "Auto-accept edits" *only* by the reviewer: `auto_review` is Codex
-    /// running its own risk-assessing subagent in the user's place, which has no Claude
-    /// equivalent.
+    /// Fleet's four Codex modes are a **presentation** over three orthogonal axes — approval
+    /// policy, sandbox policy, and permission profile — not a replacement for them. Claude's
+    /// `Auto` and `DontAsk` variants are rejected before this mapping is reached.
     pub(super) fn from_mode(mode: PermissionMode) -> Self {
         match mode {
             PermissionMode::Ask | PermissionMode::Plan => Self {
@@ -182,6 +180,8 @@ impl TurnControls {
                 sandbox: SandboxPolicy::DangerFullAccess,
                 ..Self::default()
             },
+            // Rejected by the manager because Codex does not advertise these Claude-only modes.
+            PermissionMode::Auto | PermissionMode::DontAsk => Self::from_mode(PermissionMode::Ask),
         }
     }
 
@@ -333,6 +333,7 @@ impl CodexSession {
             model_switch: ControlCost::InPlace,
             effort_switch: ControlCost::InPlace,
             mode_switch: ControlCost::InPlace,
+            modes: AgentKind::Codex.supported_modes().to_vec(),
             declared: BTreeSet::new(),
         }
     }

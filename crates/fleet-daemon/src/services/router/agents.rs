@@ -345,6 +345,7 @@ pub(crate) fn classify_agent(body: &RequestBody, resolver: &dyn Resolver) -> Tar
             .host_of_worktree(worktree)
             .map_or(Target::Local, Target::Host),
         AgentThreadOpen { thread, .. }
+        | AgentItemBody { thread, .. }
         | AgentThreadClose { thread }
         | AgentSend { thread, .. }
         | AgentInterrupt { thread }

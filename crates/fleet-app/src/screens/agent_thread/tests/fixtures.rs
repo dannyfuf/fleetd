@@ -224,6 +224,7 @@ pub(super) fn settled_turn(id: TurnId, user_item: ItemId, outcome: TurnOutcome) 
         blocked_ms: 0,
         ended: Some(TurnEnd {
             outcome,
+            abort_reason: None,
             usage: Usage {
                 total_tokens: 12_400,
                 ..Usage::default()

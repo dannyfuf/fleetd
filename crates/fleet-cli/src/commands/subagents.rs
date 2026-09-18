@@ -256,6 +256,8 @@ fn permission_mode(choice: AgentModeChoice) -> PermissionMode {
         AgentModeChoice::Ask => PermissionMode::Ask,
         AgentModeChoice::AcceptEdits => PermissionMode::AcceptEdits,
         AgentModeChoice::Plan => PermissionMode::Plan,
+        AgentModeChoice::Auto => PermissionMode::Auto,
+        AgentModeChoice::DontAsk => PermissionMode::DontAsk,
         AgentModeChoice::FullAccess => PermissionMode::FullAccess,
     }
 }

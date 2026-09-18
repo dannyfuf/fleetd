@@ -569,9 +569,10 @@ async fn deliver(shared: &Shared, output: map::MapOutput) {
 
 /// Sends one event, or notices that the thread runtime is gone.
 pub(super) fn emit(events: &HarnessSink, event: AgentEvent, raw: Option<&str>) {
-    // Fire-and-forget: the receiver is dropped only when the thread runtime has gone away, which
-    // happens during shutdown and needs no answer here.
-    let _receiver_gone_at_shutdown = events.send(HarnessEvent::now(event, raw.map(RawRef::method)));
+    // Fire-and-forget: the receiver is dropped only when the thread runtime has gone away or this
+    // harness generation was retired for restart; neither case needs an answer here.
+    let _receiver_gone_after_retirement =
+        events.send(HarnessEvent::now(event, raw.map(RawRef::method)));
 }
 
 async fn write_loop(

@@ -779,6 +779,14 @@ fn abort_closes_open_text_and_tools_without_inventing_success() {
             .map(|ended| &ended.outcome),
         Some(&TurnOutcome::Interrupted)
     );
+    assert_eq!(
+        projection.turns[0]
+            .ended
+            .as_ref()
+            .and_then(|ended| ended.abort_reason.as_ref()),
+        Some(&AbortReason::User),
+        "the reducer keeps the abort reason for presentation"
+    );
 }
 
 #[test]

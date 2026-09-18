@@ -25,9 +25,13 @@ Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lin
 | `edit-approval-deny.scenario` | the same gate answered `n`; the turn continues, and `Enter` is never an answer | `NATIVE-AGENTS.md` §6.2 |
 | `codex-approval-shows-the-diff.scenario` | a Codex file-change approval joins its named item and renders that item's diff | `NATIVE-AGENTS.md` §6.2; `TODO.md` §1 |
 | `codex-effort-menu.scenario` | `^s e` consumes Codex's discovered per-model effort vocabulary without sending the draft | `NATIVE-AGENTS.md` §7 |
+| `claude-model-effort-menu.scenario` | `^s m` and `^s e` consume Claude's discovered model and effort vocabulary without sending the draft | `NATIVE-AGENTS.md` §7 |
+| `claude-mode-menu.scenario` | `^s t` consumes Claude's declared access modes and keeps the draft | `NATIVE-AGENTS.md` §7 |
+| `codex-mode-menu.scenario` | `^s t` consumes Codex's smaller declared access-mode set and keeps the draft | `NATIVE-AGENTS.md` §7 |
 | `unread-mark.scenario` | a turn that reaches its gate while you are on another tab marks the thread; looking clears the mark and not the gate | `NATIVE-AGENTS.md` §3.3, §6.1 |
 | `unread-mark-survives-a-reconnect.scenario` | a thread read before a daemon restart remains read after reconnect through its persisted installation cursor | `NATIVE-AGENTS.md` §3.3, §10 |
 | `prefix-inside-a-thread.scenario` | agent controls plus `^s 1`–`9`, `^s Tab`, `^s w`, and `^s s` are bound in an agent tab while an unknown second key is swallowed | `KEYMAP.md` §Shadowing, §Native agent thread |
+| `turn-cut-by-a-daemon-restart.scenario` | a gated running turn is cut off and settled after restart, then resumes lazily on the next send | `NATIVE-AGENTS.md` §3.3, §8, §9.2 |
 | `scroll-wheel.scenario` | two fixture turns complete; wheel input moves up and back through the transcript without crashing | `NATIVE-AGENTS.md` §5 |
 | `subagent-attach-from-picker.scenario` | `^s d` lists a hidden delegated child as `attach`; accepting it adds the child tab and focuses its composer | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |
 | `subagent-reopen-closed-caller.scenario` | a locally closed caller remains in `AGENTS`; accepting it reopens the caller tab | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |

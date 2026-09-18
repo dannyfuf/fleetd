@@ -213,6 +213,8 @@ pub(crate) const fn mode_label(mode: PermissionMode) -> &'static str {
         PermissionMode::Ask => "asks before edits",
         PermissionMode::AcceptEdits => "accepts edits",
         PermissionMode::Plan => "plans before editing",
+        PermissionMode::Auto => "auto-approves safe actions",
+        PermissionMode::DontAsk => "denies unlisted tools",
         PermissionMode::FullAccess => "full access",
     }
 }

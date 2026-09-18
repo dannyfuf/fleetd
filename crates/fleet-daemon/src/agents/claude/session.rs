@@ -11,7 +11,7 @@ use std::{
 };
 
 use fleet_core::agents::{
-    AgentEvent, ControlCost, GateAnswer, GateId, GateResolver, HarnessCapabilities,
+    AgentEvent, AgentKind, ControlCost, GateAnswer, GateId, GateResolver, HarnessCapabilities,
     InterruptSupport, ItemId, ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, LifecycleKind,
     PermissionChoice, ReasoningChannels, ResumeSupport, SandboxAxes, SteerSupport, ToolCall,
     ToolPatch, TurnId, Usage, should_apply_lifecycle,
@@ -21,7 +21,10 @@ use serde_json::Value;
 
 use crate::agents::harness::{HarnessError, HarnessResult};
 
-use super::map::tools::{tool_kind, tool_summary};
+use super::{
+    catalogue::Catalogue,
+    map::tools::{tool_kind, tool_summary},
+};
 
 /// A capability string Claude publishes on `system/init`.
 ///
@@ -114,8 +117,12 @@ pub(super) struct ClaudeSession {
     /// `modelUsage` is cumulative across the query process and includes pipeline subcalls, so
     /// picking an arbitrary entry from it reports a summariser's window as the context meter.
     pub(super) session_model: Option<String>,
+    /// The selectable id Fleet passed at launch, used to disambiguate resolved aliases.
+    pub(super) launched_model: Option<String>,
     /// The effort Fleet launched with. Claude does not echo it, so this is the only record.
     pub(super) launched_effort: Option<String>,
+    /// Models and selector aliases discovered through the bidirectional control protocol.
+    pub(super) catalogue: Catalogue,
     pub(super) active_turn: Option<TurnId>,
     /// A submit Fleet has written that the CLI has not confirmed yet.
     pub(super) pending_start: Option<TurnId>,
@@ -182,6 +189,7 @@ impl ClaudeSession {
             model_switch: ControlCost::RestartWithResume,
             effort_switch: ControlCost::RestartWithResume,
             mode_switch: ControlCost::RestartWithResume,
+            modes: AgentKind::Claude.supported_modes().to_vec(),
             declared: self.declared.clone(),
         }
     }

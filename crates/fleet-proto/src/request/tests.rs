@@ -44,7 +44,7 @@ fn request_bodies_round_trip() {
                 .unwrap_or_else(|error| panic!("{error}")),
             provider: AgentKind::Claude,
             model: Some(model.clone()),
-            mode: PermissionMode::Ask,
+            mode: Some(PermissionMode::Ask),
             resume_cursor: Some("session-1".to_owned()),
             title: Some("native agents".to_owned()),
         },

@@ -8,11 +8,11 @@
 use std::collections::HashMap;
 
 use fleet_core::agents::{
-    Item, ItemId, ItemKind, ItemStatus, TurnId, TurnOutcome, TurnRecord, TurnState,
+    AbortReason, Item, ItemId, ItemKind, ItemStatus, TurnId, TurnOutcome, TurnRecord, TurnState,
 };
 use fleet_ui_kit::{
     TranscriptRow, TranscriptRowId, TranscriptRowKind, TurnFoldRow, TurnFooterRow,
-    format_stopped_after, format_worked, turn_footer_segments,
+    format_cut_off_after, format_stopped_after, format_worked, turn_footer_segments,
 };
 use gpui::SharedString;
 
@@ -203,9 +203,24 @@ fn emit_fold(
         record.ended.as_ref().map(|ended| &ended.outcome),
         Some(TurnOutcome::Interrupted)
     );
+    let abort_reason = record
+        .ended
+        .as_ref()
+        .and_then(|ended| ended.abort_reason.as_ref());
     let label = match (interrupted, duration) {
-        (true, Some(duration)) => format_stopped_after(duration),
-        (true, None) => SharedString::new_static("you stopped"),
+        (true, Some(duration)) => match abort_reason {
+            Some(AbortReason::ProviderExited) => format_cut_off_after(duration),
+            Some(AbortReason::SessionStopped) => SharedString::from(format!(
+                "stopped after {}",
+                fleet_ui_kit::format_duration(duration)
+            )),
+            _ => format_stopped_after(duration),
+        },
+        (true, None) => SharedString::new_static(match abort_reason {
+            Some(AbortReason::ProviderExited) => "cut off",
+            Some(AbortReason::SessionStopped) => "stopped",
+            _ => "you stopped",
+        }),
         (false, duration) => format_worked(duration, fold::steps(own, folded)),
     };
     built.push(
@@ -250,7 +265,7 @@ fn emit_close(
     );
     // The outcome leads the footer when it is not a plain completion, because "what happened"
     // outranks "what it cost".
-    if let Some(word) = outcome_word(&ended.outcome) {
+    if let Some(word) = outcome_word(&ended.outcome, ended.abort_reason.as_ref()) {
         segments.insert(0, SharedString::new_static(word));
     }
     built.push(
@@ -287,10 +302,16 @@ fn emit_close(
 }
 
 /// The word a non-plain outcome leads its footer with.
-const fn outcome_word(outcome: &TurnOutcome) -> Option<&'static str> {
+const fn outcome_word(
+    outcome: &TurnOutcome,
+    abort_reason: Option<&AbortReason>,
+) -> Option<&'static str> {
     match outcome {
         TurnOutcome::Completed => None,
-        TurnOutcome::Interrupted => Some("stopped"),
+        TurnOutcome::Interrupted => match abort_reason {
+            Some(AbortReason::ProviderExited) => Some("cut off"),
+            _ => Some("stopped"),
+        },
         TurnOutcome::Error { .. } => Some("failed"),
         TurnOutcome::Denied => Some("denied"),
         TurnOutcome::MaxTurns => Some("turn limit"),
