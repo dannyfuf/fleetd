@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use chrono::Utc;
 use fleet_core::{
     agents::{
-        AbortReason, AgentEvent, AgentKind, ApprovalPolicy, ControlCost, GateAnswer, GateId,
-        ModelSelection, PermissionMode, SandboxPolicy, Seq, StartRequest, SteerSupport, ThreadId,
-        ThreadProjection, TurnId, TurnState, UserInput,
+        AbortReason, AgentEvent, AgentKind, ApprovalPolicy, ControlCost, DelegationId, GateAnswer,
+        GateId, ModelSelection, PermissionMode, SandboxPolicy, Seq, StartRequest, SteerSupport,
+        ThreadId, ThreadProjection, TurnId, TurnState, UserInput,
     },
     ids::WorktreeId,
 };
@@ -35,6 +35,55 @@ use super::{
     window::OpenRequest,
 };
 
+/// Everything one new thread needs, including the delegation facts a child carries.
+///
+/// A struct rather than six more positional arguments: `create` grew a parent, a delegation and
+/// an environment the moment a thread could be spawned by another thread rather than by a user,
+/// and `docs/NATIVE-AGENTS.md` §15 adds more of those than a call site can read positionally.
+#[derive(Debug, Clone)]
+pub struct CreateOptions {
+    /// Worktree the child runs in.
+    pub worktree: WorktreeId,
+    /// Harness to start.
+    pub provider: AgentKind,
+    /// Model selection, or the harness default.
+    pub model: Option<ModelSelection>,
+    /// Permission mode the session starts under.
+    pub mode: PermissionMode,
+    /// Cursor to resume an existing harness session from.
+    pub resume_cursor: Option<String>,
+    /// Title, or the provider's display name.
+    pub title: Option<String>,
+    /// Caller thread, when this thread is a delegated child.
+    pub parent: Option<ThreadId>,
+    /// Delegation that spawned this thread, when one did.
+    pub delegation: Option<DelegationId>,
+    /// Extra environment for the child process, merged before `FLEET_SESSION`.
+    ///
+    /// This is how `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN` reach the child: both adapters
+    /// already extend their overrides with `StartRequest::env`, so nothing harness-specific is
+    /// needed to carry a secret the child alone may use.
+    pub extra_env: BTreeMap<String, String>,
+}
+
+impl CreateOptions {
+    /// The options a plain `AgentThreadCreate` carries: no parent, no delegation, no environment.
+    #[must_use]
+    pub fn new(worktree: WorktreeId, provider: AgentKind, mode: PermissionMode) -> Self {
+        Self {
+            worktree,
+            provider,
+            model: None,
+            mode,
+            resume_cursor: None,
+            title: None,
+            parent: None,
+            delegation: None,
+            extra_env: BTreeMap::new(),
+        }
+    }
+}
+
 impl AgentSessionManager {
     /// Handles `AgentThreadCreate`.
     #[allow(clippy::too_many_arguments)]
@@ -47,6 +96,28 @@ impl AgentSessionManager {
         resume_cursor: Option<String>,
         title: Option<String>,
     ) -> Result<ResponseBody, ProtoError> {
+        self.create_with(CreateOptions {
+            model,
+            resume_cursor,
+            title,
+            ..CreateOptions::new(worktree, provider_kind, mode)
+        })
+        .await
+    }
+
+    /// Creates a thread from the full option set, which is what a delegated child needs.
+    pub async fn create_with(&self, options: CreateOptions) -> Result<ResponseBody, ProtoError> {
+        let CreateOptions {
+            worktree,
+            provider: provider_kind,
+            model,
+            mode,
+            resume_cursor,
+            title,
+            parent,
+            delegation,
+            extra_env,
+        } = options;
         let remote_host = self
             .inner
             .remote_host_resolver
@@ -81,7 +152,7 @@ impl AgentSessionManager {
             mode,
             resume_cursor: resume_cursor.clone(),
             fork: false,
-            env: BTreeMap::new(),
+            env: extra_env,
             sandbox: SandboxPolicy::default(),
             approval_policy: ApprovalPolicy::default(),
             permission_profile: None,
@@ -102,8 +173,8 @@ impl AgentSessionManager {
         let resolved_title = title.unwrap_or_else(|| provider_kind.display_name().to_owned());
         let record = AgentThreadRecord {
             thread,
-            parent: None,
-            delegation: None,
+            parent,
+            delegation,
             worktree: worktree.clone(),
             provider: provider_kind,
             title: resolved_title.clone(),
@@ -116,6 +187,10 @@ impl AgentSessionManager {
             stop_cause: None,
         };
         let mut projection = ThreadProjection::new(thread, worktree, provider_kind);
+        // §1.5: the caller travels on the projection so the summary a client lists a child under
+        // carries it from the thread's very first frame, not from the delegation record it would
+        // have to join against.
+        projection.parent = parent;
         projection.title = resolved_title;
         projection.model = model;
         projection.mode = mode;

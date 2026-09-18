@@ -44,7 +44,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use fleet_core::{
-    agents::{AgentEvent, AgentThreadSummary, Seq, SeqEvent, SessionState, ThreadId},
+    agents::{AgentEvent, AgentThreadSummary, Delegation, Seq, SeqEvent, SessionState, ThreadId},
     ids::HostId,
 };
 use rusqlite::{Connection, TransactionBehavior};
@@ -54,6 +54,7 @@ use super::{
     AgentIndex, AgentThreadRecord, DelegationHooks, index, migrations, mirror,
     project::{self, StagedEvent},
 };
+use crate::services::agents::delegation::transition::DelegationFacts;
 
 /// Commands per transaction. Bounds how long one commit can hold the writer.
 const WRITE_BATCH_MAX_EVENTS: usize = 64;
@@ -101,6 +102,7 @@ enum Work {
     Append {
         thread: ThreadId,
         staged: Box<StagedEvent>,
+        facts: Box<DelegationFacts>,
     },
     /// Quarantine everything after `last` and rebuild the thread's read model.
     TruncateAfter { thread: ThreadId, last: Option<Seq> },
@@ -211,7 +213,6 @@ impl Writer {
     ///
     /// Composition calls this in phase 3; until then only the store's tests do, which is what the
     /// allowance says.
-    #[allow(dead_code)]
     pub(super) fn install_delegation_hooks(&self, hooks: DelegationHooks) {
         let mut installed = self
             .delegation_hooks
@@ -226,7 +227,6 @@ impl Writer {
     ///
     /// It never joins an append batch: a delegation write is a whole state change plus its outbox
     /// rows, and bisecting a failed batch would replay it.
-    #[allow(dead_code)]
     pub(super) async fn delegation_write<T, F>(
         &self,
         what: &'static str,
@@ -259,10 +259,26 @@ impl Writer {
 
     /// Appends one event, projects it, and advances the head, in one transaction.
     pub(super) async fn append(&self, thread: ThreadId, event: &SeqEvent) -> anyhow::Result<()> {
+        self.append_with_facts(thread, event, DelegationFacts::default())
+            .await
+    }
+
+    /// Appends one event with the pre-event facts used by delegation transitions.
+    pub(super) async fn append_with_facts(
+        &self,
+        thread: ThreadId,
+        event: &SeqEvent,
+        facts: DelegationFacts,
+    ) -> anyhow::Result<()> {
         // Serializing here rather than on the writer keeps the CPU cost of a large payload off
         // the transaction, and it lets the batch's byte budget be exact instead of a guess.
         let staged = Box::new(StagedEvent::prepare(event)?);
-        self.request(Work::Append { thread, staged }).await
+        self.request(Work::Append {
+            thread,
+            staged,
+            facts: Box::new(facts),
+        })
+        .await
     }
 
     /// Quarantines everything after `last` and rebuilds the thread.
@@ -451,7 +467,7 @@ fn run(
                 Err(_empty_or_closed) => break,
             }
         }
-        commit(&mut conn, batch);
+        commit(&mut conn, batch, &delegation_hooks);
     }
 
     // `optimize` runs ANALYZE only on the tables whose statistics went stale, so it is cheap and
@@ -515,7 +531,7 @@ fn commit_delegation(
 /// transaction of its own, so one poisonous command fails only its own caller instead of taking
 /// every write queued behind it. The retry is safe because the batch rolled back whole: nothing
 /// it contained was applied.
-fn commit(conn: &mut Connection, batch: Vec<Queued>) {
+fn commit(conn: &mut Connection, batch: Vec<Queued>, hooks: &Mutex<Option<DelegationHooks>>) {
     let durable = batch.iter().any(|queued| needs_durability(&queued.work));
     if durable {
         set_synchronous(conn, "FULL");
@@ -531,12 +547,19 @@ fn commit(conn: &mut Connection, batch: Vec<Queued>) {
             "an agent database batch failed; retrying its commands one at a time"
         );
     }
+    if let Ok(committed) = &outcome
+        && !bisect
+    {
+        notify_delegation_hooks(hooks, committed);
+    }
     for queued in batch {
         let answer = if bisect {
-            transact(conn, std::iter::once(&queued.work))
+            transact(conn, std::iter::once(&queued.work)).map(|committed| {
+                notify_delegation_hooks(hooks, &committed);
+            })
         } else {
             match &outcome {
-                Ok(()) => Ok(()),
+                Ok(_) => Ok(()),
                 // anyhow::Error is not cloneable, and every caller in a failed batch needs the
                 // same story, so the message is carried rather than the error object.
                 Err(error) => Err(anyhow!("{error:#}")),
@@ -556,17 +579,24 @@ fn commit(conn: &mut Connection, batch: Vec<Queued>) {
 fn transact<'work>(
     conn: &mut Connection,
     work: impl Iterator<Item = &'work Work>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DelegationCommit> {
     // IMMEDIATE, so a competing writer is refused at BEGIN rather than after the first statement
     // has already been applied.
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .context("begin an agent database write transaction")?;
+    let mut delegation_commit = DelegationCommit::default();
     for unit in work {
         match unit {
-            Work::Append { thread, staged } => {
+            Work::Append {
+                thread,
+                staged,
+                facts,
+            } => {
                 project::append_event(&transaction, *thread, staged)?;
-                project::project_event(&transaction, *thread, &staged.event)?;
+                let transition =
+                    project::project_event_with_facts(&transaction, *thread, &staged.event, facts)?;
+                delegation_commit.absorb(transition);
                 project::advance_head(&transaction, *thread, &staged.event)?;
                 advance_caught_up_seen_through_invisible_stop(
                     &transaction,
@@ -636,7 +666,52 @@ fn transact<'work>(
     }
     transaction
         .commit()
-        .context("commit an agent database write transaction")
+        .context("commit an agent database write transaction")?;
+    Ok(delegation_commit)
+}
+
+/// Delegation notifications held until the transaction that produced them commits.
+#[derive(Default)]
+struct DelegationCommit {
+    wake: bool,
+    changed: Vec<Delegation>,
+}
+
+impl DelegationCommit {
+    fn absorb(&mut self, outcome: super::delegations::TransitionOutcome) {
+        self.wake |= outcome.wake;
+        for delegation in outcome.changed {
+            if let Some(previous) = self
+                .changed
+                .iter_mut()
+                .find(|previous| previous.id == delegation.id)
+            {
+                *previous = delegation;
+            } else {
+                self.changed.push(delegation);
+            }
+        }
+    }
+}
+
+/// Publishes one transaction's delegation effects after, and only after, its commit.
+fn notify_delegation_hooks(hooks: &Mutex<Option<DelegationHooks>>, committed: &DelegationCommit) {
+    if !committed.wake && committed.changed.is_empty() {
+        return;
+    }
+    let installed = hooks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(installed) = installed else {
+        return;
+    };
+    if committed.wake && installed.wake.send(()).is_err() {
+        tracing::debug!("the delegation worker was gone when a committed append woke it");
+    }
+    for delegation in &committed.changed {
+        (installed.changed)(delegation.clone());
+    }
 }
 
 /// Writes the slot-003 metadata separately from the frozen slot-001 index statement.

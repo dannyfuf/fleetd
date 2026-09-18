@@ -70,7 +70,9 @@ use fleet_core::{
 };
 use fleet_proto::agents::AgentSeenCursor;
 
-use super::{AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord};
+use super::{
+    AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord, delegation::transition::DelegationFacts,
+};
 use cursor::TranscriptCursor;
 pub(crate) use delegations::{OutboxAction, OutboxRow};
 pub(crate) use list::BootWork;
@@ -85,10 +87,6 @@ pub(crate) struct DelegationHooks {
     /// Wakes the durable outbox worker after a transaction enqueues work.
     pub wake: tokio::sync::mpsc::UnboundedSender<()>,
     /// Publishes a delegation changed by event projection.
-    ///
-    /// Installed now and read by the transition half that phase 3 adds to `project_event`; the
-    /// allowance comes off with that caller.
-    #[allow(dead_code)]
     pub changed: Arc<dyn Fn(Delegation) + Send + Sync>,
 }
 
@@ -208,12 +206,26 @@ impl SqliteAgentStore {
         self.inner.writer.append(thread, event).await
     }
 
+    /// The same append, carrying what the delegation rules need to know about `thread`.
+    ///
+    /// `facts` describes the thread as it stood *before* `event`, and only the manager can gather
+    /// it: the rules run inside the writer's transaction, which has no projection in reach. The
+    /// writer carries them into the same transaction as the event and its projections.
+    pub(crate) async fn append_with_facts(
+        &self,
+        thread: ThreadId,
+        event: &SeqEvent,
+        facts: DelegationFacts,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .writer
+            .append_with_facts(thread, event, facts)
+            .await
+    }
+
     /// Reads one delegation by id, or `None` when this daemon has never recorded it.
     ///
-    /// This and the five reads below it are the seam phase 3's service and worker answer their
-    /// queries from. Nothing in the daemon calls them yet, which is what the allowance says; it
-    /// comes off with the first production caller.
-    #[allow(dead_code)]
+    /// This and the five reads below it are the seam the service and worker answer queries from.
     pub(crate) async fn delegation(&self, id: DelegationId) -> anyhow::Result<Option<Delegation>> {
         self.inner
             .readers
@@ -223,7 +235,7 @@ impl SqliteAgentStore {
 
     /// Reads the delegation a child thread belongs to. `child_thread` is `UNIQUE`, so there is
     /// at most one.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used by phase-3 delegation service work landing in parallel.
     pub(crate) async fn delegation_by_child(
         &self,
         child: ThreadId,
@@ -240,7 +252,7 @@ impl SqliteAgentStore {
     ///
     /// The plaintext token is never persisted and never leaves the child, so this is the only
     /// value `DelegationComplete` can be checked against.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used by phase-3 complete service work landing in parallel.
     pub(crate) async fn delegation_token_hash(
         &self,
         id: DelegationId,
@@ -254,7 +266,6 @@ impl SqliteAgentStore {
     }
 
     /// Lists delegations newest first, optionally narrowed to one caller.
-    #[allow(dead_code)]
     pub(crate) async fn delegations(
         &self,
         caller: Option<ThreadId>,
@@ -269,7 +280,7 @@ impl SqliteAgentStore {
 
     /// The same list narrowed to non-terminal delegations, which is what the depth and
     /// concurrency ceilings are counted from.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used by phase-3 run service work landing in parallel.
     pub(crate) async fn live_delegations(
         &self,
         caller: Option<ThreadId>,
@@ -283,7 +294,6 @@ impl SqliteAgentStore {
     }
 
     /// Every unfinished outbox row in id order — the durable work list the worker drains.
-    #[allow(dead_code)]
     pub(crate) async fn delegation_outbox(&self) -> anyhow::Result<Vec<OutboxRow>> {
         self.inner
             .readers
@@ -295,7 +305,6 @@ impl SqliteAgentStore {
     ///
     /// The closure's `wake` answer is observed only after `COMMIT`; without installed hooks it is
     /// deliberately a no-op, which lets the store be constructed before service composition.
-    #[allow(dead_code)]
     pub(crate) async fn delegation_write<T, F>(
         &self,
         what: &'static str,
@@ -309,7 +318,6 @@ impl SqliteAgentStore {
     }
 
     /// Installs the service hooks once composition has built the delegation worker and publisher.
-    #[allow(dead_code)]
     pub(crate) fn install_delegation_hooks(&self, hooks: DelegationHooks) {
         self.inner.writer.install_delegation_hooks(hooks);
     }

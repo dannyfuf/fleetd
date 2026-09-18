@@ -47,6 +47,9 @@ use gates::{resolve_gate, withdraw_gate};
 use items::{append_output, append_text, close_open_items, is_terminal, item_detail};
 use turns::fail_active_turn;
 
+use super::delegations::{self, TransitionOutcome};
+use crate::services::agents::delegation::transition::DelegationFacts;
+
 fn patch_columns(
     patch: Option<&ItemPayloadPatch>,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -112,6 +115,29 @@ pub(super) fn append_event(
 
 /// Applies one event to every read model it can change.
 pub(super) fn project_event(
+    transaction: &Transaction<'_>,
+    thread: ThreadId,
+    event: &SeqEvent,
+) -> anyhow::Result<()> {
+    project_rows(transaction, thread, event)
+}
+
+/// Applies one local event and its delegation transition in the same transaction.
+pub(super) fn project_event_with_facts(
+    transaction: &Transaction<'_>,
+    thread: ThreadId,
+    event: &SeqEvent,
+    facts: &DelegationFacts,
+) -> anyhow::Result<TransitionOutcome> {
+    project_rows(transaction, thread, event)?;
+    delegations::transition(transaction, thread, event, facts, event.at)
+}
+
+/// Applies only the replayable transcript projections, without orchestration side effects.
+///
+/// A rebuild derives these rows from the retained log. Delegations and their outbox are durable
+/// orchestration state, so replay must not transition them or enqueue the same work twice.
+fn project_rows(
     transaction: &Transaction<'_>,
     thread: ThreadId,
     event: &SeqEvent,
@@ -787,7 +813,7 @@ pub(super) fn rebuild_thread(
         for (seq, at, raw, payload) in chunk {
             let event = decode_event(seq, at, raw, &payload)
                 .with_context(|| format!("decode event {seq} of thread {thread} for a rebuild"))?;
-            project_event(transaction, thread, &event)?;
+            project_rows(transaction, thread, &event)?;
             advance_head(transaction, thread, &event)?;
             after = seq;
         }

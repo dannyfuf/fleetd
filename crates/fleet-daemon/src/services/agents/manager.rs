@@ -11,6 +11,7 @@ mod bodies;
 mod checkpoints;
 mod commands;
 mod controls;
+mod delegation;
 mod hydrate;
 mod mirror;
 #[cfg(test)]
@@ -52,6 +53,7 @@ use apply::{
     ends_the_turn, event_name, pending_input_turn, publish_applied, runtime_inflight,
     user_item_started,
 };
+pub use commands::CreateOptions;
 use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
 
 /// Emission-to-read skew worth a log line.
@@ -213,6 +215,15 @@ impl AgentSessionManager {
             .remote_host_resolver
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
+    }
+
+    /// The transcript store this manager writes through, when its database opened.
+    ///
+    /// The delegation service shares it rather than opening a second handle: the delegation rows
+    /// and the transcript rows they describe move in the *same* transaction, which two
+    /// connections could not do.
+    pub(crate) fn delegation_store(&self) -> Option<SqliteAgentStore> {
+        self.inner.store().ok().cloned()
     }
 
     /// Installs the checkpoint service a capture runs against.

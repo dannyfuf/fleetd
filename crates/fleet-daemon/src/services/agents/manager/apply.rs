@@ -27,14 +27,15 @@ use anyhow::Context;
 use chrono::Utc;
 use fleet_core::agents::{
     AbortReason, AgentEvent, AgentThreadSummary, GateAnswer, GateKind, ItemId, ItemKind,
-    PermissionChoice, PlanAnswer, Seq, SeqEvent, SessionState, StopCause, ThreadId, ToolKind,
-    TurnId, TurnOutcome, TurnState, UserInput,
+    PermissionChoice, PlanAnswer, Seq, SeqEvent, SessionState, StopCause, ThreadId, TurnId,
+    TurnOutcome, TurnState, UserInput,
 };
 use fleet_proto::event::Event;
 use tokio::sync::MutexGuard;
 
 use super::{
     AgentThreadRecord, ManagerInner,
+    delegation::{delegation_facts, tool_paths},
     thread::{AppliedEvent, ThreadRuntime},
 };
 
@@ -69,7 +70,7 @@ pub(super) async fn apply_event(
     raw: Option<String>,
 ) -> Result<AppliedEvent, ApplyEventError> {
     let kind = event_name(&event);
-    let (thread, before, sequenced) = {
+    let (thread, before, sequenced, facts) = {
         let state = runtime
             .state
             .lock()
@@ -95,12 +96,15 @@ pub(super) async fn apply_event(
             state.record.thread,
             state.projection.summary(Seq::default()),
             sequenced,
+            // Gathered here, from the projection as it stands *before* this event, because the
+            // delegation rules run inside the writer's transaction and cannot reach one.
+            delegation_facts(&state.projection, &state.record),
         )
     };
     inner
         .store()
         .map_err(ApplyEventError::Storage)?
-        .append(thread, &sequenced)
+        .append_with_facts(thread, &sequenced, facts)
         .await
         .context("persist native-agent event")
         .map_err(ApplyEventError::Storage)?;
@@ -220,10 +224,10 @@ pub(super) fn user_item_started(
 
 /// The worktree-relative or absolute paths an edit-shaped tool call is about to write.
 ///
-/// Provider-neutral by reading both shapes rather than by branching on the harness: Codex's
-/// `fileChange` item maps to `{"paths": [...]}` and Claude's `Edit`/`Write`/`NotebookEdit` to a
-/// single `file_path`. A tool that names no path yields nothing, and nothing is captured — which
-/// is the same outcome as a capture that fails.
+/// A tool that names no path yields nothing, and nothing is captured — which is the same outcome
+/// as a capture that fails. The path extraction itself is
+/// [`super::delegation::tool_paths`], because the delegation half reads the same paths off the
+/// same calls and two readings of one harness shape would drift.
 pub(super) fn edited_paths(event: &AgentEvent) -> Option<(TurnId, Vec<String>)> {
     let AgentEvent::ItemStarted { turn, kind, .. } = event else {
         return None;
@@ -231,23 +235,7 @@ pub(super) fn edited_paths(event: &AgentEvent) -> Option<(TurnId, Vec<String>)> 
     let ItemKind::Tool(call) = kind else {
         return None;
     };
-    if !matches!(call.kind, ToolKind::Edit | ToolKind::Write) {
-        return None;
-    }
-    let mut paths = Vec::new();
-    if let Some(listed) = call.input.get("paths").and_then(|value| value.as_array()) {
-        paths.extend(
-            listed
-                .iter()
-                .filter_map(|value| value.as_str())
-                .map(ToOwned::to_owned),
-        );
-    }
-    for key in ["file_path", "notebook_path", "path"] {
-        if let Some(path) = call.input.get(key).and_then(|value| value.as_str()) {
-            paths.push(path.to_owned());
-        }
-    }
+    let paths = tool_paths(call);
     (!paths.is_empty()).then_some((*turn, paths))
 }
 

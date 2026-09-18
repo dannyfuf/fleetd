@@ -79,7 +79,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     AGENT_CODEX_CAPABILITY,
     AGENT_SEEN_CAPABILITY,
     AGENT_ACCOUNT_CAPABILITY,
-    // Phase 3 advertises AGENT_DELEGATION_CAPABILITY once the service handles the wire family.
+    AGENT_DELEGATION_CAPABILITY,
 ];
 
 pub mod agents;

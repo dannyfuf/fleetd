@@ -7,7 +7,7 @@ mod record;
 mod store;
 mod thread;
 
-pub use manager::AgentSessionManager;
+pub use manager::{AgentSessionManager, CreateOptions};
 pub use record::{AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord};
 
 /// Native-agent service registered in [`crate::services::Services`].

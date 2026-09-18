@@ -1006,7 +1006,8 @@ mod tests {
                 "agent.checkpoints",
                 "agent.codex",
                 "agent.seen",
-                "agent.account"
+                "agent.account",
+                "agent.delegation"
             ])
         );
 

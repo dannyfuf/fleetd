@@ -4,18 +4,19 @@
 //! a reader taking a consistent snapshot while the writer commits, and a batch of appends landing
 //! in FIFO order — are driven by a multi-threaded runtime and joined, never timed.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
-        AgentEvent, AgentKind, Delegation, DelegationId, DelegationResult, DelegationStatus,
-        DeliveryState, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ItemPatch,
-        ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice,
-        PermissionMode, PermissionOption, ProviderOptionId, ReasoningEffortDescriptor,
-        ResultSource, Seq, SeqEvent, StopCause, StreamKind, ThreadId, ThreadProjection, ToolCall,
-        ToolKind, TurnId, TurnOutcome, TurnState, Usage,
+        AbortReason, AgentEvent, AgentKind, Delegation, DelegationId, DelegationResult,
+        DelegationStatus, DeliveryState, GateAnswer, GateId, GateKind, GateResolver, ItemId,
+        ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, MessageOrigin, ModelDescriptor,
+        ModelSelection, PermissionChoice, PermissionMode, PermissionOption, ProviderOptionId,
+        ReasoningEffortDescriptor, ResultSource, Seq, SeqEvent, SessionState, StopCause,
+        StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome, TurnState,
+        Usage,
     },
     ids::WorktreeId,
 };
@@ -25,6 +26,7 @@ use super::{
     AgentIndex, AgentThreadRecord, DelegationHooks, OutboxAction, SqliteAgentStore, delegations,
     read,
 };
+use crate::services::agents::delegation::transition::DelegationFacts;
 
 /// A store on a fresh tempdir. The directory is returned because dropping it deletes the database.
 fn store() -> anyhow::Result<(tempfile::TempDir, SqliteAgentStore)> {
@@ -620,6 +622,767 @@ fn delegation(child: ThreadId) -> Delegation {
         finished: Some(stamp(71)),
         headline: Some("checking transactions".to_owned()),
     }
+}
+
+fn live_delegation(child: ThreadId, caller: ThreadId, status: DelegationStatus) -> Delegation {
+    Delegation {
+        id: DelegationId::new(),
+        caller,
+        caller_turn: TurnId::new(),
+        caller_item: ItemId::new(),
+        child,
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "exercise the transactional transition".to_owned(),
+        expectation: "the row and outbox commit together".to_owned(),
+        eager: false,
+        status,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: DeliveryState::Pending,
+        created: stamp(1),
+        finished: None,
+        headline: None,
+    }
+}
+
+type ChangedDelegations = Arc<Mutex<Vec<Delegation>>>;
+
+fn capture_delegation_hooks(
+    store: &SqliteAgentStore,
+) -> (tokio::sync::mpsc::UnboundedReceiver<()>, ChangedDelegations) {
+    let (wake, wakes) = tokio::sync::mpsc::unbounded_channel();
+    let changed = ChangedDelegations::default();
+    let captured = Arc::clone(&changed);
+    store.install_delegation_hooks(DelegationHooks {
+        wake,
+        changed: Arc::new(move |delegation| {
+            captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(delegation);
+        }),
+    });
+    (wakes, changed)
+}
+
+async fn insert_test_delegation(
+    store: &SqliteAgentStore,
+    delegation: &Delegation,
+) -> anyhow::Result<()> {
+    let delegation = delegation.clone();
+    store
+        .delegation_write("insert transition test delegation", move |tx| {
+            delegations::insert(tx, &delegation, "transition-test-token")?;
+            Ok(((), false))
+        })
+        .await
+}
+
+struct ChildTransitionObservation {
+    stored: Delegation,
+    actions: Vec<OutboxAction>,
+    woke: bool,
+    changed: Vec<Delegation>,
+}
+
+async fn apply_child_transition(
+    current: Delegation,
+    agent_event: AgentEvent,
+    facts: DelegationFacts,
+) -> anyhow::Result<ChildTransitionObservation> {
+    let (_directory, store) = store()?;
+    let child = current.child;
+    let id = current.id;
+    // Keep the caller visible too: caller-side matching must still be scoped to the event thread.
+    store
+        .write_record(&record(current.caller, "transition caller", 1))
+        .await?;
+    let sequence = match &agent_event {
+        AgentEvent::GateResolved { gate, .. } | AgentEvent::GateWithdrawn { gate } => {
+            store
+                .append(
+                    child,
+                    &event(
+                        1,
+                        AgentEvent::GateOpened {
+                            gate: *gate,
+                            turn: None,
+                            kind: GateKind::Plan {
+                                markdown: "seed gate".to_owned(),
+                                steps: Vec::new(),
+                            },
+                        },
+                    ),
+                )
+                .await?;
+            2
+        }
+        _ => 1,
+    };
+    insert_test_delegation(&store, &current).await?;
+    let (mut wakes, changed) = capture_delegation_hooks(&store);
+    store
+        .append_with_facts(child, &event(sequence, agent_event), facts)
+        .await?;
+
+    let stored = store
+        .delegation(id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("transition removed delegation {id}"))?;
+    let actions = store
+        .delegation_outbox()
+        .await?
+        .into_iter()
+        .map(|row| row.action)
+        .collect();
+    let woke = wakes.try_recv().is_ok();
+    assert!(
+        wakes.try_recv().is_err(),
+        "one event may wake the worker at most once"
+    );
+    let changed = changed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    Ok(ChildTransitionObservation {
+        stored,
+        actions,
+        woke,
+        changed,
+    })
+}
+
+fn configured_event() -> AgentEvent {
+    AgentEvent::SessionConfigured {
+        provider: AgentKind::Codex,
+        resume_cursor: None,
+        model: None,
+        models: Vec::new(),
+        mode: PermissionMode::FullAccess,
+        tools: Vec::new(),
+        commands: Vec::new(),
+        skills: Vec::new(),
+    }
+}
+
+fn settled_event(outcome: TurnOutcome) -> AgentEvent {
+    AgentEvent::TurnSettled {
+        turn: TurnId::new(),
+        outcome,
+        usage: Usage::default(),
+        duration_ms: 1,
+        files_changed: Vec::new(),
+    }
+}
+
+fn assert_child_observation(
+    observation: &ChildTransitionObservation,
+    status: DelegationStatus,
+    actions: &[OutboxAction],
+    changed: bool,
+) {
+    assert_eq!(observation.stored.status, status);
+    assert_eq!(observation.actions, actions);
+    assert_eq!(observation.woke, !actions.is_empty());
+    if changed {
+        assert_eq!(observation.changed, vec![observation.stored.clone()]);
+    } else {
+        assert!(observation.changed.is_empty());
+    }
+}
+
+fn result_facts(background_live: bool) -> DelegationFacts {
+    DelegationFacts {
+        background_live,
+        last_assistant_text: Some("Finished the store transition.\nMore detail.".to_owned()),
+        files_changed: vec!["src/store.rs".to_owned()],
+        ..DelegationFacts::default()
+    }
+}
+
+#[tokio::test]
+async fn child_lifecycle_transitions_commit_row_outbox_wake_and_changed_hook() -> anyhow::Result<()>
+{
+    let child = ThreadId::new();
+    let caller = ThreadId::new();
+
+    let observation = apply_child_transition(
+        live_delegation(child, caller, DelegationStatus::Starting),
+        configured_event(),
+        DelegationFacts::default(),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Running,
+        &[OutboxAction::Mirror],
+        true,
+    );
+
+    let observation = apply_child_transition(
+        live_delegation(child, caller, DelegationStatus::Running),
+        AgentEvent::GateOpened {
+            gate: GateId::new(),
+            turn: None,
+            kind: GateKind::Plan {
+                markdown: "approve".to_owned(),
+                steps: Vec::new(),
+            },
+        },
+        DelegationFacts::default(),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Blocked,
+        &[OutboxAction::Mirror],
+        true,
+    );
+
+    for event in [
+        AgentEvent::GateResolved {
+            gate: GateId::new(),
+            answer: GateAnswer::Permission {
+                choice: PermissionChoice::AllowOnce,
+                edited_payload: None,
+            },
+            by: GateResolver::User,
+        },
+        AgentEvent::GateWithdrawn {
+            gate: GateId::new(),
+        },
+    ] {
+        let observation = apply_child_transition(
+            live_delegation(child, caller, DelegationStatus::Blocked),
+            event,
+            DelegationFacts::default(),
+        )
+        .await?;
+        assert_child_observation(
+            &observation,
+            DelegationStatus::Running,
+            &[OutboxAction::Mirror],
+            true,
+        );
+    }
+
+    let mut reported = live_delegation(child, caller, DelegationStatus::Running);
+    reported.result = Some(DelegationResult {
+        text: "reported".to_owned(),
+        files_changed: Vec::new(),
+        source: ResultSource::Reported,
+        elided: false,
+    });
+    let observation = apply_child_transition(
+        reported.clone(),
+        settled_event(TurnOutcome::Completed),
+        result_facts(false),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Succeeded,
+        &[OutboxAction::Deliver],
+        true,
+    );
+    assert_eq!(observation.stored.result, reported.result);
+    assert_eq!(observation.stored.finished, Some(stamp(1)));
+
+    let observation = apply_child_transition(
+        reported,
+        settled_event(TurnOutcome::Completed),
+        result_facts(true),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Settling,
+        &[OutboxAction::Settle],
+        true,
+    );
+
+    let observation = apply_child_transition(
+        live_delegation(child, caller, DelegationStatus::Running),
+        settled_event(TurnOutcome::Completed),
+        result_facts(false),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Settling,
+        &[OutboxAction::Nudge],
+        true,
+    );
+    assert!(matches!(
+        observation.stored.result,
+        Some(DelegationResult {
+            source: ResultSource::LastAssistantText,
+            ..
+        })
+    ));
+
+    let mut exhausted = live_delegation(child, caller, DelegationStatus::Running);
+    exhausted.nudges = 2;
+    let observation = apply_child_transition(
+        exhausted,
+        settled_event(TurnOutcome::Completed),
+        result_facts(false),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Incomplete,
+        &[OutboxAction::Deliver],
+        true,
+    );
+
+    let mut reported_blocked = live_delegation(child, caller, DelegationStatus::Blocked);
+    reported_blocked.status_payload = Some("reported blocked".to_owned());
+    let observation = apply_child_transition(
+        reported_blocked,
+        settled_event(TurnOutcome::Completed),
+        result_facts(false),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Failed,
+        &[OutboxAction::Deliver],
+        true,
+    );
+    assert_eq!(
+        observation.stored.status_payload.as_deref(),
+        Some("reported blocked")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn child_terminal_transitions_commit_every_follow_up_action() -> anyhow::Result<()> {
+    let child = ThreadId::new();
+    let caller = ThreadId::new();
+    for (outcome, payload) in [
+        (
+            TurnOutcome::Error {
+                message: Some("boom".to_owned()),
+            },
+            "error: boom",
+        ),
+        (TurnOutcome::MaxTurns, "max turns"),
+        (TurnOutcome::BudgetExhausted, "budget exhausted"),
+        (TurnOutcome::Denied, "denied"),
+        (
+            TurnOutcome::Other {
+                reason: "lost".to_owned(),
+            },
+            "other: lost",
+        ),
+    ] {
+        let observation = apply_child_transition(
+            live_delegation(child, caller, DelegationStatus::Running),
+            settled_event(outcome),
+            result_facts(false),
+        )
+        .await?;
+        assert_child_observation(
+            &observation,
+            DelegationStatus::Failed,
+            &[OutboxAction::Deliver],
+            true,
+        );
+        assert_eq!(observation.stored.status_payload.as_deref(), Some(payload));
+    }
+
+    let observation = apply_child_transition(
+        live_delegation(child, caller, DelegationStatus::Running),
+        settled_event(TurnOutcome::Interrupted),
+        result_facts(false),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Cancelled,
+        &[OutboxAction::Deliver, OutboxAction::CancelChildren],
+        true,
+    );
+
+    for reason in [
+        AbortReason::User,
+        AbortReason::SessionStopped,
+        AbortReason::Timeout,
+        AbortReason::Superseded,
+        AbortReason::Other("adapter stopped".to_owned()),
+    ] {
+        let observation = apply_child_transition(
+            live_delegation(child, caller, DelegationStatus::Running),
+            AgentEvent::TurnAborted {
+                turn: TurnId::new(),
+                reason,
+            },
+            DelegationFacts::default(),
+        )
+        .await?;
+        assert_child_observation(
+            &observation,
+            DelegationStatus::Cancelled,
+            &[OutboxAction::Deliver, OutboxAction::CancelChildren],
+            true,
+        );
+    }
+
+    let observation = apply_child_transition(
+        live_delegation(child, caller, DelegationStatus::Running),
+        AgentEvent::TurnAborted {
+            turn: TurnId::new(),
+            reason: AbortReason::ProviderExited,
+        },
+        DelegationFacts::default(),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
+        DelegationStatus::Failed,
+        &[OutboxAction::Deliver],
+        true,
+    );
+    assert_eq!(
+        observation.stored.status_payload.as_deref(),
+        Some("provider exited")
+    );
+
+    for (event, status, actions) in [
+        (
+            AgentEvent::RuntimeError {
+                fatal: true,
+                message: "runtime failed".to_owned(),
+            },
+            DelegationStatus::Failed,
+            vec![OutboxAction::Deliver],
+        ),
+        (
+            AgentEvent::SessionExited {
+                code: Some(1),
+                expected: false,
+            },
+            DelegationStatus::Failed,
+            vec![OutboxAction::Deliver],
+        ),
+        (
+            AgentEvent::SessionExited {
+                code: Some(0),
+                expected: true,
+            },
+            DelegationStatus::Cancelled,
+            vec![OutboxAction::Deliver, OutboxAction::CancelChildren],
+        ),
+    ] {
+        let observation = apply_child_transition(
+            live_delegation(child, caller, DelegationStatus::Running),
+            event,
+            DelegationFacts::default(),
+        )
+        .await?;
+        assert_child_observation(&observation, status, &actions, true);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn child_headline_and_terminal_noop_rules_run_through_the_writer() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let child = ThreadId::new();
+    let caller = ThreadId::new();
+    let delegation = live_delegation(child, caller, DelegationStatus::Running);
+    let id = delegation.id;
+    insert_test_delegation(&store, &delegation).await?;
+    let (_wakes, changed) = capture_delegation_hooks(&store);
+    let turn = TurnId::new();
+    let item = ItemId::new();
+
+    store
+        .append_with_facts(
+            child,
+            &event(
+                1,
+                AgentEvent::ItemStarted {
+                    turn,
+                    item,
+                    kind: ItemKind::Tool(Box::new(ToolCall {
+                        kind: ToolKind::Bash,
+                        name: "Bash".to_owned(),
+                        input: serde_json::json!({ "command": "cargo test" }),
+                        summary: Some("run the tests".to_owned()),
+                        result: None,
+                        output: String::new(),
+                        diff: None,
+                        exit_code: None,
+                        duration_ms: None,
+                        extra: Default::default(),
+                    })),
+                    parent: None,
+                },
+            ),
+            DelegationFacts::default(),
+        )
+        .await?;
+    assert_eq!(
+        store
+            .delegation(id)
+            .await?
+            .and_then(|delegation| delegation.headline),
+        Some("run the tests".to_owned())
+    );
+
+    store
+        .append_with_facts(
+            child,
+            &event(
+                2,
+                AgentEvent::ContentDelta {
+                    item,
+                    stream: StreamKind::CommandOutput,
+                    delta: "ok".to_owned(),
+                },
+            ),
+            DelegationFacts::default(),
+        )
+        .await?;
+    store
+        .append_with_facts(
+            child,
+            &event(
+                3,
+                AgentEvent::ItemUpdated {
+                    item,
+                    patch: ItemPatch {
+                        status: Some(ItemStatus::Completed),
+                        ..ItemPatch::default()
+                    },
+                },
+            ),
+            DelegationFacts::default(),
+        )
+        .await?;
+    assert_eq!(
+        store
+            .delegation(id)
+            .await?
+            .and_then(|delegation| delegation.headline),
+        None
+    );
+    assert_eq!(
+        changed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        2,
+        "the content delta is deliberately not a delegation change"
+    );
+
+    let terminal = live_delegation(ThreadId::new(), caller, DelegationStatus::Succeeded);
+    let terminal_id = terminal.id;
+    insert_test_delegation(&store, &terminal).await?;
+    store
+        .append_with_facts(
+            terminal.child,
+            &event(1, configured_event()),
+            DelegationFacts::default(),
+        )
+        .await?;
+    assert_eq!(store.delegation(terminal_id).await?, Some(terminal));
+    assert!(store.delegation_outbox().await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn caller_delivery_records_the_message_sequence_and_finishes_deliver_work()
+-> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let caller = ThreadId::new();
+    let child = ThreadId::new();
+    let delegation = live_delegation(child, caller, DelegationStatus::Succeeded);
+    let id = delegation.id;
+    insert_test_delegation(&store, &delegation).await?;
+    store
+        .delegation_write("seed caller delivery", move |tx| {
+            delegations::enqueue(tx, id, OutboxAction::Deliver, stamp(1))?;
+            Ok(((), false))
+        })
+        .await?;
+    let (mut wakes, changed) = capture_delegation_hooks(&store);
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    let delivered = event(
+        7,
+        AgentEvent::ItemStarted {
+            turn,
+            item,
+            kind: ItemKind::UserMessage {
+                text: "child result".to_owned(),
+                attachments: Vec::new(),
+                steered: true,
+                origin: MessageOrigin::Delegation { id },
+            },
+            parent: None,
+        },
+    );
+    store
+        .append_with_facts(caller, &delivered, DelegationFacts::default())
+        .await?;
+
+    let stored = store
+        .delegation(id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("delivered delegation disappeared"))?;
+    assert_eq!(
+        stored.delivery,
+        DeliveryState::Delivered { seq: Seq(7), turn }
+    );
+    assert!(store.delegation_outbox().await?.is_empty());
+    assert!(
+        wakes.try_recv().is_err(),
+        "delivery itself queues no new work"
+    );
+    assert_eq!(
+        changed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_slice(),
+        &[stored]
+    );
+    let item_detail: String = probe(&store)?.query_row(
+        "SELECT detail_json FROM items WHERE thread_id = ?1 AND item_id = ?2",
+        params![caller.to_string(), item.to_string()],
+        |row| row.get(0),
+    )?;
+    assert!(
+        item_detail.contains(&id.to_string()),
+        "the caller item must retain the delegation origin: {item_detail}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_caller_progress_event_wakes_an_open_delivery_once() -> anyhow::Result<()> {
+    for caller_event in [
+        settled_event(TurnOutcome::Completed),
+        configured_event(),
+        AgentEvent::GateResolved {
+            gate: GateId::new(),
+            answer: GateAnswer::Permission {
+                choice: PermissionChoice::AllowOnce,
+                edited_payload: None,
+            },
+            by: GateResolver::User,
+        },
+        AgentEvent::SessionStateChanged(SessionState::Ready),
+    ] {
+        let (_directory, store) = store()?;
+        let caller = ThreadId::new();
+        let delegation = live_delegation(ThreadId::new(), caller, DelegationStatus::Succeeded);
+        let id = delegation.id;
+        let sequence = if let AgentEvent::GateResolved { gate, .. } = &caller_event {
+            store
+                .append(
+                    caller,
+                    &event(
+                        1,
+                        AgentEvent::GateOpened {
+                            gate: *gate,
+                            turn: None,
+                            kind: GateKind::Plan {
+                                markdown: "seed gate".to_owned(),
+                                steps: Vec::new(),
+                            },
+                        },
+                    ),
+                )
+                .await?;
+            2
+        } else {
+            1
+        };
+        insert_test_delegation(&store, &delegation).await?;
+        store
+            .delegation_write("seed open delivery", move |tx| {
+                delegations::enqueue(tx, id, OutboxAction::Deliver, stamp(1))?;
+                Ok(((), false))
+            })
+            .await?;
+        let (mut wakes, changed) = capture_delegation_hooks(&store);
+        store
+            .append_with_facts(
+                caller,
+                &event(sequence, caller_event),
+                DelegationFacts::default(),
+            )
+            .await?;
+
+        wakes
+            .try_recv()
+            .context("caller progress did not wake delivery")?;
+        assert!(wakes.try_recv().is_err(), "one commit sends only one wake");
+        assert!(
+            changed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a wake-only caller event does not mutate the delegation"
+        );
+        assert_eq!(store.delegation_outbox().await?.len(), 1);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rolled_back_event_runs_neither_delegation_hook() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let child = ThreadId::new();
+    let caller = ThreadId::new();
+    store
+        .write_record(&record(child, "rollback child", 1))
+        .await?;
+    let delegation = live_delegation(child, caller, DelegationStatus::Starting);
+    let id = delegation.id;
+    insert_test_delegation(&store, &delegation).await?;
+    let (mut wakes, changed) = capture_delegation_hooks(&store);
+    runtime_writer(&store)?.execute_batch(&format!(
+        "CREATE TRIGGER fail_transition_head \
+         BEFORE UPDATE OF head_seq ON threads \
+         WHEN NEW.thread_id = '{}' AND NEW.head_seq <> OLD.head_seq \
+         BEGIN SELECT RAISE(FAIL, 'forced rollback after delegation transition'); END;",
+        child
+    ))?;
+
+    let failed = store
+        .append_with_facts(
+            child,
+            &event(1, configured_event()),
+            DelegationFacts::default(),
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "the trigger must abort the event transaction"
+    );
+    assert_eq!(store.delegation(id).await?, Some(delegation));
+    assert!(store.delegation_outbox().await?.is_empty());
+    assert!(store.load(child).await?.is_empty());
+    assert!(
+        wakes.try_recv().is_err(),
+        "a rollback cannot wake the worker"
+    );
+    assert!(
+        changed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty(),
+        "a rollback cannot publish an uncommitted delegation"
+    );
+    Ok(())
 }
 
 #[tokio::test]

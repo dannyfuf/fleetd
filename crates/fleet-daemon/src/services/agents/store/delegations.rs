@@ -3,23 +3,19 @@
 //! These are the only production statements that touch `delegations` or
 //! `delegation_outbox`. Keeping them together makes the phase-3 transition path able to compose
 //! one state change and one outbox action in the writer's existing transaction.
-// The service halves that call these statements land later in phase 3 (`run.rs`, `complete.rs`,
-// `worker.rs`) together with the transition half that runs them inside `project_event`'s
-// transaction. Until they do, the statements are reachable only from the store's own tests; the
-// allowance comes off with the first production caller.
-#![allow(dead_code)]
-
 use std::{fmt::Display, str::FromStr};
 
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 use fleet_core::agents::{
-    Delegation, DelegationId, DelegationResult, DeliveryState, Seq, ThreadId,
+    AgentEvent, Delegation, DelegationId, DelegationResult, DeliveryState, ItemKind, MessageOrigin,
+    Seq, SeqEvent, SessionState, ThreadId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::de::DeserializeOwned;
 
 use super::project::discriminant;
+use crate::services::agents::delegation::transition::{DelegationFacts, child_transition};
 
 /// Rows per delegation read. Every read in this store carries an explicit `LIMIT`; a daemon that
 /// somehow held more than this many delegations is one whose ceilings already failed.
@@ -83,7 +79,105 @@ pub(crate) struct OutboxRow {
     pub created: DateTime<Utc>,
 }
 
+/// Delegation side effects accumulated while projecting one event.
+#[derive(Debug, Default)]
+pub(super) struct TransitionOutcome {
+    /// Whether committed outbox work should wake the worker.
+    pub(super) wake: bool,
+    /// Delegations whose durable row changed, published only after commit.
+    pub(super) changed: Vec<Delegation>,
+}
+
+/// Applies child and caller delegation rules inside the event's projection transaction.
+pub(super) fn transition(
+    tx: &Transaction<'_>,
+    thread: ThreadId,
+    event: &SeqEvent,
+    facts: &DelegationFacts,
+    now: DateTime<Utc>,
+) -> anyhow::Result<TransitionOutcome> {
+    let mut outcome = TransitionOutcome::default();
+
+    if let Some(current) = get_by_child(tx, thread)? {
+        let transition = child_transition(&current, &event.event, facts, now);
+        if transition.changed {
+            update(tx, &transition.next)?;
+            record_changed(&mut outcome.changed, transition.next.clone());
+        }
+        for action in transition.actions {
+            enqueue(tx, current.id, action, now)?;
+            outcome.wake = true;
+        }
+    }
+
+    if let AgentEvent::ItemStarted {
+        turn,
+        kind:
+            ItemKind::UserMessage {
+                origin: MessageOrigin::Delegation { id },
+                ..
+            },
+        ..
+    } = &event.event
+        && let Some(mut delegation) = get(tx, *id)?
+        && delegation.caller == thread
+    {
+        let delivery = DeliveryState::Delivered {
+            seq: event.seq,
+            turn: *turn,
+        };
+        if delegation.delivery != delivery {
+            delegation.delivery = delivery;
+            update(tx, &delegation)?;
+            record_changed(&mut outcome.changed, delegation);
+        }
+        mark_done_for(tx, *id, OutboxAction::Deliver, now)?;
+    }
+
+    if caller_event_can_wake(&event.event) && caller_has_open_deliver(tx, thread)? {
+        outcome.wake = true;
+    }
+
+    Ok(outcome)
+}
+
+fn record_changed(changed: &mut Vec<Delegation>, delegation: Delegation) {
+    if let Some(previous) = changed
+        .iter_mut()
+        .find(|previous| previous.id == delegation.id)
+    {
+        *previous = delegation;
+    } else {
+        changed.push(delegation);
+    }
+}
+
+fn caller_event_can_wake(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::TurnSettled { .. }
+            | AgentEvent::SessionConfigured { .. }
+            | AgentEvent::GateResolved { .. }
+            | AgentEvent::SessionStateChanged(SessionState::Ready)
+    )
+}
+
+fn caller_has_open_deliver(tx: &Transaction<'_>, caller: ThreadId) -> anyhow::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(\
+           SELECT 1 FROM delegation_outbox AS outbox \
+           JOIN delegations ON delegations.id = outbox.delegation \
+           WHERE delegations.caller_thread = ?1 \
+             AND outbox.action = 'deliver' AND outbox.done IS NULL\
+         )",
+        [caller.to_string()],
+        |row| row.get(0),
+    )
+    .with_context(|| format!("check open delivery work for caller {caller}"))
+}
+
 /// Inserts the immutable identity and the initial mutable state of a delegation.
+#[allow(dead_code)] // The phase-3 run service inserts the row once its implementation lands.
 pub(super) fn insert(
     tx: &Transaction<'_>,
     delegation: &Delegation,
@@ -188,6 +282,7 @@ pub(super) fn get_by_child(
 }
 
 /// Reads the stored SHA-256 of a delegation's completion token. The plaintext is never persisted.
+#[allow(dead_code)] // The phase-3 complete service consumes this read.
 pub(super) fn token_hash(conn: &Connection, id: DelegationId) -> anyhow::Result<Option<String>> {
     conn.query_row(
         "SELECT token_sha256 FROM delegations WHERE id = ?1",
@@ -204,6 +299,7 @@ pub(super) fn list(conn: &Connection, caller: Option<ThreadId>) -> anyhow::Resul
 }
 
 /// The same list narrowed to non-terminal delegations, which the ceilings are counted from.
+#[allow(dead_code)] // The phase-3 run service consumes this ceiling query.
 pub(super) fn live(conn: &Connection, caller: Option<ThreadId>) -> anyhow::Result<Vec<Delegation>> {
     read_many(conn, caller, true)
 }
@@ -235,6 +331,7 @@ pub(super) fn open_rows(conn: &Connection) -> anyhow::Result<Vec<OutboxRow>> {
 }
 
 /// The same list narrowed to one delegation.
+#[allow(dead_code)] // The phase-3 worker consumes this query.
 pub(super) fn open_rows_for(
     conn: &Connection,
     delegation: DelegationId,
@@ -250,6 +347,7 @@ pub(super) fn open_rows_for(
 
 /// Closes one outbox row. Guarded on `done IS NULL`, so a replayed pass cannot move the stamp
 /// that says when the action actually finished.
+#[allow(dead_code)] // The phase-3 worker consumes this statement.
 pub(super) fn mark_done(tx: &Transaction<'_>, row: i64, now: DateTime<Utc>) -> anyhow::Result<()> {
     tx.execute(
         "UPDATE delegation_outbox SET done = ?2 WHERE id = ?1 AND done IS NULL",
@@ -280,6 +378,7 @@ pub(super) fn mark_done_for(
 }
 
 /// Whether a caller thread is still listed, which is what refuses a run against a deleted thread.
+#[allow(dead_code)] // The phase-3 run service consumes this check.
 pub(super) fn caller_exists(conn: &Connection, caller: ThreadId) -> anyhow::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM threads WHERE thread_id = ?1 AND deleted_at IS NULL)",
@@ -386,6 +485,7 @@ fn read_outbox<P: rusqlite::Params>(
 }
 
 struct EncodedDelegation {
+    #[allow(dead_code)] // Read by `insert`, whose phase-3 production caller lands separately.
     provider: String,
     status: String,
     result: Option<String>,

@@ -105,6 +105,13 @@ pub struct Services {
     pub sessions: Sessions,
     /// Native structured coding-agent threads.
     pub agents: AgentService,
+    /// Delegations between native threads, absent when the agent database could not be opened.
+    pub(crate) delegations: Option<agents::delegation::DelegationService>,
+    /// The delegation outbox worker, taken once by [`Services::start_periodic_tasks`].
+    ///
+    /// It owns the receive half of the store's wake channel, so it is taken rather than cloned:
+    /// a second task on the same receiver would steal wakes from the first.
+    delegation_worker: Arc<std::sync::Mutex<Option<agents::delegation::DelegationWorker>>>,
     /// Fleet-owned turn checkpoints and the revert that restores one.
     pub checkpoints: checkpoints::Checkpoints,
     /// Cooperative and discovered child output and lifecycle registry.

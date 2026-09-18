@@ -17,10 +17,11 @@ use std::{
 use async_trait::async_trait;
 use fleet_core::{
     agents::{
-        AbortReason, Attention, AttentionKind, ControlCost, GateAnswer, GateId, GateKind,
-        HarnessCapabilities, InterruptSupport, ItemKind, ModelSelection, PermissionChoice,
-        PermissionMode, ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind, ThreadProjection,
-        ToolKind, TurnOutcome, Usage,
+        AbortReason, Attention, AttentionKind, ControlCost, DelegationId, DelegationStatus,
+        GateAnswer, GateId, GateKind, HarnessCapabilities, InterruptSupport, ItemKind, ItemPatch,
+        ItemPayloadPatch, MessageOrigin, ModelSelection, PermissionChoice, PermissionMode,
+        ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind, ThreadProjection, ToolKind,
+        TurnOutcome, Usage,
     },
     ids::{ContextId, RepoId},
     model::{Context as ContextRecord, Repo, RepoHooks, Worktree},
@@ -71,6 +72,12 @@ struct FakeScript {
     unavailable: AtomicBool,
     /// Makes every `stop` fail, as a child that exits from the stdin close does.
     stop_fails: AtomicBool,
+    /// The environment each `start` was handed, keyed by thread.
+    ///
+    /// Both real adapters merge `StartRequest::env` into the child's process environment, so this
+    /// is the fake's stand-in for "what the child would actually see" — which is the only thing
+    /// `FLEET_DELEGATION` and its token are for.
+    start_env: StdMutex<Vec<(ThreadId, BTreeMap<String, String>)>>,
     /// The turn the scripted harness considers running, as both real adapters track one.
     ///
     /// It is what `send` normally answers `Submitted` from, so the fake decides steer-versus-fresh
@@ -90,6 +97,7 @@ impl FakeScript {
             capabilities,
             unavailable: AtomicBool::new(false),
             stop_fails: AtomicBool::new(false),
+            start_env: StdMutex::new(Vec::new()),
             active_turn: StdMutex::new(None),
             submission_answers: StdMutex::new(VecDeque::new()),
             restarts_on_control: AtomicBool::new(false),
@@ -115,6 +123,18 @@ impl FakeScript {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    /// The environment the newest start of `thread` was given.
+    fn start_env(&self, thread: ThreadId) -> BTreeMap<String, String> {
+        self.start_env
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .rev()
+            .find(|(started, _)| *started == thread)
+            .map(|(_, env)| env.clone())
+            .unwrap_or_default()
     }
 
     /// The turn the scripted harness is running, if any.
@@ -184,6 +204,11 @@ impl AgentProvider for FakeProvider {
     }
 
     async fn start(&mut self, req: StartRequest) -> ProviderResult<()> {
+        self.script
+            .start_env
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((req.thread, req.env.clone()));
         self.script
             .record(FakeCall::Start(req.thread, req.resume_cursor));
         Ok(())
@@ -656,6 +681,18 @@ fn completed(turn: TurnId) -> AgentEvent {
         duration_ms: 12,
         files_changed: Vec::new(),
     }
+}
+
+/// Where each recorded user message came from, in order.
+fn origins(projection: &ThreadProjection) -> Vec<MessageOrigin> {
+    projection
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::UserMessage { origin, .. } => Some(origin.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The user prompts the transcript holds, in order.
