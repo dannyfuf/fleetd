@@ -112,6 +112,13 @@ impl DelegationService {
                     store::delegations::update(tx, &delegation)?;
                     store::delegations::enqueue(tx, delegation.id, OutboxAction::Deliver, now)?;
                     true
+                } else if delegation.status == DelegationStatus::Settling && background_live {
+                    // The turn may have settled before the CLI report arrived. Its Nudge row is
+                    // obsolete once a report exists, but background work still needs a durable
+                    // Settle row to re-check it and eventually enqueue delivery.
+                    store::delegations::mark_done_for(tx, delegation.id, OutboxAction::Nudge, now)?;
+                    store::delegations::enqueue(tx, delegation.id, OutboxAction::Settle, now)?;
+                    true
                 } else {
                     false
                 };

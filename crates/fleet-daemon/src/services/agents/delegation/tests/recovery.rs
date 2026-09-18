@@ -197,10 +197,19 @@ async fn seed_running_delegation(
         })
         .await;
 
-    let child = harness.create(Some("child-cursor".to_owned())).await.thread;
+    let delegation_id = DelegationId::new();
+    let child = harness
+        .create_delegated(
+            caller,
+            delegation_id,
+            Some("child-cursor".to_owned()),
+            token,
+        )
+        .await
+        .thread;
     let now = Utc::now();
     let delegation = Delegation {
-        id: DelegationId::new(),
+        id: delegation_id,
         caller,
         caller_turn,
         caller_item: ItemId::new(),
@@ -299,12 +308,33 @@ async fn a_manager_restart_resumes_once_then_succeeds_and_delivers_once() {
         })
         .await;
     wait_for_running_turn(&restarted, delegation.child, resumed_turn).await;
+    let resumed_env = harness.started_env(delegation.child);
+    let resumed_token = resumed_env
+        .get("FLEET_DELEGATION_TOKEN")
+        .cloned()
+        .expect("resumed child receives a rotated token");
+    assert_ne!(resumed_token, TOKEN);
+    assert_eq!(
+        resumed_env.get("FLEET_DELEGATION").map(String::as_str),
+        Some(delegation.id.to_string().as_str())
+    );
     stop_worker(shutdown, task).await;
-    service
+    let stale = service
         .complete(CompleteRequest {
             delegation: delegation.id,
             child: delegation.child,
             token: TOKEN.to_owned(),
+            result: "stale token result".to_owned(),
+            blocked: false,
+        })
+        .await
+        .expect_err("the pre-restart token is revoked");
+    assert_eq!(stale.kind, fleet_proto::error::ErrorKind::Validation);
+    service
+        .complete(CompleteRequest {
+            delegation: delegation.id,
+            child: delegation.child,
+            token: resumed_token,
             result: "recovered result".to_owned(),
             blocked: false,
         })
@@ -600,4 +630,25 @@ async fn cancelling_a_parent_cancels_its_descendants_before_the_parent() {
         rows.iter()
             .any(|row| row.delegation == parent.id && row.action == OutboxAction::Deliver)
     );
+}
+
+#[tokio::test]
+async fn cancellation_stops_the_child_even_when_interrupt_times_out() {
+    let harness = ManagerHarness::start(full()).await;
+    let (manager, events, config, worktrees) = harness.delegation_parts();
+    let store = manager.delegation_store().expect("agent store opens");
+    let (service, _worker) =
+        super::install(&manager, &events, &config, &worktrees).expect("install delegation service");
+    let (_caller, delegation) =
+        seed_running_delegation(&harness, &manager, &store, "cancel-token").await;
+    harness.fail_interrupts();
+
+    let response = service
+        .cancel(delegation.id)
+        .await
+        .expect("stop makes cancellation succeed after interrupt timeout");
+    let ResponseBody::Delegation(cancelled) = response else {
+        panic!("expected cancelled delegation");
+    };
+    assert_eq!(cancelled.status, DelegationStatus::Cancelled);
 }

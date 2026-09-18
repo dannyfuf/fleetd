@@ -42,6 +42,8 @@ use super::{
 /// and `docs/NATIVE-AGENTS.md` §15 adds more of those than a call site can read positionally.
 #[derive(Debug, Clone)]
 pub struct CreateOptions {
+    /// Preallocated identity, used when a delegation must be durable before provider events run.
+    pub thread: Option<ThreadId>,
     /// Worktree the child runs in.
     pub worktree: WorktreeId,
     /// Harness to start.
@@ -71,6 +73,7 @@ impl CreateOptions {
     #[must_use]
     pub fn new(worktree: WorktreeId, provider: AgentKind, mode: PermissionMode) -> Self {
         Self {
+            thread: None,
             worktree,
             provider,
             model: None,
@@ -108,6 +111,7 @@ impl AgentSessionManager {
     /// Creates a thread from the full option set, which is what a delegated child needs.
     pub async fn create_with(&self, options: CreateOptions) -> Result<ResponseBody, ProtoError> {
         let CreateOptions {
+            thread,
             worktree,
             provider: provider_kind,
             model,
@@ -143,7 +147,7 @@ impl AgentSessionManager {
             .await
             .map(PathBuf::from)
             .map_err(daemon_error)?;
-        let thread = ThreadId::new();
+        let thread = thread.unwrap_or_else(ThreadId::new);
         let request = StartRequest {
             thread,
             worktree_path: path,

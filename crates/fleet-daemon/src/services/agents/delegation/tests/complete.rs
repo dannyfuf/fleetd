@@ -4,7 +4,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use fleet_core::{
     agents::{
         AgentEvent, AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId,
-        PermissionMode, ResultSource, Seq, SeqEvent, ThreadId, TurnId, TurnOutcome, Usage,
+        ItemKind, PermissionMode, ResultSource, Seq, SeqEvent, SessionState, ThreadId, TurnId,
+        TurnOutcome, Usage,
     },
     ids::WorktreeId,
     paths::FleetHome,
@@ -76,6 +77,10 @@ impl Harness {
     }
 
     async fn insert(&self, delegation: Delegation) {
+        self.insert_with_background(delegation, false).await;
+    }
+
+    async fn insert_with_background(&self, delegation: Delegation, background: bool) {
         self.store
             .write_record(&child_record(&delegation))
             .await
@@ -84,21 +89,57 @@ impl Harness {
             // A bare record hydrates as a restart orphan and emits failure events. Give this
             // already-settled fixture a terminal session event before its delegation exists, so
             // `complete` can safely inspect its empty background-task set.
-            self.store
-                .append(
-                    delegation.child,
-                    &SeqEvent {
-                        seq: Seq(1),
-                        at: stamp(3),
-                        raw: None,
-                        event: AgentEvent::SessionExited {
-                            code: Some(0),
-                            expected: true,
-                        },
+            let turn = TurnId::new();
+            let background_item = ItemId::new();
+            let events = if background {
+                vec![
+                    AgentEvent::SessionStateChanged(SessionState::Ready),
+                    AgentEvent::TurnStarted {
+                        turn,
+                        user_item: ItemId::new(),
                     },
-                )
-                .await
-                .expect("settle fixture child session");
+                    AgentEvent::ItemStarted {
+                        turn,
+                        item: background_item,
+                        kind: ItemKind::Subagent {
+                            name: "background".to_owned(),
+                            description: "still working".to_owned(),
+                            result: None,
+                        },
+                        parent: None,
+                    },
+                    AgentEvent::TurnSettled {
+                        turn,
+                        outcome: TurnOutcome::Completed,
+                        usage: Usage::default(),
+                        duration_ms: 1,
+                        files_changed: Vec::new(),
+                    },
+                    AgentEvent::SessionExited {
+                        code: Some(0),
+                        expected: true,
+                    },
+                ]
+            } else {
+                vec![AgentEvent::SessionExited {
+                    code: Some(0),
+                    expected: true,
+                }]
+            };
+            for (index, event) in events.into_iter().enumerate() {
+                self.store
+                    .append(
+                        delegation.child,
+                        &SeqEvent {
+                            seq: Seq(u64::try_from(index + 1).expect("small fixture sequence")),
+                            at: stamp(3 + i64::try_from(index).expect("small fixture time")),
+                            raw: None,
+                            event,
+                        },
+                    )
+                    .await
+                    .expect("settle fixture child event");
+            }
         }
         self.store
             .delegation_write("insert complete-test delegation", move |tx| {
@@ -527,4 +568,35 @@ async fn settle_then_complete_finishes_and_enqueues_delivery_in_the_accepting_wr
         1,
         "the retry does not enqueue a second delivery"
     );
+}
+
+#[tokio::test]
+async fn late_report_with_background_work_replaces_nudge_with_settle() {
+    let harness = Harness::new();
+    let current = delegation(DelegationStatus::Settling);
+    harness.insert_with_background(current.clone(), true).await;
+    let delegation_id = current.id;
+    harness
+        .store
+        .delegation_write("seed obsolete nudge", move |tx| {
+            delegations::enqueue(tx, delegation_id, OutboxAction::Nudge, stamp(20))?;
+            Ok(((), false))
+        })
+        .await
+        .expect("seed nudge");
+
+    let reported = one(harness
+        .service
+        .complete(request(&current, TOKEN, "done after background", false))
+        .await
+        .expect("accept late report"));
+    let rows = harness
+        .store
+        .delegation_outbox()
+        .await
+        .expect("read outbox");
+
+    assert_eq!(reported.status, DelegationStatus::Settling);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, OutboxAction::Settle);
 }

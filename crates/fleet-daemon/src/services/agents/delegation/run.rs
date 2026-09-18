@@ -144,30 +144,7 @@ impl DelegationService {
             ("FLEET_DELEGATION".to_owned(), delegation_id.to_string()),
             ("FLEET_DELEGATION_TOKEN".to_owned(), token),
         ]);
-        let created = self
-            .inner
-            .manager
-            .create_with(CreateOptions {
-                worktree: worktree.clone(),
-                provider: request.provider,
-                model: request.model,
-                mode: request.mode.unwrap_or(PermissionMode::FullAccess),
-                resume_cursor: None,
-                title: Some(title),
-                parent: Some(caller),
-                delegation: Some(delegation_id),
-                extra_env,
-            })
-            .await?;
-        let child = match created {
-            ResponseBody::AgentThreadCreated(summary) => summary.thread,
-            other => {
-                return Err(validation(format!(
-                    "child-creation rule: manager returned an unexpected response: {other:?}"
-                )));
-            }
-        };
-
+        let child = fleet_core::agents::ThreadId::new();
         let caller_item = ItemId::new();
         let delegation = Delegation {
             id: delegation_id,
@@ -192,14 +169,57 @@ impl DelegationService {
         };
 
         let stored = delegation.clone();
-        self.inner
+        let refused = self
+            .inner
             .store
-            .delegation_write("insert delegation", move |tx| {
-                delegations::insert(tx, &stored, &token_sha256)?;
-                Ok(((), false))
+            .delegation_write("reserve delegation", move |tx| {
+                let refusal = delegations::reserve(
+                    tx,
+                    &stored,
+                    &token_sha256,
+                    MAX_LIVE_CHILDREN_PER_CALLER,
+                    MAX_LIVE_DELEGATIONS,
+                )?;
+                Ok((refusal, false))
             })
             .await
             .map_err(storage_error)?;
+        if let Some(message) = refused {
+            return Err(conflict(message));
+        }
+
+        let created = self
+            .inner
+            .manager
+            .create_with(CreateOptions {
+                thread: Some(child),
+                worktree: worktree.clone(),
+                provider: request.provider,
+                model: request.model,
+                mode: request.mode.unwrap_or(PermissionMode::FullAccess),
+                resume_cursor: None,
+                title: Some(title),
+                parent: Some(caller),
+                delegation: Some(delegation_id),
+                extra_env,
+            })
+            .await;
+        let created = match created {
+            Ok(created) => created,
+            Err(error) => {
+                self.release_reservation(delegation_id).await?;
+                return Err(error);
+            }
+        };
+        match created {
+            ResponseBody::AgentThreadCreated(summary) if summary.thread == child => {}
+            other => {
+                self.release_reservation(delegation_id).await?;
+                return Err(validation(format!(
+                    "child-creation rule: manager returned an unexpected response: {other:?}"
+                )));
+            }
+        }
 
         self.inner
             .manager
@@ -234,6 +254,17 @@ impl DelegationService {
             delegation,
             warning,
         })
+    }
+
+    async fn release_reservation(&self, delegation: DelegationId) -> Result<(), ProtoError> {
+        self.inner
+            .store
+            .delegation_write("release delegation reservation", move |tx| {
+                delegations::delete(tx, delegation)?;
+                Ok(((), false))
+            })
+            .await
+            .map_err(storage_error)
     }
 }
 

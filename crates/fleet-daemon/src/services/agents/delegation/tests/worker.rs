@@ -33,7 +33,7 @@ use crate::{
 use super::super::{
     DelegationService, DelegationWorker,
     footer::{NUDGE, RESUME_NUDGE},
-    limits::RETRY_TICK,
+    limits::{RETRY_TICK, SETTLE_GRACE},
     worker::drain,
 };
 
@@ -559,6 +559,54 @@ async fn settle_waits_for_the_background_task_then_finalizes() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn settle_grace_is_measured_from_delegation_creation() {
+    let harness = Harness::start().await;
+    let child = harness.create_thread().await;
+    // The provider is an OS process, so let it run on real scheduler time while it creates the
+    // deliberately live background item.
+    tokio::time::resume();
+    harness.send(child, "background work").await;
+    harness
+        .wait_for(child, |projection| {
+            matches!(projection.turn, TurnState::Settled(_, _))
+                && !projection.background_tasks.is_empty()
+        })
+        .await;
+    tokio::time::pause();
+
+    let mut delegation = finished_delegation(
+        DelegationId::new(),
+        ThreadId::new(),
+        TurnId::new(),
+        fleet_core::agents::ItemId::new(),
+        child,
+        false,
+        0,
+    );
+    delegation.status = DelegationStatus::Settling;
+    delegation.finished = None;
+    delegation.created = Utc::now()
+        - chrono::Duration::from_std(SETTLE_GRACE).expect("settle grace converts to chrono");
+    harness
+        .insert(delegation.clone(), OutboxAction::Settle)
+        .await;
+
+    drain(&harness.service)
+        .await
+        .expect("drain expired background settle");
+    assert_eq!(
+        harness
+            .store
+            .delegation(delegation.id)
+            .await
+            .expect("read delegation")
+            .expect("delegation exists")
+            .status,
+        DelegationStatus::Succeeded
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn retry_tick_sends_and_counts_the_nudge() {
     let mut harness = Harness::start().await;
     let child = harness.create_thread().await;
@@ -641,4 +689,26 @@ async fn retry_tick_sends_and_counts_the_nudge() {
     assert_eq!(stored.nudges, 1);
     shutdown.cancel();
     task.await.expect("worker stops cleanly");
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferred_delivery_does_not_starve_cancellation_for_the_same_caller() {
+    let harness = Harness::start().await;
+    let (_caller, delegations) = harness.caller_with_delegations(1, false, false).await;
+    let delegation = &delegations[0];
+    harness
+        .enqueue(delegation.id, OutboxAction::CancelChildren)
+        .await;
+
+    drain(&harness.service)
+        .await
+        .expect("drain cancellation behind deferred delivery");
+
+    let rows = harness
+        .store
+        .delegation_outbox()
+        .await
+        .expect("read remaining outbox");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, OutboxAction::Deliver);
 }

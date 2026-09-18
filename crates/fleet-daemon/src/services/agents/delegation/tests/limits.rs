@@ -65,3 +65,22 @@ async fn a_ninth_live_delegation_is_refused_with_the_daemon_limit() {
     assert!(error.message.contains("daemon-live-limit rule"));
     assert!(error.message.contains(&MAX_LIVE_DELEGATIONS.to_string()));
 }
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_runs_cannot_both_take_the_last_child_slot() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+    for _ in 1..MAX_LIVE_CHILDREN_PER_CALLER {
+        harness.insert_live(caller, ThreadId::new(), 1).await;
+    }
+
+    let (left, right) = harness.run_pair(request(caller), request(caller)).await;
+    let outcomes = [left, right];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = outcomes
+        .into_iter()
+        .find_map(Result::err)
+        .expect("one concurrent run is refused");
+    assert_eq!(error.kind, ErrorKind::Conflict);
+    assert!(error.message.contains("live-child-limit rule"));
+}

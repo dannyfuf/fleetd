@@ -7,6 +7,33 @@
 
 use super::*;
 
+#[test]
+fn hydration_seed_preserves_a_delegated_child_parent() {
+    let thread = ThreadId::new();
+    let parent = ThreadId::new();
+    let created = Utc::now();
+    let record = AgentThreadRecord {
+        thread,
+        parent: Some(parent),
+        delegation: Some(DelegationId::new()),
+        worktree: WorktreeId::try_from("acme/api#child").expect("worktree"),
+        provider: AgentKind::Codex,
+        title: "child".to_owned(),
+        created,
+        last_activity: created,
+        resume_cursor: Some("cursor".to_owned()),
+        model: None,
+        mode: PermissionMode::FullAccess,
+        last_outcome: None,
+        stop_cause: None,
+    };
+
+    assert_eq!(
+        super::super::hydrate::projection_seed(&record).parent,
+        Some(parent)
+    );
+}
+
 #[tokio::test]
 async fn restart_recovery_never_advances_memory_past_a_log_it_could_not_write() {
     // The database path's parent is a *file*, so the store cannot be opened and every append

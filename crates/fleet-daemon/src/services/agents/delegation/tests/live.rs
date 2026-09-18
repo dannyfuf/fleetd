@@ -1,7 +1,7 @@
 //! Opt-in smoke tests for the real native-agent binaries.
 //!
 //! Run them on a signed-in workstation with:
-//! `TMPDIR=/home/df/.cache/fleet-tmp cargo test -p fleet-daemon --features real-agents delegation::tests::live -- --test-threads=1`.
+//! `TMPDIR=/home/df/.cache/fleet-tmp cargo test -p fleet-daemon --features real-agents delegation::live -- --test-threads=1`.
 
 use std::{os::unix::fs::PermissionsExt as _, path::Path, time::Duration};
 
@@ -9,8 +9,8 @@ use fleet_core::agents::{AgentKind, DelegationStatus, ResultSource, SessionState
 use fleet_proto::response::ResponseBody;
 
 use super::{
-    super::CompleteRequest,
-    run::{Harness, request, started},
+    CompleteRequest,
+    tests::run::{Harness, request, started},
 };
 
 const LIVE_TIMEOUT: Duration = Duration::from_secs(10 * 60);

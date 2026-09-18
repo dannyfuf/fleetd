@@ -122,6 +122,30 @@ fn replay(fixture: &str) -> Vec<AgentEvent> {
     events
 }
 
+#[test]
+fn thread_started_during_open_only_adopts_the_root_identity() {
+    let notification = TURN
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value.get("method").and_then(Value::as_str) == Some("thread/started"))
+        .unwrap_or_else(|| panic!("the captured turn must contain thread/started"));
+    let params = notification
+        .get("params")
+        .unwrap_or_else(|| panic!("thread/started must carry params"));
+    let mut session = CodexSession {
+        opening: true,
+        ..CodexSession::default()
+    };
+
+    let mapped = map::handle(&mut session, "thread/started", params);
+
+    assert!(mapped.events.is_empty());
+    assert_eq!(
+        session.root.as_deref(),
+        Some("01a089f2-5337-7470-adb1-219e71d62a35")
+    );
+}
+
 fn names(events: &[AgentEvent]) -> Vec<&'static str> {
     events
         .iter()

@@ -8,8 +8,8 @@ use std::{fmt::Display, str::FromStr};
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 use fleet_core::agents::{
-    AgentEvent, Delegation, DelegationId, DelegationResult, DeliveryState, ItemKind, MessageOrigin,
-    Seq, SeqEvent, SessionState, ThreadId,
+    AgentEvent, Delegation, DelegationId, DelegationResult, DeliveryState, ItemId, ItemKind,
+    MessageOrigin, Seq, SeqEvent, SessionState, ThreadId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::de::DeserializeOwned;
@@ -64,6 +64,15 @@ impl OutboxAction {
             other => bail!("unknown delegation outbox action `{other}`"),
         }
     }
+}
+
+/// Stable transcript identity for one durable outbox submission.
+pub(crate) fn outbox_item(delegation: DelegationId, action: OutboxAction, row: i64) -> ItemId {
+    let attempt = format!("{}:{row}", action.as_str());
+    ItemId::from_uuid(uuid::Uuid::new_v5(
+        &delegation.as_uuid(),
+        attempt.as_bytes(),
+    ))
 }
 
 /// One unfinished delegation outbox action.
@@ -226,6 +235,54 @@ pub(crate) fn insert(
     Ok(())
 }
 
+/// Atomically reserves one live-delegation slot and inserts its starting row.
+///
+/// Returning a rule string keeps capacity races in the domain error family instead of turning a
+/// normal limit refusal into a storage failure.
+pub(crate) fn reserve(
+    tx: &Transaction<'_>,
+    delegation: &Delegation,
+    token_sha256: &str,
+    max_children: usize,
+    max_total: usize,
+) -> anyhow::Result<Option<String>> {
+    let child_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM delegations WHERE caller_thread = ?1 \
+         AND status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled')",
+        [delegation.caller.to_string()],
+        |row| row.get(0),
+    )?;
+    if usize::try_from(child_count).unwrap_or(usize::MAX) >= max_children {
+        return Ok(Some(format!(
+            "live-child-limit rule: caller {} already has {child_count} live children (maximum {max_children})",
+            delegation.caller
+        )));
+    }
+    let total: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM delegations \
+         WHERE status NOT IN ('succeeded', 'incomplete', 'failed', 'cancelled')",
+        [],
+        |row| row.get(0),
+    )?;
+    if usize::try_from(total).unwrap_or(usize::MAX) >= max_total {
+        return Ok(Some(format!(
+            "daemon-live-limit rule: this daemon already has {total} live delegations (maximum {max_total})"
+        )));
+    }
+    insert(tx, delegation, token_sha256)?;
+    Ok(None)
+}
+
+/// Releases a reservation whose child provider could not be created.
+pub(crate) fn delete(tx: &Transaction<'_>, id: DelegationId) -> anyhow::Result<()> {
+    tx.execute(
+        "DELETE FROM delegation_outbox WHERE delegation = ?1",
+        [id.to_string()],
+    )?;
+    tx.execute("DELETE FROM delegations WHERE id = ?1", [id.to_string()])?;
+    Ok(())
+}
+
 /// Rewrites every mutable delegation column while preserving its identity and token hash.
 pub(crate) fn update(tx: &Transaction<'_>, delegation: &Delegation) -> anyhow::Result<()> {
     let encoded = EncodedDelegation::from_delegation(delegation)?;
@@ -292,6 +349,25 @@ pub(crate) fn token_hash(conn: &Connection, id: DelegationId) -> anyhow::Result<
     )
     .optional()
     .with_context(|| format!("read the token hash of delegation {id}"))
+}
+
+/// Replaces the bearer-token digest during child recovery.
+pub(crate) fn rotate_token(
+    tx: &Transaction<'_>,
+    id: DelegationId,
+    child: ThreadId,
+    token_sha256: &str,
+) -> anyhow::Result<()> {
+    let changed = tx
+        .execute(
+            "UPDATE delegations SET token_sha256 = ?3 WHERE id = ?1 AND child_thread = ?2",
+            params![id.to_string(), child.to_string(), token_sha256],
+        )
+        .with_context(|| format!("rotate token for delegation {id}"))?;
+    if changed == 0 {
+        bail!("delegation {id} does not belong to child {child}");
+    }
+    Ok(())
 }
 
 /// Stores the reported result and the metadata that makes repeated completion idempotent.

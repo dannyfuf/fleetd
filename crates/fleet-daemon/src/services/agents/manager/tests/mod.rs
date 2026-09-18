@@ -72,6 +72,8 @@ struct FakeScript {
     unavailable: AtomicBool,
     /// Makes every `stop` fail, as a child that exits from the stdin close does.
     stop_fails: AtomicBool,
+    /// Makes interrupt time out while leaving stop available.
+    interrupt_fails: AtomicBool,
     /// The environment each `start` was handed, keyed by thread.
     ///
     /// Both real adapters merge `StartRequest::env` into the child's process environment, so this
@@ -97,6 +99,7 @@ impl FakeScript {
             capabilities,
             unavailable: AtomicBool::new(false),
             stop_fails: AtomicBool::new(false),
+            interrupt_fails: AtomicBool::new(false),
             start_env: StdMutex::new(Vec::new()),
             active_turn: StdMutex::new(None),
             submission_answers: StdMutex::new(VecDeque::new()),
@@ -234,6 +237,11 @@ impl AgentProvider for FakeProvider {
 
     async fn interrupt(&mut self, turn: TurnId) -> ProviderResult<()> {
         self.script.record(FakeCall::Interrupt(turn));
+        if self.script.interrupt_fails.load(Ordering::SeqCst) {
+            return Err(ProviderError::Timeout {
+                what: "interrupt receipt".to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -424,6 +432,14 @@ impl Harness {
         }
     }
 
+    pub(crate) fn started_env(&self, thread: ThreadId) -> BTreeMap<String, String> {
+        self.script.start_env(thread)
+    }
+
+    pub(crate) fn fail_interrupts(&self) {
+        self.script.interrupt_fails.store(true, Ordering::SeqCst);
+    }
+
     /// Rebuilds the manager over the same database, as a daemon restart would.
     ///
     /// The boot repair is awaited rather than left to the task the constructor spawns: a restart
@@ -455,6 +471,37 @@ impl Harness {
             )
             .await
             .expect("create agent thread");
+        match response {
+            ResponseBody::AgentThreadCreated(summary) => summary,
+            other => panic!("expected AgentThreadCreated, got {other:?}"),
+        }
+    }
+
+    pub(crate) async fn create_delegated(
+        &self,
+        parent: ThreadId,
+        delegation: DelegationId,
+        resume_cursor: Option<String>,
+        token: &str,
+    ) -> AgentThreadSummary {
+        let response = self
+            .manager
+            .create_with(CreateOptions {
+                resume_cursor,
+                parent: Some(parent),
+                delegation: Some(delegation),
+                extra_env: BTreeMap::from([
+                    ("FLEET_DELEGATION".to_owned(), delegation.to_string()),
+                    ("FLEET_DELEGATION_TOKEN".to_owned(), token.to_owned()),
+                ]),
+                ..CreateOptions::new(
+                    self.worktree.clone(),
+                    AgentKind::Claude,
+                    PermissionMode::Ask,
+                )
+            })
+            .await
+            .expect("create delegated agent thread");
         match response {
             ResponseBody::AgentThreadCreated(summary) => summary,
             other => panic!("expected AgentThreadCreated, got {other:?}"),

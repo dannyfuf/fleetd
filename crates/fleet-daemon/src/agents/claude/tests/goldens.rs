@@ -21,6 +21,24 @@ fn the_user_frames_block_order_puts_the_text_last() {
         )
     );
 
+    let item = ItemId::from_uuid(
+        uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555")
+            .unwrap_or_else(|error| panic!("{error}")),
+    );
+    let identified = user_frame(&UserInput {
+        text: "durable delivery".to_owned(),
+        item: Some(item),
+        ..UserInput::default()
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        canonical(&identified),
+        canonical_text(
+            r#"{"message":{"content":"durable delivery","role":"user"},"parent_tool_use_id":null,"session_id":"","type":"user","uuid":"11111111-2222-4333-8444-555555555555"}"#
+        ),
+        "Claude receives the stable item identity as its client UUID"
+    );
+
     let with_image = user_frame(&UserInput {
         text: "/skill do it".to_owned(),
         attachments: vec![Attachment {

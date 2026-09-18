@@ -77,6 +77,16 @@ pub(crate) fn child_transition(
         AgentEvent::TurnSettled {
             outcome: TurnOutcome::Completed,
             ..
+        } if facts.gate_open => {
+            // A completed provider turn does not resolve a question, plan, or permission gate.
+            // Keep the child blocked until the matching GateResolved/GateWithdrawn event arrives;
+            // otherwise a normal blocked child can be finalized or nudged behind an open card.
+            next.status = DelegationStatus::Blocked;
+            next.status_payload = None;
+        }
+        AgentEvent::TurnSettled {
+            outcome: TurnOutcome::Completed,
+            ..
         } if current.status == DelegationStatus::Blocked
             && current.status_payload.as_deref() == Some("reported blocked") =>
         {
@@ -471,6 +481,21 @@ mod tests {
             &[OutboxAction::Deliver],
         );
         assert_eq!(transition.next.result, current.result);
+    }
+
+    #[test]
+    fn completed_turn_stays_blocked_while_a_gate_is_open() {
+        let mut current = delegation(DelegationStatus::Blocked);
+        current.result = Some(reported_result());
+        let mut facts = facts();
+        facts.gate_open = true;
+
+        let transition =
+            child_transition(&current, &settled(TurnOutcome::Completed), &facts, now());
+
+        assert_eq!(transition.next.status, DelegationStatus::Blocked);
+        assert_eq!(transition.next.finished, None);
+        assert!(transition.actions.is_empty());
     }
 
     #[test]

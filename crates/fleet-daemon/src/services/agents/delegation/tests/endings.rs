@@ -1,4 +1,4 @@
-use fleet_core::agents::{DelegationStatus, DeliveryState, ResultSource};
+use fleet_core::agents::{DelegationStatus, DeliveryState, ItemKind, ResultSource};
 use fleet_proto::response::ResponseBody;
 
 use crate::services::agents::store::OutboxAction;
@@ -27,6 +27,13 @@ async fn complete_then_settle_succeeds_with_the_reported_result() {
             .expect("start held delegation"),
     );
     let token = harness.token(&delegation).await;
+    harness
+        .wait_for(delegation.child, |projection| {
+            projection.items.iter().any(
+                |item| matches!(&item.kind, ItemKind::AssistantText { text } if text == "scripted answer"),
+            )
+        })
+        .await;
 
     let reported = completed(
         harness

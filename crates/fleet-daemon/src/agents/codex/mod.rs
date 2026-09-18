@@ -234,6 +234,7 @@ impl Harness for CodexHarness {
         let controls = TurnControls::from_mode(req.start.mode);
         {
             let mut session = self.session.lock().await;
+            session.opening = true;
             session.worktree_path = Some(req.start.worktree_path.clone());
             session.controls = TurnControls {
                 model: req.start.model.as_ref().map(|model| model.model.clone()),
@@ -400,6 +401,7 @@ impl Harness for CodexHarness {
         {
             let mut session = self.session.lock().await;
             session.root = Some(thread_id.clone());
+            session.opening = false;
             // Adopt `cwd` and `model` **from the response**: Codex may normalise or override what
             // the request asked for, and Fleet records what came back.
             if model.is_some() {

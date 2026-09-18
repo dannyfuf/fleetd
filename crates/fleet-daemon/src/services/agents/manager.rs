@@ -41,11 +41,12 @@ use fleet_proto::{
     error::{ErrorKind, ProtoError},
     response::ResponseBody,
 };
+use sha2::{Digest as _, Sha256};
 
 use super::{
     AgentThreadRecord,
     providers::{AgentProvider, ProviderError, ProviderEvents, spawn_provider},
-    store::SqliteAgentStore,
+    store::{self, SqliteAgentStore},
     thread,
 };
 use apply::{
@@ -365,6 +366,30 @@ impl AgentSessionManager {
             .await
             .map(PathBuf::from)
             .map_err(daemon_error)?;
+        let env = if let Some(delegation) = record.delegation {
+            let token = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
+            let child = record.thread;
+            self.inner
+                .store()
+                .map_err(storage_error)?
+                .delegation_write("rotate resumed delegation token", move |tx| {
+                    store::delegations::rotate_token(tx, delegation, child, &token_sha256)?;
+                    Ok(((), false))
+                })
+                .await
+                .map_err(storage_error)?;
+            BTreeMap::from([
+                ("FLEET_DELEGATION".to_owned(), delegation.to_string()),
+                ("FLEET_DELEGATION_TOKEN".to_owned(), token),
+            ])
+        } else {
+            BTreeMap::new()
+        };
         let request = StartRequest {
             thread: record.thread,
             worktree_path: path,
@@ -373,7 +398,7 @@ impl AgentSessionManager {
             mode: record.mode,
             resume_cursor: Some(cursor),
             fork: false,
-            env: BTreeMap::new(),
+            env,
             sandbox: SandboxPolicy::default(),
             approval_policy: ApprovalPolicy::default(),
             permission_profile: None,

@@ -196,6 +196,7 @@ async fn load_projection(
 pub(super) fn projection_seed(record: &AgentThreadRecord) -> ThreadProjection {
     let mut projection =
         ThreadProjection::new(record.thread, record.worktree.clone(), record.provider);
+    projection.parent = record.parent;
     projection.title.clone_from(&record.title);
     projection.model.clone_from(&record.model);
     projection.mode = record.mode;

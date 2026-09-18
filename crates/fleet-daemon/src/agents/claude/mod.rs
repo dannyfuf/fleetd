@@ -631,10 +631,14 @@ pub(crate) fn user_frame(input: &UserInput) -> HarnessResult<Value> {
         blocks.push(json!({"type": "text", "text": text}));
         Value::Array(blocks)
     };
-    Ok(json!({
+    let mut frame = json!({
         "type": "user",
         "session_id": "",
         "parent_tool_use_id": null,
         "message": {"role": "user", "content": content},
-    }))
+    });
+    if let Some(item) = input.item {
+        frame["uuid"] = Value::String(item.to_string());
+    }
+    Ok(frame)
 }

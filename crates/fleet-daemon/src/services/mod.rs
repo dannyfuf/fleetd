@@ -1,13 +1,14 @@
 //! Fleet application services orchestrating domain rules, stores, adapters, jobs, and runtime snapshots.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
 use fleet_core::{
+    agents::ThreadId,
     config::{Config, default_config},
     ids::{HostId, RepoId},
     paths::slot_path,
@@ -107,6 +108,8 @@ pub struct Services {
     pub agents: AgentService,
     /// Delegations between native threads, absent when the agent database could not be opened.
     pub(crate) delegations: Option<agents::delegation::DelegationService>,
+    /// Shared keyed FIFO gates for protocol-level agent mutations across all connections.
+    agent_request_gates: Arc<std::sync::Mutex<HashMap<ThreadId, Arc<tokio::sync::Mutex<()>>>>>,
     /// The delegation outbox worker, taken once by [`Services::start_periodic_tasks`].
     ///
     /// It owns the receive half of the store's wake channel, so it is taken rather than cloned:
@@ -155,6 +158,16 @@ impl Services {
     #[must_use]
     pub fn daemon_id(&self) -> &str {
         &self.daemon_id
+    }
+
+    pub(crate) fn agent_request_gate(&self, thread: ThreadId) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.agent_request_gates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(thread)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 }
 

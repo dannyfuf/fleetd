@@ -20,6 +20,9 @@ mod cancel;
 mod complete;
 pub(crate) mod footer;
 pub(crate) mod limits;
+#[cfg(all(test, feature = "real-agents"))]
+#[path = "tests/live.rs"]
+mod live;
 mod queries;
 #[cfg(test)]
 #[path = "tests/recovery.rs"]
@@ -30,7 +33,7 @@ mod tests;
 pub(crate) mod transition;
 mod worker;
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use fleet_core::{
     agents::{AgentKind, Delegation, DelegationId, ModelSelection, PermissionMode, ThreadId},
@@ -69,6 +72,8 @@ struct Inner {
     config: Arc<ConfigStore>,
     /// Resolves the worktree a child is started in.
     worktrees: Worktrees,
+    /// Locally accepted submissions awaiting their durable transcript-origin commit.
+    in_flight_rows: std::sync::Mutex<HashSet<i64>>,
 }
 
 impl DelegationService {
@@ -93,6 +98,7 @@ impl DelegationService {
                 wake,
                 config,
                 worktrees,
+                in_flight_rows: std::sync::Mutex::new(HashSet::new()),
             }),
         };
         let worker = DelegationWorker {

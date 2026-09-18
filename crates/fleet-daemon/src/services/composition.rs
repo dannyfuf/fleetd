@@ -216,6 +216,7 @@ impl Services {
             worktrees,
             agents,
             delegations,
+            agent_request_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             delegation_worker: Arc::new(std::sync::Mutex::new(delegation_worker)),
             checkpoints,
             pool,

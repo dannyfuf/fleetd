@@ -33,6 +33,29 @@ async fn idle_delivery_starts_a_caller_turn_with_delegation_origin() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_second_wake_cannot_resubmit_delivery_before_origin_commit() {
+    let harness = Harness::start().await;
+    let (caller, delegations) = harness.caller_with_delegations(1, false, true).await;
+
+    drain(&harness.service).await.expect("first delivery drain");
+    drain(&harness.service)
+        .await
+        .expect("second drain inside origin commit window");
+    tokio::time::resume();
+    harness.wait_for_delegation_origins(caller, 1).await;
+
+    assert_eq!(
+        harness
+            .origins(caller)
+            .await
+            .into_iter()
+            .filter(|origin| matches!(origin, fleet_core::agents::MessageOrigin::Delegation { id } if *id == delegations[0].id))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn running_then_idle_waits_for_the_callers_settle() {
     let harness = Harness::start().await;
     let (caller, _) = harness.caller_with_delegations(1, false, false).await;

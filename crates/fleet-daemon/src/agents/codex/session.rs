@@ -225,6 +225,8 @@ impl TurnControls {
 pub(super) struct CodexSession {
     /// The Codex thread id, which is the resume cursor.
     pub(super) root: Option<String>,
+    /// Whether `open` is still assembling the first complete session configuration.
+    pub(super) opening: bool,
     /// The `userAgent` the handshake returned, and the version scraped out of it.
     pub(super) user_agent: Option<String>,
     pub(super) version: Option<Version>,

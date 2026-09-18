@@ -79,9 +79,31 @@ impl DelegationService {
     async fn cancel_one(&self, delegation: &Delegation) -> Result<(), ProtoError> {
         // Do not write `Cancelled` here. `stop` records `TurnAborted { SessionStopped }`, and the
         // transition half changes the delegation and enqueues delivery in that same transaction.
-        self.inner.manager.interrupt(delegation.child).await?;
-        self.inner.manager.stop(delegation.child).await?;
-        Ok(())
+        let interrupt = self.inner.manager.interrupt(delegation.child).await;
+        let stop = self.inner.manager.stop(delegation.child).await;
+        match (interrupt, stop) {
+            (Err(interrupt), Err(stop)) => Err(ProtoError {
+                kind: stop.kind,
+                message: format!(
+                    "interrupt failed before stop also failed: {}; stop: {}",
+                    interrupt.message, stop.message
+                ),
+            }),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(_)) => {
+                // `stop` is authoritative and appends the cancellation transition. Surface the
+                // interrupt failure only after the provider has actually been stopped.
+                tracing::warn!(
+                    target: "fleet::agents",
+                    delegation = %delegation.id,
+                    child = %delegation.child,
+                    error = %error,
+                    "interrupt failed before delegation stop completed",
+                );
+                Ok(())
+            }
+            (Ok(_), Ok(_)) => Ok(()),
+        }
     }
 }
 

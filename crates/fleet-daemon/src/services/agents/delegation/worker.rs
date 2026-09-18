@@ -34,7 +34,15 @@ pub(super) async fn drain(service: &DelegationService) -> anyhow::Result<()> {
         service.inner.manager.projection(delegation.child).await?;
     }
     repair_missing_callers(service).await?;
-    let rows = service.inner.store.delegation_outbox().await?;
+    let mut rows = service.inner.store.delegation_outbox().await?;
+    let open = rows.iter().map(|row| row.id).collect::<HashSet<_>>();
+    service
+        .inner
+        .in_flight_rows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|row| open.contains(row));
+    rows.sort_by_key(|row| (row.action != OutboxAction::CancelChildren, row.id));
     let mut callers = HashSet::new();
 
     for row in rows {
@@ -50,7 +58,7 @@ pub(super) async fn drain(service: &DelegationService) -> anyhow::Result<()> {
             );
             continue;
         };
-        if !callers.insert(delegation.caller) {
+        if row.action != OutboxAction::CancelChildren && !callers.insert(delegation.caller) {
             continue;
         }
         let caller = delegation.caller;
@@ -141,48 +149,65 @@ async fn nudge(
     row: &OutboxRow,
     delegation: Delegation,
 ) -> anyhow::Result<()> {
-    // Count and close the durable request before the send. If the daemon exits after the commit,
-    // the child may miss one hint, but it can never receive an unbounded series of duplicate
-    // nudges after restarts.
     let delegation_id = delegation.id;
     let row_id = row.id;
-    let Some(delegation) = service
+    let current = service
         .inner
         .store
-        .delegation_write("count delegation nudge", move |tx| {
-            let Some(mut current) = delegations::get(tx, delegation_id)? else {
-                anyhow::bail!("delegation {delegation_id} does not exist");
-            };
-            let reported = current
-                .result
-                .as_ref()
-                .is_some_and(|result| result.source == ResultSource::Reported);
-            if current.status != DelegationStatus::Settling || reported {
-                delegations::mark_done(tx, row_id, Utc::now())?;
-                return Ok((None, false));
-            }
-            current.nudges = current.nudges.saturating_add(1);
-            delegations::update(tx, &current)?;
-            delegations::mark_done(tx, row_id, Utc::now())?;
-            Ok((Some(current), false))
-        })
+        .delegation(delegation_id)
         .await?
-    else {
+        .context("nudge delegation disappeared")?;
+    let reported = current
+        .result
+        .as_ref()
+        .is_some_and(|result| result.source == ResultSource::Reported);
+    if current.status != DelegationStatus::Settling || reported {
+        finish_row(service, row_id).await?;
         return Ok(());
-    };
-    service.publish_changed(delegation.clone());
+    }
+    if !claim_in_flight(service, row_id) {
+        return Ok(());
+    }
 
-    service
+    if let Err(error) = service
         .inner
         .manager
         .send(
             delegation.child,
             UserInput {
                 text: NUDGE.to_owned(),
+                item: Some(delegations::outbox_item(
+                    delegation.id,
+                    OutboxAction::Nudge,
+                    row.id,
+                )),
                 ..UserInput::default()
             },
         )
-        .await?;
+        .await
+    {
+        clear_in_flight(service, row_id);
+        return Err(error.into());
+    }
+    let changed = match service
+        .inner
+        .store
+        .delegation_write("acknowledge delegation nudge", move |tx| {
+            let Some(mut current) = delegations::get(tx, delegation_id)? else {
+                anyhow::bail!("delegation {delegation_id} does not exist");
+            };
+            current.nudges = current.nudges.saturating_add(1);
+            delegations::update(tx, &current)?;
+            delegations::mark_done(tx, row_id, Utc::now())?;
+            Ok((current, false))
+        })
+        .await
+    {
+        Ok(changed) => changed,
+        Err(error) => return Err(error),
+    };
+    clear_in_flight(service, row_id);
+    service.publish_changed(changed);
     Ok(())
 }
 
@@ -193,7 +218,7 @@ async fn settle(
 ) -> anyhow::Result<()> {
     let projection = service.inner.manager.projection(delegation.child).await?;
     let now = Utc::now();
-    let grace_elapsed = now.signed_duration_since(row.created)
+    let grace_elapsed = now.signed_duration_since(delegation.created)
         >= chrono::Duration::from_std(SETTLE_GRACE).context("convert settle grace")?;
     if !projection.background_tasks.is_empty() && !grace_elapsed {
         return Ok(());
@@ -232,11 +257,19 @@ async fn recover(
     row: &OutboxRow,
     delegation: Delegation,
 ) -> anyhow::Result<()> {
+    if !claim_in_flight(service, row.id) {
+        return Ok(());
+    }
     let input = UserInput {
         text: RESUME_NUDGE.to_owned(),
+        item: Some(delegations::outbox_item(
+            delegation.id,
+            OutboxAction::Recover,
+            row.id,
+        )),
         ..UserInput::default()
     };
-    match service.inner.manager.send(delegation.child, input).await {
+    let result = match service.inner.manager.send(delegation.child, input).await {
         Ok(_) => {
             finish_row(service, row.id).await?;
             let current = service
@@ -262,7 +295,13 @@ async fn recover(
             .await
         }
         Err(error) => Err(anyhow::Error::new(error)),
+    };
+    if result.is_ok()
+        || matches!(&result, Err(error) if error.downcast_ref::<fleet_proto::error::ProtoError>().is_some())
+    {
+        clear_in_flight(service, row.id);
     }
+    result
 }
 
 async fn fail_recovery(
@@ -310,6 +349,9 @@ async fn deliver(
     row: &OutboxRow,
     delegation: Delegation,
 ) -> anyhow::Result<()> {
+    if row_in_flight(service, row.id) {
+        return Ok(());
+    }
     if let Err(error) = service
         .inner
         .manager
@@ -392,13 +434,54 @@ async fn deliver(
     let input = UserInput {
         text: delivered_message(&delegation, Utc::now()),
         origin: MessageOrigin::Delegation { id: delegation.id },
+        item: Some(delegations::outbox_item(
+            delegation.id,
+            OutboxAction::Deliver,
+            row.id,
+        )),
         ..UserInput::default()
     };
+    if !claim_in_flight(service, row.id) {
+        return Ok(());
+    }
     match service.inner.manager.send(delegation.caller, input).await {
         Ok(_) => Ok(()),
-        Err(error) if error.kind == ErrorKind::Conflict => Ok(()),
-        Err(error) => Err(anyhow::Error::new(error)),
+        Err(error) if error.kind == ErrorKind::Conflict => {
+            clear_in_flight(service, row.id);
+            Ok(())
+        }
+        Err(error) => {
+            clear_in_flight(service, row.id);
+            Err(anyhow::Error::new(error))
+        }
     }
+}
+
+fn row_in_flight(service: &DelegationService, row: i64) -> bool {
+    service
+        .inner
+        .in_flight_rows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&row)
+}
+
+fn claim_in_flight(service: &DelegationService, row: i64) -> bool {
+    service
+        .inner
+        .in_flight_rows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(row)
+}
+
+fn clear_in_flight(service: &DelegationService, row: i64) {
+    service
+        .inner
+        .in_flight_rows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&row);
 }
 
 fn status_patch(status: DelegationStatus) -> ItemPatch {

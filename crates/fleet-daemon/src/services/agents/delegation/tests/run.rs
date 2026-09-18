@@ -31,7 +31,7 @@ use super::super::{
     footer::{SAME_WORKTREE_WARNING, first_message},
 };
 
-pub(super) struct Harness {
+pub(crate) struct Harness {
     _directory: tempfile::TempDir,
     environment_log: std::path::PathBuf,
     input_log: std::path::PathBuf,
@@ -45,7 +45,7 @@ pub(super) struct Harness {
 }
 
 impl Harness {
-    pub(super) async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let directory = tempfile::tempdir().expect("create run test directory");
         let home = directory.path().join("fleet");
         let repos = home.join("repos");
@@ -179,7 +179,7 @@ impl Harness {
         summary
     }
 
-    pub(super) async fn running_caller(&self) -> (ThreadId, TurnId) {
+    pub(crate) async fn running_caller(&self) -> (ThreadId, TurnId) {
         let caller = self.create_thread().await.thread;
         tokio::time::resume();
         self.manager
@@ -204,7 +204,7 @@ impl Harness {
         }
     }
 
-    pub(super) async fn wait_for(
+    pub(crate) async fn wait_for(
         &self,
         thread: ThreadId,
         predicate: impl Fn(&ThreadProjection) -> bool,
@@ -252,6 +252,20 @@ impl Harness {
         let response = self.service.run(request).await;
         tokio::time::pause();
         response
+    }
+
+    pub(super) async fn run_pair(
+        &self,
+        left: RunRequest,
+        right: RunRequest,
+    ) -> (
+        Result<ResponseBody, fleet_proto::error::ProtoError>,
+        Result<ResponseBody, fleet_proto::error::ProtoError>,
+    ) {
+        tokio::time::resume();
+        let responses = tokio::join!(self.service.run(left), self.service.run(right));
+        tokio::time::pause();
+        responses
     }
 
     pub(super) async fn send(&self, thread: ThreadId, text: &str) {
@@ -350,12 +364,12 @@ impl Harness {
         token_from_environment(&environment, delegation)
     }
 
-    pub(super) fn service(&self) -> &DelegationService {
+    pub(crate) fn service(&self) -> &DelegationService {
         &self.service
     }
 
     #[cfg(feature = "real-agents")]
-    pub(super) async fn allow_permission(
+    pub(crate) async fn allow_permission(
         &self,
         thread: ThreadId,
         gate: fleet_core::agents::GateId,
@@ -408,14 +422,14 @@ impl Harness {
             .expect("seed live delegation");
     }
 
-    pub(super) async fn set_claude_binary(&self, binary: &str) {
+    pub(crate) async fn set_claude_binary(&self, binary: &str) {
         let mut config = self.config.load().await.expect("load test config");
         config.agent_binaries.claude = binary.to_owned();
         self.config.save(config).await.expect("save test config");
     }
 
     #[cfg(feature = "real-agents")]
-    pub(super) async fn set_codex_binary(&self, binary: &str) {
+    pub(crate) async fn set_codex_binary(&self, binary: &str) {
         let mut config = self.config.load().await.expect("load test config");
         config.agent_binaries.codex = binary.to_owned();
         self.config.save(config).await.expect("save test config");
