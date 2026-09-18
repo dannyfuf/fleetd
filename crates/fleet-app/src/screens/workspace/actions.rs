@@ -479,6 +479,20 @@ impl WorkspaceScreen {
                 }
             })
         };
+        let root = {
+            let state = state.clone();
+            root.on_action(move |_: &prefix::UpToCaller, _window, cx| {
+                state.update(cx, |app, cx| {
+                    app.leave_prefix();
+                    if up_to_caller(app).is_some() {
+                        cx.notify();
+                    } else {
+                        app.toast_short("^s u is not bound here", Icon::Info, Instant::now());
+                        cx.notify();
+                    }
+                });
+            })
+        };
         {
             let (_, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::SessionSwitcher, _window, cx| {
@@ -735,6 +749,16 @@ impl WorkspaceScreen {
         let root = reserved_search::<scroll::SearchNext>(root, state);
         reserved_search::<scroll::SearchPrev>(root, state)
     }
+}
+
+/// Selects the active delegated thread's caller, attaching it first when this window hid it.
+pub(super) fn up_to_caller(app: &mut AppState) -> Option<ThreadId> {
+    let child = app.active_agent_thread()?;
+    let caller = app.agents.caller_of(child)?;
+    let worktree = app.agents.summary(caller)?.worktree.clone();
+    app.agents.attach(caller);
+    app.agents.activate(worktree, caller);
+    Some(caller)
 }
 
 /// Asks fleetd for a plain shell tab in the session's worktree path.

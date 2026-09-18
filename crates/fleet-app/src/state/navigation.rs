@@ -674,6 +674,38 @@ impl AppState {
             .touch(terminal);
     }
 
+    /// Routes to a native thread's worktree, reveals its tab when needed, and selects it.
+    ///
+    /// Session entry happens before a cross-worktree child is attached, so the tab can only
+    /// appear in the strip it belongs to. Activating the thread schedules composer focus for
+    /// the frame that mounts it.
+    pub fn select_agent_thread(&mut self, thread: fleet_core::agents::ThreadId) -> bool {
+        let Some(summary) = self.agents.summary(thread).cloned() else {
+            return false;
+        };
+        let Some(session) = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot.sessions.iter().find_map(|session| {
+                matches!(
+                    &session.kind,
+                    fleet_core::sessions::SessionKind::Worktree(worktree)
+                        if worktree == &summary.worktree
+                )
+                .then(|| session.id.clone())
+            })
+        }) else {
+            return false;
+        };
+
+        crate::presentation::enter_session(self, session);
+        if summary.parent.is_some() {
+            self.agents.attach(thread);
+        } else {
+            self.agents.reopen(thread);
+        }
+        self.agents.activate(summary.worktree, thread);
+        true
+    }
+
     /// The session shown by the Workspace, when that is the current screen.
     #[must_use]
     pub fn active_session(&self) -> Option<&Session> {

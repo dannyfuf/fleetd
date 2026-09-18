@@ -372,6 +372,10 @@ fn the_composer_placeholder_states_what_the_mode_is_for() {
         ),
         "add feedback to refine, or leave blank to implement"
     );
+    assert_eq!(
+        presentation::child_composer_placeholder(3),
+        "Steering a subagent of [3]. It reports to its caller when it finishes."
+    );
 }
 
 #[test]
@@ -399,6 +403,24 @@ fn an_untitled_thread_is_named_by_its_harness_alone() {
     let projection: ThreadProjection = projection();
     let summary = projection.summary(fleet_core::agents::Seq::default());
     assert_eq!(tab_title(&summary), "claude");
+}
+
+#[test]
+fn the_child_metadata_segment_names_attached_and_hidden_callers() {
+    let mut projection = projection();
+    projection.title = "design".to_owned();
+    let caller = projection.summary(fleet_core::agents::Seq::default());
+    let caller_target = caller.thread.to_string();
+
+    let attached = presentation::caller_metadata_segment(&caller, Some(3));
+    assert_eq!(attached.text.as_ref(), "for [3] claude \u{2014} design");
+    assert_eq!(attached.target.as_deref(), Some(caller_target.as_str()));
+    assert!(!attached.collapsible, "the caller jump is always pinned");
+
+    let hidden = presentation::caller_metadata_segment(&caller, None);
+    assert_eq!(hidden.text.as_ref(), "for \u{b7} claude \u{2014} design");
+    assert_eq!(hidden.target, attached.target);
+    assert!(!hidden.collapsible);
 }
 
 #[test]

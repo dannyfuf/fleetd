@@ -196,6 +196,18 @@ pub(crate) fn open_session(session: SessionId, state: &Entity<AppState>, cx: &mu
     });
 }
 
+/// Leaves the one-shot prefix and opens the palette in native-thread mode.
+// The focused Workspace listener is owned by app-child-tab and calls this after integration.
+#[allow(dead_code)]
+pub(crate) fn open_agents_picker(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        app.leave_prefix();
+        app.palette_seed = Some("agents".to_owned());
+        app.open_overlay(Overlay::Palette);
+        cx.notify();
+    });
+}
+
 /// Ensures a worktree's session exists, then routes the window to it.
 pub(crate) fn open_worktree<T: SessionTransport>(
     id: WorktreeId,

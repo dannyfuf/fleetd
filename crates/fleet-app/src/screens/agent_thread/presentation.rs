@@ -59,8 +59,7 @@ pub(crate) const fn header_word(attention: Attention) -> &'static str {
 }
 
 /// `claude — rounding fix`, or `claude` while the thread has no harness title yet (§2).
-#[must_use]
-pub(crate) fn tab_title(summary: &AgentThreadSummary) -> String {
+fn plain_tab_title(summary: &AgentThreadSummary) -> String {
     let provider = summary.provider.executable();
     let title = summary.title.trim();
     if title.is_empty()
@@ -70,6 +69,43 @@ pub(crate) fn tab_title(summary: &AgentThreadSummary) -> String {
         return provider.to_owned();
     }
     format!("{provider} \u{2014} {title}")
+}
+
+/// `claude — rounding fix`, prefixed by `↳ ` when the thread is a delegated child (§7).
+#[must_use]
+pub(crate) fn tab_title(summary: &AgentThreadSummary) -> String {
+    let title = plain_tab_title(summary);
+    if summary.parent.is_some() {
+        format!("\u{21b3} {title}")
+    } else {
+        title
+    }
+}
+
+/// The child's pinned jump back to its caller.
+///
+/// `caller_index` is the one-based strip index. A hidden caller has no index and therefore uses
+/// the contract's middle dot, while retaining its opaque thread target so activation can attach
+/// it before selection.
+#[must_use]
+#[cfg(test)]
+pub(crate) fn caller_metadata_segment(
+    caller: &AgentThreadSummary,
+    caller_index: Option<usize>,
+) -> MetadataSegment {
+    let position = caller_index.map_or_else(|| "\u{b7}".to_owned(), |index| format!("[{index}]"));
+    MetadataSegment::pinned(SharedString::from(format!(
+        "for {position} {}",
+        plain_tab_title(caller)
+    )))
+    .target(caller.thread.to_string())
+}
+
+/// The ordinary composer prompt of a delegated child.
+#[must_use]
+#[cfg(test)]
+pub(crate) fn child_composer_placeholder(caller_index: usize) -> String {
+    format!("Steering a subagent of [{caller_index}]. It reports to its caller when it finishes.")
 }
 
 /// The left half of the 22 px composer metadata row (§2, `spec-B` §B5.1).

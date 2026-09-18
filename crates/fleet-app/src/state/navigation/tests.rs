@@ -483,3 +483,93 @@ fn the_workspace_mode_follows_the_kind_of_the_active_tab() {
     assert_eq!(state.terminal_mode, TerminalMode::Terminal);
     assert_eq!(state.context_chain(), vec!["Workspace", "Terminal"]);
 }
+
+fn native_summary(
+    worktree: &str,
+    parent: Option<fleet_core::agents::ThreadId>,
+) -> fleet_core::agents::AgentThreadSummary {
+    let worktree = worktree.parse().unwrap_or_else(|error| panic!("{error}"));
+    let projection = fleet_core::agents::ThreadProjection::new(
+        fleet_core::agents::ThreadId::new(),
+        worktree,
+        fleet_core::agents::AgentKind::Claude,
+    );
+    let mut summary = projection.summary(fleet_core::agents::Seq::default());
+    summary.parent = parent;
+    summary
+}
+
+fn native_selection_state() -> (
+    AppState,
+    fleet_core::agents::AgentThreadSummary,
+    fleet_core::agents::AgentThreadSummary,
+    fleet_core::agents::AgentThreadSummary,
+) {
+    let now = Instant::now();
+    let caller = native_summary("acme/widgets#feature-0", None);
+    let child = native_summary("acme/widgets#feature-0", Some(caller.thread));
+    let other = native_summary("acme/widgets#feature-1", Some(caller.thread));
+    let mut snapshot = snapshot();
+    let mut current_session = session_with("widgets/feature-0", &[1]);
+    current_session.kind = fleet_core::sessions::SessionKind::Worktree(
+        "acme/widgets#feature-0"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+    );
+    let mut other_session = session_with("widgets/feature-1", &[1]);
+    other_session.kind = fleet_core::sessions::SessionKind::Worktree(
+        "acme/widgets#feature-1"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+    );
+    snapshot.sessions = vec![current_session.clone(), other_session];
+    snapshot.agent_threads = vec![caller.clone(), child.clone(), other.clone()];
+    let mut state = AppState::new("/tmp/fleet", now);
+    state.apply_snapshot(snapshot, now);
+    state.screen = Screen::Workspace {
+        session: current_session.id,
+    };
+    (state, caller, child, other)
+}
+
+#[test]
+fn selecting_an_attached_thread_keeps_it_attached_and_focuses_its_composer() {
+    let (mut state, _, child, _) = native_selection_state();
+    assert!(state.agents.attach(child.thread));
+    assert!(state.select_agent_thread(child.thread));
+    assert!(state.agents.is_attached(child.thread));
+    assert_eq!(state.active_agent_thread(), Some(child.thread));
+    assert!(state.agents.take_composer_focus(child.thread));
+}
+
+#[test]
+fn selecting_a_hidden_child_attaches_it_before_activation() {
+    let (mut state, _, child, _) = native_selection_state();
+    assert!(!state.agents.is_attached(child.thread));
+    assert!(state.select_agent_thread(child.thread));
+    assert!(state.agents.is_attached(child.thread));
+    assert_eq!(state.active_agent_thread(), Some(child.thread));
+}
+
+#[test]
+fn selecting_a_closed_caller_reopens_it() {
+    let (mut state, caller, _, _) = native_selection_state();
+    assert!(state.agents.close(caller.thread));
+    assert!(!state.agents.is_attached(caller.thread));
+    assert!(state.select_agent_thread(caller.thread));
+    assert!(state.agents.is_attached(caller.thread));
+    assert_eq!(state.active_agent_thread(), Some(caller.thread));
+}
+
+#[test]
+fn selecting_another_worktrees_child_switches_session_then_attaches() {
+    let (mut state, _, _, other) = native_selection_state();
+    assert!(!state.agents.is_attached(other.thread));
+    assert!(state.select_agent_thread(other.thread));
+    assert!(matches!(
+        state.screen,
+        Screen::Workspace { ref session } if session.as_str() == "widgets/feature-1"
+    ));
+    assert!(state.agents.is_attached(other.thread));
+    assert_eq!(state.active_agent_thread(), Some(other.thread));
+}

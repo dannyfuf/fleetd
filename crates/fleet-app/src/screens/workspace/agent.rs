@@ -853,7 +853,16 @@ impl WorkspaceScreen {
         });
         let (close_bridge, close_state) = (bridge.clone(), state.clone());
         root = root.on_action(move |_: &native_agent::CloseTab, _window, cx| {
-            close_agent_tab(&close_bridge, &close_state, cx);
+            let detached = close_state.update(cx, |app, cx| {
+                let detached = detach_active_child_tab(app);
+                if detached.is_some() {
+                    cx.notify();
+                }
+                detached
+            });
+            if detached.is_none() {
+                close_agent_tab(&close_bridge, &close_state, cx);
+            }
         });
         let (fallback_state, fallback_views) = (state.clone(), Rc::clone(&self.agent_views));
         root.on_action(move |_: &native_agent::TerminalFallback, _window, cx| {
@@ -863,6 +872,16 @@ impl WorkspaceScreen {
             open_terminal_fallback(&fallback_state, provider, worktree, cx);
         })
     }
+}
+
+/// Hides the active delegated child without touching the daemon-owned thread.
+pub(super) fn detach_active_child_tab(app: &mut AppState) -> Option<ThreadId> {
+    let child = app.active_agent_thread()?;
+    app.agents.caller_of(child)?;
+    let worktree = app.agents.summary(child)?.worktree.clone();
+    app.agents.deactivate(&worktree);
+    app.agents.detach(child);
+    Some(child)
 }
 
 /// Defers one activation request until the frame that mounts the composer has been painted.

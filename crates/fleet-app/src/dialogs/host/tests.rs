@@ -78,3 +78,24 @@ fn completed_requests_release_their_task_handles(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|cx| assert!(with_host(&state, cx, |host| host.completions.is_empty())));
 }
+
+#[gpui::test]
+fn agents_picker_opens_with_the_agents_seed_and_leaves_prefix(cx: &mut TestAppContext) {
+    let state = cx.new(|_| {
+        let mut state = AppState::new("/tmp/dialog", Instant::now());
+        state.screen = crate::state::Screen::Workspace {
+            session: "widgets/feature"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        state.enter_prefix();
+        state
+    });
+    cx.update(|cx| open_agents_picker(&state, cx));
+    cx.read(|cx| {
+        let state = state.read(cx);
+        assert_eq!(state.palette_seed.as_deref(), Some("agents"));
+        assert_eq!(state.overlay, Some(Overlay::Palette));
+        assert_ne!(state.terminal_mode, crate::state::TerminalMode::Prefix);
+    });
+}

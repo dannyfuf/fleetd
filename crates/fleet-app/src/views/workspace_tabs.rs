@@ -493,6 +493,22 @@ mod tests {
     }
 
     #[test]
+    fn a_child_tab_title_has_the_delegation_arrow_and_no_other_child_marker() {
+        let mut child = agent_summary(Attention::Idle);
+        child.parent = Some(fleet_core::agents::ThreadId::new());
+        child.provider = fleet_core::agents::AgentKind::Codex;
+        child.title = "design".to_owned();
+        let mut caller = child.clone();
+        caller.parent = None;
+
+        let child_tab = agent_tab(&child, 3, Attention::Idle, false);
+        let caller_tab = agent_tab(&caller, 2, Attention::Idle, false);
+        assert_eq!(child_tab.name.as_ref(), "\u{21b3} codex \u{2014} design");
+        assert_eq!(caller_tab.name.as_ref(), "codex \u{2014} design");
+        assert_eq!(child_tab.kind, caller_tab.kind);
+    }
+
+    #[test]
     fn tab_movement_wraps_at_both_ends() {
         let session = session(&["nvim", "cc", "lg"]);
         assert_eq!(
