@@ -6,9 +6,12 @@
 //! about a child process. [`lifecycle`] holds the live-session tests, [`restart`] the ones that
 //! rebuild a manager over the same database.
 
-use std::sync::{
-    Mutex as StdMutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::VecDeque,
+    sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -70,9 +73,11 @@ struct FakeScript {
     stop_fails: AtomicBool,
     /// The turn the scripted harness considers running, as both real adapters track one.
     ///
-    /// It is what `send` answers `Submitted::queued` from, so the fake decides steer-versus-fresh
+    /// It is what `send` normally answers `Submitted` from, so the fake decides steer-versus-fresh
     /// the way a harness does rather than letting the manager guess from its own projection.
     active_turn: StdMutex<Option<TurnId>>,
+    /// Explicit submission answers consumed in order before the fake's default behaviour.
+    submission_answers: StdMutex<VecDeque<Submitted>>,
     /// Makes every control change cost a restart, as Claude's launch flags do.
     restarts_on_control: AtomicBool,
 }
@@ -86,6 +91,7 @@ impl FakeScript {
             unavailable: AtomicBool::new(false),
             stop_fails: AtomicBool::new(false),
             active_turn: StdMutex::new(None),
+            submission_answers: StdMutex::new(VecDeque::new()),
             restarts_on_control: AtomicBool::new(false),
         })
     }
@@ -119,10 +125,18 @@ impl FakeScript {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Scripts the harness's next submission answer.
+    fn answer_submission(&self, answer: Submitted) {
+        self.submission_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(answer);
+    }
+
     /// Pushes one normalized event into the newest provider's stream.
     ///
     /// Announcing or settling a turn also moves the fake's own turn bookkeeping, because that is
-    /// what a real adapter does and it is what `send` answers `queued` from.
+    /// what a real adapter does and it informs the fake's default `send` answer.
     async fn emit(&self, event: AgentEvent) {
         match &event {
             AgentEvent::TurnStarted { turn, .. } => {
@@ -177,10 +191,16 @@ impl AgentProvider for FakeProvider {
 
     async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted> {
         self.script.record(FakeCall::Send(turn, input.text));
-        // Exactly what both real adapters answer: a submission into a turn the harness is
-        // already running joined it, and anything else opened one.
-        let queued = self.script.active_turn() == Some(turn);
-        Ok(if queued {
+        if let Some(answer) = self
+            .script
+            .submission_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+        {
+            return Ok(answer);
+        }
+        Ok(if self.script.active_turn() == Some(turn) {
             Submitted::JoinedActive { turn }
         } else {
             Submitted::QueuedNew { turn }

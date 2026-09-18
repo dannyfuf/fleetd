@@ -26,9 +26,9 @@
 use anyhow::Context;
 use chrono::Utc;
 use fleet_core::agents::{
-    AgentEvent, AgentThreadSummary, GateAnswer, GateKind, ItemId, ItemKind, PermissionChoice,
-    PlanAnswer, Seq, SeqEvent, SessionState, ThreadId, ToolKind, TurnId, TurnOutcome, TurnState,
-    UserInput,
+    AbortReason, AgentEvent, AgentThreadSummary, GateAnswer, GateKind, ItemId, ItemKind,
+    PermissionChoice, PlanAnswer, Seq, SeqEvent, SessionState, StopCause, ThreadId, ToolKind,
+    TurnId, TurnOutcome, TurnState, UserInput,
 };
 use fleet_proto::event::Event;
 use tokio::sync::MutexGuard;
@@ -170,6 +170,7 @@ fn record_metadata_changed(before: &AgentThreadRecord, after: &AgentThreadRecord
         || before.model != after.model
         || before.mode != after.mode
         || before.last_outcome != after.last_outcome
+        || before.stop_cause != after.stop_cause
 }
 
 /// Broadcasts one applied event and, when it moved the list row, the new summary.
@@ -291,6 +292,7 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
             }
             record.model.clone_from(model);
             record.mode = *mode;
+            record.stop_cause = None;
         }
         AgentEvent::MetadataChanged { mode, model, .. } => {
             if let Some(mode) = mode {
@@ -303,13 +305,31 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
         AgentEvent::TurnSettled { outcome, .. } => {
             record.last_outcome = Some(outcome.clone());
         }
-        AgentEvent::TurnAborted { .. } => {
+        AgentEvent::TurnAborted { reason, .. } => {
             record.last_outcome = Some(TurnOutcome::Interrupted);
+            match reason {
+                AbortReason::User | AbortReason::SessionStopped => {
+                    record.stop_cause = Some(StopCause::User);
+                }
+                AbortReason::ProviderExited => {
+                    record.stop_cause = Some(StopCause::ProviderExit);
+                }
+                AbortReason::Timeout | AbortReason::Superseded | AbortReason::Other(_) => {}
+            }
         }
-        AgentEvent::SessionExited {
-            expected: false, ..
+        AgentEvent::SessionExited { expected, .. } => {
+            record.stop_cause = Some(if *expected {
+                StopCause::User
+            } else {
+                StopCause::ProviderExit
+            });
+            if !expected {
+                record.last_outcome = Some(TurnOutcome::Error {
+                    message: Some("provider exited unexpectedly".to_owned()),
+                });
+            }
         }
-        | AgentEvent::RuntimeError { fatal: true, .. } => {
+        AgentEvent::RuntimeError { fatal: true, .. } => {
             record.last_outcome = Some(TurnOutcome::Error {
                 message: Some("provider exited unexpectedly".to_owned()),
             });

@@ -348,7 +348,6 @@ impl AgentSessionManager {
                 state.pending_inputs.push_back((turn, input.clone()));
             }
         }
-        // P1-T01 replaces this mechanical mapping with the behavioural submission split.
         if submitted.joined_active() {
             // A steer: the turn is already running, so there is no announcement to wait for and
             // the bubble is recorded now, marked as having joined it (§7.2).

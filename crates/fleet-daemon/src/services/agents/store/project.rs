@@ -725,7 +725,9 @@ pub(super) fn quarantine_after(
 /// on a live thread: it is idempotent, because every upsert is keyed on a content-derived id; and
 /// it rewrites only the projector-owned columns of `sessions`, leaving `started_at`,
 /// `last_seen_at` and `restart_count` byte-identical — a rebuild that cleared those would make
-/// restart recovery believe a running provider had never started.
+/// restart recovery believe a running provider had never started. Delegations are durable
+/// orchestration state rather than a projection of the child's log, so neither rebuild nor the
+/// quarantine path that calls it touches `delegations` or `delegation_outbox`.
 pub(super) fn rebuild_thread(
     transaction: &Transaction<'_>,
     thread: ThreadId,

@@ -151,6 +151,19 @@ async fn restart_fails_orphaned_threads_without_a_resume_cursor() {
     ));
     assert_eq!(summary.attention, Attention::Failed);
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
+    let runtime = restarted
+        .hydrated(thread)
+        .expect("restart recovery hydrates the orphan");
+    let stop_cause = runtime
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .record
+        .stop_cause;
+    assert_eq!(
+        stop_cause,
+        Some(fleet_core::agents::StopCause::ProviderExit)
+    );
 }
 
 #[tokio::test]

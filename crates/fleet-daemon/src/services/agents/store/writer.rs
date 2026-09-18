@@ -32,9 +32,10 @@
 //! and then gives up rather than hanging a daemon exit on a wedged write.
 
 use std::{
+    any::Any,
     path::Path,
     sync::{
-        Mutex,
+        Arc, Mutex,
         mpsc::{Receiver, RecvTimeoutError, Sender},
     },
     thread::JoinHandle,
@@ -50,7 +51,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AgentIndex, AgentThreadRecord, index, migrations, mirror,
+    AgentIndex, AgentThreadRecord, DelegationHooks, index, migrations, mirror,
     project::{self, StagedEvent},
 };
 
@@ -68,6 +69,31 @@ const WRITER_THREAD_NAME: &str = "fleet-agent-db";
 
 /// What the writer answers with. `()` because a write's only product is durability.
 type Reply = oneshot::Sender<anyhow::Result<()>>;
+
+/// What a delegation closure answers with, erased so one inbox carries every closure's type.
+type DelegationValue = Box<dyn Any + Send>;
+
+/// A delegation closure as the inbox carries it: one transaction in, a value and a wake request
+/// out. The higher-ranked lifetime is what lets the writer hand it a borrow of its own
+/// transaction, which is the whole point of running it here instead of on the caller's thread.
+type DelegationTask = Box<
+    dyn for<'transaction> FnOnce(
+            &rusqlite::Transaction<'transaction>,
+        ) -> anyhow::Result<(DelegationValue, bool)>
+        + Send,
+>;
+
+/// One item of the writer's inbox.
+///
+/// Delegation writes are a second kind rather than a [`Work`] variant because they never join an
+/// append batch: a delegation write is a whole state change plus the outbox rows that follow from
+/// it, and the batch's one-at-a-time retry would replay a closure that had already run.
+enum Command {
+    /// Event-log work, which batches.
+    Work(Queued),
+    /// A delegation closure, which gets a transaction of its own.
+    Delegation(DelegationQueued),
+}
 
 /// One unit of work for the writer, without its reply channel.
 enum Work {
@@ -116,7 +142,10 @@ pub(super) struct Writer {
     /// event it is asking us to persist, so the log must take it — blocking the caller instead
     /// would apply back-pressure to a thread that is holding the reply it is waiting for. The
     /// real bound is the number of in-flight callers, each of which is parked on its `oneshot`.
-    commands: Option<mpsc::UnboundedSender<Queued>>,
+    commands: Option<mpsc::UnboundedSender<Command>>,
+    /// Shared with the writer thread, which reads it after each delegation commit. `None` until
+    /// composition installs it; a store with no hooks still commits, it just wakes nobody.
+    delegation_hooks: Arc<Mutex<Option<DelegationHooks>>>,
     /// Signalled once, after the writer has drained, committed and optimized. Behind a mutex
     /// only because a `std::sync::mpsc::Receiver` is `Send` but not `Sync`, and this handle is
     /// shared across tokio tasks; nothing ever contends for it but the drop.
@@ -128,6 +157,16 @@ pub(super) struct Writer {
 struct Queued {
     work: Work,
     reply: Reply,
+}
+
+/// A delegation closure as it travels the inbox, with the caller's reply channel.
+struct DelegationQueued {
+    /// What the write is, for the error context and the log line.
+    what: &'static str,
+    /// The closure, run inside the writer's transaction.
+    task: DelegationTask,
+    /// Resolved strictly after `COMMIT`, like every other reply this writer sends.
+    reply: oneshot::Sender<anyhow::Result<DelegationValue>>,
 }
 
 /// Opens the read-write connection and brings its schema to head.
@@ -153,15 +192,69 @@ impl Writer {
     pub(super) fn spawn(conn: Connection) -> anyhow::Result<Self> {
         let (commands, inbox) = mpsc::unbounded_channel();
         let (finished_sender, finished) = std::sync::mpsc::channel();
+        let delegation_hooks = Arc::new(Mutex::new(None));
+        let writer_hooks = Arc::clone(&delegation_hooks);
         let join = std::thread::Builder::new()
             .name(WRITER_THREAD_NAME.to_owned())
-            .spawn(move || run(conn, inbox, finished_sender))
+            .spawn(move || run(conn, inbox, finished_sender, writer_hooks))
             .context("spawn the fleet-agent-db writer thread")?;
         Ok(Self {
             commands: Some(commands),
+            delegation_hooks,
             finished: Mutex::new(finished),
             join: Some(join),
         })
+    }
+
+    /// Records the hooks the writer pokes after a delegation commit. First installation wins, so
+    /// composition cannot silently replace a worker that is already draining the outbox.
+    ///
+    /// Composition calls this in phase 3; until then only the store's tests do, which is what the
+    /// allowance says.
+    #[allow(dead_code)]
+    pub(super) fn install_delegation_hooks(&self, hooks: DelegationHooks) {
+        let mut installed = self
+            .delegation_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if installed.is_none() {
+            *installed = Some(hooks);
+        }
+    }
+
+    /// Runs one delegation closure in a transaction of its own and answers what it returned.
+    ///
+    /// It never joins an append batch: a delegation write is a whole state change plus its outbox
+    /// rows, and bisecting a failed batch would replay it.
+    #[allow(dead_code)]
+    pub(super) async fn delegation_write<T, F>(
+        &self,
+        what: &'static str,
+        task: F,
+    ) -> anyhow::Result<T>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> anyhow::Result<(T, bool)> + Send + 'static,
+        T: Send + 'static,
+    {
+        let task: DelegationTask = Box::new(move |transaction| {
+            let (value, wake) = task(transaction)?;
+            Ok((Box::new(value), wake))
+        });
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .as_ref()
+            .ok_or_else(|| anyhow!("the agent database writer is shutting down"))?
+            .send(Command::Delegation(DelegationQueued { what, task, reply }))
+            .map_err(|_closed| anyhow!("the agent database writer thread is gone"))?;
+        let value = answer
+            .await
+            .map_err(|_dropped| anyhow!("the agent database writer dropped a reply"))??;
+        value
+            .downcast::<T>()
+            .map(|value| *value)
+            .map_err(|_wrong_type| {
+                anyhow!("the agent database write `{what}` returned the wrong type")
+            })
     }
 
     /// Appends one event, projects it, and advances the head, in one transaction.
@@ -277,7 +370,7 @@ impl Writer {
         self.commands
             .as_ref()
             .ok_or_else(|| anyhow!("the agent database writer is shutting down"))?
-            .send(Queued { work, reply })
+            .send(Command::Work(Queued { work, reply }))
             .map_err(|_closed| anyhow!("the agent database writer thread is gone"))?;
         answer
             .await
@@ -319,17 +412,41 @@ impl Drop for Writer {
 }
 
 /// The writer thread body.
-fn run(mut conn: Connection, mut inbox: mpsc::UnboundedReceiver<Queued>, finished: Sender<()>) {
+fn run(
+    mut conn: Connection,
+    mut inbox: mpsc::UnboundedReceiver<Command>,
+    finished: Sender<()>,
+    delegation_hooks: Arc<Mutex<Option<DelegationHooks>>>,
+) {
     // `blocking_recv` is correct precisely because this thread has no async context: it is a
     // dedicated OS thread, not a tokio worker, so parking it costs the runtime nothing.
-    while let Some(first) = inbox.blocking_recv() {
+
+    // A delegation command found while filling a batch is put back here rather than dropped: the
+    // batch it interrupted commits first, and the next pass picks it up in arrival order.
+    let mut pending = None;
+    loop {
+        let next = pending.take().or_else(|| inbox.blocking_recv());
+        let Some(command) = next else {
+            break;
+        };
+        let first = match command {
+            Command::Work(queued) => queued,
+            Command::Delegation(delegation) => {
+                commit_delegation(&mut conn, delegation, &delegation_hooks);
+                continue;
+            }
+        };
         let mut batch = vec![first];
         let mut bytes = size_of_work(&batch[0].work);
         while batch.len() < WRITE_BATCH_MAX_EVENTS && bytes < WRITE_BATCH_MAX_BYTES {
             match inbox.try_recv() {
-                Ok(next) => {
+                Ok(Command::Work(next)) => {
                     bytes = bytes.saturating_add(size_of_work(&next.work));
                     batch.push(next);
+                }
+                Ok(command @ Command::Delegation(_)) => {
+                    pending = Some(command);
+                    break;
                 }
                 Err(_empty_or_closed) => break,
             }
@@ -345,6 +462,50 @@ fn run(mut conn: Connection, mut inbox: mpsc::UnboundedReceiver<Queued>, finishe
     if finished.send(()).is_err() {
         // The handle was already gone, so nobody is waiting on the deadline. Not an error.
         tracing::debug!("nothing was waiting for the agent database writer to finish");
+    }
+}
+
+/// Runs one delegation closure in a transaction of its own, then answers its caller.
+///
+/// The wake is sent **after** `COMMIT` and never inside it, which is what makes the durable
+/// outbox safe to drain on the other end: a worker woken mid-transaction would read rows that
+/// might still roll back. Without installed hooks the wake is a no-op, so the store can be
+/// constructed before service composition exists to install them.
+fn commit_delegation(
+    conn: &mut Connection,
+    queued: DelegationQueued,
+    hooks: &Mutex<Option<DelegationHooks>>,
+) {
+    let outcome = (|| {
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .with_context(|| format!("begin delegation database write `{}`", queued.what))?;
+        let (value, wake) = (queued.task)(&transaction)
+            .with_context(|| format!("apply delegation database write `{}`", queued.what))?;
+        transaction
+            .commit()
+            .with_context(|| format!("commit delegation database write `{}`", queued.what))?;
+        if wake {
+            let installed = hooks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(installed) = installed
+                && installed.wake.send(()).is_err()
+            {
+                tracing::debug!(
+                    what = queued.what,
+                    "the delegation worker was gone when a committed write woke it"
+                );
+            }
+        }
+        Ok(value)
+    })();
+    if queued.reply.send(outcome).is_err() {
+        tracing::debug!(
+            what = queued.what,
+            "a delegation database write reply had no receiver left"
+        );
     }
 }
 
@@ -422,8 +583,16 @@ fn transact<'work>(
                 )?;
             }
             Work::Rebuild { thread } => project::rebuild_thread(&transaction, *thread)?,
-            Work::WriteIndex { index } => index::write(&transaction, index)?,
-            Work::WriteRecord { record } => index::upsert(&transaction, record)?,
+            Work::WriteIndex { index } => {
+                index::write(&transaction, index)?;
+                for record in &index.threads {
+                    write_thread_metadata(&transaction, record)?;
+                }
+            }
+            Work::WriteRecord { record } => {
+                index::upsert(&transaction, record)?;
+                write_thread_metadata(&transaction, record)?;
+            }
             Work::FailSession { thread, message } => {
                 project::fail_session(&transaction, *thread, message)?;
             }
@@ -468,6 +637,31 @@ fn transact<'work>(
     transaction
         .commit()
         .context("commit an agent database write transaction")
+}
+
+/// Writes the slot-003 metadata separately from the frozen slot-001 index statement.
+fn write_thread_metadata(
+    transaction: &rusqlite::Transaction<'_>,
+    record: &AgentThreadRecord,
+) -> anyhow::Result<()> {
+    let stop_cause = record
+        .stop_cause
+        .as_ref()
+        .map(|cause| project::discriminant(cause, "StopCause"))
+        .transpose()?;
+    transaction
+        .execute(
+            "UPDATE threads SET parent_thread_id = ?2, delegation_id = ?3, stop_cause = ?4 \
+             WHERE thread_id = ?1",
+            rusqlite::params![
+                record.thread.to_string(),
+                record.parent.map(|parent| parent.to_string()),
+                record.delegation.map(|delegation| delegation.to_string()),
+                stop_cause,
+            ],
+        )
+        .with_context(|| format!("write delegation metadata of thread {}", record.thread))?;
+    Ok(())
 }
 
 /// A clean daemon stop is lifecycle bookkeeping, not unread transcript output.

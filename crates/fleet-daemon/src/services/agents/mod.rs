@@ -1,5 +1,6 @@
 //! Daemon-owned native-agent provider, persistence, and lifecycle seams.
 
+pub(crate) mod delegation;
 mod manager;
 pub mod providers;
 mod record;

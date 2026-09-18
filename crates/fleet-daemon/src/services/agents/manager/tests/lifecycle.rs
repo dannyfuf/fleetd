@@ -255,7 +255,7 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
         .expect("the steered message is recorded in the running turn");
     assert_eq!(steered.turn, turn);
     assert_eq!(steered.status, ItemStatus::Completed);
-    // The mark comes from the harness's own `Submitted::queued`, not from the projection: §7.2
+    // The mark comes from the harness's own `Submitted::JoinedActive`, not from the projection: §7.2
     // draws a steer with a leading `↳`, and it has to survive the reload that replaces the
     // sending client's optimistic row.
     assert!(
@@ -266,6 +266,83 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
     assert!(matches!(
         harness.script.calls().last(),
         Some(FakeCall::Send(sent, _)) if *sent == turn
+    ));
+}
+
+#[tokio::test]
+async fn queued_submission_while_a_turn_runs_waits_for_its_own_start() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    let active = TurnId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn: active,
+            user_item: ItemId::new(),
+        })
+        .await;
+    harness
+        .settle(thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(active)
+        })
+        .await;
+
+    let queued = TurnId::new();
+    harness
+        .script
+        .answer_submission(Submitted::QueuedNew { turn: queued });
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "queue this separately".to_owned(),
+                attachments: Vec::new(),
+                item: None,
+                origin: Default::default(),
+            },
+        )
+        .await
+        .expect("queue a new turn");
+
+    let projection = harness.projection(thread).await;
+    assert!(
+        !user_messages(&projection).contains(&"queue this separately"),
+        "a queued turn must not be recorded as a steer"
+    );
+
+    harness.script.emit(completed(active)).await;
+    harness
+        .settle(
+            thread,
+            "the active turn to settle",
+            |projection| matches!(projection.turn, TurnState::Settled(turn, _) if turn == active),
+        )
+        .await;
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn: queued,
+            user_item: ItemId::new(),
+        })
+        .await;
+    let projection = harness
+        .settle(thread, "the queued turn to start", |projection| {
+            user_messages(projection).contains(&"queue this separately")
+        })
+        .await;
+    let queued_items = projection
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(&item.kind, ItemKind::UserMessage { text, .. } if text == "queue this separately")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(queued_items.len(), 1);
+    assert_eq!(queued_items[0].turn, queued);
+    assert!(matches!(
+        &queued_items[0].kind,
+        ItemKind::UserMessage { steered: false, .. }
     ));
 }
 
@@ -417,6 +494,17 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
         harness.manager.summaries().await[0].session,
         SessionState::Stopped
     );
+    let runtime = harness
+        .manager
+        .hydrated(thread)
+        .expect("the stopped thread remains hydrated");
+    let stop_cause = runtime
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .record
+        .stop_cause;
+    assert_eq!(stop_cause, Some(fleet_core::agents::StopCause::User));
 }
 
 #[tokio::test]

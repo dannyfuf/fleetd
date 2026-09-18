@@ -47,7 +47,6 @@ fn a_response_after_started_and_completed_does_not_reopen_the_turn() {
         !response.announce,
         "the late response emitted a second start"
     );
-    assert!(!response.queued);
     assert_eq!(session.active_turn, None);
     assert_eq!(session.active_provider_turn, None);
     assert_eq!(session.pending_start, None);

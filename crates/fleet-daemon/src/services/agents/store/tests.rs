@@ -4,21 +4,27 @@
 //! a reader taking a consistent snapshot while the writer commits, and a batch of appends landing
 //! in FIFO order — are driven by a multi-threaded runtime and joined, never timed.
 
+use std::sync::Arc;
+
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
-        AgentEvent, AgentKind, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind,
-        ItemPatch, ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice,
-        PermissionMode, PermissionOption, ProviderOptionId, ReasoningEffortDescriptor, Seq,
-        SeqEvent, StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId, TurnOutcome,
-        TurnState, Usage,
+        AgentEvent, AgentKind, Delegation, DelegationId, DelegationResult, DelegationStatus,
+        DeliveryState, GateAnswer, GateId, GateKind, GateResolver, ItemId, ItemKind, ItemPatch,
+        ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice,
+        PermissionMode, PermissionOption, ProviderOptionId, ReasoningEffortDescriptor,
+        ResultSource, Seq, SeqEvent, StopCause, StreamKind, ThreadId, ThreadProjection, ToolCall,
+        ToolKind, TurnId, TurnOutcome, TurnState, Usage,
     },
     ids::WorktreeId,
 };
 use rusqlite::{Connection, OpenFlags, params};
 
-use super::{AgentIndex, AgentThreadRecord, SqliteAgentStore, read};
+use super::{
+    AgentIndex, AgentThreadRecord, DelegationHooks, OutboxAction, SqliteAgentStore, delegations,
+    read,
+};
 
 /// A store on a fresh tempdir. The directory is returned because dropping it deletes the database.
 fn store() -> anyhow::Result<(tempfile::TempDir, SqliteAgentStore)> {
@@ -582,6 +588,271 @@ fn record(thread: ThreadId, title: &str, created_ms: u64) -> AgentThreadRecord {
         last_outcome: Some(TurnOutcome::Completed),
         stop_cause: None,
     }
+}
+
+fn delegation(child: ThreadId) -> Delegation {
+    Delegation {
+        id: DelegationId::new(),
+        caller: ThreadId::new(),
+        caller_turn: TurnId::new(),
+        caller_item: ItemId::new(),
+        child,
+        provider: AgentKind::Codex,
+        depth: 3,
+        brief: "inspect the storage boundary".to_owned(),
+        expectation: "report every changed file".to_owned(),
+        eager: true,
+        status: DelegationStatus::Blocked,
+        status_payload: Some("waiting for a decision".to_owned()),
+        result: Some(DelegationResult {
+            text: "the first report".to_owned(),
+            files_changed: vec!["src/store.rs".to_owned(), "src/tests.rs".to_owned()],
+            source: ResultSource::LastAssistantText,
+            elided: true,
+        }),
+        nudges: 2,
+        recoveries: 1,
+        delivery: DeliveryState::Delivered {
+            seq: Seq(42),
+            turn: TurnId::new(),
+        },
+        created: stamp(70),
+        finished: Some(stamp(71)),
+        headline: Some("checking transactions".to_owned()),
+    }
+}
+
+#[tokio::test]
+async fn thread_delegation_metadata_round_trips_and_parent_reaches_the_summary()
+-> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let parent = ThreadId::new();
+    let mut child = record(ThreadId::new(), "child", 60);
+    child.parent = Some(parent);
+    child.delegation = Some(DelegationId::new());
+    child.stop_cause = Some(StopCause::ProviderExit);
+
+    store.write_record(&child).await?;
+
+    assert_eq!(store.read_record(child.thread).await?, Some(child.clone()));
+    let listed = store.summaries().await?;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].parent, Some(parent));
+    Ok(())
+}
+
+#[tokio::test]
+async fn delegation_rows_round_trip_every_column_and_update_mutable_state() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let stored = delegation(ThreadId::new());
+    let expected = stored.clone();
+    let id = stored.id;
+    let child = stored.child;
+    let caller = stored.caller;
+
+    store
+        .delegation_write("insert test delegation", move |tx| {
+            delegations::insert(tx, &stored, "token-hash")?;
+            Ok(((), false))
+        })
+        .await?;
+
+    assert_eq!(store.delegation(id).await?, Some(expected.clone()));
+    assert_eq!(
+        store.delegation_by_child(child).await?,
+        Some(expected.clone())
+    );
+    assert_eq!(
+        store.delegation_token_hash(id).await?,
+        Some("token-hash".to_owned())
+    );
+    assert_eq!(
+        store.delegations(Some(caller)).await?,
+        vec![expected.clone()]
+    );
+    assert_eq!(store.live_delegations(None).await?, vec![expected.clone()]);
+
+    let mut updated = expected;
+    updated.status = DelegationStatus::Succeeded;
+    updated.status_payload = None;
+    updated.result = Some(DelegationResult {
+        text: "final report".to_owned(),
+        files_changed: vec!["src/final.rs".to_owned()],
+        source: ResultSource::Reported,
+        elided: false,
+    });
+    updated.nudges = 3;
+    updated.recoveries = 2;
+    updated.delivery = DeliveryState::Undeliverable {
+        reason: "caller stopped".to_owned(),
+    };
+    updated.finished = Some(stamp(80));
+    updated.headline = Some("done".to_owned());
+    let expected = updated.clone();
+    store
+        .delegation_write("update test delegation", move |tx| {
+            delegations::update(tx, &updated)?;
+            Ok(((), false))
+        })
+        .await?;
+
+    assert_eq!(store.delegation(id).await?, Some(expected));
+    assert!(store.live_delegations(None).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_child_cannot_belong_to_two_delegations() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let child = ThreadId::new();
+    let first = delegation(child);
+    let second = delegation(child);
+    store
+        .delegation_write("insert first child delegation", move |tx| {
+            delegations::insert(tx, &first, "first-token")?;
+            Ok(((), false))
+        })
+        .await?;
+
+    let duplicate = store
+        .delegation_write("insert duplicate child delegation", move |tx| {
+            delegations::insert(tx, &second, "second-token")?;
+            Ok(((), false))
+        })
+        .await;
+
+    assert!(
+        duplicate.is_err(),
+        "a child thread is unique: {duplicate:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn outbox_rows_are_ordered_and_done_rows_are_not_claimed() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let id = DelegationId::new();
+    let (first, second, third) = store
+        .delegation_write("enqueue ordered test actions", move |tx| {
+            let first = delegations::enqueue(tx, id, OutboxAction::Nudge, stamp(90))?;
+            let second = delegations::enqueue(tx, id, OutboxAction::Settle, stamp(91))?;
+            let third = delegations::enqueue(tx, id, OutboxAction::Recover, stamp(92))?;
+            Ok(((first, second, third), false))
+        })
+        .await?;
+    assert!(first < second && second < third);
+    assert_eq!(
+        store
+            .delegation_outbox()
+            .await?
+            .into_iter()
+            .map(|row| row.action)
+            .collect::<Vec<_>>(),
+        vec![
+            OutboxAction::Nudge,
+            OutboxAction::Settle,
+            OutboxAction::Recover
+        ]
+    );
+
+    store
+        .delegation_write("finish test actions", move |tx| {
+            delegations::mark_done(tx, first, stamp(93))?;
+            let finished = delegations::mark_done_for(tx, id, OutboxAction::Recover, stamp(94))?;
+            Ok((finished, false))
+        })
+        .await?;
+    let remaining = store
+        .delegation_write("read one delegation outbox", move |tx| {
+            let rows = delegations::open_rows_for(tx, id)?;
+            Ok((rows, false))
+        })
+        .await?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, second);
+    assert_eq!(remaining[0].action, OutboxAction::Settle);
+    Ok(())
+}
+
+#[tokio::test]
+async fn delegation_write_commits_before_it_pokes_the_wake_channel() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let id = DelegationId::new();
+    let (wake, mut wakes) = tokio::sync::mpsc::unbounded_channel();
+    store.install_delegation_hooks(DelegationHooks {
+        wake,
+        changed: Arc::new(|_delegation| {}),
+    });
+
+    store
+        .delegation_write("enqueue and wake", move |tx| {
+            delegations::enqueue(tx, id, OutboxAction::Deliver, stamp(100))?;
+            Ok(((), true))
+        })
+        .await?;
+
+    wakes.try_recv().context("receive the post-commit wake")?;
+    assert_eq!(store.delegation_outbox().await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn delegation_write_needs_no_installed_hooks() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let id = DelegationId::new();
+
+    store
+        .delegation_write("wake without hooks", move |tx| {
+            delegations::enqueue(tx, id, OutboxAction::Mirror, stamp(101))?;
+            Ok(((), true))
+        })
+        .await?;
+
+    assert_eq!(store.delegation_outbox().await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn caller_exists_requires_a_visible_thread() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let caller = ThreadId::new();
+    let unknown = ThreadId::new();
+    store.write_record(&record(caller, "caller", 110)).await?;
+
+    let (listed, never_seen) = store
+        .delegation_write("check caller existence", move |tx| {
+            Ok((
+                (
+                    delegations::caller_exists(tx, caller)?,
+                    delegations::caller_exists(tx, unknown)?,
+                ),
+                false,
+            ))
+        })
+        .await?;
+
+    assert!(listed);
+    assert!(
+        !never_seen,
+        "a thread this daemon never recorded is not a caller"
+    );
+
+    // Hiding a thread by omitting it from an index rewrite is the store's only delete, so a
+    // delegation must not be startable against one that was hidden.
+    store
+        .write_index(&AgentIndex {
+            version: super::AGENT_INDEX_VERSION,
+            threads: Vec::new(),
+        })
+        .await?;
+    let hidden = store
+        .delegation_write("check a hidden caller", move |tx| {
+            Ok((delegations::caller_exists(tx, caller)?, false))
+        })
+        .await?;
+
+    assert!(!hidden, "a soft-deleted thread is not a caller");
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -160,7 +160,7 @@ pub(super) fn item_detail(
     }
 }
 
-/// Settles every still-open item of a turn, the way the reducer does when the turn ends.
+/// Settles every ordinary open item of a turn, leaving background and delegation work open.
 pub(super) fn close_open_items(
     transaction: &Transaction<'_>,
     thread: ThreadId,
@@ -174,7 +174,8 @@ pub(super) fn close_open_items(
              WHEN kind IN ('tool', 'error') THEN 'failed' \
              ELSE 'completed' END, \
          end_seq = ?3, updated_at = ?4 \
-         WHERE thread_id = ?1 AND turn_id = ?2 AND status NOT IN {TERMINAL_ITEM_STATUSES}"
+         WHERE thread_id = ?1 AND turn_id = ?2 AND kind NOT IN ('subagent', 'delegation') \
+         AND status NOT IN {TERMINAL_ITEM_STATUSES}"
     );
     transaction
         .execute(
@@ -191,3 +192,6 @@ pub(super) fn is_terminal(status: ItemStatus) -> bool {
         ItemStatus::Completed | ItemStatus::Failed | ItemStatus::Denied | ItemStatus::Stopped
     )
 }
+
+#[cfg(test)]
+mod tests;

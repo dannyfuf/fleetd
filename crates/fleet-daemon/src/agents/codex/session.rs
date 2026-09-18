@@ -291,8 +291,6 @@ pub(super) struct CodexSession {
 /// What the `turn/start` response still has to announce after its notifications raced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TurnStartConfirmation {
-    /// Whether Codex queued this turn behind a different active turn.
-    pub(super) queued: bool,
     /// Whether the response, rather than `turn/started`, is the first running signal.
     pub(super) announce: bool,
 }
@@ -381,16 +379,10 @@ impl CodexSession {
         self.alias_turn(provider_turn, turn);
         let queued = self.active_turn.is_some() && self.active_turn != Some(turn);
         if queued || self.active_turn == Some(turn) || self.pending_start != Some(turn) {
-            return TurnStartConfirmation {
-                queued,
-                announce: false,
-            };
+            return TurnStartConfirmation { announce: false };
         }
         self.adopt_turn(turn, provider_turn);
-        TurnStartConfirmation {
-            queued: false,
-            announce: true,
-        }
+        TurnStartConfirmation { announce: true }
     }
 
     /// The Fleet item id for a provider item id, remembering the mapping.

@@ -572,12 +572,9 @@ impl Harness for CodexHarness {
                 Some("turn/start"),
             );
         }
-        // P1-T01 replaces this mechanical mapping with the behavioural submission split.
-        Ok(if confirmation.queued {
-            Submitted::JoinedActive { turn: req.turn }
-        } else {
-            Submitted::QueuedNew { turn: req.turn }
-        })
+        // Every successful `turn/start` is its own turn, whether it began immediately or Codex
+        // queued it behind the active one. Only a successful `turn/steer` joins active work.
+        Ok(Submitted::QueuedNew { turn: req.turn })
     }
 
     async fn interrupt(&mut self, turn: TurnId, reason: InterruptReason) -> HarnessResult<()> {
