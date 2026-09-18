@@ -134,6 +134,72 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
         }),
         Some(TranscriptRowId::Item("t-agent".into())),
     );
+    for (name, status, headline) in [
+        (
+            "starting",
+            DelegationRowStatus::Starting,
+            "creating the child thread",
+        ),
+        (
+            "working",
+            DelegationRowStatus::Working,
+            "checking the reducer and its tests",
+        ),
+        (
+            "blocked",
+            DelegationRowStatus::Blocked,
+            "which rounding rule should the fixture use?",
+        ),
+        (
+            "done",
+            DelegationRowStatus::Done,
+            "the regression test passes",
+        ),
+        (
+            "incomplete",
+            DelegationRowStatus::Incomplete,
+            "the Windows fixture is still missing",
+        ),
+        (
+            "failed",
+            DelegationRowStatus::Failed,
+            "the provider exited before reporting",
+        ),
+        (
+            "cancelled",
+            DelegationRowStatus::Cancelled,
+            "cancelled by the caller",
+        ),
+    ] {
+        push(
+            TranscriptRowKind::Delegation(DelegationRow {
+                provider: "codex".into(),
+                title: format!("verify payroll · {name}").into(),
+                status,
+                headline: Some(headline.into()),
+                elapsed: "14m 02s".into(),
+                hint: "⏎ attach".into(),
+            }),
+            Some(TranscriptRowId::Item(format!("delegation-{name}").into())),
+        );
+    }
+    let delegation_result = Rc::new(parse_markdown_document(
+        "Checked the reducer and added coverage.\n\n- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n- nine",
+    ));
+    for expanded in [false, true] {
+        push(
+            TranscriptRowKind::DelegationResult(DelegationResultCard {
+                header: "codex finished · done · 14m 02s · 6 files".into(),
+                body: delegation_result.clone(),
+                collapsible: true,
+                expanded,
+                hint: "⏎ attach".into(),
+            }),
+            Some(TranscriptRowId::Item(
+                format!("delegation-result-{expanded}").into(),
+            )),
+        );
+    }
     push(
         TranscriptRowKind::Work(
             ToolRow::new("t-edit", "edit", "crates/fleet-core/src/payroll.rs")

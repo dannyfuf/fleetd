@@ -9,6 +9,9 @@
 use gpui::{TestAppContext, VisualTestContext, div, prelude::*};
 use std::rc::Rc;
 
+use super::rows::{
+    DelegationResultCard, DelegationRow, DelegationRowStatus, RowContext, row_element,
+};
 use super::{
     ApprovalRequest, AssistantMetaRow, AssistantRow, CheckpointRow, Decision, DecisionDock,
     DecisionKind, DecisionQuestion, DiffRow, EmptyRow, ErrorRow, GateOutcome, GateRow, MetadataFit,
@@ -22,6 +25,79 @@ use crate::{
     icons::Icon,
     theme::{ActiveTheme, Theme, ch},
 };
+
+fn delegation_rows() -> Vec<TranscriptRow> {
+    let mut rows = [
+        DelegationRowStatus::Starting,
+        DelegationRowStatus::Working,
+        DelegationRowStatus::Blocked,
+        DelegationRowStatus::Done,
+        DelegationRowStatus::Incomplete,
+        DelegationRowStatus::Failed,
+        DelegationRowStatus::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, status)| {
+        TranscriptRow::new(
+            TranscriptRowId::Item(format!("delegation-{index}").into()),
+            TranscriptRowKind::Delegation(DelegationRow {
+                provider: "codex".into(),
+                title: "verify the payroll reducer".into(),
+                status,
+                headline: Some("the regression test still fails on Windows".into()),
+                elapsed: "14m 02s".into(),
+                hint: "⏎ attach".into(),
+            }),
+        )
+    })
+    .collect::<Vec<_>>();
+    let body = Rc::new(parse_markdown_document(
+        "Checked the reducer and added coverage.\n\n- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n- nine",
+    ));
+    for expanded in [false, true] {
+        rows.push(TranscriptRow::new(
+            TranscriptRowId::Item(format!("delegation-result-{expanded}").into()),
+            TranscriptRowKind::DelegationResult(DelegationResultCard {
+                header: "codex finished · done · 14m 02s · 6 files".into(),
+                body: body.clone(),
+                collapsible: true,
+                expanded,
+                hint: "⏎ attach".into(),
+            }),
+        ));
+    }
+    rows
+}
+
+#[test]
+fn delegation_status_words_and_liveness_are_closed() {
+    let states = [
+        (DelegationRowStatus::Starting, "starting", true),
+        (DelegationRowStatus::Working, "working", true),
+        (DelegationRowStatus::Blocked, "blocked", true),
+        (DelegationRowStatus::Done, "done", false),
+        (DelegationRowStatus::Incomplete, "incomplete", false),
+        (DelegationRowStatus::Failed, "failed", false),
+        (DelegationRowStatus::Cancelled, "cancelled", false),
+    ];
+    for (status, word, live) in states {
+        assert_eq!(status.word(), word);
+        assert_eq!(status.is_live(), live);
+    }
+}
+
+#[test]
+fn delegation_rows_use_work_rhythm_and_only_results_expand() {
+    let rows = delegation_rows();
+    for row in &rows {
+        assert_eq!(row.rhythm(), super::TranscriptRhythm::Work);
+        assert_eq!(
+            row.is_expandable(),
+            matches!(&row.kind, TranscriptRowKind::DelegationResult(_))
+        );
+    }
+}
 
 /// One row of every kind, with the sub-states that change what is drawn.
 fn every_row_kind() -> Vec<TranscriptRow> {
@@ -118,6 +194,7 @@ fn every_row_kind() -> Vec<TranscriptRow> {
             message: "new claude thread".into(),
         }),
     ];
+    kinds.extend(delegation_rows().into_iter().map(|row| row.kind));
     for state in [
         ToolRowState::Running,
         ToolRowState::Done,
@@ -257,6 +334,7 @@ fn every_component_state_draws(cx: &mut TestAppContext) {
                     decisions,
                     segments,
                     fit: MetadataFit::new(),
+                    delegation_rows: delegation_rows(),
                 })
             })
         })
@@ -270,6 +348,7 @@ struct Panels {
     decisions: Vec<Decision>,
     segments: Vec<MetadataSegment>,
     fit: MetadataFit,
+    delegation_rows: Vec<TranscriptRow>,
 }
 
 impl gpui::Render for Panels {
@@ -309,25 +388,51 @@ impl gpui::Render for Panels {
             gpui::px(120.0),
         ]
         .into_iter()
-        .map(|available| {
+        .enumerate()
+        .map(|(index, available)| {
+            let mut segments = self.segments.clone();
+            if index == 0 {
+                segments[0] = segments[0].clone().target("caller-thread");
+            }
             let fit = self
                 .fit
-                .fit(available, 0, &self.segments, theme.space.md, ch(3.0));
+                .fit(available, index as u32, &segments, theme.space.md, ch(3.0));
             div()
                 .w(available)
                 .child(
-                    MetadataRow::new(self.segments.clone(), fit)
-                        .trailing(vec![MetadataSegment::new("34%")]),
+                    MetadataRow::new(segments, fit)
+                        .trailing(vec![MetadataSegment::new("34%")])
+                        .on_target(|_, _, _| {}),
                 )
                 .into_any_element()
         })
         .collect::<Vec<_>>();
+        let delegation_rows = self
+            .delegation_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                row_element(
+                    row,
+                    RowContext {
+                        index,
+                        focused: false,
+                        visible: true,
+                        working_label: None,
+                        body: None,
+                        toggle: None,
+                    },
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>();
 
         div()
             .size_full()
             .flex()
             .flex_col()
             .children(tools)
+            .children(delegation_rows)
             .children(strips)
             .children(
                 self.decisions

@@ -41,10 +41,11 @@ pub use metrics::{
     AGENT_USER_MAX_W, AGENT_WELL_MAX_H,
 };
 pub use rows::{
-    AssistantMetaRow, AssistantRow, CheckpointRow, DiffRow, EmptyRow, ErrorRow, GateOutcome,
-    GateRow, NoticeRow, PlanRow, ReasoningRow, RowSplice, SubagentRow, TranscriptRhythm,
-    TranscriptRow, TranscriptRowId, TranscriptRowKind, TurnFoldRow, TurnFooterRow, UserRow,
-    UserRowState, WorkGroupRow, WorkLiveRow, WorkingPhase, WorkingRow, diff_rows,
+    AssistantMetaRow, AssistantRow, CheckpointRow, DelegationResultCard, DelegationRow,
+    DelegationRowStatus, DiffRow, EmptyRow, ErrorRow, GateOutcome, GateRow, NoticeRow, PlanRow,
+    ReasoningRow, RowSplice, SubagentRow, TranscriptRhythm, TranscriptRow, TranscriptRowId,
+    TranscriptRowKind, TurnFoldRow, TurnFooterRow, UserRow, UserRowState, WorkGroupRow,
+    WorkLiveRow, WorkingPhase, WorkingRow, diff_rows,
 };
 pub use scroll::{FollowState, Gesture, ScrollMode, breaks_follow, is_at_end};
 pub use tool_row::{ToolGlyph, ToolRow, ToolRowElement, ToolRowState, expand_hint};

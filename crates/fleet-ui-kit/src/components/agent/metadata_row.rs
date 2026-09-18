@@ -12,11 +12,12 @@
 //! - **The model segment never collapses; it truncates.** Losing which model is answering is
 //!   worse than losing its name's tail, so the leading segment is the one that shrinks.
 
-use std::cell::Cell;
+use std::{cell::Cell, rc::Rc};
 
-use gpui::{App, Pixels, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Pixels, SharedString, Window, div, prelude::*, px};
 
 use crate::{
+    focus::FocusRing,
     icons::{Icon, IconSize},
     text::Text,
     theme::{ActiveTheme, ch},
@@ -34,6 +35,8 @@ pub struct MetadataSegment {
     pub width: Pixels,
     /// Whether the block may be hidden into the overflow menu.
     pub collapsible: bool,
+    /// An opaque owner-defined jump target.
+    pub target: Option<SharedString>,
 }
 
 impl MetadataSegment {
@@ -46,6 +49,7 @@ impl MetadataSegment {
             text,
             width,
             collapsible: true,
+            target: None,
         }
     }
 
@@ -64,7 +68,17 @@ impl MetadataSegment {
         self.width = width;
         self
     }
+
+    /// Make the block a jump target, using an opaque id the owner maps to its model.
+    #[must_use]
+    pub fn target(mut self, id: impl Into<SharedString>) -> Self {
+        self.target = Some(id.into());
+        self
+    }
 }
+
+/// What a click or keyboard activation on a targeted segment reports.
+type TargetFn = Rc<dyn Fn(SharedString, &mut Window, &mut App) + 'static>;
 
 /// What fits at one width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +184,7 @@ pub struct MetadataRow {
     segments: Vec<MetadataSegment>,
     fit: MetadataFitResult,
     trailing: Vec<MetadataSegment>,
+    on_target: Option<TargetFn>,
 }
 
 impl MetadataRow {
@@ -183,6 +198,7 @@ impl MetadataRow {
             segments,
             fit,
             trailing: Vec::new(),
+            on_target: None,
         }
     }
 
@@ -193,6 +209,16 @@ impl MetadataRow {
         self.trailing = trailing;
         self
     }
+
+    /// Handle a click or `Enter` on a segment with a target.
+    #[must_use]
+    pub fn on_target(
+        mut self,
+        handler: impl Fn(SharedString, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_target = Some(Rc::new(handler));
+        self
+    }
 }
 
 impl RenderOnce for MetadataRow {
@@ -200,23 +226,54 @@ impl RenderOnce for MetadataRow {
         let theme = cx.theme();
         let visible = self.fit.visible.min(self.segments.len());
         let hidden = self.segments.len() - visible;
-        let block = |segment: &MetadataSegment| {
-            let text = Text::hint(segment.text.clone()).tone(Tone::Secondary);
-            if segment.collapsible {
+        let on_target = self.on_target.clone();
+        let block = |index: usize, segment: &MetadataSegment, tone: Tone| -> AnyElement {
+            let targeted = segment.target.is_some();
+            let text =
+                Text::hint(segment.text.clone()).tone(if targeted { Tone::Accent } else { tone });
+            let content = if segment.collapsible {
                 div().flex_none().child(text)
             } else {
                 // The pinned block is the one that shrinks, and it needs `min_w_0` or a flex
                 // child never shrinks and no ellipsis ever appears.
                 div().flex_1().min_w_0().child(text.ellipsize())
+            };
+            let Some(target) = segment.target.clone() else {
+                return content.into_any_element();
+            };
+            let ring = FocusRing::cursor_row(true).content(div().min_w_0().child(content));
+            if let Some(handler) = on_target.clone() {
+                div()
+                    .when_else(
+                        segment.collapsible,
+                        |element| element.flex_none(),
+                        |element| element.flex_1().min_w_0(),
+                    )
+                    .id(("metadata-target", index))
+                    .tab_index(isize::try_from(index).unwrap_or(isize::MAX))
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| handler(target.clone(), window, cx))
+                    .child(ring)
+                    .into_any_element()
+            } else {
+                ring.into_any_element()
             }
         };
+        let trailing_offset = self.segments.len();
         div()
+            .tab_group()
             .w_full()
             .h(theme.metrics.strip_h)
             .flex()
             .items_center()
             .gap(theme.space.md)
-            .children(self.segments.iter().take(visible).map(block))
+            .children(
+                self.segments
+                    .iter()
+                    .take(visible)
+                    .enumerate()
+                    .map(|(index, segment)| block(index, segment, Tone::Secondary)),
+            )
             .children((hidden > 0).then(|| {
                 div()
                     .id("metadata-overflow")
@@ -232,11 +289,12 @@ impl RenderOnce for MetadataRow {
                     )
             }))
             .child(div().flex_1().min_w_0())
-            .children(self.trailing.iter().map(|segment| {
-                div()
-                    .flex_none()
-                    .child(Text::hint(segment.text.clone()).faint())
-            }))
+            .children(
+                self.trailing
+                    .iter()
+                    .enumerate()
+                    .map(|(index, segment)| block(trailing_offset + index, segment, Tone::Muted)),
+            )
     }
 }
 
@@ -261,6 +319,13 @@ mod tests {
         let result = fit(px(1_000.0), &segments(), GAP, OVERFLOW);
         assert_eq!(result.visible, 4);
         assert_eq!(result.hidden, 0);
+    }
+
+    #[test]
+    fn a_target_is_an_opaque_owner_id() {
+        let segment = MetadataSegment::pinned("for [3] codex").target("thread-3");
+        assert_eq!(segment.target.as_deref(), Some("thread-3"));
+        assert!(!segment.collapsible);
     }
 
     /// Collapse comes off the right, one block at a time.

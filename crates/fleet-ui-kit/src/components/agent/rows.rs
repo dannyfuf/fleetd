@@ -18,6 +18,7 @@ use super::tool_row::ToolRow;
 use crate::{components::MarkdownDocument, icons::Icon};
 
 mod chrome;
+mod delegation;
 mod message;
 mod render;
 mod work;
@@ -237,6 +238,100 @@ impl PartialEq for SubagentRow {
 
 impl Eq for SubagentRow {}
 
+/// The presentation lifecycle of one native delegation.
+///
+/// This is deliberately a kit-owned enum rather than a daemon status: the app maps domain
+/// state into the seven words and marks the transcript promises to draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegationRowStatus {
+    /// The child thread is being created.
+    Starting,
+    /// The child is doing work.
+    Working,
+    /// The child needs attention before it can continue.
+    Blocked,
+    /// The child finished successfully.
+    Done,
+    /// The child stopped before satisfying the expectation.
+    Incomplete,
+    /// The child failed.
+    Failed,
+    /// The caller cancelled the child.
+    Cancelled,
+}
+
+impl DelegationRowStatus {
+    /// The one-word status shown in the transcript.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Incomplete => "incomplete",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether the delegation may still produce more work.
+    #[must_use]
+    pub const fn is_live(self) -> bool {
+        matches!(self, Self::Starting | Self::Working | Self::Blocked)
+    }
+}
+
+/// One native delegation in its caller's transcript.
+///
+/// Use [`SubagentRow`] for a provider-owned roster; this row is the durable link to one native
+/// child thread and therefore never expands itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationRow {
+    /// The provider name, already formatted by the caller.
+    pub provider: SharedString,
+    /// The child thread's title.
+    pub title: SharedString,
+    /// The presentation status.
+    pub status: DelegationRowStatus,
+    /// A latest-result or blocking-question summary.
+    pub headline: Option<SharedString>,
+    /// The elapsed time, already formatted by the caller.
+    pub elapsed: SharedString,
+    /// The trailing affordance, normally `⏎ attach`.
+    pub hint: SharedString,
+}
+
+/// The result a native child reports into its caller's transcript.
+///
+/// Use [`AssistantRow`] for ordinary assistant prose; this card keeps the delegation header and
+/// the attach affordance beside a collapsible, already-parsed document.
+#[derive(Debug, Clone)]
+pub struct DelegationResultCard {
+    /// `↳ codex finished · done · 14m 02s · 6 files`.
+    pub header: SharedString,
+    /// The parsed result document. Parsing happens in the projection, never in render.
+    pub body: Rc<MarkdownDocument>,
+    /// Whether the result is long enough to collapse.
+    pub collapsible: bool,
+    /// Whether a collapsible result is currently open.
+    pub expanded: bool,
+    /// The trailing affordance, normally `⏎ attach`.
+    pub hint: SharedString,
+}
+
+impl PartialEq for DelegationResultCard {
+    fn eq(&self, other: &Self) -> bool {
+        self.header == other.header
+            && (Rc::ptr_eq(&self.body, &other.body) || self.body == other.body)
+            && self.collapsible == other.collapsible
+            && self.expanded == other.expanded
+            && self.hint == other.hint
+    }
+}
+
+impl Eq for DelegationResultCard {}
+
 /// The diff body of an expanded edit row, emitted as its own row so its height is measured
 /// independently and an expanded diff never inflates the tool row's own measurement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,6 +519,10 @@ pub enum TranscriptRowKind {
     WorkGroup(WorkGroupRow),
     /// A subagent spawn and its roster.
     Subagent(SubagentRow),
+    /// One native child delegation.
+    Delegation(DelegationRow),
+    /// A native child's result delivered into its caller.
+    DelegationResult(DelegationResultCard),
     /// The diff body of an expanded edit row.
     Diff(DiffRow),
     /// A settled turn's collapse affordance.
@@ -489,6 +588,7 @@ impl TranscriptRow {
             TranscriptRowKind::User(row) => row.collapsible,
             TranscriptRowKind::Plan(row) => row.collapsible,
             TranscriptRowKind::Gate(row) => row.payload.is_some(),
+            TranscriptRowKind::DelegationResult(row) => row.collapsible,
             TranscriptRowKind::Reasoning(_)
             | TranscriptRowKind::WorkGroup(_)
             | TranscriptRowKind::Subagent(_)
@@ -496,6 +596,7 @@ impl TranscriptRow {
             TranscriptRowKind::Assistant(_)
             | TranscriptRowKind::AssistantMeta(_)
             | TranscriptRowKind::WorkLive(_)
+            | TranscriptRowKind::Delegation(_)
             | TranscriptRowKind::Diff(_)
             | TranscriptRowKind::TurnFooter(_)
             | TranscriptRowKind::Checkpoint(_)
@@ -521,6 +622,8 @@ impl TranscriptRow {
             | TranscriptRowKind::WorkLive(_)
             | TranscriptRowKind::WorkGroup(_)
             | TranscriptRowKind::Subagent(_)
+            | TranscriptRowKind::Delegation(_)
+            | TranscriptRowKind::DelegationResult(_)
             | TranscriptRowKind::Reasoning(_) => TranscriptRhythm::Work,
             _ => TranscriptRhythm::Block,
         }

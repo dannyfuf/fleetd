@@ -1323,6 +1323,19 @@ fn overlays_section(cx: &mut App) -> AnyElement {
                 .section(PaletteSection::new(
                     PaletteSectionKind::Context,
                     [PaletteRow::new("personal").icon(Icon::Boxes).key("2")],
+                ))
+                .section(PaletteSection::new(
+                    PaletteSectionKind::Agents,
+                    [
+                        PaletteRow::new("↳ codex — verify payroll")
+                            .leading(StatusGlyph::new(StatusKind::Unknown).id("pal-agent-0"))
+                            .secondary("blocked · which rounding rule?")
+                            .trailing("attach"),
+                        PaletteRow::new("claude — fix the reducer")
+                            .leading(StatusGlyph::new(StatusKind::Attached).id("pal-agent-1"))
+                            .secondary("working · 14m")
+                            .trailing("go"),
+                    ],
                 )),
         ),
     );

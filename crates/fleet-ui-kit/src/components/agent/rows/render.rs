@@ -70,6 +70,12 @@ pub(crate) fn row_element(row: &TranscriptRow, ctx: RowContext, cx: &mut App) ->
         }
         TranscriptRowKind::WorkLive(live) => super::work::work_live(live, index, visible, cx),
         TranscriptRowKind::WorkGroup(group) => super::work::work_group(group, &row.id, &ctx, cx),
+        TranscriptRowKind::Delegation(delegation) => {
+            super::delegation::delegation(delegation, &ctx, cx)
+        }
+        TranscriptRowKind::DelegationResult(result) => {
+            super::delegation::delegation_result(result, &row.id, &ctx, cx)
+        }
         TranscriptRowKind::TurnFold(fold) => super::chrome::turn_fold(fold, &row.id, &ctx, cx),
         TranscriptRowKind::TurnFooter(footer) => super::chrome::turn_footer(footer, cx),
         TranscriptRowKind::Checkpoint(checkpoint) => super::chrome::checkpoint(checkpoint, cx),

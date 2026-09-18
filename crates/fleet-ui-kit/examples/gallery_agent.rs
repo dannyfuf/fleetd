@@ -1,8 +1,8 @@
 //! The visual test bench for the **native-agent** group of `fleet-ui-kit`.
 //!
 //! `docs/DESIGN-SYSTEM.md` §8.3: *if a state is not in a gallery, it is not implemented.* Every
-//! state of every component in §6.6 has a panel here — the six `ToolRow` states, all eighteen
-//! transcript rows, the three `DecisionDock` occupants and their queue and in-flight states,
+//! state of every component in §6.6 has a panel here — the six `ToolRow` states, every
+//! transcript row, the three `DecisionDock` occupants and their queue and in-flight states,
 //! the `MetadataRow` collapse ladder, the live `MultilineInput` with its trigger reports, and
 //! the streaming `Markdown` invariants.
 //!
@@ -546,7 +546,7 @@ impl Render for AgentGallery {
         let mode = if self.scroll_mode { "scroll" } else { "live" };
         let available = px(WIDTHS[self.width]);
         let segments = vec![
-            MetadataSegment::pinned("claude-opus-5"),
+            MetadataSegment::pinned("for [3] codex — verify payroll").target("caller-thread"),
             MetadataSegment::new("high"),
             MetadataSegment::new("supervised"),
             MetadataSegment::new("build"),
@@ -682,11 +682,15 @@ impl Render for AgentGallery {
                                     .px(theme.space.md)
                                     .py(theme.space.sm)
                                     .child(self.composer.clone())
-                                    .child(MetadataRow::new(segments, fit).trailing(vec![
-                                        MetadataSegment::new("34%"),
-                                        MetadataSegment::new("$0.42"),
-                                        MetadataSegment::new("48s"),
-                                    ])),
+                                    .child(
+                                        MetadataRow::new(segments, fit)
+                                            .trailing(vec![
+                                                MetadataSegment::new("34%"),
+                                                MetadataSegment::new("$0.42"),
+                                                MetadataSegment::new("48s"),
+                                            ])
+                                            .on_target(|_, _, _| {}),
+                                    ),
                             )
                             .children(
                                 self.trigger
