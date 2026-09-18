@@ -45,3 +45,4 @@ what was rejected and why, and cites the research it was distilled from.
 | [0014](decisions/0014-drop-opencode-add-codex.md) | Drop OpenCode, add Codex, and gate it on a capability string rather than a protocol bump |
 | [0015](decisions/0015-detached-pty-holders.md) | Terminals live in detached holder processes, not in `fleetd` |
 | [0016](decisions/0016-e2e-harness.md) | The end-to-end GUI harness: a socket driver, a snapshot oracle, and an isolated virtual output |
+| [0017](decisions/0017-native-subagents.md) | Native subagents are delegated native threads with durable, transactional result delivery |
