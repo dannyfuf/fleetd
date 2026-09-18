@@ -28,14 +28,14 @@
 - [x] P4-T06 — Attention bubbles up from children to the caller
   - verified: state/notification tests and blocked-child scenario pass.
 - [x] P4-T07 — Harness scenarios for the row, attach, detach, blocked child and `^s u`
-  - verified: all five scenarios passed headlessly; the virtual lane was available but its capture was painted over by another layer.
+  - verified: all five scenarios passed in the final 55-scenario virtual-lane corpus.
 - [x] P4-T08 — Update the four authoritative documents for the surfaces added
   - verified: UX, keymap, native-agent, and harness docs were checked against scenarios and code.
 
 ## Notes / decisions log
 - 2026-09-18 — Fixed durable-delegation/caller-item ordering in the app and added the permitted harness snapshot fields and fixtures.
 - 2026-09-18 — Corrected KEYMAP wording: Enter attaches on delegation rows, while result-card Enter expands and only delegation rows cancel.
+- 2026-09-18 — The final full virtual-lane corpus passed, including every delegation row, card, attachment and attention scenario.
 
 ## Follow-ups
-- 2026-09-18 — Re-run the screen corpus when the virtual output is no longer painted over by another layer.
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

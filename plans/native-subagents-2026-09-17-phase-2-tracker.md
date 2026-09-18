@@ -30,6 +30,7 @@
 
 ## Notes / decisions log
 - 2026-09-18 — Store seams required only the permitted mechanical caller-minted `ItemId` update in a delegation worker test.
+- 2026-09-18 — The round-2 golden audit reverified the delegation value, request, response, event and legacy shapes.
 
 ## Follow-ups
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

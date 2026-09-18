@@ -721,7 +721,7 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Terminal agent hook attention | the PTY tab keeps the same static amber `NeedsYou` dot used by native tabs, including while selected; each session edge into permission, question, plan, or finished uses the configured toast/sound channels once |
 | Terminal exited | grid frozen at the last frame + the exit strip |
 | Alt-screen app running | the scroll pill is **suppressed**; `ctrl-s [` shows the 1.6 s toast `no scrollback in alt-screen` |
-| Native tab selected | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard" |
+| Non-agent native pane selected (`fleet://`, currently `lg`) | the grid, the scroll pill and the exit strip are all absent — there is no PTY. `ctrl-s [` toasts `no scrollback in this tab`; every key except `ctrl-s` belongs to the pane. The mode word stays `TERMINAL`: §2.8 has eight words and this is still "the Workspace has the keyboard". A native **agent thread** is the separate §3.6.0 surface and `ctrl-s [` enters its transcript scroll mode. |
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner replaces the header |
 
@@ -809,7 +809,7 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 
 | Element | Content | Position | Why here | Why needed |
 | --- | --- | --- | --- | --- |
-| Tab | `<index> <provider> — <title>`, title from the first message or OpenCode's `Session.title`; bare `claude` until there is one | the terminal strip | one strip, one numbering: an index addresses exactly one surface | `AgentThreadSummary.title` |
+| Tab | `<index> <provider> — <title>`, title from the first message or a later provider metadata update; bare provider name until there is one | the terminal strip | one strip, one numbering: an index addresses exactly one surface | `AgentThreadSummary.title` |
 | Tab mark | spinner · amber dot · neutral dot · `exited <code>` — **at most one** | inside the tab | §3.3 of `NATIVE-AGENTS.md`; amber wins over neutral because amber means *waiting on you* | `AgentThreadSummary.attention` |
 | Session header word | `working` · `needs you` · `failed` · `idle` | header, right | the same vocabulary as the tab and the chips, so three surfaces cannot disagree | idem |
 | Context-bar chips | `3 needs you · 2 working · 1 failed`, including the current tab | §2.3 | a blocked thread on another worktree is invisible otherwise | `AgentCounts` |
@@ -905,7 +905,7 @@ may open above the popup; palette and Settings are unavailable while the popup o
 `ctrl-q` hides here (swarm parity), while `ctrl-shift-q` retains the global quit-and-stop-daemon
 confirmation.
 
-**Keyboard:** Hub `a`/`A` and Workspace `ctrl-s a`/`ctrl-s A` open the floating Claude/OpenCode
+**Keyboard:** Hub `a`/`A` and Workspace `ctrl-s a`/`ctrl-s A` open the floating Claude/Codex
 popup. Inside it all keys go to the PTY except `ctrl-s`, `cmd-c`, `cmd-v`, `ctrl-q`, and the
 unchanged global `ctrl-shift-q`. Popup Prefix binds `q` hide · `a`/`A` hide-current-or-switch ·
 `[` scroll · `]` paste · `r` restart exited command · `?` Help · `ctrl-s` literal · `Esc` cancel.

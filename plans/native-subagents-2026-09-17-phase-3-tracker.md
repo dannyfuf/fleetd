@@ -37,6 +37,7 @@
 ## Notes / decisions log
 - 2026-09-18 — Run/complete tests use a hermetic scripted shell provider; the unrun live tests use an isolated `fleet` capture shim while still invoking the real provider binaries.
 - 2026-09-18 — Fixed worker result handling so only `Reported` suppresses a missing-result nudge, and replaced scheduler-sensitive retry polling with durable event waits.
+- 2026-09-18 — The round-2 §15 audit reverified the service, CLI, outbox and hermetic delegation tests against the shipped contract.
 
 ## Follow-ups
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

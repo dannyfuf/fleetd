@@ -26,6 +26,7 @@
 
 ## Notes / decisions log
 - 2026-09-18 — No phase-1 implementation deviation was reported; final integrated lint/check/test are green.
+- 2026-09-18 — The round-2 contract audit reverified every phase-1 task against the final integrated suite.
 
 ## Follow-ups
 - 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.
