@@ -1239,7 +1239,7 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{error}")),
                 provider: AgentKind::Codex,
                 model: None,
-                mode: PermissionMode::Ask,
+                mode: Some(PermissionMode::Ask),
                 resume_cursor: None,
                 title: None,
             },

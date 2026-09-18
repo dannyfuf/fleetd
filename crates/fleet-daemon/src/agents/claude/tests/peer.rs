@@ -32,16 +32,24 @@ async fn a_scripted_peer_drives_init_a_turn_and_its_result() {
     // A frame with neither `method` nor `subtype` is the `user` line Fleet writes.
     let peer = MockPeer::new()
         .greeting(&[&init])
+        .on(
+            "initialize",
+            Some(
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"__ID__","response":{"models":[{"value":"haiku","displayName":"Haiku","resolvedModel":"claude-haiku-4-5-20251001","supportedEffortLevels":["low","high"]}]}}}"#,
+            ),
+            &[],
+        )
         .on("", Some(&result), &[])
         .lingering()
         .build();
 
     let mut harness = harness(peer.command());
     let mut events = harness.events();
+    let mut request = start_request();
+    request.model = None;
+    let thread = request.thread;
     let opened = harness
-        .open(OpenSession {
-            start: start_request(),
-        })
+        .open(OpenSession { start: request })
         .await
         .unwrap_or_else(|error| panic!("open: {error}"));
     assert_eq!(
@@ -91,11 +99,40 @@ async fn a_scripted_peer_drives_init_a_turn_and_its_result() {
     assert!(mapped.contains(&"turn_started"), "{mapped:?}");
     assert_eq!(mapped.last().copied(), Some("turn_settled"));
 
-    let written = peer.wait_for_frames(1, Duration::from_secs(5)).await;
-    let first = written
-        .first()
+    let mut projection = fleet_core::agents::ThreadProjection::new(
+        thread,
+        fleet_core::ids::WorktreeId::try_from("acme/api#claude-default")
+            .unwrap_or_else(|error| panic!("worktree id: {error}")),
+        AgentKind::Claude,
+    );
+    for (index, event) in seen.iter().cloned().enumerate() {
+        projection
+            .apply(&fleet_core::agents::SeqEvent {
+                seq: fleet_core::agents::Seq(index as u64 + 1),
+                at: chrono::Utc::now(),
+                raw: None,
+                event,
+            })
+            .unwrap_or_else(|error| panic!("project Claude event: {error}"));
+    }
+    let selected = projection
+        .model
+        .as_ref()
+        .unwrap_or_else(|| panic!("system/init should select a catalogue model"));
+    assert_eq!(selected.model, "haiku");
+    assert!(
+        projection
+            .models
+            .iter()
+            .any(|model| model.id == selected.model),
+        "the active selector must exact-match a discovered descriptor: {projection:?}"
+    );
+
+    let written = peer.wait_for_frames(2, Duration::from_secs(5)).await;
+    let user = written
+        .get(1)
         .unwrap_or_else(|| panic!("Fleet wrote a frame"));
-    assert!(first.contains(r#""type":"user""#), "{first}");
+    assert!(user.contains(r#""type":"user""#), "{user}");
     harness
         .shutdown(ShutdownReason::User)
         .await

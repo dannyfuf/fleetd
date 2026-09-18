@@ -52,7 +52,11 @@ async fn server_binary_answers_snapshot_and_shutdown_and_cleans_up() {
     let rejected = receive(&mut incompatible).await;
     let error = rejected.result.expect_err("protocol 6 must be rejected");
     assert!(error.message.contains("unsupported protocol 6"));
-    assert!(error.message.contains("expected 7"));
+    assert!(
+        error
+            .message
+            .contains(&format!("expected {PROTOCOL_VERSION}"))
+    );
 
     let stream = connect_until_ready(&socket).await;
     let mut client = Framed::new(stream, FleetCodec::<Request, serde_json::Value>::new());

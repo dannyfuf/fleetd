@@ -48,8 +48,8 @@ ordered per-thread cursor with `next(self) -> Seq` (saturating) and `Display`.
 
 ### State — `crates/fleet-core/src/agents/state.rs`
 
-- `AgentKind = Claude | OpenCode`; `executable(self) -> &'static str` gives `claude` or
-  `opencode`, and `display_name(self) -> &'static str` gives UI copy. Conversions preserve the
+- `AgentKind = Claude | Codex`; `executable(self) -> &'static str` gives `claude` or
+  `codex`, and `display_name(self) -> &'static str` gives UI copy. Conversions preserve the
   legacy `fleet_core::config::Agent` terminal-popup API.
 - `SessionState = Starting | Ready | Running | Stopped | Error`; the default is `Ready`.
 - `TurnState = None | Running(TurnId) | Completed(TurnId, TurnOutcome) |
@@ -58,11 +58,16 @@ ordered per-thread cursor with `next(self) -> Seq` (saturating) and `Display`.
 - `Attention = NeedsYou(AttentionKind) | Failed | Working | Unread | Idle` implements total
   ordering. `rank(self) -> u8` is exactly: permission 8, question 7, plan 6, finished 5,
   failed 4, working 3, unread 2, idle 1.
-- `PermissionMode = Ask | AcceptEdits | Plan | FullAccess`; the default is `Ask`.
+- `PermissionMode = Ask | AcceptEdits | Plan | Auto | DontAsk | FullAccess`; the default is
+  `Ask`. Stable serde names are `ask`, `accept_edits`, `plan`, `auto`, `dont_ask`, and
+  `full_access`; the two Claude-native additions are part of the protocol-8 compatibility
+  boundary because older peers cannot decode unknown closed-enum values.
 - `ModelSelection { model: String, effort: Option<String>, provider: Option<String> }` carries
   provider-native model coordinates.
-- `Capabilities { resume: bool, fork: bool, steer: bool, interrupt: bool, modes: bool,
-  models: bool }` declares adapter support; all fields default false.
+- `HarnessCapabilities` declares adapter support and includes
+  `modes: Vec<PermissionMode>` in picker order. Claude publishes
+  `[Ask, AcceptEdits, Plan, Auto, DontAsk, FullAccess]`; Codex publishes
+  `[Ask, AcceptEdits, Plan, FullAccess]`. The vector defaults empty for older payloads.
 
 ### Provider input — `crates/fleet-core/src/agents/provider.rs`
 
@@ -210,7 +215,12 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
 
 ## `fleet-proto`
 
-`PROTOCOL_VERSION` is **6** in `crates/fleet-proto/src/lib.rs`.
+`PROTOCOL_VERSION` is **8** in `crates/fleet-proto/src/lib.rs`. The daemon and every client require
+an exact Hello match. Version 8 is intentional rather than an additive capability: version 7
+required `AgentThreadCreate.mode`, while version 8 omits it when the daemon should resolve the
+per-harness default; version 7 also cannot decode the new `auto` and `dont_ask` enum values. Thus
+both mixed-version directions fail during Hello with the normal version-mismatch UX, before an
+agent request can be misdecoded.
 
 ### Requests — `crates/fleet-proto/src/request.rs`
 
@@ -219,7 +229,7 @@ The new `RequestBody` variants are:
 ```rust
 AgentThreadList
 AgentThreadCreate { worktree: WorktreeId, provider: AgentKind,
-    model: Option<ModelSelection>, mode: PermissionMode,
+    model: Option<ModelSelection>, mode: Option<PermissionMode>,
     resume_cursor: Option<String>, title: Option<String> }
 AgentThreadOpen { thread: ThreadId, from_seq: Option<Seq> }
 AgentThreadClose { thread: ThreadId }
@@ -233,7 +243,9 @@ AgentStop { thread: ThreadId }
 ```
 
 `AgentThreadCreate` intentionally carries published `WorktreeId`; the daemon resolves the trusted,
-canonical `StartRequest::worktree_path` through its worktree service.
+canonical `StartRequest::worktree_path` through its worktree service. An omitted model or mode is
+resolved from `config.nativeAgents.<harness>` and the resolved value is persisted. Missing config
+sections default each harness to `{ mode: full_access, model: null, effort: null }`.
 
 ### Responses, events, snapshot
 
@@ -337,7 +349,7 @@ manager's drain is never re-wired.
 Worktrees, Arc<ConfigStore>) -> Self` owns store, event broadcast, trusted worktree lookup, and
 the configured provider command lines. `summaries(&self) -> Vec<AgentThreadSummary>` feeds the
 global snapshot. The following async methods return `Result<ResponseBody, ProtoError>`:
-`list(&self)`, `create(&self, WorktreeId, AgentKind, Option<ModelSelection>, PermissionMode,
+`list(&self)`, `create(&self, WorktreeId, AgentKind, Option<ModelSelection>, Option<PermissionMode>,
 Option<String>, Option<String>)`, `open(&self, ThreadId, Option<Seq>)`, `close(&self, ThreadId)`,
 `send(&self, ThreadId, UserInput)`, `interrupt(&self, ThreadId)`,
 `respond(&self, ThreadId, GateId, GateAnswer)`, `set_mode(&self, ThreadId, PermissionMode)`,
@@ -354,7 +366,7 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
 - `AgentSnapshot { projection: ThreadProjection, events_after: Vec<SeqEvent> }` is the typed open
   response.
 - `Client` methods are `agent_thread_list() -> Result<Vec<AgentThreadSummary>>`,
-  `agent_thread_create(WorktreeId, AgentKind, Option<ModelSelection>, PermissionMode,
+  `agent_thread_create(WorktreeId, AgentKind, Option<ModelSelection>, Option<PermissionMode>,
   Option<String>, Option<String>) -> Result<AgentThreadSummary>`,
   `agent_thread_open(ThreadId, Option<Seq>) -> Result<AgentSnapshot>`,
   `agent_thread_close(ThreadId) -> Result<()>`, `agent_send(ThreadId, UserInput) -> Result<()>`,
@@ -532,8 +544,8 @@ stack, so `fleet-ui-kit` gains no `fleet-git` dependency: the payload rows come 
 ## `fleet-cli`
 
 `fleet agent` is a subcommand group in `crates/fleet-cli/src/args.rs`, implemented in
-`commands/agents.rs`: `list`, `new <WORKTREE> --provider <claude|opencode> [--model M]
-[--mode ask|accept-edits|plan|full-access]`, `send <THREAD> <TEXT>`,
+`commands/agents.rs`: `list`, `new <WORKTREE> --provider <claude|codex> [--model M]
+[--mode ask|accept-edits|plan|auto|dont-ask|full-access]`, `send <THREAD> <TEXT>`,
 `respond <THREAD> <GATE> <ANSWER…>`, `interrupt <THREAD>`, `stop <THREAD>`,
 `tail <THREAD> [--replay]`, and `terminal [claude|opencode]` — the last being the former
 `fleet agent [claude|opencode]`, kept under its own verb as the §10 PTY fallback. Read-only verbs

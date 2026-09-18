@@ -1,6 +1,7 @@
 //! §3.8.6 Settings (`,`) — a 180 px section rail beside a 540 px pane.
 
 use fleet_core::{
+    agents::{AgentKind, PermissionMode},
     config::{Agent, CloneProtocol, Config},
     sleep::KeepAliveKind,
 };

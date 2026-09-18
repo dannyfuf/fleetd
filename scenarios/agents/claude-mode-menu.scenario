@@ -1,0 +1,21 @@
+# docs/NATIVE-AGENTS.md §7 — Claude's access picker follows the harness-declared mode order.
+# The FullAccess default is omitted as the current row, so Enter picks Ask and keeps the draft.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+await idle 30000
+type check the access picker
+key ctrl-s t
+key enter
+assert agents.threads[0].state == idle && lists.tabs.selected.label == Claude
+dump claude-mode-menu-kept-the-draft
+
+key enter
+await agents.threads[0].state == working 20000
+await agents.threads[0].state == idle 40000
+assert lists.tabs.selected.label == "check the access picker" && sticky_error absent
+quit

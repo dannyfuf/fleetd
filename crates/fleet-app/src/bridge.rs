@@ -168,8 +168,8 @@ pub enum BridgeCommand {
         provider: AgentKind,
         /// Optional model.
         model: Option<ModelSelection>,
-        /// Initial permission mode.
-        mode: PermissionMode,
+        /// Optional initial permission mode; the daemon resolves an omission from config.
+        mode: Option<PermissionMode>,
         /// Optional provider cursor.
         resume_cursor: Option<String>,
         /// Optional display title.

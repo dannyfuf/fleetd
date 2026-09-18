@@ -930,8 +930,6 @@ pub(crate) struct Client {
     pub(crate) title: String,
     /// The id of the monitor the window is on, matching [`Monitor::id`].
     pub(crate) monitor: i64,
-    /// Top-left corner in logical compositor coordinates.
-    pub(crate) at: [i32; 2],
     /// Logical size.
     pub(crate) size: [i32; 2],
 }

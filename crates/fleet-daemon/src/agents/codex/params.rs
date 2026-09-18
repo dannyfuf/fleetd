@@ -51,6 +51,12 @@ impl CodexHarness {
         if let Some(object) = params.as_object_mut() {
             if let Some(model) = &request.start.model {
                 object.insert("model".to_owned(), json!(model.model));
+                if let Some(effort) = &model.effort {
+                    object.insert(
+                        "config".to_owned(),
+                        json!({"model_reasoning_effort": effort}),
+                    );
+                }
             }
             if let Some(profile) = &controls.permission_profile {
                 object.insert("permissions".to_owned(), json!(profile));
@@ -163,10 +169,16 @@ pub(super) fn settings_params(thread: &str, controls: &TurnControls) -> Value {
         "approvalsReviewer": controls.reviewer,
         "sandboxPolicy": controls.sandbox_policy_wire(),
     });
-    if let Some(object) = params.as_object_mut()
-        && let Some(model) = &controls.model
-    {
-        object.insert("model".to_owned(), json!(model));
+    if let Some(object) = params.as_object_mut() {
+        if let Some(model) = &controls.model {
+            object.insert("model".to_owned(), json!(model));
+        }
+        if let Some(effort) = &controls.effort {
+            object.insert("effort".to_owned(), json!(effort));
+        }
+        if let Some(profile) = &controls.permission_profile {
+            object.insert("permissions".to_owned(), json!(profile));
+        }
     }
     params
 }

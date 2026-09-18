@@ -24,6 +24,9 @@ Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lin
 | `edit-approval-deny.scenario` | the same gate answered `n`; the turn continues, and `Enter` is never an answer | `NATIVE-AGENTS.md` §6.2 |
 | `codex-approval-shows-the-diff.scenario` | a Codex file-change approval joins its named item and renders that item's diff | `NATIVE-AGENTS.md` §6.2; `TODO.md` §1 |
 | `codex-effort-menu.scenario` | `^s e` consumes Codex's discovered per-model effort vocabulary without sending the draft | `NATIVE-AGENTS.md` §7 |
+| `claude-model-effort-menu.scenario` | `^s m` and `^s e` consume Claude's discovered model and effort vocabulary without sending the draft | `NATIVE-AGENTS.md` §7 |
+| `claude-mode-menu.scenario` | `^s t` consumes Claude's declared access modes and keeps the draft | `NATIVE-AGENTS.md` §7 |
+| `codex-mode-menu.scenario` | `^s t` consumes Codex's smaller declared access-mode set and keeps the draft | `NATIVE-AGENTS.md` §7 |
 | `unread-mark.scenario` | a turn that reaches its gate while you are on another tab marks the thread; looking clears the mark and not the gate | `NATIVE-AGENTS.md` §3.3, §6.1 |
 | `unread-mark-survives-a-reconnect.scenario` | a thread read before a daemon restart remains read after reconnect through its persisted installation cursor | `NATIVE-AGENTS.md` §3.3, §10 |
 | `prefix-inside-a-thread.scenario` | agent controls plus `^s 1`–`9`, `^s Tab`, and `^s w` are bound in an agent tab while `^s s` is not | `KEYMAP.md` §Shadowing, §Native agent thread |

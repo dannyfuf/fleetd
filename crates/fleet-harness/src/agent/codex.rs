@@ -1,7 +1,7 @@
 //! The `codex app-server` player.
 //!
 //! Transport and frame shapes come from `docs/research/harness-codex-app-server.md`, verified
-//! there against `codex --version` → `codex-cli 0.147.0`. Four properties of that surface shape
+//! there against `codex --version` → `codex-cli 0.154.0`. Four properties of that surface shape
 //! this file, and each is also a rule `agents::codex::envelope` enforces on the way in:
 //!
 //! - **It is JSON-RPC-*shaped* and it is not JSON-RPC 2.0.** There is no `jsonrpc` field in either
@@ -133,7 +133,7 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
             // `codexHome` comes back resolved, and the `clientInfo` Fleet sent is echoed into the
             // user agent — which is also the only place the CLI version appears.
             "initialize" => json!({
-                "userAgent": "fleet-harness/0.147.0 (scripted; x86_64) codex-cli",
+                "userAgent": "fleet-harness/0.154.0 (scripted; x86_64) codex-cli",
                 "codexHome": std::env::var("CODEX_HOME").unwrap_or_else(|_| "/tmp/codex".to_owned()),
                 "platformFamily": "unix",
                 "platformOs": "linux",
@@ -680,7 +680,7 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
         json!({
             "id": self.transcript.thread_id,
             "sessionId": self.transcript.thread_id,
-            "cliVersion": "0.147.0",
+            "cliVersion": "0.154.0",
             "createdAt": created,
             "updatedAt": created,
             "cwd": self.cwd(),

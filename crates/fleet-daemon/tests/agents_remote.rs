@@ -224,7 +224,7 @@ async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
         worktree: worktree.clone(),
         provider: AgentKind::Claude,
         model: None,
-        mode: PermissionMode::Ask,
+        mode: Some(PermissionMode::Ask),
         resume_cursor: None,
         title: Some("remote task".to_owned()),
     };
@@ -633,7 +633,7 @@ async fn two_daemon_agent_resume_over_real_remote_link() {
                 worktree: worktree.clone(),
                 provider: AgentKind::Claude,
                 model: None,
-                mode: PermissionMode::Ask,
+                mode: Some(PermissionMode::Ask),
                 resume_cursor: None,
                 title: None,
             },

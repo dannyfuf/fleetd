@@ -380,8 +380,8 @@ pub struct AgentNewArgs {
     #[arg(long)]
     pub model: Option<String>,
     /// Initial permission or plan mode.
-    #[arg(long, value_enum, default_value_t = AgentModeChoice::Ask)]
-    pub mode: AgentModeChoice,
+    #[arg(long, value_enum)]
+    pub mode: Option<AgentModeChoice>,
 }
 
 /// Permission modes accepted by `fleet agent new`.
@@ -393,6 +393,10 @@ pub enum AgentModeChoice {
     AcceptEdits,
     /// Request a plan before execution.
     Plan,
+    /// Let Claude approve actions it classifies as safe.
+    Auto,
+    /// Let Claude deny unlisted tools instead of asking.
+    DontAsk,
     /// Auto-allow supported operations.
     FullAccess,
 }
@@ -601,6 +605,25 @@ mod tests {
         for arguments in cases {
             let _ = parses(&arguments);
         }
+    }
+
+    #[test]
+    fn agent_new_omits_mode_so_the_daemon_can_apply_its_default() {
+        let command = parses(&[
+            "fleet",
+            "agent",
+            "new",
+            "acme/api#feature",
+            "--provider",
+            "claude",
+        ]);
+        let Command::Agent(AgentArgs {
+            command: AgentCommand::New(arguments),
+        }) = command
+        else {
+            panic!("expected agent new");
+        };
+        assert!(arguments.mode.is_none());
     }
 
     #[test]

@@ -3,8 +3,8 @@ use super::*;
 use fleet_client::{AgentMirror, MirrorOutcome, PageOutcome};
 use fleet_core::{
     agents::{
-        AgentThreadSummary, Applied, Attention, AttentionKind, Seq, SeqEvent, ThreadId,
-        ThreadProjection,
+        AgentThreadSummary, Applied, Attention, AttentionKind, PermissionMode, Seq, SeqEvent,
+        ThreadId, ThreadProjection,
     },
     ids::WorktreeId,
 };
@@ -55,6 +55,8 @@ pub struct AgentThreads {
     commands: HashMap<ThreadId, Vec<String>>,
     /// Harness skills, which `$` completes and the projection does not carry either.
     skills: HashMap<ThreadId, Vec<String>>,
+    /// Harness-supported permission modes in picker order.
+    modes: HashMap<ThreadId, Vec<PermissionMode>>,
     /// Prepared drawer observables relayed by mounted thread views.
     decisions: HashMap<ThreadId, PreparedDecisionObservable>,
     /// The cursor a daemon-declared resync must resume from, per thread.
@@ -387,6 +389,14 @@ impl AgentThreads {
         self.commands
             .insert(thread, window.session.commands.clone());
         self.skills.insert(thread, window.session.skills.clone());
+        self.modes.insert(
+            thread,
+            window
+                .session
+                .capabilities
+                .as_ref()
+                .map_or_else(Vec::new, |capabilities| capabilities.modes.clone()),
+        );
         self.last_applied.insert(thread, Applied::Structural);
         match self.mirror.install_window(window) {
             MirrorOutcome::Gap { .. } => {
@@ -415,6 +425,12 @@ impl AgentThreads {
     #[must_use]
     pub fn skills(&self, thread: ThreadId) -> Vec<String> {
         self.skills.get(&thread).cloned().unwrap_or_default()
+    }
+
+    /// The permission modes the live harness declared, in picker order.
+    #[must_use]
+    pub fn modes(&self, thread: ThreadId) -> Vec<PermissionMode> {
+        self.modes.get(&thread).cloned().unwrap_or_default()
     }
 
     /// The prepared decision currently rendered for one mounted thread.
@@ -597,6 +613,7 @@ impl AgentThreads {
         self.notified.retain(|thread, _| live.contains(thread));
         self.commands.retain(|thread, _| live.contains(thread));
         self.skills.retain(|thread, _| live.contains(thread));
+        self.modes.retain(|thread, _| live.contains(thread));
         self.decisions.retain(|thread, _| live.contains(thread));
         self.resume_from.retain(|thread, _| live.contains(thread));
         self.last_applied.retain(|thread, _| live.contains(thread));

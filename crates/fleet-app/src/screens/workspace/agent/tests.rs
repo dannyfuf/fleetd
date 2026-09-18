@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use gpui::AppContext as _;
 use gpui::{Context, Render, Window, div};
@@ -8,17 +8,77 @@ use super::*;
 #[derive(Default)]
 struct RecordingRequester {
     requests: Cell<usize>,
+    command: RefCell<Option<BridgeCommand>>,
 }
 
 impl AgentThreadRequester for RecordingRequester {
     fn request_agent(
         &self,
-        _command: BridgeCommand,
+        command: BridgeCommand,
     ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>> {
         self.requests.set(self.requests.get() + 1);
+        self.command.replace(Some(command));
         let (_reply, answer) = async_channel::bounded(1);
         answer
     }
+}
+
+#[gpui::test]
+fn create_thread_leaves_model_and_mode_for_the_daemon_defaults(cx: &mut gpui::TestAppContext) {
+    let requester = RecordingRequester::default();
+    let worktree: WorktreeId = "fleet/app#defaults"
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
+    let session_id = SessionId::try_from("fleet/app/defaults")
+        .unwrap_or_else(|error| panic!("invalid test session: {error}"));
+    let state = cx.new(|_| {
+        let mut app = AppState::new("/tmp/fleet-agent-defaults", Instant::now());
+        app.screen = Screen::Workspace {
+            session: session_id.clone(),
+        };
+        app.snapshot = Some(fleet_proto::snapshot::Snapshot {
+            boards: Vec::new(),
+            generated_at: String::new(),
+            revision: None,
+            contexts: Vec::new(),
+            repos: Vec::new(),
+            clones: Vec::new(),
+            worktrees: Vec::new(),
+            active_context: None,
+            sessions: vec![Session {
+                id: session_id,
+                host: None,
+                kind: SessionKind::Worktree(worktree.clone()),
+                cwd: "/tmp".to_owned(),
+                terminals: Vec::new(),
+                active_terminal: None,
+                slept_at: None,
+                kept_terminals: Vec::new(),
+            }],
+            agent_threads: Vec::new(),
+            statuses: Vec::new(),
+            pools: Vec::new(),
+            hosts: Vec::new(),
+            jobs: Vec::new(),
+            daemon: fleet_proto::snapshot::DaemonInfo {
+                version: "test".to_owned(),
+                pid: 1,
+                started_at: String::new(),
+                home: "/tmp/fleet-agent-defaults".to_owned(),
+            },
+        });
+        app
+    });
+
+    cx.update(|cx| create_thread(&requester, &state, AgentKind::Claude, cx));
+    assert!(matches!(
+        requester.command.borrow().as_ref(),
+        Some(BridgeCommand::AgentThreadCreate {
+            model: None,
+            mode: None,
+            ..
+        })
+    ));
 }
 
 #[gpui::test]

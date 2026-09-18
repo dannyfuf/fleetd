@@ -76,6 +76,18 @@ pub enum RowId {
     ClaudeBinary,
     /// `agentBinaries.codex`.
     CodexBinary,
+    /// `nativeAgents.claude.mode`.
+    ClaudeDefaultMode,
+    /// `nativeAgents.claude.model`.
+    ClaudeDefaultModel,
+    /// `nativeAgents.claude.effort`.
+    ClaudeDefaultEffort,
+    /// `nativeAgents.codex.mode`.
+    CodexDefaultMode,
+    /// `nativeAgents.codex.model`.
+    CodexDefaultModel,
+    /// `nativeAgents.codex.effort`.
+    CodexDefaultEffort,
     /// `sleep.enabled`.
     SleepOnSwitch,
     /// `sleep.graceMs`.
@@ -214,7 +226,70 @@ fn general_rows(config: &Config) -> Vec<SettingRow> {
             ),
             "Executable Fleet runs for a native thread, with no shell.",
         ),
+        default_mode_row(
+            RowId::ClaudeDefaultMode,
+            "Claude default access",
+            AgentKind::Claude,
+            config.native_agents.claude.mode,
+        ),
+        detailed(
+            text_row(
+                RowId::ClaudeDefaultModel,
+                "Claude default model",
+                config.native_agents.claude.model.as_deref().unwrap_or(""),
+            ),
+            "Blank uses the harness default.",
+        ),
+        detailed(
+            text_row(
+                RowId::ClaudeDefaultEffort,
+                "Claude default effort",
+                config.native_agents.claude.effort.as_deref().unwrap_or(""),
+            ),
+            "Used with the default model; blank uses the harness default.",
+        ),
+        default_mode_row(
+            RowId::CodexDefaultMode,
+            "Codex default access",
+            AgentKind::Codex,
+            config.native_agents.codex.mode,
+        ),
+        detailed(
+            text_row(
+                RowId::CodexDefaultModel,
+                "Codex default model",
+                config.native_agents.codex.model.as_deref().unwrap_or(""),
+            ),
+            "Blank uses the harness default.",
+        ),
+        detailed(
+            text_row(
+                RowId::CodexDefaultEffort,
+                "Codex default effort",
+                config.native_agents.codex.effort.as_deref().unwrap_or(""),
+            ),
+            "Used with the default model; blank uses the harness default.",
+        ),
     ]
+}
+
+fn default_mode_row(id: RowId, label: &str, kind: AgentKind, mode: PermissionMode) -> SettingRow {
+    let labels = kind
+        .supported_modes()
+        .iter()
+        .map(|mode| crate::screens::agent_thread::presentation::mode_label(*mode))
+        .collect::<Vec<_>>();
+    SettingRow {
+        id,
+        label: label.to_owned(),
+        kind: choice(
+            crate::screens::agent_thread::presentation::mode_label(mode),
+            &labels,
+            crate::screens::agent_thread::presentation::mode_label(mode),
+        ),
+        detail: Some("Applied to new threads; each thread can override it.".to_owned()),
+        invalid: None,
+    }
 }
 
 /// Attaches the sub-label that says which launch path a row governs.

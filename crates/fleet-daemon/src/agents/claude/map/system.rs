@@ -179,17 +179,21 @@ fn init(session: &mut ClaudeSession, frame: &SystemFrame, events: &mut Vec<Agent
         );
     }
     if session.initialized {
-        // A resumed session emits exactly one `SessionConfigured`.
+        // Model discovery already published the catalogue; repeated init frames must not
+        // republish the rest of the session vocabulary.
         return;
     }
     session.initialized = true;
     // Effort is a launch flag and is **not** echoed here, so Fleet reports what it launched with.
-    let model = string_field(&frame.fields, "model").map(|model| ModelSelection {
-        model,
+    let reported_model = string_field(&frame.fields, "model");
+    session.session_model.clone_from(&reported_model);
+    let model = reported_model.map(|reported| ModelSelection {
+        model: session
+            .catalogue
+            .selection_id(&reported, session.launched_model.as_deref()),
         effort: session.launched_effort.clone(),
         provider: None,
     });
-    session.session_model = model.as_ref().map(|model| model.model.clone());
     // Advisory: `manual` comes back as `"default"`, so Fleet keeps its own record and this only
     // notices a mode it did not ask for.
     let mode = string_field(&frame.fields, "permissionMode")
@@ -200,7 +204,7 @@ fn init(session: &mut ClaudeSession, frame: &SystemFrame, events: &mut Vec<Agent
         provider: AgentKind::Claude,
         resume_cursor: string_field(&frame.fields, "session_id"),
         model,
-        models: Vec::new(),
+        models: session.catalogue.models.clone(),
         mode,
         tools: string_list(frame.fields.get("tools")),
         commands: string_list(frame.fields.get("slash_commands")),

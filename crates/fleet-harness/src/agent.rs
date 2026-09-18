@@ -75,8 +75,8 @@ impl Provider {
     #[must_use]
     pub const fn version_line(self) -> &'static str {
         match self {
-            Self::Claude => "2.1.266 (Claude Code)",
-            Self::Codex => "codex-cli 0.147.0",
+            Self::Claude => "2.1.275 (Claude Code)",
+            Self::Codex => "codex-cli 0.154.0",
         }
     }
 }

@@ -5,6 +5,7 @@
 //! was hiding.
 
 pub mod argv;
+mod catalogue;
 pub mod frames;
 pub(crate) mod map;
 mod session;
@@ -50,6 +51,9 @@ const NO_CONVERSATION: &str = "No conversation found with session ID";
 
 /// How long an interrupt receipt is worth waiting for. A nicety, never a barrier.
 const RECEIPT_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Catalogue control requests are startup metadata, not a reason to block thread creation.
+const CATALOGUE_DEADLINE: Duration = Duration::from_secs(3);
 
 /// How long the interrupted turn's own `result` is waited for before escalating.
 const RESULT_DEADLINE: Duration = Duration::from_secs(10);
@@ -177,6 +181,48 @@ impl ClaudeHarness {
         }
         Ok(())
     }
+
+    async fn discover_models(&self, transport: &Transport) -> catalogue::Catalogue {
+        for subtype in ["initialize", "list_models"] {
+            let request_id = Uuid::new_v4().to_string();
+            let frame = json!({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {"subtype": subtype},
+            });
+            let receipt = match transport.control_request(request_id, frame).await {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    tracing::debug!(target: "fleet::agents::claude", %error, subtype, "Claude model discovery write failed");
+                    continue;
+                }
+            };
+            match tokio::time::timeout(CATALOGUE_DEADLINE, receipt).await {
+                Ok(Ok(response)) if response.subtype == "success" => {
+                    let models = catalogue::models(&response.response);
+                    if !models.models.is_empty() {
+                        return models;
+                    }
+                }
+                Ok(Ok(response)) => tracing::debug!(
+                    target: "fleet::agents::claude",
+                    subtype,
+                    error = ?response.error,
+                    "Claude model discovery was rejected"
+                ),
+                Ok(Err(_)) | Err(_) => tracing::debug!(
+                    target: "fleet::agents::claude",
+                    subtype,
+                    "Claude model discovery timed out"
+                ),
+            }
+        }
+        tracing::warn!(
+            target: "fleet::agents::claude",
+            "Claude model discovery returned no models; using the fallback catalogue"
+        );
+        catalogue::fallback()
+    }
 }
 
 /// How a launch can fail before the session exists.
@@ -276,6 +322,7 @@ impl Harness for ClaudeHarness {
         let resume = argv::resume_cursor(req.start.resume_cursor.as_ref());
         {
             let mut session = self.session.lock().await;
+            session.launched_model = req.start.model.as_ref().map(|model| model.model.clone());
             session.launched_effort = req
                 .start
                 .model
@@ -314,6 +361,41 @@ impl Harness for ClaudeHarness {
             }
             Err(failure) => return Err(failure.into_error(&self.config.command)),
         };
+        let catalogue = self.discover_models(&transport).await;
+        let (resume_cursor, model, models) = {
+            let mut session = self.session.lock().await;
+            session.catalogue.clone_from(&catalogue);
+            let model = session
+                .session_model
+                .as_deref()
+                .map(|reported| fleet_core::agents::ModelSelection {
+                    model: session
+                        .catalogue
+                        .selection_id(reported, session.launched_model.as_deref()),
+                    effort: session.launched_effort.clone(),
+                    provider: None,
+                })
+                .or_else(|| req.start.model.clone());
+            (
+                session.cursor.clone(),
+                model,
+                session.catalogue.models.clone(),
+            )
+        };
+        transport::emit(
+            &self.events,
+            AgentEvent::SessionConfigured {
+                provider: AgentKind::Claude,
+                resume_cursor,
+                model,
+                models,
+                mode: req.start.mode,
+                tools: Vec::new(),
+                commands: Vec::new(),
+                skills: Vec::new(),
+            },
+            Some("control_response/initialize"),
+        );
         self.transport = Some(transport);
         let session = self.session.lock().await;
         // `system/init` may not have landed yet (it lands with the first prompt), so the gate is

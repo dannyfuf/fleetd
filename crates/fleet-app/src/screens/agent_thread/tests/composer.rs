@@ -176,10 +176,6 @@ fn the_restart_rule_stated_once() {
 
     for change in [
         RestartInputs {
-            mode_changed: true,
-            ..none
-        },
-        RestartInputs {
             cwd_changed: true,
             ..none
         },
@@ -190,6 +186,17 @@ fn the_restart_rule_stated_once() {
     ] {
         assert!(restart_with_resume(change), "{change:?}");
     }
+
+    // Codex applies modes in place; Claude carries them on process launch.
+    assert!(!restart_with_resume(RestartInputs {
+        mode_changed: true,
+        ..none
+    }));
+    assert!(restart_with_resume(RestartInputs {
+        mode_changed: true,
+        controls_ride_the_turn: false,
+        ..none
+    }));
 
     // Codex's controls ride the turn, so a model change alone needs no restart.
     assert!(!restart_with_resume(RestartInputs {

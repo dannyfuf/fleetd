@@ -19,7 +19,7 @@ async fn remote_worktree_guard_precedes_path_provider_and_store_access() {
             harness.worktree.clone(),
             AgentKind::Claude,
             None,
-            PermissionMode::Ask,
+            Some(PermissionMode::Ask),
             None,
             None,
         )
@@ -863,7 +863,7 @@ async fn an_unavailable_provider_reports_the_terminal_fallback_hint() {
             harness.worktree.clone(),
             AgentKind::Claude,
             None,
-            PermissionMode::Ask,
+            Some(PermissionMode::Ask),
             None,
             None,
         )

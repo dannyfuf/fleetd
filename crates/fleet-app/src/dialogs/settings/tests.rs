@@ -88,6 +88,47 @@ fn cycling_never_wraps_past_either_end() {
 }
 
 #[test]
+fn native_agent_default_rows_follow_each_harnesss_mode_vocabulary() {
+    let mut state = draft();
+    let config = state.config.as_mut().unwrap_or_else(|| panic!("no config"));
+    assert_eq!(config.native_agents.claude.mode, PermissionMode::FullAccess);
+    cycle(config, &RowId::ClaudeDefaultMode, -1);
+    assert_eq!(config.native_agents.claude.mode, PermissionMode::DontAsk);
+    cycle(config, &RowId::CodexDefaultMode, -1);
+    assert_eq!(config.native_agents.codex.mode, PermissionMode::Plan);
+
+    assert!(commit_value(
+        config,
+        &RowId::ClaudeDefaultModel,
+        "  fable[1m]  "
+    ));
+    assert_eq!(
+        config.native_agents.claude.model.as_deref(),
+        Some("fable[1m]")
+    );
+    assert!(commit_value(config, &RowId::ClaudeDefaultEffort, "  "));
+    assert!(config.native_agents.claude.effort.is_none());
+
+    let ids = schema::rows(
+        &state,
+        &AppState::new("/tmp/fleet", std::time::Instant::now()),
+    )
+    .into_iter()
+    .map(|row| row.id)
+    .collect::<Vec<_>>();
+    for expected in [
+        RowId::ClaudeDefaultMode,
+        RowId::ClaudeDefaultModel,
+        RowId::ClaudeDefaultEffort,
+        RowId::CodexDefaultMode,
+        RowId::CodexDefaultModel,
+        RowId::CodexDefaultEffort,
+    ] {
+        assert!(ids.contains(&expected), "missing settings row {expected:?}");
+    }
+}
+
+#[test]
 fn invalid_numbers_do_not_replace_the_last_valid_value() {
     let mut state = draft();
     let config = state.config.as_mut().unwrap_or_else(|| panic!("no config"));
