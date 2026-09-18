@@ -45,7 +45,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::{
     AgentThreadRecord,
-    providers::{AgentProvider, ProviderError, ProviderEvents, spawn_provider},
+    providers::{AgentProvider, ProviderError, ProviderEvent, ProviderEvents, spawn_provider},
     store::{self, SqliteAgentStore},
     thread,
 };
@@ -415,6 +415,7 @@ impl AgentSessionManager {
             permission_profile: None,
             title: Some(record.title),
         };
+        let thread = record.thread;
         let binaries = self.agent_binaries().await;
         let kind = request.provider;
         let command = binaries.binary(kind).to_owned();
@@ -444,17 +445,40 @@ impl AgentSessionManager {
         )
         .await?;
         *runtime.provider.lock().await = Some(provider);
-        self.spawn_event_task(runtime.clone(), provider_events);
+        let provider_generation = runtime.next_provider_generation();
+        let initial_drained =
+            self.spawn_event_task(runtime.clone(), provider_events, provider_generation);
+        // Provider history is queued during `start`. Release the operation gate so the new event
+        // task can commit that history, then wait for its initial queue to drain before a caller
+        // decides whether a stable outbox item needs to be submitted again.
+        drop(operation);
+        if initial_drained.await.is_err() {
+            tracing::debug!(%thread, "provider event task ended before its initial history barrier");
+        }
         Ok(())
     }
 
-    fn spawn_event_task(&self, runtime: ThreadRuntime, events: ProviderEvents) {
+    fn spawn_event_task(
+        &self,
+        runtime: ThreadRuntime,
+        events: ProviderEvents,
+        provider_generation: u64,
+    ) -> tokio::sync::oneshot::Receiver<()> {
         let inner = Arc::clone(&self.inner);
         let runtime_for_task = runtime.clone();
+        let (initial_drained, drained) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            run_provider_events(inner, runtime_for_task, events).await;
+            run_provider_events(
+                inner,
+                runtime_for_task,
+                events,
+                provider_generation,
+                initial_drained,
+            )
+            .await;
         });
         runtime.set_task(task.abort_handle());
+        drained
     }
 
     async fn apply_provider_event(
@@ -725,64 +749,40 @@ async fn run_provider_events(
     inner: Arc<ManagerInner>,
     runtime: ThreadRuntime,
     mut receiver: ProviderEvents,
+    provider_generation: u64,
+    initial_drained: tokio::sync::oneshot::Sender<()>,
 ) {
     let manager = AgentSessionManager {
         inner: Arc::clone(&inner),
     };
+    // `provider.start` can synchronously return resumed history before this task exists. Commit
+    // everything already queued, then release the barrier used by durable outbox reconciliation.
+    let mut initial = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        initial.push(event);
+    }
+    if !initial.is_empty()
+        && !apply_provider_batch(&inner, &manager, &runtime, provider_generation, initial).await
+    {
+        if initial_drained.send(()).is_err() {
+            tracing::debug!("provider-history barrier receiver was dropped");
+        }
+        return;
+    }
+    if initial_drained.send(()).is_err() {
+        tracing::debug!("provider-history barrier receiver was dropped");
+    }
+
     while let Some(batch) = next_coalesced_batch(&mut receiver).await {
-        // §5: adjacent deltas and repeated patches are collapsed *before* reduction, so a window
-        // costs one sequence, stored row and broadcast frame per retained event.
-        for event in batch {
-            let event_kind = event_name(&event.event);
-            let operation = runtime.operation.lock().await;
-            let exited = matches!(event.event, AgentEvent::SessionExited { .. });
-            if let Some(skew) = event.emission_skew
-                && skew >= EMISSION_SKEW_FLOOR
-            {
-                tracing::debug!(
-                    target: "fleet::agents",
-                    skew_ms = skew.as_millis(),
-                    frame = event.raw.as_deref().unwrap_or("unnamed"),
-                    "a harness frame was read well after the harness says it emitted it",
-                );
-            }
-            match manager
-                .apply_provider_event(&runtime, &operation, event.event, event.raw)
-                .await
-            {
-                Ok(events) => {
-                    for applied in events {
-                        publish_applied(&inner, &runtime, applied);
-                    }
-                }
-                Err(error) => {
-                    let thread = runtime
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .record
-                        .thread;
-                    tracing::warn!(
-                        %error,
-                        %thread,
-                        event = event_kind,
-                        "dropped invalid native-agent provider event"
-                    );
-                }
-            }
-            // §6 resumes a stopped thread "lazily with a new adapter the next time it is
-            // opened", and `resume_if_stopped` only does that when the slot is empty. Waiting
-            // for the event channel to close never empties it: the adapter owns a sender for
-            // its whole life, so a crashed child would leave its dead adapter — and its stale
-            // turn bookkeeping — rejecting every later send until the daemon restarted. The
-            // session is over the moment it says so, so the adapter goes with it.
-            if exited {
-                drop(runtime.provider.lock().await.take());
-            }
+        if !apply_provider_batch(&inner, &manager, &runtime, provider_generation, batch).await {
+            return;
         }
     }
 
     let operation = runtime.operation.lock().await;
+    if !runtime.provider_is_current(provider_generation) {
+        return;
+    }
     let should_mark_exit = {
         let state = runtime
             .state
@@ -793,6 +793,10 @@ async fn run_provider_events(
             SessionState::Stopped | SessionState::Error
         )
     };
+    // Detach first. Publishing the terminal summary while the dead adapter was still present let
+    // a concurrent send observe Error, skip resume, and call the adapter that had just exited.
+    drop(runtime.provider.lock().await.take());
+    runtime.invalidate_provider();
     if should_mark_exit {
         match manager
             .apply_provider_event(
@@ -814,10 +818,74 @@ async fn run_provider_events(
             Err(error) => tracing::warn!(%error, "could not record provider event-stream exit"),
         }
     }
-    // The gate is still held: the slot is emptied under the same serialization every settlement
-    // above ran under, so nothing can pick up a provider this loop is retiring.
-    *runtime.provider.lock().await = None;
     drop(operation);
+}
+
+/// Applies one provider batch while its adapter generation is still current.
+///
+/// Returns `false` once the adapter ended or was superseded, which tells its event task to stop
+/// without touching the replacement provider's slot.
+async fn apply_provider_batch(
+    inner: &Arc<ManagerInner>,
+    manager: &AgentSessionManager,
+    runtime: &ThreadRuntime,
+    provider_generation: u64,
+    batch: Vec<ProviderEvent>,
+) -> bool {
+    // §5: adjacent deltas and repeated patches are collapsed *before* reduction, so a window
+    // costs one sequence, stored row and broadcast frame per retained event.
+    for event in batch {
+        let event_kind = event_name(&event.event);
+        let operation = runtime.operation.lock().await;
+        if !runtime.provider_is_current(provider_generation) {
+            return false;
+        }
+        let exited = matches!(event.event, AgentEvent::SessionExited { .. });
+        if exited {
+            // Guarded by the generation check under the operation gate: a stale event task can
+            // never take the adapter a newer resume installed.
+            drop(runtime.provider.lock().await.take());
+            runtime.invalidate_provider();
+        }
+        if let Some(skew) = event.emission_skew
+            && skew >= EMISSION_SKEW_FLOOR
+        {
+            tracing::debug!(
+                target: "fleet::agents",
+                skew_ms = skew.as_millis(),
+                frame = event.raw.as_deref().unwrap_or("unnamed"),
+                "a harness frame was read well after the harness says it emitted it",
+            );
+        }
+        match manager
+            .apply_provider_event(runtime, &operation, event.event, event.raw)
+            .await
+        {
+            Ok(events) => {
+                for applied in events {
+                    publish_applied(inner, runtime, applied);
+                }
+            }
+            Err(error) => {
+                let thread = runtime
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record
+                    .thread;
+                tracing::warn!(
+                    %error,
+                    %thread,
+                    event = event_kind,
+                    "dropped invalid native-agent provider event"
+                );
+            }
+        }
+        if exited {
+            return false;
+        }
+    }
+    true
 }
 
 /// Re-frames **and logs** a provider that could not be constructed.

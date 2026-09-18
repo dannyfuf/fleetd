@@ -757,3 +757,50 @@ async fn cancellation_stops_the_child_even_when_interrupt_times_out() {
     };
     assert_eq!(cancelled.status, DelegationStatus::Cancelled);
 }
+
+#[tokio::test]
+async fn cancellation_with_an_empty_provider_slot_supersedes_recovery() {
+    let harness = ManagerHarness::start(full()).await;
+    let (manager, events, config, worktrees) = harness.delegation_parts();
+    let store = manager.delegation_store().expect("agent store opens");
+    let (service, _worker) =
+        super::install(&manager, &events, &config, &worktrees).expect("install delegation service");
+    let (_caller, delegation) =
+        seed_running_delegation(&harness, &manager, &store, "empty-slot-token").await;
+    let id = delegation.id;
+    store
+        .delegation_write("seed recover before cancellation", move |tx| {
+            delegations::enqueue(tx, id, OutboxAction::Recover, Utc::now())?;
+            Ok(((), false))
+        })
+        .await
+        .expect("seed recover row");
+    harness.drop_provider(delegation.child).await;
+    assert!(
+        store
+            .delegation_outbox()
+            .await
+            .expect("read recovered outbox")
+            .iter()
+            .any(|row| row.delegation == delegation.id && row.action == OutboxAction::Recover),
+        "restart recovery queued the action cancellation must supersede"
+    );
+
+    let response = service
+        .cancel(delegation.id)
+        .await
+        .expect("empty provider slot still cancels durably");
+    let ResponseBody::Delegation(cancelled) = response else {
+        panic!("expected cancelled delegation");
+    };
+    assert_eq!(cancelled.status, DelegationStatus::Cancelled);
+    assert!(
+        store
+            .delegation_outbox()
+            .await
+            .expect("read cancellation outbox")
+            .iter()
+            .all(|row| row.delegation != delegation.id || row.action != OutboxAction::Recover),
+        "terminal cancellation closes the stale recovery action"
+    );
+}

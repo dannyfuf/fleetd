@@ -200,6 +200,7 @@ impl AgentSessionManager {
         projection.mode = mode;
         let runtime = ThreadRuntime::new(projection, record.clone(), None);
         *runtime.provider.lock().await = Some(provider);
+        let provider_generation = runtime.next_provider_generation();
 
         // The row is written before the runtime is published, so a thread a client can see is a
         // thread the next start will find. One upsert, not a whole-index rewrite.
@@ -224,7 +225,7 @@ impl AgentSessionManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(thread, runtime.clone());
-        self.spawn_event_task(runtime.clone(), provider_events);
+        drop(self.spawn_event_task(runtime.clone(), provider_events, provider_generation));
         let summary = runtime
             .state
             .lock()
@@ -536,6 +537,18 @@ impl AgentSessionManager {
         Ok(SubmissionState::Committed)
     }
 
+    /// Resumes a stopped provider and drains the history it returned during open before an
+    /// outbox row decides whether its stable item needs to be retried.
+    pub(crate) async fn reconcile_provider_history(
+        &self,
+        thread: ThreadId,
+        item: fleet_core::agents::ItemId,
+    ) -> Result<SubmissionState, ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        self.resume_if_stopped(&runtime).await?;
+        self.submission_state(thread, item).await
+    }
+
     /// Handles `AgentInterrupt`.
     ///
     /// Interrupting a turn that has already settled is a no-op, not a conflict: `esc` and the
@@ -793,23 +806,24 @@ impl AgentSessionManager {
         let runtime = self.runtime(thread).await?;
         let operation = runtime.operation.lock().await;
         let mut provider_slot = runtime.provider.lock().await;
-        let Some(mut provider) = provider_slot.take() else {
-            return Ok(ResponseBody::AgentAck);
-        };
+        let provider = provider_slot.take();
+        runtime.invalidate_provider();
         // A provider that will not die is a diagnostic, not a reason to leave the transcript
         // claiming a turn is still running: the child that exits from its own stdin close
         // answers `stop` with `Exited`, and returning here skipped every settlement below, so
         // §2's tab spun on a dead process until the daemon restarted. The handle is dropped
         // either way — nothing can reach that session again.
-        if let Err(error) = provider.stop().await {
-            tracing::warn!(
-                target: "fleet::agents",
-                %error,
-                %thread,
-                "the native-agent provider did not stop cleanly",
-            );
+        if let Some(mut provider) = provider {
+            if let Err(error) = provider.stop().await {
+                tracing::warn!(
+                    target: "fleet::agents",
+                    %error,
+                    %thread,
+                    "the native-agent provider did not stop cleanly",
+                );
+            }
+            drop(provider);
         }
-        drop(provider);
         drop(provider_slot);
 
         for applied in self.settle_open_gates(&runtime, &operation).await? {

@@ -494,6 +494,50 @@ fn finished_delegation(
 }
 
 #[tokio::test(start_paused = true)]
+async fn missing_child_reservation_does_not_abort_the_outbox_drain() {
+    let harness = Harness::start().await;
+    let (_caller, valid) = harness.caller_with_delegations(1, true, false).await;
+    let mut missing = finished_delegation(
+        DelegationId::new(),
+        ThreadId::new(),
+        TurnId::new(),
+        ItemId::new(),
+        ThreadId::new(),
+        false,
+        9,
+    );
+    missing.status = DelegationStatus::Starting;
+    missing.result = None;
+    missing.finished = None;
+    harness.insert(missing.clone(), OutboxAction::Recover).await;
+
+    tokio::time::resume();
+    drain(&harness.service)
+        .await
+        .expect("missing child is repaired without aborting the pass");
+    tokio::time::pause();
+
+    assert!(
+        harness
+            .store
+            .delegation(missing.id)
+            .await
+            .expect("read repaired reservation")
+            .is_none()
+    );
+    assert!(matches!(
+        harness
+            .store
+            .delegation(valid[0].id)
+            .await
+            .expect("read valid delegation")
+            .expect("valid delegation remains")
+            .delivery,
+        DeliveryState::Delivered { .. }
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn settle_waits_for_the_background_task_then_finalizes() {
     let harness = Harness::start().await;
     let child = harness.create_thread().await;

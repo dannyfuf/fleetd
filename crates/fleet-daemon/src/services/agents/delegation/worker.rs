@@ -32,7 +32,27 @@ pub(super) async fn drain(service: &DelegationService) -> anyhow::Result<()> {
     // here makes the worker's startup order deterministic: every ProviderExited transition and
     // its Recover row exist before this pass reads the outbox.
     for delegation in service.inner.store.live_delegations(None).await? {
-        service.inner.manager.projection(delegation.child).await?;
+        match service.inner.manager.projection(delegation.child).await {
+            Ok(_) => {}
+            Err(error) if error.kind == ErrorKind::NotFound => {
+                let id = delegation.id;
+                service
+                    .inner
+                    .store
+                    .delegation_write("release missing-child delegation reservation", move |tx| {
+                        delegations::delete(tx, id)?;
+                        Ok(((), false))
+                    })
+                    .await?;
+                tracing::warn!(
+                    target: "fleet::agents",
+                    delegation = %delegation.id,
+                    child = %delegation.child,
+                    "released a delegation reservation whose child was never created",
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     repair_missing_callers(service).await?;
     let mut rows = service.inner.store.delegation_outbox().await?;
@@ -167,27 +187,11 @@ async fn nudge(
         return Ok(());
     }
     let item = delegations::outbox_item(delegation.id, OutboxAction::Nudge, row.id);
-    match service
-        .inner
-        .manager
-        .submission_state(delegation.child, item)
-        .await?
-    {
+    match durable_submission_state(service, row, delegation.child, item).await? {
         SubmissionState::Committed => {
             return acknowledge_nudge(service, delegation_id, row_id).await;
         }
-        SubmissionState::Pending => {
-            if service
-                .inner
-                .manager
-                .reconcile_submission(delegation.child, item)
-                .await?
-                == SubmissionState::Committed
-            {
-                return acknowledge_nudge(service, delegation_id, row_id).await;
-            }
-            return Ok(());
-        }
+        SubmissionState::Pending => return Ok(()),
         SubmissionState::Unknown => {}
     }
     let Some(_claim) = InFlightClaim::acquire(service, row_id) else {
@@ -279,12 +283,7 @@ async fn recover(
     delegation: Delegation,
 ) -> anyhow::Result<()> {
     let item = delegations::outbox_item(delegation.id, OutboxAction::Recover, row.id);
-    match service
-        .inner
-        .manager
-        .submission_state(delegation.child, item)
-        .await?
-    {
+    match durable_submission_state(service, row, delegation.child, item).await? {
         SubmissionState::Committed => {
             finish_row(service, row.id).await?;
             let current = service
@@ -296,18 +295,7 @@ async fn recover(
             service.publish_changed(current);
             return Ok(());
         }
-        SubmissionState::Pending => {
-            if service
-                .inner
-                .manager
-                .reconcile_submission(delegation.child, item)
-                .await?
-                == SubmissionState::Committed
-            {
-                finish_row(service, row.id).await?;
-            }
-            return Ok(());
-        }
+        SubmissionState::Pending => return Ok(()),
         SubmissionState::Unknown => {}
     }
     let Some(_claim) = InFlightClaim::acquire(service, row.id) else {
@@ -487,28 +475,12 @@ async fn deliver(
         item: Some(item),
         ..UserInput::default()
     };
-    match service
-        .inner
-        .manager
-        .submission_state(delegation.caller, item)
-        .await?
-    {
+    match durable_submission_state(service, row, delegation.caller, item).await? {
         SubmissionState::Committed => {
             finish_row(service, row.id).await?;
             return Ok(());
         }
-        SubmissionState::Pending => {
-            if service
-                .inner
-                .manager
-                .reconcile_submission(delegation.caller, item)
-                .await?
-                == SubmissionState::Committed
-            {
-                finish_row(service, row.id).await?;
-            }
-            return Ok(());
-        }
+        SubmissionState::Pending => return Ok(()),
         SubmissionState::Unknown => {}
     }
     let Some(_claim) = InFlightClaim::acquire(service, row.id) else {
@@ -554,6 +526,42 @@ async fn mark_submission(service: &DelegationService, row: i64) -> anyhow::Resul
             Ok(((), false))
         })
         .await
+}
+
+/// Resolves the stable transcript identity before an outbox row is allowed to submit again.
+///
+/// The in-memory queue covers an ordinary failed commit. After a daemon restart that queue is
+/// gone, so a durable pre-send marker first resumes the provider and drains the history returned
+/// by that open. Only a history miss may retry, under the same stable provider item identity.
+async fn durable_submission_state(
+    service: &DelegationService,
+    row: &OutboxRow,
+    thread: fleet_core::agents::ThreadId,
+    item: fleet_core::agents::ItemId,
+) -> anyhow::Result<SubmissionState> {
+    let mut state = service.inner.manager.submission_state(thread, item).await?;
+    if state == SubmissionState::Pending {
+        state = service
+            .inner
+            .manager
+            .reconcile_submission(thread, item)
+            .await?;
+    }
+    if state == SubmissionState::Unknown && row.submitted.is_some() {
+        state = service
+            .inner
+            .manager
+            .reconcile_provider_history(thread, item)
+            .await?;
+        if state == SubmissionState::Pending {
+            state = service
+                .inner
+                .manager
+                .reconcile_submission(thread, item)
+                .await?;
+        }
+    }
+    Ok(state)
 }
 
 /// Process-local overlap suppression that can never outlive the future which acquired it.

@@ -15,7 +15,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     DaemonError,
-    services::agents::{manager::CreateOptions, store::delegations},
+    services::agents::{
+        manager::CreateOptions,
+        store::{OutboxAction, delegations},
+    },
 };
 
 use super::{
@@ -221,7 +224,8 @@ impl DelegationService {
             }
         }
 
-        self.inner
+        if let Err(error) = self
+            .inner
             .manager
             .append_item(
                 caller,
@@ -234,9 +238,16 @@ impl DelegationService {
                     status: DelegationStatus::Starting,
                 },
             )
-            .await?;
+            .await
+        {
+            let cleanup = self
+                .compensate_created_child(&delegation, false, "caller item append failed")
+                .await;
+            return Err(with_cleanup(error, cleanup));
+        }
 
-        self.inner
+        if let Err(error) = self
+            .inner
             .manager
             .send(
                 child,
@@ -246,7 +257,13 @@ impl DelegationService {
                     ..UserInput::default()
                 },
             )
-            .await?;
+            .await
+        {
+            let cleanup = self
+                .compensate_created_child(&delegation, true, "initial child send failed")
+                .await;
+            return Err(with_cleanup(error, cleanup));
+        }
 
         let warning =
             (worktree == caller_record.worktree).then(|| SAME_WORKTREE_WARNING.to_owned());
@@ -266,6 +283,65 @@ impl DelegationService {
             .await
             .map_err(storage_error)
     }
+
+    /// Stops a child whose creation succeeded but whose delegation setup did not finish.
+    ///
+    /// Before the caller row commits, the reservation is invisible and can be released. After it
+    /// commits, the durable row must remain and become terminal even when provider shutdown also
+    /// fails, so capacity is never held by an unreachable live child.
+    async fn compensate_created_child(
+        &self,
+        delegation: &Delegation,
+        caller_item_committed: bool,
+        reason: &'static str,
+    ) -> Result<(), ProtoError> {
+        let stop = self.inner.manager.stop(delegation.child).await;
+        if !caller_item_committed {
+            let release = self.release_reservation(delegation.id).await;
+            return match (stop, release) {
+                (_, Ok(())) => Ok(()),
+                (Ok(_), Err(error)) | (Err(_), Err(error)) => Err(error),
+            };
+        }
+        if stop.is_ok() {
+            return Ok(());
+        }
+
+        let id = delegation.id;
+        let now = Utc::now();
+        let reason = reason.to_owned();
+        let changed = self
+            .inner
+            .store
+            .delegation_write("terminalize failed delegation startup", move |tx| {
+                let Some(mut current) = delegations::get(tx, id)? else {
+                    anyhow::bail!("delegation {id} does not exist");
+                };
+                if !current.status.is_terminal() {
+                    current.status = DelegationStatus::Failed;
+                    current.status_payload = Some(reason);
+                    current.finished = Some(now);
+                    delegations::update(tx, &current)?;
+                    delegations::mark_done_for(tx, id, OutboxAction::Recover, now)?;
+                    delegations::enqueue(tx, id, OutboxAction::Deliver, now)?;
+                }
+                Ok((current, true))
+            })
+            .await
+            .map_err(storage_error)?;
+        self.publish_changed(changed);
+        Ok(())
+    }
+}
+
+fn with_cleanup(mut original: ProtoError, cleanup: Result<(), ProtoError>) -> ProtoError {
+    if let Err(error) = cleanup {
+        original.message = format!(
+            "{}; child cleanup also failed: {}",
+            original.message, error.message
+        );
+    }
+    original
 }
 
 fn storage_error(error: anyhow::Error) -> ProtoError {

@@ -2,7 +2,10 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -55,6 +58,9 @@ pub(super) struct ThreadRuntime {
     pub operation: Arc<Mutex<()>>,
     pub state: Arc<std::sync::Mutex<ThreadState>>,
     pub provider: Arc<Mutex<Option<Box<dyn AgentProvider>>>>,
+    /// Identity of the provider currently occupying the slot. Event tasks carry the generation
+    /// they were spawned for so a late exit from a retired adapter cannot detach its replacement.
+    provider_generation: Arc<AtomicU64>,
     task_abort: Arc<std::sync::Mutex<Option<AbortHandle>>>,
 }
 
@@ -75,8 +81,24 @@ impl ThreadRuntime {
                 answered_gates: HashSet::new(),
             })),
             provider: Arc::new(Mutex::new(None)),
+            provider_generation: Arc::new(AtomicU64::new(0)),
             task_abort: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Mints the identity of a provider immediately before its event task is installed.
+    pub fn next_provider_generation(&self) -> u64 {
+        self.provider_generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Whether an event task still belongs to the adapter in the provider slot.
+    pub fn provider_is_current(&self, generation: u64) -> bool {
+        self.provider_generation.load(Ordering::Acquire) == generation
+    }
+
+    /// Invalidates the current event task before an explicit stop settles the transcript itself.
+    pub fn invalidate_provider(&self) {
+        self.provider_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The host that owns this thread, or `None` when this daemon does.

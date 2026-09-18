@@ -115,6 +115,12 @@ pub(crate) fn transition(
             update(tx, &transition.next)?;
             record_changed(&mut outcome.changed, transition.next.clone());
         }
+        if transition.next.status.is_terminal() {
+            // A user cancellation can arrive after restart recovery queued a resume. Closing the
+            // recovery in the same transaction as the terminal child event prevents the worker
+            // from waking the child after Stop has acknowledged cancellation.
+            mark_done_for(tx, current.id, OutboxAction::Recover, now)?;
+        }
         for action in transition.actions {
             enqueue(tx, current.id, action, now)?;
             outcome.wake = true;

@@ -699,7 +699,12 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         | RequestBody::AgentThreadOpen { .. }
         // A body read is bounded by `limit` server-side, is cold-path by construction — the
         // user expanded a tool row — and routes to the owner for a mirrored thread.
-        | RequestBody::AgentItemBody { .. } => None,
+        | RequestBody::AgentItemBody { .. }
+        // Cancellation is bounded by the daemon's eight-live-delegation ceiling, but it walks
+        // descendants deepest-first and each interrupt/stop pair owns its own harness deadline.
+        // A client deadline cannot safely predict how many of those bounded children are below
+        // this node, and timing out would report failure while the daemon keeps cancelling them.
+        | RequestBody::DelegationCancel { .. } => None,
         // The six agent mutations are serialized per thread by the daemon, and each of them can
         // legitimately outlast the default: a mode or model change costs a restart-with-resume
         // on a harness that cannot switch in place, a send to a stopped thread resumes one, and
@@ -1261,6 +1266,9 @@ mod tests {
                 stream: StreamKind::CommandOutput,
                 offset: 0,
                 limit: 4_096,
+            },
+            RequestBody::DelegationCancel {
+                delegation: DelegationId::new(),
             },
         ] {
             assert_eq!(request_timeout(&exempt), None, "{exempt:?}");

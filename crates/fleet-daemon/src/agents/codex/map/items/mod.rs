@@ -56,10 +56,9 @@ pub(in crate::agents::codex) fn started(session: &mut CodexSession, params: &Val
             changes.iter().map(|change| change.path.clone()).collect(),
         );
     }
-    let item = session.item_for(&notification.thread_id, &provider_item);
     // The user's own message is echoed back: reconcile against the optimistic row rather than
     // appending a duplicate of the user's bubble.
-    if let ThreadItem::UserMessage {
+    let historical_user_item = if let ThreadItem::UserMessage {
         client_id, content, ..
     } = &notification.item
     {
@@ -70,7 +69,12 @@ pub(in crate::agents::codex) fn started(session: &mut CodexSession, params: &Val
         {
             return MapOutput::default();
         }
-    }
+        session.adopt_historical_client_item(&provider_item, client_id.as_deref())
+    } else {
+        None
+    };
+    let item = historical_user_item
+        .unwrap_or_else(|| session.item_for(&notification.thread_id, &provider_item));
     let Some(payload) = item_payload(&notification.item) else {
         return MapOutput::one(AgentEvent::Unknown {
             method: format!("item/started:{kind}"),
@@ -120,7 +124,14 @@ pub(in crate::agents::codex) fn completed(session: &mut CodexSession, params: &V
             return MapOutput::default();
         }
     }
-    let item = session.item_for(&notification.thread_id, &provider_item);
+    let historical_user_item = if let ThreadItem::UserMessage { client_id, .. } = &notification.item
+    {
+        session.adopt_historical_client_item(&provider_item, client_id.as_deref())
+    } else {
+        None
+    };
+    let item = historical_user_item
+        .unwrap_or_else(|| session.item_for(&notification.thread_id, &provider_item));
     let mut events = Vec::new();
 
     // Three item kinds are decision surfaces or boundaries rather than rows.

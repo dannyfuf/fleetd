@@ -893,6 +893,94 @@ async fn stop_settles_the_turn_even_when_the_provider_will_not_stop() {
 }
 
 #[tokio::test]
+async fn stop_without_a_provider_still_records_a_terminal_session() {
+    let harness = Harness::start(full()).await;
+    let thread = harness
+        .create(Some("cursor-empty-slot".to_owned()))
+        .await
+        .thread;
+    harness
+        .script
+        .emit(AgentEvent::SessionStateChanged(SessionState::Ready))
+        .await;
+    harness
+        .settle(thread, "a ready session", |projection| {
+            projection.session == SessionState::Ready
+        })
+        .await;
+    harness.drop_provider(thread).await;
+
+    harness
+        .manager
+        .stop(thread)
+        .await
+        .expect("an empty provider slot still records cancellation");
+
+    let projection = harness
+        .manager
+        .projection(thread)
+        .await
+        .expect("projection");
+    assert_eq!(projection.session, SessionState::Stopped);
+}
+
+#[tokio::test]
+async fn submitted_item_is_reconciled_from_resumed_provider_history() {
+    let harness = Harness::start(full()).await;
+    let thread = harness
+        .create(Some("cursor-history".to_owned()))
+        .await
+        .thread;
+    harness
+        .script
+        .emit(AgentEvent::SessionStateChanged(SessionState::Ready))
+        .await;
+    harness
+        .settle(thread, "a ready session", |projection| {
+            projection.session == SessionState::Ready
+        })
+        .await;
+    let restarted = harness.restart().await;
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    harness.replay_on_next_start(
+        thread,
+        vec![
+            AgentEvent::TurnStarted {
+                turn,
+                user_item: item,
+            },
+            AgentEvent::ItemStarted {
+                turn,
+                item,
+                kind: ItemKind::UserMessage {
+                    text: "durable delivery".to_owned(),
+                    attachments: Vec::new(),
+                    steered: false,
+                    origin: MessageOrigin::Delegation {
+                        id: DelegationId::new(),
+                    },
+                },
+                parent: None,
+            },
+            AgentEvent::ItemCompleted {
+                item,
+                status: ItemStatus::Completed,
+            },
+        ],
+    );
+
+    assert_eq!(
+        restarted
+            .reconcile_provider_history(thread, item)
+            .await
+            .expect("resume and reconcile history"),
+        SubmissionState::Committed
+    );
+    assert_eq!(harness.sent_count_containing("durable delivery"), 0);
+}
+
+#[tokio::test]
 async fn an_unavailable_provider_reports_the_terminal_fallback_hint() {
     let harness = Harness::start(full()).await;
     harness.script.unavailable.store(true, Ordering::SeqCst);

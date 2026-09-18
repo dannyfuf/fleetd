@@ -513,6 +513,48 @@ pub(super) async fn assert_refusal(
 }
 
 #[tokio::test(start_paused = true)]
+async fn caller_item_failure_stops_the_created_child_and_releases_capacity() {
+    let harness = Harness::start().await;
+    let (caller, _) = harness.running_caller().await;
+    let caller_id = caller.to_string();
+    harness
+        .store
+        .delegation_write("fail caller delegation item", move |tx| {
+            tx.execute_batch(&format!(
+                "CREATE TRIGGER fail_caller_delegation_item BEFORE INSERT ON agent_events \
+                 WHEN NEW.thread_id = '{caller_id}' \
+                 BEGIN SELECT RAISE(FAIL, 'forced caller item failure'); END;"
+            ))?;
+            Ok(((), false))
+        })
+        .await
+        .expect("install caller-item failure");
+
+    let error = harness
+        .run(request(caller))
+        .await
+        .expect_err("caller item append fails after child creation");
+    assert_eq!(error.kind, ErrorKind::Fs);
+    assert!(
+        harness
+            .store
+            .live_delegations(None)
+            .await
+            .expect("read live delegations")
+            .is_empty(),
+        "the failed setup releases its capacity reservation"
+    );
+    let child = harness
+        .manager
+        .summaries()
+        .await
+        .into_iter()
+        .find(|summary| summary.parent == Some(caller))
+        .expect("the created child remains auditable");
+    assert_eq!(child.session, SessionState::Stopped);
+}
+
+#[tokio::test(start_paused = true)]
 async fn run_carries_the_token_and_seeds_both_transcripts() {
     let harness = Harness::start().await;
     let (caller, caller_turn) = harness.running_caller().await;

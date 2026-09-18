@@ -88,6 +88,8 @@ struct FakeScript {
     active_turn: StdMutex<Option<TurnId>>,
     /// Explicit submission answers consumed in order before the fake's default behaviour.
     submission_answers: StdMutex<VecDeque<Submitted>>,
+    /// Provider-history events emitted synchronously by the next start of one thread.
+    start_events: StdMutex<HashMap<ThreadId, Vec<AgentEvent>>>,
     /// Makes every control change cost a restart, as Claude's launch flags do.
     restarts_on_control: AtomicBool,
 }
@@ -105,6 +107,7 @@ impl FakeScript {
             start_env: StdMutex::new(Vec::new()),
             active_turn: StdMutex::new(None),
             submission_answers: StdMutex::new(VecDeque::new()),
+            start_events: StdMutex::new(HashMap::new()),
             restarts_on_control: AtomicBool::new(false),
         })
     }
@@ -156,6 +159,13 @@ impl FakeScript {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(answer);
+    }
+
+    fn replay_on_next_start(&self, thread: ThreadId, events: Vec<AgentEvent>) {
+        self.start_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(thread, events);
     }
 
     /// Pushes one normalized event into the newest provider's stream.
@@ -244,6 +254,26 @@ impl AgentProvider for FakeProvider {
             .push((req.thread, req.env.clone()));
         self.script
             .record(FakeCall::Start(req.thread, req.resume_cursor));
+        let replay = self
+            .script
+            .start_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&req.thread)
+            .unwrap_or_default();
+        if !replay.is_empty() {
+            let sender = self
+                .script
+                .senders_by_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&req.thread)
+                .cloned()
+                .expect("the starting provider owns an event sender");
+            for event in replay {
+                sender.send(event.into()).expect("provider stream is open");
+            }
+        }
         Ok(())
     }
 
@@ -473,6 +503,19 @@ impl Harness {
 
     pub(crate) fn fail_interrupts(&self) {
         self.script.interrupt_fails.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) async fn drop_provider(&self, thread: ThreadId) {
+        let runtime = self.manager.hydrated(thread).expect("thread is hydrated");
+        let operation = runtime.operation.lock().await;
+        runtime.invalidate_provider();
+        drop(runtime.provider.lock().await.take());
+        runtime.abort_task();
+        drop(operation);
+    }
+
+    pub(crate) fn replay_on_next_start(&self, thread: ThreadId, events: Vec<AgentEvent>) {
+        self.script.replay_on_next_start(thread, events);
     }
 
     /// Rebuilds the manager over the same database, as a daemon restart would.

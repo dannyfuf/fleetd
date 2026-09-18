@@ -389,9 +389,28 @@ impl CodexSession {
 
     /// The Fleet item id for a provider item id, remembering the mapping.
     pub(super) fn item_for(&mut self, thread: &str, provider_item: &str) -> ItemId {
+        if let Some(item) = self.items.get(provider_item).copied() {
+            return item;
+        }
         let item = item_id(thread, provider_item);
         self.items.insert(provider_item.to_owned(), item);
         item
+    }
+
+    /// Adopts a Fleet-minted client id found while replaying provider history.
+    ///
+    /// The process-local optimistic map is empty after restart, but Codex persists
+    /// `clientUserMessageId` and returns it as `clientId`. Parsing that opaque value restores the
+    /// stable outbox item instead of deriving a second id from the provider item.
+    pub(super) fn adopt_historical_client_item(
+        &mut self,
+        provider_item: &str,
+        client_id: Option<&str>,
+    ) -> Option<ItemId> {
+        let item = client_id?.parse().ok()?;
+        self.items.insert(provider_item.to_owned(), item);
+        self.client_items.insert(item.to_string(), item);
+        Some(item)
     }
 
     /// Records the optimistic user item of a turn Fleet is submitting.
