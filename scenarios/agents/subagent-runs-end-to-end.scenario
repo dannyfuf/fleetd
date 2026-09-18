@@ -1,0 +1,17 @@
+# plans/native-subagents-2026-09-17-phase-4-plan.md P4-T01 — a scripted caller creates
+# a real delegation, whose scripted child reports through the private daemon.
+# docs/TESTING-HARNESS.md §5 — `agents-subagent` pairs a Claude caller with a Codex child.
+fixture: agents-subagent
+await idle
+key o
+await screen == Workspace 20000
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert focused == agents.composer
+await idle 30000
+type find the harness path
+key enter
+await agents.delegations[0].status == done 40000
+await agents.delegations[0].delivery == delivered 40000
+dump delegation-done
+quit

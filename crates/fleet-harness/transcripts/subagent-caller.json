@@ -1,6 +1,6 @@
 {"version":1,"steps":[
   {"type":"text","text":"I will delegate the path lookup.","pace_ms":0},
-  {"type":"shell","command":"brief=$(mktemp) && printf '%s\\n' 'Find the path requested by the caller.' > \"$brief\" && fleet subagent run --provider codex --expect \"the path\" --brief-file \"$brief\"; status=$?; rm -f \"$brief\"; exit \"$status\""},
+  {"type":"shell","command":"brief=$(mktemp) && printf '%s\\n' 'Find the path requested by the caller.' > \"$brief\" && fleet subagent run --provider codex --expect \"the path\" --brief-file \"$brief\"; status=$?; sleep 3; rm -f \"$brief\"; exit \"$status\""},
   {"type":"text","text":"delegated, waiting","pace_ms":0},
   {"type":"end_turn","status":"completed"},
   {"type":"text","text":"The delegated path report arrived.","pace_ms":0},

@@ -471,7 +471,10 @@ fn subagent_agents(preset: Preset, document: &str, caller: &str) -> Fixture {
             },
             Agent {
                 provider: Provider::Codex,
-                transcript: approval(),
+                transcript: starter(
+                    include_str!("../../transcripts/subagent-caller-blocked.json"),
+                    "subagent-caller-blocked.json",
+                ),
             },
         ],
         ..base(preset)
@@ -599,6 +602,29 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("{preset} must serve a shell caller step"));
             assert!(command.contains(expected_command), "{preset}: {command}");
+
+            let blocked_caller = fixture
+                .agents
+                .iter()
+                .find(|agent| agent.provider == Provider::Codex)
+                .unwrap_or_else(|| panic!("{preset} must configure the Codex caller"));
+            let blocked_command = blocked_caller
+                .transcript
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|steps| {
+                    steps.iter().find_map(|step| {
+                        (step.get("type").and_then(serde_json::Value::as_str) == Some("shell"))
+                            .then(|| step.get("command"))
+                            .flatten()
+                            .and_then(serde_json::Value::as_str)
+                    })
+                })
+                .unwrap_or_else(|| panic!("{preset} must serve a blocked shell caller step"));
+            assert!(
+                blocked_command.contains("--provider claude"),
+                "{preset}: {blocked_command}"
+            );
         }
     }
 }

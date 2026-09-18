@@ -188,6 +188,7 @@ fn every_starter_transcript_loads_and_validates() {
         "edit-approval.json",
         "error-mid-stream.json",
         "subagent-caller.json",
+        "subagent-caller-blocked.json",
         "subagent-caller-other-worktree.json",
         "subagent-child.json",
         "subagent-child-blocked.json",

@@ -1,0 +1,35 @@
+# plans/native-subagents-2026-09-17-phase-4-plan.md P4-T07 — closing a child tab
+# detaches it without losing the daemon-owned child, which the picker can attach again.
+fixture: agents-subagent
+await idle
+key o
+await screen == Workspace 20000
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert focused == agents.composer
+await idle 30000
+type delegate the path lookup
+key enter
+await agents.delegations[0].status == working 30000
+key ctrl-s d
+await lists.palette.rows[1].badges[1] == child 10000
+key down
+key enter
+await agents.threads[1].attached == true 20000
+
+key ctrl-s x
+await agents.threads[1].attached == false 20000
+assert lists.tabs.rows[4] absent
+
+# The caller's durable delegation row retains the hidden child and re-attaches that same thread.
+key ctrl-s 4
+await lists.tabs.selected.badges[0] == claude 10000
+key ctrl-s [
+await mode == Scroll 10000
+key k
+await agents.threads[0].focused_row == delegation 10000
+key enter
+await agents.threads[1].attached == true 20000
+assert lists.tabs.selected.badges[1] == child && focused == agents.composer
+dump child-reattached
+quit

@@ -1,5 +1,5 @@
 {"version":1,"steps":[
   {"type":"text","text":"I found the requested path and will report it to the caller.","pace_ms":0},
-  {"type":"shell","command":"report=$(mktemp) && printf '%s\\n' 'The path is crates/fleet-harness.' > \"$report\" && fleet subagent complete --result-file \"$report\"; status=$?; rm -f \"$report\"; exit \"$status\""},
+  {"type":"shell","command":"report=$(mktemp) && printf '%s\\n' 'The path is crates/fleet-harness.' 'Checked the caller contract.' 'Checked the child launcher.' 'Checked the fleet shim.' 'Checked the daemon request.' 'Checked the durable record.' 'Checked result delivery.' 'Checked the caller projection.' 'Checked the result card.' > \"$report\" && sleep 5 && fleet subagent complete --result-file \"$report\"; status=$?; rm -f \"$report\"; exit \"$status\""},
   {"type":"end_turn","status":"completed"}
 ]}
