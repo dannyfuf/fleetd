@@ -334,13 +334,10 @@ impl WorkspaceScreen {
         });
         view.update(cx, |view, cx| view.set_host(host, cx));
         self.offer_worktree_files(model, thread, cx);
-        // A resync is requested exactly once per detected gap (§6, client reconnect).
+        // A resync is requested exactly once per detected gap (§6, client reconnect). The cursor
+        // is the daemon-declared one when it named a drop, else the projection's own `last_seq`.
         if state.read(cx).agents.needs_resync(thread) {
-            let from = state
-                .read(cx)
-                .agents
-                .projection(thread)
-                .map(|projection| projection.last_seq);
+            let from = state.read(cx).agents.resume_from(thread);
             open_thread(bridge, state, thread, from, cx);
         }
         if model.overlay_open {

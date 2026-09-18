@@ -526,7 +526,8 @@ impl AgentThreadView {
     /// adapters adopt it, and the daemon records the user item under it. Text is only the
     /// fallback for a daemon that did not adopt the id, and there it compares against the echo
     /// count recorded at dispatch so sending the same message twice does not clear both bubbles
-    /// on the first echo. A failed bubble is never reconciled away: it stays until the user acts.
+    /// on the first echo. An id match also clears a failed bubble whose reply was lost with the
+    /// socket; the text fallback never does, because a failed send may genuinely be absent.
     fn reconcile_pending(&mut self) {
         if self.pending.is_empty() {
             return;
@@ -534,11 +535,11 @@ impl AgentThreadView {
         let before = self.pending.len();
         let projection = &self.projection;
         self.pending.retain(|pending| {
-            if pending.failed {
-                return true;
-            }
             if projection.items.iter().any(|item| item.id == pending.id) {
                 return false;
+            }
+            if pending.failed {
+                return true;
             }
             let echoes = count_user_items(projection, &pending.text);
             echoes <= pending.echoes

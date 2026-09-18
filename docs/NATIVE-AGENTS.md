@@ -1216,6 +1216,14 @@ that *is* the server id**, so reconciliation is by id with no temp-id swap and n
 heuristic. "Sending" clears on a **field diff** against a pre-send snapshot — any server-visible
 movement clears it — not on a correlated ack, which a *steer* would never produce.
 
+Every connection replacement — first connect or reconnect, whether fleetd restarted or not —
+re-opens every projection the client still holds from that projection's own `last_seq`. A catch-up
+open never launches a provider; if the daemon no longer has that cursor, the client falls back
+once to a fresh bounded newest-window open. A replay answer — the ladder admitted `(cursor, head]`
+— carries no transcript on purpose and is applied **onto** the projection the cursor came from;
+only a windowed answer replaces a projection, and a replay for a thread the client no longer
+holds is a gap that re-opens the newest window.
+
 ### 9.3 Remote
 
 > **The remote daemon owns the transcript and the sequence. The local daemon is a re-framing proxy
