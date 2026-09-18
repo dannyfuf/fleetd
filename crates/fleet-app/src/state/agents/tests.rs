@@ -335,6 +335,19 @@ fn a_live_delegation_keeps_its_caller_working() {
         DelegationStatus::Blocked,
     )]);
     assert!(state.agents.is_working(caller.thread));
+
+    let mut finished = delegation(caller.thread, child.thread, DelegationStatus::Succeeded);
+    finished.id = state
+        .agents
+        .delegations()
+        .first()
+        .expect("seeded delegation")
+        .id;
+    state.agents.apply_delegation(finished);
+    assert!(
+        !state.agents.is_working(caller.thread),
+        "the revision-backed live-caller index drops terminal children"
+    );
 }
 
 #[test]

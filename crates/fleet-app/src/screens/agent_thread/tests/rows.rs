@@ -5,7 +5,7 @@ use fleet_core::agents::{
     PermissionChoice, Seq, SessionState, ToolKind, TurnId, TurnOutcome, TurnState,
 };
 use fleet_ui_kit::{
-    DelegationRowStatus, GateOutcome, ToolRowState, TranscriptRowId, TranscriptRowKind,
+    DelegationRowStatus, GateOutcome, Icon, ToolRowState, TranscriptRowId, TranscriptRowKind,
     WorkingPhase,
 };
 
@@ -100,7 +100,11 @@ fn delegation_row_projects_each_status_from_the_durable_map() {
             panic!("the native child is a delegation row");
         };
         assert_eq!(row.status, expected);
-        assert_eq!(row.provider, "codex", "the durable record wins");
+        assert_eq!(
+            row.provider_glyph,
+            Icon::Sparkles,
+            "the durable record wins"
+        );
         assert_eq!(row.title, "verify the payroll reducer");
         assert_eq!(
             row.headline.as_deref(),
@@ -126,6 +130,7 @@ fn delegation_row_prefers_the_child_summary_title_to_the_brief() {
         panic!("the native child is a delegation row");
     };
     assert_eq!(row.title, "windows reducer audit");
+    assert_eq!(row.provider_glyph, Icon::Sparkles);
 }
 
 #[test]
@@ -148,6 +153,21 @@ fn delegation_result_card_collapses_after_eight_lines() {
     assert!(card.collapsible);
     assert!(!card.expanded);
     assert_eq!(card.hint, "⏎ show");
+}
+
+#[test]
+fn short_delegation_result_has_no_inert_expand_hint() {
+    let record = delegation_record(DelegationStatus::Succeeded);
+    let mut projection = projection();
+    projection.items = vec![delegation_result(TurnId::new(), &record, "done")];
+    let locals = Locals::default().delegation(record);
+
+    let built = build_rows(&locals.inputs(&projection));
+    let TranscriptRowKind::DelegationResult(card) = &built.rows[0].kind else {
+        panic!("a delivered child result is a result card");
+    };
+    assert!(!card.collapsible);
+    assert!(card.hint.is_empty());
 }
 
 #[test]

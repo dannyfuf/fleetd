@@ -1433,9 +1433,15 @@ fn run_selected<T: SessionTransport>(
                     cx.notify();
                     None
                 } else {
-                    app.agents
-                        .summary(thread)
-                        .map(|summary| summary.worktree.clone())
+                    app.agents.summary(thread).and_then(|summary| {
+                        let worktree = summary.worktree.clone();
+                        // `select_agent_thread` also returns false when the combined strip is
+                        // full. That refusal already showed its toast and must not fall through
+                        // to EnsureSession, which could switch or wake an unrelated session.
+                        (app.agents.is_attached(thread)
+                            || app.workspace_has_tab_capacity(&worktree))
+                        .then_some(worktree)
+                    })
                 }
             });
             if let Some(worktree) = worktree {
@@ -2069,6 +2075,75 @@ mod tests {
         assert_eq!(caller.key.as_deref(), Some("1"));
         assert_eq!(child.key.as_deref(), Some("2"));
         assert_eq!(hidden.key.as_deref(), Some("·"));
+    }
+
+    #[gpui::test]
+    fn capacity_refused_agent_selection_does_not_ensure_a_session(cx: &mut gpui::TestAppContext) {
+        let (mut app, summaries) = agents_picker_state();
+        let target = summaries
+            .iter()
+            .find(|summary| summary.title == "remote child")
+            .expect("remote child fixture")
+            .thread;
+        let target_worktree = summaries
+            .iter()
+            .find(|summary| summary.thread == target)
+            .expect("target summary")
+            .worktree
+            .clone();
+        let session = app
+            .snapshot
+            .as_mut()
+            .and_then(|snapshot| {
+                snapshot.sessions.iter_mut().find(|session| {
+                    matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == &target_worktree)
+                })
+            })
+            .expect("target worktree session");
+        while session.terminals.len() < crate::state::WORKSPACE_TAB_LIMIT - 1 {
+            let index = session.terminals.len();
+            session.terminals.push(fleet_core::sessions::Terminal {
+                id: fleet_core::ids::TerminalId(index as u64 + 10),
+                name: format!("terminal-{index}"),
+                command: "shell".to_owned(),
+                cwd: session.cwd.clone(),
+                shell_pid: None,
+                foreground_command: None,
+                status: fleet_core::sessions::TerminalStatus::Running,
+                title: None,
+                keep_alive: Vec::new(),
+                has_unseen_output: false,
+                agent_attention: None,
+                kind: fleet_core::sessions::TerminalKind::Pty,
+            });
+        }
+        app.overlay = Some(Overlay::Palette);
+        let rows = candidates(&app, "agents", None, None);
+        let cursor = rows
+            .iter()
+            .position(|row| row.run == Run::OpenAgentThread(target))
+            .expect("target palette row");
+        let state = cx.new(|_| app);
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.palette.rows = rows.into();
+                host.palette.cursor = cursor;
+            });
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, _| PaletteFixture);
+
+        window
+            .update(cx, |_, window, cx| {
+                run_selected(&state, &transport, window, cx)
+            })
+            .expect("run capacity-refused selection");
+
+        assert!(
+            transport.requests.borrow().is_empty(),
+            "a full strip must not issue EnsureSession"
+        );
+        cx.read(|cx| assert!(!state.read(cx).agents.is_attached(target)));
     }
 
     #[test]

@@ -231,7 +231,10 @@ pub(crate) fn delegation_row(
     let provider = delegation.map_or(fallback_provider, |record| record.provider);
     let status = delegation.map_or(fallback_status, |record| record.status);
     DelegationRow {
-        provider: SharedString::new_static(provider.executable()),
+        provider_glyph: match provider {
+            fleet_core::agents::AgentKind::Claude => Icon::Bot,
+            fleet_core::agents::AgentKind::Codex => Icon::Sparkles,
+        },
         title: SharedString::from(
             inputs
                 .delegation_titles
@@ -275,12 +278,19 @@ fn delegation_result_card(
             )
         },
     );
+    let collapsible = text.lines().count() > DELEGATION_RESULT_COLLAPSE_LINES;
     DelegationResultCard {
         header: SharedString::from(header),
         body: Rc::new(parse_markdown_document(text)),
-        collapsible: text.lines().count() > DELEGATION_RESULT_COLLAPSE_LINES,
+        collapsible,
         expanded,
-        hint: SharedString::new_static(if expanded { "⏎ hide" } else { "⏎ show" }),
+        hint: SharedString::new_static(if !collapsible {
+            ""
+        } else if expanded {
+            "⏎ hide"
+        } else {
+            "⏎ show"
+        }),
     }
 }
 

@@ -42,7 +42,7 @@ fn delegation_rows() -> Vec<TranscriptRow> {
         TranscriptRow::new(
             TranscriptRowId::Item(format!("delegation-{index}").into()),
             TranscriptRowKind::Delegation(DelegationRow {
-                provider: "codex".into(),
+                provider_glyph: Icon::Sparkles,
                 title: "verify the payroll reducer".into(),
                 status,
                 headline: Some("the regression test still fails on Windows".into()),
@@ -63,7 +63,7 @@ fn delegation_rows() -> Vec<TranscriptRow> {
                 body: body.clone(),
                 collapsible: true,
                 expanded,
-                hint: "⏎ attach".into(),
+                hint: (if expanded { "⏎ hide" } else { "⏎ show" }).into(),
             }),
         ));
     }
@@ -90,6 +90,14 @@ fn delegation_status_words_and_liveness_are_closed() {
 #[test]
 fn delegation_rows_use_work_rhythm_and_only_results_expand() {
     let rows = delegation_rows();
+    let result_hints = rows
+        .iter()
+        .filter_map(|row| match &row.kind {
+            TranscriptRowKind::DelegationResult(result) => Some(result.hint.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(result_hints, ["⏎ show", "⏎ hide"]);
     for row in &rows {
         assert_eq!(row.rhythm(), super::TranscriptRhythm::Work);
         assert_eq!(

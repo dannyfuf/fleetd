@@ -2,7 +2,7 @@
 
 use gpui::{AnyElement, App, SharedString, div, prelude::*};
 
-use super::render::{RowContext, chevron, header, separator};
+use super::render::{RowContext, chevron, header};
 use super::{DelegationResultCard, DelegationRow, DelegationRowStatus, TranscriptRowId};
 use crate::{
     components::{Spinner, StatusDot, markdown},
@@ -19,9 +19,12 @@ pub(super) fn delegation(row: &DelegationRow, ctx: &RowContext, cx: &App) -> Any
     let theme = cx.theme();
     let line = header(("delegation", ctx.index), false, None, theme)
         .child(Text::ui(SharedString::new_static("↳")).muted().flex_none())
-        .child(Icon::Bot.el().size(IconSize::Large).tone(Tone::Secondary))
-        .child(Text::data_small(row.provider.clone()).muted().flex_none())
-        .child(separator())
+        .child(
+            row.provider_glyph
+                .el()
+                .size(IconSize::Large)
+                .tone(Tone::Secondary),
+        )
         .child(
             div()
                 .flex()

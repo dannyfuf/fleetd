@@ -288,8 +288,8 @@ impl DelegationRowStatus {
 /// child thread and therefore never expands itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationRow {
-    /// The provider name, already formatted by the caller.
-    pub provider: SharedString,
+    /// Provider-specific glyph selected by the caller without exposing a domain type to the kit.
+    pub provider_glyph: Icon,
     /// The child thread's title.
     pub title: SharedString,
     /// The presentation status.

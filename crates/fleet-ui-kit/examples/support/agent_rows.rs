@@ -173,7 +173,7 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
     ] {
         push(
             TranscriptRowKind::Delegation(DelegationRow {
-                provider: "codex".into(),
+                provider_glyph: Icon::Sparkles,
                 title: format!("verify payroll · {name}").into(),
                 status,
                 headline: Some(headline.into()),
@@ -193,7 +193,7 @@ pub fn sample_thread(thread: Thread) -> Vec<TranscriptRow> {
                 body: delegation_result.clone(),
                 collapsible: true,
                 expanded,
-                hint: "⏎ attach".into(),
+                hint: (if expanded { "⏎ hide" } else { "⏎ show" }).into(),
             }),
             Some(TranscriptRowId::Item(
                 format!("delegation-result-{expanded}").into(),

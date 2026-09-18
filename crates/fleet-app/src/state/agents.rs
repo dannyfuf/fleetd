@@ -31,6 +31,8 @@ struct AgentDerived {
     attention: HashMap<ThreadId, Attention>,
     counts: AgentCounts,
     strip_offsets: HashMap<ThreadId, usize>,
+    /// Callers with at least one live durable child, rebuilt only when that census changes.
+    live_delegation_callers: HashSet<ThreadId>,
 }
 
 impl AgentCounts {
@@ -284,6 +286,7 @@ impl AgentThreads {
         self.delegations = next;
         self.delegation_order = next_order;
         self.delegations_revision = self.delegations_revision.wrapping_add(1);
+        self.prepare_live_delegation_callers();
     }
 
     /// Applies one changed delegation, advancing the row generation only for a real change.
@@ -316,6 +319,16 @@ impl AgentThreads {
             self.resync.insert(caller);
         }
         self.delegations_revision = self.delegations_revision.wrapping_add(1);
+        self.prepare_live_delegation_callers();
+    }
+
+    fn prepare_live_delegation_callers(&mut self) {
+        self.derived.live_delegation_callers = self
+            .delegations
+            .values()
+            .filter(|delegation| delegation.status.is_live())
+            .map(|delegation| delegation.caller)
+            .collect();
     }
 
     fn bump_attached_revision(&mut self) {
@@ -649,10 +662,7 @@ impl AgentThreads {
             matches!(projection.turn, fleet_core::agents::TurnState::Running(_))
                 || projection.session == fleet_core::agents::SessionState::Running
                 || !projection.background_tasks.is_empty()
-        }) || self
-            .delegations_of_caller(thread)
-            .iter()
-            .any(|delegation| delegation.status.is_live())
+        }) || self.derived.live_delegation_callers.contains(&thread)
     }
 
     /// Whether a thread's event stream must be re-opened before deltas may be applied.
