@@ -147,6 +147,12 @@ pub fn format_stopped_after(duration_ms: u64) -> SharedString {
     ))
 }
 
+/// A provider-exit fold: `cut off after 12s`.
+#[must_use]
+pub fn format_cut_off_after(duration_ms: u64) -> SharedString {
+    SharedString::from(format!("cut off after {}", format_duration(duration_ms)))
+}
+
 /// The collapsed reasoning line: `thought 12s`.
 ///
 /// One spelling for both harnesses on purpose (`spec-B` §B3.3): Claude streams raw thinking and
@@ -304,6 +310,7 @@ mod tests {
         assert_eq!(format_worked(Some(12_000), 1), "worked 12s · 1 step");
         assert_eq!(format_worked(None, 3), "worked");
         assert_eq!(format_stopped_after(12_000), "you stopped after 12s");
+        assert_eq!(format_cut_off_after(12_000), "cut off after 12s");
         assert_eq!(format_thought(12_000), "thought 12s");
         assert_eq!(format_working(0), "working 0s");
         assert_eq!(format_working(42_000), "working 42s");

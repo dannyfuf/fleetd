@@ -35,7 +35,7 @@ use fleet_proto::error::ProtoError;
 
 use super::{
     AgentSessionManager, AgentThreadRecord, ManagerInner,
-    apply::{closed_gate_answer, update_record},
+    apply::{closed_gate_answer, publish_summary, update_record},
     not_found, storage_error,
     thread::ThreadRuntime,
 };
@@ -146,6 +146,12 @@ async fn hydrate(
             recover_orphan(inner, &mut record, &mut projection).await;
             if let Err(error) = inner.store()?.write_record(&record).await {
                 tracing::warn!(thread = %record.thread, %error, "could not persist native-agent restart recovery");
+            }
+            if !orphaned(&projection) {
+                publish_summary(
+                    inner,
+                    projection.summary(fleet_core::agents::Seq::default()),
+                );
             }
         }
     }

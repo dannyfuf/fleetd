@@ -350,12 +350,13 @@ async fn restart_without_fleet(process: &mut Daemon) -> anyhow::Result<()> {
 
 /// Replaces fleetd while Fleet cannot enter its detached-spawn path.
 async fn restart_while_fleet_is_stopped(process: &mut Daemon) -> anyhow::Result<()> {
-    // `Daemon::shutdown` is also how the runner's handle learns its process is gone. Only a
+    // The orderly stop is also how the runner's handle learns its process is gone. Only a
     // handle that knows it has been reaped leaves the socket path alone when it is dropped,
     // and the replacement below binds that same path — so the restart stops here if the
-    // orderly stop did not complete.
+    // orderly stop did not complete. The holders are left running, as `fleet daemon restart`
+    // leaves them: a restart the user's terminals do not survive is a different fault.
     process
-        .shutdown()
+        .shutdown_keeping_sessions()
         .await
         .context("stop fleetd before restarting it")?;
     seal(process)?;

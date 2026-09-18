@@ -29,6 +29,7 @@ Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lin
 | `codex-mode-menu.scenario` | `^s t` consumes Codex's smaller declared access-mode set and keeps the draft | `NATIVE-AGENTS.md` §7 |
 | `unread-mark.scenario` | a turn that reaches its gate while you are on another tab marks the thread; looking clears the mark and not the gate | `NATIVE-AGENTS.md` §3.3, §6.1 |
 | `unread-mark-survives-a-reconnect.scenario` | a thread read before a daemon restart remains read after reconnect through its persisted installation cursor | `NATIVE-AGENTS.md` §3.3, §10 |
+| `turn-cut-by-a-daemon-restart.scenario` | a gated running turn is cut off and settled after restart, then resumes lazily on the next send | `NATIVE-AGENTS.md` §3.3, §8, §9.2 |
 | `prefix-inside-a-thread.scenario` | agent controls plus `^s 1`–`9`, `^s Tab`, and `^s w` are bound in an agent tab while `^s s` is not | `KEYMAP.md` §Shadowing, §Native agent thread |
 | `scroll-wheel.scenario` | two fixture turns complete; wheel input moves up and back through the transcript without crashing | `NATIVE-AGENTS.md` §5 |
 

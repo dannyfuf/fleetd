@@ -991,6 +991,55 @@ fn an_optimistic_bubble_is_reconciled_by_id_even_when_its_display_text_differs(
     });
 }
 
+#[gpui::test]
+fn a_failed_bubble_is_reconciled_only_by_its_client_minted_id(cx: &mut TestAppContext) {
+    cx.update(|cx| fleet_ui_kit::Theme::init(fleet_ui_kit::ThemeMode::Dark, cx));
+
+    for matching_id in [true, false] {
+        let mut base = projection();
+        base.last_seq = fleet_core::agents::Seq(1);
+        let view = cx.new(|cx| AgentThreadView::new(base.clone(), cx));
+        let commands = recorder(&view, cx);
+        view.update(cx, |view, cx| {
+            let input = view.input().clone();
+            input.update(cx, |input, cx| {
+                input.set_text("ship it", cx);
+                input.submit(cx);
+            });
+        });
+        cx.run_until_parked();
+        let item = commands
+            .borrow()
+            .iter()
+            .find_map(|command| match command {
+                BridgeCommand::AgentSend { input, .. } => input.item,
+                _ => None,
+            })
+            .expect("the send carries the client-minted id");
+        view.update(cx, |view, cx| view.send_failed(item, "socket closed", cx));
+
+        let turn = TurnId::new();
+        let mut echoed = user(turn, "ship it");
+        if matching_id {
+            echoed.id = item;
+        }
+        let mut next = base;
+        next.items = vec![echoed.clone()];
+        next.turns = vec![running_turn(turn, echoed.id)];
+        next.turn = TurnState::Running(turn);
+        next.last_seq = fleet_core::agents::Seq(2);
+        view.update(cx, |view, cx| view.sync(&next, &Applied::Structural, cx));
+
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                count_user_rows(view),
+                if matching_id { 1 } else { 2 },
+                "only the daemon item with the client-minted id proves the failed send landed"
+            );
+        });
+    }
+}
+
 /// A refused send marks its bubble failed and frees the composer: the thread stops reading
 /// `working`, the reason is said once, and the next send goes out instead of being refused as
 /// unacknowledged.

@@ -190,8 +190,13 @@ pub(super) fn publish_applied(
         event: applied.event,
     });
     if let Some(summary) = applied.summary {
-        inner.events.publish(Event::AgentSummary(summary));
+        publish_summary(inner, summary);
     }
+}
+
+/// Broadcasts the current list-row projection for one thread.
+pub(super) fn publish_summary(inner: &ManagerInner, summary: AgentThreadSummary) {
+    inner.events.publish(Event::AgentSummary(summary));
 }
 
 /// The `ItemStarted` that records what the user typed.

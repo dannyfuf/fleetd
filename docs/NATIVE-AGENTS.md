@@ -163,6 +163,9 @@ pub async fn spawn(kind: HarnessKind, cfg: &HarnessConfig, probe: &ProbeCache)
 
 Construction is a free function because the failure modes differ before a process exists.
 
+On Linux every probe and session child installs `PR_SET_PDEATHSIG(SIGKILL)` and verifies that its
+parent did not change across fork/exec; macOS has no parent-death signal and relies on stdin EOF.
+
 **Which binary.** `HarnessConfig.command` comes from `config.agentBinaries.{claude,codex}` — the
 executable the daemon `execve`s, with **no shell**. It is deliberately *not* `config.agentCommands`,
 which is the shell line a PTY pane types and may legally be a shell function or an alias: `cc` in a
@@ -309,7 +312,8 @@ Transition rules, each closing a real race:
    shows a spinner on a finished turn.
 4. Gates are independent of turns. A gate closes only on `GateResolved` or `GateWithdrawn`.
 5. Stream or process loss is `SessionExited { expected: false }` plus `RuntimeError`, which makes
-   the turn `Failed`. Never inferred success.
+   the turn `Failed`. Never inferred success. Restart recovery is the explicit exception: it
+   follows rule 9 and aborts a resumable orphan as `Interrupted` before leaving it `Stopped`.
 6. A user message sent while running is **steering**, dispatched immediately. There is no queue
    and no `QueuedMessage` row — see §7.2.
 7. Attention derives from gates, then work, then failure, then fresh completion.
@@ -798,6 +802,10 @@ invisible"* (`MessagesTimeline.logic.ts:575`).
 open is the user's time and is subtracted from the harness's figure by the reducer. That is why
 the fold says `worked 22s` on a turn that was on screen for four minutes.
 
+An interrupted turn caused by the user reads `you stopped after 12s` with footer word `stopped`;
+a stopped session reads `stopped after 12s` / `stopped`; a provider-exit abort reads
+`cut off after 12s` / `cut off`. Older records with no abort reason keep the user-stop copy.
+
 Diffs render as their own row under an expanded edit row, so an expanded diff never inflates the
 tool row's own measurement, drawn by `fleet_lazygit::diff_view::DiffView` from unified-diff text
 (ADR 0010 — the kit gains no `fleet-git` dependency). Claude supplies `old_string`/`new_string`
@@ -1136,7 +1144,9 @@ is worked through **in the background, one thread at a time**: a thread whose `p
 its `head_seq` is replayed through the same projector a live append uses, and one that cannot be
 replayed is marked `session_state = 'error'` while the daemon starts anyway. Taking the census
 before anything can write is what makes the pass safe — a thread created afterwards can never be in
-it, so a live thread is never mistaken for an orphan of the previous run.
+it, so a live thread is never mistaken for an orphan of the previous run. For each orphan it
+settles, the repair pass also publishes the settled summary so a client that connected before the
+pass reached that thread sees the tab change without opening it.
 
 `index.json` is gone, and with it the whole-file rewrite on every metadata change: a record is one
 upsert on one row, which touches no projected column.
@@ -1211,6 +1221,14 @@ SQLite is the cache. On open it paints the retained `Arc<ThreadProjection>` sync
 that *is* the server id**, so reconciliation is by id with no temp-id swap and no matching
 heuristic. "Sending" clears on a **field diff** against a pre-send snapshot — any server-visible
 movement clears it — not on a correlated ack, which a *steer* would never produce.
+
+Every connection replacement — first connect or reconnect, whether fleetd restarted or not —
+re-opens every projection the client still holds from that projection's own `last_seq`. A catch-up
+open never launches a provider; if the daemon no longer has that cursor, the client falls back
+once to a fresh bounded newest-window open. A replay answer — the ladder admitted `(cursor, head]`
+— carries no transcript on purpose and is applied **onto** the projection the cursor came from;
+only a windowed answer replaces a projection, and a replay for a thread the client no longer
+holds is a gap that re-opens the newest window.
 
 ### 9.3 Remote
 

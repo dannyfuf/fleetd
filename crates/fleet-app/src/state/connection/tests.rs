@@ -1,5 +1,16 @@
 use super::*;
 use crate::state::test_support::*;
+use fleet_core::agents::{AgentKind, Seq, ThreadId, ThreadProjection};
+
+fn installed_agent(last_seq: u64) -> (ThreadProjection, fleet_core::agents::AgentThreadSummary) {
+    let worktree = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("test worktree must parse: {error}"));
+    let mut projection = ThreadProjection::new(ThreadId::new(), worktree, AgentKind::Claude);
+    projection.last_seq = Seq(last_seq);
+    let summary = projection.summary(Seq::default());
+    (projection, summary)
+}
 
 #[test]
 fn reconnect_backoff_matches_the_spec() {
@@ -78,6 +89,82 @@ fn every_new_link_bumps_the_generation_screens_re_attach_on() {
         now,
     );
     assert_eq!(state.link_generation, start + 3);
+}
+
+#[test]
+fn every_replacement_connection_resyncs_installed_agent_projections_from_their_cursor() {
+    for restarted in [true, false] {
+        let now = Instant::now();
+        let mut state = AppState::new("/tmp/fleet", now);
+        let (projection, summary) = installed_agent(7);
+        let thread = projection.thread;
+        let mut before = snapshot();
+        before.agent_threads = vec![summary.clone()];
+        state.apply_snapshot(before, now);
+        state.agents.install_snapshot(projection, &[]);
+        state.agents.mark_resync_from(thread, Seq(3));
+
+        let mut after = snapshot();
+        after.agent_threads = vec![summary];
+        state.apply_bridge_event(
+            BridgeEvent::Reconnected {
+                restarted,
+                snapshot: Box::new(after),
+            },
+            now,
+        );
+
+        assert!(state.agents.needs_resync(thread));
+        assert_eq!(
+            state.agents.resume_from(thread),
+            Some(Seq(7)),
+            "the replacement link resumes from the installed projection, not its old drop cursor"
+        );
+    }
+}
+
+#[test]
+fn a_replacement_connection_does_not_resync_a_projection_the_snapshot_pruned() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let (projection, summary) = installed_agent(7);
+    let thread = projection.thread;
+    let mut before = snapshot();
+    before.agent_threads = vec![summary];
+    state.apply_snapshot(before, now);
+    state.agents.install_snapshot(projection, &[]);
+
+    state.apply_bridge_event(
+        BridgeEvent::Reconnected {
+            restarted: true,
+            snapshot: Box::new(snapshot()),
+        },
+        now,
+    );
+
+    assert!(state.agents.projection(thread).is_none());
+    assert!(!state.agents.needs_resync(thread));
+}
+
+#[test]
+fn a_replacement_connection_does_not_resync_a_summary_only_thread() {
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let (_, summary) = installed_agent(7);
+    let thread = summary.thread;
+    let mut after = snapshot();
+    after.agent_threads = vec![summary];
+
+    state.apply_bridge_event(
+        BridgeEvent::Reconnected {
+            restarted: false,
+            snapshot: Box::new(after),
+        },
+        now,
+    );
+
+    assert!(state.agents.projection(thread).is_none());
+    assert!(!state.agents.needs_resync(thread));
 }
 
 #[test]

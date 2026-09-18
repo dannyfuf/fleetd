@@ -360,9 +360,20 @@ impl Daemon {
         self.client().await.map(drop)
     }
 
-    /// Asks the daemon to exit, waits for the process, and leaves no socket behind.
+    /// Asks the daemon to exit with its terminals, waits for the process, and leaves no socket
+    /// behind. This is teardown: nothing the run started may outlive it.
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-        let refusal = self.request_shutdown().await;
+        self.stop(true).await
+    }
+
+    /// Asks the daemon to exit the way `fleet daemon restart` does: the PTY holders stay up so
+    /// the replacement adopts the same sessions, which is what a restart scenario is proving.
+    pub async fn shutdown_keeping_sessions(&mut self) -> anyhow::Result<()> {
+        self.stop(false).await
+    }
+
+    async fn stop(&mut self, stop_sessions: bool) -> anyhow::Result<()> {
+        let refusal = self.request_shutdown(stop_sessions).await;
         let killed = match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
             Ok(status) => {
                 status.context("wait for fleetd to exit")?;
@@ -390,10 +401,10 @@ impl Daemon {
     }
 
     /// Asks a reachable daemon to exit, and reports why it could not be asked.
-    async fn request_shutdown(&self) -> Option<String> {
+    async fn request_shutdown(&self, stop_sessions: bool) -> Option<String> {
         match Client::connect(self.home()).await {
             Ok(client) => client
-                .daemon_shutdown(true)
+                .daemon_shutdown(stop_sessions)
                 .await
                 .err()
                 .map(|error| error.to_string()),

@@ -327,6 +327,18 @@ impl AgentThreads {
         self.resync.insert(thread);
     }
 
+    /// Re-opens every installed projection after a daemon connection is replaced.
+    ///
+    /// Each projection supplies its own `last_seq`; an older daemon-declared cursor belongs to
+    /// the connection that just went away and must not override it.
+    pub fn resync_installed(&mut self) {
+        let installed: Vec<ThreadId> = self.mirror.projections.keys().copied().collect();
+        for thread in installed {
+            self.resync.insert(thread);
+            self.resume_from.remove(&thread);
+        }
+    }
+
     /// Records a daemon-declared drop of this connection's tail for one thread.
     ///
     /// Backpressure is never a stall, never an OOM, and never a silent drop: the daemon names
@@ -345,12 +357,18 @@ impl AgentThreads {
     }
 
     /// The cursor a re-open should resume from, when the daemon named one.
+    ///
+    /// Only a thread with an installed projection resumes from anywhere: a cursor names what
+    /// the projection already holds, and without one the open asks for the newest window.
     #[must_use]
     pub fn resume_from(&self, thread: ThreadId) -> Option<Seq> {
-        self.resume_from.get(&thread).copied().or_else(|| {
-            self.projection(thread)
-                .map(|projection| projection.last_seq)
-        })
+        let projection = self.projection(thread)?;
+        Some(
+            self.resume_from
+                .get(&thread)
+                .copied()
+                .unwrap_or(projection.last_seq),
+        )
     }
 
     /// Marks a thread's catch-up complete, which is the only transition into live.

@@ -259,6 +259,32 @@ pub fn expand_home(path: &Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
+#[cfg(target_os = "linux")]
+fn configure_parent_death(command: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: the callback runs between fork and exec, captures only a pid, and calls only
+    // `prctl`, `getppid`, and `_exit`, which are safe in the post-fork child. Checking the
+    // captured pid closes the race where fleetd dies before the child installs PDEATHSIG.
+    unsafe {
+        command.pre_exec(move || {
+            // `prctl` is variadic and reads this argument as `unsigned long`; an `int` passed
+            // through varargs leaves the register's upper half unspecified.
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_parent_death(_command: &mut Command) {
+    // macOS has no parent-death signal; harness children rely on stdin EOF instead.
+}
+
 /// Spawns a harness child with piped stdio.
 pub async fn spawn_child(
     harness: HarnessKind,
@@ -279,6 +305,7 @@ pub async fn spawn_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    configure_parent_death(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| launch_failure(harness, command_line, &error))?;
@@ -316,6 +343,7 @@ pub async fn read_version(
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .kill_on_drop(true);
+    configure_parent_death(&mut command);
     let name = harness.display_name();
     let output = tokio::time::timeout(deadline, command.output())
         .await
