@@ -293,6 +293,182 @@ fn subagent_items_track_background_work_until_the_item_settles() {
 }
 
 #[test]
+fn a_background_item_survives_turn_settlement_until_its_terminal_update() {
+    let mut projection = projection();
+    let mut events = EventBuilder::new();
+    let turn = turn_id(106);
+    let subagent = item_id(107);
+    apply(&mut projection, &mut events, session_started());
+    start_turn(
+        &mut projection,
+        &mut events,
+        turn,
+        item_id(108),
+        "Delegate research",
+    );
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::ItemStarted {
+            turn,
+            item: subagent,
+            kind: ItemKind::Subagent {
+                name: "explore".to_owned(),
+                description: "Find callers".to_owned(),
+                result: None,
+            },
+            parent: None,
+        },
+    );
+
+    complete_turn(&mut projection, &mut events, turn);
+
+    let item = projection
+        .items
+        .iter()
+        .find(|item| item.id == subagent)
+        .unwrap_or_else(|| panic!("background item must remain projected"));
+    assert_eq!(item.status, ItemStatus::InProgress);
+    assert_eq!(item.ended, None);
+    assert_eq!(projection.background_tasks, [subagent]);
+    assert_eq!(
+        projection.attention(projection.last_seq),
+        Attention::Working
+    );
+
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::ItemUpdated {
+            item: subagent,
+            patch: ItemPatch {
+                status: Some(ItemStatus::Completed),
+                ..ItemPatch::default()
+            },
+        },
+    );
+
+    assert!(projection.background_tasks.is_empty());
+    assert_eq!(projection.attention(projection.last_seq), Attention::Idle);
+}
+
+#[test]
+fn delegation_items_settle_only_from_their_own_late_events() {
+    let mut projection = projection();
+    let mut events = EventBuilder::new();
+    let turn = turn_id(109);
+    let patched = item_id(110);
+    let completed = item_id(111);
+    apply(&mut projection, &mut events, session_started());
+    start_turn(
+        &mut projection,
+        &mut events,
+        turn,
+        item_id(112),
+        "Delegate two tasks",
+    );
+    for (item, child) in [(patched, thread_id(113)), (completed, thread_id(114))] {
+        apply(
+            &mut projection,
+            &mut events,
+            AgentEvent::ItemStarted {
+                turn,
+                item,
+                kind: ItemKind::Delegation {
+                    id: crate::agents::DelegationId::new(),
+                    provider: AgentKind::Codex,
+                    child,
+                    status: crate::agents::DelegationStatus::Starting,
+                },
+                parent: None,
+            },
+        );
+    }
+
+    complete_turn(&mut projection, &mut events, turn);
+
+    assert!(projection.background_tasks.is_empty());
+    assert_eq!(
+        projection.attention(projection.last_seq),
+        Attention::Idle,
+        "an open delegation is not background work on the caller"
+    );
+    assert!(
+        projection
+            .items
+            .iter()
+            .filter(|item| item.id == patched || item.id == completed)
+            .all(|item| item.status == ItemStatus::InProgress && item.ended.is_none())
+    );
+
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::ItemUpdated {
+            item: patched,
+            patch: ItemPatch {
+                payload: Some(ItemPayloadPatch::Delegation {
+                    status: crate::agents::DelegationStatus::Running,
+                }),
+                ..ItemPatch::default()
+            },
+        },
+    );
+    let patched_item = projection
+        .items
+        .iter()
+        .find(|item| item.id == patched)
+        .unwrap_or_else(|| panic!("patched delegation must remain projected"));
+    assert!(matches!(
+        &patched_item.kind,
+        ItemKind::Delegation {
+            status: crate::agents::DelegationStatus::Running,
+            ..
+        }
+    ));
+    assert_eq!(patched_item.status, ItemStatus::InProgress);
+
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::ItemUpdated {
+            item: patched,
+            patch: ItemPatch {
+                payload: Some(ItemPayloadPatch::Delegation {
+                    status: crate::agents::DelegationStatus::Succeeded,
+                }),
+                status: Some(ItemStatus::Completed),
+            },
+        },
+    );
+    apply(
+        &mut projection,
+        &mut events,
+        AgentEvent::ItemCompleted {
+            item: completed,
+            status: ItemStatus::Failed,
+        },
+    );
+
+    assert_eq!(
+        projection
+            .items
+            .iter()
+            .find(|item| item.id == patched)
+            .map(|item| item.status),
+        Some(ItemStatus::Completed)
+    );
+    assert_eq!(
+        projection
+            .items
+            .iter()
+            .find(|item| item.id == completed)
+            .map(|item| item.status),
+        Some(ItemStatus::Failed)
+    );
+}
+
+#[test]
 fn usage_accumulates_by_turn_while_cost_and_context_use_latest_observation() {
     let mut projection = projection();
     let mut events = EventBuilder::new();

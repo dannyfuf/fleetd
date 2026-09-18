@@ -428,8 +428,12 @@ impl ThreadProjection {
     }
 
     fn close_open_items(&mut self, turn: TurnId, at: DateTime<Utc>) {
+        let background_tasks = &self.background_tasks;
         for item in self.items.iter_mut().filter(|item| item.turn == turn) {
-            if item.status.terminal() {
+            if item.status.terminal()
+                || background_tasks.contains(&item.id)
+                || matches!(&item.kind, ItemKind::Delegation { .. })
+            {
                 continue;
             }
             item.status = if tool_has_result(&item.kind) {
@@ -441,14 +445,6 @@ impl ThreadProjection {
             };
             item.ended = Some(at);
         }
-        let items = &self.items;
-        let item_index = &self.item_index;
-        self.background_tasks.retain(|item_id| {
-            item_index
-                .get(item_id)
-                .and_then(|index| items.get(*index))
-                .is_some_and(|item| item.turn != turn)
-        });
     }
 
     fn fail_active_turn(&mut self, at: DateTime<Utc>, message: &str) {
