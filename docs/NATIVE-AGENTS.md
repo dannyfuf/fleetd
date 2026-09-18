@@ -917,6 +917,10 @@ prompt, then
 options are deliberately unnamed, because §6.3's options are answered by number and a name would
 imply a stable identity they do not have.
 
+After projecting an event, `project_event` also runs the delegation transition when that thread
+is a delegation child or caller; a gate opening, resolving or withdrawing therefore moves both
+the ordinary thread projection and the delegation record in the same writer transaction (§15).
+
 ## 7. Controls
 
 ### 7.1 The model of a control
@@ -1464,7 +1468,7 @@ this build does not do**, named here rather than softened in the section that sp
 | 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
 | 8 | **Checkpoints and revert.** Fleet-owned git refs, `AgentRevert`, `[u]` | **done**: `services/checkpoints/` captures a turn or a file scope into `refs/fleet/checkpoints/`, reverts a worktree from one without touching `HEAD`, the index or the conversation, and garbage collects per thread plus an hourly orphan sweep. `AgentSessionManager` holds the service and takes both captures — `capture_turn` in `send`, for a turn that is actually starting rather than a steer, and `capture_files` on the `ItemStarted` of an edit-shaped tool. A capture failure logs and the turn proceeds, always (§5). The app draws `[u] revert turn` from `AgentCheckpoints` and sends `AgentRevert`. **Owed**: `[u] revert this edit` on a tool row. A file-scope checkpoint names the *turn* it was taken in and not the item, so a tool row has nothing to key on; and the capture is best-effort by construction, because neither harness waits for Fleet before running an auto-approved tool — the turn-scope checkpoint is the guarantee, the file-scope one is the finer-grained revert when the race goes Fleet's way, which it always does for a gated edit |
-| 9 | **Delegations.** Durable caller/child model, transcript origin, storage migration and capability-gated wire family | **model and wire landed; nothing served**. Phase 2 defines `DelegationId`, the delegation/result/delivery states, child metadata on records and summaries, migration 3, six requests, three response variants and `DelegationChanged`; phase 3 owns the service and advertises `agent.delegation` only when those verbs are live |
+| 9 | **Delegations.** Durable caller/child model, transcript origin, storage migration and capability-gated wire family | **service and CLI served; UI, recovery owed** |
 
 The whole Workspace session table — selection and MRU (`^s 1`–`9`, `^s Tab`, `^s w`), `^s s`,
 `^s S`, `^s h`/`p`/`l`/`n`, `^s W`, `^s c`, `^s y`, `^s z`, `^s v`/`V`/`N`/`P`, `^s !`, `^s J`,
@@ -1516,3 +1520,174 @@ inside the adapter rather than becoming transcript identity.
   (§4.2, §7.1): `/login` and `/logout` drive the one account of the `CODEX_HOME` the thread runs
   under, which is a different thing from running two accounts side by side.
 - **Human PR review is not an agent state.** It stays in Hub/Pull Requests.
+
+## 15. Delegations
+
+A delegation is **two durable things**, never a special harness mode. The child is an ordinary
+native-agent thread owned by `AgentSessionManager`, with its caller in `parent` and its delegation
+id on the thread record. Beside it is a `Delegation` record: why the child exists, which caller
+turn and transcript item launched it, where its answer must go, its lifecycle, result and delivery
+state. The thread owns conversation and provider lifecycle; the record owns the caller/child
+contract. Rebuilding a thread never deletes or recreates that record.
+
+`fleet subagent run` is accepted only during a running caller turn. It creates the child with
+`FLEET_DELEGATION=<id>` and `FLEET_DELEGATION_TOKEN=<token>`, inserts the delegation row, appends
+an `ItemKind::Delegation` under that turn, then sends the first message. The default worktree is
+the caller's, the default mode is `FullAccess`, and the default child title is
+`↳ <provider> — <first line of the brief, cut at 48 characters>`. A caller on a remote mirror is
+refused: phase 3 runs children only on the daemon that owns the caller.
+
+### 15.1 State and completion
+
+The lifecycle is:
+
+```text
+Starting --SessionConfigured--> Running
+any live state --GateOpened---> Blocked --GateResolved/GateWithdrawn--> Running
+completed + reported + no background work ----------------------------> Succeeded
+completed + reported + background work --> Settling --clear/deadline--> Succeeded
+completed + no report + nudge remaining -> Settling + Nudge
+Starting | Running | Blocked | Settling --terminal ending------------->
+    Succeeded | Incomplete | Failed | Cancelled
+```
+
+An already-terminal delegation ignores every later child event. `headline` may change on a child
+tool starting, a terminal item update/completion, or turn settlement; streaming `ContentDelta`
+never writes it.
+
+"Done" has three independent parts, and their arrival order is not significant:
+
+1. The child reports a result through `fleet subagent complete` with the right delegation id,
+   child thread and bearer token.
+2. Its turn settles `Completed` with no open question, plan or permission gate.
+3. Its projected background-task set is empty. If a reported child settles while background work
+   remains, it stays `Settling` until that set clears or `created + 30 seconds` has passed, then
+   succeeds even if that work never emits its terminal event.
+
+A report may beat settlement or settlement may beat the report. An identical second report is an
+idempotent success; a different second report is refused, as are a wrong token, a wrong child and
+any report against a terminal delegation. `--blocked` stores the report, sets `Blocked` with
+`status_payload = "reported blocked"`, and becomes `Failed` when the turn settles.
+
+A child whose completed turn has no reported result is nudged, at most twice. Each later completed
+turn re-evaluates the same rule. After the second nudge is exhausted, the next completed turn ends
+`Incomplete`, using the first 4 KiB of the latest assistant message as a
+`LastAssistantText` result. Every settlement refreshes that fallback unless a `Reported` result
+already exists; a reported result always wins.
+
+| Child ending | Delegation ending | Result and follow-up |
+| --- | --- | --- |
+| `TurnSettled(Completed)`, reported, no background work | `Succeeded` | deliver the reported result |
+| `TurnSettled(Completed)`, reported, background work live | `Settling`, then `Succeeded` | wait for background work or the 30 s grace, then deliver |
+| `TurnSettled(Completed)`, no report, nudges remain | `Settling` | send the nudge and continue |
+| `TurnSettled(Completed)`, no report, nudges exhausted | `Incomplete` | capture the latest assistant text and deliver |
+| `TurnSettled(Completed)` after `--blocked` | `Failed` | deliver the blocked report |
+| `TurnSettled(Error | MaxTurns | BudgetExhausted | Denied | Other)` | `Failed` | retain the outcome and latest assistant text, then deliver |
+| `TurnSettled(Interrupted)` | `Cancelled` | deliver; child cancellation propagation is owed |
+| `TurnAborted(User | SessionStopped | Timeout | Superseded | Other)` | `Cancelled` | deliver; child cancellation propagation is owed |
+| `TurnAborted(ProviderExited)` | `Failed` | payload `provider exited`, then deliver; recovery is owed |
+| fatal `RuntimeError` or unexpected `SessionExited` | `Failed` | deliver |
+| expected `SessionExited` while live | `Cancelled` | deliver; child cancellation propagation is owed |
+
+Recovery after a provider exit, the resume nudge and cancellation propagation to descendants are
+not phase-3 behavior; phase 6 owes them. The native transcript rows, child-tab navigation and
+delegation result cards are also owed to the UI phases. The service and CLI described here are the
+shipped surface.
+
+`fleet subagent cancel` refuses an already-terminal record, interrupts and stops the child, and
+lets the resulting `TurnAborted(SessionStopped)` take the ordinary `Cancelled` delivery path. A
+Stop issued through any other surface has the same result.
+
+### 15.2 Delivery and exactly once
+
+Every follow-up action caused by a state change (`Mirror`, `Nudge`, `Settle`, `Deliver`, and the
+future `Recover`/`CancelChildren`) enters the delegation outbox in the same SQLite transaction as
+the child or caller event that caused it. The worker drains once before serving, on every wake,
+and every 60 seconds; it reads rows in id order and handles at most one row per caller per pass.
+Two children finishing together therefore become two caller turns rather than one combined turn.
+A row stays open until its action actually happens, so a daemon restart or transient error costs a
+retry, not a lost result.
+
+Delivery first terminally patches the caller's delegation transcript item, completing it as
+`Completed` for `Succeeded` and `Failed` for every other terminal status. It then chooses by the
+caller's durable state:
+
+| Caller state | Delivery rule |
+| --- | --- |
+| `Ready`, idle, no open gate | start a new turn with a user message whose origin is `Delegation { id }` |
+| running, `eager == false` | leave `Deliver` open until the turn settles |
+| running, `eager == true` | send now; the harness steers the active turn |
+| stopped by `ProviderExit`, with a resume cursor | send, allowing the manager to resume the caller |
+| stopped by the user | leave `Deliver` open until a later `SessionConfigured` |
+| blocked on a gate | leave `Deliver` open until the gate resolves or withdraws |
+| stopped with no resume cursor, or record missing | set `Undeliverable { reason }` and close the row |
+
+A send that loses a race with a newly-running turn returns `Conflict` and leaves the row open; any
+other send failure is logged and retried. The worker deliberately does **not** mark `Deliver` done
+after calling `send`. When the caller's `ItemStarted(UserMessage { origin: Delegation { id } })`
+is committed, `project_event` sets `delivery = Delivered { seq, turn }` and marks that exact
+outbox row done in the same transaction. This caller-item rule is the exactly-once boundary: the
+message's durable identity, not a successful function return, proves delivery.
+
+### 15.3 Limits and bearer token
+
+- Delegation depth is at most 3; a caller at depth 3 cannot spawn another child.
+- One caller may have at most 4 live children, and one daemon at most 8 live delegations.
+- A child receives at most 2 missing-result nudges.
+- `SETTLE_GRACE` is 30 seconds; the retry tick is 60 seconds.
+- Results are capped at `ITEM_BODY_MAX_CHUNK_BYTES` (256 KiB). Truncation sets `elided` and is
+  named in both CLI stderr and the delivered message.
+- `fleet subagent wait` defaults to 540 seconds and refuses a larger timeout.
+
+The token is two concatenated `Uuid::new_v4().simple()` values: 64 lowercase hexadecimal
+characters, or 32 random bytes. Only its SHA-256 hex digest is stored. `complete` hashes the
+presented token and compares the two digests with a constant-time XOR fold. The plaintext exists
+only in the child's `FLEET_DELEGATION_TOKEN`; the delegation id is separately available as
+`FLEET_DELEGATION`, and `FLEET_SESSION` identifies the child thread.
+
+### 15.4 Exact child and caller copy
+
+The child's first message is its brief, one blank line, then this footer with `{id}` and
+`{expectation}` substituted:
+
+```text
+--- Fleet delegation {id} ---
+You are running as a subagent. No human is watching this session.
+The caller expects: {expectation}
+When the work is fully finished and verified, report it with exactly one command:
+  fleet subagent complete --result-file <path-to-your-report.md>
+Write the report first, then run the command. Do not run it before you are done.
+If you are blocked and cannot finish, run:
+  fleet subagent complete --blocked --result-file <path-with-what-you-need>
+Do not ask the user questions; state assumptions in the report instead.
+```
+
+The missing-result nudge is exactly:
+
+```text
+You have not reported a result. If the work is done, run `fleet subagent complete --result-file <path>`. If not, continue.
+```
+
+The phase-6 recovery nudge is reserved exactly as follows, but is not sent in phase 3:
+
+```text
+The session was restarted. Continue, and report with `fleet subagent complete` when done.
+```
+
+When the child shares the caller's worktree, `run` returns this warning:
+
+```text
+the child edits the caller's worktree; end your turn before it works, or pass --worktree
+```
+
+The delivered message is:
+
+```text
+[fleet subagent <id> finished: succeeded]
+provider: codex, thread: <child>, duration: 14m 02s, files changed: 6
+
+<text>
+```
+
+The status word is `succeeded`, `incomplete`, `failed` or `cancelled`. An elided result adds one
+blank line and `(report elided at <n> bytes)`.

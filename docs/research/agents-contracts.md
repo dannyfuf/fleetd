@@ -479,6 +479,41 @@ Option<String>, Option<String>)`, `open(&self, ThreadId, Option<Seq>)`, `close(&
 request. `thread.rs` holds the per-thread runtime (`ThreadState`, `ThreadRuntime`) behind the
 serialized operation gate; it is `pub(super)` and not part of the crate's public surface.
 
+Delegations add `DelegationService`, constructed beside the manager and paired with the one
+`DelegationWorker` that owns its wake receiver. It holds the store, manager, broadcast bus,
+configuration and worktree resolver, and serves the six capability-gated requests through:
+
+```rust
+DelegationService::run(RunRequest) -> Result<ResponseBody, ProtoError>
+DelegationService::complete(CompleteRequest) -> Result<ResponseBody, ProtoError>
+DelegationService::list(Option<ThreadId>) -> Result<ResponseBody, ProtoError>
+DelegationService::get(DelegationId) -> Result<ResponseBody, ProtoError>
+DelegationService::wait(DelegationId, u64) -> Result<ResponseBody, ProtoError>
+DelegationService::cancel(DelegationId) -> Result<ResponseBody, ProtoError>
+```
+
+`run` receives `{ caller, provider, brief, expectation, worktree, mode, model, title, eager }`;
+`complete` receives `{ delegation, child, token, result, blocked }`. `new` returns the service and
+worker together, `wake_sender` supplies the store's post-commit hook, and `publish_changed` emits
+`Event::DelegationChanged`. The worker drains once at start, then on a wake and every retry tick.
+
+The manager's delegation seams are:
+
+- `create_with(CreateOptions)`, where `CreateOptions` adds `parent`, `delegation` and `extra_env`
+  to the ordinary worktree/provider/model/mode/resume/title inputs;
+- `running_turn(ThreadId) -> Result<Option<TurnId>, ProtoError>` and
+  `append_item(ThreadId, TurnId, ItemKind) -> Result<ItemId, ProtoError>`, the three request-path
+  verbs used to create and seed the child and its caller row;
+- `patch_item(ThreadId, ItemId, ItemPatch, Option<ItemStatus>) -> Result<(), ProtoError>`,
+  `record(ThreadId) -> Result<AgentThreadRecord, ProtoError>`, and
+  `projection(ThreadId) -> Result<ThreadProjection, ProtoError>`, used by the outbox worker; and
+- `delegation_facts(&ThreadProjection, &AgentThreadRecord) -> DelegationFacts`, the pre-event
+  snapshot passed into the store transaction.
+
+`apply_event` derives those facts before reducing the event. The store's `project_event` runs the
+delegation transition after the ordinary item and turn projections, so the delegation status and
+its outbox actions commit with the child or caller event that caused them.
+
 ## `fleet-client`
 
 Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live in
@@ -680,6 +715,28 @@ stack, so `fleet-ui-kit` gains no `fleet-git` dependency: the payload rows come 
 `tail <THREAD> [--replay]`, and `terminal [claude|opencode]` — the last being the former
 `fleet agent [claude|opencode]`, kept under its own verb as the §10 PTY fallback. Read-only verbs
 open with `Some(Seq(0))` so looking at a thread never triggers the §6 lazy resume.
+
+`fleet subagent` is implemented in `commands/subagents.rs`. Every verb accepts `--json`; human
+output otherwise follows the exact copy in `NATIVE-AGENTS.md` §15.
+
+- `run --provider <claude|codex> [--brief-file F] --expect <text> [--worktree W] [--mode M]
+  [--model M] [--title T] [--eager] [--caller <thread>]` reads the brief from the file or stdin.
+  Caller selection is `--caller`, then `FLEET_SESSION`; neither being present is a validation
+  error.
+- `complete [<id>] [--result-file F] [--blocked] [--json-result]` reads the result from the file
+  or stdin. Its id is the argument or `FLEET_DELEGATION`; its child is `FLEET_SESSION`; its bearer
+  token is `FLEET_DELEGATION_TOKEN`. All three are required after fallback. `--json-result`
+  validates the result as JSON but does not change its wire type.
+- `wait <id> [--timeout S]` defaults to 540 seconds and caps the flag at 540; timeout exits 2 and
+  a terminal record exits 0.
+- `status <id>` prints one delegation.
+- `list [--caller T]` prints all delegations or those belonging to one caller.
+- `cancel <id>` cancels one live delegation.
+
+The environment contract is therefore deliberately narrow: `FLEET_SESSION` is the `run` caller
+fallback and the mandatory `complete` child; `FLEET_DELEGATION` is the `complete` id fallback;
+and `FLEET_DELEGATION_TOKEN` authenticates `complete`. No other subagent verb reads delegation
+environment state.
 
 ## Additions after the Stage 0 freeze
 

@@ -253,6 +253,7 @@ CREATE TABLE delegations (
   nudges INTEGER NOT NULL DEFAULT 0, recoveries INTEGER NOT NULL DEFAULT 0,
   delivery TEXT NOT NULL, delivered_seq INTEGER, delivered_turn TEXT, delivery_reason TEXT,
   headline TEXT,
+  reported_at TEXT, report_sha256 TEXT,
   created TEXT NOT NULL, finished TEXT
 );
 CREATE INDEX idx_delegations_caller ON delegations(caller_thread, created);
@@ -267,7 +268,11 @@ ALTER TABLE threads ADD COLUMN delegation_id TEXT;
 ALTER TABLE threads ADD COLUMN stop_cause TEXT;
 ```
 `status` and `delivery` store the snake_case words; `result_files` is a JSON array; timestamps RFC 3339
-like the rest of the schema (copy `created_at`'s encoding). `threads` insert/list/read statements read and
+like the rest of the schema (copy `created_at`'s encoding). `reported_at` and `report_sha256` are
+store-only (never on the wire): the time the first `complete` was accepted and the SHA-256 of the
+full, untruncated report, so a repeated `complete` can be judged byte-identical after truncation and a
+different one refused naming the first report's time. Slot 3 has not shipped, so amending its SQL (and
+its recorded sha256) is allowed until the branch merges. `threads` insert/list/read statements read and
 write the three new columns; `stop_cause` is written from the record on every metadata write.
 `rebuild_thread` and `quarantine_after` never touch `delegations` (comment says why).
 
@@ -294,8 +299,15 @@ pub(super) fn open_rows_for(conn: &Connection, delegation: DelegationId) -> anyh
 pub(super) fn mark_done(tx: &Transaction, row: i64, now: DateTime<Utc>) -> anyhow::Result<()>;
 pub(super) fn mark_done_for(tx: &Transaction, delegation: DelegationId, action: OutboxAction, now: DateTime<Utc>) -> anyhow::Result<usize>;
 pub(super) fn caller_exists(conn: &Connection, caller: ThreadId) -> anyhow::Result<bool>;        // threads row, not deleted
+pub(crate) fn set_report(tx: &Transaction, id: DelegationId, result: &DelegationResult, report_sha256: &str, now: DateTime<Utc>) -> anyhow::Result<()>;
+pub(crate) fn report_meta(conn: &Connection, id: DelegationId) -> anyhow::Result<Option<(String, DateTime<Utc>)>>; // (report_sha256, reported_at)
 ```
 `Transaction` and `Connection` are `rusqlite`'s. The file imports nothing from `services::agents::manager`.
+**Visibility (decided 2026-09-18):** the module is declared `pub(crate) mod delegations;` in `store/mod.rs`
+and every function above is `pub(crate)`, so the service's `delegation_write` closures call
+`store::delegations::{insert, update, get, token_hash, enqueue, mark_done, mark_done_for, set_report, report_meta, ...}`
+directly. That is the only sanctioned way for the service to write inside a transaction; no SQL lives outside
+`store/delegations.rs`.
 
 ### 3.3 `SqliteAgentStore` additions (`store/mod.rs`, bodies in `writer.rs`/`delegations.rs`)
 ```rust
@@ -393,6 +405,11 @@ messages naming the rule that refused. Composition: `services/composition.rs` co
 the manager, installs the hooks, and `start_periodic_tasks` spawns `worker.run(shutdown)` beside the other
 loops. Dispatch: six arms `RequestBody::Delegation*` → `self.agent_response(self.delegations.<verb>(..).await)`.
 
+`complete` (decided 2026-09-18): the first accepted report calls `set_report` with the SHA-256 of the
+untruncated text and `now`; a repeat whose SHA-256 equals `report_meta`'s hash is an idempotent success
+that changes nothing; a repeat with a different hash is refused with `conflict("delegation <id> already
+reported at <reported_at RFC 3339>")`. Token comparison is constant time over the two SHA-256 digests.
+
 ### 4.1 Manager verbs (`manager/commands.rs`, `manager/apply.rs`, `manager.rs`)
 ```rust
 pub struct CreateOptions {
@@ -402,8 +419,11 @@ pub struct CreateOptions {
 }
 pub async fn create_with(&self, options: CreateOptions) -> Result<ResponseBody, ProtoError>;  // `create` becomes a wrapper
 pub async fn running_turn(&self, thread: ThreadId) -> Result<Option<TurnId>, ProtoError>;      // under the operation lock
-/// Appends `ItemStarted { kind }` under `turn`; refuses (`conflict`) when that turn is not running.
-pub async fn append_item(&self, thread: ThreadId, turn: TurnId, kind: ItemKind) -> Result<ItemId, ProtoError>;
+/// Appends `ItemStarted { item, kind }` under `turn` with a caller-minted id (the client's
+/// optimistic-id pattern, `UserInput.item`); refuses (`conflict`) when that turn is not running.
+/// Decided 2026-09-18: the id is minted by the caller so `run` can write the delegation row (which
+/// needs `caller_item`) before the item exists, in the order row -> item -> first message.
+pub async fn append_item(&self, thread: ThreadId, turn: TurnId, item: ItemId, kind: ItemKind) -> Result<(), ProtoError>;
 /// Appends `ItemUpdated { item, patch }` and, when `complete` is `Some`, `ItemCompleted { item, status }`.
 pub async fn patch_item(&self, thread: ThreadId, item: ItemId, patch: ItemPatch, complete: Option<ItemStatus>) -> Result<(), ProtoError>;
 pub async fn record(&self, thread: ThreadId) -> Result<AgentThreadRecord, ProtoError>;         // a clone of the record
