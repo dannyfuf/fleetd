@@ -209,7 +209,7 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `toasts` | `[{level,text,count}]`; levels use the UX vocabulary `info`, `success`, `warning`, `error` |
 | `sticky_error` | stable human-readable failed-job text or null |
 | `jobs` | `[{id,status}]`; status is the daemon job vocabulary (`queued`, `running`, `succeeded`, `failed`, `cancelled`) |
-| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate,decision,parent,attached}],delegations:[{id,status,caller,child,delivery,headline}],decision:{kind,item,diff}|null}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md`; additive version-1 `threads[].decision` is null or `{kind:"permission"|"question"|"plan",title:string,paths:[string],has_diff:bool}` prepared from the rendered decision; additive `threads[].parent` is the caller thread id or null and `threads[].attached` says whether this window currently shows the thread in its strip; delegation `status` and `delivery` use their compact protocol words and `headline` is nullable; the legacy active-thread `agents.decision` remains available |
+| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate,decision,parent,attached,delegation_rows,result_cards,focused_row,expanded_result_cards}],delegations:[{id,status,caller,child,delivery,headline}],decision:{kind,item,diff}|null}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md`; additive version-1 `threads[].decision` is null or `{kind:"permission"|"question"|"plan",title:string,paths:[string],has_diff:bool}` prepared from the rendered decision; additive `threads[].parent` is the caller thread id or null and `threads[].attached` says whether this window currently shows the thread in its strip; additive `threads[].delegation_rows` counts projected delegation items and `threads[].result_cards` counts delivered delegation-origin user messages; `threads[].focused_row` is null or `delegation`, `delegation_result`, or `other`, and `threads[].expanded_result_cards` reports the mounted view's expanded delivered cards, so scenarios can await transcript row state before acting; delegation `status` and `delivery` use their compact protocol words and `headline` is nullable; the legacy active-thread `agents.decision` remains available |
 | `terminal` | `{rows:[string],text:string,cursor:{row,col,shape},viewport:{top,rows,history}}` or null; cursor shapes are `block`, `bar`, `underline`, `hidden` |
 | `targets` | map target name → `{x,y,w,h,frame}` in logical window coordinates |
 | `daemon` | `{link,attempt,dismissed,restarted}`; `link` is `starting`, `failed`, `connected`, `lost` or `reconnected`. An additive version-1 field: `key_contexts` appends `Daemon > Banner` only behind a chain that can carry it, so on a first-run Fleet or behind an open overlay a lost daemon is otherwise invisible to every predicate |
@@ -224,8 +224,11 @@ trailing empty rows, so `terminal.rows.len()` need not equal `terminal.viewport.
 must not assume the viewport's last row exists in `terminal.rows`. `jobs[].status` may also be
 `cancelling`, which is a real daemon job state.
 
-The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `board` and `board.cards`. An agent
-tab whose thread has a parent includes the additive `child` badge. The
+The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `palette`, `board` and
+`board.cards`. While the agent picker is open, `lists.palette` projects its native-thread rows:
+`id` is the thread id; `label` is the rendered picker label; `badges` are provider,
+`caller`/`child`, and worktree id; and `marks` are attention, `go`/`attach`, and
+`attached`/`hidden`. An agent tab whose thread has a parent includes the additive `child` badge. The
 last of those, and every key of `targets`, carries characters a dotted path would split on, so a
 predicate reaches them with the quoted step §2 defines: `lists["board.cards"].rows[0].label`,
 `targets["worktrees.row[0]"].frame`. The
@@ -399,9 +402,10 @@ The `agents` fixture embeds all three starters: Claude serves the two turns from
 
 Two additive presets select delegation callers without changing `agents`: `agents-subagent`
 serves `subagent-caller.json` to Claude, and `agents-subagent-other-worktree` serves
-`subagent-caller-other-worktree.json`. Both seed `acme/api#agent` and `acme/api#other`. Their
-caller writes a brief to a temporary file and invokes the hermetic `fleet subagent run`; the
-other-worktree variant passes `--worktree acme/api#other`.
+`subagent-caller-other-worktree.json`. Both also serve `subagent-caller-blocked.json` to Codex,
+so `^s A` reaches the Claude-child blocked path. Both seed `acme/api#agent` and
+`acme/api#other`. Each caller writes a brief to a temporary file and invokes the hermetic
+`fleet subagent run`; the other-worktree variant passes `--worktree acme/api#other`.
 
 The launcher chooses by role. With `FLEET_DELEGATION` unset it plays the preset transcript. With
 the variable set, Codex plays `subagent-child.json`, which writes a temporary report and runs

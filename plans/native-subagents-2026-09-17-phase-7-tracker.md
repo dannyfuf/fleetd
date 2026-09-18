@@ -10,18 +10,23 @@
 - Definition of done is not met until every box is ticked and this tracker matches reality.
 
 ## Kickoff
-- [ ] I have read the plan end to end.
+- [x] I have read the plan end to end.
 - [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
-- [ ] I am ready to start.
+- [x] I am ready to start.
 
 ## Tasks
-- [ ] P7-T01 — Write ADR 0017 and index it
-- [ ] P7-T02 — `fleet doctor` reports whether a harness child can find `fleet`
-- [ ] P7-T03 — Record the deferred items in `TODO.md` and `NATIVE-AGENTS.md` §14
-- [ ] P7-T04 — Cross-document audit and the final verification set
+- [x] P7-T01 — Write ADR 0017 and index it
+  - verified: ADR 0017 exists, follows the adopted/built/amends shape, and is indexed.
+- [x] P7-T02 — `fleet doctor` reports whether a harness child can find `fleet`
+  - verified: `make doctor` passed after restart and resolved this worktree's `target/debug/fleet`.
+- [x] P7-T03 — Record the deferred items in `TODO.md` and `NATIVE-AGENTS.md` §14
+  - verified: every deferred design item has the required impact/start/done fields and §14 entry.
+- [x] P7-T04 — Cross-document audit and the final verification set
+  - verified: lint/check/test, doctor, ten-run recovery, headless subagent scenarios, and both live providers were exercised.
 
 ## Notes / decisions log
-(Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
+- 2026-09-18 — `make doctor` initially found protocol 7 and a missing child PATH; restarting this build with `target/debug` on PATH produced a fully green report.
+- 2026-09-18 — The plan's short live-test filter matched zero tests; the documented full module path ran both Claude and Codex tests successfully.
 
 ## Follow-ups
-(Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+- Re-run `make harness` in the virtual lane when a compositor is available; the attempted run fell back headless and stopped at the first screenshot scenario.

@@ -10,22 +10,31 @@
 - Definition of done is not met until every box is ticked and this tracker matches reality.
 
 ## Kickoff
-- [ ] I have read the plan end to end.
+- [x] I have read the plan end to end.
 - [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
-- [ ] I am ready to start.
+- [x] I am ready to start.
 
 ## Tasks
-- [ ] P4-T01 — Teach the harness to spawn a real delegation from a scripted caller
-- [ ] P4-T02 — `DelegationRow` and `DelegationResultCard` in the kit
-- [ ] P4-T03 — Delegation state, the `attached` set and `reopen` in the app
-- [ ] P4-T04 — Project the delegation row and the result card into the transcript
-- [ ] P4-T05 — The child tab: title, caller segment, placeholder, `^s u`, `^s x` detaches
-- [ ] P4-T06 — Attention bubbles up from children to the caller
-- [ ] P4-T07 — Harness scenarios for the row, attach, detach, blocked child and `^s u`
-- [ ] P4-T08 — Update the four authoritative documents for the surfaces added
+- [x] P4-T01 — Teach the harness to spawn a real delegation from a scripted caller
+  - verified: `subagent-runs-end-to-end` passes in the headless harness suite.
+- [x] P4-T02 — `DelegationRow` and `DelegationResultCard` in the kit
+  - verified: fleet-ui-kit row coverage and example build pass.
+- [x] P4-T03 — Delegation state, the `attached` set and `reopen` in the app
+  - verified: app agent-state tests pass in `make test`.
+- [x] P4-T04 — Project the delegation row and the result card into the transcript
+  - verified: agent-thread row/view tests and result-card scenario pass.
+- [x] P4-T05 — The child tab: title, caller segment, placeholder, `^s u`, `^s x` detaches
+  - verified: workspace tests and attach/detach/up-to-caller scenarios pass headlessly.
+- [x] P4-T06 — Attention bubbles up from children to the caller
+  - verified: state/notification tests and blocked-child scenario pass.
+- [x] P4-T07 — Harness scenarios for the row, attach, detach, blocked child and `^s u`
+  - verified: all five scenarios passed headlessly; virtual execution was attempted but no compositor is available.
+- [x] P4-T08 — Update the four authoritative documents for the surfaces added
+  - verified: UX, keymap, native-agent, and harness docs were checked against scenarios and code.
 
 ## Notes / decisions log
-(Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
+- 2026-09-18 — Fixed durable-delegation/caller-item ordering in the app and added the permitted harness snapshot fields and fixtures.
+- 2026-09-18 — Corrected KEYMAP wording: Enter attaches on delegation rows, while result-card Enter expands and only delegation rows cancel.
 
 ## Follow-ups
-(Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+- Re-run the screen corpus in the virtual lane when a compositor is available; this machine only provided headless coverage.

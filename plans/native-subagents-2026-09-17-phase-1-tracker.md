@@ -10,18 +10,22 @@
 - Definition of done is not met until every box is ticked and this tracker matches reality.
 
 ## Kickoff
-- [ ] I have read the plan end to end.
+- [x] I have read the plan end to end.
 - [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
-- [ ] I am ready to start.
+- [x] I am ready to start.
 
 ## Tasks
-- [ ] P1-T01 — Split `Submitted.queued` into `JoinedActive` and `QueuedNew`
-- [ ] P1-T02 — Keep live background items open when their turn settles
-- [ ] P1-T03 — Record why a thread stopped on its record
-- [ ] P1-T04 — Update the two documents that describe `Submitted` and thread state
+- [x] P1-T01 — Split `Submitted.queued` into `JoinedActive` and `QueuedNew`
+  - verified: manager tests and the final workspace suite pass; no `queued: bool` remains.
+- [x] P1-T02 — Keep live background items open when their turn settles
+  - verified: fleet-core and daemon store projection tests pass in `make test`.
+- [x] P1-T03 — Record why a thread stopped on its record
+  - verified: manager lifecycle/restart coverage passes in `make test`.
+- [x] P1-T04 — Update the two documents that describe `Submitted` and thread state
+  - verified: reviewed `NATIVE-AGENTS.md` and `agents-contracts.md` against the implemented enums.
 
 ## Notes / decisions log
-(Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
+- 2026-09-18 — No phase-1 implementation deviation was reported; final integrated lint/check/test are green.
 
 ## Follow-ups
-(Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+- None.

@@ -688,6 +688,7 @@ what is running elsewhere.*
 | Exited tab | label at `fg.faint` + `circle-x` 12 px + exit code | — | a dead command must not look alive | `Terminal.status` |
 | `+` tab | `plus` glyph | end of the strip | mouse parity for `ctrl-s c` | — |
 | Native tab | `git-branch` glyph between the index and the name | inside the tab | the tab does not type what you press into a shell; the glyph is the only thing that says so before you try | `Terminal.kind = Native` |
+| Native child tab | `↳ <provider> — <title>` with the ordinary provider badge and a `child` badge | in the same numbered strip, immediately after its caller and older attached siblings | the arrow is the only child-specific title chrome; the badge makes the relationship machine-readable to the harness | `AgentThreadSummary.parent`, the window-local attached set |
 | Terminal area | painted cell grid, 8 px padding, no border | fills | maximum rows; chrome is ≤ 86 px total | — |
 | Native pane | the Fleet-drawn view for this tab, filling the terminal area exactly | replaces the grid | the tab is a tab: same header, same strip, same bars, same pixel positions | `Terminal.kind = Native`, `Worktree.path` |
 | Scroll pill | `SCROLL <offset>/<scrollback_len>`, + a second line `v select · y yank · Esc exit` while selecting; 176 × 22 px, `bg.raised`, amber left bar | overlay, top-right **inside** the terminal area, 12 px inset | during scroll the eyes are on content; top-right never covers the prompt and never shifts the grid | `viewport{scrollback_len, offset}` |
@@ -724,6 +725,11 @@ close buttons, a breadcrumb (the session name in the status bar is the breadcrum
 | Job running for this worktree | `⟳n` in the header and the status-bar ticker; **never** an overlay on the grid |
 | Daemon lost | grid dims to 55 %, keys are dropped (not buffered), and the §3.12 C banner replaces the header |
 
+Caller threads stay in daemon order. Each caller is followed by only its **attached** children,
+in child creation order; an unattached child remains daemon-owned and reachable through its
+delegation row or `^s d`, but consumes no strip slot. `^s x` closes a caller tab as usual and
+detaches a child tab without stopping or deleting that child.
+
 **Icons:** `git-branch`, `cloud`, `cloud-off`, `circle-dot`, `circle`, `moon`, `circle-help`, `circle-check`, `loader-circle`,
 `zap`, `bot`, `sparkles` (opencode), `server`, `file-pen`, `plus`, `circle-x`, `square-terminal`,
 `chevrons-up` (scroll pill), `command` (prefix pill), `maximize-2` (zoom hint), `unplug`.
@@ -739,7 +745,8 @@ key context, so its bare keys are not "drawn over Terminal mode".
 tab, every key except `ctrl-s` → the pane; `ctrl-s` then
 `ctrl-s` (literal) · `s` hub · `1`–`9` tab ·
 `h`/`l`, `p`/`n` prev/next tab · `Tab` last terminal tab (KEYMAP A2) · `w` last session (KEYMAP A3) ·
-`W` session switcher (KEYMAP A4) · `S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
+`W` session switcher (KEYMAP A4) · `u` select this child's caller · `d` `AGENTS` picker ·
+`S` sleep this session and return to Hub (KEYMAP A5) · `c` new tab ·
 `x` close tab (confirm if a keep-alive process runs) · `,` rename · `[` scroll · `]` paste ·
 `a`/`A` new native Claude/Codex agent thread · `F` the agent PTY popup (the terminal fallback) · `r` restart the exited command (KEYMAP A10) · `y` copy worktree path (KEYMAP A11)
 · `z` zoom · `!` sticky error slot (prefixed: `^s !`, KEYMAP A18) · `J` jobs · `?` help · `Esc` cancel
@@ -822,8 +829,12 @@ toast; the URL is also a `Notice` row, so it stays reachable when the browser do
 | Settled gate row | one line — `allowed once · bash: git push --force`, `answered · which package manager? → pnpm`, `withdrawn · the agent stopped waiting` | transcript, where it was asked | docking the live drawer must not lose the narrative | resolved `OpenGate` |
 | Live activity row | one row, one id, present tense: `working 1m 12s` → `thought 6s` → `running cargo` | pinned in the running turn | thinking → tool A running → tool A done → tool B running is one row changing its label, not four mounts | `RowId::LiveActivity` |
 | Steered message | an ordinary user bubble with a leading `↳` | transcript, inside the running turn | a message sent while a turn runs is a steer, dispatched immediately — there is no queue and no queued row | `UserRow.steered` |
+| Delegation row | `↳` + provider glyph + title + `starting` / `working` / `blocked` / `done` / `incomplete` / `failed` / `cancelled`; one gray spinner, amber dot, `circle-check` or `circle-x`; optional headline on line two; elapsed time and `⏎ attach` trail | at the caller item that launched the child | the durable row keeps a hidden child reachable and changes in place as `DelegationChanged` arrives, without rewriting the caller projection | `ItemKind::Delegation` joined to `Delegation` |
+| Delegation result card | `↳ <provider> finished · <word> · <elapsed> · <n> files` above the delivered Markdown; collapsed to eight lines with the ordinary fold affordance and `attach` hint | the caller's delivered user-message origin | the answer reads as a result of the child rather than as text typed by the user; `Enter` expands the body without attaching the still-hidden child | `UserMessage.origin = Delegation { id }` |
 | Composer | 36 px box, `❯` prompt glyph, placeholder `message claude… (@ files · $ skills · / commands)`; grows one line at a time to eight | docked, bottom | no send button: `⏎` sends, `⇧⏎` inserts a newline | `MultilineInput` |
 | Metadata row | 22 px: `claude-opus-5 · high · asks before edits · build` left, `34% · $0.42 · 48m · dev@example.com` right; **every segment the harness reports is shown and none is invented**, and it collapses from the right into an overflow count while the model segment truncates instead | under the composer | losing which model is answering is worse than losing its name's tail | `ThreadProjection`, `MetadataRow` |
+| Child caller segment | pinned first metadata segment `for [<n>] <provider> — <title>`; `[<n>]` is `·` while the caller is hidden; link tone and focus ring, target = caller thread | first and non-collapsible in a child metadata row | activating it or `^s u` attaches the caller when needed, selects it and focuses its composer | `AgentThreadSummary.parent`, `MetadataSegment.target` |
+| Child composer | `Steering a subagent of [<n>]. It reports to its caller when it finishes.` | composer placeholder on a child only | makes the reporting boundary explicit before a human steers the child | caller strip index |
 | Account segment | the **last** trailing segment: `signed out` when the harness reports no account, else its email — or its plan when there is no email — and **nothing at all** when the harness reports no account signal (Claude always, Codex until its first `account/read`) | end of the metadata row | the first thing a revoked token costs is a turn, and the row is where the user finds out why before the refusal; last so it collapses before the context meter | `ThreadProjection.account` |
 | Empty state | `new claude thread · feat-x` over `ask anything · @ files · $ skills · / commands` | centered in an empty transcript | a new thread must say what to type | — |
 | Mode word | `AGENT` | status bar, center | §2.8; keys reach Fleet's composer, not a PTY | `Mode::Agent` |
@@ -864,8 +875,13 @@ denied, exited), `triangle-alert` (error card), `circle-arrow-down` (jump to lat
 
 **Keyboard:** `docs/KEYMAP.md` § *Native agent thread* is authoritative. In short: `⏎` send ·
 `⇧⏎` newline · `⇧⇥` mode · `/` commands · `@` files · `↑` history · `^s m` model · `esc`
-interrupt while working · `^s [` scroll · `^s x` close · `^s a`/`^s A` new thread · `^s F` the
-PTY fallback. A decision card takes `y` / `a` / `n` / `e` / `esc` (permission), `1`–`4` /
+interrupt while working · `^s [` scroll · `^s x` close a caller or detach a child · `^s u`
+select the caller · `^s d` open the `AGENTS` picker · `^s a`/`^s A` new thread · `^s F` the
+PTY fallback. With a delegation row focused, `Enter` attaches and selects its child and `x`
+cancels the delegation; with a result card focused, `Enter` expands or collapses its body without
+attaching the child. `y` copies the delegation id from either row. A decision card takes `y` /
+`a` / `n` / `e` / `esc`
+(permission), `1`–`4` /
 `space` / `⏎` (question), `y` / `n` / `⏎` (plan).
 
 ---
@@ -1449,6 +1465,29 @@ up to **10** rows × 34 px, sections in the fixed order `GO` → `DO` → `CONTE
 | Cap | 10 rows total, fixed section order | — | a fixed maximum keeps `Enter` predictable — the top match never moves below the fold | §5 "first 10" |
 | Destructive commands | prefixed with `triangle-alert`, and still routed through their confirm dialog | — | the palette never bypasses a confirm | §1.7 |
 
+`^s d` opens the same palette with the query seeded to `agents` and shows the single `AGENTS`
+section. Its rows have five fixed slots:
+
+| Slot | Content |
+| --- | --- |
+| Key | the current strip index when attached, otherwise `·` |
+| Mark | the thread's attention glyph; a blocked gate reads `needs you` through the same amber vocabulary as its tab |
+| Primary | `↳ <provider> — <title>` for a child, `<provider> — <title>` for a caller |
+| Detail | `<word> · <age>`, except an open gate names `blocked · permission`, `blocked · question` or `blocked · plan` |
+| Trailing verb | `go` for an attached thread or caller, `attach` for a hidden child |
+
+The order is callers for the current worktree, their children in creation order, then those
+callers' children on other worktrees. An other-worktree child appends ` · <worktree>` to its
+primary label. `Enter` selects an attached thread, attaches and selects a hidden child, reopens
+and selects a closed caller, or switches to the named worktree before attaching and selecting its
+child; all four paths finish with the composer focused, and merely being blocked never attaches a
+thread. Closing a selected caller removes it from this window's attached set, selects the
+remaining terminal and restores `TERMINAL`; its picker row remains available with key `·`, verb
+`go` and hidden state until `Enter` reopens it.
+
+The strip still has the hard nine-tab ceiling. Attach what you look at, detach when done, and
+reach the rest through `^s d`; delegation rows and the picker retain every hidden child.
+
 **States:** empty query → `GO` shows the 5 most-recently-opened worktrees, `DO` the 5 most-used
 commands. No match → `Nothing matches "<query>".` A command invalid in the current context is
 **not listed at all** — never greyed, because a greyed row costs a `j`.
@@ -1810,8 +1849,11 @@ each component's full API. `Modal` is an alias of `Dialog` and `TabBar` an alias
 | --- | --- | --- |
 | `TranscriptList` | Bottom-anchored variable-height rows over gpui `list`, keyed and spliced, jump-to-latest, scroll mode | §3.6.0 |
 | `ToolRow` | The 30 px `glyph · 60 px kind · summary · result` row, with nested children and a bounded expanded body | §3.6.0 |
+| `DelegationRow` | Two-line live/terminal child summary with provider, status mark, headline, elapsed time and attach hint; never fold-grouped | §3.6.0 |
+| `DelegationResultCard` | Delivered child result in Markdown, collapsed to eight lines and expandable with the shared fold affordance | §3.6.0 |
 | `DecisionCard` | Permission / question / plan card with the amber left bar; owns the key vocabulary, not the key event | §3.6.0 |
 | `MultilineInput` | The docked composer: wrapping, IME, paste, `↑` history, `⏎`/`⇧⏎`, `/` and `@` triggers | §3.6.0 |
+| `MetadataRow` / targeted `MetadataSegment` | Width-aware metadata whose opaque optional target renders in link tone, takes a focus ring and activates through click or `Enter`; used by a child's pinned caller segment | §3.6.0 |
 | `Markdown` | Assistant prose parsed from a stream, stable under growth | §3.6.0 |
 | `DiffView` (`fleet-lazygit`) | Inline unified diff under an edit row, ADR 0005 rows with the semantic diff washes | §3.6.0 |
 

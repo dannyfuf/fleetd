@@ -58,6 +58,8 @@ The canvas fixes these decisions; do not relitigate them in code.
   closed and the strip is what forgets it. No thread-list sidebar, no inspector, no detached diff
   pane. Wide windows leave the right side empty on purpose; the content measure is 760 px with a
   16 px inset.
+  A child thread is in the strip only when attached; detaching it changes this window's tab set,
+  not the daemon-owned thread or its durable delegation.
 - **The pane is a transcript above a docked composer.** The transcript is bottom-anchored. The
   composer is a multi-line input (`❯` glyph, placeholder `Message claude… (@ file · / command ·
   $ skill)`), Enter sends, Shift+Enter inserts a newline, no send button, and a 22 px metadata row:
@@ -1394,8 +1396,10 @@ The CLI drives the same requests: `fleet agent list|new|send|respond|interrupt|s
 | `MultilineInput` | Wrapping, IME, paste, history, Enter/Shift+Enter, `@` `/` `$` triggers. Reports triggers rather than consuming the keys, so all three stay typable and a picker filters on `active_trigger().query`. History recalls at the *visual* buffer edge. |
 | `Markdown` | Parses a *prefix* safely: every decided block stays a block, at the same index, as the stream grows. A table's header is the one two-line opener and stays the last paragraph until its delimiter arrives. `MarkdownDocument::append` reparses only that open tail and reuses its highlight cache. A partial fence is not highlighted and never reaches the cache. Prose is one wrapping `StyledText` per block; tables wrap equal-width cells; fenced code scrolls horizontally without capturing a vertical wheel. Images remain literal in v1. |
 | `ToolRow` | The 30 px row: state glyph, kind column, summary, result, optional nested children region. Five states plus `Severe`. The click target is the 30 px line only, so clicking inside an expanded body does not fold the row, and the expand chevron is `invisible` rather than absent when a row cannot expand. |
+| `DelegationRow` | Two lines: `↳`, provider glyph, title, the seven-state kit status word and its one mark, then the optional headline; elapsed time and the attach hint trail. It takes no domain type, is never grouped and stays exposed while live. |
+| `DelegationResultCard` | Header `↳ <provider> finished · <word> · <elapsed> · <n> files` plus a Markdown body, collapsed to eight lines with the ordinary fold affordance and attach hint. |
 | `DecisionDock` | The docked drawer: approval / question variants, amber left bar, keycap actions, `1/N` counter, owns key routing while open. Attaches to the composer by overlapping it and masking the shared border so the two read as one panel. |
-| `MetadataRow` | A measured, ordered list of collapsible blocks; collapses from the right into an overflow menu. The hidden count is memoised **per width**, never recomputed per frame. |
+| `MetadataRow` | A measured, ordered list of collapsible blocks; collapses from the right into an overflow menu. The hidden count is memoised **per width**, never recomputed per frame. A `MetadataSegment` may carry an opaque target: it renders in link tone with a focus ring and activates through click or `Enter`, which is how a child's pinned caller segment navigates without giving the kit a thread id. |
 | `DiffView` | Lives in `fleet_lazygit::diff_view`, not the kit — it takes unified-diff text and keeps the ADR 0005 row stack. |
 | `KeyHint` | Reused for every visible shortcut. |
 
@@ -1421,7 +1425,12 @@ authoritative.
 | Plan | `y` implement · `n` refine · `⏎` expand |
 | Scroll | `j`/`k` move focus · `ctrl-d`/`ctrl-u` · `gg`/`G` · `q`/`i`/`esc` leave |
 | Row focus | `⏎` expand · `u` revert · `o` open in editor · `y` copy · `d` diff |
-| Every sub-mode | the Workspace session rows: `^s s` hub · `^s S` sleep and hub · `^s h`/`p`, `^s l`/`n` previous/next tab · `^s 1`–`9`, `^s ⇥`, `^s w` select and MRU · `^s W` session switcher · `^s c` new terminal · `^s y` copy the worktree path · `^s z` zoom · `^s v`/`V`/`N`/`P` watch pane · `^s !` sticky error · `^s J` jobs · `^s ?` help · `^s esc` cancel |
+| Every sub-mode | the Workspace session rows: `^s s` hub · `^s S` sleep and hub · `^s h`/`p`, `^s l`/`n` previous/next tab · `^s 1`–`9`, `^s ⇥`, `^s w` select and MRU · `^s W` session switcher · `^s u` select the caller, attaching first · `^s d` open the `AGENTS` picker · `^s c` new terminal · `^s y` copy the worktree path · `^s z` zoom · `^s v`/`V`/`N`/`P` watch pane · `^s !` sticky error · `^s J` jobs · `^s ?` help · `^s esc` cancel |
+
+On a focused delegation row, `⏎` attaches and selects the child and `x` cancels the delegation.
+On a focused result card, `⏎` expands or collapses the body without attaching the child; `y`
+copies the delegation id from either row. `^s x` closes a caller tab but only detaches a child,
+and `^s u` returns from a child to its caller with the caller's composer focused.
 
 **A thread tab repeats the Workspace session table, minus its PTY rows.** The thread is the
 Workspace's selected tab, so `Agent > …` *replaces* `Workspace > …` rather than covering it and
@@ -1468,10 +1477,11 @@ this build does not do**, named here rather than softened in the section that sp
 | 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
 | 8 | **Checkpoints and revert.** Fleet-owned git refs, `AgentRevert`, `[u]` | **done**: `services/checkpoints/` captures a turn or a file scope into `refs/fleet/checkpoints/`, reverts a worktree from one without touching `HEAD`, the index or the conversation, and garbage collects per thread plus an hourly orphan sweep. `AgentSessionManager` holds the service and takes both captures — `capture_turn` in `send`, for a turn that is actually starting rather than a steer, and `capture_files` on the `ItemStarted` of an edit-shaped tool. A capture failure logs and the turn proceeds, always (§5). The app draws `[u] revert turn` from `AgentCheckpoints` and sends `AgentRevert`. **Owed**: `[u] revert this edit` on a tool row. A file-scope checkpoint names the *turn* it was taken in and not the item, so a tool row has nothing to key on; and the capture is best-effort by construction, because neither harness waits for Fleet before running an auto-approved tool — the turn-scope checkpoint is the guarantee, the file-scope one is the finer-grained revert when the race goes Fleet's way, which it always does for a gated edit |
-| 9 | **Delegations.** Durable caller/child model, transcript origin, storage migration and capability-gated wire family | **service and CLI served; UI, recovery owed** |
+| 9 | **Delegations.** Durable caller/child model, transcript origin, storage migration, capability-gated wire family, transcript rows, attach/detach navigation, `AGENTS` picker and restart recovery | **done**. A child starts hidden, attaches from its durable row or `^s d`, detaches without stopping, bubbles attention to its caller, and delivers one result card. Startup resumes one provider exit, preserves exact-once delivery, repairs deleted callers, and cancellation walks descendants first |
 
 The whole Workspace session table — selection and MRU (`^s 1`–`9`, `^s Tab`, `^s w`), `^s s`,
-`^s S`, `^s h`/`p`/`l`/`n`, `^s W`, `^s c`, `^s y`, `^s z`, `^s v`/`V`/`N`/`P`, `^s !`, `^s J`,
+`^s S`, `^s h`/`p`/`l`/`n`, `^s W`, `^s u`, `^s d`, `^s c`, `^s y`, `^s z`,
+`^s v`/`V`/`N`/`P`, `^s !`, `^s J`,
 `^s ?` — is bound inside every agent-tab sub-mode, minus the four PTY-only rows, and an unbound
 second key is swallowed with a toast rather than typed into the composer (§12). The
 fixture-driven `scenarios/agents/` corpus is the GUI smoke pass for the agent tab.
@@ -1583,25 +1593,22 @@ already exists; a reported result always wins.
 | `TurnSettled(Completed)`, no report, nudges exhausted | `Incomplete` | capture the latest assistant text and deliver |
 | `TurnSettled(Completed)` after `--blocked` | `Failed` | deliver the blocked report |
 | `TurnSettled(Error | MaxTurns | BudgetExhausted | Denied | Other)` | `Failed` | retain the outcome and latest assistant text, then deliver |
-| `TurnSettled(Interrupted)` | `Cancelled` | deliver; child cancellation propagation is owed |
-| `TurnAborted(User | SessionStopped | Timeout | Superseded | Other)` | `Cancelled` | deliver; child cancellation propagation is owed |
-| `TurnAborted(ProviderExited)` | `Failed` | payload `provider exited`, then deliver; recovery is owed |
+| `TurnSettled(Interrupted)` | `Cancelled` | deliver and cancel live descendants depth-first |
+| `TurnAborted(User | SessionStopped | Timeout | Superseded | Other)` | `Cancelled` | deliver and queue cancellation of live descendants |
+| first `TurnAborted(ProviderExited)` | keep `Running` or `Blocked` | set `recoveries = 1`, enqueue `Recover`, resume with the recovery nudge |
+| later `TurnAborted(ProviderExited)` | `Failed` | payload `provider exited twice`, then deliver |
 | fatal `RuntimeError` or unexpected `SessionExited` | `Failed` | deliver |
-| expected `SessionExited` while live | `Cancelled` | deliver; child cancellation propagation is owed |
+| expected `SessionExited` while live | `Cancelled` | deliver and cancel live descendants depth-first |
 
-Recovery after a provider exit, the resume nudge and cancellation propagation to descendants are
-not phase-3 behavior; phase 6 owes them. The native transcript rows, child-tab navigation and
-delegation result cards are also owed to the UI phases. The service and CLI described here are the
-shipped surface.
-
-`fleet subagent cancel` refuses an already-terminal record, interrupts and stops the child, and
-lets the resulting `TurnAborted(SessionStopped)` take the ordinary `Cancelled` delivery path. A
-Stop issued through any other surface has the same result.
+`fleet subagent cancel` refuses an already-terminal record, cancels every live descendant
+depth-first, then interrupts and stops the child. Each resulting `TurnAborted(SessionStopped)`
+takes the ordinary `Cancelled` delivery path. A Stop issued through any other surface enqueues
+the same descendant propagation before the child is considered finished.
 
 ### 15.2 Delivery and exactly once
 
-Every follow-up action caused by a state change (`Mirror`, `Nudge`, `Settle`, `Deliver`, and the
-future `Recover`/`CancelChildren`) enters the delegation outbox in the same SQLite transaction as
+Every follow-up action caused by a state change (`Mirror`, `Nudge`, `Settle`, `Deliver`, `Recover`
+and `CancelChildren`) enters the delegation outbox in the same SQLite transaction as
 the child or caller event that caused it. The worker drains once before serving, on every wake,
 and every 60 seconds; it reads rows in id order and handles at most one row per caller per pass.
 Two children finishing together therefore become two caller turns rather than one combined turn.
@@ -1668,7 +1675,7 @@ The missing-result nudge is exactly:
 You have not reported a result. If the work is done, run `fleet subagent complete --result-file <path>`. If not, continue.
 ```
 
-The phase-6 recovery nudge is reserved exactly as follows, but is not sent in phase 3:
+The recovery nudge is exactly:
 
 ```text
 The session was restarted. Continue, and report with `fleet subagent complete` when done.
@@ -1691,3 +1698,78 @@ provider: codex, thread: <child>, duration: 14m 02s, files changed: 6
 
 The status word is `succeeded`, `incomplete`, `failed` or `cancelled`. An elided result adds one
 blank line and `(report elided at <n> bytes)`.
+
+### 15.5 UI: rows, attachment and attention
+
+The caller transcript projects `ItemKind::Delegation` as a `DelegationRow` joined to the durable
+record. It shows the provider, child title, status word and mark, latest headline, elapsed time and
+`attach`; a live row never folds into a completed-work group. Each delivered
+`UserMessage { origin: Delegation { id } }` produces exactly one `DelegationResultCard`, not a
+user bubble: its header names the provider, terminal word, elapsed time and changed-file count,
+and its Markdown
+body collapses to eight lines. Expanding that card does not attach the child.
+
+A new child starts hidden. `Enter` on its delegation row attaches and selects the same
+daemon-owned thread, gives its composer focus, and adds `↳ <provider> — <title>` to the mixed
+strip immediately after its caller and older attached siblings. `Enter` on the delivered result
+card expands it while the child stays hidden. `^s x` on an attached child detaches it without
+stopping it; the caller's durable row remains and can attach it again. The
+child's pinned metadata begins `for [<n>] <provider> — <title>` (`·` replaces the index when the
+caller is hidden), and activating that segment or `^s u` attaches and selects the caller. Its
+composer says `Steering a subagent of [<n>]. It reports to its caller when it finishes.`
+
+Child attention folds into the caller so a hidden child is not silent:
+
+| Child/caller fact | Caller presentation |
+| --- | --- |
+| the caller itself has an open permission, question or plan gate | keep the caller's own `needs you`; its priority remains above every child working contribution |
+| any child has an open permission, question or plan gate | `needs you`; the highest-priority open gate wins and remains while the caller is selected |
+| otherwise a child is working/waiting, or the caller itself is working | `working`; a live child can outrank the caller's failed, finished, unread or idle state, and the family is included once in the context count under the caller |
+| a child is finished, idle or otherwise no longer live | contributes nothing; the caller's own attention remains |
+
+`^s d` opens the palette seeded to its `AGENTS` section. Rows show an attached strip index or `·`,
+the attention mark, the caller or `↳` child title, status and age (or the open gate), and `go` or
+`attach`. The order is current-worktree callers, their children, then their other-worktree
+children with a ` · <worktree>` suffix. `Enter` selects an attached thread, attaches a hidden
+child, reopens a closed caller, or switches worktrees before attaching a remote-worktree child;
+each path focuses the selected composer. Nothing auto-attaches merely because it is blocked.
+Closing a selected caller removes its tab, selects the remaining terminal and returns the
+Workspace to `TERMINAL`; the picker keeps that caller as a `·` / `go` / hidden row until it is
+reopened.
+Because the strip stops at nine tabs, attach what you look at, detach when done, and reach the
+rest through `^s d`.
+
+### 15.6 Restart and recovery
+
+Startup has four ordered boundaries:
+
+1. Before it reads delegation outbox rows, the worker hydrates every live child. Hydration runs
+   the ordinary orphan pass, which records `TurnAborted(ProviderExited)` for a child whose
+   provider disappeared with the daemon.
+2. That committed transition applies the resume-once rule. With `recoveries == 0`, it preserves
+   `Running` or `Blocked`, writes `recoveries = 1` and opens one `Recover` row; a later provider
+   exit ends `Failed` with `status_payload = "provider exited twice"` and opens `Deliver`.
+3. The worker begins its startup outbox drain. As the drain's preflight — and before every later
+   drain as well — it repairs terminal, pending delegations whose caller record was deleted to
+   `Undeliverable { reason: "caller deleted" }`, preserving their result and closing their open
+   delivery row.
+4. It then reads the remaining open rows in id order and performs at most one per caller in that
+   pass. An open delivery from the previous daemon therefore drains on restart, while the durable
+   caller-message origin remains the exact-once boundary and prevents a duplicate item on later
+   restarts.
+
+`Recover` sends the exact recovery nudge from §15.4 through the child's resume cursor. A child
+without a usable cursor ends `Failed` with that reason and is delivered instead. A successful
+recovery starts one resumed turn, may finish
+`Succeeded`, and retains `recoveries = 1`; the recovery nudge and the caller's delegation-origin
+message each occur exactly once, and a completed drain leaves no open row. A second provider exit
+never gets another nudge: its `provider exited twice` failure survives another restart and is
+delivered exactly once. Resuming once can repeat work the provider performed before its last
+durable event; that is the accepted cost of continuing instead of failing on the first exit.
+
+Cancellation has the same durability. Explicit cancellation walks the bounded delegation tree
+depth-first, so a grandchild reaches `Cancelled` and records its `Deliver` row before its parent;
+both delivery rows remain recorded. A Stop or other cancelling child event writes
+`CancelChildren` beside its own `Deliver`, so a restart cannot lose propagation. A descendant's
+delivery may become `Undeliverable` if its caller is stopped before that caller drains it, but the
+state and result remain on the record.

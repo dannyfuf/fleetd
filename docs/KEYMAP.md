@@ -285,8 +285,9 @@ fire and retires the caveat that those keys were bound, handled and never entere
 the focus and scroll to it. Clicking a tool row, a `thought …` line or a `worked …` fold still
 expands and collapses it, so the mouse reaches every `[⏎] show` hint too.
 
-On a delegation row or result card, `Enter` attaches and selects the child, `y` copies the
-delegation id, and `x` cancels the delegation.
+On a delegation row, `Enter` attaches and selects the child and `x` cancels the delegation. On a
+result card, `Enter` expands or collapses the body without attaching the child. `y` copies the
+delegation id from either row.
 
 **The Workspace session rows are repeated here, and the four PTY-only ones are not.** `^s r`
 (restart the exited command), `^s ,` (rename the terminal), `^s ]` (paste into it) and `^s ^s`

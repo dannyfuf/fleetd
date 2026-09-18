@@ -10,20 +10,26 @@
 - Definition of done is not met until every box is ticked and this tracker matches reality.
 
 ## Kickoff
-- [ ] I have read the plan end to end.
+- [x] I have read the plan end to end.
 - [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
-- [ ] I am ready to start.
+- [x] I am ready to start.
 
 ## Tasks
-- [ ] P2-T01 — Add `DelegationId` and the `Delegation` record family to `fleet-core`
-- [ ] P2-T02 — Add `MessageOrigin` and `ItemKind::Delegation`, with reducer exemptions
-- [ ] P2-T03 — Add `parent` and `delegation` to the thread record and `parent` to the summary
-- [ ] P2-T04 — Migration 3: `delegations`, `delegation_outbox`, and the three `threads` columns
-- [ ] P2-T05 — Wire variants, capability string, timeouts and goldens in `fleet-proto`
-- [ ] P2-T06 — Describe the new shapes and the migration in `docs/`
+- [x] P2-T01 — Add `DelegationId` and the `Delegation` record family to `fleet-core`
+  - verified: fleet-core delegation round trips pass in the final workspace suite.
+- [x] P2-T02 — Add `MessageOrigin` and `ItemKind::Delegation`, with reducer exemptions
+  - verified: fleet-core reducer and fleet-app row tests pass in `make test`.
+- [x] P2-T03 — Add `parent` and `delegation` to the thread record and `parent` to the summary
+  - verified: daemon manager/store round-trip tests pass in `make test`.
+- [x] P2-T04 — Migration 3: `delegations`, `delegation_outbox`, and the three `threads` columns
+  - verified: 89 daemon store tests and migration coverage pass.
+- [x] P2-T05 — Wire variants, capability string, timeouts and goldens in `fleet-proto`
+  - verified: fleet-proto and fleet-client compatibility tests pass in `make test`.
+- [x] P2-T06 — Describe the new shapes and the migration in `docs/`
+  - verified: documentation shapes were compared with the contract and compiled wire types.
 
 ## Notes / decisions log
-(Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
+- 2026-09-18 — Store seams required only the permitted mechanical caller-minted `ItemId` update in a delegation worker test.
 
 ## Follow-ups
-(Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+- None.

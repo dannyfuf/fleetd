@@ -10,19 +10,24 @@
 - Definition of done is not met until every box is ticked and this tracker matches reality.
 
 ## Kickoff
-- [ ] I have read the plan end to end.
+- [x] I have read the plan end to end.
 - [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
-- [ ] I am ready to start.
+- [x] I am ready to start.
 
 ## Tasks
-- [ ] P5-T01 — The `AGENTS` palette section
-- [ ] P5-T02 — `^s d` seeds the palette to `AGENTS`
-- [ ] P5-T03 — Selection: attach, reopen, or switch session then attach
-- [ ] P5-T04 — Harness scenarios: attach from the picker, reopen a closed caller, other-worktree child
-- [ ] P5-T05 — Document the section and the chord
+- [x] P5-T01 — The `AGENTS` palette section
+  - verified: 31 palette tests pass.
+- [x] P5-T02 — `^s d` seeds the palette to `AGENTS`
+  - verified: keymap and prefix tests pass in `make test`.
+- [x] P5-T03 — Selection: attach, reopen, or switch session then attach
+  - verified: palette branch tests and all three picker scenarios pass headlessly.
+- [x] P5-T04 — Harness scenarios: attach from the picker, reopen a closed caller, other-worktree child
+  - verified: all three scenarios passed headlessly; virtual execution was attempted but unavailable.
+- [x] P5-T05 — Document the section and the chord
+  - verified: UX, KEYMAP, and NATIVE-AGENTS text matches the tested picker behavior.
 
 ## Notes / decisions log
-(Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
+- 2026-09-18 — Fixed cross-worktree picker selection to ensure the destination session before attach; the specialized two-worktree preset avoids duplicating `other`.
 
 ## Follow-ups
-(Things discovered mid-flight that are out of scope for this plan. Each gets a one-line description.)
+- Re-run the three picker scenarios in the virtual lane when a compositor is available.
