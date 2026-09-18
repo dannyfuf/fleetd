@@ -50,7 +50,7 @@ impl AgentSessionManager {
         })
     }
 
-    /// Appends one `ItemStarted` under `turn` and answers the item it minted.
+    /// Appends one `ItemStarted` under `turn` with the caller-minted item id.
     ///
     /// Refused when `turn` is not the running turn: an item under a settled turn would be a row
     /// the reducer accepts and no client draws in a live position, and the delegation row has to
@@ -59,8 +59,9 @@ impl AgentSessionManager {
         &self,
         thread: ThreadId,
         turn: TurnId,
+        item: ItemId,
         kind: ItemKind,
-    ) -> Result<ItemId, ProtoError> {
+    ) -> Result<(), ProtoError> {
         let runtime = self.runtime(thread).await?;
         let operation = runtime.operation.lock().await;
         let running = matches!(
@@ -77,7 +78,6 @@ impl AgentSessionManager {
                 "agent thread {thread} is not running turn {turn}"
             )));
         }
-        let item = ItemId::new();
         self.apply_one(
             &runtime,
             &operation,
@@ -90,7 +90,7 @@ impl AgentSessionManager {
             Some(RAW.to_owned()),
         )
         .await?;
-        Ok(item)
+        Ok(())
     }
 
     /// Patches one existing item and, when `complete` is given, settles it in the same operation.

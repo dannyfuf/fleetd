@@ -15,7 +15,7 @@ mod delegation;
 mod hydrate;
 mod mirror;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod window;
 
 use std::{

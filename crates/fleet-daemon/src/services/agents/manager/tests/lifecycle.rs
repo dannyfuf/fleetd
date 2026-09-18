@@ -1097,9 +1097,10 @@ async fn a_delegation_row_is_appended_to_the_running_turn_and_refused_outside_on
         None,
         "an idle caller has no turn to hang a delegation row on"
     );
+    let refused_item = ItemId::new();
     let refused = harness
         .manager
-        .append_item(thread, TurnId::new(), row())
+        .append_item(thread, TurnId::new(), refused_item, row())
         .await
         .expect_err("a turn that is not running cannot take an item");
     assert_eq!(refused.kind, ErrorKind::Conflict);
@@ -1126,9 +1127,10 @@ async fn a_delegation_row_is_appended_to_the_running_turn_and_refused_outside_on
         Some(turn)
     );
 
-    let item = harness
+    let item = ItemId::new();
+    harness
         .manager
-        .append_item(thread, turn, row())
+        .append_item(thread, turn, item, row())
         .await
         .expect("append the delegation row");
     let projection = harness

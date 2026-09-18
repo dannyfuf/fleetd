@@ -111,9 +111,3 @@ fn not_found(message: impl Into<String>) -> ProtoError {
 fn one_line(message: &str) -> String {
     message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
-
-// Keep this owned suite reachable while the separately owned service-test stage wires the shared
-// delegation test tree into `delegation/mod.rs`.
-#[cfg(test)]
-#[path = "tests/queries.rs"]
-mod tests;

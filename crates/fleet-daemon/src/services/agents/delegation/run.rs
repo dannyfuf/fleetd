@@ -1,16 +1,282 @@
 //! `DelegationRun`: validate, mint the token, create the child, seed the transcript.
-//!
-//! The body belongs to stage `service-run` (phase 3, P3-T03). The shape is here so every other
-//! half of the service — dispatch, the worker, the CLI — can be written against it first.
 
-use fleet_proto::{error::ProtoError, response::ResponseBody};
+use std::collections::BTreeMap;
 
-use super::{DelegationService, RunRequest, unsupported};
+use chrono::Utc;
+use fleet_core::agents::{
+    Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, ItemKind, MessageOrigin,
+    PermissionMode, UserInput,
+};
+use fleet_proto::{
+    error::{ErrorKind, ProtoError},
+    response::ResponseBody,
+};
+use sha2::{Digest as _, Sha256};
+
+use crate::{
+    DaemonError,
+    services::agents::{manager::CreateOptions, store::delegations},
+};
+
+use super::{
+    DelegationService, RunRequest,
+    footer::{SAME_WORKTREE_WARNING, child_title, first_message},
+    limits::{MAX_DEPTH, MAX_LIVE_CHILDREN_PER_CALLER, MAX_LIVE_DELEGATIONS},
+};
 
 impl DelegationService {
     /// Starts one delegation: a child thread, a durable record, and a row in the caller's
-    /// transcript, in that order.
-    pub(crate) async fn run(&self, _request: RunRequest) -> Result<ResponseBody, ProtoError> {
-        Err(unsupported("run"))
+    /// transcript.
+    pub(crate) async fn run(&self, request: RunRequest) -> Result<ResponseBody, ProtoError> {
+        let caller = request.caller;
+        let caller_exists = self
+            .inner
+            .store
+            .delegation_write("check delegation caller", move |tx| {
+                Ok((delegations::caller_exists(tx, caller)?, false))
+            })
+            .await
+            .map_err(storage_error)?;
+        if !caller_exists {
+            return Err(not_found(format!(
+                "caller-exists rule: delegation caller {caller} does not exist"
+            )));
+        }
+
+        if let Some(owner) = self.inner.manager.owner_of(caller).await? {
+            return Err(unsupported(format!(
+                "caller-locality rule: delegation caller {caller} is a mirror owned by host {owner}"
+            )));
+        }
+
+        let caller_turn = self
+            .inner
+            .manager
+            .running_turn(caller)
+            .await?
+            .ok_or_else(|| {
+                conflict(format!(
+                    "running-turn rule: delegation caller {caller} has no running turn"
+                ))
+            })?;
+
+        let caller_depth = self
+            .inner
+            .store
+            .delegation_by_child(caller)
+            .await
+            .map_err(storage_error)?
+            .map_or(0, |delegation| delegation.depth);
+        if caller_depth >= MAX_DEPTH {
+            return Err(conflict(format!(
+                "depth-limit rule: caller depth {caller_depth} has reached the maximum {MAX_DEPTH}"
+            )));
+        }
+
+        let live_children = self
+            .inner
+            .store
+            .live_delegations(Some(caller))
+            .await
+            .map_err(storage_error)?;
+        if live_children.len() >= MAX_LIVE_CHILDREN_PER_CALLER {
+            return Err(conflict(format!(
+                "live-child-limit rule: caller {caller} already has {} live children (maximum {MAX_LIVE_CHILDREN_PER_CALLER})",
+                live_children.len()
+            )));
+        }
+
+        let live_delegations = self
+            .inner
+            .store
+            .live_delegations(None)
+            .await
+            .map_err(storage_error)?;
+        if live_delegations.len() >= MAX_LIVE_DELEGATIONS {
+            return Err(conflict(format!(
+                "daemon-live-limit rule: this daemon already has {} live delegations (maximum {MAX_LIVE_DELEGATIONS})",
+                live_delegations.len()
+            )));
+        }
+
+        let config = self.inner.config.load().await.map_err(|error| {
+            validation(format!(
+                "provider-binary rule: could not read agent binary configuration: {error}"
+            ))
+        })?;
+        let binary = config.agent_binaries.binary(request.provider);
+        if binary.trim().is_empty() {
+            return Err(unsupported(format!(
+                "provider-binary rule: {} has no configured executable",
+                request.provider.display_name()
+            )));
+        }
+        crate::agents::harness::process::command_parts(binary).map_err(|error| {
+            unsupported(format!(
+                "provider-binary rule: the configured {} executable is invalid: {error}",
+                request.provider.display_name()
+            ))
+        })?;
+
+        let caller_record = self.inner.manager.record(caller).await?;
+        let worktree = request
+            .worktree
+            .clone()
+            .unwrap_or_else(|| caller_record.worktree.clone());
+        self.inner
+            .worktrees
+            .path(worktree.clone())
+            .await
+            .map_err(|error| worktree_error(&worktree, error))?;
+
+        let delegation_id = DelegationId::new();
+        let token = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
+        let title = request
+            .title
+            .clone()
+            .unwrap_or_else(|| child_title(request.provider, &request.brief));
+        let extra_env = BTreeMap::from([
+            ("FLEET_DELEGATION".to_owned(), delegation_id.to_string()),
+            ("FLEET_DELEGATION_TOKEN".to_owned(), token),
+        ]);
+        let created = self
+            .inner
+            .manager
+            .create_with(CreateOptions {
+                worktree: worktree.clone(),
+                provider: request.provider,
+                model: request.model,
+                mode: request.mode.unwrap_or(PermissionMode::FullAccess),
+                resume_cursor: None,
+                title: Some(title),
+                parent: Some(caller),
+                delegation: Some(delegation_id),
+                extra_env,
+            })
+            .await?;
+        let child = match created {
+            ResponseBody::AgentThreadCreated(summary) => summary.thread,
+            other => {
+                return Err(validation(format!(
+                    "child-creation rule: manager returned an unexpected response: {other:?}"
+                )));
+            }
+        };
+
+        let caller_item = ItemId::new();
+        let delegation = Delegation {
+            id: delegation_id,
+            caller,
+            caller_turn,
+            caller_item,
+            child,
+            provider: request.provider,
+            depth: caller_depth + 1,
+            brief: request.brief,
+            expectation: request.expectation,
+            eager: request.eager,
+            status: DelegationStatus::Starting,
+            status_payload: None,
+            result: None,
+            nudges: 0,
+            recoveries: 0,
+            delivery: DeliveryState::Pending,
+            created: Utc::now(),
+            finished: None,
+            headline: None,
+        };
+
+        let stored = delegation.clone();
+        self.inner
+            .store
+            .delegation_write("insert delegation", move |tx| {
+                delegations::insert(tx, &stored, &token_sha256)?;
+                Ok(((), false))
+            })
+            .await
+            .map_err(storage_error)?;
+
+        self.inner
+            .manager
+            .append_item(
+                caller,
+                caller_turn,
+                caller_item,
+                ItemKind::Delegation {
+                    id: delegation.id,
+                    provider: delegation.provider,
+                    child,
+                    status: DelegationStatus::Starting,
+                },
+            )
+            .await?;
+
+        self.inner
+            .manager
+            .send(
+                child,
+                UserInput {
+                    text: first_message(&delegation.brief, delegation.id, &delegation.expectation),
+                    origin: MessageOrigin::User,
+                    ..UserInput::default()
+                },
+            )
+            .await?;
+
+        let warning =
+            (worktree == caller_record.worktree).then(|| SAME_WORKTREE_WARNING.to_owned());
+        Ok(ResponseBody::DelegationStarted {
+            delegation,
+            warning,
+        })
     }
+}
+
+fn storage_error(error: anyhow::Error) -> ProtoError {
+    ProtoError {
+        kind: ErrorKind::Fs,
+        message: one_line(&format!("native-agent storage failed: {error:#}")),
+    }
+}
+
+fn worktree_error(worktree: &fleet_core::ids::WorktreeId, error: DaemonError) -> ProtoError {
+    let message =
+        format!("worktree-resolution rule: worktree {worktree} could not be resolved: {error}");
+    match error {
+        DaemonError::NotFound(_) => not_found(message),
+        DaemonError::Remote(_) | DaemonError::Unsupported(_) => unsupported(message),
+        _ => validation(message),
+    }
+}
+
+fn not_found(message: impl Into<String>) -> ProtoError {
+    error(ErrorKind::NotFound, message)
+}
+
+fn conflict(message: impl Into<String>) -> ProtoError {
+    error(ErrorKind::Conflict, message)
+}
+
+fn validation(message: impl Into<String>) -> ProtoError {
+    error(ErrorKind::Validation, message)
+}
+
+fn unsupported(message: impl Into<String>) -> ProtoError {
+    error(ErrorKind::Unsupported, message)
+}
+
+fn error(kind: ErrorKind, message: impl Into<String>) -> ProtoError {
+    ProtoError {
+        kind,
+        message: one_line(&message.into()),
+    }
+}
+
+fn one_line(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
 }

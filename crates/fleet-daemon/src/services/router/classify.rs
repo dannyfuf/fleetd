@@ -38,13 +38,14 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | AgentAccountLogout { .. }
         | AgentStop { .. } => classify_agent(body, resolver),
 
-        // Phase 3 replaces this fallback with delegation-aware routing.
+        // Delegation is served by the daemon that owns the caller's thread. A mirrored caller is
+        // refused by the service itself with the specific locality reason.
         DelegationRun { .. }
         | DelegationComplete { .. }
         | DelegationList { .. }
         | DelegationGet { .. }
         | DelegationCancel { .. }
-        | DelegationWait { .. } => Target::Unsupported("native-agent delegation"),
+        | DelegationWait { .. } => Target::Local,
 
         AgentSeenCursors => Target::Local,
 
@@ -300,7 +301,6 @@ pub(crate) fn local_fanout_part(
         | RequestBody::AgentAccountLogin { .. }
         | RequestBody::AgentAccountLogout { .. }
         | RequestBody::AgentStop { .. }
-        // Phase 3 replaces this fallback with delegation-aware fanout behavior.
         | RequestBody::DelegationRun { .. }
         | RequestBody::DelegationComplete { .. }
         | RequestBody::DelegationList { .. }
@@ -410,7 +410,7 @@ fn nonempty_worktree_part(
 #[cfg(test)]
 mod tests {
     use fleet_core::{
-        agents::ThreadId,
+        agents::{AgentKind, DelegationId, ThreadId},
         ids::{JobId, TerminalId, WorktreeId},
     };
 
@@ -480,6 +480,51 @@ mod tests {
             RequestBody::AgentAccountLogout { thread },
         ] {
             assert_eq!(classify(&local, &resolver), Target::Local, "{local:?}");
+        }
+    }
+
+    #[test]
+    fn every_delegation_request_is_served_locally() {
+        let remote = WorktreeId::try_from("acme/api#remote").expect("worktree");
+        let resolver = TestResolver {
+            remote,
+            host: HostId::try_from("dev-box").expect("host"),
+        };
+        let caller = ThreadId::new();
+        let child = ThreadId::new();
+        let delegation = DelegationId::new();
+        let requests = [
+            RequestBody::DelegationRun {
+                caller,
+                provider: AgentKind::Codex,
+                brief: "inspect the router".to_owned(),
+                expectation: "report local routing".to_owned(),
+                worktree: None,
+                mode: None,
+                model: None,
+                title: None,
+                eager: false,
+            },
+            RequestBody::DelegationComplete {
+                delegation,
+                child,
+                token: "secret".to_owned(),
+                result: "done".to_owned(),
+                blocked: false,
+            },
+            RequestBody::DelegationList {
+                caller: Some(caller),
+            },
+            RequestBody::DelegationGet { delegation },
+            RequestBody::DelegationCancel { delegation },
+            RequestBody::DelegationWait {
+                delegation,
+                timeout_ms: 1,
+            },
+        ];
+
+        for request in requests {
+            assert_eq!(classify(&request, &resolver), Target::Local, "{request:?}");
         }
     }
 }

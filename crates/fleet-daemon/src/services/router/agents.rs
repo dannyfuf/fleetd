@@ -445,7 +445,6 @@ pub fn register_thread_events(
         Event::AgentResync { .. }
         | Event::AgentSynchronized { .. }
         | Event::AgentWindow { .. }
-        // Phase 3 replaces this fallback when delegation routing is installed.
         | Event::DelegationChanged(_)
         | Event::BoardChanged { .. }
         | Event::WatchStarted(_)

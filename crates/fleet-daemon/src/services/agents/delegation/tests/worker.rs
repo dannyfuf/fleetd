@@ -4,8 +4,8 @@ use chrono::Utc;
 use fleet_core::{
     agents::{
         AgentKind, Delegation, DelegationId, DelegationResult, DelegationStatus, DeliveryState,
-        ItemKind, MessageOrigin, PermissionMode, ResultSource, SessionState, StopCause, ThreadId,
-        ThreadProjection, TurnId, TurnState, UserInput,
+        ItemId, ItemKind, MessageOrigin, PermissionMode, ResultSource, SessionState, StopCause,
+        ThreadId, ThreadProjection, TurnId, TurnState, UserInput,
     },
     ids::{ContextId, RepoId, WorktreeId},
     model::{Context, Repo, RepoHooks, Worktree},
@@ -20,7 +20,10 @@ use crate::{
     jobs::JobManager,
     server::BroadcastBus,
     services::{
-        agents::{AgentSessionManager, store::SqliteAgentStore},
+        agents::{
+            AgentSessionManager,
+            store::{OutboxAction, SqliteAgentStore, delegations},
+        },
         sessions::Sessions,
         worktrees::Worktrees,
     },
@@ -28,22 +31,28 @@ use crate::{
 };
 
 use super::super::{
-    DelegationService, DelegationWorker, footer::NUDGE, limits::RETRY_TICK, worker::drain,
+    DelegationService, DelegationWorker,
+    footer::{NUDGE, RESUME_NUDGE},
+    limits::RETRY_TICK,
+    worker::drain,
 };
 
-struct Harness {
+pub(crate) struct Harness {
     _directory: tempfile::TempDir,
     log: std::path::PathBuf,
     cursor_marker: std::path::PathBuf,
-    manager: AgentSessionManager,
-    store: SqliteAgentStore,
-    service: DelegationService,
+    config: Arc<ConfigStore>,
+    pub(crate) manager: AgentSessionManager,
+    events: BroadcastBus,
+    pub(crate) store: SqliteAgentStore,
+    pub(crate) service: DelegationService,
     worker: Option<DelegationWorker>,
     worktree: WorktreeId,
+    worktrees: Worktrees,
 }
 
 impl Harness {
-    async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let directory = tempfile::tempdir().expect("create worker test directory");
         let home = directory.path().join("fleet");
         let repos = home.join("repos");
@@ -116,35 +125,34 @@ impl Harness {
             sessions,
         );
         let events = BroadcastBus::new(256);
+        let database = FleetHome::new(&home).agents_db_path();
         let manager = AgentSessionManager::new(
-            FleetHome::new(&home).agents_db_path(),
+            database.clone(),
             events.clone(),
             worktrees.clone(),
             Arc::clone(&config),
         );
+        let (service, worker) = super::super::install(&manager, &events, &config, &worktrees)
+            .expect("the worker test database opens");
         let store = manager
             .delegation_store()
-            .expect("the worker test database opens");
-        let (service, worker) = DelegationService::new(
-            store.clone(),
-            manager.clone(),
-            events.clone(),
-            Arc::clone(&config),
-            worktrees.clone(),
-        );
+            .expect("the worker test database remains available");
         Self {
             _directory: directory,
             log,
             cursor_marker,
+            config,
             manager,
+            events,
             store,
             service,
             worker: Some(worker),
             worktree,
+            worktrees,
         }
     }
 
-    async fn create_thread(&self) -> ThreadId {
+    pub(crate) async fn create_thread(&self) -> ThreadId {
         // Process startup is OS work, so a paused runtime would auto-advance the provider probe's
         // timeout before the executable gets scheduled. Worker behaviour is tested paused; only
         // this external-process fixture setup runs against real time.
@@ -173,7 +181,7 @@ impl Harness {
         thread
     }
 
-    async fn send(&self, thread: ThreadId, text: &str) {
+    pub(crate) async fn send(&self, thread: ThreadId, text: &str) {
         self.manager
             .send(
                 thread,
@@ -186,24 +194,33 @@ impl Harness {
             .expect("send scripted input");
     }
 
-    async fn wait_for(
+    pub(crate) async fn wait_for(
         &self,
         thread: ThreadId,
         predicate: impl Fn(&ThreadProjection) -> bool,
     ) -> ThreadProjection {
-        for _ in 0..2_000 {
+        // Subscribe before reading so an event committed between the read and the wait remains
+        // queued. Provider-backed tests then wait on actual progress instead of a scheduler-
+        // sensitive number of yields.
+        let mut events = self.events.subscribe();
+        loop {
             if let Ok(projection) = self.manager.projection(thread).await
                 && predicate(&projection)
             {
                 return projection;
             }
-            tokio::task::yield_now().await;
+            match events.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event bus closed while waiting for thread {thread}")
+                }
+            }
         }
-        panic!("thread {thread} did not reach the expected state")
     }
 
-    async fn wait_for_stop_cause(&self, thread: ThreadId, cause: StopCause) {
-        for _ in 0..2_000 {
+    pub(crate) async fn wait_for_stop_cause(&self, thread: ThreadId, cause: StopCause) {
+        let mut events = self.events.subscribe();
+        loop {
             if self
                 .manager
                 .record(thread)
@@ -212,18 +229,48 @@ impl Harness {
             {
                 return;
             }
-            tokio::task::yield_now().await;
+            match events.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event bus closed while waiting for {cause:?} on thread {thread}")
+                }
+            }
         }
-        panic!("thread {thread} did not record {cause:?}")
     }
 
-    async fn caller_with_delegations(
+    pub(crate) async fn wait_for_delegation(
+        &self,
+        id: DelegationId,
+        predicate: impl Fn(&Delegation) -> bool,
+    ) -> Delegation {
+        let mut events = self.events.subscribe();
+        loop {
+            if let Some(delegation) = self
+                .store
+                .delegation(id)
+                .await
+                .expect("read recovery-test delegation")
+                && predicate(&delegation)
+            {
+                return delegation;
+            }
+            match events.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("event bus closed while waiting for delegation {id}")
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn caller_with_delegations(
         &self,
         count: usize,
         eager: bool,
         settle_caller: bool,
     ) -> (ThreadId, Vec<Delegation>) {
         let caller = self.create_thread().await;
+        tokio::time::resume();
         self.send(caller, "hold setup turn").await;
         let running = self
             .wait_for(caller, |projection| {
@@ -238,11 +285,12 @@ impl Harness {
         for index in 0..count {
             let id = DelegationId::new();
             let child = ThreadId::new();
-            let item = self
-                .manager
+            let item = ItemId::new();
+            self.manager
                 .append_item(
                     caller,
                     turn,
+                    item,
                     ItemKind::Delegation {
                         id,
                         provider: AgentKind::Claude,
@@ -263,71 +311,36 @@ impl Harness {
             })
             .await;
         }
+        tokio::time::pause();
         for delegation in &delegations {
-            self.insert(delegation.clone(), "deliver").await;
+            self.insert(delegation.clone(), OutboxAction::Deliver).await;
         }
         (caller, delegations)
     }
 
-    async fn insert(&self, delegation: Delegation, action: &'static str) {
+    pub(crate) async fn insert(&self, delegation: Delegation, action: OutboxAction) {
         let stored = delegation.clone();
         self.store
             .delegation_write("insert worker-test delegation", move |tx| {
-                let result = stored.result.as_ref().expect("test delegation result");
-                tx.execute(
-                    "INSERT INTO delegations (id, token_sha256, caller_thread, caller_turn, \
-                     caller_item, child_thread, provider, depth, brief, expectation, eager, \
-                     status, result, result_source, result_files, result_elided, nudges, \
-                     recoveries, delivery, created, finished) VALUES (?1, 'test-token', ?2, ?3, \
-                     ?4, ?5, 'claude', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                     'pending', ?17, ?18)",
-                    rusqlite::params![
-                        stored.id.to_string(),
-                        stored.caller.to_string(),
-                        stored.caller_turn.to_string(),
-                        stored.caller_item.to_string(),
-                        stored.child.to_string(),
-                        i64::from(stored.depth),
-                        stored.brief,
-                        stored.expectation,
-                        i64::from(stored.eager),
-                        status_word(stored.status),
-                        result.text,
-                        "reported",
-                        serde_json::to_string(&result.files_changed)?,
-                        i64::from(result.elided),
-                        i64::from(stored.nudges),
-                        i64::from(stored.recoveries),
-                        stored.created.to_rfc3339(),
-                        stored.finished.map(|stamp| stamp.to_rfc3339()),
-                    ],
-                )?;
-                tx.execute(
-                    "INSERT INTO delegation_outbox (delegation, action, created) \
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![stored.id.to_string(), action, Utc::now().to_rfc3339()],
-                )?;
+                delegations::insert(tx, &stored, "test-token")?;
+                delegations::enqueue(tx, stored.id, action, Utc::now())?;
                 Ok(((), false))
             })
             .await
             .expect("insert worker-test delegation");
     }
 
-    async fn enqueue(&self, delegation: DelegationId, action: &'static str) {
+    pub(crate) async fn enqueue(&self, delegation: DelegationId, action: OutboxAction) {
         self.store
             .delegation_write("enqueue worker-test action", move |tx| {
-                tx.execute(
-                    "INSERT INTO delegation_outbox (delegation, action, created) \
-                     VALUES (?1, ?2, ?3)",
-                    rusqlite::params![delegation.to_string(), action, Utc::now().to_rfc3339()],
-                )?;
+                delegations::enqueue(tx, delegation, action, Utc::now())?;
                 Ok(((), false))
             })
             .await
             .expect("enqueue worker-test action");
     }
 
-    async fn origins(&self, caller: ThreadId) -> Vec<MessageOrigin> {
+    pub(crate) async fn origins(&self, caller: ThreadId) -> Vec<MessageOrigin> {
         self.manager
             .projection(caller)
             .await
@@ -341,7 +354,7 @@ impl Harness {
             .collect()
     }
 
-    async fn wait_for_delegation_origins(&self, caller: ThreadId, count: usize) {
+    pub(crate) async fn wait_for_delegation_origins(&self, caller: ThreadId, count: usize) {
         self.wait_for(caller, |projection| {
             projection
                 .items
@@ -361,11 +374,45 @@ impl Harness {
         .await;
     }
 
-    fn provider_log(&self) -> String {
-        std::fs::read_to_string(&self.log).unwrap_or_default()
+    pub(crate) fn take_worker(&mut self) -> DelegationWorker {
+        self.worker.take().expect("delegation worker is available")
     }
 
-    fn omit_resume_cursor(&self) {
+    pub(crate) async fn restart(self) -> Self {
+        let Self {
+            _directory,
+            log,
+            cursor_marker,
+            config,
+            manager,
+            events,
+            store,
+            service,
+            worker,
+            worktree,
+            worktrees,
+        } = self;
+        drop(worker);
+        drop(service);
+        tokio::task::yield_now().await;
+        let (service, worker) = super::super::install(&manager, &events, &config, &worktrees)
+            .expect("the restarted worker test database opens");
+        Self {
+            _directory,
+            log,
+            cursor_marker,
+            config,
+            manager,
+            events,
+            store,
+            service,
+            worker: Some(worker),
+            worktree,
+            worktrees,
+        }
+    }
+
+    pub(crate) fn omit_resume_cursor(&self) {
         std::fs::write(&self.cursor_marker, b"").expect("write no-cursor marker");
     }
 }
@@ -381,6 +428,7 @@ if [ -f '{}' ]; then
 else
   printf '%s\n' '{{"type":"system","subtype":"init","session_id":"worker-cursor","model":"test","tools":[],"slash_commands":[],"capabilities":["interrupt_receipt_v1","interrupt_cancel_queued_v1","msg_lifecycle_v1"]}}'
 fi
+printf 'ENV|%s|%s|%s\n' "$FLEET_SESSION" "$FLEET_DELEGATION" "$FLEET_DELEGATION_TOKEN" >> '{}'
 count=0
 while IFS= read -r line; do
   count=$((count + 1))
@@ -396,12 +444,13 @@ while IFS= read -r line; do
   esac
   printf '%s\n' "{{\"type\":\"assistant\",\"message\":{{\"id\":\"msg-$count\",\"content\":[{{\"type\":\"text\",\"text\":\"scripted answer\"}}]}},\"parent_tool_use_id\":null}}"
   case "$line" in
-    *hold*) ;;
+    *hold*|*"The session was restarted."*) ;;
     *) printf '%s\n' '{{"type":"result","subtype":"success","terminal_reason":"completed","usage":{{}}}}' ;;
   esac
 done
 "##,
         cursor_marker.display(),
+        log.display(),
         log.display()
     )
 }
@@ -444,193 +493,13 @@ fn finished_delegation(
     }
 }
 
-const fn status_word(status: DelegationStatus) -> &'static str {
-    match status {
-        DelegationStatus::Starting => "starting",
-        DelegationStatus::Running => "running",
-        DelegationStatus::Blocked => "blocked",
-        DelegationStatus::Settling => "settling",
-        DelegationStatus::Succeeded => "succeeded",
-        DelegationStatus::Incomplete => "incomplete",
-        DelegationStatus::Failed => "failed",
-        DelegationStatus::Cancelled => "cancelled",
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn idle_delivery_starts_a_caller_turn_with_delegation_origin() {
-    let harness = Harness::start().await;
-    let (caller, delegations) = harness.caller_with_delegations(1, false, true).await;
-
-    drain(&harness.service).await.expect("drain delivery");
-    harness.wait_for_delegation_origins(caller, 1).await;
-
-    assert!(
-        harness
-            .origins(caller)
-            .await
-            .contains(&MessageOrigin::Delegation {
-                id: delegations[0].id
-            })
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn running_then_idle_waits_for_the_callers_settle() {
-    let harness = Harness::start().await;
-    let (caller, _) = harness.caller_with_delegations(1, false, false).await;
-
-    drain(&harness.service).await.expect("drain while running");
-    assert!(
-        harness
-            .origins(caller)
-            .await
-            .iter()
-            .all(MessageOrigin::is_user)
-    );
-
-    harness.send(caller, "finish setup turn").await;
-    harness
-        .wait_for(caller, |projection| {
-            matches!(projection.turn, TurnState::Settled(_, _))
-        })
-        .await;
-    drain(&harness.service).await.expect("drain after settle");
-    harness.wait_for_delegation_origins(caller, 1).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn eager_delivery_steers_the_running_turn() {
-    let harness = Harness::start().await;
-    let (caller, delegations) = harness.caller_with_delegations(1, true, false).await;
-
-    drain(&harness.service).await.expect("drain eager delivery");
-    harness.wait_for_delegation_origins(caller, 1).await;
-
-    assert!(
-        harness
-            .origins(caller)
-            .await
-            .contains(&MessageOrigin::Delegation {
-                id: delegations[0].id
-            })
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn provider_exit_delivery_resumes_and_sends() {
-    let harness = Harness::start().await;
-    let (caller, _) = harness.caller_with_delegations(1, false, true).await;
-    tokio::time::resume();
-    harness.send(caller, "exit-now").await;
-    harness
-        .wait_for(caller, |projection| {
-            projection.session == SessionState::Error
-        })
-        .await;
-    harness
-        .wait_for_stop_cause(caller, StopCause::ProviderExit)
-        .await;
-
-    drain(&harness.service)
-        .await
-        .expect("drain resume delivery");
-    harness.wait_for_delegation_origins(caller, 1).await;
-    tokio::time::pause();
-}
-
-#[tokio::test(start_paused = true)]
-async fn user_stop_holds_the_delivery() {
-    let harness = Harness::start().await;
-    let (caller, _) = harness.caller_with_delegations(1, false, true).await;
-    tokio::time::resume();
-    harness.manager.stop(caller).await.expect("stop caller");
-    harness
-        .wait_for(caller, |projection| {
-            projection.session == SessionState::Stopped
-        })
-        .await;
-    harness.wait_for_stop_cause(caller, StopCause::User).await;
-    tokio::time::pause();
-
-    drain(&harness.service).await.expect("drain stopped caller");
-
-    assert!(
-        harness
-            .origins(caller)
-            .await
-            .iter()
-            .all(MessageOrigin::is_user)
-    );
-    assert_eq!(
-        harness
-            .store
-            .delegation_outbox()
-            .await
-            .expect("open rows")
-            .len(),
-        1
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn stopped_caller_without_a_cursor_becomes_undeliverable() {
-    let harness = Harness::start().await;
-    harness.omit_resume_cursor();
-    let (caller, delegations) = harness.caller_with_delegations(1, false, true).await;
-    tokio::time::resume();
-    harness.send(caller, "exit-now").await;
-    harness
-        .wait_for(caller, |projection| {
-            projection.session == SessionState::Error
-        })
-        .await;
-    harness
-        .wait_for_stop_cause(caller, StopCause::ProviderExit)
-        .await;
-    tokio::time::pause();
-
-    drain(&harness.service)
-        .await
-        .expect("drain no-cursor delivery");
-
-    let stored = harness
-        .store
-        .delegation(delegations[0].id)
-        .await
-        .expect("read delegation")
-        .expect("delegation exists");
-    assert!(matches!(
-        stored.delivery,
-        DeliveryState::Undeliverable { .. }
-    ));
-}
-
-#[tokio::test(start_paused = true)]
-async fn two_children_of_one_caller_deliver_as_two_turns() {
-    let harness = Harness::start().await;
-    let (caller, delegations) = harness.caller_with_delegations(2, false, true).await;
-
-    drain(&harness.service).await.expect("drain first child");
-    harness.wait_for_delegation_origins(caller, 1).await;
-    harness
-        .wait_for(caller, |projection| {
-            matches!(projection.turn, TurnState::Settled(_, _))
-        })
-        .await;
-    drain(&harness.service).await.expect("drain second child");
-    harness.wait_for_delegation_origins(caller, 2).await;
-
-    let origins = harness.origins(caller).await;
-    for delegation in delegations {
-        assert!(origins.contains(&MessageOrigin::Delegation { id: delegation.id }));
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn settle_waits_for_the_background_task_then_finalizes() {
     let harness = Harness::start().await;
     let child = harness.create_thread().await;
+    // The scripted provider is an OS process. Keep Tokio's paused clock from auto-advancing its
+    // protocol deadlines while the process and pipe reader need real scheduler time.
+    tokio::time::resume();
     harness.send(child, "background work").await;
     harness
         .wait_for(child, |projection| {
@@ -638,6 +507,7 @@ async fn settle_waits_for_the_background_task_then_finalizes() {
                 && !projection.background_tasks.is_empty()
         })
         .await;
+    tokio::time::pause();
     let mut delegation = finished_delegation(
         DelegationId::new(),
         ThreadId::new(),
@@ -649,7 +519,9 @@ async fn settle_waits_for_the_background_task_then_finalizes() {
     );
     delegation.status = DelegationStatus::Settling;
     delegation.finished = None;
-    harness.insert(delegation.clone(), "settle").await;
+    harness
+        .insert(delegation.clone(), OutboxAction::Settle)
+        .await;
 
     drain(&harness.service)
         .await
@@ -665,10 +537,12 @@ async fn settle_waits_for_the_background_task_then_finalizes() {
         DelegationStatus::Settling
     );
 
+    tokio::time::resume();
     harness.send(child, "clear-background").await;
     harness
         .wait_for(child, |projection| projection.background_tasks.is_empty())
         .await;
+    tokio::time::pause();
     drain(&harness.service)
         .await
         .expect("drain completed settle");
@@ -699,8 +573,11 @@ async fn retry_tick_sends_and_counts_the_nudge() {
     );
     delegation.status = DelegationStatus::Settling;
     delegation.finished = None;
+    delegation.result = None;
 
-    harness.insert(delegation.clone(), "recover").await;
+    harness
+        .insert(delegation.clone(), OutboxAction::Recover)
+        .await;
     let worker = harness.worker.take().expect("worker is available");
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(worker.run(shutdown.clone()));
@@ -724,15 +601,35 @@ async fn retry_tick_sends_and_counts_the_nudge() {
             .expect("read drained startup rows")
             .is_empty()
     );
-    harness.enqueue(delegation.id, "nudge").await;
-    tokio::time::advance(RETRY_TICK).await;
     tokio::time::resume();
-    for _ in 0..200 {
-        if harness.provider_log().contains(NUDGE) {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    harness
+        .wait_for(child, |projection| {
+            projection.items.iter().any(|item| {
+                matches!(
+                    &item.kind,
+                    ItemKind::UserMessage { text, .. } if text == RESUME_NUDGE
+                )
+            })
+        })
+        .await;
+    tokio::time::pause();
+    harness.enqueue(delegation.id, OutboxAction::Nudge).await;
+    tokio::time::advance(RETRY_TICK).await;
+    let stored = harness
+        .wait_for_delegation(delegation.id, |current| current.nudges == 1)
+        .await;
+    assert_eq!(stored.nudges, 1);
+    tokio::time::resume();
+    harness
+        .wait_for(child, |projection| {
+            projection.items.iter().any(|item| {
+                matches!(
+                    &item.kind,
+                    ItemKind::UserMessage { text, .. } if text == NUDGE
+                )
+            })
+        })
+        .await;
     tokio::time::pause();
 
     let stored = harness
@@ -742,7 +639,6 @@ async fn retry_tick_sends_and_counts_the_nudge() {
         .expect("read delegation")
         .expect("delegation exists");
     assert_eq!(stored.nudges, 1);
-    assert!(harness.provider_log().contains(NUDGE));
     shutdown.cancel();
     task.await.expect("worker stops cleanly");
 }

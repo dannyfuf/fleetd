@@ -3,11 +3,6 @@
 //! Nothing here performs I/O and nothing here imports the session manager: the SQL half in
 //! `store/delegations.rs` calls [`child_transition`] inside the writer's transaction, so a
 //! manager call from this file would deadlock the writer thread against the operation lock.
-// The service halves that consume these rules land later in phase 3 (`run.rs`, `complete.rs`,
-// `worker.rs`) and the SQL half in `store/delegations.rs`. Until they do, the rules are reachable
-// only from this file's tests; the allowance comes off with the first caller.
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use fleet_core::agents::{
     AbortReason, AgentEvent, Delegation, DelegationResult, DelegationStatus, ItemKind, ItemPatch,
@@ -146,13 +141,18 @@ pub(crate) fn child_transition(
             reason: AbortReason::ProviderExited,
             ..
         } => {
-            finish(
-                &mut next,
-                DelegationStatus::Failed,
-                Some("provider exited".into()),
-                now,
-            );
-            actions.push(OutboxAction::Deliver);
+            if current.recoveries == 0 {
+                next.recoveries = 1;
+                actions.push(OutboxAction::Recover);
+            } else {
+                finish(
+                    &mut next,
+                    DelegationStatus::Failed,
+                    Some("provider exited twice".into()),
+                    now,
+                );
+                actions.push(OutboxAction::Deliver);
+            }
         }
         AgentEvent::TurnAborted { .. } => {
             finish(&mut next, DelegationStatus::Cancelled, None, now);
@@ -632,17 +632,24 @@ mod tests {
     }
 
     #[test]
-    fn provider_exit_abort_fails_and_delivers_in_phase_three() {
+    fn provider_exit_abort_recovers_once_then_fails_and_delivers() {
         let event = AgentEvent::TurnAborted {
             turn: TurnId::new(),
             reason: AbortReason::ProviderExited,
         };
-        let transition = child_transition(
+        let first = child_transition(
             &delegation(DelegationStatus::Running),
             &event,
             &facts(),
             now(),
         );
+        assert_eq!(first.next.status, DelegationStatus::Running);
+        assert_eq!(first.next.recoveries, 1);
+        assert_eq!(first.next.finished, None);
+        assert_eq!(first.actions, [OutboxAction::Recover]);
+        assert!(first.changed);
+
+        let transition = child_transition(&first.next, &event, &facts(), now());
         assert_terminal(
             &transition,
             DelegationStatus::Failed,
@@ -650,8 +657,25 @@ mod tests {
         );
         assert_eq!(
             transition.next.status_payload.as_deref(),
-            Some("provider exited")
+            Some("provider exited twice")
         );
+    }
+
+    #[test]
+    fn provider_exit_preserves_a_blocked_status_during_its_one_recovery() {
+        let current = delegation(DelegationStatus::Blocked);
+        let transition = child_transition(
+            &current,
+            &AgentEvent::TurnAborted {
+                turn: TurnId::new(),
+                reason: AbortReason::ProviderExited,
+            },
+            &facts(),
+            now(),
+        );
+        assert_eq!(transition.next.status, DelegationStatus::Blocked);
+        assert_eq!(transition.next.recoveries, 1);
+        assert_eq!(transition.actions, [OutboxAction::Recover]);
     }
 
     #[test]

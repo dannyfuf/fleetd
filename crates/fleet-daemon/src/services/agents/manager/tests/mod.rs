@@ -320,10 +320,11 @@ fn factory(script: &Arc<FakeScript>) -> Arc<ProviderFactory> {
 }
 
 /// A temporary daemon home with one published worktree and a scripted provider.
-struct Harness {
+pub(crate) struct Harness {
     _temp: tempfile::TempDir,
     home: PathBuf,
     manager: AgentSessionManager,
+    config: Arc<ConfigStore>,
     events: BroadcastBus,
     worktrees: Worktrees,
     worktree: WorktreeId,
@@ -346,7 +347,7 @@ fn empty_worktrees(home: &std::path::Path) -> Worktrees {
 }
 
 impl Harness {
-    async fn start(capabilities: HarnessCapabilities) -> Self {
+    pub(crate) async fn start(capabilities: HarnessCapabilities) -> Self {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("fleet");
         let repos = home.join("repos");
@@ -415,6 +416,7 @@ impl Harness {
             _temp: temp,
             home,
             manager,
+            config,
             events,
             worktrees,
             worktree,
@@ -428,7 +430,7 @@ impl Harness {
     /// no longer replays anything synchronously, so a test that asserts on settled orphans has to
     /// say when the background pass is done. Running it twice is harmless — a rebuild is
     /// idempotent and a thread already hydrated is no longer an orphan.
-    async fn restart(&self) -> AgentSessionManager {
+    pub(crate) async fn restart(&self) -> AgentSessionManager {
         let manager = AgentSessionManager::new_with_factory(
             FleetHome::new(&self.home).agents_db_path(),
             self.events.clone(),
@@ -440,7 +442,7 @@ impl Harness {
         manager
     }
 
-    async fn create(&self, resume_cursor: Option<String>) -> AgentThreadSummary {
+    pub(crate) async fn create(&self, resume_cursor: Option<String>) -> AgentThreadSummary {
         let response = self
             .manager
             .create(
@@ -472,7 +474,7 @@ impl Harness {
     }
 
     /// Waits until `predicate` holds of the projection, failing the test on timeout.
-    async fn settle(
+    pub(crate) async fn settle(
         &self,
         thread: ThreadId,
         what: &str,
@@ -494,6 +496,45 @@ impl Harness {
         })
         .await
         .unwrap_or_else(|_| panic!("agent thread never reached {what}"))
+    }
+
+    pub(crate) fn delegation_parts(
+        &self,
+    ) -> (
+        AgentSessionManager,
+        BroadcastBus,
+        Arc<ConfigStore>,
+        Worktrees,
+    ) {
+        (
+            self.manager.clone(),
+            self.events.clone(),
+            Arc::clone(&self.config),
+            self.worktrees.clone(),
+        )
+    }
+
+    pub(crate) async fn emit(&self, event: AgentEvent) {
+        self.script.emit(event).await;
+    }
+
+    pub(crate) fn sent_turn_containing(&self, needle: &str) -> Option<TurnId> {
+        self.script
+            .calls()
+            .iter()
+            .rev()
+            .find_map(|call| match call {
+                FakeCall::Send(turn, text) if text.contains(needle) => Some(*turn),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn sent_count_containing(&self, needle: &str) -> usize {
+        self.script
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, FakeCall::Send(_, text) if text.contains(needle)))
+            .count()
     }
 }
 
@@ -562,7 +603,7 @@ fn attentions(events: &[Event]) -> Vec<Attention> {
         .collect()
 }
 
-fn full() -> HarnessCapabilities {
+pub(crate) fn full() -> HarnessCapabilities {
     HarnessCapabilities {
         resume: ResumeSupport::ByCursor { fork: false },
         steer: SteerSupport::Explicit {

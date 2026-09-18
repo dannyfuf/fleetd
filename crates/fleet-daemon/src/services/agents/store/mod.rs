@@ -45,7 +45,7 @@
 //!   on either is the thing this store was built to stop doing.
 
 mod cursor;
-mod delegations;
+pub(crate) mod delegations;
 mod import;
 mod index;
 mod list;
@@ -235,7 +235,6 @@ impl SqliteAgentStore {
 
     /// Reads the delegation a child thread belongs to. `child_thread` is `UNIQUE`, so there is
     /// at most one.
-    #[allow(dead_code)] // Used by phase-3 delegation service work landing in parallel.
     pub(crate) async fn delegation_by_child(
         &self,
         child: ThreadId,
@@ -252,7 +251,7 @@ impl SqliteAgentStore {
     ///
     /// The plaintext token is never persisted and never leaves the child, so this is the only
     /// value `DelegationComplete` can be checked against.
-    #[allow(dead_code)] // Used by phase-3 complete service work landing in parallel.
+    #[allow(dead_code)] // Contracted typed read; completion validates atomically on the writer.
     pub(crate) async fn delegation_token_hash(
         &self,
         id: DelegationId,
@@ -280,7 +279,6 @@ impl SqliteAgentStore {
 
     /// The same list narrowed to non-terminal delegations, which is what the depth and
     /// concurrency ceilings are counted from.
-    #[allow(dead_code)] // Used by phase-3 run service work landing in parallel.
     pub(crate) async fn live_delegations(
         &self,
         caller: Option<ThreadId>,

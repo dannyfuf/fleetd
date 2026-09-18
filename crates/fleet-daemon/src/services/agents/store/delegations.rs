@@ -81,15 +81,15 @@ pub(crate) struct OutboxRow {
 
 /// Delegation side effects accumulated while projecting one event.
 #[derive(Debug, Default)]
-pub(super) struct TransitionOutcome {
+pub(crate) struct TransitionOutcome {
     /// Whether committed outbox work should wake the worker.
-    pub(super) wake: bool,
+    pub(crate) wake: bool,
     /// Delegations whose durable row changed, published only after commit.
-    pub(super) changed: Vec<Delegation>,
+    pub(crate) changed: Vec<Delegation>,
 }
 
 /// Applies child and caller delegation rules inside the event's projection transaction.
-pub(super) fn transition(
+pub(crate) fn transition(
     tx: &Transaction<'_>,
     thread: ThreadId,
     event: &SeqEvent,
@@ -141,7 +141,7 @@ pub(super) fn transition(
     Ok(outcome)
 }
 
-fn record_changed(changed: &mut Vec<Delegation>, delegation: Delegation) {
+pub(crate) fn record_changed(changed: &mut Vec<Delegation>, delegation: Delegation) {
     if let Some(previous) = changed
         .iter_mut()
         .find(|previous| previous.id == delegation.id)
@@ -152,7 +152,7 @@ fn record_changed(changed: &mut Vec<Delegation>, delegation: Delegation) {
     }
 }
 
-fn caller_event_can_wake(event: &AgentEvent) -> bool {
+pub(crate) fn caller_event_can_wake(event: &AgentEvent) -> bool {
     matches!(
         event,
         AgentEvent::TurnSettled { .. }
@@ -162,7 +162,10 @@ fn caller_event_can_wake(event: &AgentEvent) -> bool {
     )
 }
 
-fn caller_has_open_deliver(tx: &Transaction<'_>, caller: ThreadId) -> anyhow::Result<bool> {
+pub(crate) fn caller_has_open_deliver(
+    tx: &Transaction<'_>,
+    caller: ThreadId,
+) -> anyhow::Result<bool> {
     tx.query_row(
         "SELECT EXISTS(\
            SELECT 1 FROM delegation_outbox AS outbox \
@@ -177,8 +180,7 @@ fn caller_has_open_deliver(tx: &Transaction<'_>, caller: ThreadId) -> anyhow::Re
 }
 
 /// Inserts the immutable identity and the initial mutable state of a delegation.
-#[allow(dead_code)] // The phase-3 run service inserts the row once its implementation lands.
-pub(super) fn insert(
+pub(crate) fn insert(
     tx: &Transaction<'_>,
     delegation: &Delegation,
     token_sha256: &str,
@@ -225,7 +227,7 @@ pub(super) fn insert(
 }
 
 /// Rewrites every mutable delegation column while preserving its identity and token hash.
-pub(super) fn update(tx: &Transaction<'_>, delegation: &Delegation) -> anyhow::Result<()> {
+pub(crate) fn update(tx: &Transaction<'_>, delegation: &Delegation) -> anyhow::Result<()> {
     let encoded = EncodedDelegation::from_delegation(delegation)?;
     let changed = tx
         .execute(
@@ -259,7 +261,7 @@ pub(super) fn update(tx: &Transaction<'_>, delegation: &Delegation) -> anyhow::R
 }
 
 /// Reads one delegation by id.
-pub(super) fn get(conn: &Connection, id: DelegationId) -> anyhow::Result<Option<Delegation>> {
+pub(crate) fn get(conn: &Connection, id: DelegationId) -> anyhow::Result<Option<Delegation>> {
     read_one(
         conn,
         &format!("SELECT {DELEGATION_COLUMNS} FROM delegations WHERE id = ?1"),
@@ -269,7 +271,7 @@ pub(super) fn get(conn: &Connection, id: DelegationId) -> anyhow::Result<Option<
 }
 
 /// Reads the delegation a child thread belongs to; `child_thread` is `UNIQUE`.
-pub(super) fn get_by_child(
+pub(crate) fn get_by_child(
     conn: &Connection,
     child: ThreadId,
 ) -> anyhow::Result<Option<Delegation>> {
@@ -282,8 +284,7 @@ pub(super) fn get_by_child(
 }
 
 /// Reads the stored SHA-256 of a delegation's completion token. The plaintext is never persisted.
-#[allow(dead_code)] // The phase-3 complete service consumes this read.
-pub(super) fn token_hash(conn: &Connection, id: DelegationId) -> anyhow::Result<Option<String>> {
+pub(crate) fn token_hash(conn: &Connection, id: DelegationId) -> anyhow::Result<Option<String>> {
     conn.query_row(
         "SELECT token_sha256 FROM delegations WHERE id = ?1",
         [id.to_string()],
@@ -293,19 +294,69 @@ pub(super) fn token_hash(conn: &Connection, id: DelegationId) -> anyhow::Result<
     .with_context(|| format!("read the token hash of delegation {id}"))
 }
 
+/// Stores the reported result and the metadata that makes repeated completion idempotent.
+pub(crate) fn set_report(
+    tx: &Transaction<'_>,
+    id: DelegationId,
+    result: &DelegationResult,
+    report_sha256: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let result_source = discriminant(&result.source, "ResultSource")?;
+    let result_files =
+        serde_json::to_string(&result.files_changed).context("encode delegation result files")?;
+    let changed = tx
+        .execute(
+            "UPDATE delegations SET result = ?2, result_source = ?3, result_files = ?4, \
+             result_elided = ?5, reported_at = ?6, report_sha256 = ?7 WHERE id = ?1",
+            params![
+                id.to_string(),
+                result.text,
+                result_source,
+                result_files,
+                i64::from(result.elided),
+                timestamp(now),
+                report_sha256,
+            ],
+        )
+        .with_context(|| format!("store report for delegation {id}"))?;
+    if changed == 0 {
+        bail!("delegation {id} does not exist");
+    }
+    Ok(())
+}
+
+/// Reads the full-report hash and first accepted time used to judge a repeated completion.
+pub(crate) fn report_meta(
+    conn: &Connection,
+    id: DelegationId,
+) -> anyhow::Result<Option<(String, DateTime<Utc>)>> {
+    let stored = conn
+        .query_row(
+            "SELECT report_sha256, reported_at FROM delegations \
+             WHERE id = ?1 AND report_sha256 IS NOT NULL AND reported_at IS NOT NULL",
+            [id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .with_context(|| format!("read report metadata for delegation {id}"))?;
+    stored
+        .map(|(sha256, reported_at)| Ok((sha256, parse_timestamp(&reported_at, "report time")?)))
+        .transpose()
+}
+
 /// Lists delegations newest first, optionally narrowed to one caller.
-pub(super) fn list(conn: &Connection, caller: Option<ThreadId>) -> anyhow::Result<Vec<Delegation>> {
+pub(crate) fn list(conn: &Connection, caller: Option<ThreadId>) -> anyhow::Result<Vec<Delegation>> {
     read_many(conn, caller, false)
 }
 
 /// The same list narrowed to non-terminal delegations, which the ceilings are counted from.
-#[allow(dead_code)] // The phase-3 run service consumes this ceiling query.
-pub(super) fn live(conn: &Connection, caller: Option<ThreadId>) -> anyhow::Result<Vec<Delegation>> {
+pub(crate) fn live(conn: &Connection, caller: Option<ThreadId>) -> anyhow::Result<Vec<Delegation>> {
     read_many(conn, caller, true)
 }
 
 /// Records one follow-up action for the worker to run after this transaction commits.
-pub(super) fn enqueue(
+pub(crate) fn enqueue(
     tx: &Transaction<'_>,
     delegation: DelegationId,
     action: OutboxAction,
@@ -320,7 +371,7 @@ pub(super) fn enqueue(
 }
 
 /// Every unfinished row in id order — the durable work list one worker pass drains.
-pub(super) fn open_rows(conn: &Connection) -> anyhow::Result<Vec<OutboxRow>> {
+pub(crate) fn open_rows(conn: &Connection) -> anyhow::Result<Vec<OutboxRow>> {
     read_outbox(
         conn,
         "SELECT id, delegation, action, created FROM delegation_outbox \
@@ -331,8 +382,8 @@ pub(super) fn open_rows(conn: &Connection) -> anyhow::Result<Vec<OutboxRow>> {
 }
 
 /// The same list narrowed to one delegation.
-#[allow(dead_code)] // The phase-3 worker consumes this query.
-pub(super) fn open_rows_for(
+#[allow(dead_code)] // Contracted per-delegation diagnostic read; the worker drains globally.
+pub(crate) fn open_rows_for(
     conn: &Connection,
     delegation: DelegationId,
 ) -> anyhow::Result<Vec<OutboxRow>> {
@@ -347,8 +398,7 @@ pub(super) fn open_rows_for(
 
 /// Closes one outbox row. Guarded on `done IS NULL`, so a replayed pass cannot move the stamp
 /// that says when the action actually finished.
-#[allow(dead_code)] // The phase-3 worker consumes this statement.
-pub(super) fn mark_done(tx: &Transaction<'_>, row: i64, now: DateTime<Utc>) -> anyhow::Result<()> {
+pub(crate) fn mark_done(tx: &Transaction<'_>, row: i64, now: DateTime<Utc>) -> anyhow::Result<()> {
     tx.execute(
         "UPDATE delegation_outbox SET done = ?2 WHERE id = ?1 AND done IS NULL",
         params![row, timestamp(now)],
@@ -358,7 +408,7 @@ pub(super) fn mark_done(tx: &Transaction<'_>, row: i64, now: DateTime<Utc>) -> a
 }
 
 /// Closes every open row of one action for one delegation, and answers how many it closed.
-pub(super) fn mark_done_for(
+pub(crate) fn mark_done_for(
     tx: &Transaction<'_>,
     delegation: DelegationId,
     action: OutboxAction,
@@ -378,14 +428,52 @@ pub(super) fn mark_done_for(
 }
 
 /// Whether a caller thread is still listed, which is what refuses a run against a deleted thread.
-#[allow(dead_code)] // The phase-3 run service consumes this check.
-pub(super) fn caller_exists(conn: &Connection, caller: ThreadId) -> anyhow::Result<bool> {
+pub(crate) fn caller_exists(conn: &Connection, caller: ThreadId) -> anyhow::Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM threads WHERE thread_id = ?1 AND deleted_at IS NULL)",
         [caller.to_string()],
         |row| row.get(0),
     )
     .with_context(|| format!("check whether delegation caller {caller} exists"))
+}
+
+/// Makes terminal results whose caller disappeared while the daemon was down durably
+/// undeliverable, and closes their delivery work in the same transaction.
+pub(crate) fn mark_missing_callers_undeliverable(
+    tx: &Transaction<'_>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<Delegation>> {
+    let sql = format!(
+        "SELECT {DELEGATION_COLUMNS} FROM delegations \
+         WHERE status IN ('succeeded', 'incomplete', 'failed', 'cancelled') \
+           AND delivery = 'pending' \
+           AND NOT EXISTS (\
+             SELECT 1 FROM threads \
+             WHERE threads.thread_id = delegations.caller_thread \
+               AND threads.deleted_at IS NULL\
+           ) \
+         ORDER BY created ASC LIMIT ?1"
+    );
+    let raw = {
+        let mut statement = tx
+            .prepare(&sql)
+            .context("prepare missing delegation caller query")?;
+        statement
+            .query_map([READ_LIMIT], RawDelegation::read)
+            .context("query delegations with missing callers")?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut changed = Vec::with_capacity(raw.len());
+    for raw in raw {
+        let mut delegation = raw.decode()?;
+        delegation.delivery = DeliveryState::Undeliverable {
+            reason: "caller deleted".to_owned(),
+        };
+        update(tx, &delegation)?;
+        mark_done_for(tx, delegation.id, OutboxAction::Deliver, now)?;
+        changed.push(delegation);
+    }
+    Ok(changed)
 }
 
 /// The projection every delegation read selects, in the order [`RawDelegation::read`] decodes.
@@ -397,7 +485,7 @@ provider, depth, brief, expectation, eager, status, status_payload, result, resu
 result_files, result_elided, nudges, recoveries, delivery, delivered_seq, delivered_turn, \
 delivery_reason, headline, created, finished";
 
-fn read_many(
+pub(crate) fn read_many(
     conn: &Connection,
     caller: Option<ThreadId>,
     live_only: bool,
@@ -436,7 +524,7 @@ fn read_many(
     raw.into_iter().map(RawDelegation::decode).collect()
 }
 
-fn read_one(
+pub(crate) fn read_one(
     conn: &Connection,
     sql: &str,
     parameter: String,
@@ -451,7 +539,7 @@ fn read_one(
         .with_context(|| context)
 }
 
-fn read_outbox<P: rusqlite::Params>(
+pub(crate) fn read_outbox<P: rusqlite::Params>(
     conn: &Connection,
     sql: &str,
     parameters: P,
@@ -485,7 +573,6 @@ fn read_outbox<P: rusqlite::Params>(
 }
 
 struct EncodedDelegation {
-    #[allow(dead_code)] // Read by `insert`, whose phase-3 production caller lands separately.
     provider: String,
     status: String,
     result: Option<String>,
@@ -499,7 +586,7 @@ struct EncodedDelegation {
 }
 
 impl EncodedDelegation {
-    fn from_delegation(delegation: &Delegation) -> anyhow::Result<Self> {
+    pub(crate) fn from_delegation(delegation: &Delegation) -> anyhow::Result<Self> {
         let (result, result_source, result_files, result_elided) = match &delegation.result {
             Some(result) => (
                 Some(result.text.clone()),
@@ -565,7 +652,7 @@ struct RawDelegation {
 }
 
 impl RawDelegation {
-    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+    pub(crate) fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get(0)?,
             caller: row.get(1)?,
@@ -595,7 +682,7 @@ impl RawDelegation {
         })
     }
 
-    fn decode(self) -> anyhow::Result<Delegation> {
+    pub(crate) fn decode(self) -> anyhow::Result<Delegation> {
         let id = parse_id(&self.id, "delegation id")?;
         let result = match self.result {
             Some(text) => {
@@ -675,12 +762,12 @@ impl RawDelegation {
 
 /// Decodes a word this file wrote with [`discriminant`], which is what keeps the two directions
 /// from drifting when a variant is renamed.
-fn parse_enum<T: DeserializeOwned>(word: &str, what: &str) -> anyhow::Result<T> {
+pub(crate) fn parse_enum<T: DeserializeOwned>(word: &str, what: &str) -> anyhow::Result<T> {
     serde_json::from_value(serde_json::Value::String(word.to_owned()))
         .with_context(|| format!("decode delegation {what} `{word}`"))
 }
 
-fn parse_id<T>(value: &str, what: &str) -> anyhow::Result<T>
+pub(crate) fn parse_id<T>(value: &str, what: &str) -> anyhow::Result<T>
 where
     T: FromStr,
     T::Err: Display + Send + Sync + 'static,
@@ -691,11 +778,11 @@ where
         .with_context(|| format!("decode delegation {what} `{value}`"))
 }
 
-fn timestamp(value: DateTime<Utc>) -> String {
+pub(crate) fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339()
 }
 
-fn parse_timestamp(value: &str, what: &str) -> anyhow::Result<DateTime<Utc>> {
+pub(crate) fn parse_timestamp(value: &str, what: &str) -> anyhow::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .with_context(|| format!("decode delegation {what} `{value}`"))

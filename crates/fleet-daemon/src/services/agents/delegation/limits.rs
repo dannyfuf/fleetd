@@ -1,8 +1,4 @@
 //! Limits and retry intervals shared by delegation operations.
-// Only `MAX_NUDGES` has a caller until `run.rs`, `queries.rs` and `worker.rs` land later in
-// phase 3; the allowance comes off with them.
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 /// Deepest delegation chain a caller may extend.
@@ -20,4 +16,5 @@ pub(crate) const RETRY_TICK: Duration = Duration::from_secs(60);
 /// Ceiling on a reported result, matching the transcript item-body budget.
 pub(crate) const RESULT_CAP_BYTES: usize = fleet_proto::agents::ITEM_BODY_MAX_CHUNK_BYTES as usize;
 /// Default and ceiling, in seconds, for `fleet subagent wait`.
+#[allow(dead_code)] // The cli-subagent stage applies this default before sending the wait request.
 pub(crate) const WAIT_DEFAULT_SECS: u64 = 540;

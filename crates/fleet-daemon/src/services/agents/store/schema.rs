@@ -354,6 +354,39 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
     "turns",
 ];
 
+/// Every column migration slot 003 adds to the durable delegation record.
+#[cfg(test)]
+pub(super) const REQUIRED_DELEGATION_COLUMNS: &[&str] = &[
+    "brief",
+    "caller_item",
+    "caller_thread",
+    "caller_turn",
+    "child_thread",
+    "created",
+    "delivered_seq",
+    "delivered_turn",
+    "delivery",
+    "delivery_reason",
+    "depth",
+    "eager",
+    "expectation",
+    "finished",
+    "headline",
+    "id",
+    "nudges",
+    "provider",
+    "recoveries",
+    "report_sha256",
+    "reported_at",
+    "result",
+    "result_elided",
+    "result_files",
+    "result_source",
+    "status",
+    "status_payload",
+    "token_sha256",
+];
+
 /// Every index the read paths of `docs/NATIVE-AGENTS.md` §8 rely on.
 ///
 /// A read query whose index is missing still returns the right rows, just by scanning a whole

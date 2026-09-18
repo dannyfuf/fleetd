@@ -15,7 +15,10 @@ use crate::{
     jobs::JobManager,
     server::BroadcastBus,
     services::{
-        agents::{AgentSessionManager, store::SqliteAgentStore},
+        agents::{
+            AgentSessionManager,
+            store::{SqliteAgentStore, delegations},
+        },
         sessions::Sessions,
         worktrees::Worktrees,
     },
@@ -68,27 +71,7 @@ impl Harness {
         let stored = delegation.clone();
         self.store
             .delegation_write("insert query-test delegation", move |tx| {
-                tx.execute(
-                    "INSERT INTO delegations (id, token_sha256, caller_thread, caller_turn, \
-                     caller_item, child_thread, provider, depth, brief, expectation, eager, \
-                     status, delivery, created, finished) \
-                     VALUES (?1, 'test-token', ?2, ?3, ?4, ?5, 'codex', ?6, ?7, ?8, ?9, \
-                             ?10, 'pending', ?11, ?12)",
-                    rusqlite::params![
-                        stored.id.to_string(),
-                        stored.caller.to_string(),
-                        stored.caller_turn.to_string(),
-                        stored.caller_item.to_string(),
-                        stored.child.to_string(),
-                        i64::from(stored.depth),
-                        stored.brief,
-                        stored.expectation,
-                        i64::from(stored.eager),
-                        status_word(stored.status),
-                        stored.created.to_rfc3339(),
-                        stored.finished.map(|stamp| stamp.to_rfc3339()),
-                    ],
-                )?;
+                delegations::insert(tx, &stored, "test-token")?;
                 Ok(((), false))
             })
             .await
@@ -101,14 +84,7 @@ impl Harness {
         let stored = delegation.clone();
         self.store
             .delegation_write("finish query-test delegation", move |tx| {
-                tx.execute(
-                    "UPDATE delegations SET status = ?2, finished = ?3 WHERE id = ?1",
-                    rusqlite::params![
-                        stored.id.to_string(),
-                        status_word(stored.status),
-                        stored.finished.map(|stamp| stamp.to_rfc3339()),
-                    ],
-                )?;
+                delegations::update(tx, &stored)?;
                 Ok(((), false))
             })
             .await
@@ -144,19 +120,6 @@ fn delegation(caller: ThreadId, created_offset: i64) -> Delegation {
         created: stamp(created_offset),
         finished: None,
         headline: None,
-    }
-}
-
-const fn status_word(status: DelegationStatus) -> &'static str {
-    match status {
-        DelegationStatus::Starting => "starting",
-        DelegationStatus::Running => "running",
-        DelegationStatus::Blocked => "blocked",
-        DelegationStatus::Settling => "settling",
-        DelegationStatus::Succeeded => "succeeded",
-        DelegationStatus::Incomplete => "incomplete",
-        DelegationStatus::Failed => "failed",
-        DelegationStatus::Cancelled => "cancelled",
     }
 }
 

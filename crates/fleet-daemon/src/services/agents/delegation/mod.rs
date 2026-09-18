@@ -21,7 +21,12 @@ mod complete;
 pub(crate) mod footer;
 pub(crate) mod limits;
 mod queries;
+#[cfg(test)]
+#[path = "tests/recovery.rs"]
+mod recovery;
 mod run;
+#[cfg(test)]
+mod tests;
 pub(crate) mod transition;
 mod worker;
 
@@ -31,10 +36,7 @@ use fleet_core::{
     agents::{AgentKind, Delegation, DelegationId, ModelSelection, PermissionMode, ThreadId},
     ids::WorktreeId,
 };
-use fleet_proto::{
-    error::{ErrorKind, ProtoError},
-    event::Event,
-};
+use fleet_proto::event::Event;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -56,22 +58,16 @@ pub(crate) struct DelegationService {
 struct Inner {
     /// The one place a delegation row is read or written.
     ///
-    /// Unread until `run.rs`, `complete.rs`, `queries.rs`, `cancel.rs` and `worker.rs` carry the
-    /// bodies this skeleton reserves; each allowance below comes off with its stage.
-    #[allow(dead_code)]
     store: SqliteAgentStore,
     /// The only way this service touches a thread: create it, send to it, patch its transcript.
-    #[allow(dead_code)]
     manager: AgentSessionManager,
     /// Where `Event::DelegationChanged` goes.
     events: BroadcastBus,
     /// Poked by the store after a committed transaction enqueued outbox work.
     wake: mpsc::UnboundedSender<()>,
     /// Names the provider executables `run` refuses a delegation against when one is missing.
-    #[allow(dead_code)]
     config: Arc<ConfigStore>,
     /// Resolves the worktree a child is started in.
-    #[allow(dead_code)]
     worktrees: Worktrees,
 }
 
@@ -115,7 +111,6 @@ impl DelegationService {
     ///
     /// Best effort by construction: the bus is bounded and may lag, so every surface treats
     /// `DelegationChanged` as a repaint hint and reads the record when it needs the truth.
-    #[allow(dead_code)]
     pub(crate) fn publish_changed(&self, delegation: Delegation) {
         self.inner
             .events
@@ -125,9 +120,7 @@ impl DelegationService {
 
 /// Everything `DelegationRun` carries, after the wire shape is left behind.
 ///
-/// Read by `run.rs`, which stage `service-run` fills; dispatch builds it today so the verb is
-/// routed end to end before its body exists.
-#[allow(dead_code)]
+/// Read by `run.rs` after dispatch has left the wire shape behind.
 pub(crate) struct RunRequest {
     pub caller: ThreadId,
     pub provider: AgentKind,
@@ -140,9 +133,7 @@ pub(crate) struct RunRequest {
     pub eager: bool,
 }
 
-/// Everything `DelegationComplete` carries. Read by `complete.rs`, which stage `service-complete`
-/// fills.
-#[allow(dead_code)]
+/// Everything `DelegationComplete` carries after dispatch has left the wire shape behind.
 pub(crate) struct CompleteRequest {
     pub delegation: DelegationId,
     pub child: ThreadId,
@@ -170,6 +161,7 @@ impl DelegationWorker {
         retry.tick().await;
         loop {
             tokio::select! {
+                biased;
                 () = shutdown.cancelled() => break,
                 _ = retry.tick() => self.drain_once().await,
                 woken = self.wake.recv() => match woken {
@@ -227,15 +219,4 @@ pub(crate) fn install(
         }),
     });
     Some((service, worker))
-}
-
-/// The refusal a verb whose body has not landed yet answers with.
-///
-/// Typed `Unsupported` rather than `Unknown` so a caller reads it as "this daemon does not do
-/// that", which is exactly true until the stage that fills the body lands.
-fn unsupported(verb: &str) -> ProtoError {
-    ProtoError {
-        kind: ErrorKind::Unsupported,
-        message: format!("delegation {verb} is not built yet"),
-    }
 }

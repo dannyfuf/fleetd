@@ -6,20 +6,18 @@
 
 use std::collections::HashSet;
 
+use crate::services::agents::store::{OutboxAction, OutboxRow, delegations};
 use anyhow::Context as _;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use fleet_core::agents::{
     Delegation, DelegationStatus, DeliveryState, ItemPatch, ItemPayloadPatch, ItemStatus,
-    MessageOrigin, SessionState, StopCause, UserInput,
+    MessageOrigin, ResultSource, SessionState, StopCause, UserInput,
 };
 use fleet_proto::error::ErrorKind;
-use rusqlite::params;
-
-use crate::services::agents::store::{OutboxAction, OutboxRow};
 
 use super::{
     DelegationService,
-    footer::{NUDGE, delivered_message},
+    footer::{NUDGE, RESUME_NUDGE, delivered_message},
     limits::SETTLE_GRACE,
 };
 
@@ -29,6 +27,13 @@ use super::{
 /// a turn, the next child's row waits for the caller-item commit and the later settle wake rather
 /// than being folded into the same turn.
 pub(super) async fn drain(service: &DelegationService) -> anyhow::Result<()> {
+    // The manager repairs restart orphans in the background. Hydrating live delegation children
+    // here makes the worker's startup order deterministic: every ProviderExited transition and
+    // its Recover row exist before this pass reads the outbox.
+    for delegation in service.inner.store.live_delegations(None).await? {
+        service.inner.manager.projection(delegation.child).await?;
+    }
+    repair_missing_callers(service).await?;
     let rows = service.inner.store.delegation_outbox().await?;
     let mut callers = HashSet::new();
 
@@ -84,13 +89,31 @@ async fn perform(
         OutboxAction::Nudge => nudge(service, row, delegation).await,
         OutboxAction::Settle => settle(service, row, delegation).await,
         OutboxAction::Deliver => deliver(service, row, delegation).await,
-        OutboxAction::Recover | OutboxAction::CancelChildren => {
-            // Phase 6 replaces these placeholders with recovery and descendant cancellation.
-            finish_row(service, row.id).await?;
-            service.publish_changed(delegation);
-            Ok(())
-        }
+        OutboxAction::Recover => recover(service, row, delegation).await,
+        OutboxAction::CancelChildren => cancel_children(service, row, delegation).await,
     }
+}
+
+async fn repair_missing_callers(service: &DelegationService) -> anyhow::Result<()> {
+    let now = Utc::now();
+    let repaired = service
+        .inner
+        .store
+        .delegation_write("repair missing delegation callers", move |tx| {
+            let changed = delegations::mark_missing_callers_undeliverable(tx, now)?;
+            Ok((changed, false))
+        })
+        .await?;
+    for delegation in repaired {
+        tracing::warn!(
+            target: "fleet::agents",
+            delegation = %delegation.id,
+            caller = %delegation.caller,
+            "marked a terminal delegation with a deleted caller undeliverable",
+        );
+        service.publish_changed(delegation);
+    }
+    Ok(())
 }
 
 async fn mirror(
@@ -116,13 +139,37 @@ async fn mirror(
 async fn nudge(
     service: &DelegationService,
     row: &OutboxRow,
-    mut delegation: Delegation,
+    delegation: Delegation,
 ) -> anyhow::Result<()> {
     // Count and close the durable request before the send. If the daemon exits after the commit,
     // the child may miss one hint, but it can never receive an unbounded series of duplicate
     // nudges after restarts.
-    bump_nudge_and_finish(service, row.id, delegation.id).await?;
-    delegation.nudges = delegation.nudges.saturating_add(1);
+    let delegation_id = delegation.id;
+    let row_id = row.id;
+    let Some(delegation) = service
+        .inner
+        .store
+        .delegation_write("count delegation nudge", move |tx| {
+            let Some(mut current) = delegations::get(tx, delegation_id)? else {
+                anyhow::bail!("delegation {delegation_id} does not exist");
+            };
+            let reported = current
+                .result
+                .as_ref()
+                .is_some_and(|result| result.source == ResultSource::Reported);
+            if current.status != DelegationStatus::Settling || reported {
+                delegations::mark_done(tx, row_id, Utc::now())?;
+                return Ok((None, false));
+            }
+            current.nudges = current.nudges.saturating_add(1);
+            delegations::update(tx, &current)?;
+            delegations::mark_done(tx, row_id, Utc::now())?;
+            Ok((Some(current), false))
+        })
+        .await?
+    else {
+        return Ok(());
+    };
     service.publish_changed(delegation.clone());
 
     service
@@ -142,7 +189,7 @@ async fn nudge(
 async fn settle(
     service: &DelegationService,
     row: &OutboxRow,
-    mut delegation: Delegation,
+    delegation: Delegation,
 ) -> anyhow::Result<()> {
     let projection = service.inner.manager.projection(delegation.child).await?;
     let now = Utc::now();
@@ -152,9 +199,108 @@ async fn settle(
         return Ok(());
     }
 
-    settle_and_enqueue_delivery(service, row.id, delegation.id, now).await?;
-    delegation.status = DelegationStatus::Succeeded;
-    delegation.finished = Some(now);
+    let delegation_id = delegation.id;
+    let row_id = row.id;
+    let Some(delegation) = service
+        .inner
+        .store
+        .delegation_write("settle delegation", move |tx| {
+            let Some(mut current) = delegations::get(tx, delegation_id)? else {
+                anyhow::bail!("delegation {delegation_id} does not exist");
+            };
+            if current.status != DelegationStatus::Settling {
+                delegations::mark_done(tx, row_id, now)?;
+                return Ok((None, false));
+            }
+            current.status = DelegationStatus::Succeeded;
+            current.finished = Some(now);
+            delegations::update(tx, &current)?;
+            delegations::enqueue(tx, current.id, OutboxAction::Deliver, now)?;
+            delegations::mark_done(tx, row_id, now)?;
+            Ok((Some(current), true))
+        })
+        .await?
+    else {
+        return Ok(());
+    };
+    service.publish_changed(delegation);
+    Ok(())
+}
+
+async fn recover(
+    service: &DelegationService,
+    row: &OutboxRow,
+    delegation: Delegation,
+) -> anyhow::Result<()> {
+    let input = UserInput {
+        text: RESUME_NUDGE.to_owned(),
+        ..UserInput::default()
+    };
+    match service.inner.manager.send(delegation.child, input).await {
+        Ok(_) => {
+            finish_row(service, row.id).await?;
+            let current = service
+                .inner
+                .store
+                .delegation(delegation.id)
+                .await?
+                .unwrap_or(delegation);
+            service.publish_changed(current);
+            Ok(())
+        }
+        Err(error) if error.kind == ErrorKind::Conflict => {
+            let record = service.inner.manager.record(delegation.child).await?;
+            if record.resume_cursor.is_some() {
+                return Err(anyhow::Error::new(error));
+            }
+            fail_recovery(
+                service,
+                row.id,
+                delegation.id,
+                "agent thread has no resume cursor".to_owned(),
+            )
+            .await
+        }
+        Err(error) => Err(anyhow::Error::new(error)),
+    }
+}
+
+async fn fail_recovery(
+    service: &DelegationService,
+    row: i64,
+    delegation: fleet_core::agents::DelegationId,
+    reason: String,
+) -> anyhow::Result<()> {
+    let now = Utc::now();
+    let changed = service
+        .inner
+        .store
+        .delegation_write("fail delegation recovery", move |tx| {
+            let Some(mut current) = delegations::get(tx, delegation)? else {
+                anyhow::bail!("delegation {delegation} does not exist");
+            };
+            if !current.status.is_terminal() {
+                current.status = DelegationStatus::Failed;
+                current.status_payload = Some(reason);
+                current.finished = Some(now);
+                delegations::update(tx, &current)?;
+                delegations::enqueue(tx, current.id, OutboxAction::Deliver, now)?;
+            }
+            delegations::mark_done(tx, row, now)?;
+            Ok((current, true))
+        })
+        .await?;
+    service.publish_changed(changed);
+    Ok(())
+}
+
+async fn cancel_children(
+    service: &DelegationService,
+    row: &OutboxRow,
+    delegation: Delegation,
+) -> anyhow::Result<()> {
+    service.cancel_descendants(delegation.child).await?;
+    finish_row(service, row.id).await?;
     service.publish_changed(delegation);
     Ok(())
 }
@@ -273,77 +419,13 @@ const fn terminal_item_status(status: DelegationStatus) -> Option<ItemStatus> {
 }
 
 async fn finish_row(service: &DelegationService, row: i64) -> anyhow::Result<()> {
-    let now = timestamp(Utc::now());
+    let now = Utc::now();
     service
         .inner
         .store
         .delegation_write("finish delegation outbox row", move |tx| {
-            tx.execute(
-                "UPDATE delegation_outbox SET done = ?2 WHERE id = ?1 AND done IS NULL",
-                params![row, now],
-            )
-            .with_context(|| format!("mark delegation outbox row {row} done"))?;
+            delegations::mark_done(tx, row, now)?;
             Ok(((), false))
-        })
-        .await
-}
-
-async fn bump_nudge_and_finish(
-    service: &DelegationService,
-    row: i64,
-    delegation: fleet_core::agents::DelegationId,
-) -> anyhow::Result<()> {
-    let now = timestamp(Utc::now());
-    service
-        .inner
-        .store
-        .delegation_write("count delegation nudge", move |tx| {
-            let changed = tx
-                .execute(
-                    "UPDATE delegations SET nudges = nudges + 1 WHERE id = ?1",
-                    [delegation.to_string()],
-                )
-                .with_context(|| format!("count nudge for delegation {delegation}"))?;
-            anyhow::ensure!(changed == 1, "delegation {delegation} does not exist");
-            tx.execute(
-                "UPDATE delegation_outbox SET done = ?2 WHERE id = ?1 AND done IS NULL",
-                params![row, now],
-            )
-            .with_context(|| format!("mark delegation outbox row {row} done"))?;
-            Ok(((), false))
-        })
-        .await
-}
-
-async fn settle_and_enqueue_delivery(
-    service: &DelegationService,
-    row: i64,
-    delegation: fleet_core::agents::DelegationId,
-    now: DateTime<Utc>,
-) -> anyhow::Result<()> {
-    let stamped = timestamp(now);
-    service
-        .inner
-        .store
-        .delegation_write("settle delegation", move |tx| {
-            let changed = tx
-                .execute(
-                    "UPDATE delegations SET status = 'succeeded', finished = ?2 WHERE id = ?1",
-                    params![delegation.to_string(), stamped],
-                )
-                .with_context(|| format!("settle delegation {delegation}"))?;
-            anyhow::ensure!(changed == 1, "delegation {delegation} does not exist");
-            tx.execute(
-                "INSERT INTO delegation_outbox (delegation, action, created) VALUES (?1, 'deliver', ?2)",
-                params![delegation.to_string(), stamped],
-            )
-            .with_context(|| format!("enqueue delivery for delegation {delegation}"))?;
-            tx.execute(
-                "UPDATE delegation_outbox SET done = ?2 WHERE id = ?1 AND done IS NULL",
-                params![row, stamped],
-            )
-            .with_context(|| format!("mark delegation outbox row {row} done"))?;
-            Ok(((), true))
         })
         .await
 }
@@ -354,40 +436,20 @@ async fn make_undeliverable(
     mut delegation: Delegation,
     reason: String,
 ) -> anyhow::Result<()> {
-    let id = delegation.id;
-    let stored_reason = reason.clone();
-    let now = timestamp(Utc::now());
-    service
+    let delegation_id = delegation.id;
+    delegation = service
         .inner
         .store
         .delegation_write("make delegation undeliverable", move |tx| {
-            let changed = tx
-                .execute(
-                    "UPDATE delegations SET delivery = 'undeliverable', delivery_reason = ?2, \
-                     delivered_seq = NULL, delivered_turn = NULL WHERE id = ?1",
-                    params![id.to_string(), stored_reason],
-                )
-                .with_context(|| format!("make delegation {id} undeliverable"))?;
-            anyhow::ensure!(changed == 1, "delegation {id} does not exist");
-            tx.execute(
-                "UPDATE delegation_outbox SET done = ?2 WHERE id = ?1 AND done IS NULL",
-                params![row, now],
-            )
-            .with_context(|| format!("mark delegation outbox row {row} done"))?;
-            Ok(((), false))
+            let Some(mut current) = delegations::get(tx, delegation_id)? else {
+                anyhow::bail!("delegation {delegation_id} does not exist");
+            };
+            current.delivery = DeliveryState::Undeliverable { reason };
+            delegations::update(tx, &current)?;
+            delegations::mark_done(tx, row, Utc::now())?;
+            Ok((current, false))
         })
         .await?;
-    delegation.delivery = DeliveryState::Undeliverable { reason };
     service.publish_changed(delegation);
     Ok(())
 }
-
-fn timestamp(value: DateTime<Utc>) -> String {
-    value.to_rfc3339()
-}
-
-// Keep this owned suite reachable even while the separately owned service-test stage is still
-// wiring the delegation test tree into `delegation/mod.rs`.
-#[cfg(test)]
-#[path = "tests/worker.rs"]
-mod tests;

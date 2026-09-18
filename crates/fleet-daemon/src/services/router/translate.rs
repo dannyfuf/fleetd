@@ -42,7 +42,7 @@ pub fn to_remote(
         | AgentAccountLogin { .. }
         | AgentAccountLogout { .. }
         | AgentStop { .. }
-        // Phase 3 replaces this fallback with delegation-aware ID translation.
+        // Delegation requests are always local, so none enters remote-id translation.
         | DelegationRun { .. }
         | DelegationComplete { .. }
         | DelegationList { .. }
@@ -204,7 +204,7 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         | AgentReverted(_)
         | AgentAccountLogin { .. }
         | AgentSeenCursors(_)
-        // Phase 3 replaces this fallback with delegation-aware response translation.
+        // Delegation responses are always local, so none enters remote-id translation.
         | DelegationStarted { .. }
         | Delegations(_)
         | Delegation(_) => {}
@@ -318,7 +318,7 @@ pub fn event_to_local(mut event: Event, host: &HostId, ids: &RemoteIds) -> Optio
         | Event::AgentSynchronized { thread }
         | Event::AgentWindow { thread } => ids.register_thread(host, *thread),
         Event::BoardChanged { .. }
-        // Phase 3 replaces this fallback with delegation-aware event translation.
+        // Delegation events are emitted by the local owner and carry globally unique ids.
         | Event::DelegationChanged(_)
         | Event::WatchOutput { .. }
         | Event::WatchDismissed(_)
@@ -616,7 +616,6 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::AgentAccountLogin { .. }
         | RequestBody::AgentAccountLogout { .. }
         | RequestBody::AgentStop { .. }
-        // Phase 3 replaces this fallback with delegation-aware unavailable-host responses.
         | RequestBody::DelegationRun { .. }
         | RequestBody::DelegationComplete { .. }
         | RequestBody::DelegationList { .. }

@@ -68,7 +68,7 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         name: "delegations",
         run: m003::run,
         source: m003::SOURCE,
-        sha256: "e081181727f048997eeb11ed473ef6b5d3463d0832f33d9137615e285be3ded1",
+        sha256: "9b013b2e74ef153e16e50b0086d6534748fd3844d084b4b01403a5d56d5d28c1",
     },
 ];
 
@@ -126,6 +126,7 @@ mod m003 {
   nudges INTEGER NOT NULL DEFAULT 0, recoveries INTEGER NOT NULL DEFAULT 0,
   delivery TEXT NOT NULL, delivered_seq INTEGER, delivered_turn TEXT, delivery_reason TEXT,
   headline TEXT,
+  reported_at TEXT, report_sha256 TEXT,
   created TEXT NOT NULL, finished TEXT
 );
 CREATE INDEX idx_delegations_caller ON delegations(caller_thread, created);
@@ -149,6 +150,7 @@ ALTER TABLE threads ADD COLUMN stop_cause TEXT;"#;
   nudges INTEGER NOT NULL DEFAULT 0, recoveries INTEGER NOT NULL DEFAULT 0,
   delivery TEXT NOT NULL, delivered_seq INTEGER, delivered_turn TEXT, delivery_reason TEXT,
   headline TEXT,
+  reported_at TEXT, report_sha256 TEXT,
   created TEXT NOT NULL, finished TEXT
 )"#;
     const CREATE_DELEGATIONS_CALLER: &str =
@@ -410,7 +412,7 @@ mod tests {
     use anyhow::Context;
     use rusqlite::{Connection, params};
 
-    use super::schema::{REQUIRED_INDEXES, REQUIRED_TABLES};
+    use super::schema::{REQUIRED_DELEGATION_COLUMNS, REQUIRED_INDEXES, REQUIRED_TABLES};
     use super::{DOMAIN, MIGRATIONS, run, sha256};
 
     #[test]
@@ -588,6 +590,10 @@ mod tests {
         let tables = objects(&conn, "table")?;
         assert!(tables.contains("delegations"));
         assert!(tables.contains("delegation_outbox"));
+        assert_eq!(
+            table_columns(&conn, "delegations")?,
+            expected(REQUIRED_DELEGATION_COLUMNS)
+        );
         let columns = table_columns(&conn, "threads")?;
         assert!(columns.contains("parent_thread_id"));
         assert!(columns.contains("delegation_id"));
@@ -609,6 +615,10 @@ mod tests {
             .context("commit slot-003 retry probe")?;
 
         assert!(objects(&conn, "table")?.contains("delegations"));
+        assert_eq!(
+            table_columns(&conn, "delegations")?,
+            expected(REQUIRED_DELEGATION_COLUMNS)
+        );
         assert!(table_columns(&conn, "threads")?.contains("stop_cause"));
         Ok(())
     }

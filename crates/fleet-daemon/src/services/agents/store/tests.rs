@@ -1044,13 +1044,33 @@ async fn child_terminal_transitions_commit_every_follow_up_action() -> anyhow::R
     .await?;
     assert_child_observation(
         &observation,
+        DelegationStatus::Running,
+        &[OutboxAction::Recover],
+        true,
+    );
+    assert_eq!(observation.stored.recoveries, 1);
+    assert_eq!(observation.stored.status_payload, None);
+
+    let mut recovering = live_delegation(child, caller, DelegationStatus::Running);
+    recovering.recoveries = 1;
+    let observation = apply_child_transition(
+        recovering,
+        AgentEvent::TurnAborted {
+            turn: TurnId::new(),
+            reason: AbortReason::ProviderExited,
+        },
+        DelegationFacts::default(),
+    )
+    .await?;
+    assert_child_observation(
+        &observation,
         DelegationStatus::Failed,
         &[OutboxAction::Deliver],
         true,
     );
     assert_eq!(
         observation.stored.status_payload.as_deref(),
-        Some("provider exited")
+        Some("provider exited twice")
     );
 
     for (event, status, actions) in [
@@ -1461,6 +1481,46 @@ async fn delegation_rows_round_trip_every_column_and_update_mutable_state() -> a
 
     assert_eq!(store.delegation(id).await?, Some(expected));
     assert!(store.live_delegations(None).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn delegation_report_and_its_idempotence_metadata_round_trip() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let stored = delegation(ThreadId::new());
+    let id = stored.id;
+    store
+        .delegation_write("insert report test delegation", move |tx| {
+            delegations::insert(tx, &stored, "report-token")?;
+            Ok(((), false))
+        })
+        .await?;
+    assert_eq!(delegations::report_meta(&probe(&store)?, id)?, None);
+
+    let reported_at = stamp(81);
+    let report_sha256 = "full-untruncated-report-hash";
+    let report = DelegationResult {
+        text: "stored report".to_owned(),
+        files_changed: vec!["src/report.rs".to_owned()],
+        source: ResultSource::Reported,
+        elided: true,
+    };
+    let expected_report = report.clone();
+    store
+        .delegation_write("store delegation report", move |tx| {
+            delegations::set_report(tx, id, &report, report_sha256, reported_at)?;
+            Ok(((), false))
+        })
+        .await?;
+
+    assert_eq!(
+        delegations::report_meta(&probe(&store)?, id)?,
+        Some((report_sha256.to_owned(), reported_at))
+    );
+    assert_eq!(
+        store.delegation(id).await?.and_then(|row| row.result),
+        Some(expected_report)
+    );
     Ok(())
 }
 

@@ -2,10 +2,6 @@
 //!
 //! Every string here is part of the delegation contract a child and a caller read, so each one is
 //! a constant with a test asserting it verbatim rather than a format string at its call site.
-// The callers — `run.rs`, `complete.rs` and `worker.rs` — land later in phase 3; the allowance
-// comes off with them.
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use fleet_core::agents::{AgentKind, Delegation, DelegationId, DelegationStatus};
 
