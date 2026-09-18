@@ -1,7 +1,7 @@
 //! The Claude Code stream-json player.
 //!
 //! Transport and frame shapes come from `docs/research/harness-protocols.md` §A, verified there
-//! against `claude --version` → `2.1.266 (Claude Code)`: UTF-8 NDJSON in both directions, one
+//! against `claude --version` → `2.1.275 (Claude Code)`: UTF-8 NDJSON in both directions, one
 //! complete JSON object per line, stdin held open across turns, and `result` as the single
 //! authoritative per-turn terminal.
 //!
@@ -109,7 +109,7 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
             "uuid": uuid,
             "session_id": self.transcript.session_id,
             "cwd": cwd.to_string_lossy(),
-            "claude_code_version": "2.1.266",
+            "claude_code_version": "2.1.275",
             "apiKeySource": "none",
             "model": self.catalogue.default_model(),
             // Advisory: the CLI reports the `manual` mode Fleet launches with as `default`.
@@ -593,7 +593,7 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
                 json!({"still_queued": [], "cancelled": []})
             }
             "list_models" => json!({"models": self.model_catalogue()}),
-            "get_binary_version" => json!({"version": "2.1.266"}),
+            "get_binary_version" => json!({"version": "2.1.275"}),
             "set_permission_mode"
             | "set_model"
             | "set_max_thinking_tokens"
@@ -635,9 +635,12 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
                 .iter()
                 .map(|model| {
                     json!({
-                        "model": model,
+                        "value": model,
+                        "resolvedModel": model,
                         "displayName": model,
                         "description": "a scripted model",
+                        "supportsEffort": true,
+                        "supportedEffortLevels": self.catalogue.efforts,
                     })
                 })
                 .collect(),
