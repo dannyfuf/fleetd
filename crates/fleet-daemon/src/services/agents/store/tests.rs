@@ -1218,6 +1218,69 @@ async fn child_headline_and_terminal_noop_rules_run_through_the_writer() -> anyh
 }
 
 #[tokio::test]
+async fn a_terminal_child_item_wakes_an_open_settle_row_after_commit() -> anyhow::Result<()> {
+    let (_directory, store) = store()?;
+    let child = ThreadId::new();
+    let caller = ThreadId::new();
+    let delegation = live_delegation(child, caller, DelegationStatus::Settling);
+    let id = delegation.id;
+    insert_test_delegation(&store, &delegation).await?;
+    store
+        .delegation_write("seed background settle", move |tx| {
+            delegations::enqueue(tx, id, OutboxAction::Settle, stamp(1))?;
+            Ok(((), false))
+        })
+        .await?;
+    let (mut wakes, _changed) = capture_delegation_hooks(&store);
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    store
+        .append_with_facts(
+            child,
+            &event(
+                1,
+                AgentEvent::ItemStarted {
+                    turn,
+                    item,
+                    kind: ItemKind::Subagent {
+                        name: "background".to_owned(),
+                        description: "still working".to_owned(),
+                        result: None,
+                    },
+                    parent: None,
+                },
+            ),
+            DelegationFacts::default(),
+        )
+        .await?;
+    assert!(wakes.try_recv().is_err());
+
+    store
+        .append_with_facts(
+            child,
+            &event(
+                2,
+                AgentEvent::ItemCompleted {
+                    item,
+                    status: ItemStatus::Completed,
+                },
+            ),
+            DelegationFacts {
+                background_live: true,
+                ..DelegationFacts::default()
+            },
+        )
+        .await?;
+
+    wakes
+        .try_recv()
+        .context("terminal background item did not wake settle")?;
+    assert!(wakes.try_recv().is_err(), "one commit sends one wake");
+    assert_eq!(store.delegation_outbox().await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn caller_delivery_records_the_message_sequence_and_finishes_deliver_work()
 -> anyhow::Result<()> {
     let (_directory, store) = store()?;

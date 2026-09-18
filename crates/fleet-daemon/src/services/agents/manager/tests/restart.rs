@@ -125,6 +125,15 @@ async fn restart_settles_a_ready_thread_and_lets_open_resume_it() {
         .find(|summary| summary.thread == thread)
         .expect("the thread survives a restart");
     assert_eq!(summary.session, SessionState::Stopped);
+    assert_eq!(
+        restarted
+            .record(thread)
+            .await
+            .expect("read the recovered ready thread")
+            .stop_cause,
+        Some(fleet_core::agents::StopCause::ProviderExit),
+        "restart recovery persists why an idle resumable caller stopped",
+    );
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
 
     restarted

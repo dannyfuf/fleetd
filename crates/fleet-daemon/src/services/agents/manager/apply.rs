@@ -282,6 +282,14 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
             record.mode = *mode;
             record.stop_cause = None;
         }
+        AgentEvent::SessionStateChanged(SessionState::Stopped)
+            if event.raw.as_deref() == Some("daemon_restart_recovery") =>
+        {
+            // A resumable provider disappears on every daemon restart even when it was idle in
+            // `Ready`. The synthetic stop is the durable fact delivery replays to distinguish
+            // that orphan from a user-issued Stop.
+            record.stop_cause = Some(StopCause::ProviderExit);
+        }
         AgentEvent::MetadataChanged { mode, model, .. } => {
             if let Some(mode) = mode {
                 record.mode = *mode;

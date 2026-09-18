@@ -50,6 +50,7 @@ pub(crate) fn child_transition(
 
     let mut next = current.clone();
     let mut actions = Vec::new();
+    let reported_blocked = current.status_payload.as_deref() == Some("reported blocked");
 
     if matches!(event, AgentEvent::TurnSettled { .. }) {
         capture_last_assistant_result(&mut next, facts);
@@ -64,15 +65,31 @@ pub(crate) fn child_transition(
         }
         AgentEvent::GateOpened { .. } => {
             next.status = DelegationStatus::Blocked;
-            next.status_payload = None;
+            if !reported_blocked {
+                next.status_payload = None;
+            }
             actions.push(OutboxAction::Mirror);
         }
         AgentEvent::GateResolved { .. } | AgentEvent::GateWithdrawn { .. }
             if current.status == DelegationStatus::Blocked =>
         {
-            next.status = DelegationStatus::Running;
-            next.status_payload = None;
+            if !reported_blocked {
+                next.status = DelegationStatus::Running;
+                next.status_payload = None;
+            }
             actions.push(OutboxAction::Mirror);
+        }
+        AgentEvent::TurnSettled {
+            outcome: TurnOutcome::Completed,
+            ..
+        } if reported_blocked => {
+            finish(
+                &mut next,
+                DelegationStatus::Failed,
+                Some("reported blocked".into()),
+                now,
+            );
+            actions.push(OutboxAction::Deliver);
         }
         AgentEvent::TurnSettled {
             outcome: TurnOutcome::Completed,
@@ -83,20 +100,6 @@ pub(crate) fn child_transition(
             // otherwise a normal blocked child can be finalized or nudged behind an open card.
             next.status = DelegationStatus::Blocked;
             next.status_payload = None;
-        }
-        AgentEvent::TurnSettled {
-            outcome: TurnOutcome::Completed,
-            ..
-        } if current.status == DelegationStatus::Blocked
-            && current.status_payload.as_deref() == Some("reported blocked") =>
-        {
-            finish(
-                &mut next,
-                DelegationStatus::Failed,
-                Some("reported blocked".into()),
-                now,
-            );
-            actions.push(OutboxAction::Deliver);
         }
         AgentEvent::TurnSettled {
             outcome: TurnOutcome::Completed,
@@ -559,6 +562,55 @@ mod tests {
         current.result = Some(reported_result());
         let transition =
             child_transition(&current, &settled(TurnOutcome::Completed), &facts(), now());
+        assert_terminal(
+            &transition,
+            DelegationStatus::Failed,
+            &[OutboxAction::Deliver],
+        );
+        assert_eq!(
+            transition.next.status_payload.as_deref(),
+            Some("reported blocked")
+        );
+    }
+
+    #[test]
+    fn gate_events_cannot_erase_a_reported_blocked_cause() {
+        let mut current = delegation(DelegationStatus::Blocked);
+        current.status_payload = Some("reported blocked".into());
+        current.result = Some(reported_result());
+        let gate = GateId::new();
+        for event in [
+            AgentEvent::GateOpened {
+                gate,
+                turn: None,
+                kind: GateKind::Plan {
+                    markdown: "Plan".into(),
+                    steps: Vec::new(),
+                },
+            },
+            AgentEvent::GateResolved {
+                gate,
+                answer: GateAnswer::Plan(fleet_core::agents::PlanAnswer::Approve),
+                by: GateResolver::User,
+            },
+            AgentEvent::GateWithdrawn { gate },
+        ] {
+            let transition = child_transition(&current, &event, &facts(), now());
+            assert_eq!(transition.next.status, DelegationStatus::Blocked);
+            assert_eq!(
+                transition.next.status_payload.as_deref(),
+                Some("reported blocked")
+            );
+        }
+
+        let mut open_gate = facts();
+        open_gate.gate_open = true;
+        let transition = child_transition(
+            &current,
+            &settled(TurnOutcome::Completed),
+            &open_gate,
+            now(),
+        );
         assert_terminal(
             &transition,
             DelegationStatus::Failed,

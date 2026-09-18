@@ -54,6 +54,17 @@ use apply::{
     ends_the_turn, event_name, pending_input_turn, publish_applied, runtime_inflight,
     user_item_started,
 };
+
+/// What the durable manager already knows about one stable client item identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmissionState {
+    /// Neither the event log nor this process's accepted-input queue contains it.
+    Unknown,
+    /// The provider accepted it, but its transcript event has not committed yet.
+    Pending,
+    /// The stable `ItemStarted` is in the durable transcript.
+    Committed,
+}
 pub use commands::CreateOptions;
 use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
 

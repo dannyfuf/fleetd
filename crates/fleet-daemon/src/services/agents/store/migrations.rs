@@ -70,6 +70,13 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         source: m003::SOURCE,
         sha256: "9b013b2e74ef153e16e50b0086d6534748fd3844d084b4b01403a5d56d5d28c1",
     },
+    Migration {
+        id: 4,
+        name: "delegation_submission_state",
+        run: m004::run,
+        source: m004::SOURCE,
+        sha256: "6b222436efc9f2cc8be1a0b50ec518923d04b1006f29289f121299ff202a03de",
+    },
 ];
 
 /// Slot 001 — create the log and every read model derived from it.
@@ -226,6 +233,28 @@ ALTER TABLE threads ADD COLUMN stop_cause TEXT;"#;
         }
         drop(statement);
         transaction.execute_batch(sql)
+    }
+}
+
+/// Slot 004 — record that an outbox submission crossed its durable pre-send boundary.
+///
+/// The nullable timestamp preserves every existing row. A worker writes it before calling a
+/// provider, then reconciles the row's stable item with provider history before a retry.
+mod m004 {
+    use rusqlite::Transaction;
+
+    pub(super) const SOURCE: &str = "ALTER TABLE delegation_outbox ADD COLUMN submitted TEXT";
+
+    pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        let mut statement = transaction.prepare("PRAGMA table_info(delegation_outbox)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for column in columns {
+            if column? == "submitted" {
+                return Ok(());
+            }
+        }
+        drop(statement);
+        transaction.execute_batch(SOURCE)
     }
 }
 
@@ -422,7 +451,7 @@ mod tests {
         run(&mut conn, None)?;
 
         assert_eq!(objects(&conn, "table")?, expected(REQUIRED_TABLES));
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
         Ok(())
     }
 
@@ -624,6 +653,19 @@ mod tests {
     }
 
     #[test]
+    fn slot_004_adds_durable_outbox_submission_state() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(3))?;
+        assert!(!table_columns(&conn, "delegation_outbox")?.contains("submitted"));
+
+        run(&mut conn, Some(4))?;
+
+        assert!(table_columns(&conn, "delegation_outbox")?.contains("submitted"));
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
     fn every_slot_hash_matches_its_source() {
         for migration in MIGRATIONS {
             assert_eq!(
@@ -708,7 +750,7 @@ mod tests {
 
         run(&mut conn, None)?;
 
-        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
         Ok(())
     }
 

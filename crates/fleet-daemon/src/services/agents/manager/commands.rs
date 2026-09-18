@@ -28,7 +28,7 @@ use fleet_proto::{
 use crate::agents::harness::{AccountOp, AccountOutcome, RuntimeChange};
 
 use super::{
-    AgentSessionManager, AgentThreadRecord, ThreadRuntime,
+    AgentSessionManager, AgentThreadRecord, SubmissionState, ThreadRuntime,
     apply::{publish_applied, runtime_inflight},
     conflict, daemon_error, hydrate, not_found, provider_error, provider_factory_error,
     provider_start_error, storage_error, validation,
@@ -355,6 +355,28 @@ impl AgentSessionManager {
         thread: ThreadId,
         input: UserInput,
     ) -> Result<ResponseBody, ProtoError> {
+        self.send_inner(thread, input, false).await
+    }
+
+    /// Sends a durable outbox-owned input and commits its stable item before acknowledging it.
+    ///
+    /// Delegation workers cannot treat a provider return as durable: a database failure after the
+    /// provider accepted the input would otherwise make the open row submit it again. Ordinary UI
+    /// sends still wait for the provider's `TurnStarted`; outbox sends use this tighter boundary.
+    pub(crate) async fn send_durable(
+        &self,
+        thread: ThreadId,
+        input: UserInput,
+    ) -> Result<ResponseBody, ProtoError> {
+        self.send_inner(thread, input, true).await
+    }
+
+    async fn send_inner(
+        &self,
+        thread: ThreadId,
+        input: UserInput,
+        durable: bool,
+    ) -> Result<ResponseBody, ProtoError> {
         if input.text.trim().is_empty() && input.attachments.is_empty() {
             return Err(validation("agent input cannot be empty"));
         }
@@ -433,8 +455,85 @@ impl AgentSessionManager {
             let item = input.item.unwrap_or_default();
             self.record_user_input(&runtime, &operation, turn, item, input, true)
                 .await?;
+        } else if durable && !projected_running && !had_inflight {
+            // The stable item is the durable acknowledgement keyed by the outbox row. Provider
+            // `TurnStarted` remains useful, but if it arrives later it is a harmless duplicate;
+            // the worker may reconcile this committed item instead of resubmitting the prompt.
+            for applied in self
+                .flush_pending_inputs(&runtime, &operation, turn, "durable_outbox_submission")
+                .await?
+            {
+                publish_applied(&self.inner, &runtime, applied);
+            }
         }
         Ok(ResponseBody::AgentAck)
+    }
+
+    /// Reconciles a stable outbox item with the durable transcript or accepted-input queue.
+    pub(crate) async fn submission_state(
+        &self,
+        thread: ThreadId,
+        item: fleet_core::agents::ItemId,
+    ) -> Result<SubmissionState, ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        let state = runtime
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .projection
+            .items
+            .iter()
+            .any(|candidate| candidate.id == item)
+        {
+            return Ok(SubmissionState::Committed);
+        }
+        if state
+            .pending_inputs
+            .iter()
+            .any(|(_, input)| input.item == Some(item))
+        {
+            return Ok(SubmissionState::Pending);
+        }
+        Ok(SubmissionState::Unknown)
+    }
+
+    /// Commits an input the provider accepted when the first transcript write failed.
+    pub(crate) async fn reconcile_submission(
+        &self,
+        thread: ThreadId,
+        item: fleet_core::agents::ItemId,
+    ) -> Result<SubmissionState, ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        let operation = runtime.operation.lock().await;
+        let pending_turn = {
+            let state = runtime
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state
+                .projection
+                .items
+                .iter()
+                .any(|candidate| candidate.id == item)
+            {
+                return Ok(SubmissionState::Committed);
+            }
+            state
+                .pending_inputs
+                .iter()
+                .find_map(|(turn, input)| (input.item == Some(item)).then_some(*turn))
+        };
+        let Some(turn) = pending_turn else {
+            return Ok(SubmissionState::Unknown);
+        };
+        for applied in self
+            .flush_pending_inputs(&runtime, &operation, turn, "durable_outbox_reconcile")
+            .await?
+        {
+            publish_applied(&self.inner, &runtime, applied);
+        }
+        Ok(SubmissionState::Committed)
     }
 
     /// Handles `AgentInterrupt`.

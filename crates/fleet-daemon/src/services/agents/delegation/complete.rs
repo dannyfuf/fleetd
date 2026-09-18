@@ -1,7 +1,7 @@
 //! `DelegationComplete`: verify the token, record the result, finish an already-settled child.
 
 use chrono::Utc;
-use fleet_core::agents::{Delegation, DelegationResult, DelegationStatus, ResultSource};
+use fleet_core::agents::{Delegation, DelegationResult, DelegationStatus, ResultSource, TurnState};
 use fleet_proto::{
     error::{ErrorKind, ProtoError},
     response::ResponseBody,
@@ -54,17 +54,16 @@ impl DelegationService {
 
         // A completed turn can reach the store before its CLI report does. Only that state needs
         // the reducer projection; every other completion avoids hydrating the child.
-        let background_live = if current.status == DelegationStatus::Settling {
-            !self
-                .inner
-                .manager
-                .projection(current.child)
-                .await?
-                .background_tasks
-                .is_empty()
-        } else {
-            false
-        };
+        let (turn_settled, background_live) =
+            if current.status == DelegationStatus::Settling || request.blocked {
+                let projection = self.inner.manager.projection(current.child).await?;
+                (
+                    matches!(projection.turn, TurnState::Settled(_, _)),
+                    !projection.background_tasks.is_empty(),
+                )
+            } else {
+                (false, false)
+            };
 
         let now = Utc::now();
         let accepted_request = request;
@@ -100,7 +99,21 @@ impl DelegationService {
                 )?;
                 delegation.result = Some(result);
 
-                let wake = if accepted_request.blocked {
+                let wake = if accepted_request.blocked && turn_settled {
+                    delegation.status = DelegationStatus::Failed;
+                    delegation.status_payload = Some("reported blocked".to_owned());
+                    delegation.finished = Some(now);
+                    store::delegations::update(tx, &delegation)?;
+                    store::delegations::mark_done_for(tx, delegation.id, OutboxAction::Nudge, now)?;
+                    store::delegations::mark_done_for(
+                        tx,
+                        delegation.id,
+                        OutboxAction::Settle,
+                        now,
+                    )?;
+                    store::delegations::enqueue(tx, delegation.id, OutboxAction::Deliver, now)?;
+                    true
+                } else if accepted_request.blocked {
                     delegation.status = DelegationStatus::Blocked;
                     delegation.status_payload = Some("reported blocked".to_owned());
                     store::delegations::update(tx, &delegation)?;

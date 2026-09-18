@@ -7,7 +7,7 @@
 //! rebuild a manager over the same database.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
@@ -68,6 +68,7 @@ enum FakeCall {
 struct FakeScript {
     calls: StdMutex<Vec<FakeCall>>,
     senders: StdMutex<Vec<ProviderSink>>,
+    senders_by_thread: StdMutex<HashMap<ThreadId, ProviderSink>>,
     capabilities: HarnessCapabilities,
     unavailable: AtomicBool,
     /// Makes every `stop` fail, as a child that exits from the stdin close does.
@@ -96,6 +97,7 @@ impl FakeScript {
         Arc::new(Self {
             calls: StdMutex::new(Vec::new()),
             senders: StdMutex::new(Vec::new()),
+            senders_by_thread: StdMutex::new(HashMap::new()),
             capabilities,
             unavailable: AtomicBool::new(false),
             stop_fails: AtomicBool::new(false),
@@ -185,6 +187,34 @@ impl FakeScript {
             .last()
             .cloned()
             .expect("a provider must have been started");
+        sender.send(event.into()).expect("provider stream is open");
+    }
+
+    async fn emit_to(&self, thread: ThreadId, event: AgentEvent) {
+        match &event {
+            AgentEvent::TurnStarted { turn, .. } => {
+                *self
+                    .active_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*turn);
+            }
+            AgentEvent::TurnSettled { .. }
+            | AgentEvent::TurnAborted { .. }
+            | AgentEvent::SessionExited { .. } => {
+                *self
+                    .active_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            _ => {}
+        }
+        let sender = self
+            .senders_by_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread)
+            .cloned()
+            .expect("the thread provider must have been started");
         sender.send(event.into()).expect("provider stream is open");
     }
 }
@@ -306,7 +336,7 @@ impl AgentProvider for FakeProvider {
 fn factory(script: &Arc<FakeScript>) -> Arc<ProviderFactory> {
     let script = Arc::clone(script);
     Arc::new(
-        move |kind: AgentKind, _request: &StartRequest, _binaries: &AgentBinaries| {
+        move |kind: AgentKind, request: &StartRequest, _binaries: &AgentBinaries| {
             if script.unavailable.load(Ordering::SeqCst) {
                 return Err(anyhow::Error::new(ProviderError::Unavailable {
                     reason: format!("the {} executable was not found", kind.executable()),
@@ -317,7 +347,12 @@ fn factory(script: &Arc<FakeScript>) -> Arc<ProviderFactory> {
                 .senders
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(sender);
+                .push(sender.clone());
+            script
+                .senders_by_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(request.thread, sender.clone());
             Ok(Box::new(FakeProvider {
                 kind,
                 script: Arc::clone(&script),
@@ -563,6 +598,10 @@ impl Harness {
 
     pub(crate) async fn emit(&self, event: AgentEvent) {
         self.script.emit(event).await;
+    }
+
+    pub(crate) async fn emit_to(&self, thread: ThreadId, event: AgentEvent) {
+        self.script.emit_to(thread, event).await;
     }
 
     pub(crate) fn sent_turn_containing(&self, needle: &str) -> Option<TurnId> {

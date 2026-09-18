@@ -20,6 +20,7 @@ use super::{
     footer::{NUDGE, RESUME_NUDGE, delivered_message},
     limits::SETTLE_GRACE,
 };
+use crate::services::agents::manager::SubmissionState;
 
 /// Performs one oldest open row per caller.
 ///
@@ -165,31 +166,56 @@ async fn nudge(
         finish_row(service, row_id).await?;
         return Ok(());
     }
-    if !claim_in_flight(service, row_id) {
-        return Ok(());
-    }
-
-    if let Err(error) = service
+    let item = delegations::outbox_item(delegation.id, OutboxAction::Nudge, row.id);
+    match service
         .inner
         .manager
-        .send(
+        .submission_state(delegation.child, item)
+        .await?
+    {
+        SubmissionState::Committed => {
+            return acknowledge_nudge(service, delegation_id, row_id).await;
+        }
+        SubmissionState::Pending => {
+            if service
+                .inner
+                .manager
+                .reconcile_submission(delegation.child, item)
+                .await?
+                == SubmissionState::Committed
+            {
+                return acknowledge_nudge(service, delegation_id, row_id).await;
+            }
+            return Ok(());
+        }
+        SubmissionState::Unknown => {}
+    }
+    let Some(_claim) = InFlightClaim::acquire(service, row_id) else {
+        return Ok(());
+    };
+    mark_submission(service, row_id).await?;
+
+    service
+        .inner
+        .manager
+        .send_durable(
             delegation.child,
             UserInput {
                 text: NUDGE.to_owned(),
-                item: Some(delegations::outbox_item(
-                    delegation.id,
-                    OutboxAction::Nudge,
-                    row.id,
-                )),
+                item: Some(item),
                 ..UserInput::default()
             },
         )
-        .await
-    {
-        clear_in_flight(service, row_id);
-        return Err(error.into());
-    }
-    let changed = match service
+        .await?;
+    acknowledge_nudge(service, delegation_id, row_id).await
+}
+
+async fn acknowledge_nudge(
+    service: &DelegationService,
+    delegation_id: fleet_core::agents::DelegationId,
+    row_id: i64,
+) -> anyhow::Result<()> {
+    let changed = service
         .inner
         .store
         .delegation_write("acknowledge delegation nudge", move |tx| {
@@ -201,12 +227,7 @@ async fn nudge(
             delegations::mark_done(tx, row_id, Utc::now())?;
             Ok((current, false))
         })
-        .await
-    {
-        Ok(changed) => changed,
-        Err(error) => return Err(error),
-    };
-    clear_in_flight(service, row_id);
+        .await?;
     service.publish_changed(changed);
     Ok(())
 }
@@ -257,19 +278,53 @@ async fn recover(
     row: &OutboxRow,
     delegation: Delegation,
 ) -> anyhow::Result<()> {
-    if !claim_in_flight(service, row.id) {
-        return Ok(());
+    let item = delegations::outbox_item(delegation.id, OutboxAction::Recover, row.id);
+    match service
+        .inner
+        .manager
+        .submission_state(delegation.child, item)
+        .await?
+    {
+        SubmissionState::Committed => {
+            finish_row(service, row.id).await?;
+            let current = service
+                .inner
+                .store
+                .delegation(delegation.id)
+                .await?
+                .unwrap_or(delegation);
+            service.publish_changed(current);
+            return Ok(());
+        }
+        SubmissionState::Pending => {
+            if service
+                .inner
+                .manager
+                .reconcile_submission(delegation.child, item)
+                .await?
+                == SubmissionState::Committed
+            {
+                finish_row(service, row.id).await?;
+            }
+            return Ok(());
+        }
+        SubmissionState::Unknown => {}
     }
+    let Some(_claim) = InFlightClaim::acquire(service, row.id) else {
+        return Ok(());
+    };
+    mark_submission(service, row.id).await?;
     let input = UserInput {
         text: RESUME_NUDGE.to_owned(),
-        item: Some(delegations::outbox_item(
-            delegation.id,
-            OutboxAction::Recover,
-            row.id,
-        )),
+        item: Some(item),
         ..UserInput::default()
     };
-    let result = match service.inner.manager.send(delegation.child, input).await {
+    match service
+        .inner
+        .manager
+        .send_durable(delegation.child, input)
+        .await
+    {
         Ok(_) => {
             finish_row(service, row.id).await?;
             let current = service
@@ -295,13 +350,7 @@ async fn recover(
             .await
         }
         Err(error) => Err(anyhow::Error::new(error)),
-    };
-    if result.is_ok()
-        || matches!(&result, Err(error) if error.downcast_ref::<fleet_proto::error::ProtoError>().is_some())
-    {
-        clear_in_flight(service, row.id);
     }
-    result
 }
 
 async fn fail_recovery(
@@ -431,29 +480,50 @@ async fn deliver(
         return Ok(());
     }
 
+    let item = delegations::outbox_item(delegation.id, OutboxAction::Deliver, row.id);
     let input = UserInput {
         text: delivered_message(&delegation, Utc::now()),
         origin: MessageOrigin::Delegation { id: delegation.id },
-        item: Some(delegations::outbox_item(
-            delegation.id,
-            OutboxAction::Deliver,
-            row.id,
-        )),
+        item: Some(item),
         ..UserInput::default()
     };
-    if !claim_in_flight(service, row.id) {
-        return Ok(());
+    match service
+        .inner
+        .manager
+        .submission_state(delegation.caller, item)
+        .await?
+    {
+        SubmissionState::Committed => {
+            finish_row(service, row.id).await?;
+            return Ok(());
+        }
+        SubmissionState::Pending => {
+            if service
+                .inner
+                .manager
+                .reconcile_submission(delegation.caller, item)
+                .await?
+                == SubmissionState::Committed
+            {
+                finish_row(service, row.id).await?;
+            }
+            return Ok(());
+        }
+        SubmissionState::Unknown => {}
     }
-    match service.inner.manager.send(delegation.caller, input).await {
+    let Some(_claim) = InFlightClaim::acquire(service, row.id) else {
+        return Ok(());
+    };
+    mark_submission(service, row.id).await?;
+    match service
+        .inner
+        .manager
+        .send_durable(delegation.caller, input)
+        .await
+    {
         Ok(_) => Ok(()),
-        Err(error) if error.kind == ErrorKind::Conflict => {
-            clear_in_flight(service, row.id);
-            Ok(())
-        }
-        Err(error) => {
-            clear_in_flight(service, row.id);
-            Err(anyhow::Error::new(error))
-        }
+        Err(error) if error.kind == ErrorKind::Conflict => Ok(()),
+        Err(error) => Err(anyhow::Error::new(error)),
     }
 }
 
@@ -466,15 +536,6 @@ fn row_in_flight(service: &DelegationService, row: i64) -> bool {
         .contains(&row)
 }
 
-fn claim_in_flight(service: &DelegationService, row: i64) -> bool {
-    service
-        .inner
-        .in_flight_rows
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(row)
-}
-
 fn clear_in_flight(service: &DelegationService, row: i64) {
     service
         .inner
@@ -482,6 +543,41 @@ fn clear_in_flight(service: &DelegationService, row: i64) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&row);
+}
+
+async fn mark_submission(service: &DelegationService, row: i64) -> anyhow::Result<()> {
+    service
+        .inner
+        .store
+        .delegation_write("mark delegation submission durable", move |tx| {
+            delegations::mark_submitted(tx, row, Utc::now())?;
+            Ok(((), false))
+        })
+        .await
+}
+
+/// Process-local overlap suppression that can never outlive the future which acquired it.
+struct InFlightClaim<'a> {
+    service: &'a DelegationService,
+    row: i64,
+}
+
+impl<'a> InFlightClaim<'a> {
+    fn acquire(service: &'a DelegationService, row: i64) -> Option<Self> {
+        service
+            .inner
+            .in_flight_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(row)
+            .then_some(Self { service, row })
+    }
+}
+
+impl Drop for InFlightClaim<'_> {
+    fn drop(&mut self) {
+        clear_in_flight(self.service, self.row);
+    }
 }
 
 fn status_patch(status: DelegationStatus) -> ItemPatch {

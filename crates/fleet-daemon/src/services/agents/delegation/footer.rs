@@ -34,6 +34,7 @@ pub(crate) fn footer(id: DelegationId, expectation: &str) -> String {
 
 /// Builds the first child message from its brief and completion footer.
 pub(crate) fn first_message(brief: &str, id: DelegationId, expectation: &str) -> String {
+    let brief = brief.trim_end_matches(['\r', '\n']);
     format!("{brief}\n\n{}", footer(id, expectation))
 }
 
@@ -160,6 +161,15 @@ Do not ask the user questions; state assumptions in the report instead."
         let id = DelegationId::new();
         assert_eq!(
             first_message("Do the work", id, "ship it"),
+            format!("Do the work\n\n{}", footer(id, "ship it"))
+        );
+    }
+
+    #[test]
+    fn first_message_normalizes_a_newline_terminated_brief() {
+        let id = DelegationId::new();
+        assert_eq!(
+            first_message("Do the work\r\n", id, "ship it"),
             format!("Do the work\n\n{}", footer(id, "ship it"))
         );
     }

@@ -9,7 +9,7 @@ use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 use fleet_core::agents::{
     AgentEvent, Delegation, DelegationId, DelegationResult, DeliveryState, ItemId, ItemKind,
-    MessageOrigin, Seq, SeqEvent, SessionState, ThreadId,
+    ItemStatus, MessageOrigin, Seq, SeqEvent, SessionState, ThreadId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::de::DeserializeOwned;
@@ -86,6 +86,8 @@ pub(crate) struct OutboxRow {
     pub action: OutboxAction,
     /// When the transaction that enqueued the row committed.
     pub created: DateTime<Utc>,
+    /// When the worker durably recorded its intent immediately before provider submission.
+    pub submitted: Option<DateTime<Utc>>,
 }
 
 /// Delegation side effects accumulated while projecting one event.
@@ -115,6 +117,13 @@ pub(crate) fn transition(
         }
         for action in transition.actions {
             enqueue(tx, current.id, action, now)?;
+            outcome.wake = true;
+        }
+        if terminal_item_event(&event.event)
+            && has_open_action(tx, current.id, OutboxAction::Settle)?
+        {
+            // The projector removes a completed background item in this same transaction. Wake
+            // only after commit so `Settle` sees the cleared set without waiting for its retry.
             outcome.wake = true;
         }
     }
@@ -148,6 +157,40 @@ pub(crate) fn transition(
     }
 
     Ok(outcome)
+}
+
+fn terminal_item_event(event: &AgentEvent) -> bool {
+    match event {
+        AgentEvent::ItemUpdated { patch, .. } => patch.status.is_some_and(item_status_is_terminal),
+        AgentEvent::ItemCompleted { status, .. } => item_status_is_terminal(*status),
+        _ => false,
+    }
+}
+
+const fn item_status_is_terminal(status: ItemStatus) -> bool {
+    matches!(
+        status,
+        ItemStatus::Completed | ItemStatus::Failed | ItemStatus::Denied | ItemStatus::Stopped
+    )
+}
+
+fn has_open_action(
+    tx: &Transaction<'_>,
+    delegation: DelegationId,
+    action: OutboxAction,
+) -> anyhow::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM delegation_outbox \
+         WHERE delegation = ?1 AND action = ?2 AND done IS NULL)",
+        params![delegation.to_string(), action.as_str()],
+        |row| row.get(0),
+    )
+    .with_context(|| {
+        format!(
+            "check open {} row for delegation {delegation}",
+            action.as_str()
+        )
+    })
 }
 
 pub(crate) fn record_changed(changed: &mut Vec<Delegation>, delegation: Delegation) {
@@ -450,7 +493,7 @@ pub(crate) fn enqueue(
 pub(crate) fn open_rows(conn: &Connection) -> anyhow::Result<Vec<OutboxRow>> {
     read_outbox(
         conn,
-        "SELECT id, delegation, action, created FROM delegation_outbox \
+        "SELECT id, delegation, action, created, submitted FROM delegation_outbox \
          WHERE done IS NULL ORDER BY id ASC LIMIT ?1",
         params![READ_LIMIT],
         "read the delegation outbox",
@@ -465,11 +508,27 @@ pub(crate) fn open_rows_for(
 ) -> anyhow::Result<Vec<OutboxRow>> {
     read_outbox(
         conn,
-        "SELECT id, delegation, action, created FROM delegation_outbox \
+        "SELECT id, delegation, action, created, submitted FROM delegation_outbox \
          WHERE done IS NULL AND delegation = ?1 ORDER BY id ASC LIMIT ?2",
         params![delegation.to_string(), READ_LIMIT],
         "read one delegation's outbox",
     )
+}
+
+/// Persists the pre-send boundary once. The stable outbox item is the provider idempotency key;
+/// retaining this timestamp makes a restart reconcile provider history before retrying it.
+pub(crate) fn mark_submitted(
+    tx: &Transaction<'_>,
+    row: i64,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    tx.execute(
+        "UPDATE delegation_outbox SET submitted = COALESCE(submitted, ?2) \
+         WHERE id = ?1 AND done IS NULL",
+        params![row, timestamp(now)],
+    )
+    .with_context(|| format!("mark delegation outbox row {row} submitted"))?;
+    Ok(())
 }
 
 /// Closes one outbox row. Guarded on `done IS NULL`, so a replayed pass cannot move the stamp
@@ -631,18 +690,22 @@ pub(crate) fn read_outbox<P: rusqlite::Params>(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })
         .with_context(|| format!("query to {context}"))?;
     let mut decoded = Vec::new();
     for row in rows {
-        let (id, delegation, action, created) =
+        let (id, delegation, action, created, submitted) =
             row.with_context(|| format!("decode row to {context}"))?;
         decoded.push(OutboxRow {
             id,
             delegation: parse_id(&delegation, "delegation id")?,
             action: OutboxAction::parse(&action)?,
             created: parse_timestamp(&created, "outbox creation time")?,
+            submitted: submitted
+                .map(|value| parse_timestamp(&value, "outbox submission time"))
+                .transpose()?,
         });
     }
     Ok(decoded)

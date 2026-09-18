@@ -1,8 +1,8 @@
 use chrono::Utc;
 use fleet_core::agents::{
-    AbortReason, AgentEvent, AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState,
-    ItemId, ItemKind, MessageOrigin, PermissionMode, SessionState, ThreadId, TurnId, TurnOutcome,
-    TurnState, Usage, UserInput,
+    AbortReason, AgentEvent, AgentKind, Delegation, DelegationId, DelegationResult,
+    DelegationStatus, DeliveryState, ItemId, ItemKind, MessageOrigin, PermissionMode, ResultSource,
+    SessionState, ThreadId, TurnId, TurnOutcome, TurnState, Usage, UserInput,
 };
 use fleet_proto::response::ResponseBody;
 use sha2::{Digest as _, Sha256};
@@ -398,6 +398,111 @@ async fn a_manager_restart_resumes_once_then_succeeds_and_delivers_once() {
             })
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn restart_delivers_to_an_idle_ready_caller_exactly_once() {
+    let harness = ManagerHarness::start(full()).await;
+    let (manager, events, config, worktrees) = harness.delegation_parts();
+    let store = manager.delegation_store().expect("agent store opens");
+    let (_service, worker) = super::install(&manager, &events, &config, &worktrees)
+        .expect("install initial delegation service");
+    drop(worker);
+    let (caller, delegation) =
+        seed_running_delegation(&harness, &manager, &store, "idle-caller-token").await;
+    harness
+        .emit_to(
+            caller,
+            AgentEvent::TurnSettled {
+                turn: delegation.caller_turn,
+                outcome: TurnOutcome::Completed,
+                usage: Usage::default(),
+                duration_ms: 8,
+                files_changed: Vec::new(),
+            },
+        )
+        .await;
+    harness
+        .settle(caller, "idle ready caller", |projection| {
+            projection.session == SessionState::Ready
+                && matches!(
+                    projection.turn,
+                    TurnState::Settled(_, TurnOutcome::Completed)
+                )
+        })
+        .await;
+
+    let terminal = Delegation {
+        status: DelegationStatus::Succeeded,
+        result: Some(DelegationResult {
+            text: "result recovered for an idle caller".to_owned(),
+            files_changed: Vec::new(),
+            source: ResultSource::Reported,
+            elided: false,
+        }),
+        finished: Some(Utc::now()),
+        ..delegation.clone()
+    };
+    let stored = terminal.clone();
+    store
+        .delegation_write("stage idle-caller restart delivery", move |tx| {
+            delegations::update(tx, &stored)?;
+            tx.execute(
+                "UPDATE delegation_outbox SET done = ?2 WHERE delegation = ?1 AND done IS NULL",
+                rusqlite::params![stored.id.to_string(), Utc::now().timestamp_millis()],
+            )?;
+            delegations::enqueue(tx, stored.id, OutboxAction::Deliver, Utc::now())?;
+            Ok(((), false))
+        })
+        .await
+        .expect("stage terminal delivery");
+
+    let restarted = harness.restart().await;
+    assert_eq!(
+        restarted
+            .record(caller)
+            .await
+            .expect("read recovered caller")
+            .stop_cause,
+        Some(fleet_core::agents::StopCause::ProviderExit),
+    );
+    let restarted_store = restarted.delegation_store().expect("restarted store opens");
+    let (service, worker) = super::install(&restarted, &events, &config, &worktrees)
+        .expect("install restarted delegation service");
+    drop(worker);
+    for _ in 0..4 {
+        drain(&service).await.expect("drain idle-caller delivery");
+        if restarted_store
+            .delegation(terminal.id)
+            .await
+            .expect("read delivery")
+            .is_some_and(|current| matches!(current.delivery, DeliveryState::Delivered { .. }))
+        {
+            break;
+        }
+    }
+
+    let marker = format!("[fleet subagent {} finished", terminal.id);
+    assert_eq!(harness.sent_count_containing(&marker), 1);
+    assert_eq!(
+        restarted
+            .projection(caller)
+            .await
+            .expect("read delivered caller")
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.kind,
+                    ItemKind::UserMessage {
+                        origin: MessageOrigin::Delegation { id },
+                        ..
+                    } if id == terminal.id
+                )
+            })
+            .count(),
+        1,
     );
 }
 

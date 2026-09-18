@@ -692,6 +692,166 @@ async fn retry_tick_sends_and_counts_the_nudge() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_failed_nudge_ack_reconciles_the_stable_item_without_resending() {
+    let harness = Harness::start().await;
+    let child = harness.create_thread().await;
+    let mut delegation = finished_delegation(
+        DelegationId::new(),
+        ThreadId::new(),
+        TurnId::new(),
+        ItemId::new(),
+        child,
+        false,
+        0,
+    );
+    delegation.status = DelegationStatus::Settling;
+    delegation.finished = None;
+    delegation.result = None;
+    harness
+        .insert(delegation.clone(), OutboxAction::Nudge)
+        .await;
+    let nudge_row = harness
+        .store
+        .delegation_outbox()
+        .await
+        .expect("read nudge row")
+        .into_iter()
+        .find(|row| row.delegation == delegation.id && row.action == OutboxAction::Nudge)
+        .expect("open nudge row")
+        .id;
+    harness
+        .store
+        .delegation_write("install nudge acknowledgement failure", |tx| {
+            tx.execute_batch(
+                "CREATE TRIGGER fail_nudge_ack BEFORE UPDATE OF nudges ON delegations \
+                 BEGIN SELECT RAISE(FAIL, 'forced nudge acknowledgement failure'); END;",
+            )?;
+            Ok(((), false))
+        })
+        .await
+        .expect("install acknowledgement failure");
+
+    tokio::time::resume();
+    drain(&harness.service).await.expect("first nudge drain");
+    harness
+        .wait_for(child, |projection| {
+            projection.items.iter().any(
+                |item| matches!(&item.kind, ItemKind::UserMessage { text, .. } if text == NUDGE),
+            )
+        })
+        .await;
+    tokio::time::pause();
+    harness
+        .store
+        .delegation_write("remove nudge acknowledgement failure", |tx| {
+            tx.execute_batch("DROP TRIGGER fail_nudge_ack")?;
+            Ok(((), false))
+        })
+        .await
+        .expect("remove acknowledgement failure");
+
+    drain(&harness.service)
+        .await
+        .expect("reconcile committed nudge");
+    let stored = harness
+        .store
+        .delegation(delegation.id)
+        .await
+        .expect("read delegation")
+        .expect("delegation exists");
+    assert_eq!(stored.nudges, 1);
+    assert!(
+        harness
+            .store
+            .delegation_outbox()
+            .await
+            .expect("read reconciled outbox")
+            .iter()
+            .all(|row| row.id != nudge_row)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&harness.log)
+            .expect("read provider input")
+            .matches(NUDGE)
+            .count(),
+        1,
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reopened_delivery_row_reconciles_its_committed_item_without_resending() {
+    let harness = Harness::start().await;
+    let (_caller, delegations) = harness.caller_with_delegations(1, true, false).await;
+    let delegation = delegations[0].clone();
+    let row = harness
+        .store
+        .delegation_outbox()
+        .await
+        .expect("read delivery row")
+        .into_iter()
+        .find(|row| row.delegation == delegation.id && row.action == OutboxAction::Deliver)
+        .expect("open delivery row");
+
+    tokio::time::resume();
+    drain(&harness.service).await.expect("submit delivery");
+    harness
+        .wait_for_delegation(delegation.id, |current| {
+            matches!(current.delivery, DeliveryState::Delivered { .. })
+        })
+        .await;
+    tokio::time::pause();
+    let row_id = row.id;
+    let submitted = harness
+        .store
+        .delegation_write("read delivery submission marker", move |tx| {
+            let submitted = tx.query_row(
+                "SELECT submitted FROM delegation_outbox WHERE id = ?1",
+                [row_id],
+                |record| record.get::<_, Option<String>>(0),
+            )?;
+            Ok((submitted, false))
+        })
+        .await
+        .expect("read submitted delivery row");
+    assert!(
+        submitted.is_some(),
+        "the provider call must have a durable pre-send marker"
+    );
+    harness
+        .store
+        .delegation_write("reopen committed delivery row", move |tx| {
+            tx.execute(
+                "UPDATE delegation_outbox SET done = NULL WHERE id = ?1",
+                [row.id],
+            )?;
+            Ok(((), false))
+        })
+        .await
+        .expect("reopen delivery row");
+
+    drain(&harness.service)
+        .await
+        .expect("reconcile committed delivery");
+    assert!(
+        harness
+            .store
+            .delegation_outbox()
+            .await
+            .expect("read reconciled delivery outbox")
+            .iter()
+            .all(|open| open.id != row.id)
+    );
+    let marker = format!("[fleet subagent {} finished", delegation.id);
+    assert_eq!(
+        std::fs::read_to_string(&harness.log)
+            .expect("read provider input")
+            .matches(&marker)
+            .count(),
+        1,
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn deferred_delivery_does_not_starve_cancellation_for_the_same_caller() {
     let harness = Harness::start().await;
     let (_caller, delegations) = harness.caller_with_delegations(1, false, false).await;

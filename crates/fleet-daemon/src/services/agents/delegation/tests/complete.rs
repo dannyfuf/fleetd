@@ -121,10 +121,24 @@ impl Harness {
                     },
                 ]
             } else {
-                vec![AgentEvent::SessionExited {
-                    code: Some(0),
-                    expected: true,
-                }]
+                vec![
+                    AgentEvent::SessionStateChanged(SessionState::Ready),
+                    AgentEvent::TurnStarted {
+                        turn,
+                        user_item: ItemId::new(),
+                    },
+                    AgentEvent::TurnSettled {
+                        turn,
+                        outcome: TurnOutcome::Completed,
+                        usage: Usage::default(),
+                        duration_ms: 1,
+                        files_changed: Vec::new(),
+                    },
+                    AgentEvent::SessionExited {
+                        code: Some(0),
+                        expected: true,
+                    },
+                ]
             };
             for (index, event) in events.into_iter().enumerate() {
                 self.store
@@ -140,6 +154,22 @@ impl Harness {
                     .await
                     .expect("settle fixture child event");
             }
+        } else {
+            self.store
+                .append(
+                    delegation.child,
+                    &SeqEvent {
+                        seq: Seq(1),
+                        at: stamp(3),
+                        raw: None,
+                        event: AgentEvent::SessionExited {
+                            code: Some(0),
+                            expected: true,
+                        },
+                    },
+                )
+                .await
+                .expect("stop fixture child session");
         }
         self.store
             .delegation_write("insert complete-test delegation", move |tx| {
@@ -169,11 +199,18 @@ impl Harness {
     }
 
     async fn settle(&self, delegation: &Delegation) {
+        let seq = self
+            .store
+            .load(delegation.child)
+            .await
+            .expect("read child fixture events")
+            .last()
+            .map_or(Seq(1), |event| Seq(event.seq.0.saturating_add(1)));
         self.store
             .append_with_facts(
                 delegation.child,
                 &SeqEvent {
-                    seq: Seq(1),
+                    seq,
                     at: stamp(50),
                     raw: None,
                     event: AgentEvent::TurnSettled {
@@ -491,6 +528,42 @@ async fn a_blocked_report_marks_the_delegation_and_settlement_fails_it() {
             .action,
         OutboxAction::Deliver
     );
+}
+
+#[tokio::test]
+async fn a_blocked_report_after_settlement_fails_and_replaces_obsolete_work() {
+    let harness = Harness::new();
+    let current = delegation(DelegationStatus::Settling);
+    harness.insert(current.clone()).await;
+    harness
+        .store
+        .delegation_write("stage obsolete settlement work", {
+            let current = current.clone();
+            move |tx| {
+                delegations::enqueue(tx, current.id, OutboxAction::Nudge, Utc::now())?;
+                delegations::enqueue(tx, current.id, OutboxAction::Settle, Utc::now())?;
+                Ok(((), false))
+            }
+        })
+        .await
+        .expect("stage obsolete settlement work");
+
+    let failed = one(harness
+        .service
+        .complete(request(&current, TOKEN, "need credentials", true))
+        .await
+        .expect("the late blocked report succeeds"));
+    let rows = harness
+        .store
+        .delegation_outbox()
+        .await
+        .expect("read outbox");
+
+    assert_eq!(failed.status, DelegationStatus::Failed);
+    assert_eq!(failed.status_payload.as_deref(), Some("reported blocked"));
+    assert!(failed.finished.is_some());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, OutboxAction::Deliver);
 }
 
 #[tokio::test]
