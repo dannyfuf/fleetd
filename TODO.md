@@ -45,13 +45,15 @@ for a gated edit.
 
 **Impact: medium.** You cannot paste an image into the composer.
 
-`item_attachments` has no writer. §4.1 already grants the attachments directory via `--add-dir`
-and §7.2 documents Claude's block-order rule (images before the final text block, because the CLI
+`item_attachments` has no writer. The adapter seam can carry an attachments directory, but the
+manager currently passes `None`, so Claude is not granted `--add-dir`. §7.2 documents Claude's
+block-order rule (images before the final text block, because the CLI
 only reads a streamed user message as a slash-command invocation when the last block is text), so
 the design is settled — only the implementation is missing.
 
 - **Start in:** `crates/fleet-ui-kit/src/components/agent/` for the pending-chip model, then the
-  store writer, then both adapters' `UserInput` mapping. Codex takes structured `image` /
+  store writer, the per-thread attachment directory, and both adapters' `UserInput` mapping.
+  Codex takes structured `image` /
   `localImage` parts; Claude takes base64 blocks limited to gif/jpeg/png/webp.
 - **Limits, already decided:** 120 000 input chars, 8 attachments, 10 MiB per image, 50 MiB per
   file.

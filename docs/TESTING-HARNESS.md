@@ -416,9 +416,11 @@ beside the vendor shims with the run's private `FLEET_HOME` and resolved `FLEET_
 ## 6. Run directory and baselines
 
 The runner prints its directory first. The default is
-`/tmp/fleet-harness/<UTC-timestamp>-<scenario-stem>[-2|-3|…]/`: the first claimant gets the
-unsuffixed name, and a concurrent or same-second collision atomically claims the next suffix.
-Suite roots follow the same rule.
+`$TMPDIR/fleet-harness/<UTC-timestamp>-<scenario-stem>[-2|-3|…]/` (`/tmp` when `TMPDIR` is
+unset): the first claimant gets the
+unsuffixed name, and a concurrent or same-second collision atomically claims the next suffix. A
+long scenario stem is shortened only enough to leave room for the run's Unix sockets. Suite roots
+follow the same rule.
 
 ```text
 run.jsonl          timestamped request/response journal, one JSON object per exchange
@@ -442,7 +444,7 @@ A directory run adds one level. The suite directory holds its own `report.md` an
 subdirectory per scenario, numbered in execution order and named after the scenario's file stem:
 
 ```text
-/tmp/fleet-harness/<UTC-timestamp>-<directory-name>/
+$TMPDIR/fleet-harness/<UTC-timestamp>-<directory-name>/
   report.md            the suite digest, linking into each run below
   001-hub-help/        a complete run directory, exactly as above
   002-pointer-basics/
@@ -640,8 +642,9 @@ still short of it, so no other document has to claim a capability that does not 
 - **`clipboard set` and `clipboard get` have no working lane.** Stated in §1 and unchanged: they
   are part of the frozen grammar and no scenario may use them.
 - **`advance` does not move `BackgroundExecutor` timers.** Stated in §1 and unchanged.
-- **A suite writes about five megabytes per scenario into `/tmp/fleet-harness` and never prunes
-  it.** The run directory is the evidence (§6), so nothing deletes it on its own; `make
+- **A suite writes about five megabytes per scenario into `$TMPDIR/fleet-harness` (`/tmp` when
+  `TMPDIR` is unset) and never prunes it.** The run directory is the evidence (§6), so nothing
+  deletes it on its own; `make
   harness-prune` is the broom, and it is opt-in.
 - **Six source files are past the ~900-line rule** `rust-workspace-architecture` sets:
   `fleet-harness/src/{report.rs, baseline.rs, scenario.rs, agent/codex.rs}`,

@@ -76,6 +76,17 @@ harness and can leave an older `target/debug/fleetd` in place. Before running ap
 directly, run `cargo build -p fleet-daemon`, then
 `FLEET_DAEMON="$PWD/target/debug/fleetd" cargo test -p fleet-app`.
 
+The opt-in delegation smoke tests invoke the real Claude and Codex binaries. On a workstation
+where both vendor CLIs are installed and signed in, run:
+
+```sh
+cargo test -p fleet-daemon --features real-agents delegation::live
+```
+
+They are excluded from the ordinary workspace suite. `make doctor` checks the other half of this
+path and should include `subagent fleet CLI ok <resolved-path>`; a child that cannot resolve that
+CLI cannot report its result.
+
 Direct Cargo equivalents work as usual. Build artifacts use Cargo's default target directory,
 `target/` inside this repository. Sharing that repository-local directory between commands in
 the same worktree is supported. Do not point multiple worktrees at one external
@@ -160,7 +171,7 @@ It exits nonzero when any line fails, naming the line and its response.
 | `--lane virtual` | Default when Hyprland answers. Creates its own headless output, moves the window there by title and captures it with `grim`. Your screen is never touched. |
 | `--lane headless` | No compositor at all: full layout, state, keyboard and pointer handling, no pixels. `shot` fails with "no pixels in the headless lane". This is the lane a machine with no display can run. |
 | `--lane attach` | Your current session and monitor, for watching a run live. Opt-in. |
-| `--run-dir <path>` | Put the run directory somewhere other than `/tmp/fleet-harness/<UTC>-<stem>/`. |
+| `--run-dir <path>` | Put the run directory somewhere other than `$TMPDIR/fleet-harness/<UTC>-<stem>/` (`/tmp` when `TMPDIR` is unset). |
 | `--keep` | Keep the hermetic `home/` after a passing run. A failed run keeps it regardless. |
 | `--continue-on-failure` | Run every remaining line, and every remaining scenario, instead of stopping at the first failure. The run still exits nonzero. |
 | `--update-baselines` | Replace the golden images a virtual-lane run compares against. |

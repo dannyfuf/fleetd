@@ -11,7 +11,7 @@
 
 ## Kickoff
 - [x] I have read the plan end to end.
-- [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
+- [x] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
 - [x] I am ready to start.
 
 ## Tasks
@@ -31,4 +31,4 @@
 - 2026-09-18 — Restart coverage uses the manager scripted harness at the valid running boundary and cfg(test)-only helper visibility.
 
 ## Follow-ups
-- None.
+- 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

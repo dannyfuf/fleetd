@@ -1,12 +1,12 @@
 # Native agents contract reference
 
-This document is the reference for the **shipped** native-agent public API: names, signatures,
-serialized shapes, and module paths. It began as the Stage 0 freeze; the behaviour stages
-implemented the marked stubs and, where the design needed more surface, added to it. Everything
-below has been read back off the code, and the *Additions after the Stage 0 freeze* section at the
-end lists what moved so a reader holding the original freeze can find it. All domain and wire enums
-use Serde `snake_case` variant names; struct fields use `camelCase` unless a declaration says
-otherwise.
+This document preserves the Stage 0 public-API freeze and the later additive delegation contract:
+names, signatures, serialized shapes, and module paths. The delegation value/request/response/event
+shapes are current and are pinned byte-for-byte by
+`crates/fleet-proto/tests/agent_compatibility.rs`. Earlier native-agent shapes remain here as
+archaeology and are explicitly superseded by the notice below; they are not a second statement of
+the shipped API. All domain and wire enums use Serde `snake_case` variant names; struct fields use
+`camelCase` unless a declaration says otherwise.
 
 > **Superseded by the native-agents rewrite, phase by phase.** This file records the public API
 > of the Claude Code + OpenCode implementation. Phase 1 replaced the `fleet-core::agents` half of

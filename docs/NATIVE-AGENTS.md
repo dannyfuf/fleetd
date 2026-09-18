@@ -1507,9 +1507,10 @@ inside the adapter rather than becoming transcript identity.
 ## 14. Risks and open questions
 
 - **Protocol drift, both harnesses.** Neither wire is a documented public contract, and Codex
-  demonstrably adds enum values without a version bump. Mitigation is §4.5's tolerant decoding, the
-  capability gates, per-version fixtures, the terminal fallback, and a per-thread raw NDJSON log
-  behind a flag from day one — every nuance in §4 was discovered by reading one.
+  demonstrably adds enum values without a version bump. Current mitigation is §4.5's tolerant
+  decoding, the capability gates, per-version fixtures and the terminal fallback. The per-thread
+  raw NDJSON log remains deferred in `TODO.md` §7 — every nuance in §4 was discovered by reading
+  one, which is why that missing diagnostic matters.
 - **Claude in-session control requests are unproven.** t3code gets `setModel`/`setPermissionMode`
   from the SDK; the corresponding `control_request` subtypes are not proven by any capture Fleet
   holds. Shipping a guess means a silently-ignored control, so v1 treats every such change as
@@ -1529,6 +1530,20 @@ inside the adapter rather than becoming transcript identity.
   must ignore the shadow home. **Single-account sign-in and sign-out are in scope and built**
   (§4.2, §7.1): `/login` and `/logout` drive the one account of the `CODEX_HOME` the thread runs
   under, which is a different thing from running two accounts side by side.
+- **An MCP wrapper is deferred.** The CLI remains the one delegation contract; a later MCP server
+  may wrap its six verbs without introducing a second state machine (`TODO.md` §9).
+- **Terminal caller discovery is deferred.** `fleet subagent run --caller <thread>` works, but a
+  terminal user must discover and copy that id themselves (`TODO.md` §10).
+- **Remote-host delegations are deferred.** A mirrored caller is refused rather than creating a
+  local child whose durable record would be split from its authoritative transcript (`TODO.md`
+  §11).
+- **Structured delegation results are deferred.** `--json-result` validates its input, but the
+  stored and delivered contract remains bounded text (`TODO.md` §12).
+- **Caller-authorized gate answers through the CLI are deferred.** The first CLI controls the
+  delegation lifecycle; it does not expose a general child-thread control surface (`TODO.md`
+  §13).
+- **A Jobs-screen delegation projection is deferred.** Delegations remain visible in their caller
+  transcript and keep their own lifecycle; a later Jobs view may be read-only (`TODO.md` §14).
 - **Human PR review is not an agent state.** It stays in Hub/Pull Requests.
 
 ## 15. Delegations

@@ -11,7 +11,7 @@
 
 ## Kickoff
 - [x] I have read the plan end to end.
-- [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
+- [x] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
 - [x] I am ready to start.
 
 ## Tasks
@@ -22,7 +22,7 @@
 - [x] P5-T03 — Selection: attach, reopen, or switch session then attach
   - verified: palette branch tests and all three picker scenarios pass headlessly.
 - [x] P5-T04 — Harness scenarios: attach from the picker, reopen a closed caller, other-worktree child
-  - verified: all three scenarios passed headlessly; virtual execution was attempted but unavailable.
+  - verified: all three scenarios passed headlessly; the virtual lane was available but its capture was painted over by another layer.
 - [x] P5-T05 — Document the section and the chord
   - verified: UX, KEYMAP, and NATIVE-AGENTS text matches the tested picker behavior.
 
@@ -30,4 +30,5 @@
 - 2026-09-18 — Fixed cross-worktree picker selection to ensure the destination session before attach; the specialized two-worktree preset avoids duplicating `other`.
 
 ## Follow-ups
-- Re-run the three picker scenarios in the virtual lane when a compositor is available.
+- 2026-09-18 — Re-run the three picker scenarios when the virtual output is no longer painted over by another layer.
+- 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

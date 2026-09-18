@@ -11,7 +11,7 @@
 
 ## Kickoff
 - [x] I have read the plan end to end.
-- [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
+- [x] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
 - [x] I am ready to start.
 
 ## Tasks
@@ -30,13 +30,13 @@
 - [x] P3-T07 — The `fleet subagent` CLI noun
   - verified: fleet-cli parsing, context, human, and JSON tests pass.
 - [x] P3-T08 — The tokio suite the design asks for, plus one live test per harness
-  - verified: 78 delegation tests pass; both real Claude and Codex live tests passed on 2026-09-18.
+  - verified: the hermetic delegation suite passes; the feature-gated live tests are present at the documented filter.
 - [x] P3-T09 — `docs/NATIVE-AGENTS.md` §15 and the CLI contract
   - verified: §15 and the CLI contract were read against the passing service and CLI tests.
 
 ## Notes / decisions log
-- 2026-09-18 — Run/complete tests use a hermetic scripted shell provider; live tests use an isolated `fleet` capture shim while still invoking the real provider binaries.
+- 2026-09-18 — Run/complete tests use a hermetic scripted shell provider; the unrun live tests use an isolated `fleet` capture shim while still invoking the real provider binaries.
 - 2026-09-18 — Fixed worker result handling so only `Reported` suppresses a missing-result nudge, and replaced scheduler-sensitive retry polling with durable event waits.
 
 ## Follow-ups
-- None.
+- 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.

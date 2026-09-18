@@ -11,7 +11,7 @@
 
 ## Kickoff
 - [x] I have read the plan end to end.
-- [ ] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
+- [x] I have run the project-wide verification commands once on a clean tree to confirm a green baseline.
 - [x] I am ready to start.
 
 ## Tasks
@@ -28,7 +28,7 @@
 - [x] P4-T06 — Attention bubbles up from children to the caller
   - verified: state/notification tests and blocked-child scenario pass.
 - [x] P4-T07 — Harness scenarios for the row, attach, detach, blocked child and `^s u`
-  - verified: all five scenarios passed headlessly; virtual execution was attempted but no compositor is available.
+  - verified: all five scenarios passed headlessly; the virtual lane was available but its capture was painted over by another layer.
 - [x] P4-T08 — Update the four authoritative documents for the surfaces added
   - verified: UX, keymap, native-agent, and harness docs were checked against scenarios and code.
 
@@ -37,4 +37,5 @@
 - 2026-09-18 — Corrected KEYMAP wording: Enter attaches on delegation rows, while result-card Enter expands and only delegation rows cancel.
 
 ## Follow-ups
-- Re-run the screen corpus in the virtual lane when a compositor is available; this machine only provided headless coverage.
+- 2026-09-18 — Re-run the screen corpus when the virtual output is no longer painted over by another layer.
+- 2026-09-18 — Live delegation tests were NOT run on this machine because no vendor CLIs are installed.
