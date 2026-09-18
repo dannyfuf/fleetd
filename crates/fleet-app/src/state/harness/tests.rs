@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use fleet_core::{
     agents::{
-        AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, Seq,
-        ThreadId, ThreadProjection, TurnId,
+        AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, GateId, GateKind,
+        ItemId, OpenGate, Seq, ThreadId, ThreadProjection, ToolKind, TurnId,
     },
     ids::TerminalId,
     model::Worktree,
@@ -532,6 +532,83 @@ fn native_children_and_delegations_are_additive_snapshot_fields() {
     let completed = state.harness_projection();
     assert!(completed.revision > detached.revision);
     assert_eq!(completed.snapshot.agents.delegations[0].status, "done");
+}
+
+#[test]
+fn pending_gate_waits_for_the_actionable_projection() {
+    let now = Instant::now();
+    let mut state = state();
+    let worktree = "buk/payroll#feat"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let thread = ThreadId::new();
+    let mut projection = ThreadProjection::new(thread, worktree, AgentKind::Codex);
+    projection.gates.push(OpenGate {
+        id: GateId::new(),
+        turn: None,
+        kind: GateKind::Permission {
+            item: None,
+            tool: ToolKind::Edit,
+            title: "edit README.md".to_owned(),
+            payload: "README.md".to_owned(),
+            rationale: None,
+            options: Vec::new(),
+        },
+        opened_seq: Seq(1),
+        blocked_since: None,
+    });
+    let mut snapshot = test_support::snapshot();
+    snapshot
+        .sessions
+        .push(test_support::session_with("buk/payroll#feat", &[]));
+    snapshot.agent_threads = vec![projection.summary(Seq::default())];
+    state.apply_snapshot(snapshot, now);
+    state.screen = Screen::Workspace {
+        session: "buk/payroll#feat"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+    };
+    state.agents.activate(
+        "buk/payroll#feat"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+        thread,
+    );
+
+    assert_eq!(
+        state.harness_projection().snapshot.agents.threads[0].state,
+        "needs_you"
+    );
+    assert!(
+        state.harness_projection().snapshot.agents.threads[0]
+            .pending_gate
+            .is_none(),
+        "a summary may announce attention before the projection can route an answer"
+    );
+
+    assert!(
+        state.agents.deactivate(
+            &"buk/payroll#feat"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}"))
+        )
+    );
+    assert_eq!(
+        state.harness_projection().snapshot.agents.threads[0]
+            .pending_gate
+            .as_deref(),
+        Some("permission"),
+        "an unopened background thread still exposes the gate kind carried by its summary"
+    );
+
+    state.agents.install_snapshot(projection, &[]);
+
+    assert_eq!(
+        state.harness_projection().snapshot.agents.threads[0]
+            .pending_gate
+            .as_deref(),
+        Some("permission")
+    );
 }
 
 #[test]

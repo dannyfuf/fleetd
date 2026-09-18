@@ -877,11 +877,7 @@ fn agent_strip_index(state: &AppState, summary: &AgentThreadSummary) -> Option<u
     let session = state.snapshot.as_ref()?.sessions.iter().find(|session| {
         matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == &summary.worktree)
     })?;
-    let offset = state
-        .agents
-        .of_worktree(&summary.worktree)
-        .iter()
-        .position(|candidate| candidate.thread == summary.thread)?;
+    let offset = state.agents.strip_offset(summary.thread)?;
     Some(session.terminals.len() + offset + 1)
 }
 

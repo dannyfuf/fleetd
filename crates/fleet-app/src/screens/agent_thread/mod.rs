@@ -132,6 +132,8 @@ struct RowsKey {
     checkpoints_rev: u64,
     /// Bumps when a durable delegation record changes independently of the caller projection.
     delegations_rev: u64,
+    /// Bumps once per retained clock tick while at least one delegation is live.
+    delegation_clock_rev: u64,
     /// Which composer mode is live, because the plan-ready reminder depends on it.
     mode: ComposerMode,
 }
@@ -158,6 +160,10 @@ pub struct AgentThreadView {
     delegation_titles: HashMap<DelegationId, String>,
     /// App-mirror revision paired with `delegations` for the row memo key.
     delegations_rev: u64,
+    /// Retained one-second clock for live delegation elapsed labels.
+    delegation_clock_rev: u64,
+    delegation_clock_task: Option<Task<()>>,
+    delegation_clock_running: bool,
     /// The prepared decisions, in creation order; the kit applies the priority ladder.
     decisions: Vec<Decision>,
     /// The prepared metadata strip and its per-width fit memo.
@@ -282,6 +288,9 @@ impl AgentThreadView {
             delegations: HashMap::new(),
             delegation_titles: HashMap::new(),
             delegations_rev: 0,
+            delegation_clock_rev: 0,
+            delegation_clock_task: None,
+            delegation_clock_running: false,
             decisions: Vec::new(),
             metadata: Vec::new(),
             trailing: Vec::new(),

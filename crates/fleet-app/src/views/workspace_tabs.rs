@@ -96,7 +96,8 @@ pub(crate) fn agent_tab(
     active: bool,
 ) -> TerminalTab {
     let mut tab = TerminalTab::new(index, SharedString::from(tab_title(summary)))
-        .id(SharedString::from(format!("agent-tab-{}", summary.thread)));
+        .id(SharedString::from(format!("agent-tab-{}", summary.thread)))
+        .kind(TerminalTabKind::Native);
     match tab_badge(attention, summary.exit_code) {
         TabBadge::Spinner => tab = tab.starting(true),
         // §2 draws the amber dot for as long as the thread needs you, on the selected tab too:
@@ -505,7 +506,16 @@ mod tests {
         let caller_tab = agent_tab(&caller, 2, Attention::Idle, false);
         assert_eq!(child_tab.name.as_ref(), "\u{21b3} codex \u{2014} design");
         assert_eq!(caller_tab.name.as_ref(), "codex \u{2014} design");
-        assert_eq!(child_tab.kind, caller_tab.kind);
+        assert_eq!(child_tab.kind, TerminalTabKind::Native);
+        assert_eq!(caller_tab.kind, TerminalTabKind::Native);
+
+        child.title = "\u{21b3} codex \u{2014} inspect the reducer".to_owned();
+        let default_title = agent_tab(&child, 3, Attention::Idle, false);
+        assert_eq!(
+            default_title.name.as_ref(),
+            "\u{21b3} codex \u{2014} inspect the reducer",
+            "the daemon's complete default title is not prefixed twice"
+        );
     }
 
     #[test]

@@ -26,6 +26,23 @@ pub struct AgentCounts {
     pub failed: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DerivedKey {
+    summaries: u64,
+    seen: u64,
+    delegations: u64,
+    attachments: u64,
+}
+
+#[derive(Debug, Default)]
+struct AgentDerived {
+    key: DerivedKey,
+    ready: bool,
+    attention: HashMap<ThreadId, Attention>,
+    counts: AgentCounts,
+    strip_offsets: HashMap<ThreadId, usize>,
+}
+
 impl AgentCounts {
     /// Whether any counter is non-zero, which is what zero-suppresses the chips (§2.3).
     #[must_use]
@@ -43,6 +60,8 @@ impl AgentCounts {
 pub struct AgentThreads {
     /// Daemon summaries in snapshot order; the tab strip inherits that order.
     summaries: Vec<AgentThreadSummary>,
+    summaries_revision: u64,
+    seen_revision: u64,
     /// Durable caller-to-child records, replaced by the capability-gated seed after Hello.
     delegations: HashMap<DelegationId, Delegation>,
     /// Delegation ids in creation order, independent of hash-map iteration order.
@@ -95,6 +114,10 @@ pub struct AgentThreads {
     composer_focused: Option<ThreadId>,
     /// Narrow damage reported by the latest accepted event for each opened thread.
     last_applied: HashMap<ThreadId, Applied>,
+    /// Threads whose authoritative projection was replaced outside the live event stream.
+    projection_replaced: HashSet<ThreadId>,
+    /// Derived foreground data, rebuilt at most once for each authoritative revision tuple.
+    derived: RefCell<AgentDerived>,
 }
 
 impl AgentThreads {
@@ -357,6 +380,11 @@ impl AgentThreads {
         self.last_applied.get(&thread)
     }
 
+    /// Takes the one-shot signal that a mounted view must adopt a replacement projection.
+    pub fn take_projection_replaced(&mut self, thread: ThreadId) -> bool {
+        self.projection_replaced.remove(&thread)
+    }
+
     /// The sequence this client has reported as seen for a thread.
     #[must_use]
     pub fn seen(&self, thread: ThreadId) -> Seq {
@@ -374,7 +402,13 @@ impl AgentThreads {
     /// Windows from one installation share that identity; separate installations do not.
     #[must_use]
     pub fn attention(&self, thread: ThreadId) -> Attention {
-        self.attention_in(thread, &self.summaries)
+        self.ensure_derived();
+        self.derived
+            .borrow()
+            .attention
+            .get(&thread)
+            .copied()
+            .unwrap_or(Attention::Idle)
     }
 
     fn own_attention(&self, summary: &AgentThreadSummary) -> Attention {
@@ -417,23 +451,71 @@ impl AgentThreads {
     /// The §3.3 counters the context bar shows, including the thread on the current tab.
     #[must_use]
     pub fn counts(&self) -> AgentCounts {
+        self.ensure_derived();
+        self.derived.borrow().counts
+    }
+
+    /// Zero-based position among the native tabs of this thread's worktree.
+    #[must_use]
+    pub fn strip_offset(&self, thread: ThreadId) -> Option<usize> {
+        self.ensure_derived();
+        self.derived.borrow().strip_offsets.get(&thread).copied()
+    }
+
+    fn ensure_derived(&self) {
+        let key = DerivedKey {
+            summaries: self.summaries_revision,
+            seen: self.seen_revision,
+            delegations: self.delegations_revision,
+            attachments: self.attached_revision,
+        };
+        if self.derived.borrow().ready && self.derived.borrow().key == key {
+            return;
+        }
+        let attention = self
+            .summaries
+            .iter()
+            .map(|summary| {
+                (
+                    summary.thread,
+                    self.attention_in(summary.thread, &self.summaries),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let mut counts = AgentCounts::default();
         for summary in self
             .summaries
             .iter()
             .filter(|summary| summary.parent.is_none())
         {
-            match self.attention(summary.thread) {
+            match attention
+                .get(&summary.thread)
+                .copied()
+                .unwrap_or(Attention::Idle)
+            {
                 Attention::NeedsYou(_) => counts.needs_you += 1,
                 Attention::Failed => counts.failed += 1,
-                // A thread parked on a usage window is working as far as the bar is concerned:
-                // §3.3 ranks `waiting` below `working` and above `failed`, and nothing about it
-                // needs the user.
                 Attention::Working | Attention::Waiting => counts.working += 1,
                 Attention::Unread | Attention::Idle => {}
             }
         }
-        counts
+        let mut strip_offsets = HashMap::new();
+        let mut worktrees = HashSet::new();
+        for summary in &self.summaries {
+            if worktrees.insert(summary.worktree.clone()) {
+                for (offset, visible) in self.of_worktree(&summary.worktree).into_iter().enumerate()
+                {
+                    strip_offsets.insert(visible.thread, offset);
+                }
+            }
+        }
+        *self.derived.borrow_mut() = AgentDerived {
+            key,
+            ready: true,
+            attention,
+            counts,
+            strip_offsets,
+        };
     }
 
     /// The agent tab selected in a worktree's workspace.
@@ -631,14 +713,16 @@ impl AgentThreads {
     /// what is in hand rather than from the newest row the daemon has.
     pub fn install_window(&mut self, window: &AgentThreadWindow) {
         let thread = window.summary.thread;
+        let repair_pending = self.resync.contains(&thread);
         if let Some(seen) = window.seen_seq {
-            self.mirror.mark_seen(thread, seen);
+            self.mark_seen(thread, seen);
         }
         self.apply_summary(window.summary.clone());
         self.commands
             .insert(thread, window.session.commands.clone());
         self.skills.insert(thread, window.session.skills.clone());
         self.last_applied.insert(thread, Applied::Structural);
+        self.projection_replaced.insert(thread);
         match self.mirror.install_window(window) {
             MirrorOutcome::Gap { .. } => {
                 self.resync.insert(thread);
@@ -646,7 +730,9 @@ impl AgentThreads {
             MirrorOutcome::Applied(_)
             | MirrorOutcome::Duplicate { .. }
             | MirrorOutcome::Rejected { .. } => {
-                self.resync.remove(&thread);
+                if !repair_pending {
+                    self.resync.remove(&thread);
+                }
                 self.resume_from.remove(&thread);
             }
         }
@@ -750,7 +836,9 @@ impl AgentThreads {
     /// Replaces a projection with a daemon snapshot and applies its ordered tail.
     pub fn install_snapshot(&mut self, projection: ThreadProjection, events: &[SeqEvent]) {
         let thread = projection.thread;
+        let repair_pending = self.resync.contains(&thread);
         self.last_applied.insert(thread, Applied::Structural);
+        self.projection_replaced.insert(thread);
         match self.mirror.install_snapshot(projection, events) {
             MirrorOutcome::Gap { .. } => {
                 self.resync.insert(thread);
@@ -760,7 +848,9 @@ impl AgentThreads {
             MirrorOutcome::Applied(_)
             | MirrorOutcome::Duplicate { .. }
             | MirrorOutcome::Rejected { .. } => {
-                self.resync.remove(&thread);
+                if !repair_pending {
+                    self.resync.remove(&thread);
+                }
             }
         }
     }
@@ -790,7 +880,9 @@ impl AgentThreads {
         }
         if !self.mirror.projections.contains_key(&thread) {
             // A thread this client has not opened has no projection to advance; its tab still
-            // updates from the summary the daemon broadcasts beside the event.
+            // updates from the summary the daemon broadcasts beside the event. Remember the
+            // missing tail in case an open reply was already in flight when this event landed.
+            self.resync.insert(thread);
             return MirrorOutcome::Applied(Applied::Structural);
         }
         let outcome = self.mirror.apply_event(thread, event);
@@ -805,25 +897,38 @@ impl AgentThreads {
 
     /// Patches one broadcast summary into the mirror, preserving snapshot order.
     pub fn apply_summary(&mut self, summary: AgentThreadSummary) {
-        match self
+        let changed = match self
             .summaries
             .iter_mut()
             .find(|existing| existing.thread == summary.thread)
         {
-            Some(existing) => *existing = summary,
-            None => self.summaries.push(summary),
+            Some(existing) if *existing == summary => false,
+            Some(existing) => {
+                *existing = summary;
+                true
+            }
+            None => {
+                self.summaries.push(summary);
+                true
+            }
+        };
+        if changed {
+            self.summaries_revision = self.summaries_revision.wrapping_add(1);
         }
     }
 
     /// Records the sequence the user has actually seen in a focused tab.
     pub fn mark_seen(&mut self, thread: ThreadId, seq: Seq) {
-        self.mirror.mark_seen(thread, seq);
+        if self.seen(thread) != seq {
+            self.mirror.mark_seen(thread, seq);
+            self.seen_revision = self.seen_revision.wrapping_add(1);
+        }
     }
 
     /// Seeds persisted cursors returned for this installation after Hello.
     pub fn seed_seen(&mut self, cursors: &[(ThreadId, Seq)]) {
         for (thread, seq) in cursors {
-            self.mirror.mark_seen(*thread, *seq);
+            self.mark_seen(*thread, *seq);
         }
     }
 
@@ -870,7 +975,10 @@ impl AgentThreads {
     /// Replaces the summary list from an authoritative snapshot and forgets vanished threads.
     pub fn sync_snapshot(&mut self, threads: Vec<AgentThreadSummary>) {
         let live: HashSet<ThreadId> = threads.iter().map(|summary| summary.thread).collect();
-        self.summaries = threads;
+        if self.summaries != threads {
+            self.summaries = threads;
+            self.summaries_revision = self.summaries_revision.wrapping_add(1);
+        }
         self.mirror
             .projections
             .retain(|thread, _| live.contains(thread));
@@ -884,6 +992,8 @@ impl AgentThreads {
         self.decisions.retain(|thread, _| live.contains(thread));
         self.resume_from.retain(|thread, _| live.contains(thread));
         self.last_applied.retain(|thread, _| live.contains(thread));
+        self.projection_replaced
+            .retain(|thread| live.contains(thread));
         self.row_focus.retain(|thread| live.contains(thread));
         self.focused_rows.retain(|thread, _| live.contains(thread));
         self.expanded_result_cards

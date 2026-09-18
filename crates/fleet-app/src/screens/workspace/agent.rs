@@ -12,8 +12,9 @@ use crate::{
     actions::native_agent,
     bridge::BridgeCommand,
     screens::agent_thread::{
-        AgentThreadEvent, AgentThreadView, ThreadHost, picker::PickerKind,
-        presentation::header_word,
+        AgentThreadEvent, AgentThreadView, ThreadHost,
+        picker::PickerKind,
+        presentation::{header_word, title_subject},
     },
     views::workspace_tabs::TabTarget,
 };
@@ -385,8 +386,12 @@ impl WorkspaceScreen {
         // The mirror is authoritative; the view adopts it and moves only the rows a stream
         // touched, so a fast model does not rebuild the transcript per token (§5).
         state.update(cx, |app, cx| {
-            let structural = Applied::Structural;
-            let applied = app.agents.last_applied(thread).unwrap_or(&structural);
+            let applied = app
+                .agents
+                .last_applied(thread)
+                .cloned()
+                .unwrap_or(Applied::Structural);
+            let projection_replaced = app.agents.take_projection_replaced(thread);
             let commands = app.agents.commands(thread);
             let skills = app.agents.skills(thread);
             let delegations = app
@@ -399,11 +404,11 @@ impl WorkspaceScreen {
                 .iter()
                 .filter_map(|delegation| {
                     let summary = app.agents.summary(delegation.child)?;
-                    let title = summary.title.trim();
+                    let title = title_subject(summary);
                     (!title.is_empty()
                         && !title.eq_ignore_ascii_case(summary.provider.executable())
                         && !title.eq_ignore_ascii_case(summary.provider.display_name()))
-                    .then(|| (delegation.id, title.to_owned()))
+                    .then_some((delegation.id, title))
                 })
                 .collect();
             let delegations_revision = app.agents.delegations_revision();
@@ -417,7 +422,11 @@ impl WorkspaceScreen {
                         .unwrap_or((None, None));
                     view.sync_caller(caller, caller_index, cx);
                     view.sync_delegations(delegations, delegation_titles, delegations_revision, cx);
-                    view.sync(projection, applied, cx);
+                    if projection_replaced {
+                        view.sync_replacement(projection, cx);
+                    } else {
+                        view.sync(projection, &applied, cx);
+                    }
                 });
             }
         });
@@ -915,9 +924,8 @@ fn caller_context(app: &AppState, child: ThreadId) -> Option<(AgentThreadSummary
         if worktree != &summary.worktree {
             return None;
         }
-        threads_of(app, session)
-            .iter()
-            .position(|candidate| candidate.thread == caller)
+        app.agents
+            .strip_offset(caller)
             .map(|position| session.terminals.len() + position + 1)
     });
     Some((summary, index))

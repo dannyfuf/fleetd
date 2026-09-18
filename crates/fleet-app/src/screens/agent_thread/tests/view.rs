@@ -748,6 +748,33 @@ fn a_changed_delegation_rewrites_one_row_and_reuses_every_other(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn a_live_delegation_retains_a_clock_until_its_duration_is_frozen(cx: &mut TestAppContext) {
+    let turn = TurnId::new();
+    let mut record = delegation_record(DelegationStatus::Running);
+    record.finished = None;
+    let mut base = projection();
+    base.items = vec![delegation_item(turn, &record)];
+    let view = cx.new(|cx| AgentThreadView::new(base, cx));
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![record.clone()], HashMap::new(), 1, cx);
+        assert!(view.delegation_clock_running);
+        assert!(view.delegation_clock_task.is_some());
+    });
+
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| assert!(view.delegation_clock_rev > 0));
+
+    record.status = DelegationStatus::Succeeded;
+    record.finished = Some(chrono::Utc::now());
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![record], HashMap::new(), 2, cx);
+        assert!(!view.delegation_clock_running);
+        assert!(view.delegation_clock_task.is_none());
+    });
+}
+
+#[gpui::test]
 fn a_question_binds_the_composer_to_the_active_answer(cx: &mut TestAppContext) {
     let mut base = projection();
     base.gates = vec![question_gate(vec![question(

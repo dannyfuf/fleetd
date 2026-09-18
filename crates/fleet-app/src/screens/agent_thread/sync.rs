@@ -64,6 +64,7 @@ impl AgentThreadView {
             self.rows_key = None;
         }
         self.delegations_rev = revision;
+        self.sync_delegation_clock(cx);
         self.refresh_rows();
         self.install_rows(cx);
         cx.notify();
@@ -98,6 +99,19 @@ impl AgentThreadView {
         self.sync_batch(projection, std::slice::from_ref(applied), cx);
     }
 
+    /// Adopts a daemon replacement even when its cursor matches the mounted projection.
+    ///
+    /// A bounded open reply can hydrate transcript or session fields at the same sequence the
+    /// live stream already reached. It is structural, but unlike a thread switch it preserves
+    /// the transcript's measured list state.
+    pub(crate) fn sync_replacement(
+        &mut self,
+        projection: &ThreadProjection,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_batch_inner(projection, &[Applied::Structural], true, cx);
+    }
+
     /// Adopts one bridge batch. Pure text suffixes stay incremental; any structural member makes
     /// the batch one structural adoption so grouping runs at most once.
     pub(crate) fn sync_batch(
@@ -106,7 +120,17 @@ impl AgentThreadView {
         applied: &[Applied],
         cx: &mut Context<Self>,
     ) {
-        if projection.last_seq == self.projection.last_seq {
+        self.sync_batch_inner(projection, applied, false, cx);
+    }
+
+    fn sync_batch_inner(
+        &mut self,
+        projection: &ThreadProjection,
+        applied: &[Applied],
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !force && projection.last_seq == self.projection.last_seq {
             return;
         }
         let described_tail = u64::try_from(applied.len()).ok().is_some_and(|count| {
@@ -346,6 +370,7 @@ impl AgentThreadView {
             pending_rev: self.pending_rev,
             checkpoints_rev: self.checkpoints_rev,
             delegations_rev: self.delegations_rev,
+            delegation_clock_rev: self.delegation_clock_rev,
             mode: self.composer_mode(),
         };
         if self.rows_key.as_ref() == Some(&key) {
@@ -370,6 +395,47 @@ impl AgentThreadView {
         self.targets = built.targets;
         self.row_of_item = built.streaming;
         self.rows_key = Some(key);
+    }
+
+    fn sync_delegation_clock(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .delegations
+            .values()
+            .any(|delegation| delegation.status.is_live())
+        {
+            self.delegation_clock_task = None;
+            self.delegation_clock_running = false;
+            return;
+        }
+        if self.delegation_clock_running {
+            return;
+        }
+        self.delegation_clock_running = true;
+        self.delegation_clock_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let alive = this
+                    .update(cx, |view, cx| {
+                        if !view
+                            .delegations
+                            .values()
+                            .any(|delegation| delegation.status.is_live())
+                        {
+                            view.delegation_clock_running = false;
+                            return false;
+                        }
+                        view.delegation_clock_rev = view.delegation_clock_rev.wrapping_add(1);
+                        view.refresh_rows();
+                        view.install_rows(cx);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Hands the prepared rows to the list, which splices only what changed.
@@ -439,10 +505,9 @@ impl AgentThreadView {
         let payload = self.approval_payload();
         let placeholder = match self.host.as_ref().filter(|_| unreachable) {
             Some(host) => unreachable_placeholder(&host.name),
-            None if matches!(mode, ComposerMode::Normal) => self.caller_index.map_or_else(
-                || composer_placeholder(mode, self.projection.provider, None, choice_only),
-                presentation::child_composer_placeholder,
-            ),
+            None if matches!(mode, ComposerMode::Normal) && self.caller.is_some() => {
+                presentation::child_composer_placeholder(self.caller_index)
+            }
             None => composer_placeholder(
                 mode,
                 self.projection.provider,

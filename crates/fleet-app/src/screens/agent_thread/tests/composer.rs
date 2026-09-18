@@ -373,8 +373,12 @@ fn the_composer_placeholder_states_what_the_mode_is_for() {
         "add feedback to refine, or leave blank to implement"
     );
     assert_eq!(
-        presentation::child_composer_placeholder(3),
+        presentation::child_composer_placeholder(Some(3)),
         "Steering a subagent of [3]. It reports to its caller when it finishes."
+    );
+    assert_eq!(
+        presentation::child_composer_placeholder(None),
+        "Steering a subagent of ·. It reports to its caller when it finishes."
     );
 }
 

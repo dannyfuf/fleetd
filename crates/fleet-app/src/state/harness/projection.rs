@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use fleet_core::{
-    agents::{AgentKind, Attention, AttentionKind},
+    agents::{AgentKind, Attention, AttentionKind, GateKind},
     board::Card,
     ids::TerminalId,
     sessions::Terminal as SessionTerminal,
@@ -417,12 +417,29 @@ impl AppState {
                 .iter()
                 .map(|summary| {
                     let attention = self.agents.attention(summary.thread);
+                    let pending_gate = self
+                        .agents
+                        .projection(summary.thread)
+                        .and_then(|projection| projection.gates.last())
+                        .map(|gate| pending_gate_name(&gate.kind))
+                        .or_else(|| {
+                            (self.active_agent_thread() != Some(summary.thread))
+                                .then(|| match attention {
+                                    Attention::NeedsYou(kind) => pending_attention_name(kind),
+                                    Attention::Working
+                                    | Attention::Waiting
+                                    | Attention::Failed
+                                    | Attention::Unread
+                                    | Attention::Idle => None,
+                                })
+                                .flatten()
+                        });
                     AgentThreadSnapshot {
                         id: summary.thread.to_string(),
                         provider: provider_name(summary.provider).to_owned(),
                         state: attention_name(attention).to_owned(),
                         unread: self.agents.seen(summary.thread) < summary.last_seq,
-                        pending_gate: pending_gate_name(attention).map(str::to_owned),
+                        pending_gate: pending_gate.map(str::to_owned),
                         decision: self.agents.decision(summary.thread).map(|decision| {
                             AgentThreadDecisionSnapshot {
                                 kind: decision.kind,
@@ -1007,18 +1024,21 @@ fn attention_name(attention: Attention) -> &'static str {
         Attention::Idle => "idle",
     }
 }
-/// The gate a thread is blocked on. A finished turn needs the user but is not a gate.
-fn pending_gate_name(attention: Attention) -> Option<&'static str> {
+/// The gate a thread's installed projection can act on.
+fn pending_gate_name(gate: &GateKind) -> &'static str {
+    match gate {
+        GateKind::Permission { .. } => "permission",
+        GateKind::Question { .. } => "question",
+        GateKind::Plan { .. } => "plan",
+    }
+}
+
+fn pending_attention_name(attention: AttentionKind) -> Option<&'static str> {
     match attention {
-        Attention::NeedsYou(AttentionKind::Permission) => Some("permission"),
-        Attention::NeedsYou(AttentionKind::Question) => Some("question"),
-        Attention::NeedsYou(AttentionKind::Plan) => Some("plan"),
-        Attention::NeedsYou(AttentionKind::Finished)
-        | Attention::Working
-        | Attention::Waiting
-        | Attention::Failed
-        | Attention::Unread
-        | Attention::Idle => None,
+        AttentionKind::Permission => Some("permission"),
+        AttentionKind::Question => Some("question"),
+        AttentionKind::Plan => Some("plan"),
+        AttentionKind::Finished => None,
     }
 }
 fn cursor_shape_name(cursor: fleet_proto::terminal::CursorState) -> &'static str {

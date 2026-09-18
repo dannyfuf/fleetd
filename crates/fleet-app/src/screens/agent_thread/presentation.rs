@@ -58,10 +58,28 @@ pub(crate) const fn header_word(attention: Attention) -> &'static str {
     }
 }
 
+/// The provider-independent title a surface places after its own child/provider chrome.
+///
+/// Delegation creation stores the contract's complete default (`↳ provider — brief`) as the
+/// thread title. Tabs, picker rows and delegation rows already render that chrome themselves, so
+/// peel it once rather than producing `↳ codex — ↳ codex — brief` on the default path.
+#[must_use]
+pub(crate) fn title_subject(summary: &AgentThreadSummary) -> String {
+    let provider = summary.provider.executable();
+    let title = summary.title.trim();
+    if summary.parent.is_some() {
+        let prefix = format!("\u{21b3} {provider} \u{2014} ");
+        if let Some(subject) = title.strip_prefix(&prefix) {
+            return subject.trim().to_owned();
+        }
+    }
+    title.to_owned()
+}
+
 /// `claude — rounding fix`, or `claude` while the thread has no harness title yet (§2).
 fn plain_tab_title(summary: &AgentThreadSummary) -> String {
     let provider = summary.provider.executable();
-    let title = summary.title.trim();
+    let title = title_subject(summary);
     if title.is_empty()
         || title.eq_ignore_ascii_case(provider)
         || title.eq_ignore_ascii_case(summary.provider.display_name())
@@ -102,8 +120,9 @@ pub(crate) fn caller_metadata_segment(
 
 /// The ordinary composer prompt of a delegated child.
 #[must_use]
-pub(crate) fn child_composer_placeholder(caller_index: usize) -> String {
-    format!("Steering a subagent of [{caller_index}]. It reports to its caller when it finishes.")
+pub(crate) fn child_composer_placeholder(caller_index: Option<usize>) -> String {
+    let caller = caller_index.map_or_else(|| "·".to_owned(), |index| format!("[{index}]"));
+    format!("Steering a subagent of {caller}. It reports to its caller when it finishes.")
 }
 
 /// The left half of the 22 px composer metadata row (§2, `spec-B` §B5.1).

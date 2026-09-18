@@ -118,6 +118,32 @@ fn the_context_bar_counts_every_thread_in_the_snapshot() {
 }
 
 #[test]
+fn attention_counts_and_strip_offsets_share_revision_keyed_derived_data() {
+    let caller = summary("cache", Attention::Working, 4);
+    let child = child_summary("cache", Attention::Idle, 1, caller.thread);
+    let mut agents = AgentThreads::default();
+    agents.sync_snapshot(vec![caller.clone(), child.clone()]);
+    agents.attach(child.thread);
+
+    assert_eq!(agents.attention(caller.thread), Attention::Working);
+    assert_eq!(agents.counts().working, 1);
+    assert_eq!(agents.strip_offset(child.thread), Some(1));
+    let first = agents.derived.borrow().key;
+    assert!(agents.derived.borrow().ready);
+
+    let _same = (
+        agents.attention(caller.thread),
+        agents.counts(),
+        agents.strip_offset(child.thread),
+    );
+    assert_eq!(agents.derived.borrow().key, first);
+
+    agents.mark_seen(caller.thread, Seq(4));
+    let _refreshed = agents.attention(caller.thread);
+    assert_ne!(agents.derived.borrow().key, first);
+}
+
+#[test]
 fn viewing_a_thread_clears_finished_and_unread_before_the_daemon_echoes() {
     let finished = summary("a", Attention::NeedsYou(AttentionKind::Finished), 7);
     let blocked = summary("b", Attention::NeedsYou(AttentionKind::Permission), 7);
@@ -439,6 +465,45 @@ fn a_snapshot_forgets_threads_the_daemon_no_longer_lists() {
     assert!(state.agents.decision(thread.thread).is_none());
     assert_eq!(state.agents.seen(thread.thread), Seq::default());
     assert_eq!(state.agents.counts(), AgentCounts::default());
+}
+
+#[test]
+fn installing_a_projection_marks_one_wholesale_view_adoption() {
+    let thread = summary("feat", Attention::Idle, 1);
+    let mut state = state_with(vec![thread.clone()]);
+    let projection = ThreadProjection::new(thread.thread, worktree("feat"), AgentKind::Codex);
+
+    state.agents.install_snapshot(projection, &[]);
+
+    assert!(state.agents.take_projection_replaced(thread.thread));
+    assert!(!state.agents.take_projection_replaced(thread.thread));
+}
+
+#[test]
+fn an_event_before_the_open_projection_requires_a_tail_repair() {
+    let thread = summary("feat", Attention::Idle, 1);
+    let mut state = state_with(vec![thread.clone()]);
+    let event = SeqEvent {
+        seq: Seq(1),
+        at: chrono::DateTime::UNIX_EPOCH,
+        raw: None,
+        event: AgentEvent::SessionStateChanged(AgentSessionState::Ready),
+    };
+
+    assert!(matches!(
+        state.agents.apply_event(thread.thread, &event),
+        MirrorOutcome::Applied(Applied::Structural)
+    ));
+    assert!(state.agents.needs_resync(thread.thread));
+
+    state.agents.install_snapshot(
+        ThreadProjection::new(thread.thread, worktree("feat"), AgentKind::Claude),
+        &[],
+    );
+    assert!(
+        state.agents.needs_resync(thread.thread),
+        "a stale open reply must not clear the event that raced ahead of it"
+    );
 }
 
 #[test]

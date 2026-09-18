@@ -280,7 +280,7 @@ fn delegation_result_card(
         body: Rc::new(parse_markdown_document(text)),
         collapsible: text.lines().count() > DELEGATION_RESULT_COLLAPSE_LINES,
         expanded,
-        hint: SharedString::new_static("⏎ attach"),
+        hint: SharedString::new_static(if expanded { "⏎ hide" } else { "⏎ show" }),
     }
 }
 

@@ -64,6 +64,7 @@ fn rows_key_equality_includes_the_delegations_revision() {
         pending_rev: 3,
         checkpoints_rev: 4,
         delegations_rev: 5,
+        delegation_clock_rev: 6,
         mode: ComposerMode::Normal,
     };
     let mut changed = key.clone();
@@ -146,7 +147,7 @@ fn delegation_result_card_collapses_after_eight_lines() {
     assert_eq!(card.header, "codex finished · done · 14m · 2 files");
     assert!(card.collapsible);
     assert!(!card.expanded);
-    assert_eq!(card.hint, "⏎ attach");
+    assert_eq!(card.hint, "⏎ show");
 }
 
 #[test]
