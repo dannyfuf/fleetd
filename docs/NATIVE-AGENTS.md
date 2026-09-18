@@ -163,6 +163,9 @@ pub async fn spawn(kind: HarnessKind, cfg: &HarnessConfig, probe: &ProbeCache)
 
 Construction is a free function because the failure modes differ before a process exists.
 
+On Linux every probe and session child installs `PR_SET_PDEATHSIG(SIGKILL)` and verifies that its
+parent did not change across fork/exec; macOS has no parent-death signal and relies on stdin EOF.
+
 **Which binary.** `HarnessConfig.command` comes from `config.agentBinaries.{claude,codex}` — the
 executable the daemon `execve`s, with **no shell**. It is deliberately *not* `config.agentCommands`,
 which is the shell line a PTY pane types and may legally be a shell function or an alias: `cc` in a
@@ -309,7 +312,8 @@ Transition rules, each closing a real race:
    shows a spinner on a finished turn.
 4. Gates are independent of turns. A gate closes only on `GateResolved` or `GateWithdrawn`.
 5. Stream or process loss is `SessionExited { expected: false }` plus `RuntimeError`, which makes
-   the turn `Failed`. Never inferred success.
+   the turn `Failed`. Never inferred success. Restart recovery is the explicit exception: it
+   follows rule 9 and aborts a resumable orphan as `Interrupted` before leaving it `Stopped`.
 6. A user message sent while running is **steering**, dispatched immediately. There is no queue
    and no `QueuedMessage` row — see §7.2.
 7. Attention derives from gates, then work, then failure, then fresh completion.
@@ -1140,7 +1144,9 @@ is worked through **in the background, one thread at a time**: a thread whose `p
 its `head_seq` is replayed through the same projector a live append uses, and one that cannot be
 replayed is marked `session_state = 'error'` while the daemon starts anyway. Taking the census
 before anything can write is what makes the pass safe — a thread created afterwards can never be in
-it, so a live thread is never mistaken for an orphan of the previous run.
+it, so a live thread is never mistaken for an orphan of the previous run. For each orphan it
+settles, the repair pass also publishes the settled summary so a client that connected before the
+pass reached that thread sees the tab change without opening it.
 
 `index.json` is gone, and with it the whole-file rewrite on every metadata change: a record is one
 upsert on one row, which touches no projected column.

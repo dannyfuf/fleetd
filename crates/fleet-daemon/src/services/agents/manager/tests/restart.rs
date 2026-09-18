@@ -286,7 +286,16 @@ async fn restart_stops_resumable_threads_and_resumes_them_on_open() {
         })
         .await;
 
+    let mut updates = harness.events.subscribe();
     let restarted = harness.restart().await;
+    assert!(
+        drain(&mut updates).into_iter().any(|event| matches!(
+            event,
+            Event::AgentSummary(summary)
+                if summary.thread == thread && summary.session == SessionState::Stopped
+        )),
+        "the repair pass publishes the settled summary to already-connected clients"
+    );
     let summary = restarted
         .summaries()
         .await
