@@ -220,6 +220,21 @@ impl HarnessProvider {
         }));
     }
 
+    /// Ends one harness generation's forwarding before its restart-only lifecycle is emitted.
+    async fn stop_forwarding(&mut self) {
+        let Some(forwarder) = self.forwarder.take() else {
+            return;
+        };
+        forwarder.abort();
+        match forwarder.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => {
+                tracing::warn!(%error, "native-agent event forwarder stopped unexpectedly");
+            }
+        }
+    }
+
     /// Opens the harness for `request`, taking its event stream.
     async fn open(&mut self, request: StartRequest) -> ProviderResult<()> {
         let mut harness = harness::spawn(self.kind, &self.config, probes()).await?;
@@ -268,10 +283,14 @@ impl HarnessProvider {
         }
         request.resume_cursor = if resume { self.cursor.clone() } else { None };
         request.fork = false;
-        if let Some(harness) = self.harness.as_mut() {
+        // A restart is one provider generation, not a visible stop followed by another start.
+        // Retire and join the old forwarder before `shutdown` emits its terminal lifecycle;
+        // otherwise those frames can wait behind the manager's operation gate, settle the next
+        // queued send, and make its real `TurnStarted` target the "wrong" turn.
+        self.stop_forwarding().await;
+        if let Some(mut harness) = self.harness.take() {
             harness.shutdown(ShutdownReason::Restart { resume }).await?;
         }
-        self.harness = None;
         self.open(request).await
     }
 }
@@ -478,7 +497,7 @@ pub(crate) fn empty_events() -> ProviderEvents {
 mod tests {
     use std::path::PathBuf;
 
-    use fleet_core::agents::{PermissionMode, ThreadId};
+    use fleet_core::agents::{PermissionMode, SessionState, ThreadId};
 
     use super::*;
 
@@ -589,6 +608,51 @@ mod tests {
         // Stopping a session that never started is a no-op, not an error: the manager stops
         // threads it is not sure about all the time.
         assert!(provider.stop().await.is_ok());
+    }
+
+    /// Restart teardown belongs to the retired process generation. If its `Stopped` or
+    /// `SessionExited` reaches the manager after the replacement opens, it can settle the next
+    /// queued send and later evict the replacement provider from its runtime slot.
+    #[tokio::test]
+    async fn a_restart_generation_drops_the_retired_harness_lifecycle() {
+        let mut provider = HarnessProvider::new(AgentKind::Claude, HarnessConfig::default());
+        let mut manager_events = provider.events();
+        let (retired, retired_events) = tokio::sync::mpsc::unbounded_channel();
+        provider.forward(retired_events);
+
+        provider.stop_forwarding().await;
+        assert!(
+            retired
+                .send(HarnessEvent::now(
+                    AgentEvent::SessionStateChanged(SessionState::Stopped),
+                    Some(crate::agents::harness::RawRef::method("shutdown")),
+                ))
+                .is_err(),
+            "the retired harness stream is closed before shutdown emits lifecycle events"
+        );
+
+        let (replacement, replacement_events) = tokio::sync::mpsc::unbounded_channel();
+        provider.forward(replacement_events);
+        let turn = TurnId::new();
+        replacement
+            .send(HarnessEvent::now(
+                AgentEvent::TurnStarted {
+                    turn,
+                    user_item: fleet_core::agents::ItemId::new(),
+                },
+                Some(crate::agents::harness::RawRef::method("assistant")),
+            ))
+            .unwrap_or_else(|error| panic!("replacement stream is open: {error}"));
+
+        let event = manager_events
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("replacement event reaches the manager"));
+        assert!(matches!(
+            event.event,
+            AgentEvent::TurnStarted { turn: actual, .. } if actual == turn
+        ));
+        assert!(manager_events.try_recv().is_err());
     }
 
     /// A harness protocol failure reaches the manager as counts and field names.
