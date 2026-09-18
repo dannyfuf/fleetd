@@ -798,6 +798,10 @@ invisible"* (`MessagesTimeline.logic.ts:575`).
 open is the user's time and is subtracted from the harness's figure by the reducer. That is why
 the fold says `worked 22s` on a turn that was on screen for four minutes.
 
+An interrupted turn caused by the user reads `you stopped after 12s` with footer word `stopped`;
+a stopped session reads `stopped after 12s` / `stopped`; a provider-exit abort reads
+`cut off after 12s` / `cut off`. Older records with no abort reason keep the user-stop copy.
+
 Diffs render as their own row under an expanded edit row, so an expanded diff never inflates the
 tool row's own measurement, drawn by `fleet_lazygit::diff_view::DiffView` from unified-diff text
 (ADR 0010 — the kit gains no `fleet-git` dependency). Claude supplies `old_string`/`new_string`
