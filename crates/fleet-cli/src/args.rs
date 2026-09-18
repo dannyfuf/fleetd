@@ -66,6 +66,8 @@ pub enum Command {
     Sleep(SleepArgs),
     /// Create and control native coding-agent threads.
     Agent(AgentArgs),
+    /// Create and control delegated native-agent threads.
+    Subagent(SubagentArgs),
     /// Report coding-agent lifecycle activity for the current Fleet terminal.
     AgentStatus(AgentStatusArgs),
     /// Run environment diagnostics.
@@ -360,6 +362,119 @@ pub enum AgentCommand {
     Terminal(AgentTerminalArgs),
 }
 
+/// Arguments accepted by `fleet subagent`.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SubagentArgs {
+    /// Delegated-agent operation.
+    #[command(subcommand)]
+    pub command: SubagentCommand,
+}
+
+/// Delegated-agent operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum SubagentCommand {
+    /// Start a delegated child thread.
+    Run(SubagentRunArgs),
+    /// Report the current delegated child's result.
+    Complete(SubagentCompleteArgs),
+    /// Wait for a delegation to finish or for a timeout.
+    Wait(SubagentWaitArgs),
+    /// Show one delegation.
+    Status(SubagentIdArgs),
+    /// List delegations, optionally for one caller.
+    List(SubagentListArgs),
+    /// Cancel one live delegation.
+    Cancel(SubagentIdArgs),
+}
+
+/// Options for starting a delegated child thread.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SubagentRunArgs {
+    /// Structured provider to launch.
+    #[arg(long, value_enum)]
+    pub provider: AgentChoice,
+    /// Read the work brief from this file instead of stdin.
+    #[arg(long)]
+    pub brief_file: Option<std::path::PathBuf>,
+    /// Completion criteria for the child.
+    #[arg(long = "expect")]
+    pub expectation: String,
+    /// Published worktree override.
+    #[arg(long)]
+    pub worktree: Option<fleet_core::ids::WorktreeId>,
+    /// Permission-mode override.
+    #[arg(long, value_enum)]
+    pub mode: Option<AgentModeChoice>,
+    /// Provider-native model override.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Child-thread title override.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Deliver the result as soon as it is ready.
+    #[arg(long)]
+    pub eager: bool,
+    /// Calling native-agent thread; defaults to FLEET_SESSION.
+    #[arg(long)]
+    pub caller: Option<fleet_core::agents::ThreadId>,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Options for reporting a delegated child result.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SubagentCompleteArgs {
+    /// Delegation id; defaults to FLEET_DELEGATION.
+    pub id: Option<fleet_core::agents::DelegationId>,
+    /// Read the result from this file instead of stdin.
+    #[arg(long)]
+    pub result_file: Option<std::path::PathBuf>,
+    /// Report that the child is blocked rather than finished.
+    #[arg(long)]
+    pub blocked: bool,
+    /// Require the result to be valid JSON.
+    #[arg(long)]
+    pub json_result: bool,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Options for waiting on one delegation.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SubagentWaitArgs {
+    /// Delegation id.
+    pub id: fleet_core::agents::DelegationId,
+    /// Maximum wait in seconds.
+    #[arg(long, default_value_t = 540, value_parser = clap::value_parser!(u64).range(..=540))]
+    pub timeout: u64,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// One delegation id and output mode.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SubagentIdArgs {
+    /// Delegation id.
+    pub id: fleet_core::agents::DelegationId,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Delegation-list filters and output mode.
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct SubagentListArgs {
+    /// Restrict results to one calling thread.
+    #[arg(long)]
+    pub caller: Option<fleet_core::agents::ThreadId>,
+    /// Emit a protocol-versioned JSON envelope.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Provider selection for the legacy PTY agent session.
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct AgentTerminalArgs {
@@ -376,7 +491,7 @@ pub struct AgentNewArgs {
     /// Structured provider to launch.
     #[arg(long, value_enum)]
     pub provider: AgentChoice,
-    /// Provider-native model, optionally `provider/model` for OpenCode.
+    /// Provider-native model, optionally qualified as `provider/model` when supported.
     #[arg(long)]
     pub model: Option<String>,
     /// Initial permission or plan mode.
@@ -590,6 +705,71 @@ mod tests {
             ],
             vec!["fleet", "agent", "terminal"],
             vec!["fleet", "agent", "terminal", "codex"],
+            vec![
+                "fleet",
+                "subagent",
+                "run",
+                "--provider",
+                "codex",
+                "--brief-file",
+                "/tmp/brief.md",
+                "--expect",
+                "tests pass",
+                "--worktree",
+                "acme/api#feature",
+                "--mode",
+                "full-access",
+                "--model",
+                "gpt-5",
+                "--title",
+                "worker",
+                "--eager",
+                "--caller",
+                "00000000-0000-4000-8000-000000000001",
+                "--json",
+            ],
+            vec![
+                "fleet",
+                "subagent",
+                "complete",
+                "00000000-0000-4000-8000-000000000003",
+                "--result-file",
+                "/tmp/result.md",
+                "--blocked",
+                "--json-result",
+                "--json",
+            ],
+            vec![
+                "fleet",
+                "subagent",
+                "wait",
+                "00000000-0000-4000-8000-000000000003",
+                "--timeout",
+                "12",
+                "--json",
+            ],
+            vec![
+                "fleet",
+                "subagent",
+                "status",
+                "00000000-0000-4000-8000-000000000003",
+                "--json",
+            ],
+            vec![
+                "fleet",
+                "subagent",
+                "list",
+                "--caller",
+                "00000000-0000-4000-8000-000000000001",
+                "--json",
+            ],
+            vec![
+                "fleet",
+                "subagent",
+                "cancel",
+                "00000000-0000-4000-8000-000000000003",
+                "--json",
+            ],
             vec!["fleet", "agent-status", "finished", "--json"],
             vec!["fleet", "agent-status", "permission"],
             vec!["fleet", "agent-status", "question"],
@@ -657,6 +837,14 @@ mod tests {
             vec!["fleet", "path", "acme/api#slug", "extra"],
             vec!["fleet", "delete"],
             vec!["fleet", "import"],
+            vec![
+                "fleet",
+                "subagent",
+                "wait",
+                "00000000-0000-4000-8000-000000000003",
+                "--timeout",
+                "541",
+            ],
         ];
 
         for arguments in invalid {

@@ -588,6 +588,7 @@ mod tests {
                         text: "hi".to_owned(),
                         attachments: Vec::new(),
                         item: None,
+                        origin: Default::default(),
                     },
                 )
                 .await

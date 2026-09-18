@@ -225,6 +225,59 @@ fn restart_clears_daemon_local_identity() {
     assert!(state.terminal_mru.is_empty());
 }
 
+/// The delegation census is capability-gated on both edges: a daemon that advertises
+/// `agent.delegation` seeds it after Hello and patches it with the event, and one that does not
+/// leaves the app with nothing to draw rather than the previous link's records.
+#[test]
+fn the_delegation_census_is_seeded_behind_its_capability_and_patched_by_the_event() {
+    use fleet_core::agents::{
+        AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, ThreadId,
+        TurnId,
+    };
+
+    let now = Instant::now();
+    let mut state = AppState::new("/tmp/fleet", now);
+    let record = Delegation {
+        id: DelegationId::new(),
+        caller: ThreadId::new(),
+        caller_turn: TurnId::new(),
+        caller_item: ItemId::new(),
+        child: ThreadId::new(),
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "inspect the reducer".to_owned(),
+        expectation: "report the invariant".to_owned(),
+        eager: false,
+        status: DelegationStatus::Starting,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: DeliveryState::Pending,
+        created: chrono::DateTime::UNIX_EPOCH,
+        finished: None,
+        headline: None,
+    };
+
+    state.apply_bridge_event(
+        BridgeEvent::Capabilities(vec![fleet_proto::AGENT_DELEGATION_CAPABILITY.to_owned()]),
+        now,
+    );
+    state.apply_bridge_event(BridgeEvent::Delegations(vec![record.clone()]), now);
+    assert_eq!(state.agents.delegation(record.id), Some(&record));
+
+    let mut running = record.clone();
+    running.status = DelegationStatus::Running;
+    state.apply_daemon_event(Event::DelegationChanged(running.clone()), now);
+    assert_eq!(state.agents.delegation(record.id), Some(&running));
+
+    state.apply_bridge_event(BridgeEvent::Capabilities(Vec::new()), now);
+    assert!(
+        state.agents.delegation(record.id).is_none(),
+        "an older daemon deserves an empty map, not the last one's delegations"
+    );
+}
+
 /// A remote host's status entry, as the daemon reports it before any link event.
 fn host_status(link: LinkState) -> fleet_proto::snapshot::HostStatus {
     fleet_proto::snapshot::HostStatus {

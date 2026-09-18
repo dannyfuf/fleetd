@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use fleet_proto::{
     codec::FleetCodec,
     event::{Event, EventKind},
-    request::{HelloClient, Request, RequestBody},
+    request::{HelloClient, Request, RequestBody, agent_request_is_serialized},
     response::{
         DaemonIdentity, HelloResponse, PRUNE_REVIEWED_IDS_CAPABILITY, PongResponse, Response,
         ResponseBody, SNAPSHOT_REVISION_CAPABILITY, StampedResponse,
@@ -237,6 +237,8 @@ impl Connection {
                         }
                         body => {
                             let services = Arc::clone(&self.services);
+                            let agent_gate = agent_request_is_serialized(&body)
+                                .map(|thread| services.agent_request_gate(thread));
                             let context = crate::services::RequestContext {
                                 client: client.clone(),
                             };
@@ -254,9 +256,19 @@ impl Connection {
                                 )
                                 .await
                                 {
-                                    Ok(()) => services
-                                        .dispatch_routed_with_owner(body, owner_id, context.clone())
-                                        .await,
+                                    Ok(()) => {
+                                        let _agent_order = match agent_gate {
+                                            Some(gate) => Some(gate.lock_owned().await),
+                                            None => None,
+                                        };
+                                        services
+                                            .dispatch_routed_with_owner(
+                                                body,
+                                                owner_id,
+                                                context.clone(),
+                                            )
+                                            .await
+                                    }
                                     Err(error) => Err(error),
                                 };
                                 let result = personalize_agent_window(
@@ -1006,7 +1018,8 @@ mod tests {
                 "agent.checkpoints",
                 "agent.codex",
                 "agent.seen",
-                "agent.account"
+                "agent.account",
+                "agent.delegation"
             ])
         );
 
@@ -1433,6 +1446,33 @@ mod tests {
         assert!(!terminal_request_is_serialized(
             &RequestBody::RequestFullFrame { terminal }
         ));
+    }
+
+    #[tokio::test]
+    async fn agent_mutations_share_one_fifo_gate_per_thread() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let services = test_services(temp.path()).await;
+        let thread = fleet_core::agents::ThreadId::new();
+        let first = services.agent_request_gate(thread);
+        let second = services.agent_request_gate(thread);
+        let other = services.agent_request_gate(fleet_core::agents::ThreadId::new());
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+
+        let held = first.lock().await;
+        let (entered, mut wait_for_entered) = mpsc::unbounded_channel();
+        let waiting = tokio::spawn(async move {
+            let _ordered = second.lock().await;
+            entered.send(()).expect("observer remains open");
+        });
+        assert!(wait_for_entered.try_recv().is_err());
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), wait_for_entered.recv())
+            .await
+            .expect("serialized request enters")
+            .expect("observer remains open");
+        waiting.await.expect("waiting request finishes");
     }
 
     #[tokio::test]

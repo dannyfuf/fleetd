@@ -16,7 +16,13 @@ use std::{
 use tokio::io::AsyncWriteExt as _;
 
 /// Where run directories are created when `--run-dir` is not given.
-const DEFAULT_ROOT: &str = "/tmp/fleet-harness";
+///
+/// `std::env::temp_dir` honours the platform's temporary-directory override (`TMPDIR` on
+/// Linux), which keeps the harness off a quota-bound `/tmp` when the caller has selected a
+/// roomier temporary volume.
+fn default_root() -> PathBuf {
+    std::env::temp_dir().join("fleet-harness")
+}
 
 /// The longest a Unix-socket path may be, in bytes.
 ///
@@ -60,14 +66,10 @@ pub struct RunDirectory {
 
 impl RunDirectory {
     /// Creates the directory and its subdirectories, defaulting to
-    /// `/tmp/fleet-harness/<UTC timestamp>-<scenario stem>[-N]/`.
+    /// `<temporary directory>/fleet-harness/<UTC timestamp>-<scenario stem>[-N]/`.
     pub fn create(requested: Option<&Path>, scenario: &Path) -> anyhow::Result<Self> {
-        Self::create_at(
-            requested,
-            scenario,
-            SystemTime::now(),
-            Path::new(DEFAULT_ROOT),
-        )
+        let default_root = default_root();
+        Self::create_at(requested, scenario, SystemTime::now(), &default_root)
     }
 
     /// Atomically claims the root of a directory run without populating single-run artifacts.
@@ -75,12 +77,8 @@ impl RunDirectory {
     /// An explicit root must not already exist. A default root follows the same timestamp and
     /// collision-suffix policy as a single run.
     pub fn create_suite(requested: Option<&Path>, directory: &Path) -> anyhow::Result<PathBuf> {
-        Self::create_suite_at(
-            requested,
-            directory,
-            SystemTime::now(),
-            Path::new(DEFAULT_ROOT),
-        )
+        let default_root = default_root();
+        Self::create_suite_at(requested, directory, SystemTime::now(), &default_root)
     }
 
     fn create_suite_at(
@@ -257,20 +255,11 @@ fn claim_root(
         None => {
             std::fs::create_dir_all(default_root)
                 .with_context(|| format!("create default run root {}", default_root.display()))?;
-            let stem = format!(
-                "{}-{}",
-                stamp(utc(now)),
-                sanitize(&subject.file_stem().unwrap_or_default().to_string_lossy())
-            );
+            let timestamp = stamp(utc(now));
+            let subject = sanitize(&subject.file_stem().unwrap_or_default().to_string_lossy());
             let mut suffix = 1_u64;
             loop {
-                let name = if suffix == 1 {
-                    stem.clone()
-                } else {
-                    format!("{stem}-{suffix}")
-                };
-                let candidate = default_root.join(name);
-                ensure_socket_path_fits(&candidate)?;
+                let candidate = default_candidate(default_root, &timestamp, &subject, suffix)?;
                 if claim(&candidate)? {
                     return Ok(candidate);
                 }
@@ -280,6 +269,44 @@ fn claim_root(
             }
         }
     }
+}
+
+/// Builds a readable default name that still leaves room for the longest socket below it.
+///
+/// Sanitized subjects are ASCII, so byte truncation cannot split a character. Collision suffixes
+/// retain their right edge and take space from the subject as they grow.
+fn default_candidate(
+    default_root: &Path,
+    timestamp: &str,
+    subject: &str,
+    suffix: u64,
+) -> anyhow::Result<PathBuf> {
+    let collision = if suffix == 1 {
+        String::new()
+    } else {
+        format!("-{suffix}")
+    };
+    let fixed_length = default_root
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .saturating_add(1)
+        .saturating_add(timestamp.len())
+        .saturating_add(1)
+        .saturating_add(collision.len())
+        .saturating_add(1)
+        .saturating_add(LONGEST_SOCKET_NAME.len());
+    let subject_budget = MAX_SOCKET_PATH.saturating_sub(fixed_length);
+    anyhow::ensure!(
+        subject_budget > 0,
+        "the default harness root {} is too deep to hold a timestamped run and its sockets; \
+         set TMPDIR to a shorter path or pass --run-dir",
+        default_root.display()
+    );
+    let subject = &subject[..subject.len().min(subject_budget)];
+    let candidate = default_root.join(format!("{timestamp}-{subject}{collision}"));
+    ensure_socket_path_fits(&candidate)?;
+    Ok(candidate)
 }
 
 /// Atomically claims `path`, returning false when another run already owns it.
@@ -425,6 +452,11 @@ mod tests {
     }
 
     #[test]
+    fn default_root_follows_the_platform_temporary_directory() {
+        assert_eq!(default_root(), std::env::temp_dir().join("fleet-harness"));
+    }
+
+    #[test]
     fn run_directory_is_populated_and_named_from_the_scenario() {
         let root = std::env::temp_dir().join(format!(
             "fleet-harness-rundir-test-{}-{}",
@@ -495,6 +527,28 @@ mod tests {
             Some("20231114-221320-help-2")
         );
         assert!(first.root.is_dir() && second.root.is_dir());
+    }
+
+    #[test]
+    fn a_default_name_shortens_the_subject_to_leave_room_for_sockets() {
+        let root = Path::new("/01234567890123456789012345678901234567");
+        let candidate = default_candidate(
+            root,
+            "20260918-170629",
+            "subagent-blocked-child-paints-caller",
+            12,
+        )
+        .expect("fit a default run below the configured temporary root");
+
+        ensure_socket_path_fits(&candidate).expect("the shortened default leaves socket room");
+        assert!(
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(
+                    |name| name.starts_with("20260918-170629-subagent-") && name.ends_with("-12")
+                )
+        );
     }
 
     #[test]

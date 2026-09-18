@@ -66,6 +66,9 @@ pub(super) fn event_is_nonterminal(event: &AgentEvent) -> bool {
 pub struct AgentThreadSummary {
     /// Thread identity.
     pub thread: ThreadId,
+    /// Parent thread for a delegated child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ThreadId>,
     /// Owning worktree.
     pub worktree: WorktreeId,
     /// Owning remote host, or `None` for a daemon-local thread.

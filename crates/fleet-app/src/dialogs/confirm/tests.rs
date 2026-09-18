@@ -307,6 +307,76 @@ fn reviewed_prune_requires_the_negotiated_capability() {
     );
 }
 
+/// A transport that records the wire instead of reaching a daemon.
+#[derive(Clone, Default)]
+struct RecordingTransport(std::rc::Rc<std::cell::RefCell<Vec<RequestBody>>>);
+
+impl SessionTransport for RecordingTransport {
+    fn send(&self, body: RequestBody) {
+        self.0.borrow_mut().push(body);
+    }
+
+    fn request(
+        &self,
+        body: RequestBody,
+    ) -> async_channel::Receiver<Result<ResponseBody, fleet_proto::error::ProtoError>> {
+        self.send(body);
+        let (_reply, answer) = async_channel::bounded(1);
+        answer
+    }
+}
+
+/// `x` on a delegation row stages the child, the dialog adopts it, and only the accepted
+/// dialog sends `DelegationCancel` — cancelling a child is irreversible, so nothing reaches the
+/// daemon before the user has read back which child it is.
+#[gpui::test]
+fn a_staged_delegation_cancel_reaches_the_dialog_and_only_then_the_wire(
+    cx: &mut gpui::TestAppContext,
+) {
+    let delegation = DelegationId::new();
+    let child = ThreadId::new();
+    let state = cx.new(|_| AppState::new("/tmp/fleet-delegation-cancel", Instant::now()));
+    let wire = RecordingTransport::default();
+
+    cx.update(|cx| {
+        ConfirmRequest::stage_delegation_cancel(
+            &state,
+            delegation,
+            child,
+            AgentKind::Codex,
+            "verify the payroll reducer".to_owned(),
+            cx,
+        );
+        state.update(cx, |app, _| {
+            app.open_overlay(crate::state::Overlay::Dialog(
+                crate::dialogs::Dialogs::Confirm,
+            ));
+        });
+        adopt_staged_delegation_cancel(&state, cx);
+    });
+
+    assert!(
+        wire.0.borrow().is_empty(),
+        "staging the confirm must not reach the daemon"
+    );
+    let adopted = cx
+        .update(|cx| {
+            crate::dialogs::read_host(&state, cx, |host, _| host.confirm.delegation_cancel.clone())
+        })
+        .unwrap_or_else(|| panic!("the dialog adopts the staged child"));
+    assert_eq!(adopted.id, delegation);
+    assert_eq!(adopted.child, child);
+    assert_eq!(adopted.provider, AgentKind::Codex);
+
+    cx.update(|cx| commit_delegation_cancel(&state, &wire, delegation, cx));
+
+    assert_eq!(
+        wire.0.borrow().as_slice(),
+        [RequestBody::DelegationCancel { delegation }]
+    );
+    state.read_with(cx, |app, _| assert!(app.overlay.is_none()));
+}
+
 #[test]
 fn confirmed_prune_stays_open_when_any_reviewed_item_was_skipped() {
     let result = PruneResult {

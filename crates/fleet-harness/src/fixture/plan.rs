@@ -264,6 +264,16 @@ pub fn describe(preset: Preset) -> Fixture {
         Preset::Busy => busy(),
         Preset::Board => board(),
         Preset::Agents => agents(),
+        Preset::AgentsSubagent => subagent_agents(
+            Preset::AgentsSubagent,
+            include_str!("../../transcripts/subagent-caller.json"),
+            "subagent-caller.json",
+        ),
+        Preset::AgentsSubagentOtherWorktree => subagent_agents(
+            Preset::AgentsSubagentOtherWorktree,
+            include_str!("../../transcripts/subagent-caller-other-worktree.json"),
+            "subagent-caller-other-worktree.json",
+        ),
     }
 }
 
@@ -444,11 +454,38 @@ fn agents() -> Fixture {
     }
 }
 
+/// A caller fixture with two worktrees, so both shipped caller variants address real ids.
+fn subagent_agents(preset: Preset, document: &str, caller: &str) -> Fixture {
+    Fixture {
+        repositories: vec![Repository {
+            owner: "acme".to_owned(),
+            name: "api".to_owned(),
+            branches: Vec::new(),
+            worktrees: vec![Worktree::clean("agent"), Worktree::clean("other")],
+            pull_requests: Vec::new(),
+        }],
+        agents: vec![
+            Agent {
+                provider: Provider::Claude,
+                transcript: starter(document, caller),
+            },
+            Agent {
+                provider: Provider::Codex,
+                transcript: starter(
+                    include_str!("../../transcripts/subagent-caller-blocked.json"),
+                    "subagent-caller-blocked.json",
+                ),
+            },
+        ],
+        ..base(preset)
+    }
+}
+
 /// The three-turn conversation the `agents` preset gives Claude.
 ///
 /// The first two turns and the failing third turn come from the shipped starters rather than
 /// copies written here. That keeps this preset tied to the same documents
-/// `crate::agent::tests::all_three_starter_transcripts_load_and_validate` checks.
+/// `crate::agent::tests::every_starter_transcript_loads_and_validates` checks.
 fn conversation() -> serde_json::Value {
     let mut conversation = starter(
         include_str!("../../transcripts/two-turns.json"),
@@ -482,7 +519,7 @@ fn approval() -> serde_json::Value {
 /// Parses one embedded starter transcript.
 ///
 /// The file is compiled into the binary, so a malformed one is a build-time fact rather than a
-/// runtime condition; `agent::tests::all_three_starter_transcripts_load_and_validate` is what catches it.
+/// runtime condition; `agent::tests::every_starter_transcript_loads_and_validates` catches it.
 fn starter(document: &str, name: &str) -> serde_json::Value {
     serde_json::from_str(document)
         .unwrap_or_else(|error| panic!("the embedded transcript {name} is not valid JSON: {error}"))
@@ -526,5 +563,68 @@ mod tests {
             }),
             "the third turn must preserve error-mid-stream's provider error"
         );
+    }
+
+    #[test]
+    fn subagent_presets_select_their_caller_and_seed_the_other_worktree() {
+        for (preset, expected_command) in [
+            (Preset::AgentsSubagent, "--brief-file"),
+            (
+                Preset::AgentsSubagentOtherWorktree,
+                "--worktree acme/api#other",
+            ),
+        ] {
+            let fixture = describe(preset);
+            assert_eq!(
+                fixture.repositories[0]
+                    .worktrees
+                    .iter()
+                    .map(|worktree| worktree.slug.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["agent", "other"]
+            );
+            let caller = fixture
+                .agents
+                .iter()
+                .find(|agent| agent.provider == Provider::Claude)
+                .unwrap_or_else(|| panic!("{preset} must configure the Claude caller"));
+            let command = caller
+                .transcript
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|steps| {
+                    steps.iter().find_map(|step| {
+                        (step.get("type").and_then(serde_json::Value::as_str) == Some("shell"))
+                            .then(|| step.get("command"))
+                            .flatten()
+                            .and_then(serde_json::Value::as_str)
+                    })
+                })
+                .unwrap_or_else(|| panic!("{preset} must serve a shell caller step"));
+            assert!(command.contains(expected_command), "{preset}: {command}");
+
+            let blocked_caller = fixture
+                .agents
+                .iter()
+                .find(|agent| agent.provider == Provider::Codex)
+                .unwrap_or_else(|| panic!("{preset} must configure the Codex caller"));
+            let blocked_command = blocked_caller
+                .transcript
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|steps| {
+                    steps.iter().find_map(|step| {
+                        (step.get("type").and_then(serde_json::Value::as_str) == Some("shell"))
+                            .then(|| step.get("command"))
+                            .flatten()
+                            .and_then(serde_json::Value::as_str)
+                    })
+                })
+                .unwrap_or_else(|| panic!("{preset} must serve a blocked shell caller step"));
+            assert!(
+                blocked_command.contains("--provider claude"),
+                "{preset}: {blocked_command}"
+            );
+        }
     }
 }

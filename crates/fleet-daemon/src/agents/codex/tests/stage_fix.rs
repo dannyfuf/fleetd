@@ -47,7 +47,6 @@ fn a_response_after_started_and_completed_does_not_reopen_the_turn() {
         !response.announce,
         "the late response emitted a second start"
     );
-    assert!(!response.queued);
     assert_eq!(session.active_turn, None);
     assert_eq!(session.active_provider_turn, None);
     assert_eq!(session.pending_start, None);
@@ -102,6 +101,7 @@ async fn a_successful_turn_response_without_a_string_id_is_rejected_and_rolled_b
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
                 item: Some(ItemId::new()),
+                origin: Default::default(),
             },
             intent: SubmitIntent::Fresh,
         })

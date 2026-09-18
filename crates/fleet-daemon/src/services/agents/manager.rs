@@ -11,10 +11,11 @@ mod bodies;
 mod checkpoints;
 mod commands;
 mod controls;
+mod delegation;
 mod hydrate;
 mod mirror;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod window;
 
 use std::{
@@ -40,11 +41,12 @@ use fleet_proto::{
     error::{ErrorKind, ProtoError},
     response::ResponseBody,
 };
+use sha2::{Digest as _, Sha256};
 
 use super::{
     AgentThreadRecord,
-    providers::{AgentProvider, ProviderError, ProviderEvents, spawn_provider},
-    store::SqliteAgentStore,
+    providers::{AgentProvider, ProviderError, ProviderEvent, ProviderEvents, spawn_provider},
+    store::{self, SqliteAgentStore},
     thread,
 };
 use apply::{
@@ -52,6 +54,18 @@ use apply::{
     ends_the_turn, event_name, pending_input_turn, publish_applied, runtime_inflight,
     user_item_started,
 };
+
+/// What the durable manager already knows about one stable client item identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmissionState {
+    /// Neither the event log nor this process's accepted-input queue contains it.
+    Unknown,
+    /// The provider accepted it, but its transcript event has not committed yet.
+    Pending,
+    /// The stable `ItemStarted` is in the durable transcript.
+    Committed,
+}
+pub use commands::CreateOptions;
 use thread::{AppliedEvent, ThreadRuntime, next_coalesced_batch};
 
 /// Emission-to-read skew worth a log line.
@@ -216,6 +230,15 @@ impl AgentSessionManager {
             .remote_host_resolver
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
+    }
+
+    /// The transcript store this manager writes through, when its database opened.
+    ///
+    /// The delegation service shares it rather than opening a second handle: the delegation rows
+    /// and the transcript rows they describe move in the *same* transaction, which two
+    /// connections could not do.
+    pub(crate) fn delegation_store(&self) -> Option<SqliteAgentStore> {
+        self.inner.store().ok().cloned()
     }
 
     /// Installs the checkpoint service a capture runs against.
@@ -397,6 +420,31 @@ impl AgentSessionManager {
             .await
             .map(PathBuf::from)
             .map_err(daemon_error)?;
+        let env = if let Some(delegation) = record.delegation {
+            let token = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            let token_sha256 = format!("{:x}", Sha256::digest(token.as_bytes()));
+            let child = record.thread;
+            self.inner
+                .store()
+                .map_err(storage_error)?
+                .delegation_write("rotate resumed delegation token", move |tx| {
+                    store::delegations::rotate_token(tx, delegation, child, &token_sha256)?;
+                    Ok(((), false))
+                })
+                .await
+                .map_err(storage_error)?;
+            BTreeMap::from([
+                ("FLEET_DELEGATION".to_owned(), delegation.to_string()),
+                ("FLEET_DELEGATION_TOKEN".to_owned(), token),
+            ])
+        } else {
+            BTreeMap::new()
+        };
+        let (sandbox, approval_policy) = controls_for_mode(record.mode);
         let request = StartRequest {
             thread: record.thread,
             worktree_path: path,
@@ -405,12 +453,13 @@ impl AgentSessionManager {
             mode: record.mode,
             resume_cursor: cursor,
             fork: false,
-            env: BTreeMap::new(),
-            sandbox: controls_for_mode(record.mode).0,
-            approval_policy: controls_for_mode(record.mode).1,
+            env,
+            sandbox,
+            approval_policy,
             permission_profile: None,
             title: Some(record.title),
         };
+        let thread = record.thread;
         let binaries = self.agent_binaries().await;
         let kind = request.provider;
         let command = binaries.binary(kind).to_owned();
@@ -440,17 +489,40 @@ impl AgentSessionManager {
         )
         .await?;
         *runtime.provider.lock().await = Some(provider);
-        self.spawn_event_task(runtime.clone(), provider_events);
+        let provider_generation = runtime.next_provider_generation();
+        let initial_drained =
+            self.spawn_event_task(runtime.clone(), provider_events, provider_generation);
+        // Provider history is queued during `start`. Release the operation gate so the new event
+        // task can commit that history, then wait for its initial queue to drain before a caller
+        // decides whether a stable outbox item needs to be submitted again.
+        drop(operation);
+        if initial_drained.await.is_err() {
+            tracing::debug!(%thread, "provider event task ended before its initial history barrier");
+        }
         Ok(())
     }
 
-    fn spawn_event_task(&self, runtime: ThreadRuntime, events: ProviderEvents) {
+    fn spawn_event_task(
+        &self,
+        runtime: ThreadRuntime,
+        events: ProviderEvents,
+        provider_generation: u64,
+    ) -> tokio::sync::oneshot::Receiver<()> {
         let inner = Arc::clone(&self.inner);
         let runtime_for_task = runtime.clone();
+        let (initial_drained, drained) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            run_provider_events(inner, runtime_for_task, events).await;
+            run_provider_events(
+                inner,
+                runtime_for_task,
+                events,
+                provider_generation,
+                initial_drained,
+            )
+            .await;
         });
         runtime.set_task(task.abort_handle());
+        drained
     }
 
     async fn apply_provider_event(
@@ -749,64 +821,40 @@ async fn run_provider_events(
     inner: Arc<ManagerInner>,
     runtime: ThreadRuntime,
     mut receiver: ProviderEvents,
+    provider_generation: u64,
+    initial_drained: tokio::sync::oneshot::Sender<()>,
 ) {
     let manager = AgentSessionManager {
         inner: Arc::clone(&inner),
     };
+    // `provider.start` can synchronously return resumed history before this task exists. Commit
+    // everything already queued, then release the barrier used by durable outbox reconciliation.
+    let mut initial = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        initial.push(event);
+    }
+    if !initial.is_empty()
+        && !apply_provider_batch(&inner, &manager, &runtime, provider_generation, initial).await
+    {
+        if initial_drained.send(()).is_err() {
+            tracing::debug!("provider-history barrier receiver was dropped");
+        }
+        return;
+    }
+    if initial_drained.send(()).is_err() {
+        tracing::debug!("provider-history barrier receiver was dropped");
+    }
+
     while let Some(batch) = next_coalesced_batch(&mut receiver).await {
-        // §5: adjacent deltas and repeated patches are collapsed *before* reduction, so a window
-        // costs one sequence, stored row and broadcast frame per retained event.
-        for event in batch {
-            let event_kind = event_name(&event.event);
-            let operation = runtime.operation.lock().await;
-            let exited = matches!(event.event, AgentEvent::SessionExited { .. });
-            if let Some(skew) = event.emission_skew
-                && skew >= EMISSION_SKEW_FLOOR
-            {
-                tracing::debug!(
-                    target: "fleet::agents",
-                    skew_ms = skew.as_millis(),
-                    frame = event.raw.as_deref().unwrap_or("unnamed"),
-                    "a harness frame was read well after the harness says it emitted it",
-                );
-            }
-            match manager
-                .apply_provider_event(&runtime, &operation, event.event, event.raw)
-                .await
-            {
-                Ok(events) => {
-                    for applied in events {
-                        publish_applied(&inner, &runtime, applied);
-                    }
-                }
-                Err(error) => {
-                    let thread = runtime
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .record
-                        .thread;
-                    tracing::warn!(
-                        %error,
-                        %thread,
-                        event = event_kind,
-                        "dropped invalid native-agent provider event"
-                    );
-                }
-            }
-            // §6 resumes a stopped thread "lazily with a new adapter the next time it is
-            // opened", and `resume_if_stopped` only does that when the slot is empty. Waiting
-            // for the event channel to close never empties it: the adapter owns a sender for
-            // its whole life, so a crashed child would leave its dead adapter — and its stale
-            // turn bookkeeping — rejecting every later send until the daemon restarted. The
-            // session is over the moment it says so, so the adapter goes with it.
-            if exited {
-                drop(runtime.provider.lock().await.take());
-            }
+        if !apply_provider_batch(&inner, &manager, &runtime, provider_generation, batch).await {
+            return;
         }
     }
 
     let operation = runtime.operation.lock().await;
+    if !runtime.provider_is_current(provider_generation) {
+        return;
+    }
     let should_mark_exit = {
         let state = runtime
             .state
@@ -817,6 +865,10 @@ async fn run_provider_events(
             SessionState::Stopped | SessionState::Error
         )
     };
+    // Detach first. Publishing the terminal summary while the dead adapter was still present let
+    // a concurrent send observe Error, skip resume, and call the adapter that had just exited.
+    drop(runtime.provider.lock().await.take());
+    runtime.invalidate_provider();
     if should_mark_exit {
         match manager
             .apply_provider_event(
@@ -838,10 +890,74 @@ async fn run_provider_events(
             Err(error) => tracing::warn!(%error, "could not record provider event-stream exit"),
         }
     }
-    // The gate is still held: the slot is emptied under the same serialization every settlement
-    // above ran under, so nothing can pick up a provider this loop is retiring.
-    *runtime.provider.lock().await = None;
     drop(operation);
+}
+
+/// Applies one provider batch while its adapter generation is still current.
+///
+/// Returns `false` once the adapter ended or was superseded, which tells its event task to stop
+/// without touching the replacement provider's slot.
+async fn apply_provider_batch(
+    inner: &Arc<ManagerInner>,
+    manager: &AgentSessionManager,
+    runtime: &ThreadRuntime,
+    provider_generation: u64,
+    batch: Vec<ProviderEvent>,
+) -> bool {
+    // §5: adjacent deltas and repeated patches are collapsed *before* reduction, so a window
+    // costs one sequence, stored row and broadcast frame per retained event.
+    for event in batch {
+        let event_kind = event_name(&event.event);
+        let operation = runtime.operation.lock().await;
+        if !runtime.provider_is_current(provider_generation) {
+            return false;
+        }
+        let exited = matches!(event.event, AgentEvent::SessionExited { .. });
+        if exited {
+            // Guarded by the generation check under the operation gate: a stale event task can
+            // never take the adapter a newer resume installed.
+            drop(runtime.provider.lock().await.take());
+            runtime.invalidate_provider();
+        }
+        if let Some(skew) = event.emission_skew
+            && skew >= EMISSION_SKEW_FLOOR
+        {
+            tracing::debug!(
+                target: "fleet::agents",
+                skew_ms = skew.as_millis(),
+                frame = event.raw.as_deref().unwrap_or("unnamed"),
+                "a harness frame was read well after the harness says it emitted it",
+            );
+        }
+        match manager
+            .apply_provider_event(runtime, &operation, event.event, event.raw)
+            .await
+        {
+            Ok(events) => {
+                for applied in events {
+                    publish_applied(inner, runtime, applied);
+                }
+            }
+            Err(error) => {
+                let thread = runtime
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record
+                    .thread;
+                tracing::warn!(
+                    %error,
+                    %thread,
+                    event = event_kind,
+                    "dropped invalid native-agent provider event"
+                );
+            }
+        }
+        if exited {
+            return false;
+        }
+    }
+    true
 }
 
 /// Re-frames **and logs** a provider that could not be constructed.

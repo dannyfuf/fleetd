@@ -387,6 +387,7 @@ async fn a_disconnected_host_still_reads_its_mirrored_transcript() {
                     text: "queued?".to_owned(),
                     attachments: Vec::new(),
                     item: None,
+                    origin: Default::default(),
                 },
             },
         )

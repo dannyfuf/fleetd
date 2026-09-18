@@ -8,10 +8,11 @@ use super::*;
 use crate::agents::{
     AbortReason, AccountInfo, AccountKind, AccountStatus, AgentEvent, AgentKind, Attachment,
     Attention, AttentionKind, FileDelta, GateAnswer, GateId, GateKind, GateResolver, ItemId,
-    ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, ModelDescriptor, ModelSelection,
-    PermissionChoice, PermissionMode, PermissionOption, PlanAnswer, ProviderOptionId, Question,
-    QuestionOption, ReasoningEffortDescriptor, Seq, SeqEvent, SessionState, StreamKind, ThreadId,
-    ToolCall, ToolDiff, ToolKind, ToolPatch, TurnId, TurnOutcome, TurnState, Usage,
+    ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, MessageOrigin, ModelDescriptor,
+    ModelSelection, PermissionChoice, PermissionMode, PermissionOption, PlanAnswer,
+    ProviderOptionId, Question, QuestionOption, ReasoningEffortDescriptor, Seq, SeqEvent,
+    SessionState, StreamKind, ThreadId, ToolCall, ToolDiff, ToolKind, ToolPatch, TurnId,
+    TurnOutcome, TurnState, Usage,
 };
 use crate::ids::WorktreeId;
 
@@ -144,6 +145,7 @@ fn user_message(text: &str) -> ItemKind {
         text: text.to_owned(),
         attachments: Vec::<Attachment>::new(),
         steered: false,
+        origin: MessageOrigin::User,
     }
 }
 
@@ -158,7 +160,7 @@ fn item_text(item: &Item) -> Option<&str> {
             .or_else(|| raw.values().next())
             .map(String::as_str),
         ItemKind::Error { message } => Some(message),
-        ItemKind::Tool(_) | ItemKind::Subagent { .. } => None,
+        ItemKind::Tool(_) | ItemKind::Subagent { .. } | ItemKind::Delegation { .. } => None,
     }
 }
 

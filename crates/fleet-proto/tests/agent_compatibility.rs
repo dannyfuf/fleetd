@@ -3,15 +3,18 @@
 //! `rust-ipc-protocol` Rule 9 asks for one golden per wire shape, and the agent family shipped
 //! with **zero** — only round-trip assertions, which pass just as happily after a field is
 //! renamed or a case is changed on both sides at once. These are the debt payment, and they cover
-//! three things the round trips cannot:
+//! four things the round trips cannot:
 //!
 //! 1. **Every request, response, and event in the family**, so the windowed open cannot silently
 //!    change the shape introduced by version 7.
 //! 2. **One `SeqEvent` golden per [`AgentEvent`] variant.** That set protects the *persisted log*,
 //!    not just the wire: `agent_events.payload` is this exact serialization, so a rename here is a
 //!    transcript that no longer decodes on the next daemon start.
-//! 3. **Legacy-peer fixtures**, proving a payload written before the window fields, before Codex,
-//!    and before the sequenced log still decodes.
+//! 3. **One fixture per variant of the delegation value types**, and one per new shape with every
+//!    optional field absent — the only place a missing `skip_serializing_if` or a changed
+//!    `snake_case` word is visible, since the composite goldens only ever reach one variant each.
+//! 4. **Legacy-peer fixtures**, proving a payload written before the window fields, before Codex,
+//!    before the sequenced log, and before delegation still decodes.
 
 mod support;
 
@@ -22,12 +25,13 @@ use chrono::{DateTime, Utc};
 use fleet_core::{
     agents::{
         AbortReason, AccountInfo, AccountKind, AccountStatus, AgentEvent, AgentKind,
-        AgentThreadSummary, Attention, AttentionKind, CheckpointKind, FileDelta, GateAnswer,
-        GateId, GateKind, GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch,
-        ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode, PlanAnswer,
-        ProviderOptionId, Question, QuestionOption, ReasoningEffortDescriptor, Seq, SeqEvent,
-        SessionState, StreamKind, ThreadId, ThreadProjection, ToolCall, ToolKind, TurnId,
-        TurnOutcome, TurnState, Usage, UserInput,
+        AgentThreadSummary, Attention, AttentionKind, CheckpointKind, Delegation, DelegationId,
+        DelegationResult, DelegationStatus, DeliveryState, FileDelta, GateAnswer, GateId, GateKind,
+        GateResolver, Item, ItemId, ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus,
+        MessageOrigin, ModelDescriptor, ModelSelection, PermissionChoice, PermissionMode,
+        PlanAnswer, ProviderOptionId, Question, QuestionOption, ReasoningEffortDescriptor,
+        ResultSource, Seq, SeqEvent, SessionState, StreamKind, ThreadId, ThreadProjection,
+        ToolCall, ToolKind, TurnId, TurnOutcome, TurnState, Usage, UserInput,
     },
     ids::WorktreeId,
 };
@@ -210,6 +214,177 @@ fn model_descriptors_and_skill_refresh_have_additive_wire_goldens() {
 }
 
 #[test]
+fn delegation_item_and_origin_wire_goldens() {
+    assert_frame(
+        seq(
+            30,
+            None,
+            AgentEvent::ItemStarted {
+                turn: turn(),
+                item: item(),
+                kind: ItemKind::Delegation {
+                    id: delegation_id(),
+                    provider: AgentKind::Codex,
+                    child: child_thread(),
+                    status: DelegationStatus::Running,
+                },
+                parent: None,
+            },
+        ),
+        r#"{"seq":30,"at":"2026-09-07T12:00:00Z","event":{"type":"item_started","data":{"turn":"aaaaaaaa-2222-4333-8444-555555555555","item":"bbbbbbbb-2222-4333-8444-555555555555","kind":{"type":"delegation","data":{"id":"dddddddd-2222-4333-8444-555555555555","provider":"codex","child":"22222222-3333-4444-8555-666666666666","status":"running"}},"parent":null}}}"#,
+    );
+    assert_frame(
+        seq(
+            31,
+            None,
+            AgentEvent::ItemUpdated {
+                item: item(),
+                patch: ItemPatch {
+                    payload: Some(ItemPayloadPatch::Delegation {
+                        status: DelegationStatus::Succeeded,
+                    }),
+                    status: None,
+                },
+            },
+        ),
+        r#"{"seq":31,"at":"2026-09-07T12:00:00Z","event":{"type":"item_updated","data":{"item":"bbbbbbbb-2222-4333-8444-555555555555","patch":{"payload":{"type":"delegation","data":{"status":"succeeded"}}}}}}"#,
+    );
+    assert_frame(
+        seq(
+            32,
+            None,
+            AgentEvent::ItemStarted {
+                turn: turn(),
+                item: item(),
+                kind: ItemKind::UserMessage {
+                    text: "child result".to_owned(),
+                    attachments: Vec::new(),
+                    steered: false,
+                    origin: MessageOrigin::Delegation {
+                        id: delegation_id(),
+                    },
+                },
+                parent: None,
+            },
+        ),
+        r#"{"seq":32,"at":"2026-09-07T12:00:00Z","event":{"type":"item_started","data":{"turn":"aaaaaaaa-2222-4333-8444-555555555555","item":"bbbbbbbb-2222-4333-8444-555555555555","kind":{"type":"user_message","data":{"text":"child result","attachments":[],"origin":{"type":"delegation","data":{"id":"dddddddd-2222-4333-8444-555555555555"}}}},"parent":null}}}"#,
+    );
+    assert_frame(
+        seq(
+            33,
+            None,
+            AgentEvent::ItemStarted {
+                turn: turn(),
+                item: item(),
+                kind: ItemKind::UserMessage {
+                    text: "ordinary user message".to_owned(),
+                    attachments: Vec::new(),
+                    steered: false,
+                    origin: MessageOrigin::User,
+                },
+                parent: None,
+            },
+        ),
+        r#"{"seq":33,"at":"2026-09-07T12:00:00Z","event":{"type":"item_started","data":{"turn":"aaaaaaaa-2222-4333-8444-555555555555","item":"bbbbbbbb-2222-4333-8444-555555555555","kind":{"type":"user_message","data":{"text":"ordinary user message","attachments":[]}},"parent":null}}}"#,
+    );
+}
+
+/// One byte fixture per variant of every enum the delegation family introduced.
+///
+/// The composite goldens above only ever reach a handful of these — a `Succeeded` delegation that
+/// was `Delivered` from a `Reported` result. The remaining variants are exactly the ones a rename
+/// would slip past: they are written to `delegations.status` and `delegations.delivery` as these
+/// words, so a casing change here is a row the next daemon start cannot parse.
+#[test]
+fn delegation_value_types_have_one_wire_golden_per_variant() {
+    // `DelegationStatus::word` deliberately says "working" and "done"; the wire never does.
+    for (status, golden) in [
+        (DelegationStatus::Starting, r#""starting""#),
+        (DelegationStatus::Running, r#""running""#),
+        (DelegationStatus::Blocked, r#""blocked""#),
+        (DelegationStatus::Settling, r#""settling""#),
+        (DelegationStatus::Succeeded, r#""succeeded""#),
+        (DelegationStatus::Incomplete, r#""incomplete""#),
+        (DelegationStatus::Failed, r#""failed""#),
+        (DelegationStatus::Cancelled, r#""cancelled""#),
+    ] {
+        assert_frame(status, golden);
+    }
+
+    assert_frame(ResultSource::Reported, r#""reported""#);
+    assert_frame(ResultSource::LastAssistantText, r#""last_assistant_text""#);
+
+    assert_frame(DeliveryState::Pending, r#"{"type":"pending"}"#);
+    assert_frame(
+        DeliveryState::Delivered {
+            seq: Seq(42),
+            turn: turn(),
+        },
+        r#"{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}}"#,
+    );
+    assert_frame(
+        DeliveryState::Undeliverable {
+            reason: "the caller thread was deleted".to_owned(),
+        },
+        r#"{"type":"undeliverable","data":{"reason":"the caller thread was deleted"}}"#,
+    );
+
+    assert_frame(MessageOrigin::User, r#"{"type":"user"}"#);
+    assert_frame(
+        MessageOrigin::Delegation {
+            id: delegation_id(),
+        },
+        r#"{"type":"delegation","data":{"id":"dddddddd-2222-4333-8444-555555555555"}}"#,
+    );
+
+    // A recovered, truncated result: the half of `DelegationResult` the composite goldens skip.
+    assert_frame(
+        DelegationResult {
+            text: "partial answer".to_owned(),
+            files_changed: Vec::new(),
+            source: ResultSource::LastAssistantText,
+            elided: true,
+        },
+        r#"{"text":"partial answer","source":"last_assistant_text","elided":true}"#,
+    );
+
+    assert_frame(
+        starting_delegation(),
+        r#"{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"pending"},"created":"2026-09-07T12:00:00Z"}"#,
+    );
+}
+
+/// `parent` is the only field a child thread adds to two shapes a version-7 peer already knows.
+/// The goldens above all carry `parent: None` and so prove it is absent; these two prove the key
+/// and its position when the thread really is a delegated child.
+#[test]
+fn a_delegated_child_carries_its_parent_on_the_wire() {
+    assert_frame(
+        AgentThreadSummary {
+            thread: child_thread(),
+            parent: Some(thread()),
+            ..summary()
+        },
+        r#"{"thread":"22222222-3333-4444-8555-666666666666","parent":"11111111-2222-4333-8444-555555555555","worktree":"acme/api#native-agents","provider":"codex","title":"Codex","attention":{"type":"needs_you","data":"permission"},"session":{"type":"ready"},"turn":{"type":"running","data":"aaaaaaaa-2222-4333-8444-555555555555"},"lastSeq":12,"lastActivity":"2026-09-07T12:00:00Z","lastCompletedSeq":9,"lastNonterminalSeq":11,"exitCode":null}"#,
+    );
+
+    let mut projection = ThreadProjection::new(child_thread(), worktree(), AgentKind::Codex);
+    projection.parent = Some(thread());
+    assert_frame(
+        projection,
+        r#"{"thread":"22222222-3333-4444-8555-666666666666","parent":"11111111-2222-4333-8444-555555555555","worktree":"acme/api#native-agents","provider":"codex","title":"Codex","session":{"type":"starting"},"turn":{"type":"none"},"gates":[],"items":[],"turns":[],"backgroundTasks":[],"lastSeq":0,"lastActivity":null,"cumulativeUsage":{"inputTokens":0,"outputTokens":0,"reasoningTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":0,"webSearchRequests":0,"toolUses":0},"cumulativeCostUsd":null,"contextPct":0.0,"model":null,"mode":"ask","exitCode":null,"retrying":null}"#,
+    );
+}
+
+/// A capability string is wire vocabulary a peer matches literally in `HelloResponse.capabilities`,
+/// so a rename here is a negotiation that fails open rather than loudly. `AGENT_CAPABILITIES` does
+/// not carry this one yet — phase 3 adds it once the daemon serves the family.
+#[test]
+fn the_delegation_capability_string_is_pinned() {
+    assert_eq!(fleet_proto::AGENT_DELEGATION_CAPABILITY, "agent.delegation");
+}
+
+#[test]
 fn legacy_permission_gate_defaults_the_additive_item() {
     let gate: GateKind = serde_json::from_str(
         r#"{"type":"permission","data":{"tool":{"type":"edit"},"title":"Apply patch","payload":"README.md","rationale":null,"options":[]}}"#,
@@ -268,6 +443,18 @@ fn gate() -> GateId {
         .unwrap_or_else(|error| panic!("{error}"))
 }
 
+fn delegation_id() -> DelegationId {
+    "dddddddd-2222-4333-8444-555555555555"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn child_thread() -> ThreadId {
+    "22222222-3333-4444-8555-666666666666"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
 /// The third checkpoint of [`turn`], which is what a `[u] revert turn` would address.
 fn checkpoint() -> CheckpointId {
     CheckpointId::from_parts(3, CheckpointScope::Turn, turn())
@@ -291,6 +478,54 @@ fn model() -> ModelSelection {
     }
 }
 
+fn delegation() -> Delegation {
+    Delegation {
+        id: delegation_id(),
+        caller: thread(),
+        caller_turn: turn(),
+        caller_item: item(),
+        child: child_thread(),
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "write protocol goldens".to_owned(),
+        expectation: "all wire bytes are pinned".to_owned(),
+        eager: true,
+        status: DelegationStatus::Succeeded,
+        status_payload: Some("reported complete".to_owned()),
+        result: Some(DelegationResult {
+            text: "goldens added".to_owned(),
+            files_changed: vec!["crates/fleet-proto/tests/agent_compatibility.rs".to_owned()],
+            source: ResultSource::Reported,
+            elided: false,
+        }),
+        nudges: 1,
+        recoveries: 0,
+        delivery: DeliveryState::Delivered {
+            seq: Seq(42),
+            turn: turn(),
+        },
+        created: at(),
+        finished: Some(at()),
+        headline: Some("Pinned delegation wire shapes".to_owned()),
+    }
+}
+
+/// The same delegation the instant `DelegationRun` answers: nothing optional has happened yet.
+fn starting_delegation() -> Delegation {
+    Delegation {
+        eager: false,
+        status: DelegationStatus::Starting,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: DeliveryState::Pending,
+        finished: None,
+        headline: None,
+        ..delegation()
+    }
+}
+
 fn summary() -> AgentThreadSummary {
     AgentThreadSummary {
         thread: thread(),
@@ -306,6 +541,7 @@ fn summary() -> AgentThreadSummary {
         last_completed_seq: Some(Seq(9)),
         last_nonterminal_seq: Some(Seq(11)),
         exit_code: None,
+        parent: None,
     }
 }
 
@@ -443,6 +679,7 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                         text: "inspect the failing test".to_owned(),
                         attachments: Vec::new(),
                         item: None,
+                        origin: Default::default(),
                     },
                 },
             },
@@ -543,6 +780,132 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                 body: RequestBody::AgentAccountLogout { thread },
             },
             r#"{"id":19,"body":{"type":"agent_account_logout","thread":"11111111-2222-4333-8444-555555555555"}}"#,
+        ),
+        (
+            Request {
+                id: 20,
+                body: RequestBody::DelegationRun {
+                    caller: thread,
+                    provider: AgentKind::Codex,
+                    brief: "write protocol goldens".to_owned(),
+                    expectation: "all wire bytes are pinned".to_owned(),
+                    worktree: Some(worktree()),
+                    mode: Some(PermissionMode::FullAccess),
+                    model: Some(model()),
+                    title: Some("Golden writer".to_owned()),
+                    eager: true,
+                },
+            },
+            r#"{"id":20,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"codex","brief":"write protocol goldens","expectation":"all wire bytes are pinned","worktree":"acme/api#native-agents","mode":"full_access","model":{"model":"gpt-5-codex","effort":"high"},"title":"Golden writer","eager":true}}"#,
+        ),
+        (
+            Request {
+                id: 21,
+                body: RequestBody::DelegationComplete {
+                    delegation: delegation_id(),
+                    child: child_thread(),
+                    token: "completion-token".to_owned(),
+                    result: "goldens added".to_owned(),
+                    blocked: true,
+                },
+            },
+            r#"{"id":21,"body":{"type":"delegation_complete","delegation":"dddddddd-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","token":"completion-token","result":"goldens added","blocked":true}}"#,
+        ),
+        (
+            Request {
+                id: 22,
+                body: RequestBody::DelegationList {
+                    caller: Some(thread),
+                },
+            },
+            r#"{"id":22,"body":{"type":"delegation_list","caller":"11111111-2222-4333-8444-555555555555"}}"#,
+        ),
+        (
+            Request {
+                id: 23,
+                body: RequestBody::DelegationGet {
+                    delegation: delegation_id(),
+                },
+            },
+            r#"{"id":23,"body":{"type":"delegation_get","delegation":"dddddddd-2222-4333-8444-555555555555"}}"#,
+        ),
+        (
+            Request {
+                id: 24,
+                body: RequestBody::DelegationCancel {
+                    delegation: delegation_id(),
+                },
+            },
+            r#"{"id":24,"body":{"type":"delegation_cancel","delegation":"dddddddd-2222-4333-8444-555555555555"}}"#,
+        ),
+        (
+            Request {
+                id: 25,
+                body: RequestBody::DelegationWait {
+                    delegation: delegation_id(),
+                    timeout_ms: 30_000,
+                },
+            },
+            r#"{"id":25,"body":{"type":"delegation_wait","delegation":"dddddddd-2222-4333-8444-555555555555","timeout_ms":30000}}"#,
+        ),
+        // The three delegation requests that carry optional fields, with every option absent: a
+        // missing `skip_serializing_if` would show up here as a `null` or a `false` a version-7
+        // peer never sent, and nowhere else.
+        (
+            Request {
+                id: 26,
+                body: RequestBody::DelegationRun {
+                    caller: thread,
+                    provider: AgentKind::Claude,
+                    brief: "summarize the diff".to_owned(),
+                    expectation: "one paragraph".to_owned(),
+                    worktree: None,
+                    mode: None,
+                    model: None,
+                    title: None,
+                    eager: false,
+                },
+            },
+            r#"{"id":26,"body":{"type":"delegation_run","caller":"11111111-2222-4333-8444-555555555555","provider":"claude","brief":"summarize the diff","expectation":"one paragraph"}}"#,
+        ),
+        (
+            Request {
+                id: 27,
+                body: RequestBody::DelegationComplete {
+                    delegation: delegation_id(),
+                    child: child_thread(),
+                    token: "completion-token".to_owned(),
+                    result: "goldens added".to_owned(),
+                    blocked: false,
+                },
+            },
+            r#"{"id":27,"body":{"type":"delegation_complete","delegation":"dddddddd-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","token":"completion-token","result":"goldens added"}}"#,
+        ),
+        (
+            Request {
+                id: 28,
+                body: RequestBody::DelegationList { caller: None },
+            },
+            r#"{"id":28,"body":{"type":"delegation_list"}}"#,
+        ),
+        // Delivery of a child's result to its caller is an ordinary `AgentSend` whose input is
+        // marked; request 8 above pins the same shape with the mark absent.
+        (
+            Request {
+                id: 29,
+                body: RequestBody::AgentSend {
+                    thread,
+                    input: UserInput {
+                        text: "goldens added".to_owned(),
+                        attachments: Vec::new(),
+                        item: Some(item()),
+                        origin: MessageOrigin::Delegation {
+                            id: delegation_id(),
+                        },
+                    },
+                },
+            },
+            r#"{"id":29,"body":{"type":"agent_send","thread":"11111111-2222-4333-8444-555555555555","input":{"text":"goldens added","attachments":[],"item":"bbbbbbbb-2222-4333-8444-555555555555","origin":{"type":"delegation","data":{"id":"dddddddd-2222-4333-8444-555555555555"}}}}}"#,
         ),
     ]
 }
@@ -678,6 +1041,42 @@ fn response_goldens() -> Vec<(Response, &'static str)> {
             },
             r#"{"id":8,"result":{"Ok":{"type":"agent_reverted","data":{"thread":"11111111-2222-4333-8444-555555555555","checkpoint":"00003-turn-aaaaaaaa-2222-4333-8444-555555555555","restored":2,"deleted":1,"paths":["src/lib.rs","src/new.rs"]}}}}"#,
         ),
+        (
+            Response {
+                id: 20,
+                result: Ok(ResponseBody::DelegationStarted {
+                    delegation: delegation(),
+                    warning: Some("child started with a fallback model".to_owned()),
+                }),
+            },
+            r#"{"id":20,"result":{"Ok":{"type":"delegation_started","data":{"delegation":{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","eager":true,"status":"succeeded","statusPayload":"reported complete","result":{"text":"goldens added","filesChanged":["crates/fleet-proto/tests/agent_compatibility.rs"],"source":"reported"},"nudges":1,"recoveries":0,"delivery":{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}},"created":"2026-09-07T12:00:00Z","finished":"2026-09-07T12:00:00Z","headline":"Pinned delegation wire shapes"},"warning":"child started with a fallback model"}}}}"#,
+        ),
+        (
+            Response {
+                id: 21,
+                result: Ok(ResponseBody::Delegations(vec![delegation()])),
+            },
+            r#"{"id":21,"result":{"Ok":{"type":"delegations","data":[{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","eager":true,"status":"succeeded","statusPayload":"reported complete","result":{"text":"goldens added","filesChanged":["crates/fleet-proto/tests/agent_compatibility.rs"],"source":"reported"},"nudges":1,"recoveries":0,"delivery":{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}},"created":"2026-09-07T12:00:00Z","finished":"2026-09-07T12:00:00Z","headline":"Pinned delegation wire shapes"}]}}}"#,
+        ),
+        (
+            Response {
+                id: 22,
+                result: Ok(ResponseBody::Delegation(delegation())),
+            },
+            r#"{"id":22,"result":{"Ok":{"type":"delegation","data":{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","eager":true,"status":"succeeded","statusPayload":"reported complete","result":{"text":"goldens added","filesChanged":["crates/fleet-proto/tests/agent_compatibility.rs"],"source":"reported"},"nudges":1,"recoveries":0,"delivery":{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}},"created":"2026-09-07T12:00:00Z","finished":"2026-09-07T12:00:00Z","headline":"Pinned delegation wire shapes"}}}}"#,
+        ),
+        // The answer to a `DelegationRun` that needed no warning, carrying the delegation as it
+        // looks the instant it is created: every optional column still empty.
+        (
+            Response {
+                id: 23,
+                result: Ok(ResponseBody::DelegationStarted {
+                    delegation: starting_delegation(),
+                    warning: None,
+                }),
+            },
+            r#"{"id":23,"result":{"Ok":{"type":"delegation_started","data":{"delegation":{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","status":"starting","nudges":0,"recoveries":0,"delivery":{"type":"pending"},"created":"2026-09-07T12:00:00Z"}}}}}"#,
+        ),
     ]
 }
 
@@ -697,6 +1096,10 @@ fn event_goldens() -> Vec<(Event, &'static str)> {
         (
             Event::AgentSummary(summary()),
             r#"{"type":"agent_summary","data":{"thread":"11111111-2222-4333-8444-555555555555","worktree":"acme/api#native-agents","provider":"codex","title":"Codex","attention":{"type":"needs_you","data":"permission"},"session":{"type":"ready"},"turn":{"type":"running","data":"aaaaaaaa-2222-4333-8444-555555555555"},"lastSeq":12,"lastActivity":"2026-09-07T12:00:00Z","lastCompletedSeq":9,"lastNonterminalSeq":11,"exitCode":null}}"#,
+        ),
+        (
+            Event::DelegationChanged(delegation()),
+            r#"{"type":"delegation_changed","data":{"id":"dddddddd-2222-4333-8444-555555555555","caller":"11111111-2222-4333-8444-555555555555","callerTurn":"aaaaaaaa-2222-4333-8444-555555555555","callerItem":"bbbbbbbb-2222-4333-8444-555555555555","child":"22222222-3333-4444-8555-666666666666","provider":"codex","depth":1,"brief":"write protocol goldens","expectation":"all wire bytes are pinned","eager":true,"status":"succeeded","statusPayload":"reported complete","result":{"text":"goldens added","filesChanged":["crates/fleet-proto/tests/agent_compatibility.rs"],"source":"reported"},"nudges":1,"recoveries":0,"delivery":{"type":"delivered","data":{"seq":42,"turn":"aaaaaaaa-2222-4333-8444-555555555555"}},"created":"2026-09-07T12:00:00Z","finished":"2026-09-07T12:00:00Z","headline":"Pinned delegation wire shapes"}}"#,
         ),
         (
             Event::AgentResync {

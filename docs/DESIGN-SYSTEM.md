@@ -885,12 +885,14 @@ and name the irreversibility.
 
 #### `Palette`
 **Purpose.** Jump to anything by name, or do the thing whose key you do not remember.
-**Anatomy.** 640 px card at y = 120 · 44 px input · sections `GO` → `DO` → `CONTEXT` · ≤ 10 rows
-of 34 px · footer `9 of 63 · ⏎ run · esc cancel`.
+**Anatomy.** 640 px card at y = 120 · 44 px input · default sections `GO` → `DO` → `CONTEXT`,
+or one seeded `AGENTS` section · ≤ 10 rows of 34 px · footer `9 of 63 · ⏎ run · esc cancel`.
 **API.** `Palette::new(query).section(PaletteSection::new(PaletteSectionKind::Go, rows))
 .cursor(usize).caret(usize).cap(usize).total(usize).empty(..)`; `.shown()`, `.flat_len()`;
 `PaletteSection::{len, is_empty}`;
 `PaletteRow::new(label).icon(Icon).leading(..).detail(..).key(..).destructive(bool).matches(..)`.
+`PaletteSectionKind::Agents` titles the seeded section. Its five row slots are attention mark,
+provider/title label, worktree detail, child/caller relationship, and optional strip-index key.
 **Usage rule.** `GO` (objects) always first — that is what makes a session reachable from inside
 another session. Every `DO` row shows its bound key, right-aligned, so the palette trains itself
 out of the loop. A command that is invalid here is **not listed**, never greyed. Destructive
@@ -1119,9 +1121,10 @@ by the row that owns them.
 `Gesture` / `breaks_follow` / `is_at_end`.
 **Rows.** `TranscriptRow { id: TranscriptRowId, kind: TranscriptRowKind, attached }` — flat by
 construction: a turn is a *run* of rows, never a container, because nested containers make
-variable-height virtualization and scroll anchoring unsolvable. The eighteen kinds are `User`,
-`Assistant`, `AssistantMeta`, `Reasoning`, `Work`, `WorkLive`, `WorkGroup`, `Subagent`, `Diff`,
-`TurnFold`, `TurnFooter`, `Plan`, `Gate`, `Checkpoint`, `Notice`, `Error`, `Working`, `Empty`.
+variable-height virtualization and scroll anchoring unsolvable. The twenty kinds are `User`,
+`Assistant`, `AssistantMeta`, `Reasoning`, `Work`, `WorkLive`, `WorkGroup`, `Subagent`,
+`Delegation`, `DelegationResult`, `Diff`, `TurnFold`, `TurnFooter`, `Plan`, `Gate`, `Checkpoint`,
+`Notice`, `Error`, `Working`, `Empty`.
 `Notice` is a harness's own user-facing message — a config warning, a deprecation — which is not
 an error and must not be drawn as one; `Error` is the **severe** tier only (a runtime error or a
 broken side effect), because a nonzero command exit is carried by the failing `Work` row.
@@ -1185,6 +1188,15 @@ only**, so clicking inside an expanded body or a nested child never folds the ro
 chevron is `invisible`, not absent, when a row cannot expand, so alignment never shifts. A
 `Failed` row is always expandable, so its truncated label can be read in full.
 
+#### `DelegationRow` / `DelegationResultCard`
+**Purpose.** Keep a native child reachable at its caller item and render the one result delivered
+back to the caller without making it look user-authored.
+**API.** `DelegationRow { provider, title, status, headline, elapsed, hint }` with
+`DelegationRowStatus::{Starting, Working, Blocked, Done, Incomplete, Failed, Cancelled}`;
+`DelegationResultCard { header, body, collapsible, expanded, hint }`.
+**States.** The live row uses a spinner for starting/working, amber for blocked, and frozen terminal
+marks/durations. The result card uses `⏎ show` / `⏎ hide`; Enter only folds it and never attaches.
+
 #### `DecisionDock`
 **Purpose.** A permission approval or a model question, in a drawer docked to the top edge of the
 composer. Nothing is ever a modal, and an approval is never a transcript card: a card can be
@@ -1218,11 +1230,11 @@ in both axes, and is **never truncated and never line-clamped**.
 #### `MetadataRow`
 **Purpose.** The composer's ordered strip of harness-reported blocks.
 **API.** `MetadataRow::new(Vec<MetadataSegment>, MetadataFitResult).trailing(..)`;
-`MetadataSegment::new(text)` / `::pinned(text)` / `.width(px)`; the owner holds a `MetadataFit`
+`MetadataSegment::new(text)` / `::pinned(text)` / `.target(id)` / `.width(px)`; the owner holds a `MetadataFit`
 and calls `fit(available, revision, &segments, gap, overflow)`, or the free `metadata_fit` for a
 one-shot.
 **States.** everything visible · collapsed from the right with an overflow count · the pinned
-segment alone, truncating.
+segment alone, truncating · targeted segment in link tone with focus ring and click/Enter action.
 **Usage rule.** **The hidden count is memoised per width**, in a `MetadataFit` the owner holds
 across frames, never recomputed per frame. **The model segment never collapses; it truncates** —
 losing which model is answering is worse than losing its name's tail. No segment is ever

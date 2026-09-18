@@ -31,6 +31,8 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
 pub const APP_SOCKET_NAME: &str = "fleet-harness.sock";
 /// The daemon socket path relative to a run directory.
 pub const DAEMON_SOCKET_RELATIVE: &str = "home/fleetd.sock";
+/// Marker checked by the fixture's `fleet` shim once scenario teardown begins.
+const FLEET_CLI_STOP_FILE: &str = ".fleet-harness-cli-stop";
 /// How often readiness is probed while waiting for it.
 const PROBE_INTERVAL: Duration = Duration::from_millis(50);
 /// How long an orderly shutdown is given before the daemon is killed outright.
@@ -167,6 +169,19 @@ impl HarnessEnv {
     #[must_use]
     pub fn daemon_socket(&self) -> PathBuf {
         FleetHome::new(self.fleet_home.clone()).socket_path()
+    }
+
+    /// Marker the fixture's `fleet` shim checks before it may auto-start a daemon.
+    #[must_use]
+    pub fn fleet_cli_stop_path(&self) -> PathBuf {
+        self.fake_bin.join(FLEET_CLI_STOP_FILE)
+    }
+
+    /// Prevents a provider command that outlives daemon shutdown from starting a replacement.
+    pub fn stop_fleet_cli(&self) -> anyhow::Result<()> {
+        let path = self.fleet_cli_stop_path();
+        fs::write(&path, b"teardown\n")
+            .with_context(|| format!("write Fleet CLI teardown marker {}", path.display()))
     }
 
     /// Points one child at this environment and at nothing outside it, without wrapping it.

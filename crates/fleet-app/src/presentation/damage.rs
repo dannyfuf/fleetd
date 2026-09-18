@@ -53,6 +53,14 @@ pub fn event_damage(event: &Event) -> EventDamage {
             notifications: true,
             ..EventDamage::default()
         },
+        // Delegations live outside a caller's projection, so their own revision invalidates
+        // transcript joins while the event repaints domain/chrome attention surfaces.
+        Event::DelegationChanged(_) => EventDamage {
+            domain: true,
+            chrome: true,
+            notifications: true,
+            ..EventDamage::default()
+        },
         // The three stream-control events change which rows a thread view may trust, not any
         // cached Hub row, so they damage the domain projection and the chrome and nothing else.
         Event::AgentResync { .. } | Event::AgentSynchronized { .. } | Event::AgentWindow { .. } => {

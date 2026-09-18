@@ -63,6 +63,20 @@ pub(super) const MIGRATIONS: &[Migration] = &[
         source: m002::SOURCE,
         sha256: "13a395b29dd1c0a1ee6a0fd7d29263b871ead729eaa2475e7405f54dbe49484d",
     },
+    Migration {
+        id: 3,
+        name: "delegations",
+        run: m003::run,
+        source: m003::SOURCE,
+        sha256: "9b013b2e74ef153e16e50b0086d6534748fd3844d084b4b01403a5d56d5d28c1",
+    },
+    Migration {
+        id: 4,
+        name: "delegation_submission_state",
+        run: m004::run,
+        source: m004::SOURCE,
+        sha256: "6b222436efc9f2cc8be1a0b50ec518923d04b1006f29289f121299ff202a03de",
+    },
 ];
 
 /// Slot 001 — create the log and every read model derived from it.
@@ -97,6 +111,149 @@ mod m002 {
                 return Ok(());
             }
         }
+        transaction.execute_batch(SOURCE)
+    }
+}
+
+/// Slot 003 — persist delegated children, their durable outbox, and child-thread metadata.
+///
+/// The three nullable thread columns preserve every slot-002 row verbatim. Each `ALTER TABLE` is
+/// guarded independently because SQLite has no `ADD COLUMN IF NOT EXISTS`, and a migration slot
+/// must be harmless if its body is retried before its ledger row is recorded.
+mod m003 {
+    use rusqlite::Transaction;
+
+    pub(super) const SOURCE: &str = r#"CREATE TABLE delegations (
+  id TEXT PRIMARY KEY, token_sha256 TEXT NOT NULL,
+  caller_thread TEXT NOT NULL, caller_turn TEXT NOT NULL, caller_item TEXT NOT NULL,
+  child_thread TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, depth INTEGER NOT NULL,
+  brief TEXT NOT NULL, expectation TEXT NOT NULL, eager INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL, status_payload TEXT, result TEXT, result_source TEXT,
+  result_files TEXT, result_elided INTEGER NOT NULL DEFAULT 0,
+  nudges INTEGER NOT NULL DEFAULT 0, recoveries INTEGER NOT NULL DEFAULT 0,
+  delivery TEXT NOT NULL, delivered_seq INTEGER, delivered_turn TEXT, delivery_reason TEXT,
+  headline TEXT,
+  reported_at TEXT, report_sha256 TEXT,
+  created TEXT NOT NULL, finished TEXT
+);
+CREATE INDEX idx_delegations_caller ON delegations(caller_thread, created);
+CREATE TABLE delegation_outbox (
+  id INTEGER PRIMARY KEY, delegation TEXT NOT NULL,
+  action TEXT NOT NULL,  -- deliver | nudge | settle | recover | cancel_children | mirror
+  created TEXT NOT NULL, done TEXT
+);
+CREATE INDEX idx_delegation_outbox_open ON delegation_outbox(id) WHERE done IS NULL;
+ALTER TABLE threads ADD COLUMN parent_thread_id TEXT;
+ALTER TABLE threads ADD COLUMN delegation_id TEXT;
+ALTER TABLE threads ADD COLUMN stop_cause TEXT;"#;
+
+    const CREATE_DELEGATIONS: &str = r#"CREATE TABLE delegations (
+  id TEXT PRIMARY KEY, token_sha256 TEXT NOT NULL,
+  caller_thread TEXT NOT NULL, caller_turn TEXT NOT NULL, caller_item TEXT NOT NULL,
+  child_thread TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, depth INTEGER NOT NULL,
+  brief TEXT NOT NULL, expectation TEXT NOT NULL, eager INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL, status_payload TEXT, result TEXT, result_source TEXT,
+  result_files TEXT, result_elided INTEGER NOT NULL DEFAULT 0,
+  nudges INTEGER NOT NULL DEFAULT 0, recoveries INTEGER NOT NULL DEFAULT 0,
+  delivery TEXT NOT NULL, delivered_seq INTEGER, delivered_turn TEXT, delivery_reason TEXT,
+  headline TEXT,
+  reported_at TEXT, report_sha256 TEXT,
+  created TEXT NOT NULL, finished TEXT
+)"#;
+    const CREATE_DELEGATIONS_CALLER: &str =
+        "CREATE INDEX idx_delegations_caller ON delegations(caller_thread, created)";
+    const CREATE_OUTBOX: &str = r#"CREATE TABLE delegation_outbox (
+  id INTEGER PRIMARY KEY, delegation TEXT NOT NULL,
+  action TEXT NOT NULL,  -- deliver | nudge | settle | recover | cancel_children | mirror
+  created TEXT NOT NULL, done TEXT
+)"#;
+    const CREATE_OUTBOX_OPEN: &str =
+        "CREATE INDEX idx_delegation_outbox_open ON delegation_outbox(id) WHERE done IS NULL";
+
+    pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        create_if_missing(transaction, "table", "delegations", CREATE_DELEGATIONS)?;
+        create_if_missing(
+            transaction,
+            "index",
+            "idx_delegations_caller",
+            CREATE_DELEGATIONS_CALLER,
+        )?;
+        create_if_missing(transaction, "table", "delegation_outbox", CREATE_OUTBOX)?;
+        create_if_missing(
+            transaction,
+            "index",
+            "idx_delegation_outbox_open",
+            CREATE_OUTBOX_OPEN,
+        )?;
+        add_column_if_missing(
+            transaction,
+            "parent_thread_id",
+            "ALTER TABLE threads ADD COLUMN parent_thread_id TEXT",
+        )?;
+        add_column_if_missing(
+            transaction,
+            "delegation_id",
+            "ALTER TABLE threads ADD COLUMN delegation_id TEXT",
+        )?;
+        add_column_if_missing(
+            transaction,
+            "stop_cause",
+            "ALTER TABLE threads ADD COLUMN stop_cause TEXT",
+        )
+    }
+
+    fn create_if_missing(
+        transaction: &Transaction<'_>,
+        kind: &str,
+        name: &str,
+        sql: &str,
+    ) -> rusqlite::Result<()> {
+        let exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2)",
+            [kind, name],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+        transaction.execute_batch(sql)
+    }
+
+    fn add_column_if_missing(
+        transaction: &Transaction<'_>,
+        column: &str,
+        sql: &str,
+    ) -> rusqlite::Result<()> {
+        let mut statement = transaction.prepare("PRAGMA table_info(threads)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for existing in columns {
+            if existing? == column {
+                return Ok(());
+            }
+        }
+        drop(statement);
+        transaction.execute_batch(sql)
+    }
+}
+
+/// Slot 004 — record that an outbox submission crossed its durable pre-send boundary.
+///
+/// The nullable timestamp preserves every existing row. A worker writes it before calling a
+/// provider, then reconciles the row's stable item with provider history before a retry.
+mod m004 {
+    use rusqlite::Transaction;
+
+    pub(super) const SOURCE: &str = "ALTER TABLE delegation_outbox ADD COLUMN submitted TEXT";
+
+    pub(super) fn run(transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        let mut statement = transaction.prepare("PRAGMA table_info(delegation_outbox)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for column in columns {
+            if column? == "submitted" {
+                return Ok(());
+            }
+        }
+        drop(statement);
         transaction.execute_batch(SOURCE)
     }
 }
@@ -284,7 +441,7 @@ mod tests {
     use anyhow::Context;
     use rusqlite::{Connection, params};
 
-    use super::schema::{REQUIRED_INDEXES, REQUIRED_TABLES};
+    use super::schema::{REQUIRED_DELEGATION_COLUMNS, REQUIRED_INDEXES, REQUIRED_TABLES};
     use super::{DOMAIN, MIGRATIONS, run, sha256};
 
     #[test]
@@ -294,7 +451,7 @@ mod tests {
         run(&mut conn, None)?;
 
         assert_eq!(objects(&conn, "table")?, expected(REQUIRED_TABLES));
-        assert_eq!(applied_slots(&conn)?, vec![1, 2]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
         Ok(())
     }
 
@@ -417,9 +574,24 @@ mod tests {
 
         run(&mut conn, Some(1))?;
 
-        assert_eq!(objects(&conn, "table")?, expected(REQUIRED_TABLES));
+        // Head minus what later slots add: slot 003 brings the two delegation tables, so
+        // asserting the head set here would silently turn this into a test of the whole ladder.
+        assert_eq!(objects(&conn, "table")?, expected(&tables_at_slot(1)));
         assert_eq!(applied_slots(&conn)?, vec![1]);
         Ok(())
+    }
+
+    /// The tables the schema declares once slots up to and including `slot` have been applied.
+    ///
+    /// Derived from [`REQUIRED_TABLES`] rather than listed again, so a table added to head without
+    /// a note here fails loudly instead of being quietly assumed to have existed since slot 001.
+    fn tables_at_slot(slot: u32) -> Vec<&'static str> {
+        const SLOT_003_TABLES: &[&str] = &["delegation_outbox", "delegations"];
+        REQUIRED_TABLES
+            .iter()
+            .filter(|table| slot >= 3 || !SLOT_003_TABLES.contains(*table))
+            .copied()
+            .collect()
     }
 
     #[test]
@@ -432,6 +604,64 @@ mod tests {
 
         assert!(table_columns(&conn, "sessions")?.contains("models_json"));
         assert_eq!(applied_slots(&conn)?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn slot_003_adds_delegations_and_thread_metadata_to_slot_002() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(2))?;
+        assert!(!objects(&conn, "table")?.contains("delegations"));
+        assert!(!table_columns(&conn, "threads")?.contains("parent_thread_id"));
+
+        run(&mut conn, Some(3))?;
+
+        let tables = objects(&conn, "table")?;
+        assert!(tables.contains("delegations"));
+        assert!(tables.contains("delegation_outbox"));
+        assert_eq!(
+            table_columns(&conn, "delegations")?,
+            expected(REQUIRED_DELEGATION_COLUMNS)
+        );
+        let columns = table_columns(&conn, "threads")?;
+        assert!(columns.contains("parent_thread_id"));
+        assert!(columns.contains("delegation_id"));
+        assert!(columns.contains("stop_cause"));
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn slot_003_body_is_idempotent_before_its_ledger_write() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(2))?;
+        let transaction = conn.transaction().context("begin slot-003 retry probe")?;
+
+        super::m003::run(&transaction)?;
+        super::m003::run(&transaction)?;
+        transaction
+            .commit()
+            .context("commit slot-003 retry probe")?;
+
+        assert!(objects(&conn, "table")?.contains("delegations"));
+        assert_eq!(
+            table_columns(&conn, "delegations")?,
+            expected(REQUIRED_DELEGATION_COLUMNS)
+        );
+        assert!(table_columns(&conn, "threads")?.contains("stop_cause"));
+        Ok(())
+    }
+
+    #[test]
+    fn slot_004_adds_durable_outbox_submission_state() -> anyhow::Result<()> {
+        let mut conn = memory_database()?;
+        run(&mut conn, Some(3))?;
+        assert!(!table_columns(&conn, "delegation_outbox")?.contains("submitted"));
+
+        run(&mut conn, Some(4))?;
+
+        assert!(table_columns(&conn, "delegation_outbox")?.contains("submitted"));
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
         Ok(())
     }
 
@@ -520,7 +750,7 @@ mod tests {
 
         run(&mut conn, None)?;
 
-        assert_eq!(applied_slots(&conn)?, vec![1, 2]);
+        assert_eq!(applied_slots(&conn)?, vec![1, 2, 3, 4]);
         Ok(())
     }
 

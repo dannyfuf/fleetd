@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use fleet_core::{
+    agents::ThreadId,
     config::Agent,
     ids::{SessionId, WorktreeId},
 };
@@ -196,6 +197,16 @@ pub(crate) fn open_session(session: SessionId, state: &Entity<AppState>, cx: &mu
     });
 }
 
+/// Leaves the one-shot prefix and opens the palette in native-thread mode.
+pub(crate) fn open_agents_picker(state: &Entity<AppState>, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        app.leave_prefix();
+        app.palette_seed = Some("agents".to_owned());
+        app.open_overlay(Overlay::Palette);
+        cx.notify();
+    });
+}
+
 /// Ensures a worktree's session exists, then routes the window to it.
 pub(crate) fn open_worktree<T: SessionTransport>(
     id: WorktreeId,
@@ -204,6 +215,46 @@ pub(crate) fn open_worktree<T: SessionTransport>(
     cx: &mut App,
 ) {
     ensure_worktree_session(id, true, true, state, transport, cx);
+}
+
+/// Ensures a delegated thread's worktree session, then attaches and selects that thread.
+pub(crate) fn open_agent_thread_worktree<T: SessionTransport>(
+    worktree: WorktreeId,
+    thread: ThreadId,
+    state: &Entity<AppState>,
+    transport: &T,
+    cx: &mut App,
+) {
+    transport.send(RequestBody::TouchWorktreeOpened {
+        id: worktree.clone(),
+    });
+    let reply = transport.request(RequestBody::EnsureSession {
+        worktree: Some(worktree.clone()),
+        agent: None,
+        sleep_previous: true,
+    });
+    complete_request(state, cx, async move |state, cx| {
+        let result = reply.recv().await;
+        cx.update(|cx| {
+            let Some(state) = state.upgrade() else { return };
+            match result {
+                Ok(Ok(ResponseBody::Session(session))) => state.update(cx, |app, cx| {
+                    crate::presentation::enter_session(app, session.id);
+                    app.select_agent_thread(thread);
+                    cx.notify();
+                }),
+                Ok(Ok(_)) => report_session_failure(
+                    &state,
+                    "daemon returned an unexpected ensure-session response",
+                    cx,
+                ),
+                Ok(Err(error)) => report_session_failure(&state, error.message, cx),
+                Err(_) => {
+                    report_session_failure(&state, "the Fleet daemon reply channel closed", cx)
+                }
+            }
+        });
+    });
 }
 
 pub(crate) fn ensure_worktree_session<T: SessionTransport>(

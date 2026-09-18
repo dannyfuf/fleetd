@@ -54,8 +54,9 @@ pub struct DaemonVersion {
 }
 
 pub use agents::{
-    AgentEvents, AgentItemBody, AgentMirror, AgentSnapshot, AgentWindowRequest, MirrorOutcome,
-    PageOutcome, WindowState, applied_seq, projection_from_window,
+    AgentEvents, AgentItemBody, AgentMirror, AgentSnapshot, AgentWindowRequest,
+    DelegationRunRequest, MirrorOutcome, PageOutcome, WindowState, applied_seq,
+    projection_from_window,
 };
 
 pub(crate) fn expect_ack(operation: &str, response: ResponseBody) -> Result<()> {

@@ -127,6 +127,42 @@ fn a_user_echo_without_client_id_is_reconciled_once_by_text() {
     assert!(frame("item/completed").events.is_empty());
 }
 
+/// Resumed history restores Fleet's durable item identity from Codex's client id.
+#[test]
+fn resumed_user_history_adopts_the_stable_client_item_id() {
+    let mut session = CodexSession {
+        root: Some("t".to_owned()),
+        ..CodexSession::default()
+    };
+    let provider_turn = "01a089f2-579b-75c2-8e51-3492ec617046";
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    session.alias_turn(provider_turn, turn);
+    session.adopt_turn(turn, provider_turn);
+
+    let output = map::handle(
+        &mut session,
+        "item/started",
+        &json!({
+            "threadId": "t",
+            "turnId": provider_turn,
+            "startedAtMs": 1,
+            "item": {
+                "type": "userMessage",
+                "id": "provider-user-1",
+                "clientId": item.to_string(),
+                "content": [{"type": "text", "text": "durable delivery", "text_elements": []}],
+            },
+        }),
+    );
+
+    assert!(matches!(
+        output.events.as_slice(),
+        [AgentEvent::ItemStarted { item: restored, .. }] if *restored == item
+    ));
+    assert_eq!(session.item_for("t", "provider-user-1"), item);
+}
+
 /// A failed `turn/start` leaves no pending correlation for a later unrelated notification.
 #[test]
 fn a_failed_turn_start_rolls_back_its_pending_alias_and_echo() {

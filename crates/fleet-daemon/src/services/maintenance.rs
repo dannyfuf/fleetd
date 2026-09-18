@@ -103,6 +103,7 @@ impl Services {
             )),
             tokio::spawn(run_pool_refresh(Arc::clone(self), events, shutdown.clone())),
             tokio::spawn(checkpoints::run_sweep(Arc::clone(self), shutdown.clone())),
+            tokio::spawn(run_delegation_outbox(Arc::clone(self), shutdown.clone())),
             tokio::spawn(run_pr_cache_expiry(Arc::clone(self), shutdown)),
         ];
         Ok(PeriodicTasks { handles })
@@ -418,6 +419,24 @@ async fn run_pool_refresh(
             }
         }
     }
+}
+
+/// Runs the delegation outbox worker for the life of the daemon.
+///
+/// The worker is taken, not cloned: it owns the receive half of the store's wake channel, and a
+/// second task on the same receiver would steal wakes from the first. A second call therefore
+/// finds nothing and returns, which is what a `Services` built without an agent database, or one
+/// whose tasks were started twice, gets.
+async fn run_delegation_outbox(services: Arc<Services>, shutdown: CancellationToken) {
+    let worker = services
+        .delegation_worker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let Some(worker) = worker else {
+        return;
+    };
+    worker.run(shutdown).await;
 }
 
 async fn run_pr_cache_expiry(services: Arc<Services>, shutdown: CancellationToken) {

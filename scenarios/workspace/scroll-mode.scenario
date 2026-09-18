@@ -67,12 +67,14 @@ key ctrl-u
 await terminal.viewport.top == 21 10000
 key escape
 await mode == Terminal 10000
+await terminal.viewport.top == 0 10000
 assert terminal.viewport.top == 0
 
 key ctrl-s [
 await mode == Scroll 10000
 key q
 await mode == Terminal 10000
+await terminal.viewport.top == 0 10000
 assert key_contexts[1] == Terminal && screen == Workspace
 dump scroll-exit
 quit

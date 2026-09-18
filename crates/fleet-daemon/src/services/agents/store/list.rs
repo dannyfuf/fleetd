@@ -31,7 +31,8 @@ const LIST_PAGE: usize = 500;
 /// The list query, hoisted so a test can assert its plan against the exact text the read runs.
 pub(super) const LIST_SQL: &str = "\
 SELECT thread_id, worktree_id, owner_host, provider, title, attention, session_state, turn_json, \
-       head_seq, last_activity_at, last_completed_seq, last_nonterminal_seq, exit_code, created_at \
+       head_seq, last_activity_at, last_completed_seq, last_nonterminal_seq, exit_code, created_at, \
+       parent_thread_id \
   FROM threads \
  WHERE deleted_at IS NULL \
    AND (created_at > ?1 OR (created_at = ?1 AND thread_id > ?2)) \
@@ -97,6 +98,7 @@ struct ListRow {
     last_nonterminal_seq: Option<i64>,
     exit_code: Option<i64>,
     created_at: i64,
+    parent: Option<String>,
 }
 
 impl ListRow {
@@ -132,6 +134,12 @@ impl ListRow {
             .with_context(|| format!("thread {thread} names an unusable owner host"))?;
         Ok(AgentThreadSummary {
             thread,
+            parent: self
+                .parent
+                .as_deref()
+                .map(str::parse::<ThreadId>)
+                .transpose()
+                .with_context(|| format!("decode the parent of thread {thread}"))?,
             worktree: WorktreeId::try_from(self.worktree.clone())
                 .with_context(|| format!("thread {thread} names worktree `{}`", self.worktree))?,
             host,
@@ -187,6 +195,7 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
         last_nonterminal_seq: row.get(11)?,
         exit_code: row.get(12)?,
         created_at: row.get(13)?,
+        parent: row.get(14)?,
     })
 }
 

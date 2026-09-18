@@ -182,16 +182,71 @@ fn two_gates_may_not_share_an_id_and_a_step_may_not_follow_exit() {
 }
 
 #[test]
-fn all_three_starter_transcripts_load_and_validate() {
+fn every_starter_transcript_loads_and_validates() {
     for name in [
         "two-turns.json",
         "edit-approval.json",
         "error-mid-stream.json",
+        "subagent-caller.json",
+        "subagent-caller-blocked.json",
+        "subagent-caller-other-worktree.json",
+        "subagent-child.json",
+        "subagent-child-blocked.json",
     ] {
         let transcript = starter(name);
         assert_eq!(transcript.version, 1, "{name}");
         assert!(!transcript.steps.is_empty(), "{name}");
     }
+}
+
+#[test]
+fn a_shell_step_echoes_an_environment_variable_as_a_tool_call_for_both_players() {
+    let transcript: Transcript = serde_json::from_value(json!({
+        "version": 1,
+        "steps": [
+            {"type": "shell", "command": "printf '%s' \"$PATH\""},
+            {"type": "end_turn", "status": "completed"}
+        ]
+    }))
+    .unwrap_or_else(|error| panic!("parse the shell transcript: {error}"));
+    validate(&transcript).unwrap_or_else(|error| panic!("validate the shell transcript: {error}"));
+    let expected = std::env::var("PATH").unwrap_or_default();
+
+    let (claude, _) = drive(
+        Provider::Claude,
+        &transcript,
+        &[claude_prompt("show the path")],
+    );
+    let tool = of_type(&claude, "assistant")
+        .into_iter()
+        .filter_map(|frame| frame.pointer("/message/content/0"))
+        .find(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .unwrap_or_else(|| panic!("Claude presented the shell step as a tool call"));
+    assert_eq!(tool.get("name").and_then(Value::as_str), Some("Bash"));
+    let output = of_type(&claude, "user")
+        .into_iter()
+        .filter_map(|frame| frame.pointer("/message/content/0"))
+        .find(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .and_then(|block| block.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("Claude emitted the shell output as the tool result"));
+    assert_eq!(output, expected);
+
+    let mut client = codex_handshake();
+    client.push(codex_turn(3, "show the path", "client-shell"));
+    let (codex, _) = drive(Provider::Codex, &transcript, &client);
+    let command = of_method(&codex, "item/completed")
+        .into_iter()
+        .find(|frame| {
+            frame.pointer("/params/item/type").and_then(Value::as_str) == Some("commandExecution")
+        })
+        .unwrap_or_else(|| panic!("Codex presented the shell step as a command tool call"));
+    assert_eq!(
+        command
+            .pointer("/params/item/aggregatedOutput")
+            .and_then(Value::as_str),
+        Some(expected.as_str())
+    );
 }
 
 #[test]
@@ -885,5 +940,18 @@ fn the_launcher_answers_the_version_probe_and_drops_the_vendor_launch_flags() {
     assert!(
         !body.contains("\"$@\"\nexec") && body.contains("exec '"),
         "the vendor flags are dropped rather than forwarded: {body}"
+    );
+    assert!(
+        body.contains("${FLEET_DELEGATION+x}") && body.contains("subagent-child.json"),
+        "a delegated Codex launch selects the child transcript: {body}"
+    );
+
+    let claude = super::write_launcher(directory.path(), Provider::Claude, &transcript)
+        .unwrap_or_else(|error| panic!("write the Claude launcher: {error}"));
+    let body = std::fs::read_to_string(&claude)
+        .unwrap_or_else(|error| panic!("read the Claude launcher: {error}"));
+    assert!(
+        body.contains("${FLEET_DELEGATION+x}") && body.contains("subagent-child-blocked.json"),
+        "a delegated Claude launch selects the blocked child transcript: {body}"
     );
 }

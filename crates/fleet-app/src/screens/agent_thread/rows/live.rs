@@ -39,7 +39,9 @@ fn subsumable(item: &Item) -> bool {
         | ItemKind::Reasoning { .. }
         | ItemKind::Subagent { .. }
         | ItemKind::Plan { .. }
-        | ItemKind::Error { .. } => false,
+        | ItemKind::Error { .. }
+        // A delegation is its own live status row and must never disappear behind tool activity.
+        | ItemKind::Delegation { .. } => false,
     }
 }
 

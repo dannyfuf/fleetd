@@ -3,6 +3,8 @@
 //!
 //! This module holds no queries. The read path builds its statements where it runs them
 //! (`docs/NATIVE-AGENTS.md` §8); what lives here is the shape those queries assume.
+//! Migration slot 003 extends `threads` with nullable `parent_thread_id`, `delegation_id`, and
+//! `stop_cause` columns and adds the delegation and outbox tables; slot 001 remains immutable.
 
 /// Settings applied to the single read-write connection, at open, in exactly this order.
 ///
@@ -340,6 +342,8 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
     "agent_events",
     "agent_events_quarantine",
     "checkpoints",
+    "delegation_outbox",
+    "delegations",
     "fleet_migrations",
     "gates",
     "item_attachments",
@@ -348,6 +352,39 @@ pub(super) const REQUIRED_TABLES: &[&str] = &[
     "sessions",
     "threads",
     "turns",
+];
+
+/// Every column migration slot 003 adds to the durable delegation record.
+#[cfg(test)]
+pub(super) const REQUIRED_DELEGATION_COLUMNS: &[&str] = &[
+    "brief",
+    "caller_item",
+    "caller_thread",
+    "caller_turn",
+    "child_thread",
+    "created",
+    "delivered_seq",
+    "delivered_turn",
+    "delivery",
+    "delivery_reason",
+    "depth",
+    "eager",
+    "expectation",
+    "finished",
+    "headline",
+    "id",
+    "nudges",
+    "provider",
+    "recoveries",
+    "report_sha256",
+    "reported_at",
+    "result",
+    "result_elided",
+    "result_files",
+    "result_source",
+    "status",
+    "status_payload",
+    "token_sha256",
 ];
 
 /// Every index the read paths of `docs/NATIVE-AGENTS.md` §8 rely on.
@@ -362,6 +399,8 @@ pub(super) const REQUIRED_INDEXES: &[&str] = &[
     "idx_agent_events_thread_kind_seq",
     "idx_agent_events_thread_seq",
     "idx_checkpoints_ordinal",
+    "idx_delegation_outbox_open",
+    "idx_delegations_caller",
     "idx_gates_open",
     "idx_item_attachments_path",
     "idx_items_thread_parent",

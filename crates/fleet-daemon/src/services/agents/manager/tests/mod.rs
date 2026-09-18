@@ -6,18 +6,22 @@
 //! about a child process. [`lifecycle`] holds the live-session tests, [`restart`] the ones that
 //! rebuild a manager over the same database.
 
-use std::sync::{
-    Mutex as StdMutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
 use fleet_core::{
     agents::{
-        AbortReason, Attention, AttentionKind, ControlCost, GateAnswer, GateId, GateKind,
-        HarnessCapabilities, InterruptSupport, ItemKind, ModelSelection, PermissionChoice,
-        PermissionMode, ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind, ThreadProjection,
-        ToolKind, TurnOutcome, Usage,
+        AbortReason, Attention, AttentionKind, ControlCost, DelegationId, DelegationStatus,
+        GateAnswer, GateId, GateKind, HarnessCapabilities, InterruptSupport, ItemKind, ItemPatch,
+        ItemPayloadPatch, MessageOrigin, ModelSelection, PermissionChoice, PermissionMode,
+        ResumeSupport, Seq, SeqEvent, SteerSupport, StreamKind, ThreadProjection, ToolKind,
+        TurnOutcome, Usage,
     },
     ids::{ContextId, RepoId},
     model::{Context as ContextRecord, Repo, RepoHooks, Worktree},
@@ -65,15 +69,22 @@ struct FakeScript {
     calls: StdMutex<Vec<FakeCall>>,
     start_requests: StdMutex<Vec<StartRequest>>,
     senders: StdMutex<Vec<ProviderSink>>,
+    senders_by_thread: StdMutex<HashMap<ThreadId, ProviderSink>>,
     capabilities: HarnessCapabilities,
     unavailable: AtomicBool,
     /// Makes every `stop` fail, as a child that exits from the stdin close does.
     stop_fails: AtomicBool,
+    /// Makes interrupt time out while leaving stop available.
+    interrupt_fails: AtomicBool,
     /// The turn the scripted harness considers running, as both real adapters track one.
     ///
-    /// It is what `send` answers `Submitted::queued` from, so the fake decides steer-versus-fresh
+    /// It is what `send` normally answers `Submitted` from, so the fake decides steer-versus-fresh
     /// the way a harness does rather than letting the manager guess from its own projection.
     active_turn: StdMutex<Option<TurnId>>,
+    /// Explicit submission answers consumed in order before the fake's default behaviour.
+    submission_answers: StdMutex<VecDeque<Submitted>>,
+    /// Provider-history events emitted synchronously by the next start of one thread.
+    start_events: StdMutex<HashMap<ThreadId, Vec<AgentEvent>>>,
     /// Makes every control change cost a restart, as Claude's launch flags do.
     restarts_on_control: AtomicBool,
     /// Makes replacement startup fail after the old provider generation has been retired.
@@ -88,10 +99,14 @@ impl FakeScript {
             calls: StdMutex::new(Vec::new()),
             start_requests: StdMutex::new(Vec::new()),
             senders: StdMutex::new(Vec::new()),
+            senders_by_thread: StdMutex::new(HashMap::new()),
             capabilities,
             unavailable: AtomicBool::new(false),
             stop_fails: AtomicBool::new(false),
+            interrupt_fails: AtomicBool::new(false),
             active_turn: StdMutex::new(None),
+            submission_answers: StdMutex::new(VecDeque::new()),
+            start_events: StdMutex::new(HashMap::new()),
             restarts_on_control: AtomicBool::new(false),
             restart_fails: AtomicBool::new(false),
             cursor: StdMutex::new(None),
@@ -119,6 +134,16 @@ impl FakeScript {
             .len()
     }
 
+    /// The environment the newest start of `thread` was given.
+    fn start_env(&self, thread: ThreadId) -> BTreeMap<String, String> {
+        self.start_requests()
+            .into_iter()
+            .rev()
+            .find(|request| request.thread == thread)
+            .map(|request| request.env.clone())
+            .unwrap_or_default()
+    }
+
     fn start_requests(&self) -> Vec<StartRequest> {
         self.start_requests
             .lock()
@@ -134,10 +159,25 @@ impl FakeScript {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Scripts the harness's next submission answer.
+    fn answer_submission(&self, answer: Submitted) {
+        self.submission_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(answer);
+    }
+
+    fn replay_on_next_start(&self, thread: ThreadId, events: Vec<AgentEvent>) {
+        self.start_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(thread, events);
+    }
+
     /// Pushes one normalized event into the newest provider's stream.
     ///
     /// Announcing or settling a turn also moves the fake's own turn bookkeeping, because that is
-    /// what a real adapter does and it is what `send` answers `queued` from.
+    /// what a real adapter does and it informs the fake's default `send` answer.
     async fn emit(&self, event: AgentEvent) {
         match &event {
             AgentEvent::TurnStarted { turn, .. } => {
@@ -163,6 +203,34 @@ impl FakeScript {
             .last()
             .cloned()
             .expect("a provider must have been started");
+        sender.send(event.into()).expect("provider stream is open");
+    }
+
+    async fn emit_to(&self, thread: ThreadId, event: AgentEvent) {
+        match &event {
+            AgentEvent::TurnStarted { turn, .. } => {
+                *self
+                    .active_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(*turn);
+            }
+            AgentEvent::TurnSettled { .. }
+            | AgentEvent::TurnAborted { .. }
+            | AgentEvent::SessionExited { .. } => {
+                *self
+                    .active_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+            _ => {}
+        }
+        let sender = self
+            .senders_by_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&thread)
+            .cloned()
+            .expect("the thread provider must have been started");
         sender.send(event.into()).expect("provider stream is open");
     }
 }
@@ -192,6 +260,26 @@ impl AgentProvider for FakeProvider {
             .push(req.clone());
         self.script
             .record(FakeCall::Start(req.thread, req.resume_cursor));
+        let replay = self
+            .script
+            .start_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&req.thread)
+            .unwrap_or_default();
+        if !replay.is_empty() {
+            let sender = self
+                .script
+                .senders_by_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&req.thread)
+                .cloned()
+                .expect("the starting provider owns an event sender");
+            for event in replay {
+                sender.send(event.into()).expect("provider stream is open");
+            }
+        }
         Ok(())
     }
 
@@ -205,14 +293,29 @@ impl AgentProvider for FakeProvider {
 
     async fn send(&mut self, turn: TurnId, input: UserInput) -> ProviderResult<Submitted> {
         self.script.record(FakeCall::Send(turn, input.text));
-        // Exactly what both real adapters answer: a submission into a turn the harness is
-        // already running joined it, and anything else opened one.
-        let queued = self.script.active_turn() == Some(turn);
-        Ok(Submitted { turn, queued })
+        if let Some(answer) = self
+            .script
+            .submission_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+        {
+            return Ok(answer);
+        }
+        Ok(if self.script.active_turn() == Some(turn) {
+            Submitted::JoinedActive { turn }
+        } else {
+            Submitted::QueuedNew { turn }
+        })
     }
 
     async fn interrupt(&mut self, turn: TurnId) -> ProviderResult<()> {
         self.script.record(FakeCall::Interrupt(turn));
+        if self.script.interrupt_fails.load(Ordering::SeqCst) {
+            return Err(ProviderError::Timeout {
+                what: "interrupt receipt".to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -282,7 +385,7 @@ impl AgentProvider for FakeProvider {
 fn factory(script: &Arc<FakeScript>) -> Arc<ProviderFactory> {
     let script = Arc::clone(script);
     Arc::new(
-        move |kind: AgentKind, _request: &StartRequest, _binaries: &AgentBinaries| {
+        move |kind: AgentKind, request: &StartRequest, _binaries: &AgentBinaries| {
             if script.unavailable.load(Ordering::SeqCst) {
                 return Err(anyhow::Error::new(ProviderError::Unavailable {
                     reason: format!("the {} executable was not found", kind.executable()),
@@ -293,7 +396,12 @@ fn factory(script: &Arc<FakeScript>) -> Arc<ProviderFactory> {
                 .senders
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(sender);
+                .push(sender.clone());
+            script
+                .senders_by_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(request.thread, sender.clone());
             Ok(Box::new(FakeProvider {
                 kind,
                 script: Arc::clone(&script),
@@ -304,14 +412,14 @@ fn factory(script: &Arc<FakeScript>) -> Arc<ProviderFactory> {
 }
 
 /// A temporary daemon home with one published worktree and a scripted provider.
-struct Harness {
+pub(crate) struct Harness {
     _temp: tempfile::TempDir,
     home: PathBuf,
     manager: AgentSessionManager,
+    config: Arc<ConfigStore>,
     events: BroadcastBus,
     worktrees: Worktrees,
     worktree: WorktreeId,
-    config: Arc<ConfigStore>,
     script: Arc<FakeScript>,
 }
 
@@ -331,7 +439,7 @@ fn empty_worktrees(home: &std::path::Path) -> Worktrees {
 }
 
 impl Harness {
-    async fn start(capabilities: HarnessCapabilities) -> Self {
+    pub(crate) async fn start(capabilities: HarnessCapabilities) -> Self {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("fleet");
         let repos = home.join("repos");
@@ -400,12 +508,33 @@ impl Harness {
             _temp: temp,
             home,
             manager,
+            config,
             events,
             worktrees,
             worktree,
-            config,
             script,
         }
+    }
+
+    pub(crate) fn started_env(&self, thread: ThreadId) -> BTreeMap<String, String> {
+        self.script.start_env(thread)
+    }
+
+    pub(crate) fn fail_interrupts(&self) {
+        self.script.interrupt_fails.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) async fn drop_provider(&self, thread: ThreadId) {
+        let runtime = self.manager.hydrated(thread).expect("thread is hydrated");
+        let operation = runtime.operation.lock().await;
+        runtime.invalidate_provider();
+        drop(runtime.provider.lock().await.take());
+        runtime.abort_task();
+        drop(operation);
+    }
+
+    pub(crate) fn replay_on_next_start(&self, thread: ThreadId, events: Vec<AgentEvent>) {
+        self.script.replay_on_next_start(thread, events);
     }
 
     /// Rebuilds the manager over the same database, as a daemon restart would.
@@ -414,7 +543,7 @@ impl Harness {
     /// no longer replays anything synchronously, so a test that asserts on settled orphans has to
     /// say when the background pass is done. Running it twice is harmless — a rebuild is
     /// idempotent and a thread already hydrated is no longer an orphan.
-    async fn restart(&self) -> AgentSessionManager {
+    pub(crate) async fn restart(&self) -> AgentSessionManager {
         let manager = AgentSessionManager::new_with_factory(
             FleetHome::new(&self.home).agents_db_path(),
             self.events.clone(),
@@ -426,7 +555,7 @@ impl Harness {
         manager
     }
 
-    async fn create(&self, resume_cursor: Option<String>) -> AgentThreadSummary {
+    pub(crate) async fn create(&self, resume_cursor: Option<String>) -> AgentThreadSummary {
         let response = self
             .manager
             .create(
@@ -439,6 +568,37 @@ impl Harness {
             )
             .await
             .expect("create agent thread");
+        match response {
+            ResponseBody::AgentThreadCreated(summary) => summary,
+            other => panic!("expected AgentThreadCreated, got {other:?}"),
+        }
+    }
+
+    pub(crate) async fn create_delegated(
+        &self,
+        parent: ThreadId,
+        delegation: DelegationId,
+        resume_cursor: Option<String>,
+        token: &str,
+    ) -> AgentThreadSummary {
+        let response = self
+            .manager
+            .create_with(CreateOptions {
+                resume_cursor,
+                parent: Some(parent),
+                delegation: Some(delegation),
+                extra_env: BTreeMap::from([
+                    ("FLEET_DELEGATION".to_owned(), delegation.to_string()),
+                    ("FLEET_DELEGATION_TOKEN".to_owned(), token.to_owned()),
+                ]),
+                ..CreateOptions::new(
+                    self.worktree.clone(),
+                    AgentKind::Claude,
+                    Some(PermissionMode::Ask),
+                )
+            })
+            .await
+            .expect("create delegated agent thread");
         match response {
             ResponseBody::AgentThreadCreated(summary) => summary,
             other => panic!("expected AgentThreadCreated, got {other:?}"),
@@ -458,7 +618,7 @@ impl Harness {
     }
 
     /// Waits until `predicate` holds of the projection, failing the test on timeout.
-    async fn settle(
+    pub(crate) async fn settle(
         &self,
         thread: ThreadId,
         what: &str,
@@ -480,6 +640,49 @@ impl Harness {
         })
         .await
         .unwrap_or_else(|_| panic!("agent thread never reached {what}"))
+    }
+
+    pub(crate) fn delegation_parts(
+        &self,
+    ) -> (
+        AgentSessionManager,
+        BroadcastBus,
+        Arc<ConfigStore>,
+        Worktrees,
+    ) {
+        (
+            self.manager.clone(),
+            self.events.clone(),
+            Arc::clone(&self.config),
+            self.worktrees.clone(),
+        )
+    }
+
+    pub(crate) async fn emit(&self, event: AgentEvent) {
+        self.script.emit(event).await;
+    }
+
+    pub(crate) async fn emit_to(&self, thread: ThreadId, event: AgentEvent) {
+        self.script.emit_to(thread, event).await;
+    }
+
+    pub(crate) fn sent_turn_containing(&self, needle: &str) -> Option<TurnId> {
+        self.script
+            .calls()
+            .iter()
+            .rev()
+            .find_map(|call| match call {
+                FakeCall::Send(turn, text) if text.contains(needle) => Some(*turn),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn sent_count_containing(&self, needle: &str) -> usize {
+        self.script
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, FakeCall::Send(_, text) if text.contains(needle)))
+            .count()
     }
 }
 
@@ -548,7 +751,7 @@ fn attentions(events: &[Event]) -> Vec<Attention> {
         .collect()
 }
 
-fn full() -> HarnessCapabilities {
+pub(crate) fn full() -> HarnessCapabilities {
     HarnessCapabilities {
         resume: ResumeSupport::ByCursor { fork: false },
         steer: SteerSupport::Explicit {
@@ -668,6 +871,18 @@ fn completed(turn: TurnId) -> AgentEvent {
         duration_ms: 12,
         files_changed: Vec::new(),
     }
+}
+
+/// Where each recorded user message came from, in order.
+fn origins(projection: &ThreadProjection) -> Vec<MessageOrigin> {
+    projection
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::UserMessage { origin, .. } => Some(origin.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The user prompts the transcript holds, in order.

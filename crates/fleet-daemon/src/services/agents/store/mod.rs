@@ -32,7 +32,9 @@
 //! [`import`] the one-shot NDJSON migration, [`project`] the event → rows projector, [`list`] the
 //! one-`SELECT` thread list, [`index`] the `AgentThreadRecord` mapping, [`writer`] the owned
 //! writer thread, [`read`] the read-only pool and its bounded queries, [`cursor`] the pagination
-//! cursor, [`mirror`] the `owner_host` columns and the only statements allowed to write them.
+//! cursor, [`mirror`] the `owner_host` columns and the only statements allowed to write them, and
+//! [`delegations`] the `delegations` and `delegation_outbox` tables and the only statements allowed
+//! to touch them.
 //!
 //! **Two deviations from the NDJSON seam this replaces,** both forced by the design:
 //!
@@ -43,6 +45,7 @@
 //!   on either is the thing this store was built to stop doing.
 
 mod cursor;
+pub(crate) mod delegations;
 mod import;
 mod index;
 mod list;
@@ -62,18 +65,30 @@ use std::{
 
 use anyhow::Context;
 use fleet_core::{
-    agents::{AgentThreadSummary, Seq, SeqEvent, ThreadId},
+    agents::{AgentThreadSummary, Delegation, DelegationId, Seq, SeqEvent, ThreadId},
     ids::HostId,
 };
 use fleet_proto::agents::AgentSeenCursor;
 
-use super::{AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord};
+use super::{
+    AGENT_INDEX_VERSION, AgentIndex, AgentThreadRecord, delegation::transition::DelegationFacts,
+};
 use cursor::TranscriptCursor;
+pub(crate) use delegations::{OutboxAction, OutboxRow};
 pub(crate) use list::BootWork;
 pub(crate) use mirror::{Admission, MirrorRefusal, ThreadOwnership, admits_append};
 use read::ReaderPool;
 pub(crate) use read::{SessionRuntime, TranscriptWindow, TurnKeyset};
 use writer::Writer;
+
+/// Post-commit delegation notifications installed by service composition.
+#[derive(Clone)]
+pub(crate) struct DelegationHooks {
+    /// Wakes the durable outbox worker after a transaction enqueues work.
+    pub wake: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Publishes a delegation changed by event projection.
+    pub changed: Arc<dyn Fn(Delegation) + Send + Sync>,
+}
 
 /// The ceiling on one page, whatever a caller asks for.
 ///
@@ -189,6 +204,120 @@ impl SqliteAgentStore {
     /// before this returns.
     pub(crate) async fn append(&self, thread: ThreadId, event: &SeqEvent) -> anyhow::Result<()> {
         self.inner.writer.append(thread, event).await
+    }
+
+    /// The same append, carrying what the delegation rules need to know about `thread`.
+    ///
+    /// `facts` describes the thread as it stood *before* `event`, and only the manager can gather
+    /// it: the rules run inside the writer's transaction, which has no projection in reach. The
+    /// writer carries them into the same transaction as the event and its projections.
+    pub(crate) async fn append_with_facts(
+        &self,
+        thread: ThreadId,
+        event: &SeqEvent,
+        facts: DelegationFacts,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .writer
+            .append_with_facts(thread, event, facts)
+            .await
+    }
+
+    /// Reads one delegation by id, or `None` when this daemon has never recorded it.
+    ///
+    /// This and the five reads below it are the seam the service and worker answer queries from.
+    pub(crate) async fn delegation(&self, id: DelegationId) -> anyhow::Result<Option<Delegation>> {
+        self.inner
+            .readers
+            .read("read a delegation", move |conn| delegations::get(conn, id))
+            .await
+    }
+
+    /// Reads the delegation a child thread belongs to. `child_thread` is `UNIQUE`, so there is
+    /// at most one.
+    pub(crate) async fn delegation_by_child(
+        &self,
+        child: ThreadId,
+    ) -> anyhow::Result<Option<Delegation>> {
+        self.inner
+            .readers
+            .read("read a delegation by child", move |conn| {
+                delegations::get_by_child(conn, child)
+            })
+            .await
+    }
+
+    /// Reads the stored SHA-256 of one delegation's completion token.
+    ///
+    /// The plaintext token is never persisted and never leaves the child, so this is the only
+    /// value `DelegationComplete` can be checked against.
+    #[allow(dead_code)] // Contracted typed read; completion validates atomically on the writer.
+    pub(crate) async fn delegation_token_hash(
+        &self,
+        id: DelegationId,
+    ) -> anyhow::Result<Option<String>> {
+        self.inner
+            .readers
+            .read("read a delegation token hash", move |conn| {
+                delegations::token_hash(conn, id)
+            })
+            .await
+    }
+
+    /// Lists delegations newest first, optionally narrowed to one caller.
+    pub(crate) async fn delegations(
+        &self,
+        caller: Option<ThreadId>,
+    ) -> anyhow::Result<Vec<Delegation>> {
+        self.inner
+            .readers
+            .read("list delegations", move |conn| {
+                delegations::list(conn, caller)
+            })
+            .await
+    }
+
+    /// The same list narrowed to non-terminal delegations, which is what the depth and
+    /// concurrency ceilings are counted from.
+    pub(crate) async fn live_delegations(
+        &self,
+        caller: Option<ThreadId>,
+    ) -> anyhow::Result<Vec<Delegation>> {
+        self.inner
+            .readers
+            .read("list live delegations", move |conn| {
+                delegations::live(conn, caller)
+            })
+            .await
+    }
+
+    /// Every unfinished outbox row in id order — the durable work list the worker drains.
+    pub(crate) async fn delegation_outbox(&self) -> anyhow::Result<Vec<OutboxRow>> {
+        self.inner
+            .readers
+            .read("read the delegation outbox", delegations::open_rows)
+            .await
+    }
+
+    /// Runs one delegation closure in one writer-thread transaction.
+    ///
+    /// The closure's `wake` answer is observed only after `COMMIT`; without installed hooks it is
+    /// deliberately a no-op, which lets the store be constructed before service composition.
+    pub(crate) async fn delegation_write<T, F>(
+        &self,
+        what: &'static str,
+        task: F,
+    ) -> anyhow::Result<T>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>) -> anyhow::Result<(T, bool)> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.inner.writer.delegation_write(what, task).await
+    }
+
+    /// Installs the service hooks once composition has built the delegation worker and publisher.
+    pub(crate) fn install_delegation_hooks(&self, hooks: DelegationHooks) {
+        self.inner.writer.install_delegation_hooks(hooks);
     }
 
     /// Replays every retained event of a thread in sequence order.
@@ -321,7 +450,7 @@ impl SqliteAgentStore {
         self.inner
             .readers
             .read("read an agent thread record", move |conn| {
-                index::read_one(conn, thread)
+                read::read_record(conn, thread)
             })
             .await
     }

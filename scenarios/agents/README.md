@@ -2,9 +2,10 @@
 
 The surfaces that change most and break most: the floating agent popup, a native thread's
 streaming turn, the decision drawer, the unread mark, and the `^s` table bound inside an agent
-tab. Every scenario runs on the `agents` preset, which installs `fleet-harness agent` under the
-vendor's own name and hands it a scripted transcript — **no scenario here needs the `claude` or
-`codex` binary, a network, or a token** (`docs/NATIVE-AGENTS.md` §6.5).
+tab. Scenarios use `agents` or one of its additive subagent presets, which install
+`fleet-harness agent` under the vendor's own name and hand it a scripted transcript — **no
+scenario here needs the `claude` or `codex` binary, a network, or a token**
+(`docs/NATIVE-AGENTS.md` §6.5).
 
 ```sh
 target/debug/fleet-harness run scenarios/agents --lane virtual        # the corpus
@@ -29,9 +30,29 @@ Keyboard input reaches the focused view in both lanes. Scenarios with `shot` lin
 | `codex-mode-menu.scenario` | `^s t` consumes Codex's smaller declared access-mode set and keeps the draft | `NATIVE-AGENTS.md` §7 |
 | `unread-mark.scenario` | a turn that reaches its gate while you are on another tab marks the thread; looking clears the mark and not the gate | `NATIVE-AGENTS.md` §3.3, §6.1 |
 | `unread-mark-survives-a-reconnect.scenario` | a thread read before a daemon restart remains read after reconnect through its persisted installation cursor | `NATIVE-AGENTS.md` §3.3, §10 |
+| `prefix-inside-a-thread.scenario` | agent controls plus `^s 1`–`9`, `^s Tab`, `^s w`, and `^s s` are bound in an agent tab while an unknown second key is swallowed | `KEYMAP.md` §Shadowing, §Native agent thread |
 | `turn-cut-by-a-daemon-restart.scenario` | a gated running turn is cut off and settled after restart, then resumes lazily on the next send | `NATIVE-AGENTS.md` §3.3, §8, §9.2 |
-| `prefix-inside-a-thread.scenario` | agent controls plus `^s 1`–`9`, `^s Tab`, and `^s w` are bound in an agent tab while `^s s` is not | `KEYMAP.md` §Shadowing, §Native agent thread |
 | `scroll-wheel.scenario` | two fixture turns complete; wheel input moves up and back through the transcript without crashing | `NATIVE-AGENTS.md` §5 |
+| `subagent-attach-from-picker.scenario` | `^s d` lists a hidden delegated child as `attach`; accepting it adds the child tab and focuses its composer | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |
+| `subagent-reopen-closed-caller.scenario` | a locally closed caller remains in `AGENTS`; accepting it reopens the caller tab | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |
+| `subagent-other-worktree-child.scenario` | the picker labels an other-worktree child and switches to its session before attaching it | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |
+| `subagent-runs-end-to-end.scenario` | a scripted caller creates a real delegation; its child reports and delivery reaches `delivered` | `TESTING-HARNESS.md` §5; phase 4 P4-T01 |
+| `subagent-attach-from-row.scenario` | `Enter` on a durable delegation row attaches and selects its child tab | `NATIVE-AGENTS.md` §15; phase 4 P4-T07 |
+| `subagent-detach-and-reattach.scenario` | `^s x` detaches a child, and its caller's durable row re-attaches it | `NATIVE-AGENTS.md` §15; `KEYMAP.md` §Native agent thread |
+| `subagent-blocked-child-paints-caller.scenario` | a blocked Claude child paints its selected Codex caller `needs_you` | `NATIVE-AGENTS.md` §3.3, §15; phase 4 P4-T07 |
+| `subagent-up-to-caller.scenario` | `^s u` from a child selects its caller without detaching either thread | `KEYMAP.md` §Native agent thread; phase 4 P4-T07 |
+| `subagent-result-card.scenario` | delivered delegation data projects a collapsed result card that `Enter` expands in place | `NATIVE-AGENTS.md` §15; phase 4 P4-T07 |
+
+## UX surface audit
+
+The native-agent surfaces added to the shared UX sections have executable coverage here:
+
+| `UX-SPEC.md` surface | Scenarios |
+| --- | --- |
+| §3.6 Workspace: mixed strip, attached child ordering, child tab chrome, attach/detach and caller navigation | `subagent-attach-from-row`, `subagent-detach-and-reattach`, `subagent-up-to-caller` |
+| §3.6.0 Native agent tab: streaming transcript, decisions, delegation row, blocked-child attention, result card, child caller metadata and composer boundary | `thread-streaming`, `edit-approval-allow`, `edit-approval-deny`, `subagent-runs-end-to-end`, `subagent-blocked-child-paints-caller`, `subagent-result-card`, `subagent-up-to-caller` |
+| §3.9 Command palette: the `AGENTS` section and its attach, reopen, cross-worktree and focus outcomes | `subagent-attach-from-picker`, `subagent-reopen-closed-caller`, `subagent-other-worktree-child` |
+| §9.6 component inventory: `TranscriptList`, `ToolRow`, `DelegationRow`, `DelegationResultCard`, `DecisionCard`, `MultilineInput`, targeted `MetadataSegment`, `Markdown` and `DiffView` | `scroll-wheel`, `codex-approval-shows-the-diff`, `prefix-inside-a-thread`, plus the delegation scenarios above |
 
 `expected-to-fail/` currently has no entries. Files placed there carry an extension a directory
 run does not collect; `run.sh` runs them and inverts the verdict until they are promoted.

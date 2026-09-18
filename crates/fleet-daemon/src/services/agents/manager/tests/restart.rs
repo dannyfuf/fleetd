@@ -7,6 +7,33 @@
 
 use super::*;
 
+#[test]
+fn hydration_seed_preserves_a_delegated_child_parent() {
+    let thread = ThreadId::new();
+    let parent = ThreadId::new();
+    let created = Utc::now();
+    let record = AgentThreadRecord {
+        thread,
+        parent: Some(parent),
+        delegation: Some(DelegationId::new()),
+        worktree: WorktreeId::try_from("acme/api#child").expect("worktree"),
+        provider: AgentKind::Codex,
+        title: "child".to_owned(),
+        created,
+        last_activity: created,
+        resume_cursor: Some("cursor".to_owned()),
+        model: None,
+        mode: PermissionMode::FullAccess,
+        last_outcome: None,
+        stop_cause: None,
+    };
+
+    assert_eq!(
+        super::super::hydrate::projection_seed(&record).parent,
+        Some(parent)
+    );
+}
+
 #[tokio::test]
 async fn codex_resume_rebuilds_turn_controls_from_the_persisted_mode() {
     let harness = Harness::start(full()).await;
@@ -78,6 +105,8 @@ async fn restart_recovery_never_advances_memory_past_a_log_it_could_not_write() 
     let created = Utc::now();
     let mut record = AgentThreadRecord {
         thread,
+        parent: None,
+        delegation: None,
         worktree: worktree.clone(),
         provider: AgentKind::Claude,
         title: "Claude".to_owned(),
@@ -87,6 +116,7 @@ async fn restart_recovery_never_advances_memory_past_a_log_it_could_not_write() 
         model: None,
         mode: PermissionMode::Ask,
         last_outcome: None,
+        stop_cause: None,
     };
     let mut projection = ThreadProjection::new(thread, worktree, AgentKind::Claude);
     let gate = GateId::new();
@@ -144,6 +174,15 @@ async fn restart_settles_a_ready_thread_and_lets_open_resume_it() {
         .find(|summary| summary.thread == thread)
         .expect("the thread survives a restart");
     assert_eq!(summary.session, SessionState::Stopped);
+    assert_eq!(
+        restarted
+            .record(thread)
+            .await
+            .expect("read the recovered ready thread")
+            .stop_cause,
+        Some(fleet_core::agents::StopCause::ProviderExit),
+        "restart recovery persists why an idle resumable caller stopped",
+    );
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
 
     restarted
@@ -158,6 +197,7 @@ async fn restart_settles_a_ready_thread_and_lets_open_resume_it() {
                 text: "still usable".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -196,6 +236,19 @@ async fn restart_fails_orphaned_threads_without_a_resume_cursor() {
     ));
     assert_eq!(summary.attention, Attention::Failed);
     assert_eq!(harness.script.starts(), 1, "restart never reattaches");
+    let runtime = restarted
+        .hydrated(thread)
+        .expect("restart recovery hydrates the orphan");
+    let stop_cause = runtime
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .record
+        .stop_cause;
+    assert_eq!(
+        stop_cause,
+        Some(fleet_core::agents::StopCause::ProviderExit)
+    );
 }
 
 /// A thread that was created and never prompted has no turn to lose. A restart leaves it
@@ -382,6 +435,8 @@ async fn a_start_with_five_hundred_threads_lists_them_without_reading_a_log() {
             store
                 .write_record(&AgentThreadRecord {
                     thread,
+                    parent: None,
+                    delegation: None,
                     worktree: worktree.clone(),
                     provider: AgentKind::Claude,
                     title: format!("thread {index}"),
@@ -391,6 +446,7 @@ async fn a_start_with_five_hundred_threads_lists_them_without_reading_a_log() {
                     model: None,
                     mode: PermissionMode::Ask,
                     last_outcome: None,
+                    stop_cause: None,
                 })
                 .await
                 .expect("record a thread");

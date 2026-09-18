@@ -134,7 +134,7 @@ async fn hydrate(
     mut record: AgentThreadRecord,
     owner: Option<HostId>,
 ) -> anyhow::Result<ThreadRuntime> {
-    let mut projection = load_projection(inner, &record).await?;
+    let mut projection = load_projection(inner, &mut record).await?;
     if orphaned(&projection) {
         if let Some(owner) = &owner {
             tracing::debug!(
@@ -168,8 +168,11 @@ async fn hydrate(
 /// reason rather than dropped.
 async fn load_projection(
     inner: &ManagerInner,
-    record: &AgentThreadRecord,
+    record: &mut AgentThreadRecord,
 ) -> anyhow::Result<ThreadProjection> {
+    // Record metadata is a cache of the log. Rebuild this field from events so records written by
+    // an older daemon gain the same stop cause as records updated live by this one.
+    record.stop_cause = None;
     let mut projection = projection_seed(record);
     let events = inner.store()?.load(record.thread).await?;
     let logged = events.last().map(|event| event.seq);
@@ -184,6 +187,7 @@ async fn load_projection(
             );
             break;
         }
+        update_record(record, event, &projection.title);
         replayed = Some(event.seq);
     }
     if replayed != logged
@@ -198,6 +202,7 @@ async fn load_projection(
 pub(super) fn projection_seed(record: &AgentThreadRecord) -> ThreadProjection {
     let mut projection =
         ThreadProjection::new(record.thread, record.worktree.clone(), record.provider);
+    projection.parent = record.parent;
     projection.title.clone_from(&record.title);
     projection.model.clone_from(&record.model);
     projection.mode = record.mode;

@@ -344,6 +344,7 @@ async fn a_failed_control_restart_clears_the_provider_for_lazy_resume() {
                 text: "recovered".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                ..UserInput::default()
             },
         )
         .await
@@ -379,6 +380,7 @@ async fn a_starting_turn_is_checkpointed_and_a_steer_is_not() {
                 text: "ship it".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -421,6 +423,7 @@ async fn a_starting_turn_is_checkpointed_and_a_steer_is_not() {
                 text: "also update the docs".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await

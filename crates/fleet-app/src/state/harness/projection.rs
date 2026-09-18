@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use fleet_core::{
-    agents::{AgentKind, Attention, AttentionKind},
+    agents::{AgentKind, Attention, AttentionKind, GateKind},
     board::Card,
     ids::TerminalId,
     sessions::Terminal as SessionTerminal,
@@ -21,11 +21,11 @@ use fleet_core::{
 
 use super::{
     AgentThreadDecisionSnapshot, AgentThreadSnapshot, AgentsSnapshot, CursorSnapshot,
-    DaemonSnapshot, DialogSnapshot, HarnessProjection, IdleSnapshot, JobSnapshot, ListSnapshot,
-    RowSnapshot, SNAPSHOT_VERSION, TerminalSnapshot, ToastSnapshot, UiSnapshot, ViewportSnapshot,
-    WindowSnapshot,
+    DaemonSnapshot, DelegationSnapshot, DialogSnapshot, HarnessProjection, IdleSnapshot,
+    JobSnapshot, ListSnapshot, RowSnapshot, SNAPSHOT_VERSION, TerminalSnapshot, ToastSnapshot,
+    UiSnapshot, ViewportSnapshot, WindowSnapshot,
 };
-use crate::presentation::DisplayedHub;
+use crate::presentation::{DisplayedHub, selected_worktree_id};
 use crate::state::{
     AgentPopupMode, AppState, BoardFocus, Cursors, DaemonLink, FilterState, HubPane, HubTab,
     JobsPanelMirror, LiveToast, Mode, Overlay, RepoScope, Screen, StickyError, running_jobs,
@@ -41,6 +41,8 @@ use crate::state::{
 struct ProjectionKey {
     derived: Derived,
     snapshot_revision: u64,
+    delegations_revision: u64,
+    attached_revision: u64,
     board_revision: u64,
     link_generation: u64,
     scope: RepoScope,
@@ -172,6 +174,8 @@ impl AppState {
         ProjectionKey {
             derived: self.derived(),
             snapshot_revision: self.snapshot_revision,
+            delegations_revision: self.agents.delegations_revision(),
+            attached_revision: self.agents.attached_revision(),
             board_revision: self.board.revision,
             link_generation: self.link_generation,
             scope: self.scope.clone(),
@@ -413,12 +417,29 @@ impl AppState {
                 .iter()
                 .map(|summary| {
                     let attention = self.agents.attention(summary.thread);
+                    let pending_gate = self
+                        .agents
+                        .projection(summary.thread)
+                        .and_then(|projection| projection.gates.last())
+                        .map(|gate| pending_gate_name(&gate.kind))
+                        .or_else(|| {
+                            (self.active_agent_thread() != Some(summary.thread))
+                                .then(|| match attention {
+                                    Attention::NeedsYou(kind) => pending_attention_name(kind),
+                                    Attention::Working
+                                    | Attention::Waiting
+                                    | Attention::Failed
+                                    | Attention::Unread
+                                    | Attention::Idle => None,
+                                })
+                                .flatten()
+                        });
                     AgentThreadSnapshot {
                         id: summary.thread.to_string(),
                         provider: provider_name(summary.provider).to_owned(),
                         state: attention_name(attention).to_owned(),
                         unread: self.agents.seen(summary.thread) < summary.last_seq,
-                        pending_gate: pending_gate_name(attention).map(str::to_owned),
+                        pending_gate: pending_gate.map(str::to_owned),
                         decision: self.agents.decision(summary.thread).map(|decision| {
                             AgentThreadDecisionSnapshot {
                                 kind: decision.kind,
@@ -427,7 +448,60 @@ impl AppState {
                                 has_diff: decision.has_diff,
                             }
                         }),
+                        parent: summary.parent.map(|parent| parent.to_string()),
+                        attached: self.agents.is_attached(summary.thread),
+                        delegation_rows: self
+                            .agents
+                            .projection(summary.thread)
+                            .map_or(0, |projection| {
+                                saturating_u32(
+                                    projection
+                                        .items
+                                        .iter()
+                                        .filter(|item| {
+                                            matches!(item.kind, fleet_core::agents::ItemKind::Delegation { .. })
+                                        })
+                                        .count(),
+                                )
+                            }),
+                        result_cards: self
+                            .agents
+                            .projection(summary.thread)
+                            .map_or(0, |projection| {
+                                saturating_u32(
+                                    projection
+                                        .items
+                                        .iter()
+                                        .filter(|item| {
+                                            matches!(
+                                                &item.kind,
+                                                fleet_core::agents::ItemKind::UserMessage {
+                                                    origin: fleet_core::agents::MessageOrigin::Delegation { .. },
+                                                    ..
+                                                }
+                                            )
+                                        })
+                                        .count(),
+                                )
+                            }),
+                        focused_row: self.agents.focused_row(summary.thread),
+                        expanded_result_cards: self
+                            .agents
+                            .expanded_result_cards(summary.thread),
                     }
+                })
+                .collect(),
+            delegations: self
+                .agents
+                .delegations()
+                .into_iter()
+                .map(|delegation| DelegationSnapshot {
+                    id: delegation.id.to_string(),
+                    status: delegation.status.word(),
+                    caller: delegation.caller.to_string(),
+                    child: delegation.child.to_string(),
+                    delivery: delegation.delivery.word(),
+                    headline: delegation.headline.clone(),
                 })
                 .collect(),
             decision: agents::decision_snapshot(self),
@@ -524,6 +598,17 @@ impl AppState {
                         .map(|row| row.row.clone()),
                     rows: tabs.rows.iter().map(|row| row.row.clone()).collect(),
                     filter: String::new(),
+                },
+            );
+        }
+        if matches!(self.overlay, Some(Overlay::Palette)) {
+            let rows = self.palette_rows();
+            lists.insert(
+                "palette".to_owned(),
+                ListSnapshot {
+                    selected: None,
+                    rows,
+                    filter: "agents".to_owned(),
                 },
             );
         }
@@ -671,7 +756,14 @@ impl AppState {
                     row: RowSnapshot {
                         id: summary.thread.to_string(),
                         label: summary.title.clone(),
-                        badges: vec![provider_name(summary.provider).to_owned()],
+                        badges: if summary.parent.is_some() {
+                            vec![
+                                provider_name(summary.provider).to_owned(),
+                                "child".to_owned(),
+                            ]
+                        } else {
+                            vec![provider_name(summary.provider).to_owned()]
+                        },
                         marks: vec![
                             attention_name(self.agents.attention(summary.thread)).to_owned(),
                         ],
@@ -681,6 +773,69 @@ impl AppState {
             }
         }
         TabRows { rows, selected }
+    }
+
+    /// Native-thread rows exposed while the agent picker owns the palette.
+    fn palette_rows(&self) -> Vec<RowSnapshot> {
+        let current = selected_worktree_id(self);
+        let summaries = self.agents.summaries();
+        let callers: Vec<_> = summaries
+            .iter()
+            .filter(|summary| {
+                summary.parent.is_none()
+                    && current
+                        .as_ref()
+                        .is_none_or(|worktree| &summary.worktree == worktree)
+            })
+            .collect();
+        let caller_ids: HashSet<_> = callers.iter().map(|summary| summary.thread).collect();
+        let children: Vec<_> = summaries
+            .iter()
+            .filter(|summary| {
+                summary
+                    .parent
+                    .is_some_and(|parent| caller_ids.contains(&parent))
+            })
+            .collect();
+
+        callers
+            .into_iter()
+            .chain(children.iter().copied().filter(|summary| {
+                current
+                    .as_ref()
+                    .is_none_or(|worktree| &summary.worktree == worktree)
+            }))
+            .chain(children.iter().copied().filter(|summary| {
+                current
+                    .as_ref()
+                    .is_some_and(|worktree| &summary.worktree != worktree)
+            }))
+            .map(|summary| {
+                let child = summary.parent.is_some();
+                let attached = self.agents.is_attached(summary.thread);
+                let other_worktree =
+                    child && current.as_ref().is_some_and(|id| id != &summary.worktree);
+                let mut label = crate::screens::agent_thread::presentation::tab_title(summary);
+                if other_worktree {
+                    label.push_str(" · ");
+                    label.push_str(summary.worktree.as_str());
+                }
+                RowSnapshot {
+                    id: summary.thread.to_string(),
+                    label,
+                    badges: vec![
+                        provider_name(summary.provider).to_owned(),
+                        if child { "child" } else { "caller" }.to_owned(),
+                        summary.worktree.as_str().to_owned(),
+                    ],
+                    marks: vec![
+                        attention_name(self.agents.attention(summary.thread)).to_owned(),
+                        if attached || !child { "go" } else { "attach" }.to_owned(),
+                        if attached { "attached" } else { "hidden" }.to_owned(),
+                    ],
+                }
+            })
+            .collect()
     }
 
     fn terminal_row(&self, terminal: &SessionTerminal) -> RowSnapshot {
@@ -869,18 +1024,21 @@ fn attention_name(attention: Attention) -> &'static str {
         Attention::Idle => "idle",
     }
 }
-/// The gate a thread is blocked on. A finished turn needs the user but is not a gate.
-fn pending_gate_name(attention: Attention) -> Option<&'static str> {
+/// The gate a thread's installed projection can act on.
+fn pending_gate_name(gate: &GateKind) -> &'static str {
+    match gate {
+        GateKind::Permission { .. } => "permission",
+        GateKind::Question { .. } => "question",
+        GateKind::Plan { .. } => "plan",
+    }
+}
+
+fn pending_attention_name(attention: AttentionKind) -> Option<&'static str> {
     match attention {
-        Attention::NeedsYou(AttentionKind::Permission) => Some("permission"),
-        Attention::NeedsYou(AttentionKind::Question) => Some("question"),
-        Attention::NeedsYou(AttentionKind::Plan) => Some("plan"),
-        Attention::NeedsYou(AttentionKind::Finished)
-        | Attention::Working
-        | Attention::Waiting
-        | Attention::Failed
-        | Attention::Unread
-        | Attention::Idle => None,
+        AttentionKind::Permission => Some("permission"),
+        AttentionKind::Question => Some("question"),
+        AttentionKind::Plan => Some("plan"),
+        AttentionKind::Finished => None,
     }
 }
 fn cursor_shape_name(cursor: fleet_proto::terminal::CursorState) -> &'static str {

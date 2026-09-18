@@ -287,6 +287,8 @@ impl IndexRow {
             .with_context(|| format!("decode the last turn outcome of thread {thread}"))?;
         Ok(AgentThreadRecord {
             thread,
+            parent: None,
+            delegation: None,
             worktree: fleet_core::ids::WorktreeId::try_from(self.worktree.clone())
                 .with_context(|| format!("thread {thread} names worktree `{}`", self.worktree))?,
             provider,
@@ -297,6 +299,7 @@ impl IndexRow {
             model,
             mode,
             last_outcome,
+            stop_cause: None,
         })
     }
 }

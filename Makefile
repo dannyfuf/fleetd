@@ -80,7 +80,7 @@ harness-headless: build ## Run the GUI corpus scenarios that need no pixels
 	exit $$status
 
 harness-prune: ## Delete harness run directories older than SWEEP_DAYS (default 7)
-	@root=$${HARNESS_RUNS:-/tmp/fleet-harness}; \
+	@root=$${HARNESS_RUNS:-$${TMPDIR:-/tmp}/fleet-harness}; \
 	if [ ! -d "$$root" ]; then echo "No harness runs under $$root/."; exit 0; fi; \
 	echo "$$root before: $$(du -sh "$$root" 2>/dev/null | cut -f1), $$(find "$$root" -mindepth 1 -maxdepth 1 -type d | wc -l) runs"; \
 	find "$$root" -mindepth 1 -maxdepth 1 -type d -mtime +$(SWEEP_DAYS) -exec rm -rf {} +; \

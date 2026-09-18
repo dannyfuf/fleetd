@@ -21,7 +21,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use fleet_core::agents::{Seq, SeqEvent, ThreadId, TurnId};
+use fleet_core::agents::{DelegationId, Seq, SeqEvent, StopCause, ThreadId, TurnId};
 use fleet_proto::agents::AgentSeenCursor;
 use rusqlite::{Connection, OpenFlags, params};
 use tokio::sync::Semaphore;
@@ -503,7 +503,54 @@ pub(super) fn window(
 
 /// Reads the thread index.
 pub(super) fn read_index(conn: &Connection) -> anyhow::Result<AgentIndex> {
-    index::read(conn)
+    let mut index = index::read(conn)?;
+    for record in &mut index.threads {
+        read_thread_metadata(conn, record)?;
+    }
+    Ok(index)
+}
+
+/// Reads one thread record and its slot-003 metadata.
+pub(super) fn read_record(
+    conn: &Connection,
+    thread: ThreadId,
+) -> anyhow::Result<Option<super::AgentThreadRecord>> {
+    let mut record = match index::read_one(conn, thread)? {
+        Some(record) => record,
+        None => return Ok(None),
+    };
+    read_thread_metadata(conn, &mut record)?;
+    Ok(Some(record))
+}
+
+fn read_thread_metadata(
+    conn: &Connection,
+    record: &mut super::AgentThreadRecord,
+) -> anyhow::Result<()> {
+    let (parent, delegation, stop_cause): (Option<String>, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT parent_thread_id, delegation_id, stop_cause FROM threads WHERE thread_id = ?1",
+            [record.thread.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .with_context(|| format!("read delegation metadata of thread {}", record.thread))?;
+    record.parent = parent
+        .as_deref()
+        .map(str::parse::<ThreadId>)
+        .transpose()
+        .with_context(|| format!("decode the parent of thread {}", record.thread))?;
+    record.delegation = delegation
+        .as_deref()
+        .map(str::parse::<DelegationId>)
+        .transpose()
+        .with_context(|| format!("decode the delegation of thread {}", record.thread))?;
+    record.stop_cause = stop_cause
+        .map(|cause| {
+            serde_json::from_value::<StopCause>(serde_json::Value::String(cause.clone()))
+                .with_context(|| format!("decode stop cause `{cause}` of thread {}", record.thread))
+        })
+        .transpose()?;
+    Ok(())
 }
 
 /// The log head and the projector cursor of one thread.

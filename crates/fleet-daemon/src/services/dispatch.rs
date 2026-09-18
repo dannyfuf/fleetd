@@ -654,8 +654,85 @@ impl Services {
                 version: Self::version(),
                 protocol: fleet_proto::PROTOCOL_VERSION,
             }),
+            RequestBody::DelegationRun {
+                caller,
+                provider,
+                brief,
+                expectation,
+                worktree,
+                mode,
+                model,
+                title,
+                eager,
+            } => {
+                let request = agents::delegation::RunRequest {
+                    caller,
+                    provider,
+                    brief,
+                    expectation,
+                    worktree,
+                    mode,
+                    model,
+                    title,
+                    eager,
+                };
+                let answer = self.delegation_service()?.run(request).await;
+                self.agent_response(answer)
+            }
+            RequestBody::DelegationComplete {
+                delegation,
+                child,
+                token,
+                result,
+                blocked,
+            } => {
+                let request = agents::delegation::CompleteRequest {
+                    delegation,
+                    child,
+                    token,
+                    result,
+                    blocked,
+                };
+                let answer = self.delegation_service()?.complete(request).await;
+                self.agent_response(answer)
+            }
+            RequestBody::DelegationList { caller } => {
+                let answer = self.delegation_service()?.list(caller).await;
+                self.agent_response(answer)
+            }
+            RequestBody::DelegationGet { delegation } => {
+                let answer = self.delegation_service()?.get(delegation).await;
+                self.agent_response(answer)
+            }
+            RequestBody::DelegationCancel { delegation } => {
+                let answer = self.delegation_service()?.cancel(delegation).await;
+                self.agent_response(answer)
+            }
+            RequestBody::DelegationWait {
+                delegation,
+                timeout_ms,
+            } => {
+                let answer = self
+                    .delegation_service()?
+                    .wait(delegation, timeout_ms)
+                    .await;
+                self.agent_response(answer)
+            }
             RequestBody::DaemonShutdown { .. } => Ok(ResponseBody::ShuttingDown),
         }
+    }
+
+    /// The delegation service, or the one reason there is none.
+    ///
+    /// Composition builds it only when the agent database opened, and the manager already refuses
+    /// every agent request with that reason: this says the same thing for the six delegation
+    /// verbs rather than letting them look like verbs this daemon does not know.
+    fn delegation_service(&self) -> DaemonResult<&agents::delegation::DelegationService> {
+        self.delegations.as_ref().ok_or_else(|| {
+            DaemonError::Unsupported(
+                "the native-agent database is unavailable, so delegation is refused".to_owned(),
+            )
+        })
     }
 
     pub(crate) fn agent_response(

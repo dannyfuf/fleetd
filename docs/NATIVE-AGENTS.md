@@ -58,6 +58,8 @@ The canvas fixes these decisions; do not relitigate them in code.
   closed and the strip is what forgets it. No thread-list sidebar, no inspector, no detached diff
   pane. Wide windows leave the right side empty on purpose; the content measure is 760 px with a
   16 px inset.
+  A child thread is in the strip only when attached; detaching it changes this window's tab set,
+  not the daemon-owned thread or its durable delegation.
 - **The pane is a transcript above a docked composer.** The transcript is bottom-anchored. The
   composer is a multi-line input (`❯` glyph, placeholder `Message claude… (@ file · / command ·
   $ skill)`), Enter sends, Shift+Enter inserts a newline, no send button, and a 22 px metadata row:
@@ -272,6 +274,10 @@ work:     open_items, background_tasks (subagents), retrying
 view:     last_seen_seq            // per installation, persisted daemon-side
 ```
 
+A stopped thread also keeps `stop_cause: User | ProviderExit` on its durable record. Session
+state alone says only that the process is stopped; the cause lets recovery and delegation
+delivery distinguish an intentional Stop from a provider crash.
+
 The client library creates one UUID at `FleetHome::client_id_path()` on first use and sends it as
 `HelloClient.client_id`. Every Fleet window using that home shares the cursor; another installation
 has another UUID and cannot clear its mark. A newer in-process cursor remains an immediate local
@@ -309,7 +315,8 @@ Transition rules, each closing a real race:
 2. **Only the harness's authoritative primitive settles a turn** (§4.4). Never silence, never a
    stream closing, never process liveness, never a status hint.
 3. Before `TurnSettled` is applied, every open item in that turn is closed so the transcript never
-   shows a spinner on a finished turn.
+   shows a spinner on a finished turn, except a live background item: a subagent can outlive the
+   turn that launched it and remains live in the projection until its own terminal event.
 4. Gates are independent of turns. A gate closes only on `GateResolved` or `GateWithdrawn`.
 5. Stream or process loss is `SessionExited { expected: false }` plus `RuntimeError`, which makes
    the turn `Failed`. Never inferred success. Restart recovery is the explicit exception: it
@@ -967,6 +974,10 @@ prompt, then
 options are deliberately unnamed, because §6.3's options are answered by number and a name would
 imply a stable identity they do not have.
 
+After projecting an event, `project_event` also runs the delegation transition when that thread
+is a delegation child or caller; a gate opening, resolving or withdrawing therefore moves both
+the ordinary thread projection and the delegation record in the same writer transaction (§15).
+
 ## 7. Controls
 
 ### 7.1 The model of a control
@@ -1121,6 +1132,17 @@ for reads while the log keeps every delta for replay), `gates`, `checkpoints`, `
 `AgentMarkSeen`), `agent_events_quarantine`, and `fleet_migrations`. No foreign keys — deletes are explicit
 multi-table statements in the projector, which is what you want when you also have to delete
 files.
+
+Migration 3, `delegations`, adds two tables and three nullable columns to that schema.
+`delegations` is the durable caller-to-child record: identity and token hash; caller thread, turn
+and item; unique child thread; provider, depth, brief, expectation and eager policy; lifecycle,
+result and delivery state; nudge/recovery counters; headline; and creation/finish timestamps.
+`delegation_outbox` is the durable work queue for `deliver`, `nudge`, `settle`, `recover`,
+`cancel_children` and `mirror`, with a partial index over rows whose `done` timestamp is null.
+`threads.parent_thread_id`, `threads.delegation_id` and `threads.stop_cause` preserve the child
+relationship and distinguish a user Stop from a provider exit. The delegation record is not
+rebuilt from the transcript log: rebuild and quarantine leave both delegation tables alone, while
+the service derives and advances only the lifecycle status columns from thread events.
 
 Three columns exist to keep the denormalized `attention` byte-identical to what
 `ThreadProjection::attention` derives, rather than approximately equal to it: `threads.retrying_json`
@@ -1431,6 +1453,31 @@ forwarded, because the sign-in Codex starts is a loopback callback on the owner 
 browser opened here would come back to the wrong machine. `AgentSessionView` gains `account`,
 defaulted and omitted when absent, so a windowed open paints the chip on a cold thread.
 
+The delegation wire family is **defined in phase 2 and served from phase 3**. It is gated by
+`agent.delegation`; phase 2 defines the constant but deliberately does not add it to
+`AGENT_CAPABILITIES`, so a client must not send these requests until a daemon advertises it.
+Requests are internally tagged by `type`; their wire names are `delegation_run`,
+`delegation_complete`, `delegation_list`, `delegation_get`, `delegation_cancel` and
+`delegation_wait`, and field names are exactly the snake-case names below (`timeout_ms`, not
+`timeoutMs`). Every `None` field, and every false boolean, is omitted from JSON:
+
+```text
+DelegationRun { caller, provider, brief, expectation,
+    worktree?, mode?, model?, title?, eager=false }
+DelegationComplete { delegation, child, token, result, blocked=false }
+DelegationList { caller? }
+DelegationGet { delegation }
+DelegationCancel { delegation }
+DelegationWait { delegation, timeout_ms }
+```
+
+`DelegationRun` answers `DelegationStarted { delegation, warning? }`.
+`DelegationList` answers `Delegations(Vec<Delegation>)`; complete, get, cancel and wait each answer
+`Delegation(Delegation)`, with wait returning either the terminal record or the current record at
+its deadline. `Event::DelegationChanged(Delegation)` belongs to the `AgentSummary` subscription
+family and is emitted only to peers that advertised `agent.delegation`. Run uses the harness-start
+transport deadline; wait adds 15 seconds of transport slack to its `timeout_ms` service deadline.
+
 Federation adds no agent-specific wire variant. Byte-exact goldens are added for **all** agent
 requests, responses and events — `rust-ipc-protocol` Rule 9, and the current code has zero of
 them. `request_timeout()` decisions are made per agent request; today they all default to 10 s
@@ -1447,8 +1494,10 @@ The CLI drives the same requests: `fleet agent list|new|send|respond|interrupt|s
 | `MultilineInput` | Wrapping, IME, paste, history, Enter/Shift+Enter, `@` `/` `$` triggers. Reports triggers rather than consuming the keys, so all three stay typable and a picker filters on `active_trigger().query`. History recalls at the *visual* buffer edge. |
 | `Markdown` | Parses a *prefix* safely: every decided block stays a block, at the same index, as the stream grows. A table's header is the one two-line opener and stays the last paragraph until its delimiter arrives. `MarkdownDocument::append` reparses only that open tail and reuses its highlight cache. A partial fence is not highlighted and never reaches the cache. Prose is one wrapping `StyledText` per block; tables wrap equal-width cells; fenced code scrolls horizontally without capturing a vertical wheel. Images remain literal in v1. |
 | `ToolRow` | The 30 px row: state glyph, kind column, summary, result, optional nested children region. Five states plus `Severe`. The click target is the 30 px line only, so clicking inside an expanded body does not fold the row, and the expand chevron is `invisible` rather than absent when a row cannot expand. |
+| `DelegationRow` | Two lines: `↳`, provider glyph, title, the seven-state kit status word and its one mark, then the optional headline; elapsed time and the attach hint trail. It takes no domain type, is never grouped and stays exposed while live. |
+| `DelegationResultCard` | Header `↳ <provider> finished · <word> · <elapsed> · <n> files` plus a Markdown body, collapsed to eight lines with the ordinary fold affordance and attach hint. |
 | `DecisionDock` | The docked drawer: approval / question variants, amber left bar, keycap actions, `1/N` counter, owns key routing while open. Attaches to the composer by overlapping it and masking the shared border so the two read as one panel. |
-| `MetadataRow` | A measured, ordered list of collapsible blocks; collapses from the right into an overflow menu. The hidden count is memoised **per width**, never recomputed per frame. |
+| `MetadataRow` | A measured, ordered list of collapsible blocks; collapses from the right into an overflow menu. The hidden count is memoised **per width**, never recomputed per frame. A `MetadataSegment` may carry an opaque target: it renders in link tone with a focus ring and activates through click or `Enter`, which is how a child's pinned caller segment navigates without giving the kit a thread id. |
 | `DiffView` | Lives in `fleet_lazygit::diff_view`, not the kit — it takes unified-diff text and keeps the ADR 0005 row stack. |
 | `KeyHint` | Reused for every visible shortcut. |
 
@@ -1474,7 +1523,12 @@ authoritative.
 | Plan | `y` implement · `n` refine · `⏎` expand |
 | Scroll | `j`/`k` move focus · `ctrl-d`/`ctrl-u` · `gg`/`G` · `q`/`i`/`esc` leave |
 | Row focus | `⏎` expand · `u` revert · `o` open in editor · `y` copy · `d` diff |
-| Every sub-mode | the Workspace session rows: `^s s` hub · `^s S` sleep and hub · `^s h`/`p`, `^s l`/`n` previous/next tab · `^s 1`–`9`, `^s ⇥`, `^s w` select and MRU · `^s W` session switcher · `^s c` new terminal · `^s y` copy the worktree path · `^s z` zoom · `^s v`/`V`/`N`/`P` watch pane · `^s !` sticky error · `^s J` jobs · `^s ?` help · `^s esc` cancel |
+| Every sub-mode | the Workspace session rows: `^s s` hub · `^s S` sleep and hub · `^s h`/`p`, `^s l`/`n` previous/next tab · `^s 1`–`9`, `^s ⇥`, `^s w` select and MRU · `^s W` session switcher · `^s u` select the caller, attaching first · `^s d` open the `AGENTS` picker · `^s c` new terminal · `^s y` copy the worktree path · `^s z` zoom · `^s v`/`V`/`N`/`P` watch pane · `^s !` sticky error · `^s J` jobs · `^s ?` help · `^s esc` cancel |
+
+On a focused delegation row, `⏎` attaches and selects the child and `x` cancels the delegation.
+On a focused result card, `⏎` expands or collapses the body without attaching the child; `y`
+copies the delegation id from either row. `^s x` closes a caller tab but only detaches a child,
+and `^s u` returns from a child to its caller with the caller's composer focused.
 
 **A thread tab repeats the Workspace session table, minus its PTY rows.** The thread is the
 Workspace's selected tab, so `Agent > …` *replaces* `Workspace > …` rather than covering it and
@@ -1515,15 +1569,17 @@ this build does not do**, named here rather than softened in the section that sp
 | --- | --- | --- |
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle` | **done**; `providers/opencode/**` was deleted with it. `ItemKind::UserMessage` later gained `steered` and `UserInput` gained `item`, both additive and both with a producer |
 | 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Owed: `item_attachments` has no writer because attachments are not built |
-| 3 | **Harnesses.** The `Harness` trait and probe; Claude stream-json; Codex app-server; scripted fixtures | **done** against Claude 2.1.275 and Codex 0.154.0. Claude discovers `initialize.models` (with `list_models` and a static fallback), publishes per-model effort ladders, and restarts with resume for every model/effort/mode change. Codex discovers every `model/list` page, sends launch effort through `config.model_reasoning_effort`, and updates effort plus permissions in place. Both adapters publish their supported mode lists. **Owed**: the per-thread raw NDJSON log, Codex cold rehydration from its own store, and per-instance homes (multi-account is out of scope per §14). |
-| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Eight `agent.*` capabilities are advertised and served — `agent.account` is the newest, gating `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. Protocol 8 is the later exact-version boundary for defaulted agent creates and the expanded permission enum. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
+| 3 | **Harnesses.** The `Harness` trait and probe; Claude stream-json; Codex app-server; scripted fixtures | **done** against Claude 2.1.275 and Codex 0.154.0. Claude discovers `initialize.models` (with `list_models` and a static fallback), publishes per-model effort ladders, and restarts with resume for every model/effort/mode change. Codex discovers every `model/list` page, sends launch effort through `config.model_reasoning_effort`, and updates effort plus permissions in place. Both adapters publish their supported mode lists. The manager reads the adapter's `Submitted::JoinedActive { turn }` versus `Submitted::QueuedNew { turn }` answer, so a steer is distinguishable from a queued turn. **Owed**: the per-thread raw NDJSON log, Codex cold rehydration from its own store, and per-instance homes (multi-account is out of scope per §14). |
+| 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Nine `agent.*` capabilities are advertised and served — `agent.delegation` is the newest, gating the six delegation requests and `DelegationChanged`; `agent.account` gates `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` added `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write additively in protocol 7; anonymous peers retain validate-only compatibility. Protocol 8 is the later exact-version boundary for defaulted agent creates and the expanded permission enum. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
 | 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer. Deferred scroll refresh no longer borrows list state from inside its own callback; the two-turn `scroll-wheel.scenario` exercises wheel input up and back at a 600-pixel viewport |
 | 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
 | 8 | **Checkpoints and revert.** Fleet-owned git refs, `AgentRevert`, `[u]` | **done**: `services/checkpoints/` captures a turn or a file scope into `refs/fleet/checkpoints/`, reverts a worktree from one without touching `HEAD`, the index or the conversation, and garbage collects per thread plus an hourly orphan sweep. `AgentSessionManager` holds the service and takes both captures — `capture_turn` in `send`, for a turn that is actually starting rather than a steer, and `capture_files` on the `ItemStarted` of an edit-shaped tool. A capture failure logs and the turn proceeds, always (§5). The app draws `[u] revert turn` from `AgentCheckpoints` and sends `AgentRevert`. **Owed**: `[u] revert this edit` on a tool row. A file-scope checkpoint names the *turn* it was taken in and not the item, so a tool row has nothing to key on; and the capture is best-effort by construction, because neither harness waits for Fleet before running an auto-approved tool — the turn-scope checkpoint is the guarantee, the file-scope one is the finer-grained revert when the race goes Fleet's way, which it always does for a gated edit |
+| 9 | **Delegations.** Durable caller/child model, transcript origin, storage migration, capability-gated wire family, transcript rows, attach/detach navigation, `AGENTS` picker and restart recovery | **done**. A child starts hidden, attaches from its durable row or `^s d`, detaches without stopping, bubbles attention to its caller, and delivers one result card. Startup resumes one provider exit, preserves exact-once delivery, repairs deleted callers, and cancellation walks descendants first |
 
 The whole Workspace session table — selection and MRU (`^s 1`–`9`, `^s Tab`, `^s w`), `^s s`,
-`^s S`, `^s h`/`p`/`l`/`n`, `^s W`, `^s c`, `^s y`, `^s z`, `^s v`/`V`/`N`/`P`, `^s !`, `^s J`,
+`^s S`, `^s h`/`p`/`l`/`n`, `^s W`, `^s u`, `^s d`, `^s c`, `^s y`, `^s z`,
+`^s v`/`V`/`N`/`P`, `^s !`, `^s J`,
 `^s ?` — is bound inside every agent-tab sub-mode, minus the four PTY-only rows, and an unbound
 second key is swallowed with a toast rather than typed into the composer (§12). The
 fixture-driven `scenarios/agents/` corpus is the GUI smoke pass for the agent tab.
@@ -1549,9 +1605,10 @@ inside the adapter rather than becoming transcript identity.
 ## 14. Risks and open questions
 
 - **Protocol drift, both harnesses.** Neither wire is a documented public contract, and Codex
-  demonstrably adds enum values without a version bump. Mitigation is §4.5's tolerant decoding, the
-  capability gates, per-version fixtures, the terminal fallback, and a per-thread raw NDJSON log
-  behind a flag from day one — every nuance in §4 was discovered by reading one.
+  demonstrably adds enum values without a version bump. Current mitigation is §4.5's tolerant
+  decoding, the capability gates, per-version fixtures and the terminal fallback. The per-thread
+  raw NDJSON log remains deferred in `TODO.md` §7 — every nuance in §4 was discovered by reading
+  one, which is why that missing diagnostic matters.
 - **Claude in-session control requests are unproven.** t3code gets `setModel`/`setPermissionMode`
   from the SDK; the corresponding `control_request` subtypes are not proven by any capture Fleet
   holds. Shipping a guess means a silently-ignored control, so v1 treats every such change as
@@ -1566,9 +1623,281 @@ inside the adapter rather than becoming transcript identity.
 - **Markdown scope.** A focused in-house renderer was chosen over Zed's `markdown` crate to
   respect ADR 0003 and keep the dependency graph small (ADR 0010). GFM pipe tables are in scope;
   images and indented code remain literal source text.
+- **Per-edit revert is deferred.** Turn checkpoints are built, but a file-scope checkpoint does
+  not yet carry the `ItemId` a tool row needs to offer `u` truthfully (`TODO.md` §4).
+- **Attachments are deferred.** The wire can describe them, but no composer, store writer or
+  per-thread attachment directory produces one, so Fleet does not grant Claude `--add-dir`
+  (`TODO.md` §5).
+- **A cold window still replays once.** Windowed responses are bounded, but their content comes
+  from the reducer projection rather than the planned SQL-native window read (`TODO.md` §6).
 - **Multi-account shadow homes** (t3code's symlink overlay) are out of scope. If Fleet ever wants
   two Codex accounts sharing thread continuity, the non-obvious part is that the continuation key
   must ignore the shadow home. **Single-account sign-in and sign-out are in scope and built**
   (§4.2, §7.1): `/login` and `/logout` drive the one account of the `CODEX_HOME` the thread runs
-  under, which is a different thing from running two accounts side by side.
+  under, which is a different thing from running two accounts side by side. Per-instance harness
+  homes are correspondingly deferred even though `HarnessConfig.home` is plumbed (`TODO.md` §8).
+- **An MCP wrapper is deferred.** The CLI remains the one delegation contract; a later MCP server
+  may wrap its six verbs without introducing a second state machine (`TODO.md` §9).
+- **Terminal caller discovery is deferred.** `fleet subagent run --caller <thread>` works, but a
+  terminal user must discover and copy that id themselves (`TODO.md` §10).
+- **Remote-host delegations are deferred.** A mirrored caller is refused rather than creating a
+  local child whose durable record would be split from its authoritative transcript (`TODO.md`
+  §11).
+- **Structured delegation results are deferred.** `--json-result` validates its input, but the
+  stored and delivered contract remains bounded text (`TODO.md` §12).
+- **Caller-authorized gate answers through the CLI are deferred.** The first CLI controls the
+  delegation lifecycle; it does not expose a general child-thread control surface (`TODO.md`
+  §13).
+- **A Jobs-screen delegation projection is deferred.** Delegations remain visible in their caller
+  transcript and keep their own lifecycle; a later Jobs view may be read-only (`TODO.md` §14).
 - **Human PR review is not an agent state.** It stays in Hub/Pull Requests.
+
+## 15. Delegations
+
+A delegation is **two durable things**, never a special harness mode. The child is an ordinary
+native-agent thread owned by `AgentSessionManager`, with its caller in `parent` and its delegation
+id on the thread record. Beside it is a `Delegation` record: why the child exists, which caller
+turn and transcript item launched it, where its answer must go, its lifecycle, result and delivery
+state. The thread owns conversation and provider lifecycle; the record owns the caller/child
+contract. Rebuilding a thread never deletes or recreates that record.
+
+`fleet subagent run` is accepted only during a running caller turn. It creates the child with
+`FLEET_DELEGATION=<id>` and `FLEET_DELEGATION_TOKEN=<token>`, inserts the delegation row, appends
+an `ItemKind::Delegation` under that turn, then sends the first message. The default worktree is
+the caller's. An omitted mode resolves through the configured default for the selected harness
+(which is `full_access` when unset); `--mode` accepts `ask`, `accept-edits`, `plan`, `auto`,
+`dont-ask`, and `full-access`. The default child title is
+`↳ <provider> — <first line of the brief, cut at 48 characters>`. A caller on a remote mirror is
+refused: phase 3 runs children only on the daemon that owns the caller.
+
+### 15.1 State and completion
+
+The lifecycle is:
+
+```text
+Starting --SessionConfigured--> Running
+any live state --GateOpened---> Blocked --GateResolved/GateWithdrawn--> Running
+completed + reported + no background work ----------------------------> Succeeded
+completed + reported + background work --> Settling --clear/deadline--> Succeeded
+completed + no report + nudge remaining -> Settling + Nudge
+Starting | Running | Blocked | Settling --terminal ending------------->
+    Succeeded | Incomplete | Failed | Cancelled
+```
+
+An already-terminal delegation ignores every later child event. `headline` may change on a child
+tool starting, a terminal item update/completion, or turn settlement; streaming `ContentDelta`
+never writes it.
+
+"Done" has three independent parts, and their arrival order is not significant:
+
+1. The child reports a result through `fleet subagent complete` with the right delegation id,
+   child thread and bearer token.
+2. Its turn settles `Completed` with no open question, plan or permission gate.
+3. Its projected background-task set is empty. If a reported child settles while background work
+   remains, it stays `Settling` until that set clears or `created + 30 seconds` has passed, then
+   succeeds even if that work never emits its terminal event.
+
+A report may beat settlement or settlement may beat the report. An identical second report is an
+idempotent success; a different second report is refused, as are a wrong token, a wrong child and
+any report against a terminal delegation. `--blocked` stores the report, sets `Blocked` with
+`status_payload = "reported blocked"`, and becomes `Failed` when the turn settles.
+
+A child whose completed turn has no reported result is nudged, at most twice. Each later completed
+turn re-evaluates the same rule. After the second nudge is exhausted, the next completed turn ends
+`Incomplete`, using the first 4 KiB of the latest assistant message as a
+`LastAssistantText` result. Every settlement refreshes that fallback unless a `Reported` result
+already exists; a reported result always wins.
+
+| Child ending | Delegation ending | Result and follow-up |
+| --- | --- | --- |
+| `TurnSettled(Completed)`, reported, no background work | `Succeeded` | deliver the reported result |
+| `TurnSettled(Completed)`, reported, background work live | `Settling`, then `Succeeded` | wait for background work or the 30 s grace, then deliver |
+| `TurnSettled(Completed)`, no report, nudges remain | `Settling` | send the nudge and continue |
+| `TurnSettled(Completed)`, no report, nudges exhausted | `Incomplete` | capture the latest assistant text and deliver |
+| `TurnSettled(Completed)` after `--blocked` | `Failed` | deliver the blocked report |
+| `TurnSettled(Error | MaxTurns | BudgetExhausted | Denied | Other)` | `Failed` | retain the outcome and latest assistant text, then deliver |
+| `TurnSettled(Interrupted)` | `Cancelled` | deliver and cancel live descendants depth-first |
+| `TurnAborted(User | SessionStopped | Timeout | Superseded | Other)` | `Cancelled` | deliver and queue cancellation of live descendants |
+| first `TurnAborted(ProviderExited)` | keep `Running` or `Blocked` | set `recoveries = 1`, enqueue `Recover`, resume with the recovery nudge |
+| later `TurnAborted(ProviderExited)` | `Failed` | payload `provider exited twice`, then deliver |
+| fatal `RuntimeError` or unexpected `SessionExited` | `Failed` | deliver |
+| expected `SessionExited` while live | `Cancelled` | deliver and cancel live descendants depth-first |
+
+`fleet subagent cancel` refuses an already-terminal record, cancels every live descendant
+depth-first, then interrupts and stops the child. Each resulting `TurnAborted(SessionStopped)`
+takes the ordinary `Cancelled` delivery path. A Stop issued through any other surface enqueues
+the same descendant propagation before the child is considered finished.
+
+### 15.2 Delivery and exactly once
+
+Every follow-up action caused by a state change (`Mirror`, `Nudge`, `Settle`, `Deliver`, `Recover`
+and `CancelChildren`) enters the delegation outbox in the same SQLite transaction as
+the child or caller event that caused it. The worker drains once before serving, on every wake,
+and every 60 seconds. It handles `CancelChildren` rows first, in id order, so a deferred delivery
+cannot starve cancellation; those propagation rows are exempt from the per-caller throttle. It
+then handles every other row in id order, at most one per caller per pass. Two children finishing
+together therefore become two caller turns rather than one combined turn. A row stays open until
+its action actually happens, so a daemon restart or transient error costs a retry, not a lost
+result.
+
+Delivery first terminally patches the caller's delegation transcript item, completing it as
+`Completed` for `Succeeded` and `Failed` for every other terminal status. It then chooses by the
+caller's durable state:
+
+| Caller state | Delivery rule |
+| --- | --- |
+| `Ready`, idle, no open gate | start a new turn with a user message whose origin is `Delegation { id }` |
+| running, `eager == false` | leave `Deliver` open until the turn settles |
+| running, `eager == true` | send now; the harness steers the active turn |
+| stopped by `ProviderExit`, with a resume cursor | send, allowing the manager to resume the caller |
+| stopped by the user | leave `Deliver` open until a later `SessionConfigured` |
+| blocked on a gate | leave `Deliver` open until the gate resolves or withdraws |
+| starting, or parked in provider `Waiting` | leave `Deliver` open until the session can accept input |
+| stopped with no resume cursor, or record missing | set `Undeliverable { reason }` and close the row |
+
+Both shipped adapters mint a cursor at start, so the cursorless stopped-caller case is a legacy-record path.
+
+A send that loses a race with a newly-running turn returns `Conflict` and leaves the row open; any
+other send failure is logged and retried. The worker deliberately does **not** mark `Deliver` done
+after calling `send`. When the caller's `ItemStarted(UserMessage { origin: Delegation { id } })`
+is committed, `project_event` sets `delivery = Delivered { seq, turn }` and marks that exact
+outbox row done in the same transaction. This caller-item rule is the exactly-once boundary: the
+message's durable identity, not a successful function return, proves delivery.
+
+### 15.3 Limits and bearer token
+
+- Delegation depth is at most 3; a caller at depth 3 cannot spawn another child.
+- One caller may have at most 4 live children, and one daemon at most 8 live delegations.
+- A child receives at most 2 missing-result nudges.
+- `SETTLE_GRACE` is 30 seconds; the retry tick is 60 seconds.
+- Results are capped at `ITEM_BODY_MAX_CHUNK_BYTES` (256 KiB). Truncation sets `elided` and is
+  named in both CLI stderr and the delivered message.
+- `fleet subagent wait` defaults to 540 seconds and refuses a larger timeout.
+
+The token is two concatenated `Uuid::new_v4().simple()` values: 64 lowercase hexadecimal
+characters, or 32 random bytes. Only its SHA-256 hex digest is stored. `complete` hashes the
+presented token and compares the two digests with a constant-time XOR fold. The plaintext exists
+only in the child's `FLEET_DELEGATION_TOKEN`; the delegation id is separately available as
+`FLEET_DELEGATION`, and `FLEET_SESSION` identifies the child thread.
+
+### 15.4 Exact child and caller copy
+
+The child's first message is its brief, one blank line, then this footer with `{id}` and
+`{expectation}` substituted:
+
+```text
+--- Fleet delegation {id} ---
+You are running as a subagent. No human is watching this session.
+The caller expects: {expectation}
+When the work is fully finished and verified, report it with exactly one command:
+  fleet subagent complete --result-file <path-to-your-report.md>
+Write the report first, then run the command. Do not run it before you are done.
+If you are blocked and cannot finish, run:
+  fleet subagent complete --blocked --result-file <path-with-what-you-need>
+Do not ask the user questions; state assumptions in the report instead.
+```
+
+The missing-result nudge is exactly:
+
+```text
+You have not reported a result. If the work is done, run `fleet subagent complete --result-file <path>`. If not, continue.
+```
+
+The recovery nudge is exactly:
+
+```text
+The session was restarted. Continue, and report with `fleet subagent complete` when done.
+```
+
+When the child shares the caller's worktree, `run` returns this warning:
+
+```text
+the child edits the caller's worktree; end your turn before it works, or pass --worktree
+```
+
+The delivered message is:
+
+```text
+[fleet subagent <id> finished: succeeded]
+provider: codex, thread: <child>, duration: 14m 02s, files changed: 6
+
+<text>
+```
+
+The status word is `succeeded`, `incomplete`, `failed` or `cancelled`. An elided result adds one
+blank line and `(report elided at <n> bytes)`.
+
+### 15.5 UI: rows, attachment and attention
+
+The caller transcript projects `ItemKind::Delegation` as a `DelegationRow` joined to the durable
+record. It shows the provider, child title, status word and mark, latest headline, elapsed time and
+`attach`; a live row never folds into a completed-work group. Each delivered
+`UserMessage { origin: Delegation { id } }` produces exactly one `DelegationResultCard`, not a
+user bubble: its header names the provider, terminal word, elapsed time and changed-file count,
+and its Markdown
+body collapses to eight lines. Expanding that card does not attach the child.
+
+A new child starts hidden. `Enter` on its delegation row attaches and selects the same
+daemon-owned thread, gives its composer focus, and adds `↳ <provider> — <title>` to the mixed
+strip immediately after its caller and older attached siblings. `Enter` on the delivered result
+card expands it while the child stays hidden. `^s x` on an attached child detaches it without
+stopping it; the caller's durable row remains and can attach it again. The
+child's pinned metadata begins `for [<n>] <provider> — <title>` (`·` replaces the index when the
+caller is hidden), and activating that segment or `^s u` attaches and selects the caller. Its
+composer says `Steering a subagent of [<n>]. It reports to its caller when it finishes.`
+
+Child attention folds into the caller so a hidden child is not silent:
+
+| Child/caller fact | Caller presentation |
+| --- | --- |
+| the caller itself has an open permission, question or plan gate | keep the caller's own `needs you`; its priority remains above every child working contribution |
+| any child has an open permission, question or plan gate | `needs you`; the highest-priority open gate wins and remains while the caller is selected |
+| otherwise a child is working/waiting, or the caller itself is working | `working`; a live child can outrank the caller's failed, finished, unread or idle state, and the family is included once in the context count under the caller |
+| a child is finished, idle or otherwise no longer live | contributes nothing; the caller's own attention remains |
+
+`^s d` opens the palette seeded to its `AGENTS` section. Rows show an attached strip index or `·`,
+the attention mark, the caller or `↳` child title, status and age (or the open gate), and `go` or
+`attach`. The order is current-worktree callers, their children, then their other-worktree
+children with a ` · <worktree>` suffix. `Enter` selects an attached thread, attaches a hidden
+child, reopens a closed caller, or switches worktrees before attaching a remote-worktree child;
+each path focuses the selected composer. Nothing auto-attaches merely because it is blocked.
+Closing a selected caller removes its tab, selects the remaining terminal and returns the
+Workspace to `TERMINAL`; the picker keeps that caller as a `·` / `go` / hidden row until it is
+reopened.
+Because the strip stops at nine tabs, attach what you look at, detach when done, and reach the
+rest through `^s d`.
+
+### 15.6 Restart and recovery
+
+Startup has four ordered boundaries:
+
+1. Before it reads delegation outbox rows, the worker hydrates every live child. Hydration runs
+   the ordinary orphan pass, which records `TurnAborted(ProviderExited)` for a child whose
+   provider disappeared with the daemon.
+2. That committed transition applies the resume-once rule. With `recoveries == 0`, it preserves
+   `Running` or `Blocked`, writes `recoveries = 1` and opens one `Recover` row; a later provider
+   exit ends `Failed` with `status_payload = "provider exited twice"` and opens `Deliver`.
+3. The worker begins its startup outbox drain. As the drain's preflight — and before every later
+   drain as well — it repairs terminal, pending delegations whose caller record was deleted to
+   `Undeliverable { reason: "caller deleted" }`, preserving their result and closing their open
+   delivery row.
+4. It then performs cancellation propagation first and reads the remaining open rows in id order,
+   at most one non-cancellation row per caller in that pass. An open delivery from the previous
+   daemon therefore drains on restart, while the durable caller-message origin remains the
+   exact-once boundary and prevents a duplicate item on later restarts.
+
+`Recover` sends the exact recovery nudge from §15.4 through the child's resume cursor. A child
+without a usable cursor ends `Failed` with that reason and is delivered instead. A successful
+recovery starts one resumed turn, may finish
+`Succeeded`, and retains `recoveries = 1`; the recovery nudge and the caller's delegation-origin
+message each occur exactly once, and a completed drain leaves no open row. A second provider exit
+never gets another nudge: its `provider exited twice` failure survives another restart and is
+delivered exactly once. Resuming once can repeat work the provider performed before its last
+durable event; that is the accepted cost of continuing instead of failing on the first exit.
+
+Cancellation has the same durability. Explicit cancellation walks the bounded delegation tree
+depth-first, so a grandchild reaches `Cancelled` and records its `Deliver` row before its parent;
+both delivery rows remain recorded. A Stop or other cancelling child event writes
+`CancelChildren` beside its own `Deliver`, so a restart cannot lose propagation. A descendant's
+delivery may become `Undeliverable` if its caller is stopped before that caller drains it, but the
+state and result remain on the record.

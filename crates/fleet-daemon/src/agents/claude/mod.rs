@@ -449,12 +449,16 @@ impl Harness for ClaudeHarness {
         };
         // `TurnStarted` reaches the channel *before* the write, or the opening item of a fast
         // turn can overtake it and be rejected for naming a turn nothing has started.
-        let queued = announced.is_none();
+        //
+        // Announcing nothing is exactly the coalesce path: a steer, or a `Fresh` submit the
+        // session folded into the turn already running. Announcing a turn is a prompt accepted
+        // while the CLI was idle, which is its own turn.
+        let joined_active = announced.is_none();
         if let Some(event) = announced {
             transport::emit(&self.events, event, Some("submit"));
         }
         if let Err(error) = writer.write(frame).await {
-            if !queued {
+            if !joined_active {
                 let mut session = self.session.lock().await;
                 session.rollback_turn_start(req.turn);
                 drop(session);
@@ -471,9 +475,13 @@ impl Harness for ClaudeHarness {
             }
             return Err(error);
         }
-        Ok(Submitted {
-            turn: req.turn,
-            queued,
+        // Claude coalesces steers into the running turn, and the settling `result` reports how
+        // many were folded in; a prompt accepted while idle starts its own turn and is recorded
+        // when its `TurnStarted` announcement arrives.
+        Ok(if joined_active {
+            Submitted::JoinedActive { turn: req.turn }
+        } else {
+            Submitted::QueuedNew { turn: req.turn }
         })
     }
 
@@ -782,10 +790,14 @@ pub(crate) fn user_frame(input: &UserInput) -> HarnessResult<Value> {
         blocks.push(json!({"type": "text", "text": text}));
         Value::Array(blocks)
     };
-    Ok(json!({
+    let mut frame = json!({
         "type": "user",
         "session_id": "",
         "parent_tool_use_id": null,
         "message": {"role": "user", "content": content},
-    }))
+    });
+    if let Some(item) = input.item {
+        frame["uuid"] = Value::String(item.to_string());
+    }
+    Ok(frame)
 }

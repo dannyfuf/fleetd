@@ -417,7 +417,7 @@ Mixed-host dismiss, sleep, and kill routing follows the same rule: the router pa
 runs host parts independently, and preserves an outcome for each requested item instead of failing
 the whole request on the first unreachable host.
 
-The version-6 board and native-agent families remain valid in v7, and both `Snapshot.boards` and
+The version-6 board and native-agent families remain valid in v8, and both `Snapshot.boards` and
 `Snapshot.agent_threads` stay `#[serde(default)]`. `PruneWorktrees.ids` also remains defaulted and
 omitted when `None`, preserving its legacy request shape; `None` retains repo/all-worktree
 discovery, `Some(ids)` is the reviewed allowlist, and an empty explicit list deletes nothing. A
@@ -428,7 +428,7 @@ Pong response envelopes likewise have an optional `daemon` object containing `pi
 `bootId` is stable for one fleetd process and changes across starts, including PID reuse. New
 clients retain it while delivering the existing unit `Pong` body to callers; older clients ignore
 the additive envelope member. App reconnect identity probes use this Pong metadata and never load
-a fallback snapshot. IPC v7 otherwise does not include daemon Git-mutation jobs, arbitrary
+a fallback snapshot. IPC v8 otherwise does not include daemon Git-mutation jobs, arbitrary
 terminal-history reads, terminal search/focus requests, cell hyperlinks, or frame effects. Those
 deferred surfaces require a separately negotiated additive contract before clients may send them.
 The public JSON CLI is a separate, unchanged protocol-1 envelope.

@@ -82,6 +82,12 @@ impl Services {
         // and it already holds the `Worktrees` a capture needs to resolve a path
         // (`docs/NATIVE-AGENTS.md` §13 phase 8).
         agents.set_checkpoints(checkpoints.clone());
+        // After the manager, because the delegation service shares the manager's store handle and
+        // drives threads through the manager's own verbs (`docs/NATIVE-AGENTS.md` §15). Installing
+        // the store hooks is part of this: from here on, a committed transition wakes the worker
+        // and publishes `DelegationChanged`.
+        let (delegations, delegation_worker) =
+            agents::delegation::install(&agents, &events, &config, &worktrees).unzip();
         let boards = Arc::new(boards::Boards::new(
             Arc::new(crate::stores::board::BoardStore::new(
                 fleet_home,
@@ -209,6 +215,9 @@ impl Services {
             repos,
             worktrees,
             agents,
+            delegations,
+            agent_request_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            delegation_worker: Arc::new(std::sync::Mutex::new(delegation_worker)),
             checkpoints,
             pool,
             github,
@@ -299,6 +308,56 @@ mod tests {
             .finish();
         let value = tracing::subscriber::with_default(subscriber, work);
         (value, logs.text())
+    }
+
+    /// The delegation service is composed with the daemon, and its worker stops with it.
+    ///
+    /// Both halves matter. The worker owns the receive side of the store's wake channel, so a
+    /// `Services` that built one and never spawned it would enqueue outbox work nothing ever
+    /// performs; and a loop that ignored the shutdown token would hold `fleetd` open past the
+    /// two seconds [`PeriodicTasks::join`] waits and be aborted mid-action every restart.
+    #[tokio::test]
+    async fn the_delegation_worker_is_composed_with_the_daemon_and_stops_with_it() {
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = temp.path();
+        let files = Arc::new(RealFiles::new(
+            home.join("trash"),
+            [home.join("repos"), home.join("worktrees")],
+        ));
+        let services = Services::new(
+            home,
+            Arc::new(ConfigStore::new(home, files.clone())),
+            Arc::new(StateStore::new(home, files.clone(), Arc::new(SystemClock))),
+            Arc::new(JobManager::new(home)),
+            Adapters::system(files),
+        );
+
+        assert!(
+            services.delegations.is_some(),
+            "a daemon whose agent database opened serves the delegation verbs"
+        );
+        let worker = services
+            .delegation_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("composition built the outbox worker");
+        assert!(
+            services
+                .delegation_worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none(),
+            "the worker is taken once, so two tasks cannot share one wake receiver"
+        );
+
+        let shutdown = CancellationToken::new();
+        let running = tokio::spawn(worker.run(shutdown.clone()));
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("the worker stops when the daemon does")
+            .expect("the worker task did not panic");
     }
 
     #[test]

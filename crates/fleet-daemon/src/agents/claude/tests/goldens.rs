@@ -11,6 +11,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
         text: "hello".to_owned(),
         attachments: Vec::new(),
         item: None,
+        origin: Default::default(),
     })
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
@@ -18,6 +19,24 @@ fn the_user_frames_block_order_puts_the_text_last() {
         canonical_text(
             r#"{"message":{"content":"hello","role":"user"},"parent_tool_use_id":null,"session_id":"","type":"user"}"#
         )
+    );
+
+    let item = ItemId::from_uuid(
+        uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555")
+            .unwrap_or_else(|error| panic!("{error}")),
+    );
+    let identified = user_frame(&UserInput {
+        text: "durable delivery".to_owned(),
+        item: Some(item),
+        ..UserInput::default()
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        canonical(&identified),
+        canonical_text(
+            r#"{"message":{"content":"durable delivery","role":"user"},"parent_tool_use_id":null,"session_id":"","type":"user","uuid":"11111111-2222-4333-8444-555555555555"}"#
+        ),
+        "Claude receives the stable item identity as its client UUID"
     );
 
     let with_image = user_frame(&UserInput {
@@ -28,6 +47,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
             source: AttachmentSource::Base64("AAAA".to_owned()),
         }],
         item: None,
+        origin: Default::default(),
     })
     .unwrap_or_else(|error| panic!("{error}"));
     let blocks = with_image
@@ -52,6 +72,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
             source: AttachmentSource::Path("/w/notes.md".into()),
         }],
         item: None,
+        origin: Default::default(),
     })
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
@@ -71,6 +92,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
                 source: AttachmentSource::Base64("AAAA".to_owned()),
             }],
             item: None,
+            origin: Default::default(),
         })
         .is_err()
     );

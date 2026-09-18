@@ -151,6 +151,7 @@ async fn a_turn_streams_items_and_moves_attention_to_finished() {
                 text: "ship it".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -279,6 +280,7 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
                 text: "also update the docs".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -292,7 +294,7 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
         .expect("the steered message is recorded in the running turn");
     assert_eq!(steered.turn, turn);
     assert_eq!(steered.status, ItemStatus::Completed);
-    // The mark comes from the harness's own `Submitted::queued`, not from the projection: §7.2
+    // The mark comes from the harness's own `Submitted::JoinedActive`, not from the projection: §7.2
     // draws a steer with a leading `↳`, and it has to survive the reload that replaces the
     // sending client's optimistic row.
     assert!(
@@ -303,6 +305,83 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
     assert!(matches!(
         harness.script.calls().last(),
         Some(FakeCall::Send(sent, _)) if *sent == turn
+    ));
+}
+
+#[tokio::test]
+async fn queued_submission_while_a_turn_runs_waits_for_its_own_start() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    let active = TurnId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn: active,
+            user_item: ItemId::new(),
+        })
+        .await;
+    harness
+        .settle(thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(active)
+        })
+        .await;
+
+    let queued = TurnId::new();
+    harness
+        .script
+        .answer_submission(Submitted::QueuedNew { turn: queued });
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "queue this separately".to_owned(),
+                attachments: Vec::new(),
+                item: None,
+                origin: Default::default(),
+            },
+        )
+        .await
+        .expect("queue a new turn");
+
+    let projection = harness.projection(thread).await;
+    assert!(
+        !user_messages(&projection).contains(&"queue this separately"),
+        "a queued turn must not be recorded as a steer"
+    );
+
+    harness.script.emit(completed(active)).await;
+    harness
+        .settle(
+            thread,
+            "the active turn to settle",
+            |projection| matches!(projection.turn, TurnState::Settled(turn, _) if turn == active),
+        )
+        .await;
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn: queued,
+            user_item: ItemId::new(),
+        })
+        .await;
+    let projection = harness
+        .settle(thread, "the queued turn to start", |projection| {
+            user_messages(projection).contains(&"queue this separately")
+        })
+        .await;
+    let queued_items = projection
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(&item.kind, ItemKind::UserMessage { text, .. } if text == "queue this separately")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(queued_items.len(), 1);
+    assert_eq!(queued_items[0].turn, queued);
+    assert!(matches!(
+        &queued_items[0].kind,
+        ItemKind::UserMessage { steered: false, .. }
     ));
 }
 
@@ -444,6 +523,7 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -453,6 +533,17 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
         harness.manager.summaries().await[0].session,
         SessionState::Stopped
     );
+    let runtime = harness
+        .manager
+        .hydrated(thread)
+        .expect("the stopped thread remains hydrated");
+    let stop_cause = runtime
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .record
+        .stop_cause;
+    assert_eq!(stop_cause, Some(fleet_core::agents::StopCause::User));
 }
 
 #[tokio::test]
@@ -646,6 +737,7 @@ async fn send_resumes_a_stopped_thread_rather_than_refusing_it() {
                 text: "carry on".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -720,6 +812,7 @@ async fn a_crashed_provider_is_dropped_so_the_next_send_resumes_the_thread() {
                 text: "carry on".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -752,6 +845,7 @@ async fn a_prompt_whose_turn_never_started_does_not_swallow_the_next_one() {
                 text: "one".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -781,6 +875,7 @@ async fn a_prompt_whose_turn_never_started_does_not_swallow_the_next_one() {
                 text: "two".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -854,6 +949,94 @@ async fn stop_settles_the_turn_even_when_the_provider_will_not_stop() {
 }
 
 #[tokio::test]
+async fn stop_without_a_provider_still_records_a_terminal_session() {
+    let harness = Harness::start(full()).await;
+    let thread = harness
+        .create(Some("cursor-empty-slot".to_owned()))
+        .await
+        .thread;
+    harness
+        .script
+        .emit(AgentEvent::SessionStateChanged(SessionState::Ready))
+        .await;
+    harness
+        .settle(thread, "a ready session", |projection| {
+            projection.session == SessionState::Ready
+        })
+        .await;
+    harness.drop_provider(thread).await;
+
+    harness
+        .manager
+        .stop(thread)
+        .await
+        .expect("an empty provider slot still records cancellation");
+
+    let projection = harness
+        .manager
+        .projection(thread)
+        .await
+        .expect("projection");
+    assert_eq!(projection.session, SessionState::Stopped);
+}
+
+#[tokio::test]
+async fn submitted_item_is_reconciled_from_resumed_provider_history() {
+    let harness = Harness::start(full()).await;
+    let thread = harness
+        .create(Some("cursor-history".to_owned()))
+        .await
+        .thread;
+    harness
+        .script
+        .emit(AgentEvent::SessionStateChanged(SessionState::Ready))
+        .await;
+    harness
+        .settle(thread, "a ready session", |projection| {
+            projection.session == SessionState::Ready
+        })
+        .await;
+    let restarted = harness.restart().await;
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    harness.replay_on_next_start(
+        thread,
+        vec![
+            AgentEvent::TurnStarted {
+                turn,
+                user_item: item,
+            },
+            AgentEvent::ItemStarted {
+                turn,
+                item,
+                kind: ItemKind::UserMessage {
+                    text: "durable delivery".to_owned(),
+                    attachments: Vec::new(),
+                    steered: false,
+                    origin: MessageOrigin::Delegation {
+                        id: DelegationId::new(),
+                    },
+                },
+                parent: None,
+            },
+            AgentEvent::ItemCompleted {
+                item,
+                status: ItemStatus::Completed,
+            },
+        ],
+    );
+
+    assert_eq!(
+        restarted
+            .reconcile_provider_history(thread, item)
+            .await
+            .expect("resume and reconcile history"),
+        SubmissionState::Committed
+    );
+    assert_eq!(harness.sent_count_containing("durable delivery"), 0);
+}
+
+#[tokio::test]
 async fn an_unavailable_provider_reports_the_terminal_fallback_hint() {
     let harness = Harness::start(full()).await;
     harness.script.unavailable.store(true, Ordering::SeqCst);
@@ -901,6 +1084,7 @@ async fn the_derived_title_reaches_the_thread_list_and_not_only_the_tab() {
                 text: "rewrite the storage docs".to_owned(),
                 attachments: Vec::new(),
                 steered: false,
+                origin: Default::default(),
             },
             parent: None,
         })
@@ -971,4 +1155,263 @@ async fn a_harness_without_an_account_surface_refuses_both_account_verbs() {
             error.message
         );
     }
+}
+
+/// A child created with an extra environment gets it, and carries its caller on record.
+///
+/// This is the whole delivery mechanism for the delegation secret (`NATIVE-AGENTS.md` §15): both
+/// adapters merge `StartRequest::env` into the child's process environment before `FLEET_SESSION`,
+/// so there is nothing harness-specific to assert beyond "the start was handed these variables".
+#[tokio::test]
+async fn a_delegated_child_starts_with_its_extra_environment_and_its_caller() {
+    let harness = Harness::start(full()).await;
+    let caller = ThreadId::new();
+    let delegation = DelegationId::new();
+    let response = harness
+        .manager
+        .create_with(CreateOptions {
+            parent: Some(caller),
+            delegation: Some(delegation),
+            extra_env: BTreeMap::from([
+                ("FLEET_DELEGATION".to_owned(), delegation.to_string()),
+                ("FLEET_DELEGATION_TOKEN".to_owned(), "0f".repeat(32)),
+            ]),
+            ..CreateOptions::new(
+                harness.worktree.clone(),
+                AgentKind::Claude,
+                Some(PermissionMode::FullAccess),
+            )
+        })
+        .await
+        .expect("create a delegated child");
+    let summary = match response {
+        ResponseBody::AgentThreadCreated(summary) => summary,
+        other => panic!("expected AgentThreadCreated, got {other:?}"),
+    };
+
+    let environment = harness.script.start_env(summary.thread);
+    assert_eq!(
+        environment.get("FLEET_DELEGATION").map(String::as_str),
+        Some(delegation.to_string().as_str())
+    );
+    assert_eq!(
+        environment
+            .get("FLEET_DELEGATION_TOKEN")
+            .map(String::as_str),
+        Some("0f".repeat(32).as_str())
+    );
+    // The caller is on the summary as well as the record: a client groups a child under its
+    // caller from the first frame it ever sees, without joining against the delegation row.
+    assert_eq!(summary.parent, Some(caller));
+    let record = harness
+        .manager
+        .record(summary.thread)
+        .await
+        .expect("the child's record");
+    assert_eq!(record.parent, Some(caller));
+    assert_eq!(record.delegation, Some(delegation));
+    assert_eq!(record.mode, PermissionMode::FullAccess);
+
+    // Control: an ordinary create carries neither, and hands the harness no environment at all.
+    let plain = harness.create(None).await;
+    assert_eq!(plain.parent, None);
+    assert!(harness.script.start_env(plain.thread).is_empty());
+}
+
+/// The delegation row lands in the caller's running turn, and only there.
+#[tokio::test]
+async fn a_delegation_row_is_appended_to_the_running_turn_and_refused_outside_one() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    let delegation = DelegationId::new();
+    let child = ThreadId::new();
+    let row = || ItemKind::Delegation {
+        id: delegation,
+        provider: AgentKind::Codex,
+        child,
+        status: DelegationStatus::Starting,
+    };
+
+    assert_eq!(
+        harness
+            .manager
+            .running_turn(thread)
+            .await
+            .expect("an idle thread answers"),
+        None,
+        "an idle caller has no turn to hang a delegation row on"
+    );
+    let refused_item = ItemId::new();
+    let refused = harness
+        .manager
+        .append_item(thread, TurnId::new(), refused_item, row())
+        .await
+        .expect_err("a turn that is not running cannot take an item");
+    assert_eq!(refused.kind, ErrorKind::Conflict);
+    assert!(
+        refused.message.contains("is not running turn"),
+        "{refused:?}"
+    );
+
+    let turn = TurnId::new();
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn,
+            user_item: ItemId::new(),
+        })
+        .await;
+    harness
+        .settle(thread, "a running turn", |projection| {
+            projection.turn == TurnState::Running(turn)
+        })
+        .await;
+    assert_eq!(
+        harness.manager.running_turn(thread).await.expect("running"),
+        Some(turn)
+    );
+
+    let item = ItemId::new();
+    harness
+        .manager
+        .append_item(thread, turn, item, row())
+        .await
+        .expect("append the delegation row");
+    let projection = harness
+        .manager
+        .projection(thread)
+        .await
+        .expect("projection");
+    let appended = projection
+        .items
+        .iter()
+        .find(|candidate| candidate.id == item)
+        .expect("the delegation row is in the caller's transcript");
+    assert_eq!(appended.turn, turn);
+    assert!(matches!(
+        &appended.kind,
+        ItemKind::Delegation { status, .. } if *status == DelegationStatus::Starting
+    ));
+
+    // The mirror of a terminal delegation: one patch, and the settlement in the same operation.
+    harness
+        .manager
+        .patch_item(
+            thread,
+            item,
+            ItemPatch {
+                payload: Some(ItemPayloadPatch::Delegation {
+                    status: DelegationStatus::Succeeded,
+                }),
+                status: None,
+            },
+            Some(ItemStatus::Completed),
+        )
+        .await
+        .expect("mirror the ending");
+    let projection = harness
+        .manager
+        .projection(thread)
+        .await
+        .expect("projection");
+    let mirrored = projection
+        .items
+        .iter()
+        .find(|candidate| candidate.id == item)
+        .expect("the row survives its patch");
+    assert!(matches!(
+        &mirrored.kind,
+        ItemKind::Delegation { status, .. } if *status == DelegationStatus::Succeeded
+    ));
+    assert_eq!(mirrored.status, ItemStatus::Completed);
+}
+
+/// A delivered result keeps its delegation origin, whichever path recorded it.
+///
+/// The two paths are not interchangeable: an idle caller's prompt is written down only when the
+/// harness announces the turn it opened, while a steer is written down by `send` itself. §15
+/// draws a delivered result as a delegation card rather than as something the user typed, so the
+/// origin has to survive both.
+#[tokio::test]
+async fn a_delivered_message_keeps_its_delegation_origin_on_both_paths() {
+    let harness = Harness::start(full()).await;
+    let thread = harness.create(None).await.thread;
+    let delegation = DelegationId::new();
+    let origin = MessageOrigin::Delegation { id: delegation };
+
+    let announced = TurnId::new();
+    harness
+        .script
+        .answer_submission(Submitted::QueuedNew { turn: announced });
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "[fleet subagent finished: succeeded]".to_owned(),
+                attachments: Vec::new(),
+                item: None,
+                origin: origin.clone(),
+            },
+        )
+        .await
+        .expect("deliver into an idle caller");
+    harness
+        .script
+        .emit(AgentEvent::TurnStarted {
+            turn: announced,
+            user_item: ItemId::new(),
+        })
+        .await;
+    let projection = harness
+        .settle(thread, "the delivered turn to start", |projection| {
+            user_messages(projection).len() == 1
+        })
+        .await;
+    assert_eq!(origins(&projection), vec![origin.clone()]);
+
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "[fleet subagent finished: failed]".to_owned(),
+                attachments: Vec::new(),
+                item: None,
+                origin: origin.clone(),
+            },
+        )
+        .await
+        .expect("steer a second result into the running caller");
+    let projection = harness
+        .manager
+        .projection(thread)
+        .await
+        .expect("projection");
+    assert_eq!(
+        origins(&projection),
+        vec![origin.clone(), origin],
+        "the steer path records the origin too"
+    );
+
+    // Control: an ordinary prompt is still a user message, and serializes without an origin.
+    harness
+        .manager
+        .send(
+            thread,
+            UserInput {
+                text: "and now explain it".to_owned(),
+                attachments: Vec::new(),
+                item: None,
+                origin: MessageOrigin::User,
+            },
+        )
+        .await
+        .expect("steer a user prompt");
+    let projection = harness
+        .manager
+        .projection(thread)
+        .await
+        .expect("projection");
+    assert_eq!(origins(&projection).last(), Some(&MessageOrigin::User));
 }

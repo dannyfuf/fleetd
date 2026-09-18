@@ -30,7 +30,49 @@ pub fn install(
     std::fs::create_dir_all(&data).with_context(|| format!("create {}", data.display()))?;
     install_gh(environment, fixture, &data)?;
     install_acli(environment, &data)?;
+    install_fleet(environment)?;
     install_agents(environment, fixture, &data)
+}
+
+/// Installs the real Fleet binary under its CLI name with the run's private home baked in.
+fn install_fleet(environment: &HarnessEnv) -> anyhow::Result<PathBuf> {
+    let home = crate::agent::shell_word(&environment.fleet_home)?;
+    let app = crate::agent::shell_word(&fleet_app())?;
+    let stop = crate::agent::shell_word(&environment.fleet_cli_stop_path())?;
+    environment.install_fake(
+        "fleet",
+        &format!(
+            "#!/bin/sh\n\
+             if [ -e {stop} ]; then\n\
+               echo 'fleet harness teardown has begun; refusing daemon autostart' >&2\n\
+               exit 75\n\
+             fi\n\
+             FLEET_HOME={home} exec {app} \"$@\"\n"
+        ),
+    )
+}
+
+/// Resolves the same workspace app the scenario runner will start.
+///
+/// Fixture unit tests do not execute this shim and may build without the app binary, so the
+/// final fallback stays as the conventional binary name. End-to-end runs build the workspace or
+/// set `FLEET_APP`, making the baked path absolute before a shell step can invoke it.
+fn fleet_app() -> PathBuf {
+    if let Some(path) = std::env::var_os("FLEET_APP") {
+        return PathBuf::from(path);
+    }
+    let mut directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    for _level in 0..4 {
+        let Some(candidate) = directory else { break };
+        let app = candidate.join("fleet");
+        if app.is_file() {
+            return app;
+        }
+        directory = candidate.parent().map(Path::to_path_buf);
+    }
+    PathBuf::from("fleet")
 }
 
 /// Writes the pull-request and repository answers, then the `gh` that reads them.
@@ -104,6 +146,20 @@ fn install_agents(
     fixture: &Fixture,
     data: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
+    for (name, document) in [
+        (
+            "subagent-child.json",
+            include_str!("../../transcripts/subagent-child.json"),
+        ),
+        (
+            "subagent-child-blocked.json",
+            include_str!("../../transcripts/subagent-child-blocked.json"),
+        ),
+    ] {
+        let transcript: serde_json::Value = serde_json::from_str(document)
+            .with_context(|| format!("parse embedded transcript {name}"))?;
+        write_json(&data.join(name), &transcript)?;
+    }
     let mut written = Vec::new();
     for agent in &fixture.agents {
         let transcript = data.join(format!("{}-transcript.json", agent.provider.flag()));

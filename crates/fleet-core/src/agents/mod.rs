@@ -1,5 +1,6 @@
 //! Provider-neutral contracts for native coding-agent threads.
 
+mod delegation;
 mod event;
 mod gates;
 mod ids;
@@ -10,6 +11,7 @@ mod provider;
 mod recognition;
 mod state;
 
+pub use delegation::*;
 pub use event::*;
 pub use gates::*;
 pub use ids::*;

@@ -15,6 +15,7 @@ assert mode == Dialog && dialog.name == Context && key_contexts[0] == Dialog && 
 type Beta
 key enter
 await overlay absent 20000
+await idle 20000
 
 # Creating a context does not switch to it: context 1 is still the fixture's.
 assert lists.repos.rows[1].label == "acme/api"

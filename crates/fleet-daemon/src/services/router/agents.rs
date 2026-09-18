@@ -446,6 +446,7 @@ pub fn register_thread_events(
         Event::AgentResync { .. }
         | Event::AgentSynchronized { .. }
         | Event::AgentWindow { .. }
+        | Event::DelegationChanged(_)
         | Event::BoardChanged { .. }
         | Event::WatchStarted(_)
         | Event::WatchOutput { .. }

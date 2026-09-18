@@ -73,13 +73,14 @@ async fn a_scripted_peer_drives_init_a_turn_and_its_result() {
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
             intent: SubmitIntent::Fresh,
         })
         .await
         .unwrap_or_else(|error| panic!("submit: {error}"));
-    assert_eq!(submitted.turn, turn);
-    assert!(!submitted.queued);
+    assert_eq!(submitted.turn(), turn);
+    assert!(!submitted.joined_active());
 
     let mut seen = Vec::new();
     let settled = tokio::time::timeout(Duration::from_secs(10), async {

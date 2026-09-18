@@ -72,6 +72,10 @@ uuid_id!(
     ThreadId,
     "A persistent native-agent conversation identifier."
 );
+uuid_id!(
+    DelegationId,
+    "A durable native-agent delegation identifier."
+);
 uuid_id!(TurnId, "A user turn within an agent thread.");
 uuid_id!(ItemId, "A projected transcript item identifier.");
 uuid_id!(GateId, "A human-decision gate identifier.");

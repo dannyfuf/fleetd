@@ -225,6 +225,8 @@ impl TurnControls {
 pub(super) struct CodexSession {
     /// The Codex thread id, which is the resume cursor.
     pub(super) root: Option<String>,
+    /// Whether `open` is still assembling the first complete session configuration.
+    pub(super) opening: bool,
     /// The `userAgent` the handshake returned, and the version scraped out of it.
     pub(super) user_agent: Option<String>,
     pub(super) version: Option<Version>,
@@ -291,8 +293,6 @@ pub(super) struct CodexSession {
 /// What the `turn/start` response still has to announce after its notifications raced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TurnStartConfirmation {
-    /// Whether Codex queued this turn behind a different active turn.
-    pub(super) queued: bool,
     /// Whether the response, rather than `turn/started`, is the first running signal.
     pub(super) announce: bool,
 }
@@ -382,23 +382,36 @@ impl CodexSession {
         self.alias_turn(provider_turn, turn);
         let queued = self.active_turn.is_some() && self.active_turn != Some(turn);
         if queued || self.active_turn == Some(turn) || self.pending_start != Some(turn) {
-            return TurnStartConfirmation {
-                queued,
-                announce: false,
-            };
+            return TurnStartConfirmation { announce: false };
         }
         self.adopt_turn(turn, provider_turn);
-        TurnStartConfirmation {
-            queued: false,
-            announce: true,
-        }
+        TurnStartConfirmation { announce: true }
     }
 
     /// The Fleet item id for a provider item id, remembering the mapping.
     pub(super) fn item_for(&mut self, thread: &str, provider_item: &str) -> ItemId {
+        if let Some(item) = self.items.get(provider_item).copied() {
+            return item;
+        }
         let item = item_id(thread, provider_item);
         self.items.insert(provider_item.to_owned(), item);
         item
+    }
+
+    /// Adopts a Fleet-minted client id found while replaying provider history.
+    ///
+    /// The process-local optimistic map is empty after restart, but Codex persists
+    /// `clientUserMessageId` and returns it as `clientId`. Parsing that opaque value restores the
+    /// stable outbox item instead of deriving a second id from the provider item.
+    pub(super) fn adopt_historical_client_item(
+        &mut self,
+        provider_item: &str,
+        client_id: Option<&str>,
+    ) -> Option<ItemId> {
+        let item = client_id?.parse().ok()?;
+        self.items.insert(provider_item.to_owned(), item);
+        self.client_items.insert(item.to_string(), item);
+        Some(item)
     }
 
     /// Records the optimistic user item of a turn Fleet is submitting.

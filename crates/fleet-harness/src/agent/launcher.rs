@@ -56,6 +56,16 @@ pub fn write_launcher(
 /// Fails when this build's own executable cannot be located.
 pub fn launcher_script(provider: Provider, transcript: &Path) -> anyhow::Result<String> {
     let binary = shell_word(&harness_binary()?)?;
+    let child_name = match provider {
+        Provider::Claude => "subagent-child-blocked.json",
+        Provider::Codex => "subagent-child.json",
+    };
+    let child = shell_word(
+        &transcript
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(child_name),
+    )?;
     let transcript = shell_word(transcript)?;
     Ok(format!(
         "#!/bin/sh\n\
@@ -68,6 +78,9 @@ pub fn launcher_script(provider: Provider, transcript: &Path) -> anyhow::Result<
          \x20   exit 0\n\
          \x20 fi\n\
          done\n\
+         if [ \"${{FLEET_DELEGATION+x}}\" = x ]; then\n\
+         \x20 exec {binary} agent --provider {provider} --transcript {child}\n\
+         fi\n\
          exec {binary} agent --provider {provider} --transcript {transcript}\n",
         provider = provider.as_str(),
         version = provider.version_line(),

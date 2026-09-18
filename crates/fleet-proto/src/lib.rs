@@ -59,6 +59,9 @@ pub const AGENT_SEEN_CAPABILITY: &str = "agent.seen";
 /// offers `/login` on a Codex thread and on no other.
 pub const AGENT_ACCOUNT_CAPABILITY: &str = "agent.account";
 
+/// Gates the six `Delegation*` requests, their responses and `Event::DelegationChanged`.
+pub const AGENT_DELEGATION_CAPABILITY: &str = "agent.delegation";
+
 /// Every `agent.*` capability this build implements, in advertisement order.
 ///
 /// Both directions publish it. A daemon puts it in `HelloResponse.capabilities`, and a client
@@ -76,6 +79,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     AGENT_CODEX_CAPABILITY,
     AGENT_SEEN_CAPABILITY,
     AGENT_ACCOUNT_CAPABILITY,
+    AGENT_DELEGATION_CAPABILITY,
 ];
 
 pub mod agents;

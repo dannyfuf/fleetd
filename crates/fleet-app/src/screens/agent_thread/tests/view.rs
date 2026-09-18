@@ -1,18 +1,19 @@
 //! The wiring only an entity graph can show: what a stream chunk splices, which frame a gate
 //! takes the keyboard in, the `esc` cascade, scroll mode, and what a closed tab releases.
 
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use fleet_core::agents::{
-    AgentKind, Applied, GateAnswer, ItemStatus, ModelDescriptor, ModelSelection, PermissionChoice,
-    ReasoningEffortDescriptor, SessionState, StreamKind, ToolKind, TurnId, TurnOutcome, TurnState,
+    AgentKind, Applied, DelegationStatus, GateAnswer, ItemStatus, ModelDescriptor, ModelSelection,
+    PermissionChoice, ReasoningEffortDescriptor, SessionState, StreamKind, ToolKind, TurnId,
+    TurnOutcome, TurnState,
 };
 use fleet_ui_kit::{TranscriptRowId, TranscriptRowKind};
 use gpui::{AppContext as _, EntityInputHandler as _, TestAppContext};
 
 use super::fixtures::{
-    assistant, command, edit, permission_gate, projection, question, question_gate, running_turn,
-    settled_turn, tool, user,
+    assistant, command, delegation_item, delegation_record, edit, permission_gate, projection,
+    question, question_gate, running_turn, settled_turn, tool, user,
 };
 use crate::{
     bridge::BridgeCommand,
@@ -225,6 +226,30 @@ fn decision_observable_comes_from_the_prepared_drawer_and_joined_item(cx: &mut T
         assert_eq!(decision.paths, ["README.md"]);
         assert!(decision.has_diff);
         assert!(decision.title.contains("codex"));
+    });
+}
+
+#[gpui::test]
+fn child_context_prepares_the_caller_jump_before_render(cx: &mut TestAppContext) {
+    let mut caller_projection = projection();
+    caller_projection.title = "design".to_owned();
+    let caller = caller_projection.summary(fleet_core::agents::Seq::default());
+    let target = caller.thread.to_string();
+    let view = cx.new(|cx| AgentThreadView::new(projection(), cx));
+
+    view.update(cx, |view, cx| {
+        view.sync_caller(Some(caller), Some(3), cx);
+    });
+
+    view.read_with(cx, |view, _| {
+        let segment = view
+            .metadata
+            .first()
+            .unwrap_or_else(|| panic!("the caller jump should lead the prepared metadata"));
+        assert_eq!(segment.text.as_ref(), "for [3] claude — design");
+        assert_eq!(segment.target.as_deref(), Some(target.as_str()));
+        assert!(!segment.collapsible);
+        assert_eq!(view.caller_index, Some(3));
     });
 }
 
@@ -799,6 +824,78 @@ fn toggling_a_row_reuses_every_row_it_did_not_touch(cx: &mut TestAppContext) {
         splice.count, 1,
         "the group header above it kept its identity"
     );
+}
+
+/// A `DelegationChanged` is not a projection event: it arrives on the app mirror and must rewrite
+/// exactly the delegation's own row, so a child reporting progress cannot re-run the caller's
+/// grouping or cost every other row its measured height.
+#[gpui::test]
+fn a_changed_delegation_rewrites_one_row_and_reuses_every_other(cx: &mut TestAppContext) {
+    let turn = TurnId::new();
+    let record = delegation_record(DelegationStatus::Running);
+    let prompt = user(turn, "delegate the reducer");
+    let mut base = projection();
+    base.items = vec![
+        prompt.clone(),
+        delegation_item(turn, &record),
+        assistant(turn, "on it", ItemStatus::Completed),
+    ];
+    base.turns = vec![running_turn(turn, prompt.id)];
+
+    let view = cx.new(|cx| AgentThreadView::new(base, cx));
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![record.clone()], HashMap::new(), 1, cx);
+    });
+    let before = view.read_with(cx, |view, _| view.rows().to_vec());
+    let builds = view.read_with(cx, |view, _| view.row_builds());
+
+    let settled = fleet_core::agents::Delegation {
+        status: DelegationStatus::Succeeded,
+        ..record
+    };
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![settled], HashMap::new(), 2, cx);
+    });
+    let after = view.read_with(cx, |view, _| view.rows().to_vec());
+    assert_eq!(view.read_with(cx, |view, _| view.row_builds()), builds);
+
+    assert_eq!(before.len(), after.len());
+    let splice = fleet_ui_kit::diff_rows(&before, &after).expect("the delegation row changed");
+    assert_eq!(
+        splice.count, 1,
+        "every other row kept its identity and its height"
+    );
+}
+
+#[gpui::test]
+fn a_live_delegation_retains_a_clock_until_its_duration_is_frozen(cx: &mut TestAppContext) {
+    let turn = TurnId::new();
+    let mut record = delegation_record(DelegationStatus::Running);
+    record.finished = None;
+    let mut base = projection();
+    base.items = vec![delegation_item(turn, &record)];
+    let view = cx.new(|cx| AgentThreadView::new(base, cx));
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![record.clone()], HashMap::new(), 1, cx);
+        assert!(view.delegation_clock_running);
+        assert!(view.delegation_clock_task.is_some());
+    });
+    let builds = view.read_with(cx, |view, _| view.row_builds());
+
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(view.delegation_clock_rev > 0);
+        assert_eq!(view.row_builds(), builds);
+    });
+
+    record.status = DelegationStatus::Succeeded;
+    record.finished = Some(chrono::Utc::now());
+    view.update(cx, |view, cx| {
+        view.sync_delegations(vec![record], HashMap::new(), 2, cx);
+        assert!(!view.delegation_clock_running);
+        assert!(view.delegation_clock_task.is_none());
+    });
 }
 
 #[gpui::test]

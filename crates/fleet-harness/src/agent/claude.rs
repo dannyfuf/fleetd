@@ -24,7 +24,9 @@ use super::{
     GATE_BUDGET, Transcript, TranscriptStep,
     ids::Ids,
     peer::Peer,
-    transcript::{Catalogue, Playback, Settlement, diff_counts, diff_sides, text_chunks},
+    transcript::{
+        Catalogue, Playback, Settlement, diff_counts, diff_sides, run_shell, text_chunks,
+    },
 };
 
 /// Plays one transcript as Claude Code.
@@ -158,7 +160,12 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
                     output,
                 } => {
                     let tool_use = self.tool_use(name, arguments.clone(), Some(id.clone()))?;
-                    self.tool_result(&tool_use, output, None)?;
+                    self.tool_result(&tool_use, output, None, false)?;
+                }
+                TranscriptStep::Shell { command, name } => {
+                    let result = run_shell(command)?;
+                    let tool_use = self.tool_use(name, json!({ "command": command }), None)?;
+                    self.tool_result(&tool_use, &result.output, None, !result.success)?;
                 }
                 TranscriptStep::FileChange { path, diff } => {
                     let tool_use = self.tool_use("Edit", edit_input(path, diff), None)?;
@@ -184,7 +191,7 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
                         }
                     };
                     match decision {
-                        Decision::Allow => self.tool_result(&tool_use, "", None)?,
+                        Decision::Allow => self.tool_result(&tool_use, "", None, false)?,
                         Decision::Deny { interrupt } => {
                             self.permission_denied(&tool_use, "Bash")?;
                             if interrupt {
@@ -364,6 +371,7 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
         tool_use: &str,
         output: &str,
         structured: Option<Value>,
+        is_error: bool,
     ) -> anyhow::Result<()> {
         let uuid = self.ids.uuid(0x5157_0003);
         let mut frame = json!({
@@ -377,7 +385,7 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
                     "type": "tool_result",
                     "tool_use_id": tool_use,
                     "content": output,
-                    "is_error": false,
+                    "is_error": is_error,
                 }],
             },
         });
@@ -401,7 +409,12 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
             "additions": added,
             "deletions": removed,
         });
-        self.tool_result(tool_use, &format!("Updated {path}"), Some(structured))
+        self.tool_result(
+            tool_use,
+            &format!("Updated {path}"),
+            Some(structured),
+            false,
+        )
     }
 
     /// `system/permission_denied`: the frame that says "this was refused without asking you".

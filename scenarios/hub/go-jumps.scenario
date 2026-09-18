@@ -20,6 +20,7 @@ assert focused == worktrees.row[0] && hub_tab == Worktrees
 # `gp` is the pull-request screen: a different Hub tab, its own list and its own key context.
 key g p
 await hub_tab == Prs 15000
+await lists.prs.rows[0] exists 15000
 assert focused == prs.row[0] && key_contexts[1] == Prs && lists.prs.rows[0] exists
 shot pr-screen
 dump pr-screen

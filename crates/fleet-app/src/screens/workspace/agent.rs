@@ -12,13 +12,14 @@ use crate::{
     actions::native_agent,
     bridge::BridgeCommand,
     screens::agent_thread::{
-        AgentThreadEvent, AgentThreadView, ThreadHost, picker::PickerKind,
-        presentation::header_word,
+        AgentThreadEvent, AgentThreadView, ThreadHost,
+        picker::PickerKind,
+        presentation::{header_word, title_subject},
     },
     views::workspace_tabs::TabTarget,
 };
 use fleet_core::{
-    agents::{AgentKind, AgentThreadSummary, Applied, ThreadId},
+    agents::{AgentKind, AgentThreadSummary, Applied, DelegationId, ThreadId},
     ids::WorktreeId,
 };
 
@@ -106,6 +107,63 @@ pub(super) fn activate_agent_tab(state: &Entity<AppState>, thread: ThreadId, cx:
     });
 }
 
+/// Attaches one delegation's child and selects it, which is what `⏎` on a delegation row does.
+///
+/// `⏎` and `native_agent::AttachChild` share this, so the row's enter, the palette's `attach`
+/// and `^s u`'s return trip can never disagree about what selecting a child means. Returns the
+/// child that was selected, or `None` when the delegation is not in this client's mirror.
+pub(super) fn attach_delegation_child(
+    state: &Entity<AppState>,
+    delegation: DelegationId,
+    cx: &mut App,
+) -> Option<ThreadId> {
+    let child = state
+        .read(cx)
+        .agents
+        .delegation(delegation)
+        .map(|record| record.child)?;
+    state.update(cx, |app, cx| {
+        app.select_agent_thread(child);
+        cx.notify();
+    });
+    Some(child)
+}
+
+/// Stages the delegation-cancel confirm for this window and opens the dialog.
+///
+/// Cancelling a child is destructive and irreversible, so `x` never sends
+/// [`RequestBody::DelegationCancel`] itself: it names the child, the provider and the title the
+/// dialog states back before anything reaches the daemon.
+pub(super) fn open_delegation_cancel_confirm(
+    state: &Entity<AppState>,
+    delegation: DelegationId,
+    cx: &mut App,
+) -> Option<ThreadId> {
+    let (child, provider, title) = {
+        let app = state.read(cx);
+        let record = app.agents.delegation(delegation)?;
+        let title = app.agents.summary(record.child).map_or_else(
+            || {
+                record
+                    .brief
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned()
+            },
+            |summary| summary.title.clone(),
+        );
+        (record.child, record.provider, title)
+    };
+    dialogs::ConfirmRequest::stage_delegation_cancel(state, delegation, child, provider, title, cx);
+    state.update(cx, |app, cx| {
+        app.open_overlay(Overlay::Dialog(Dialogs::Confirm));
+        cx.notify();
+    });
+    Some(child)
+}
+
 /// The worktree of the session the workspace is showing.
 fn active_worktree(app: &AppState) -> Option<WorktreeId> {
     let session = app.active_session()?;
@@ -168,6 +226,13 @@ fn create_thread(
             return;
         }
     };
+    if !state.read(cx).workspace_has_tab_capacity(&worktree) {
+        state.update(cx, |app, cx| {
+            app.notify_workspace_tab_limit();
+            cx.notify();
+        });
+        return;
+    }
     let reply = bridge.request_agent(BridgeCommand::AgentThreadCreate {
         worktree,
         provider,
@@ -184,9 +249,11 @@ fn create_thread(
                 let thread = summary.thread;
                 state.update(cx, |app, cx| {
                     app.agents.apply_summary(summary);
+                    if !app.select_agent_thread(thread) {
+                        app.agents.close(thread);
+                    }
                     cx.notify();
                 });
-                activate_agent_tab(&state, thread, cx);
             }
             Ok(Err(error)) => state.update(cx, |app, cx| {
                 record_mutation_failure(app, create_failure(&error.message));
@@ -282,6 +349,12 @@ impl WorkspaceScreen {
                 AgentThreadEvent::Copy(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
                 }
+                AgentThreadEvent::SelectThread(thread) => {
+                    relay_state.update(cx, |app, cx| {
+                        app.select_agent_thread(*thread);
+                        cx.notify();
+                    });
+                }
                 AgentThreadEvent::Notice(text) => {
                     let text = text.clone();
                     relay_state.update(cx, |app, cx| {
@@ -312,17 +385,49 @@ impl WorkspaceScreen {
         // The mirror is authoritative; the view adopts it and moves only the rows a stream
         // touched, so a fast model does not rebuild the transcript per token (§5).
         state.update(cx, |app, cx| {
-            let structural = Applied::Structural;
-            let applied = app.agents.last_applied(thread).unwrap_or(&structural);
+            let applied = app
+                .agents
+                .last_applied(thread)
+                .cloned()
+                .unwrap_or(Applied::Structural);
+            let projection_replaced = app.agents.take_projection_replaced(thread);
             let commands = app.agents.commands(thread);
             let skills = app.agents.skills(thread);
+            let delegations = app
+                .agents
+                .delegations_of_caller(thread)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let delegation_titles = delegations
+                .iter()
+                .filter_map(|delegation| {
+                    let summary = app.agents.summary(delegation.child)?;
+                    let title = title_subject(summary);
+                    (!title.is_empty()
+                        && !title.eq_ignore_ascii_case(summary.provider.executable())
+                        && !title.eq_ignore_ascii_case(summary.provider.display_name()))
+                    .then_some((delegation.id, title))
+                })
+                .collect();
+            let delegations_revision = app.agents.delegations_revision();
+            let caller = caller_context(app, thread);
             let modes = app.agents.modes(thread);
             if let Some(projection) = app.agents.projection(thread) {
                 view.update(cx, |view, cx| {
                     view.set_commands(commands);
                     view.set_skills(skills);
                     view.set_modes(modes);
-                    view.sync(projection, applied, cx);
+                    let (caller, caller_index) = caller
+                        .map(|(summary, index)| (Some(summary), index))
+                        .unwrap_or((None, None));
+                    view.sync_caller(caller, caller_index, cx);
+                    view.sync_delegations(delegations, delegation_titles, delegations_revision, cx);
+                    if projection_replaced {
+                        view.sync_replacement(projection, cx);
+                    } else {
+                        view.sync(projection, &applied, cx);
+                    }
                 });
             }
         });
@@ -568,19 +673,69 @@ impl WorkspaceScreen {
             native_agent::Skills,
             |view: &mut AgentThreadView, cx| view.open_picker(PickerKind::Skills, cx)
         );
-        root = on_view!(
-            root,
-            native_agent::ExpandRow,
-            |view: &mut AgentThreadView, cx| view.expand_row(cx)
-        );
+        root = {
+            let view_state = state.clone();
+            let views = Rc::clone(&self.agent_views);
+            root.on_action(move |_: &native_agent::ExpandRow, window, cx| {
+                let Some(view) = active_view(&views, &view_state, cx) else {
+                    return;
+                };
+                if view.read(cx).focused_delegation(cx).is_some() {
+                    window.dispatch_action(Box::new(native_agent::AttachChild), cx);
+                } else {
+                    view.update(cx, AgentThreadView::expand_row);
+                }
+            })
+        };
+        root = {
+            let view_state = state.clone();
+            let views = Rc::clone(&self.agent_views);
+            root.on_action(move |_: &native_agent::AttachChild, _window, cx| {
+                let Some(view) = active_view(&views, &view_state, cx) else {
+                    return;
+                };
+                let Some(delegation) = view.read(cx).focused_delegation(cx) else {
+                    return;
+                };
+                attach_delegation_child(&view_state, delegation, cx);
+            })
+        };
         root = on_row!(root, native_agent::Revert, fleet_ui_kit::RowAction::Revert);
         root = on_row!(
             root,
             native_agent::OpenInEditor,
             fleet_ui_kit::RowAction::Open
         );
-        root = on_row!(root, native_agent::CopyRow, fleet_ui_kit::RowAction::Copy);
+        root = {
+            let view_state = state.clone();
+            let views = Rc::clone(&self.agent_views);
+            root.on_action(move |_: &native_agent::CopyRow, _window, cx| {
+                let Some(view) = active_view(&views, &view_state, cx) else {
+                    return;
+                };
+                if let Some(delegation) = view.read(cx).focused_delegation_link(cx) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(delegation.to_string()));
+                } else {
+                    view.update(cx, |view, cx| {
+                        view.focused_row_verb(fleet_ui_kit::RowAction::Copy, cx);
+                    });
+                }
+            })
+        };
         root = on_row!(root, native_agent::DiffRow, fleet_ui_kit::RowAction::Diff);
+        root = {
+            let view_state = state.clone();
+            let views = Rc::clone(&self.agent_views);
+            root.on_action(move |_: &native_agent::CancelDelegation, _window, cx| {
+                let Some(view) = active_view(&views, &view_state, cx) else {
+                    return;
+                };
+                let Some(id) = view.read(cx).focused_delegation(cx) else {
+                    return;
+                };
+                open_delegation_cancel_confirm(&view_state, id, cx);
+            })
+        };
         root = on_view!(
             root,
             native_agent::Scroll,
@@ -735,7 +890,16 @@ impl WorkspaceScreen {
         });
         let (close_bridge, close_state) = (bridge.clone(), state.clone());
         root = root.on_action(move |_: &native_agent::CloseTab, _window, cx| {
-            close_agent_tab(&close_bridge, &close_state, cx);
+            let detached = close_state.update(cx, |app, cx| {
+                let detached = detach_active_child_tab(app);
+                if detached.is_some() {
+                    cx.notify();
+                }
+                detached
+            });
+            if detached.is_none() {
+                close_agent_tab(&close_bridge, &close_state, cx);
+            }
         });
         let (fallback_state, fallback_views) = (state.clone(), Rc::clone(&self.agent_views));
         root.on_action(move |_: &native_agent::TerminalFallback, _window, cx| {
@@ -745,6 +909,34 @@ impl WorkspaceScreen {
             open_terminal_fallback(&fallback_state, provider, worktree, cx);
         })
     }
+}
+
+/// The caller summary and its live one-based strip index for child-specific chrome.
+fn caller_context(app: &AppState, child: ThreadId) -> Option<(AgentThreadSummary, Option<usize>)> {
+    let caller = app.agents.caller_of(child)?;
+    let summary = app.agents.summary(caller)?.clone();
+    let index = app.active_session().and_then(|session| {
+        let SessionKind::Worktree(worktree) = &session.kind else {
+            return None;
+        };
+        if worktree != &summary.worktree {
+            return None;
+        }
+        app.agents
+            .strip_offset(caller)
+            .map(|position| session.terminals.len() + position + 1)
+    });
+    Some((summary, index))
+}
+
+/// Hides the active delegated child without touching the daemon-owned thread.
+pub(super) fn detach_active_child_tab(app: &mut AppState) -> Option<ThreadId> {
+    let child = app.active_agent_thread()?;
+    app.agents.caller_of(child)?;
+    let worktree = app.agents.summary(child)?.worktree.clone();
+    app.agents.deactivate(&worktree);
+    app.agents.detach(child);
+    Some(child)
 }
 
 /// Defers one activation request until the frame that mounts the composer has been painted.
@@ -775,7 +967,7 @@ fn agent_tab_may_take_focus(app: &AppState, thread: ThreadId) -> bool {
 }
 
 /// Focuses the selected tab's mode owner.
-fn focus_agent_tab(
+pub(super) fn focus_agent_tab(
     view: &Entity<AgentThreadView>,
     scrolling: bool,
     decision: bool,
@@ -796,7 +988,7 @@ fn focus_agent_tab(
     view.update(cx, |view, cx| view.focus_composer(window, cx));
 }
 
-fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
+pub(super) fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
     (
         app.agents.is_scrolling(thread),
         app.agent_context_chain()
@@ -805,7 +997,7 @@ fn agent_tab_focus_mode(app: &AppState, thread: ThreadId) -> (bool, bool) {
 }
 
 /// Mirrors the mounted focus tree into the harness-only vocabulary.
-fn record_composer_focus(
+pub(super) fn record_composer_focus(
     view: &Entity<AgentThreadView>,
     thread: ThreadId,
     state: &Entity<AppState>,
@@ -867,6 +1059,8 @@ pub(super) fn relay_view_state(
     let scrolling = view.read(cx).is_scrolling();
     let question_cursor = view.read(cx).question_cursor();
     let decision = view.read(cx).decision_observable();
+    let focused_row = view.read(cx).focused_row_kind(cx);
+    let expanded_result_cards = view.read(cx).expanded_result_cards();
     // §12: the `AgentRow` context is derived from whether a row actually carries the focus ring,
     // so `⏎`/`u`/`o`/`y`/`d` are bound exactly when there is a row for them to act on.
     let row_focus = scrolling && view.read(cx).transcript().read(cx).focused_row().is_some();
@@ -875,6 +1069,10 @@ pub(super) fn relay_view_state(
         changed |= app.agents.set_scrolling(thread, scrolling);
         changed |= app.agents.set_question_cursor(thread, question_cursor);
         changed |= app.agents.set_row_focus(thread, row_focus);
+        changed |= app.agents.set_focused_row(thread, focused_row);
+        changed |= app
+            .agents
+            .set_expanded_result_cards(thread, expanded_result_cards);
         changed |= app.agents.set_decision(thread, decision);
         if changed {
             cx.notify();

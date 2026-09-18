@@ -31,6 +31,13 @@ pub(in crate::agents::codex) fn started(session: &mut CodexSession, params: &Val
         Some(_) => MapOutput::default(),
         None => {
             session.root = Some(thread.id.clone());
+            // `thread/started` races the response to Fleet's own `thread/start`. While `open`
+            // is still discovering models and skills it is only identity, not a complete
+            // configuration and not readiness. `open` publishes the authoritative
+            // `SessionConfigured` after both catalogues have landed.
+            if session.opening {
+                return MapOutput::default();
+            }
             MapOutput::one(AgentEvent::SessionConfigured {
                 provider: AgentKind::Codex,
                 resume_cursor: Some(thread.id),

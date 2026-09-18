@@ -180,11 +180,27 @@ pub struct Submit {
 
 /// What the harness did with a submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Submitted {
-    /// The turn the message landed in.
-    pub turn: TurnId,
-    /// Whether the harness folded it into a running turn (or queued it behind one).
-    pub queued: bool,
+pub enum Submitted {
+    /// Folded into the turn that was already running (a steer).
+    JoinedActive { turn: TurnId },
+    /// Accepted as its own turn: running now, or queued behind the current one.
+    QueuedNew { turn: TurnId },
+}
+
+impl Submitted {
+    /// Returns the turn the message landed in.
+    #[must_use]
+    pub const fn turn(self) -> TurnId {
+        match self {
+            Self::JoinedActive { turn } | Self::QueuedNew { turn } => turn,
+        }
+    }
+
+    /// Whether the message joined the already-active turn.
+    #[must_use]
+    pub const fn joined_active(self) -> bool {
+        matches!(self, Self::JoinedActive { .. })
+    }
 }
 
 /// Why a turn is being stopped.

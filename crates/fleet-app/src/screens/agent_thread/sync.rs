@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fleet_core::agents::{Applied, ItemKind, StreamKind, ThreadProjection, TurnState};
+use fleet_core::agents::{
+    AgentThreadSummary, Applied, Delegation, ItemKind, StreamKind, ThreadProjection, TurnState,
+};
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{ActiveTheme, TranscriptRowKind};
 use gpui::{Context, SharedString, prelude::*};
@@ -21,10 +23,76 @@ use super::{
     decisions::QuestionWizard,
     presentation::{self, composer_placeholder, empty_invitation, unreachable_placeholder},
     reveal::RevealChunk,
-    rows::{self, ResolvedGate, RowInputs, build_rows},
+    rows::{self, ResolvedGate, RowInputs, RowTarget, build_rows},
 };
 
 impl AgentThreadView {
+    /// Refreshes the child-specific caller chrome prepared by the owning workspace.
+    pub(crate) fn sync_caller(
+        &mut self,
+        caller: Option<AgentThreadSummary>,
+        caller_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.caller == caller && self.caller_index == caller_index {
+            return;
+        }
+        self.caller = caller;
+        self.caller_index = caller_index;
+        self.refresh_metadata();
+        self.sync_composer(cx);
+        cx.notify();
+    }
+
+    /// Refreshes the durable delegation join independently of the caller's event projection.
+    pub(crate) fn sync_delegations(
+        &mut self,
+        delegations: Vec<Delegation>,
+        titles: std::collections::HashMap<fleet_core::agents::DelegationId, String>,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.delegations_rev == revision && self.delegation_titles == titles {
+            return;
+        }
+        let next = delegations
+            .into_iter()
+            .map(|delegation| (delegation.id, delegation))
+            .collect::<std::collections::HashMap<_, _>>();
+        let projected = self
+            .projection
+            .items
+            .iter()
+            .filter_map(|item| match item.kind {
+                ItemKind::Delegation { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let old_missing = self
+            .delegations
+            .keys()
+            .filter(|id| !projected.contains(id))
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let next_missing = next
+            .keys()
+            .filter(|id| !projected.contains(id))
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        self.delegations = next;
+        self.delegation_titles = titles;
+        self.delegations_rev = revision;
+        self.sync_delegation_clock(cx);
+        if old_missing != next_missing {
+            self.rows_key = None;
+            self.refresh_rows();
+            self.install_rows(cx);
+        } else {
+            self.patch_delegation_rows(cx);
+        }
+        cx.notify();
+    }
+
     /// Replaces the daemon projection wholesale, which a thread switch does.
     pub fn set_projection(&mut self, projection: ThreadProjection, cx: &mut Context<Self>) {
         self.flush_reveal(cx);
@@ -54,6 +122,19 @@ impl AgentThreadView {
         self.sync_batch(projection, std::slice::from_ref(applied), cx);
     }
 
+    /// Adopts a daemon replacement even when its cursor matches the mounted projection.
+    ///
+    /// A bounded open reply can hydrate transcript or session fields at the same sequence the
+    /// live stream already reached. It is structural, but unlike a thread switch it preserves
+    /// the transcript's measured list state.
+    pub(crate) fn sync_replacement(
+        &mut self,
+        projection: &ThreadProjection,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_batch_inner(projection, &[Applied::Structural], true, cx);
+    }
+
     /// Adopts one bridge batch. Pure text suffixes stay incremental; any structural member makes
     /// the batch one structural adoption so grouping runs at most once.
     pub(crate) fn sync_batch(
@@ -62,7 +143,17 @@ impl AgentThreadView {
         applied: &[Applied],
         cx: &mut Context<Self>,
     ) {
-        if projection.last_seq == self.projection.last_seq {
+        self.sync_batch_inner(projection, applied, false, cx);
+    }
+
+    fn sync_batch_inner(
+        &mut self,
+        projection: &ThreadProjection,
+        applied: &[Applied],
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !force && projection.last_seq == self.projection.last_seq {
             return;
         }
         let described_tail = u64::try_from(applied.len()).ok().is_some_and(|count| {
@@ -252,6 +343,8 @@ impl AgentThreadView {
                 let items = std::collections::HashMap::from([(source.id, source)]);
                 let inputs = RowInputs {
                     projection: &self.projection,
+                    delegations: &self.delegations,
+                    delegation_titles: &self.delegation_titles,
                     expanded: &self.expanded,
                     unfolded: &self.unfolded,
                     expanded_gates: &self.expanded_gates,
@@ -299,6 +392,8 @@ impl AgentThreadView {
             unfolded_rev: self.unfolded_rev,
             pending_rev: self.pending_rev,
             checkpoints_rev: self.checkpoints_rev,
+            delegations_rev: self.delegations_rev,
+            delegation_clock_rev: self.delegation_clock_rev,
             mode: self.composer_mode(),
         };
         if self.rows_key.as_ref() == Some(&key) {
@@ -307,6 +402,8 @@ impl AgentThreadView {
         let worktree = self.projection.worktree.slug().to_owned();
         let built = build_rows(&RowInputs {
             projection: &self.projection,
+            delegations: &self.delegations,
+            delegation_titles: &self.delegation_titles,
             expanded: &self.expanded,
             unfolded: &self.unfolded,
             expanded_gates: &self.expanded_gates,
@@ -321,6 +418,111 @@ impl AgentThreadView {
         self.targets = built.targets;
         self.row_of_item = built.streaming;
         self.rows_key = Some(key);
+        #[cfg(test)]
+        {
+            self.row_builds += 1;
+        }
+    }
+
+    /// Reprojects only durable delegation rows; grouping and measured identities stay intact.
+    fn patch_delegation_rows(&mut self, cx: &mut Context<Self>) {
+        let mut replacements = Vec::new();
+        for (index, row) in self.rows.iter().enumerate() {
+            let Some(RowTarget::Delegation(id)) = self.targets.get(&row.id.key()).copied() else {
+                continue;
+            };
+            let fallback = self
+                .projection
+                .items
+                .iter()
+                .find_map(|item| match item.kind {
+                    ItemKind::Delegation {
+                        id: projected,
+                        provider,
+                        status,
+                        ..
+                    } if projected == id => Some((provider, status)),
+                    _ => None,
+                });
+            let fallback = fallback.or_else(|| {
+                self.delegations
+                    .get(&id)
+                    .map(|record| (record.provider, record.status))
+            });
+            let Some((provider, status)) = fallback else {
+                continue;
+            };
+            let inputs = RowInputs {
+                projection: &self.projection,
+                delegations: &self.delegations,
+                delegation_titles: &self.delegation_titles,
+                expanded: &self.expanded,
+                unfolded: &self.unfolded,
+                expanded_gates: &self.expanded_gates,
+                resolved: &self.resolved,
+                pending: &self.pending,
+                checkpoints: &self.checkpoints,
+                started_at: self.started_at,
+                parked: self.parked_detail(),
+                empty: SharedString::default(),
+            };
+            let mut replacement = row.clone();
+            replacement.kind = TranscriptRowKind::Delegation(rows::item::delegation_row(
+                &inputs, id, provider, status,
+            ));
+            if replacement != *row {
+                replacements.push((index, replacement));
+            }
+        }
+        for (index, row) in replacements {
+            Rc::make_mut(&mut self.rows)[index] = row.clone();
+            self.transcript
+                .update(cx, |list, cx| list.patch_row(index, row, cx));
+        }
+        if let Some(key) = &mut self.rows_key {
+            key.delegations_rev = self.delegations_rev;
+            key.delegation_clock_rev = self.delegation_clock_rev;
+        }
+    }
+
+    fn sync_delegation_clock(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .delegations
+            .values()
+            .any(|delegation| delegation.status.is_live())
+        {
+            self.delegation_clock_task = None;
+            self.delegation_clock_running = false;
+            return;
+        }
+        if self.delegation_clock_running {
+            return;
+        }
+        self.delegation_clock_running = true;
+        self.delegation_clock_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let alive = this
+                    .update(cx, |view, cx| {
+                        if !view
+                            .delegations
+                            .values()
+                            .any(|delegation| delegation.status.is_live())
+                        {
+                            view.delegation_clock_running = false;
+                            return false;
+                        }
+                        view.delegation_clock_rev = view.delegation_clock_rev.wrapping_add(1);
+                        view.patch_delegation_rows(cx);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Hands the prepared rows to the list, which splices only what changed.
@@ -356,7 +558,17 @@ impl AgentThreadView {
 
     /// Rebuilds the metadata strip and bumps the fit memo's revision.
     fn refresh_metadata(&mut self) {
-        let metadata = presentation::metadata_segments(&self.projection, self.interaction_mode());
+        let mut metadata = Vec::new();
+        if let Some(caller) = &self.caller {
+            metadata.push(presentation::caller_metadata_segment(
+                caller,
+                self.caller_index,
+            ));
+        }
+        metadata.extend(presentation::metadata_segments(
+            &self.projection,
+            self.interaction_mode(),
+        ));
         let trailing = presentation::trailing_segments(&self.projection);
         if metadata == self.metadata && trailing == self.trailing {
             return;
@@ -380,6 +592,9 @@ impl AgentThreadView {
         let payload = self.approval_payload();
         let placeholder = match self.host.as_ref().filter(|_| unreachable) {
             Some(host) => unreachable_placeholder(&host.name),
+            None if matches!(mode, ComposerMode::Normal) && self.caller.is_some() => {
+                presentation::child_composer_placeholder(self.caller_index)
+            }
             None => composer_placeholder(
                 mode,
                 self.projection.provider,

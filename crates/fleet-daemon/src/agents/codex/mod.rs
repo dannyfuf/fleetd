@@ -234,6 +234,7 @@ impl Harness for CodexHarness {
         let controls = TurnControls::from_mode(req.start.mode);
         {
             let mut session = self.session.lock().await;
+            session.opening = true;
             session.worktree_path = Some(req.start.worktree_path.clone());
             session.controls = TurnControls {
                 model: req.start.model.as_ref().map(|model| model.model.clone()),
@@ -398,6 +399,7 @@ impl Harness for CodexHarness {
         {
             let mut session = self.session.lock().await;
             session.root = Some(thread_id.clone());
+            session.opening = false;
             // Adopt `cwd` and `model` **from the response**: Codex may normalise or override what
             // the request asked for, and Fleet records what came back.
             if model.is_some() {
@@ -514,7 +516,7 @@ impl Harness for CodexHarness {
                     let mut session = self.session.lock().await;
                     let turn = session.turn_for(&active);
                     session.remember_user_item(turn, user_item, &req.input.text);
-                    return Ok(Submitted { turn, queued: true });
+                    return Ok(Submitted::JoinedActive { turn });
                 }
                 Err(error) if is_not_steerable(&error) => {
                     // Silently: the user never sees this one.
@@ -570,10 +572,9 @@ impl Harness for CodexHarness {
                 Some("turn/start"),
             );
         }
-        Ok(Submitted {
-            turn: req.turn,
-            queued: confirmation.queued,
-        })
+        // Every successful `turn/start` is its own turn, whether it began immediately or Codex
+        // queued it behind the active one. Only a successful `turn/steer` joins active work.
+        Ok(Submitted::QueuedNew { turn: req.turn })
     }
 
     async fn interrupt(&mut self, turn: TurnId, reason: InterruptReason) -> HarnessResult<()> {

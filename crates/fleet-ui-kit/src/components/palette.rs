@@ -27,7 +27,7 @@ use crate::{
     tone::Tone,
 };
 
-/// The three sections, in their fixed order.
+/// The palette sections, in their fixed order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PaletteSectionKind {
     /// Objects: worktrees, PRs, repos. Ranked above commands.
@@ -36,6 +36,8 @@ pub enum PaletteSectionKind {
     Do,
     /// Context switches, with their digit.
     Context,
+    /// Native agent threads, opened by the seeded `agents` query.
+    Agents,
 }
 
 impl PaletteSectionKind {
@@ -45,6 +47,7 @@ impl PaletteSectionKind {
             PaletteSectionKind::Go => "go",
             PaletteSectionKind::Do => "do",
             PaletteSectionKind::Context => "context",
+            PaletteSectionKind::Agents => "AGENTS",
         }
     }
 }
@@ -83,6 +86,18 @@ impl PaletteRow {
     /// The muted right-hand description (`session attached`, `PR · mine`, `repo`).
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.item = self.item.trailing(detail);
+        self
+    }
+
+    /// A muted second line, e.g. `blocked · question` or `working · 14m`.
+    pub fn secondary(mut self, secondary: impl Into<SharedString>) -> Self {
+        self.item = self.item.secondary(secondary);
+        self
+    }
+
+    /// A right-aligned value, e.g. `attach` or `go`.
+    pub fn trailing(mut self, trailing: impl Into<SharedString>) -> Self {
+        self.item = self.item.trailing(trailing);
         self
     }
 
@@ -384,6 +399,7 @@ mod tests {
     fn sections_have_a_fixed_order() {
         let mut kinds = vec![
             PaletteSectionKind::Context,
+            PaletteSectionKind::Agents,
             PaletteSectionKind::Do,
             PaletteSectionKind::Go,
         ];
@@ -393,8 +409,10 @@ mod tests {
             vec![
                 PaletteSectionKind::Go,
                 PaletteSectionKind::Do,
-                PaletteSectionKind::Context
+                PaletteSectionKind::Context,
+                PaletteSectionKind::Agents
             ]
         );
+        assert_eq!(PaletteSectionKind::Agents.title(), "AGENTS");
     }
 }

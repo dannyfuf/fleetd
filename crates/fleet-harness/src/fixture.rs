@@ -42,7 +42,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The five worlds a scenario may ask for, frozen in `docs/TESTING-HARNESS.md` §4.
+/// The five frozen worlds plus additive subagent variants a scenario may ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Preset {
@@ -56,6 +56,10 @@ pub enum Preset {
     Board,
     /// Native-agent configuration pointed at scripted transcripts.
     Agents,
+    /// Native-agent configuration whose Claude transcript delegates in the current worktree.
+    AgentsSubagent,
+    /// Native-agent configuration whose Claude transcript delegates to a second worktree.
+    AgentsSubagentOtherWorktree,
 }
 
 impl Preset {
@@ -68,18 +72,22 @@ impl Preset {
             Self::Busy => "busy",
             Self::Board => "board",
             Self::Agents => "agents",
+            Self::AgentsSubagent => "agents-subagent",
+            Self::AgentsSubagentOtherWorktree => "agents-subagent-other-worktree",
         }
     }
 
     /// Every preset, for tests and for `--help` text.
     #[must_use]
-    pub const fn all() -> [Self; 5] {
+    pub const fn all() -> [Self; 7] {
         [
             Self::Empty,
             Self::OneRepo,
             Self::Busy,
             Self::Board,
             Self::Agents,
+            Self::AgentsSubagent,
+            Self::AgentsSubagentOtherWorktree,
         ]
     }
 }

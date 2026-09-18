@@ -145,6 +145,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
         ("V", Action::name(&prefix::DismissWatch)),
         ("N", Action::name(&prefix::NextWatch)),
         ("P", Action::name(&prefix::PrevWatch)),
+        ("d", Action::name(&prefix::AgentsPicker)),
     ] {
         state.enter_prefix();
         let keystroke = Keystroke::parse(keys).unwrap_or_else(|error| panic!("{error}"));
@@ -155,7 +156,7 @@ fn workspace_prefix_consumes_bound_and_unbound_keys_with_daemon_banner() {
     }
 
     state.enter_prefix();
-    let unbound = Keystroke::parse("d").unwrap_or_else(|error| panic!("{error}"));
+    let unbound = Keystroke::parse("e").unwrap_or_else(|error| panic!("{error}"));
     let (consumed, action) = live_prefix(&mut state, &unbound);
     assert!(consumed);
     assert!(action.is_none());

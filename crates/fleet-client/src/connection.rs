@@ -671,6 +671,10 @@ impl ConnectionEffect {
 
 fn request_timeout(body: &RequestBody) -> Option<Duration> {
     match body {
+        RequestBody::DelegationWait { timeout_ms, .. } => {
+            Some(Duration::from_millis(*timeout_ms) + Duration::from_secs(15))
+        }
+        RequestBody::DelegationRun { .. } => Some(AGENT_HARNESS_TIMEOUT),
         RequestBody::CreateWorktree { .. }
         | RequestBody::CreateWorktreeFromPr { .. }
         | RequestBody::CreateWorktreeFromCard { .. }
@@ -695,7 +699,12 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         | RequestBody::AgentThreadOpen { .. }
         // A body read is bounded by `limit` server-side, is cold-path by construction — the
         // user expanded a tool row — and routes to the owner for a mirrored thread.
-        | RequestBody::AgentItemBody { .. } => None,
+        | RequestBody::AgentItemBody { .. }
+        // Cancellation is bounded by the daemon's eight-live-delegation ceiling, but it walks
+        // descendants deepest-first and each interrupt/stop pair owns its own harness deadline.
+        // A client deadline cannot safely predict how many of those bounded children are below
+        // this node, and timing out would report failure while the daemon keeps cancelling them.
+        | RequestBody::DelegationCancel { .. } => None,
         // The six agent mutations are serialized per thread by the daemon, and each of them can
         // legitimately outlast the default: a mode or model change costs a restart-with-resume
         // on a harness that cannot switch in place, a send to a stopped thread resumes one, and
@@ -1225,7 +1234,7 @@ mod tests {
     #[test]
     fn every_agent_request_has_a_deadline_decision_and_none_of_them_is_the_bare_default() {
         use fleet_core::agents::{
-            AgentKind, GateAnswer, GateId, ItemId, ModelSelection, PermissionChoice,
+            AgentKind, DelegationId, GateAnswer, GateId, ItemId, ModelSelection, PermissionChoice,
             PermissionMode, Seq, StreamKind, ThreadId, UserInput,
         };
 
@@ -1258,6 +1267,9 @@ mod tests {
                 offset: 0,
                 limit: 4_096,
             },
+            RequestBody::DelegationCancel {
+                delegation: DelegationId::new(),
+            },
         ] {
             assert_eq!(request_timeout(&exempt), None, "{exempt:?}");
         }
@@ -1270,6 +1282,7 @@ mod tests {
                     text: "go".to_owned(),
                     attachments: Vec::new(),
                     item: None,
+                    origin: Default::default(),
                 },
             },
             RequestBody::AgentRespond {
@@ -1305,6 +1318,28 @@ mod tests {
             AGENT_HARNESS_TIMEOUT > Duration::from_secs(30),
             "a transport deadline shorter than the harness deadline it triggers reports a \
              failure for work that succeeds"
+        );
+
+        assert_eq!(
+            request_timeout(&RequestBody::DelegationRun {
+                caller: thread,
+                provider: AgentKind::Codex,
+                brief: "inspect the failure".to_owned(),
+                expectation: "report the root cause".to_owned(),
+                worktree: None,
+                mode: None,
+                model: None,
+                title: None,
+                eager: false,
+            }),
+            Some(AGENT_HARNESS_TIMEOUT)
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::DelegationWait {
+                delegation: DelegationId::new(),
+                timeout_ms: 2_500,
+            }),
+            Some(Duration::from_millis(2_500) + Duration::from_secs(15))
         );
 
         // These metadata operations touch no harness and keep the default on purpose.

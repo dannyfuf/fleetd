@@ -171,6 +171,9 @@ pub struct RetryState {
 pub struct ThreadProjection {
     /// Thread identity.
     pub thread: ThreadId,
+    /// Parent thread for a delegated child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ThreadId>,
     /// Owning published worktree.
     pub worktree: WorktreeId,
     /// Provider kind.
@@ -245,6 +248,7 @@ impl ThreadProjection {
     pub fn new(thread: ThreadId, worktree: WorktreeId, provider: AgentKind) -> Self {
         Self {
             thread,
+            parent: None,
             worktree,
             provider,
             title: provider.display_name().to_owned(),
@@ -592,6 +596,7 @@ impl ThreadProjection {
     pub fn summary(&self, last_seen: Seq) -> AgentThreadSummary {
         AgentThreadSummary {
             thread: self.thread,
+            parent: self.parent,
             worktree: self.worktree.clone(),
             host: None,
             provider: self.provider,

@@ -147,6 +147,46 @@ fn app_showing_an_agent_tab() -> (AppState, fleet_core::agents::ThreadId) {
     (app, thread)
 }
 
+fn app_showing_a_child_tab() -> (
+    AppState,
+    WorktreeId,
+    fleet_core::agents::ThreadId,
+    fleet_core::agents::ThreadId,
+) {
+    let worktree: WorktreeId = "buk/payroll#child"
+        .parse()
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut record = session("payroll/child", terminal(1, TerminalKind::Pty));
+    record.kind = SessionKind::Worktree(worktree.clone());
+    let mut app = app_with_session(record.clone());
+    let caller_projection = fleet_core::agents::ThreadProjection::new(
+        fleet_core::agents::ThreadId::new(),
+        worktree.clone(),
+        fleet_core::agents::AgentKind::Claude,
+    );
+    let caller = caller_projection.thread;
+    let mut child_projection = fleet_core::agents::ThreadProjection::new(
+        fleet_core::agents::ThreadId::new(),
+        worktree.clone(),
+        fleet_core::agents::AgentKind::Codex,
+    );
+    child_projection.parent = Some(caller);
+    let child = child_projection.thread;
+    let mut snapshot = app
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| panic!("app_with_session installs a snapshot"));
+    snapshot.agent_threads = vec![
+        caller_projection.summary(fleet_core::agents::Seq::default()),
+        child_projection.summary(fleet_core::agents::Seq::default()),
+    ];
+    app.apply_snapshot(snapshot, Instant::now());
+    app.screen = Screen::Workspace { session: record.id };
+    assert!(app.agents.attach(child));
+    app.agents.activate(worktree.clone(), child);
+    (app, worktree, caller, child)
+}
+
 /// S1: characters typed into an agent tab's composer were forwarded to a background PTY, where
 /// they edited whatever program was running in tab 1. The composer never saw them, because the
 /// Workspace's key-down listener stopped propagation before gpui reached the input handler.
@@ -222,6 +262,42 @@ fn a_closed_agent_tab_leaves_the_strip_and_stays_gone() {
         "a redrawn summary must not resurrect a tab the user closed"
     );
     assert!(app.agents.is_closed(thread));
+}
+
+#[test]
+fn ctrl_s_u_selects_the_caller_attaching_it_first_when_hidden() {
+    let (mut app, worktree, caller, child) = app_showing_a_child_tab();
+    assert_eq!(app.active_agent_thread(), Some(child));
+    assert!(app.agents.close(caller));
+    assert!(!app.agents.is_attached(caller));
+
+    assert_eq!(up_to_caller(&mut app), Some(caller));
+
+    assert!(app.agents.is_attached(caller));
+    assert_eq!(app.agents.active(&worktree), Some(caller));
+}
+
+#[test]
+fn ctrl_s_x_on_a_child_leaves_the_summary_present_and_the_tab_gone() {
+    let (mut app, worktree, _caller, child) = app_showing_a_child_tab();
+    assert_eq!(app.active_agent_thread(), Some(child));
+    assert!(app.agents.is_attached(child));
+
+    assert_eq!(detach_active_child_tab(&mut app), Some(child));
+
+    assert!(
+        app.agents.summary(child).is_some(),
+        "the daemon summary remains"
+    );
+    assert!(!app.agents.is_attached(child));
+    assert_eq!(app.agents.active(&worktree), None);
+    assert!(
+        app.agents
+            .of_worktree(&worktree)
+            .iter()
+            .all(|summary| summary.thread != child),
+        "the detached child is gone from the tab strip"
+    );
 }
 
 fn encoded(key: &str, key_char: Option<&str>, mods: GpuiModifiers) -> KeyEvent {

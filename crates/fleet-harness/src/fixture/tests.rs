@@ -282,6 +282,30 @@ async fn the_fake_gh_answers_the_daemon_s_own_queries_from_fixture_data() {
 }
 
 #[tokio::test]
+async fn the_fake_fleet_refuses_to_autostart_after_teardown_begins() {
+    let root = tempfile::tempdir().unwrap_or_else(|error| panic!("temporary root: {error}"));
+    let environment = HarnessEnv::rooted(root.path())
+        .unwrap_or_else(|error| panic!("lay the environment out: {error}"));
+    apply_preset(Preset::Empty, &environment)
+        .await
+        .unwrap_or_else(|error| panic!("install the fake tools: {error:#}"));
+    environment
+        .stop_fleet_cli()
+        .unwrap_or_else(|error| panic!("mark teardown: {error:#}"));
+
+    let output = tokio::process::Command::new(environment.fake_bin.join("fleet"))
+        .arg("subagent")
+        .arg("complete")
+        .output()
+        .await
+        .unwrap_or_else(|error| panic!("run the stopped Fleet shim: {error}"));
+
+    assert_eq!(output.status.code(), Some(75));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing daemon autostart"));
+    assert!(!environment.daemon_socket().exists());
+}
+
+#[tokio::test]
 async fn the_empty_preset_is_a_fleet_that_has_never_been_run() {
     let (booted, mut daemon, environment) = boot(Preset::Empty).await;
     assert!(

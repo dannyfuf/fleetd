@@ -26,15 +26,16 @@
 use anyhow::Context;
 use chrono::Utc;
 use fleet_core::agents::{
-    AgentEvent, AgentThreadSummary, GateAnswer, GateKind, ItemId, ItemKind, PermissionChoice,
-    PlanAnswer, Seq, SeqEvent, SessionState, ThreadId, ToolKind, TurnId, TurnOutcome, TurnState,
-    UserInput,
+    AbortReason, AgentEvent, AgentThreadSummary, GateAnswer, GateKind, ItemId, ItemKind,
+    PermissionChoice, PlanAnswer, Seq, SeqEvent, SessionState, StopCause, ThreadId, TurnId,
+    TurnOutcome, TurnState, UserInput,
 };
 use fleet_proto::event::Event;
 use tokio::sync::MutexGuard;
 
 use super::{
     AgentThreadRecord, ManagerInner,
+    delegation::{delegation_facts, tool_paths},
     thread::{AppliedEvent, ThreadRuntime},
 };
 
@@ -69,7 +70,7 @@ pub(super) async fn apply_event(
     raw: Option<String>,
 ) -> Result<AppliedEvent, ApplyEventError> {
     let kind = event_name(&event);
-    let (thread, before, sequenced) = {
+    let (thread, before, sequenced, facts) = {
         let state = runtime
             .state
             .lock()
@@ -95,12 +96,15 @@ pub(super) async fn apply_event(
             state.record.thread,
             state.projection.summary(Seq::default()),
             sequenced,
+            // Gathered here, from the projection as it stands *before* this event, because the
+            // delegation rules run inside the writer's transaction and cannot reach one.
+            delegation_facts(&state.projection, &state.record),
         )
     };
     inner
         .store()
         .map_err(ApplyEventError::Storage)?
-        .append(thread, &sequenced)
+        .append_with_facts(thread, &sequenced, facts)
         .await
         .context("persist native-agent event")
         .map_err(ApplyEventError::Storage)?;
@@ -171,6 +175,7 @@ fn record_metadata_changed(before: &AgentThreadRecord, after: &AgentThreadRecord
         || before.model != after.model
         || before.mode != after.mode
         || before.last_outcome != after.last_outcome
+        || before.stop_cause != after.stop_cause
 }
 
 /// Broadcasts one applied event and, when it moved the list row, the new summary.
@@ -202,7 +207,7 @@ pub(super) fn publish_summary(inner: &ManagerInner, summary: AgentThreadSummary)
 /// The `ItemStarted` that records what the user typed.
 ///
 /// `steered` is the harness's own answer to "did this message join a turn that was already
-/// running?" ([`crate::agents::harness::Submitted::queued`]), never a guess from the projection:
+/// running?" ([`crate::agents::harness::Submitted::joined_active`]), never a guess from the projection:
 /// §7.2 marks a steer with a leading `↳` and the mark has to survive a reload.
 pub(super) fn user_item_started(
     turn: TurnId,
@@ -217,6 +222,7 @@ pub(super) fn user_item_started(
             text: input.text,
             attachments: input.attachments,
             steered,
+            origin: input.origin,
         },
         parent: None,
     }
@@ -224,10 +230,10 @@ pub(super) fn user_item_started(
 
 /// The worktree-relative or absolute paths an edit-shaped tool call is about to write.
 ///
-/// Provider-neutral by reading both shapes rather than by branching on the harness: Codex's
-/// `fileChange` item maps to `{"paths": [...]}` and Claude's `Edit`/`Write`/`NotebookEdit` to a
-/// single `file_path`. A tool that names no path yields nothing, and nothing is captured — which
-/// is the same outcome as a capture that fails.
+/// A tool that names no path yields nothing, and nothing is captured — which is the same outcome
+/// as a capture that fails. The path extraction itself is
+/// [`super::delegation::tool_paths`], because the delegation half reads the same paths off the
+/// same calls and two readings of one harness shape would drift.
 pub(super) fn edited_paths(event: &AgentEvent) -> Option<(TurnId, Vec<String>)> {
     let AgentEvent::ItemStarted { turn, kind, .. } = event else {
         return None;
@@ -235,23 +241,7 @@ pub(super) fn edited_paths(event: &AgentEvent) -> Option<(TurnId, Vec<String>)> 
     let ItemKind::Tool(call) = kind else {
         return None;
     };
-    if !matches!(call.kind, ToolKind::Edit | ToolKind::Write) {
-        return None;
-    }
-    let mut paths = Vec::new();
-    if let Some(listed) = call.input.get("paths").and_then(|value| value.as_array()) {
-        paths.extend(
-            listed
-                .iter()
-                .filter_map(|value| value.as_str())
-                .map(ToOwned::to_owned),
-        );
-    }
-    for key in ["file_path", "notebook_path", "path"] {
-        if let Some(path) = call.input.get(key).and_then(|value| value.as_str()) {
-            paths.push(path.to_owned());
-        }
-    }
+    let paths = tool_paths(call);
     (!paths.is_empty()).then_some((*turn, paths))
 }
 
@@ -343,6 +333,15 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
             }
             record.model.clone_from(model);
             record.mode = *mode;
+            record.stop_cause = None;
+        }
+        AgentEvent::SessionStateChanged(SessionState::Stopped)
+            if event.raw.as_deref() == Some("daemon_restart_recovery") =>
+        {
+            // A resumable provider disappears on every daemon restart even when it was idle in
+            // `Ready`. The synthetic stop is the durable fact delivery replays to distinguish
+            // that orphan from a user-issued Stop.
+            record.stop_cause = Some(StopCause::ProviderExit);
         }
         AgentEvent::MetadataChanged { mode, model, .. } => {
             if let Some(mode) = mode {
@@ -355,13 +354,31 @@ pub(super) fn update_record(record: &mut AgentThreadRecord, event: &SeqEvent, ti
         AgentEvent::TurnSettled { outcome, .. } => {
             record.last_outcome = Some(outcome.clone());
         }
-        AgentEvent::TurnAborted { .. } => {
+        AgentEvent::TurnAborted { reason, .. } => {
             record.last_outcome = Some(TurnOutcome::Interrupted);
+            match reason {
+                AbortReason::User | AbortReason::SessionStopped => {
+                    record.stop_cause = Some(StopCause::User);
+                }
+                AbortReason::ProviderExited => {
+                    record.stop_cause = Some(StopCause::ProviderExit);
+                }
+                AbortReason::Timeout | AbortReason::Superseded | AbortReason::Other(_) => {}
+            }
         }
-        AgentEvent::SessionExited {
-            expected: false, ..
+        AgentEvent::SessionExited { expected, .. } => {
+            record.stop_cause = Some(if *expected {
+                StopCause::User
+            } else {
+                StopCause::ProviderExit
+            });
+            if !expected {
+                record.last_outcome = Some(TurnOutcome::Error {
+                    message: Some("provider exited unexpectedly".to_owned()),
+                });
+            }
         }
-        | AgentEvent::RuntimeError { fatal: true, .. } => {
+        AgentEvent::RuntimeError { fatal: true, .. } => {
             record.last_outcome = Some(TurnOutcome::Error {
                 message: Some("provider exited unexpectedly".to_owned()),
             });

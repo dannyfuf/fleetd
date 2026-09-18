@@ -1,11 +1,14 @@
 //! §3.9 Command palette (`:`) — *jump to anything by name, or do the thing whose key I do not
 
+#[cfg(test)]
+use fleet_core::agents::Seq;
 use fleet_core::{
+    agents::{AgentThreadSummary, Attention, AttentionKind, ThreadId},
     ids::{CardId, ContextId, JobId, RepoId, SessionId, WorktreeId},
     sessions::{AgentActivity, SessionKind, SessionState},
 };
 use fleet_proto::{request::RequestBody, snapshot::Snapshot};
-use fleet_ui_kit::{Icon, prelude::*};
+use fleet_ui_kit::{Icon, IconSize, Spinner, StatusDot, Tone, prelude::*};
 use gpui::{AnyElement, App, Entity, FocusHandle, Window, div};
 
 use crate::{
@@ -13,10 +16,12 @@ use crate::{
     bridge::Bridge,
     dialogs::{
         ConfirmRequest, DialogHost, Dialogs, SessionTransport, clear_all, notify,
-        open_agent_session, open_worktree, request_confirm, step, type_into, with_host,
+        open_agent_session, open_agent_thread_worktree, open_worktree, request_confirm, step,
+        type_into, with_host,
     },
     keymap,
     presentation::{FuzzyQuery, SnapshotIndex, pretty_keys, selected_worktree_id},
+    screens::agent_thread::presentation::tab_title,
     screens::workspace::status_kind,
     state::{
         AppState, Cursors, HubPane, HubTab, Overlay, RepoScope, Screen, latest_failed_job,
@@ -28,6 +33,7 @@ use crate::{
 pub const ROW_CAP: usize = 10;
 /// How many rows each section shows on an empty query (§3.9 "States").
 pub const IDLE_ROWS: usize = 5;
+const ATTENTION_MARK_SIZE: f32 = 16.0;
 
 /// The palette's draft.
 #[derive(Debug, Clone, Default)]
@@ -57,6 +63,11 @@ pub struct PaletteState {
 struct PreparedKey {
     /// `AppState::snapshot_revision`: sessions, worktrees, repos, jobs and contexts.
     snapshot: u64,
+    /// Native-thread summary and installation-local cursor generations.
+    agent_summaries: u64,
+    agent_seen: u64,
+    /// The local tab-set choice is independent of the daemon snapshot.
+    attached: u64,
     /// `BoardState::revision`: a card edit never lands through a snapshot.
     board: u64,
     /// The board's selection and filter, which decide which card the `Board:` rows act on.
@@ -88,6 +99,9 @@ impl PreparedKey {
     ) -> Self {
         Self {
             snapshot: state.snapshot_revision,
+            agent_summaries: state.agents.summaries_revision(),
+            agent_seen: state.agents.seen_revision(),
+            attached: state.agents.attached_revision(),
             board: state.board.revision,
             board_focus: state.board.focus,
             board_filter: state.board.filter.clone(),
@@ -109,6 +123,8 @@ impl PreparedKey {
 /// What a palette row does when `Enter` runs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Run {
+    /// Select one native thread, attaching or reopening its tab first when needed.
+    OpenAgentThread(ThreadId),
     /// Wake and open a fixed agent session.
     OpenSession {
         session: SessionId,
@@ -135,6 +151,10 @@ pub struct Entry {
     pub(crate) label: String,
     /// The muted right-hand description.
     pub(crate) detail: Option<String>,
+    /// The muted second line.
+    pub(crate) secondary: Option<String>,
+    /// The right-aligned row verb.
+    pub(crate) trailing: Option<String>,
     /// The bound key, right-aligned.
     pub(crate) key: Option<String>,
     /// Whether the row is prefixed with `triangle-alert`.
@@ -147,6 +167,8 @@ pub struct Entry {
     /// alone cannot tell `circle` from `moon`, and §5 invariant 1 requires the palette to
     /// draw exactly the glyph the Hub draws for the same worktree.
     pub(crate) status: Option<StatusKind>,
+    /// The native-thread attention mark, when this is an `AGENTS` row.
+    pub(crate) attention: Option<Attention>,
     /// What `Enter` does.
     pub(crate) run: Run,
 }
@@ -736,6 +758,9 @@ pub fn candidates(
     behind: Option<Dialogs>,
     detail_card: Option<&CardId>,
 ) -> Vec<Entry> {
+    if let Some(filter) = agents_picker_filter(query) {
+        return agents_rows(state, &FuzzyQuery::new(filter), usize::MAX);
+    }
     let sessions_only = is_session_switcher(query);
     let effective_query = if sessions_only { "" } else { query };
     let idle = effective_query.trim().is_empty();
@@ -760,6 +785,130 @@ pub fn candidates(
         rows.extend(context_rows(snapshot, &matcher));
     }
     rows
+}
+
+/// Native threads reachable from the selected worktree, in caller/child order.
+fn agents_rows(state: &AppState, matcher: &FuzzyQuery, limit: usize) -> Vec<Entry> {
+    let current = selected_worktree_id(state);
+    let summaries = state.agents.summaries();
+    let callers: Vec<_> = summaries
+        .iter()
+        .filter(|summary| {
+            summary.parent.is_none()
+                && current
+                    .as_ref()
+                    .is_none_or(|worktree| &summary.worktree == worktree)
+        })
+        .collect();
+    let caller_ids: std::collections::HashSet<_> =
+        callers.iter().map(|summary| summary.thread).collect();
+    let children: Vec<_> = summaries
+        .iter()
+        .filter(|summary| {
+            summary
+                .parent
+                .is_some_and(|parent| caller_ids.contains(&parent))
+        })
+        .collect();
+
+    callers
+        .into_iter()
+        .chain(children.iter().copied().filter(|summary| {
+            current
+                .as_ref()
+                .is_none_or(|worktree| &summary.worktree == worktree)
+        }))
+        .chain(children.iter().copied().filter(|summary| {
+            current
+                .as_ref()
+                .is_some_and(|worktree| &summary.worktree != worktree)
+        }))
+        .filter(|summary| agent_matches(summary, matcher))
+        .take(limit)
+        .map(|summary| agent_entry(state, summary, current.as_ref()))
+        .collect()
+}
+
+fn agent_matches(summary: &AgentThreadSummary, matcher: &FuzzyQuery) -> bool {
+    matcher.matches(&summary.title)
+        || matcher.matches(summary.provider.executable())
+        || matcher.matches(summary.provider.display_name())
+}
+
+fn agent_entry(
+    state: &AppState,
+    summary: &AgentThreadSummary,
+    current: Option<&WorktreeId>,
+) -> Entry {
+    let child = summary.parent.is_some();
+    let other_worktree = child && current.is_some_and(|worktree| worktree != &summary.worktree);
+    let mut label = tab_title(summary);
+    if other_worktree {
+        label.push_str(" \u{b7} ");
+        label.push_str(summary.worktree.as_str());
+    }
+    let attached = state.agents.is_attached(summary.thread);
+    let attention = state.agents.attention(summary.thread);
+    Entry {
+        section: PaletteSectionKind::Agents,
+        label,
+        detail: None,
+        secondary: Some(agent_detail(summary, attention)),
+        trailing: Some(if attached || !child { "go" } else { "attach" }.to_owned()),
+        key: Some(
+            agent_strip_index(state, summary)
+                .map_or_else(|| "\u{b7}".to_owned(), |index| index.to_string()),
+        ),
+        destructive: false,
+        icon: Icon::Bot,
+        status: None,
+        attention: Some(attention),
+        run: Run::OpenAgentThread(summary.thread),
+    }
+}
+
+fn agent_strip_index(state: &AppState, summary: &AgentThreadSummary) -> Option<usize> {
+    if !state.agents.is_attached(summary.thread) {
+        return None;
+    }
+    let session = state.snapshot.as_ref()?.sessions.iter().find(|session| {
+        matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == &summary.worktree)
+    })?;
+    let offset = state.agents.strip_offset(summary.thread)?;
+    Some(session.terminals.len() + offset + 1)
+}
+
+fn agent_detail(summary: &AgentThreadSummary, attention: Attention) -> String {
+    let word = match attention {
+        Attention::NeedsYou(AttentionKind::Permission) => "blocked \u{b7} permission",
+        Attention::NeedsYou(AttentionKind::Question) => "blocked \u{b7} question",
+        Attention::NeedsYou(AttentionKind::Plan) => "blocked \u{b7} plan",
+        Attention::NeedsYou(AttentionKind::Finished) => "done",
+        Attention::Working => "working",
+        Attention::Waiting => "waiting",
+        Attention::Failed => "failed",
+        Attention::Unread => "unread",
+        Attention::Idle => "idle",
+    };
+    if matches!(
+        attention,
+        Attention::NeedsYou(
+            AttentionKind::Permission | AttentionKind::Question | AttentionKind::Plan
+        )
+    ) {
+        return word.to_owned();
+    }
+    let age = summary.last_activity.map_or_else(
+        || "\u{2013}".to_owned(),
+        |last| {
+            let seconds = chrono::Utc::now()
+                .signed_duration_since(last)
+                .num_seconds()
+                .max(0);
+            fleet_ui_kit::format_age(seconds)
+        },
+    );
+    format!("{word} \u{b7} {age}")
 }
 
 /// GO: sessions first, because reaching one from inside another is the point (§3.9).
@@ -824,10 +973,13 @@ fn go_rows(
             section: PaletteSectionKind::Go,
             label: label.to_owned(),
             detail: Some(session_detail(session_state, slept).to_owned()),
+            secondary: None,
+            trailing: None,
             key: None,
             destructive: false,
             icon: Icon::GitBranch,
             status: Some(status_kind(session_state, slept, agent_activity, degraded)),
+            attention: None,
             run: match (&session.kind, worktree) {
                 (SessionKind::Agent(agent), _) => Run::OpenSession {
                     session: session.id.clone(),
@@ -861,6 +1013,8 @@ fn go_rows(
             section: PaletteSectionKind::Go,
             label: worktree.id.as_str().to_owned(),
             detail: Some(session_detail(session, false).to_owned()),
+            secondary: None,
+            trailing: None,
             key: None,
             destructive: false,
             icon: Icon::GitBranch,
@@ -870,6 +1024,7 @@ fn go_rows(
                 status.map_or(AgentActivity::Unknown, |status| status.agent_activity),
                 worktree.degraded.is_some(),
             )),
+            attention: None,
             run: Run::OpenWorktree(worktree.id.clone()),
         });
     }
@@ -884,10 +1039,13 @@ fn go_rows(
             section: PaletteSectionKind::Go,
             label: repo.id.as_str().to_owned(),
             detail: Some("repo".to_owned()),
+            secondary: None,
+            trailing: None,
             key: None,
             destructive: false,
             icon: Icon::FolderGit2,
             status: None,
+            attention: None,
             run: Run::SelectRepo(repo.id.clone()),
         });
     }
@@ -914,10 +1072,13 @@ fn do_rows(
             section: PaletteSectionKind::Do,
             label: command.label().to_owned(),
             detail: None,
+            secondary: None,
+            trailing: None,
             key: key_for(command.action()),
             destructive: command.destructive(),
             icon: command.icon(),
             status: None,
+            attention: None,
             run: Run::Command(command),
         });
     }
@@ -936,10 +1097,13 @@ fn do_rows(
             section: PaletteSectionKind::Do,
             label,
             detail: None,
+            secondary: None,
+            trailing: None,
             key: key_for("fleet::OpenJobs"),
             destructive: false,
             icon: Icon::CircleStop,
             status: None,
+            attention: None,
             run: Run::CancelJob(job.id.clone()),
         });
     }
@@ -952,10 +1116,13 @@ fn do_rows(
                 section: PaletteSectionKind::Do,
                 label,
                 detail: None,
+                secondary: None,
+                trailing: None,
                 key: key_for("fleet::FocusStickyError"),
                 destructive: false,
                 icon: Icon::CircleX,
                 status: None,
+                attention: None,
                 run: Run::Command(Command::JobsPanel),
             });
         }
@@ -975,10 +1142,13 @@ fn context_rows(snapshot: &Snapshot, matcher: &FuzzyQuery) -> Vec<Entry> {
             section: PaletteSectionKind::Context,
             label: context.name.clone(),
             detail: None,
+            secondary: None,
+            trailing: None,
             key: (index < 9).then(|| (index + 1).to_string()),
             destructive: false,
             icon: Icon::Boxes,
             status: None,
+            attention: None,
             run: Run::SwitchContext(context.id.clone()),
         })
         .collect()
@@ -1004,7 +1174,7 @@ pub(super) fn render(
         )
     };
 
-    let windowed = is_session_switcher(query.text());
+    let windowed = is_session_switcher(query.text()) || is_agents_picker(query.text());
     let (visible_rows, visible_cursor) = visible_rows(&rows, cursor, windowed);
     let mut card = fleet_ui_kit::Palette::new(query.text().to_owned())
         .cursor(visible_cursor)
@@ -1015,11 +1185,13 @@ pub(super) fn render(
         PaletteSectionKind::Go,
         PaletteSectionKind::Do,
         PaletteSectionKind::Context,
+        PaletteSectionKind::Agents,
     ] {
         let section: Vec<PaletteRow> = visible_rows
             .iter()
             .filter(|entry| entry.section == kind)
-            .map(|entry| {
+            .enumerate()
+            .map(|(index, entry)| {
                 let mut row = PaletteRow::new(entry.label.clone())
                     .destructive(entry.destructive)
                     .icon(entry.icon);
@@ -1027,9 +1199,17 @@ pub(super) fn render(
                     row = row.leading(StatusGlyph::new(status).id(gpui::SharedString::from(
                         format!("palette-glyph-{}", entry.label),
                     )));
+                } else if let Some(attention) = entry.attention {
+                    row = row.leading(attention_mark(index, attention));
                 }
                 if let Some(detail) = entry.detail.clone() {
                     row = row.detail(detail);
+                }
+                if let Some(secondary) = entry.secondary.clone() {
+                    row = row.secondary(secondary);
+                }
+                if let Some(trailing) = entry.trailing.clone() {
+                    row = row.trailing(trailing);
                 }
                 if let Some(key) = entry.key.clone() {
                     row = row.key(key);
@@ -1112,6 +1292,36 @@ pub(super) fn render(
         .into_any_element()
 }
 
+fn attention_mark(index: usize, attention: Attention) -> AnyElement {
+    if !attention_has_visible_mark(attention) {
+        return div()
+            .w(px(ATTENTION_MARK_SIZE))
+            .h(px(ATTENTION_MARK_SIZE))
+            .into_any_element();
+    }
+    match attention {
+        Attention::Working | Attention::Waiting => Spinner::new(("palette-agent", index))
+            .size(IconSize::Small)
+            .tone(Tone::Secondary)
+            .into_any_element(),
+        Attention::NeedsYou(_) => StatusDot::small(Tone::Warning).into_any_element(),
+        Attention::Unread => StatusDot::small(Tone::Secondary).into_any_element(),
+        Attention::Failed => Icon::CircleX
+            .el()
+            .size(IconSize::Small)
+            .tone(Tone::Danger)
+            .into_any_element(),
+        Attention::Idle => div()
+            .w(px(ATTENTION_MARK_SIZE))
+            .h(px(ATTENTION_MARK_SIZE))
+            .into_any_element(),
+    }
+}
+
+const fn attention_has_visible_mark(attention: Attention) -> bool {
+    !matches!(attention, Attention::Idle)
+}
+
 fn visible_rows(rows: &[Entry], cursor: usize, windowed: bool) -> (&[Entry], usize) {
     if !windowed || rows.len() <= ROW_CAP {
         return (rows, cursor);
@@ -1162,7 +1372,7 @@ pub(super) fn refresh(state: &Entity<AppState>, cx: &mut App) {
         key.detail_card.as_ref(),
     );
     let total = rows.len();
-    let cap = if is_session_switcher(&key.query) {
+    let cap = if is_session_switcher(&key.query) || is_agents_picker(&key.query) {
         usize::MAX
     } else {
         ROW_CAP
@@ -1217,6 +1427,27 @@ fn run_selected<T: SessionTransport>(
         cx.notify();
     });
     match entry.run {
+        Run::OpenAgentThread(thread) => {
+            let worktree = state.update(cx, |app, cx| {
+                if app.select_agent_thread(thread) {
+                    cx.notify();
+                    None
+                } else {
+                    app.agents.summary(thread).and_then(|summary| {
+                        let worktree = summary.worktree.clone();
+                        // `select_agent_thread` also returns false when the combined strip is
+                        // full. That refusal already showed its toast and must not fall through
+                        // to EnsureSession, which could switch or wake an unrelated session.
+                        (app.agents.is_attached(thread)
+                            || app.workspace_has_tab_capacity(&worktree))
+                        .then_some(worktree)
+                    })
+                }
+            });
+            if let Some(worktree) = worktree {
+                open_agent_thread_worktree(worktree, thread, state, transport, cx);
+            }
+        }
         Run::OpenSession { agent, .. } => open_agent_session(agent, state, transport, cx),
         Run::OpenWorktree(id) => open_worktree(id, state, transport, cx),
         Run::SelectRepo(repo) => {
@@ -1472,6 +1703,16 @@ fn is_session_switcher(query: &str) -> bool {
     query.trim() == "sessions"
 }
 
+fn is_agents_picker(query: &str) -> bool {
+    agents_picker_filter(query).is_some()
+}
+
+fn agents_picker_filter(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let rest = query.strip_prefix("agents")?;
+    (rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)).then(|| rest.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Instant};
@@ -1686,6 +1927,253 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{error}")),
             })
             .collect()
+    }
+
+    fn picker_summary(
+        worktree: &str,
+        provider: fleet_core::agents::AgentKind,
+        title: &str,
+        parent: Option<ThreadId>,
+    ) -> AgentThreadSummary {
+        let worktree = worktree.parse().unwrap_or_else(|error| panic!("{error}"));
+        let mut projection =
+            fleet_core::agents::ThreadProjection::new(ThreadId::new(), worktree, provider);
+        projection.title = title.to_owned();
+        projection.last_activity = Some(chrono::Utc::now() - chrono::Duration::minutes(14));
+        let mut summary = projection.summary(Seq::default());
+        summary.parent = parent;
+        summary
+    }
+
+    fn agents_picker_state() -> (AppState, Vec<AgentThreadSummary>) {
+        let now = Instant::now();
+        let mut snapshot = multi_session_snapshot(2);
+        let caller = picker_summary(
+            "acme/widgets#feature-0",
+            fleet_core::agents::AgentKind::Claude,
+            "current caller",
+            None,
+        );
+        let closed = picker_summary(
+            "acme/widgets#feature-0",
+            fleet_core::agents::AgentKind::Claude,
+            "closed caller",
+            None,
+        );
+        let child = picker_summary(
+            "acme/widgets#feature-0",
+            fleet_core::agents::AgentKind::Codex,
+            "local child",
+            Some(caller.thread),
+        );
+        let other_child = picker_summary(
+            "acme/widgets#feature-1",
+            fleet_core::agents::AgentKind::Codex,
+            "remote child",
+            Some(caller.thread),
+        );
+        let unrelated = picker_summary(
+            "acme/widgets#feature-1",
+            fleet_core::agents::AgentKind::Claude,
+            "other caller",
+            None,
+        );
+        let summaries = vec![
+            child.clone(),
+            caller.clone(),
+            other_child.clone(),
+            closed.clone(),
+            unrelated,
+        ];
+        snapshot.agent_threads = summaries.clone();
+        let mut state = AppState::new("/tmp/fleet", now);
+        state.apply_snapshot(snapshot, now);
+        state.screen = Screen::Workspace {
+            session: "widgets/feature-0"
+                .parse()
+                .unwrap_or_else(|error| panic!("{error}")),
+        };
+        state.agents.attach(child.thread);
+        state.agents.close(closed.thread);
+        (state, summaries)
+    }
+
+    #[test]
+    fn agents_picker_orders_callers_then_local_and_other_worktree_children() {
+        let (state, _) = agents_picker_state();
+        let rows = candidates(&state, "agents", None, None);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "claude — current caller",
+                "claude — closed caller",
+                "↳ codex — local child",
+                "↳ codex — remote child · acme/widgets#feature-1",
+            ]
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.section == PaletteSectionKind::Agents)
+        );
+    }
+
+    #[test]
+    fn idle_agent_attention_has_no_picker_glyph() {
+        assert!(!attention_has_visible_mark(Attention::Idle));
+        assert!(attention_has_visible_mark(Attention::Working));
+        assert!(attention_has_visible_mark(Attention::Failed));
+    }
+
+    #[test]
+    fn prepared_key_uses_scalar_agent_revisions() {
+        let (mut state, summaries) = agents_picker_state();
+        let first = PreparedKey::new(&state, String::new(), None, None);
+        let same = PreparedKey::new(&state, String::new(), None, None);
+        assert_eq!(first, same);
+
+        state.agents.mark_seen(summaries[0].thread, Seq(1));
+        let seen = PreparedKey::new(&state, String::new(), None, None);
+        assert_eq!(seen.agent_summaries, first.agent_summaries);
+        assert_ne!(seen.agent_seen, first.agent_seen);
+    }
+
+    #[test]
+    fn agents_picker_keeps_a_closed_caller_reachable() {
+        let (state, summaries) = agents_picker_state();
+        let closed = summaries
+            .iter()
+            .find(|summary| summary.title == "closed caller")
+            .expect("closed caller fixture");
+        assert!(state.agents.is_closed(closed.thread));
+        let rows = candidates(&state, "agents", None, None);
+        let row = rows
+            .iter()
+            .find(|row| row.label.contains("closed caller"))
+            .expect("closed caller row");
+        assert_eq!(row.key.as_deref(), Some("·"));
+        assert_eq!(row.trailing.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn agents_picker_shows_a_strip_index_only_for_an_attached_thread() {
+        let (state, _) = agents_picker_state();
+        let rows = candidates(&state, "agents", None, None);
+        let caller = rows
+            .iter()
+            .find(|row| row.label == "claude — current caller")
+            .expect("caller row");
+        let child = rows
+            .iter()
+            .find(|row| row.label.contains("local child"))
+            .expect("local child row");
+        let hidden = rows
+            .iter()
+            .find(|row| row.label.contains("remote child"))
+            .expect("remote child row");
+        assert_eq!(caller.key.as_deref(), Some("1"));
+        assert_eq!(child.key.as_deref(), Some("2"));
+        assert_eq!(hidden.key.as_deref(), Some("·"));
+    }
+
+    #[gpui::test]
+    fn capacity_refused_agent_selection_does_not_ensure_a_session(cx: &mut gpui::TestAppContext) {
+        let (mut app, summaries) = agents_picker_state();
+        let target = summaries
+            .iter()
+            .find(|summary| summary.title == "remote child")
+            .expect("remote child fixture")
+            .thread;
+        let target_worktree = summaries
+            .iter()
+            .find(|summary| summary.thread == target)
+            .expect("target summary")
+            .worktree
+            .clone();
+        let session = app
+            .snapshot
+            .as_mut()
+            .and_then(|snapshot| {
+                snapshot.sessions.iter_mut().find(|session| {
+                    matches!(&session.kind, SessionKind::Worktree(worktree) if worktree == &target_worktree)
+                })
+            })
+            .expect("target worktree session");
+        while session.terminals.len() < crate::state::WORKSPACE_TAB_LIMIT - 1 {
+            let index = session.terminals.len();
+            session.terminals.push(fleet_core::sessions::Terminal {
+                id: fleet_core::ids::TerminalId(index as u64 + 10),
+                name: format!("terminal-{index}"),
+                command: "shell".to_owned(),
+                cwd: session.cwd.clone(),
+                shell_pid: None,
+                foreground_command: None,
+                status: fleet_core::sessions::TerminalStatus::Running,
+                title: None,
+                keep_alive: Vec::new(),
+                has_unseen_output: false,
+                agent_attention: None,
+                kind: fleet_core::sessions::TerminalKind::Pty,
+            });
+        }
+        app.overlay = Some(Overlay::Palette);
+        let rows = candidates(&app, "agents", None, None);
+        let cursor = rows
+            .iter()
+            .position(|row| row.run == Run::OpenAgentThread(target))
+            .expect("target palette row");
+        let state = cx.new(|_| app);
+        cx.update(|cx| {
+            with_host(&state, cx, |host| {
+                host.palette.rows = rows.into();
+                host.palette.cursor = cursor;
+            });
+        });
+        let transport = FakeTransport::default();
+        let window = cx.add_window(|_, _| PaletteFixture);
+
+        window
+            .update(cx, |_, window, cx| {
+                run_selected(&state, &transport, window, cx)
+            })
+            .expect("run capacity-refused selection");
+
+        assert!(
+            transport.requests.borrow().is_empty(),
+            "a full strip must not issue EnsureSession"
+        );
+        cx.read(|cx| assert!(!state.read(cx).agents.is_attached(target)));
+    }
+
+    #[test]
+    fn agents_picker_filters_on_the_provider_name() {
+        let (state, _) = agents_picker_state();
+        let rows = candidates(&state, "agents codex", None, None);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.label.contains("codex")));
+    }
+
+    #[test]
+    fn agents_picker_projects_cached_attention_without_attaching_a_blocked_child() {
+        let (mut state, summaries) = agents_picker_state();
+        let mut child = summaries
+            .iter()
+            .find(|summary| summary.title == "remote child")
+            .expect("remote child fixture")
+            .clone();
+        child.attention = Attention::NeedsYou(AttentionKind::Question);
+        state.apply_agent_summary(child.clone(), Instant::now());
+        let row = candidates(&state, "agents", None, None)
+            .into_iter()
+            .find(|row| row.label.contains("remote child"))
+            .expect("blocked child row");
+        assert_eq!(row.secondary.as_deref(), Some("blocked · question"));
+        assert_eq!(
+            row.attention,
+            Some(Attention::NeedsYou(AttentionKind::Question))
+        );
+        assert!(!state.agents.is_attached(child.thread));
     }
 
     #[test]
@@ -2106,6 +2594,7 @@ mod tests {
     fn the_section_order_is_fixed() {
         assert!(PaletteSectionKind::Go < PaletteSectionKind::Do);
         assert!(PaletteSectionKind::Do < PaletteSectionKind::Context);
+        assert!(PaletteSectionKind::Context < PaletteSectionKind::Agents);
     }
 
     #[gpui::test]
@@ -2170,10 +2659,13 @@ mod tests {
                     section: PaletteSectionKind::Do,
                     label: "sentinel".to_owned(),
                     detail: None,
+                    secondary: None,
+                    trailing: None,
                     key: None,
                     destructive: false,
                     icon: Icon::Boxes,
                     status: None,
+                    attention: None,
                     run: Run::Command(Command::Help),
                 }]);
             });

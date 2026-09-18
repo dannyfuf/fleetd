@@ -12,8 +12,9 @@ use super::{Result, unexpected};
 use crate::Client;
 use fleet_core::{
     agents::{
-        AgentKind, AgentThreadSummary, GateAnswer, GateId, ItemId, ModelSelection, PermissionMode,
-        Seq, SeqEvent, StreamKind, ThreadId, ThreadProjection, UserInput,
+        AgentKind, AgentThreadSummary, Delegation, DelegationId, GateAnswer, GateId, ItemId,
+        ModelSelection, PermissionMode, Seq, SeqEvent, StreamKind, ThreadId, ThreadProjection,
+        UserInput,
     },
     ids::WorktreeId,
 };
@@ -52,6 +53,29 @@ pub struct AgentItemBody {
     pub text: String,
 }
 
+/// Parameters for starting a delegated child thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationRunRequest {
+    /// Calling thread.
+    pub caller: ThreadId,
+    /// Provider implementation to start.
+    pub provider: AgentKind,
+    /// Work assigned to the child.
+    pub brief: String,
+    /// Completion criteria for the child.
+    pub expectation: String,
+    /// Optional published worktree override.
+    pub worktree: Option<WorktreeId>,
+    /// Optional permission-mode override.
+    pub mode: Option<PermissionMode>,
+    /// Optional model override.
+    pub model: Option<ModelSelection>,
+    /// Optional child-thread title.
+    pub title: Option<String>,
+    /// Deliver completion as soon as possible.
+    pub eager: bool,
+}
+
 impl AgentItemBody {
     /// The offset to ask for next, or `None` once the whole body has been read.
     #[must_use]
@@ -72,6 +96,105 @@ pub(crate) fn out_of_sequence(thread: ThreadId, expected: Seq, got: Seq) -> Prot
 }
 
 impl Client {
+    /// Starts a delegated child thread.
+    pub async fn delegation_run(
+        &self,
+        request: DelegationRunRequest,
+    ) -> Result<(Delegation, Option<String>)> {
+        match self
+            .request(RequestBody::DelegationRun {
+                caller: request.caller,
+                provider: request.provider,
+                brief: request.brief,
+                expectation: request.expectation,
+                worktree: request.worktree,
+                mode: request.mode,
+                model: request.model,
+                title: request.title,
+                eager: request.eager,
+            })
+            .await?
+        {
+            ResponseBody::DelegationStarted {
+                delegation,
+                warning,
+            } => Ok((delegation, warning)),
+            response => Err(unexpected("delegation_run", response)),
+        }
+    }
+
+    /// Reports a delegated child's completion.
+    pub async fn delegation_complete(
+        &self,
+        delegation: DelegationId,
+        child: ThreadId,
+        token: String,
+        result: String,
+        blocked: bool,
+    ) -> Result<Delegation> {
+        match self
+            .request(RequestBody::DelegationComplete {
+                delegation,
+                child,
+                token,
+                result,
+                blocked,
+            })
+            .await?
+        {
+            ResponseBody::Delegation(delegation) => Ok(delegation),
+            response => Err(unexpected("delegation_complete", response)),
+        }
+    }
+
+    /// Lists delegations, optionally for one caller.
+    pub async fn delegation_list(&self, caller: Option<ThreadId>) -> Result<Vec<Delegation>> {
+        match self.request(RequestBody::DelegationList { caller }).await? {
+            ResponseBody::Delegations(delegations) => Ok(delegations),
+            response => Err(unexpected("delegation_list", response)),
+        }
+    }
+
+    /// Reads one delegation.
+    pub async fn delegation_get(&self, delegation: DelegationId) -> Result<Delegation> {
+        match self
+            .request(RequestBody::DelegationGet { delegation })
+            .await?
+        {
+            ResponseBody::Delegation(delegation) => Ok(delegation),
+            response => Err(unexpected("delegation_get", response)),
+        }
+    }
+
+    /// Cancels one delegation and returns its current record.
+    pub async fn delegation_cancel(&self, delegation: DelegationId) -> Result<Delegation> {
+        match self
+            .request(RequestBody::DelegationCancel { delegation })
+            .await?
+        {
+            ResponseBody::Delegation(delegation) => Ok(delegation),
+            response => Err(unexpected("delegation_cancel", response)),
+        }
+    }
+
+    /// Waits for one delegation to become terminal or the deadline to expire.
+    pub async fn delegation_wait(
+        &self,
+        delegation: DelegationId,
+        timeout_ms: u64,
+    ) -> Result<Delegation> {
+        match self
+            .request(RequestBody::DelegationWait {
+                delegation,
+                timeout_ms,
+            })
+            .await?
+        {
+            ResponseBody::Delegation(delegation) => Ok(delegation),
+            response => Err(unexpected("delegation_wait", response)),
+        }
+    }
+
     /// Reads the stable installation's persisted agent cursors after capability negotiation.
     pub async fn agent_seen_cursors(&self) -> Result<Vec<AgentSeenCursor>> {
         if !self.supports_capability(AGENT_SEEN_CAPABILITY) {

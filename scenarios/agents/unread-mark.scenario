@@ -29,6 +29,8 @@ assert screen == Workspace && mode == Terminal && key_contexts[1] == Terminal
 
 # The turn reaches its gate with nobody watching: the tab carries the mark and the attention.
 await agents.threads[0].unread == true 40000
+await agents.threads[0].pending_gate == permission 30000
+await agents.threads[0].state == needs_you 30000
 assert agents.threads[0].pending_gate == permission && agents.threads[0].state == needs_you
 assert lists.tabs.rows[3].marks[0] == needs_you && lists.tabs.selected.badges[0] == pty
 shot unread
@@ -37,6 +39,7 @@ dump unread
 # Looking at it is what reads it. The gate is untouched — reading a thread is not answering it.
 click agents.tabs.tab[3]
 await agents.threads[0].unread == false 20000
+await key_contexts[2] == AgentPermission 20000
 assert agents.threads[0].pending_gate == permission && key_contexts[2] == AgentPermission
 dump read
 quit

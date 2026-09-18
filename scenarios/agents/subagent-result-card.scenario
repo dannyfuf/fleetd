@@ -1,0 +1,26 @@
+# plans/native-subagents-2026-09-17-phase-4-plan.md P4-T07 — a delivered child result
+# becomes a delegation result card in its caller projection.
+fixture: agents-subagent
+await idle
+key o
+await screen == Workspace 20000
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert focused == agents.composer
+await idle 30000
+type delegate the path lookup
+key enter
+await agents.delegations[0].status == working 30000
+await agents.delegations[0].delivery == delivered 40000
+await agents.threads[0].result_cards == 1 40000
+await idle 40000
+assert agents.delegations[0].status == done && agents.threads[0].result_cards == 1
+key ctrl-s [
+await mode == Scroll 10000
+key k k k
+await agents.threads[0].focused_row == delegation_result 10000
+key enter
+await agents.threads[0].expanded_result_cards == 1 10000
+assert agents.threads[1].attached == false
+dump result-card-expanded
+quit

@@ -510,6 +510,8 @@ mod tests {
         let assistant = fleet_core::agents::ItemId::new();
         let record = AgentThreadRecord {
             thread,
+            parent: None,
+            delegation: None,
             worktree: WorktreeId::try_from("acme/api#feature").expect("worktree"),
             provider: AgentKind::Claude,
             title: "Claude".to_owned(),
@@ -519,6 +521,7 @@ mod tests {
             model: None,
             mode: PermissionMode::Ask,
             last_outcome: None,
+            stop_cause: None,
         };
         let events = vec![
             event(
@@ -550,6 +553,7 @@ mod tests {
                         text: "ship it".to_owned(),
                         attachments: Vec::new(),
                         steered: false,
+                        origin: Default::default(),
                     },
                     parent: None,
                 },

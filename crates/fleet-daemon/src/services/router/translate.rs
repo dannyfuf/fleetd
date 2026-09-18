@@ -41,7 +41,14 @@ pub fn to_remote(
         | AgentRevert { .. }
         | AgentAccountLogin { .. }
         | AgentAccountLogout { .. }
-        | AgentStop { .. } => {}
+        | AgentStop { .. }
+        // Delegation requests are always local, so none enters remote-id translation.
+        | DelegationRun { .. }
+        | DelegationComplete { .. }
+        | DelegationList { .. }
+        | DelegationGet { .. }
+        | DelegationCancel { .. }
+        | DelegationWait { .. } => {}
         CreateWorktree {
             host: placement, ..
         }
@@ -196,7 +203,11 @@ pub fn response_to_local(mut body: ResponseBody, host: &HostId, ids: &RemoteIds)
         | AgentCheckpoints(_)
         | AgentReverted(_)
         | AgentAccountLogin { .. }
-        | AgentSeenCursors(_) => {}
+        | AgentSeenCursors(_)
+        // Delegation responses are always local, so none enters remote-id translation.
+        | DelegationStarted { .. }
+        | Delegations(_)
+        | Delegation(_) => {}
         CardWorktree { worktree, .. } => translate_worktree(worktree, host, ids),
         Watches(watches) => {
             for watch in watches {
@@ -307,6 +318,8 @@ pub fn event_to_local(mut event: Event, host: &HostId, ids: &RemoteIds) -> Optio
         | Event::AgentSynchronized { thread }
         | Event::AgentWindow { thread } => ids.register_thread(host, *thread),
         Event::BoardChanged { .. }
+        // Delegation events are emitted by the local owner and carry globally unique ids.
+        | Event::DelegationChanged(_)
         | Event::WatchOutput { .. }
         | Event::WatchDismissed(_)
         | Event::Toast { .. }
@@ -603,6 +616,12 @@ pub(crate) fn unavailable_fanout_response(
         | RequestBody::AgentAccountLogin { .. }
         | RequestBody::AgentAccountLogout { .. }
         | RequestBody::AgentStop { .. }
+        | RequestBody::DelegationRun { .. }
+        | RequestBody::DelegationComplete { .. }
+        | RequestBody::DelegationList { .. }
+        | RequestBody::DelegationGet { .. }
+        | RequestBody::DelegationCancel { .. }
+        | RequestBody::DelegationWait { .. }
         | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }
         | RequestBody::EnsureBoard { .. }

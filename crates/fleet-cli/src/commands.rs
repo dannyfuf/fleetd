@@ -5,6 +5,7 @@ mod board;
 mod hosts;
 mod jobs;
 mod sessions;
+mod subagents;
 mod watches;
 mod worktrees;
 
@@ -41,15 +42,29 @@ const QUIET_RECONCILE: Duration = Duration::from_secs(30);
 struct CommandOutput {
     text: String,
     exit_code: i32,
+    stderr: Option<String>,
 }
 
 impl CommandOutput {
     fn success(text: String) -> Self {
-        Self { text, exit_code: 0 }
+        Self {
+            text,
+            exit_code: 0,
+            stderr: None,
+        }
     }
 
     fn with_exit_code(text: String, exit_code: i32) -> Self {
-        Self { text, exit_code }
+        Self {
+            text,
+            exit_code,
+            stderr: None,
+        }
+    }
+
+    fn with_stderr(mut self, stderr: Option<String>) -> Self {
+        self.stderr = stderr;
+        self
     }
 }
 
@@ -123,6 +138,11 @@ fn run_from(arguments: Vec<OsString>, stdout: &mut impl Write, stderr: &mut impl
 
     match runtime.block_on(run_command(command)) {
         Ok(output) => {
+            if let Some(notice) = output.stderr
+                && writeln!(stderr, "{notice}").is_err()
+            {
+                return FAILURE;
+            }
             if output.text.is_empty() {
                 output.exit_code
             } else {
@@ -149,6 +169,9 @@ async fn run_command(mut command: Command) -> Result<CommandOutput, ProtoError> 
             arguments.session.take(),
             std::env::var("FLEET_SESSION").ok().as_deref(),
         )?);
+    }
+    if let Command::Subagent(arguments) = &command {
+        subagents::validate_context(&arguments.command, &subagents::Environment::from_process())?;
     }
     let home = fleet_home()?;
     if matches!(
@@ -187,6 +210,14 @@ async fn execute(client: &Client, command: Command) -> Result<CommandOutput, Pro
             // native provider reports itself unavailable (`NATIVE-AGENTS.md` §10).
             AgentCommand::Terminal(arguments) => sessions::agent(client, arguments.agent).await,
         },
+        Command::Subagent(arguments) => {
+            subagents::execute(
+                client,
+                arguments.command,
+                &subagents::Environment::from_process(),
+            )
+            .await
+        }
         Command::Create(arguments) => create(client, arguments).await,
         Command::Open(arguments) => open(client, arguments).await,
         Command::List(arguments) => list(client, arguments).await,
@@ -248,6 +279,14 @@ fn command_requests_json(command: &Command) -> bool {
         Command::Kill(arguments) => arguments.json,
         Command::Sleep(arguments) => arguments.json,
         Command::AgentStatus(arguments) => arguments.json,
+        Command::Subagent(arguments) => match &arguments.command {
+            crate::args::SubagentCommand::Run(arguments) => arguments.json,
+            crate::args::SubagentCommand::Complete(arguments) => arguments.json,
+            crate::args::SubagentCommand::Wait(arguments) => arguments.json,
+            crate::args::SubagentCommand::Status(arguments)
+            | crate::args::SubagentCommand::Cancel(arguments) => arguments.json,
+            crate::args::SubagentCommand::List(arguments) => arguments.json,
+        },
         Command::Doctor(arguments) => arguments.json,
         Command::Exec(_)
         | Command::WatchChild(_)

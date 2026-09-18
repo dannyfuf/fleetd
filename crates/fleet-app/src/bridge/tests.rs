@@ -258,6 +258,7 @@ async fn an_agent_send_waits_for_the_preceding_control_acknowledgement() {
                     text: "explain this crate".to_owned(),
                     attachments: Vec::new(),
                     item: Some(fleet_core::agents::ItemId::new()),
+                    ..fleet_core::agents::UserInput::default()
                 },
             }),
             reply: Some(reply),

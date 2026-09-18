@@ -479,6 +479,36 @@ impl WorkspaceScreen {
                 }
             })
         };
+        let root = {
+            let state = state.clone();
+            let views = Rc::clone(&self.agent_views);
+            root.on_action(move |_: &prefix::UpToCaller, window, cx| {
+                let caller = state.update(cx, |app, cx| {
+                    app.leave_prefix();
+                    let caller = up_to_caller(app);
+                    if caller.is_some() {
+                        cx.notify();
+                    } else {
+                        app.toast_short("^s u is not bound here", Icon::Info, Instant::now());
+                        cx.notify();
+                    }
+                    caller
+                });
+                let Some(caller) = caller else { return };
+                let Some(view) = views.borrow().get(&caller).map(|tab| tab.view.clone()) else {
+                    return;
+                };
+                let (scrolling, decision) = agent_tab_focus_mode(state.read(cx), caller);
+                focus_agent_tab(&view, scrolling, decision, window, cx);
+                record_composer_focus(&view, caller, &state, window, cx);
+            })
+        };
+        let root = {
+            let state = state.clone();
+            root.on_action(move |_: &prefix::AgentsPicker, _window, cx| {
+                dialogs::open_agents_picker(&state, cx);
+            })
+        };
         {
             let (_, _, state) = self.handles(bridge, state);
             root.on_action(move |_: &prefix::SessionSwitcher, _window, cx| {
@@ -737,6 +767,13 @@ impl WorkspaceScreen {
     }
 }
 
+/// Selects the active delegated thread's caller, attaching it first when this window hid it.
+pub(super) fn up_to_caller(app: &mut AppState) -> Option<ThreadId> {
+    let child = app.active_agent_thread()?;
+    let caller = app.agents.caller_of(child)?;
+    app.select_agent_thread(caller).then_some(caller)
+}
+
 /// Asks fleetd for a plain shell tab in the session's worktree path.
 ///
 /// `ctrl-s c` and the `+` at the end of the strip are the same request, so they share this.
@@ -751,6 +788,25 @@ pub(super) fn request_shell_tab(
         RequestBody::NewTerminal { session, .. } => session.clone(),
         _ => return,
     };
+    let capacity = state.read(cx).snapshot.as_ref().and_then(|snapshot| {
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == originating_session)
+            .and_then(|session| match &session.kind {
+                SessionKind::Worktree(worktree) => {
+                    Some(state.read(cx).workspace_has_tab_capacity(worktree))
+                }
+                SessionKind::Agent { .. } => None,
+            })
+    });
+    if capacity == Some(false) {
+        state.update(cx, |app, cx| {
+            app.notify_workspace_tab_limit();
+            cx.notify();
+        });
+        return;
+    }
     let reply = bridge.request(request);
     let state = state.clone();
     let bridge = bridge.clone();

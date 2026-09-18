@@ -1,0 +1,23 @@
+# Closing a caller removes only this window's tab. The AGENTS picker keeps the daemon-owned thread
+# reachable, and accepting it reopens the tab with composer focus.
+fixture: agents
+await idle
+key o
+await screen == Workspace 20000
+
+key ctrl-s a
+await agents.threads[0].provider == claude 20000
+assert focused == agents.composer && agents.threads[0].attached == true
+key ctrl-s x
+await lists.tabs.rows[3] absent 10000
+assert agents.threads[0].attached == false && mode == Terminal
+
+key ctrl-s d
+await lists.palette.rows[0].badges[1] == caller 10000
+assert lists.palette.rows[0].marks[1] == go && lists.palette.rows[0].marks[2] == hidden
+key enter
+
+await agents.threads[0].attached == true 20000
+assert lists.tabs.selected.badges[0] == claude && focused == agents.composer
+dump reopened-caller
+quit

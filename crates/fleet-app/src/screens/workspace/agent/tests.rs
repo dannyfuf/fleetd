@@ -183,6 +183,146 @@ fn a_created_thread_activates_its_owning_worktree_after_navigation(cx: &mut gpui
     });
 }
 
+/// One durable delegation of `caller` onto `child`, live and undelivered.
+fn delegation_fixture(caller: ThreadId, child: ThreadId) -> fleet_core::agents::Delegation {
+    fleet_core::agents::Delegation {
+        id: fleet_core::agents::DelegationId::new(),
+        caller,
+        caller_turn: fleet_core::agents::TurnId::new(),
+        caller_item: fleet_core::agents::ItemId::new(),
+        child,
+        provider: AgentKind::Codex,
+        depth: 1,
+        brief: "verify the payroll reducer".to_owned(),
+        expectation: "report the failing cases".to_owned(),
+        eager: false,
+        status: fleet_core::agents::DelegationStatus::Running,
+        status_payload: None,
+        result: None,
+        nudges: 0,
+        recoveries: 0,
+        delivery: fleet_core::agents::DeliveryState::Pending,
+        created: chrono::Utc::now(),
+        finished: None,
+        headline: None,
+    }
+}
+
+/// The caller's app state: both threads listed, the delegation mirrored.
+fn delegating_state(
+    cx: &mut gpui::TestAppContext,
+    worktree: &WorktreeId,
+    record: &fleet_core::agents::Delegation,
+) -> Entity<AppState> {
+    let caller = record.caller;
+    let child = record.child;
+    let record = record.clone();
+    let worktree = worktree.clone();
+    cx.new(move |_| {
+        let mut app = AppState::new("/tmp/fleet-delegation-row", Instant::now());
+        app.agents.apply_summary(
+            ThreadProjection::new(caller, worktree.clone(), AgentKind::Claude)
+                .summary(fleet_core::agents::Seq::default()),
+        );
+        let mut child_projection = ThreadProjection::new(child, worktree.clone(), AgentKind::Codex);
+        child_projection.parent = Some(caller);
+        app.agents
+            .apply_summary(child_projection.summary(fleet_core::agents::Seq::default()));
+        app.agents.apply_delegation(record);
+        app
+    })
+}
+
+/// A caller transcript holding exactly one delegation row, with that row focused.
+fn focused_caller_view(
+    cx: &mut gpui::TestAppContext,
+    worktree: &WorktreeId,
+    record: &fleet_core::agents::Delegation,
+) -> Entity<AgentThreadView> {
+    let mut projection = ThreadProjection::new(record.caller, worktree.clone(), AgentKind::Claude);
+    projection.session = fleet_core::agents::SessionState::Ready;
+    projection.items = vec![fleet_core::agents::Item {
+        id: record.caller_item,
+        turn: record.caller_turn,
+        parent: None,
+        kind: fleet_core::agents::ItemKind::Delegation {
+            id: record.id,
+            provider: record.provider,
+            child: record.child,
+            status: record.status,
+        },
+        status: fleet_core::agents::ItemStatus::Completed,
+        children: Vec::new(),
+        started: record.created,
+        ended: Some(record.created),
+    }];
+    let view = cx.new(|cx| AgentThreadView::new(projection, cx));
+    let delegations = vec![record.clone()];
+    view.update(cx, |view, cx| {
+        view.sync_delegations(delegations, HashMap::new(), 1, cx);
+        view.set_scroll_mode(true, cx);
+        // Row focus is what makes `⏎` / `x` / `y` fire, and it needs no laid-out window.
+        view.move_row_focus(0, cx);
+    });
+    view
+}
+
+/// `⏎` on a delegation row is `AttachChild`, never `ExpandRow`: it brings the child into the
+/// worktree's strip and selects it, so one key reaches the work instead of unfolding a summary.
+#[gpui::test]
+fn enter_on_a_delegation_row_attaches_and_selects_the_child(cx: &mut gpui::TestAppContext) {
+    let worktree: WorktreeId = "fleet/app#delegation-attach"
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
+    let record = delegation_fixture(ThreadId::new(), ThreadId::new());
+    let state = delegating_state(cx, &worktree, &record);
+    let view = focused_caller_view(cx, &worktree, &record);
+
+    let focused = view.read_with(cx, |view, cx| view.focused_delegation(cx));
+    assert_eq!(
+        focused,
+        Some(record.id),
+        "the focused row must resolve to the delegation the handlers act on"
+    );
+
+    let attached = cx.update(|cx| attach_delegation_child(&state, record.id, cx));
+
+    assert_eq!(attached, Some(record.child));
+    state.read_with(cx, |app, _| {
+        assert!(app.agents.is_attached(record.child));
+        assert_eq!(app.agents.active(&worktree), Some(record.child));
+    });
+}
+
+/// `x` on a delegation row never cancels on the spot: it names the child in the Confirm dialog
+/// first, and `dialogs::confirm` sends `DelegationCancel` only once that is accepted.
+#[gpui::test]
+fn x_on_a_delegation_row_opens_the_confirm_for_that_child(cx: &mut gpui::TestAppContext) {
+    let worktree: WorktreeId = "fleet/app#delegation-cancel"
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid test worktree: {error}"));
+    let record = delegation_fixture(ThreadId::new(), ThreadId::new());
+    let state = delegating_state(cx, &worktree, &record);
+    let view = focused_caller_view(cx, &worktree, &record);
+
+    let focused = view.read_with(cx, |view, cx| view.focused_delegation(cx));
+    assert_eq!(focused, Some(record.id));
+
+    let staged = cx.update(|cx| open_delegation_cancel_confirm(&state, record.id, cx));
+
+    assert_eq!(staged, Some(record.child));
+    state.read_with(cx, |app, _| {
+        assert!(
+            matches!(app.overlay, Some(Overlay::Dialog(Dialogs::Confirm))),
+            "cancelling a child goes through the confirm dialog"
+        );
+        assert!(
+            !app.agents.is_attached(record.child),
+            "asking to cancel never attaches the child"
+        );
+    });
+}
+
 struct ComposerFocusFixture;
 
 impl Render for ComposerFocusFixture {

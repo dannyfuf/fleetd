@@ -25,7 +25,8 @@ use std::{
 };
 
 use fleet_core::agents::{
-    GateId, ItemId, ItemKind, PermissionMode, Seq, ThreadId, ThreadProjection, TurnId, UserInput,
+    AgentThreadSummary, Delegation, DelegationId, GateId, ItemId, ItemKind, PermissionMode, Seq,
+    ThreadId, ThreadProjection, TurnId, UserInput,
 };
 use fleet_lazygit::diff_view::DiffView;
 use fleet_ui_kit::{
@@ -69,6 +70,8 @@ pub(crate) enum AgentThreadEvent {
     OpenInEditor(String),
     /// Copy text to the clipboard.
     Copy(String),
+    /// Attach and select another native thread named by prepared chrome.
+    SelectThread(ThreadId),
     /// Say something short to the user, as a transient toast.
     Notice(SharedString),
     /// The reader reached the oldest row this client holds: load the page behind it.
@@ -127,6 +130,10 @@ struct RowsKey {
     pending_rev: u32,
     /// Bumps when the checkpoint listing changes, because a turn footer gains or loses `[u]`.
     checkpoints_rev: u64,
+    /// Bumps when a durable delegation record changes independently of the caller projection.
+    delegations_rev: u64,
+    /// Bumps once per retained clock tick while at least one delegation is live.
+    delegation_clock_rev: u64,
     /// Which composer mode is live, because the plan-ready reminder depends on it.
     mode: ComposerMode,
 }
@@ -147,6 +154,16 @@ pub struct AgentThreadView {
     targets: HashMap<SharedString, RowTarget>,
     /// Where each streaming item's row sits, so a `ContentDelta` rewrites exactly one row.
     row_of_item: HashMap<ItemId, usize>,
+    /// Durable delegation records used by caller rows, refreshed from the app mirror.
+    delegations: HashMap<DelegationId, Delegation>,
+    /// Child titles joined from daemon summaries, keyed by their delegation.
+    delegation_titles: HashMap<DelegationId, String>,
+    /// App-mirror revision paired with `delegations` for the row memo key.
+    delegations_rev: u64,
+    /// Retained one-second clock for live delegation elapsed labels.
+    delegation_clock_rev: u64,
+    delegation_clock_task: Option<Task<()>>,
+    delegation_clock_running: bool,
     /// The prepared decisions, in creation order; the kit applies the priority ladder.
     decisions: Vec<Decision>,
     /// The prepared metadata strip and its per-width fit memo.
@@ -154,6 +171,10 @@ pub struct AgentThreadView {
     trailing: Vec<MetadataSegment>,
     metadata_fit: MetadataFit,
     metadata_rev: u32,
+    /// This delegated thread's caller, prepared by the workspace from the app mirror.
+    caller: Option<AgentThreadSummary>,
+    /// The caller's one-based combined-strip index, absent while its tab is hidden.
+    caller_index: Option<usize>,
 
     /// One inline diff surface per item that carries a patch, keyed by the row's item id.
     ///
@@ -223,6 +244,8 @@ pub struct AgentThreadView {
     reveal_running: bool,
     #[cfg(test)]
     patched_rows: usize,
+    #[cfg(test)]
+    row_builds: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -267,11 +290,19 @@ impl AgentThreadView {
             rows_key: None,
             targets: HashMap::new(),
             row_of_item: HashMap::new(),
+            delegations: HashMap::new(),
+            delegation_titles: HashMap::new(),
+            delegations_rev: 0,
+            delegation_clock_rev: 0,
+            delegation_clock_task: None,
+            delegation_clock_running: false,
             decisions: Vec::new(),
             metadata: Vec::new(),
             trailing: Vec::new(),
             metadata_fit: MetadataFit::new(),
             metadata_rev: 0,
+            caller: None,
+            caller_index: None,
             diffs,
             expanded: HashSet::new(),
             unfolded: HashSet::new(),
@@ -304,6 +335,8 @@ impl AgentThreadView {
             reveal_running: false,
             #[cfg(test)]
             patched_rows: 0,
+            #[cfg(test)]
+            row_builds: 0,
             _subscriptions: subscriptions,
         };
         view.prepare(cx);
@@ -347,6 +380,12 @@ impl AgentThreadView {
     #[cfg(test)]
     pub(crate) fn patched_rows(&self) -> usize {
         self.patched_rows
+    }
+
+    /// Number of full grouping projections performed by this view.
+    #[cfg(test)]
+    pub(crate) fn row_builds(&self) -> usize {
+        self.row_builds
     }
 
     /// The prepared decisions, newest gate last.
@@ -658,6 +697,7 @@ pub(crate) fn user_input(text: String, item: ItemId) -> UserInput {
         text,
         attachments: Vec::new(),
         item: Some(item),
+        origin: Default::default(),
     }
 }
 

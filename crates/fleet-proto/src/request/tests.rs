@@ -78,6 +78,7 @@ fn request_bodies_round_trip() {
                 text: "inspect the failing test".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         },
         RequestBody::AgentInterrupt { thread },
@@ -254,6 +255,7 @@ fn the_seven_agent_mutations_serialize_per_thread_and_the_reads_do_not() {
                 text: "go".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         },
         RequestBody::AgentRespond {

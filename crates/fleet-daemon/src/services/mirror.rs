@@ -519,6 +519,7 @@ mod tests {
     fn thread_summary(thread: ThreadId, worktree: WorktreeId) -> AgentThreadSummary {
         AgentThreadSummary {
             thread,
+            parent: None,
             worktree,
             host: None,
             provider: AgentKind::Codex,

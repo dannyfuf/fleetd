@@ -3,8 +3,8 @@ use super::*;
 use fleet_client::{AgentMirror, MirrorOutcome, PageOutcome};
 use fleet_core::{
     agents::{
-        AgentThreadSummary, Applied, Attention, AttentionKind, PermissionMode, Seq, SeqEvent,
-        ThreadId, ThreadProjection,
+        AgentThreadSummary, Applied, Attention, AttentionKind, Delegation, DelegationId,
+        PermissionMode, Seq, SeqEvent, ThreadId, ThreadProjection,
     },
     ids::WorktreeId,
 };
@@ -26,6 +26,15 @@ pub struct AgentCounts {
     pub failed: usize,
 }
 
+#[derive(Debug, Default)]
+struct AgentDerived {
+    attention: HashMap<ThreadId, Attention>,
+    counts: AgentCounts,
+    strip_offsets: HashMap<ThreadId, usize>,
+    /// Callers with at least one live durable child, rebuilt only when that census changes.
+    live_delegation_callers: HashSet<ThreadId>,
+}
+
 impl AgentCounts {
     /// Whether any counter is non-zero, which is what zero-suppresses the chips (§2.3).
     #[must_use]
@@ -43,6 +52,18 @@ impl AgentCounts {
 pub struct AgentThreads {
     /// Daemon summaries in snapshot order; the tab strip inherits that order.
     summaries: Vec<AgentThreadSummary>,
+    summaries_revision: u64,
+    seen_revision: u64,
+    /// Durable caller-to-child records, replaced by the capability-gated seed after Hello.
+    delegations: HashMap<DelegationId, Delegation>,
+    /// Delegation ids in creation order, independent of hash-map iteration order.
+    delegation_order: Vec<DelegationId>,
+    /// Invalidates transcript rows and harness snapshots when a delegation changes.
+    delegations_revision: u64,
+    /// Child threads this window chose to show in a tab strip.
+    attached: HashSet<ThreadId>,
+    /// Invalidates tab projections when the local attached/closed choice changes.
+    attached_revision: u64,
     /// Projections of the threads this client has opened.
     mirror: AgentMirror,
     /// The agent tab selected in each worktree's workspace, when one is.
@@ -77,12 +98,20 @@ pub struct AgentThreads {
     /// §12 puts row focus **inside** scroll mode, which is what finally makes `⏎`/`u`/`o`/`y`/`d`
     /// fire: the `AgentRow` context is only ever on the chain under `AgentNativeScroll`.
     row_focus: HashSet<ThreadId>,
+    /// Focused transcript row kind per mounted thread, for harness assertions.
+    focused_rows: HashMap<ThreadId, &'static str>,
+    /// Expanded delegation-result cards per mounted thread, for harness assertions.
+    expanded_result_cards: HashMap<ThreadId, u32>,
     /// The one agent tab whose composer must take focus after its next mounted frame.
     focus_composer: Option<ThreadId>,
     /// The active thread whose mounted composer most recently proved it held focus.
     composer_focused: Option<ThreadId>,
     /// Narrow damage reported by the latest accepted event for each opened thread.
     last_applied: HashMap<ThreadId, Applied>,
+    /// Threads whose authoritative projection was replaced outside the live event stream.
+    projection_replaced: HashSet<ThreadId>,
+    /// Prepared foreground data. Render getters only read this cache.
+    derived: AgentDerived,
 }
 
 impl AgentThreads {
@@ -92,18 +121,34 @@ impl AgentThreads {
         &self.summaries
     }
 
+    /// Scalar generation for consumers whose projection depends on the summary census.
+    #[must_use]
+    pub const fn summaries_revision(&self) -> u64 {
+        self.summaries_revision
+    }
+
+    /// Scalar generation for consumers whose projection depends on installation-local cursors.
+    #[must_use]
+    pub const fn seen_revision(&self) -> u64 {
+        self.seen_revision
+    }
+
     /// The threads of one worktree, which are that workspace's agent tabs.
     ///
     /// A thread the user closed with `^s x` is not one of them: the daemon still lists it, and
     /// still counts it in the context bar, but this window has put it away.
     #[must_use]
     pub fn of_worktree(&self, worktree: &WorktreeId) -> Vec<&AgentThreadSummary> {
-        self.summaries
+        let mut visible = self
+            .summaries
             .iter()
             .filter(|summary| {
-                &summary.worktree == worktree && !self.closed.contains(&summary.thread)
+                &summary.worktree == worktree
+                    && self.derived.strip_offsets.contains_key(&summary.thread)
             })
-            .collect()
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|summary| self.derived.strip_offsets[&summary.thread]);
+        visible
     }
 
     /// Whether this window has closed the thread's tab.
@@ -116,7 +161,181 @@ impl AgentThreads {
     ///
     /// Returns whether the strip actually changed.
     pub fn close(&mut self, thread: ThreadId) -> bool {
-        self.closed.insert(thread)
+        let changed = self.closed.insert(thread);
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// Whether this thread currently belongs to its worktree's tab strip.
+    #[must_use]
+    pub fn is_attached(&self, thread: ThreadId) -> bool {
+        self.summary(thread).is_some_and(|summary| {
+            if summary.parent.is_some() {
+                self.attached.contains(&thread) && !self.closed.contains(&thread)
+            } else {
+                !self.closed.contains(&thread)
+            }
+        })
+    }
+
+    /// Shows a delegated child in its worktree and clears a stale local close marker.
+    pub fn attach(&mut self, thread: ThreadId) -> bool {
+        let mut changed = self.closed.remove(&thread);
+        if self.caller_of(thread).is_some() {
+            changed |= self.attached.insert(thread);
+        }
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// Hides a delegated child without changing the daemon-owned thread.
+    pub fn detach(&mut self, thread: ThreadId) -> bool {
+        let changed = self.attached.remove(&thread);
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// Reopens a caller tab previously hidden with `close`.
+    pub fn reopen(&mut self, thread: ThreadId) -> bool {
+        let changed = self.closed.remove(&thread);
+        if changed {
+            self.bump_attached_revision();
+        }
+        changed
+    }
+
+    /// The parent declared by one thread's summary.
+    #[must_use]
+    pub fn caller_of(&self, thread: ThreadId) -> Option<ThreadId> {
+        self.summary(thread).and_then(|summary| summary.parent)
+    }
+
+    /// Direct children of a caller in daemon creation order.
+    #[must_use]
+    pub fn children_of(&self, caller: ThreadId) -> Vec<&AgentThreadSummary> {
+        self.summaries
+            .iter()
+            .filter(|summary| summary.parent == Some(caller))
+            .collect()
+    }
+
+    /// One durable delegation record.
+    #[must_use]
+    pub fn delegation(&self, id: DelegationId) -> Option<&Delegation> {
+        self.delegations.get(&id)
+    }
+
+    /// Delegations spawned by one caller, oldest first.
+    #[must_use]
+    pub fn delegations_of_caller(&self, caller: ThreadId) -> Vec<&Delegation> {
+        self.delegation_order
+            .iter()
+            .filter_map(|id| self.delegations.get(id))
+            .filter(|delegation| delegation.caller == caller)
+            .collect()
+    }
+
+    /// The delegation that owns a child thread.
+    #[must_use]
+    pub fn delegation_of_child(&self, child: ThreadId) -> Option<&Delegation> {
+        self.delegation_order
+            .iter()
+            .filter_map(|id| self.delegations.get(id))
+            .find(|delegation| delegation.child == child)
+    }
+
+    /// Every delegation in creation order, for stable harness projection.
+    #[must_use]
+    pub(crate) fn delegations(&self) -> Vec<&Delegation> {
+        self.delegation_order
+            .iter()
+            .filter_map(|id| self.delegations.get(id))
+            .collect()
+    }
+
+    /// Generation consumed by transcript and harness projection keys.
+    #[must_use]
+    pub const fn delegations_revision(&self) -> u64 {
+        self.delegations_revision
+    }
+
+    /// Generation consumed by tab-strip and harness projection keys.
+    #[must_use]
+    pub const fn attached_revision(&self) -> u64 {
+        self.attached_revision
+    }
+
+    /// Replaces the capability-gated delegation census received after Hello.
+    pub fn seed_delegations(&mut self, mut list: Vec<Delegation>) {
+        list.sort_by_key(|delegation| (delegation.created, delegation.id));
+        let next_order = list
+            .iter()
+            .map(|delegation| delegation.id)
+            .collect::<Vec<_>>();
+        let next = list
+            .into_iter()
+            .map(|delegation| (delegation.id, delegation))
+            .collect::<HashMap<_, _>>();
+        if self.delegations == next && self.delegation_order == next_order {
+            return;
+        }
+        self.delegations = next;
+        self.delegation_order = next_order;
+        self.delegations_revision = self.delegations_revision.wrapping_add(1);
+        self.prepare_live_delegation_callers();
+    }
+
+    /// Applies one changed delegation, advancing the row generation only for a real change.
+    pub fn apply_delegation(&mut self, delegation: Delegation) {
+        if self.delegations.get(&delegation.id) == Some(&delegation) {
+            return;
+        }
+        let id = delegation.id;
+        let caller = delegation.caller;
+        let caller_item = delegation.caller_item;
+        let is_new = !self.delegations.contains_key(&id);
+        self.delegations.insert(id, delegation);
+        if is_new {
+            self.delegation_order.push(id);
+            self.delegation_order.sort_by_key(|id| {
+                self.delegations
+                    .get(id)
+                    .map(|delegation| (delegation.created, delegation.id))
+            });
+        }
+        if self
+            .mirror
+            .projections
+            .get(&caller)
+            .is_some_and(|projection| !projection.items.iter().any(|item| item.id == caller_item))
+        {
+            // `DelegationChanged` and the caller's item event travel independently. If this
+            // window observed the durable record first, re-open its caller window so the row
+            // cannot stay absent after a brief event-stream race.
+            self.resync.insert(caller);
+        }
+        self.delegations_revision = self.delegations_revision.wrapping_add(1);
+        self.prepare_live_delegation_callers();
+    }
+
+    fn prepare_live_delegation_callers(&mut self) {
+        self.derived.live_delegation_callers = self
+            .delegations
+            .values()
+            .filter(|delegation| delegation.status.is_live())
+            .map(|delegation| delegation.caller)
+            .collect();
+    }
+
+    fn bump_attached_revision(&mut self) {
+        self.attached_revision = self.attached_revision.wrapping_add(1);
+        self.prepare_strip_offsets();
     }
 
     /// One thread's summary.
@@ -139,6 +358,11 @@ impl AgentThreads {
         self.last_applied.get(&thread)
     }
 
+    /// Takes the one-shot signal that a mounted view must adopt a replacement projection.
+    pub fn take_projection_replaced(&mut self, thread: ThreadId) -> bool {
+        self.projection_replaced.remove(&thread)
+    }
+
     /// The sequence this client has reported as seen for a thread.
     #[must_use]
     pub fn seen(&self, thread: ThreadId) -> Seq {
@@ -156,10 +380,15 @@ impl AgentThreads {
     /// Windows from one installation share that identity; separate installations do not.
     #[must_use]
     pub fn attention(&self, thread: ThreadId) -> Attention {
-        let Some(summary) = self.summary(thread) else {
-            return Attention::Idle;
-        };
-        let seen = self.seen(thread);
+        self.derived
+            .attention
+            .get(&thread)
+            .copied()
+            .unwrap_or(Attention::Idle)
+    }
+
+    fn own_attention(&self, summary: &AgentThreadSummary) -> Attention {
+        let seen = self.seen(summary.thread);
         match summary.attention_for(seen) {
             // A cursor at the tail is the tab the user is looking at, whatever the last stored
             // completion sequence was.
@@ -172,22 +401,144 @@ impl AgentThreads {
         }
     }
 
+    fn attention_in(&self, thread: ThreadId, summaries: &[AgentThreadSummary]) -> Attention {
+        let Some(summary) = summaries.iter().find(|summary| summary.thread == thread) else {
+            return Attention::Idle;
+        };
+        let own = self.own_attention(summary);
+        summaries
+            .iter()
+            .filter(|child| child.parent == Some(thread))
+            .filter_map(|child| match self.own_attention(child) {
+                Attention::NeedsYou(
+                    kind @ (AttentionKind::Permission
+                    | AttentionKind::Question
+                    | AttentionKind::Plan),
+                ) => Some(Attention::NeedsYou(kind)),
+                Attention::Working | Attention::Waiting => Some(Attention::Working),
+                Attention::NeedsYou(AttentionKind::Finished)
+                | Attention::Failed
+                | Attention::Unread
+                | Attention::Idle => None,
+            })
+            .fold(own, std::cmp::max)
+    }
+
     /// The §3.3 counters the context bar shows, including the thread on the current tab.
     #[must_use]
     pub fn counts(&self) -> AgentCounts {
+        self.derived.counts
+    }
+
+    /// Zero-based position among the native tabs of this thread's worktree.
+    #[must_use]
+    pub fn strip_offset(&self, thread: ThreadId) -> Option<usize> {
+        self.derived.strip_offsets.get(&thread).copied()
+    }
+
+    fn prepare_attention_counts(&mut self) {
+        let own = self
+            .summaries
+            .iter()
+            .map(|summary| (summary.thread, self.own_attention(summary)))
+            .collect::<HashMap<_, _>>();
+        let mut attention = own.clone();
+        for child in self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_some())
+        {
+            let Some(parent) = child.parent else {
+                continue;
+            };
+            let propagated = match own.get(&child.thread).copied().unwrap_or(Attention::Idle) {
+                Attention::NeedsYou(
+                    kind @ (AttentionKind::Permission
+                    | AttentionKind::Question
+                    | AttentionKind::Plan),
+                ) => Attention::NeedsYou(kind),
+                Attention::Working | Attention::Waiting => Attention::Working,
+                Attention::NeedsYou(AttentionKind::Finished)
+                | Attention::Failed
+                | Attention::Unread
+                | Attention::Idle => continue,
+            };
+            attention
+                .entry(parent)
+                .and_modify(|current| *current = std::cmp::max(*current, propagated));
+        }
         let mut counts = AgentCounts::default();
-        for summary in &self.summaries {
-            match self.attention(summary.thread) {
+        for summary in self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_none())
+        {
+            match attention
+                .get(&summary.thread)
+                .copied()
+                .unwrap_or(Attention::Idle)
+            {
                 Attention::NeedsYou(_) => counts.needs_you += 1,
                 Attention::Failed => counts.failed += 1,
-                // A thread parked on a usage window is working as far as the bar is concerned:
-                // §3.3 ranks `waiting` below `working` and above `failed`, and nothing about it
-                // needs the user.
                 Attention::Working | Attention::Waiting => counts.working += 1,
                 Attention::Unread | Attention::Idle => {}
             }
         }
-        counts
+        self.derived.attention = attention;
+        self.derived.counts = counts;
+    }
+
+    fn prepare_strip_offsets(&mut self) {
+        let worktree_of = self
+            .summaries
+            .iter()
+            .map(|summary| (summary.thread, summary.worktree.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut children = HashMap::<ThreadId, Vec<ThreadId>>::new();
+        for summary in &self.summaries {
+            if let Some(parent) = summary.parent {
+                children.entry(parent).or_default().push(summary.thread);
+            }
+        }
+        let mut strip_offsets = HashMap::new();
+        let mut next_by_worktree = HashMap::<WorktreeId, usize>::new();
+        let mut roots = self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_none() && !self.closed.contains(&summary.thread))
+            .map(|summary| summary.thread)
+            .collect::<Vec<_>>();
+        roots.extend(self.summaries.iter().filter_map(|summary| {
+            (summary.parent.is_some()
+                && self.attached.contains(&summary.thread)
+                && !self.closed.contains(&summary.thread))
+            .then_some(summary.thread)
+        }));
+        for root in roots {
+            let mut stack = vec![root];
+            while let Some(thread) = stack.pop() {
+                let Some(worktree) = worktree_of.get(&thread) else {
+                    continue;
+                };
+                if strip_offsets.contains_key(&thread) {
+                    continue;
+                }
+                let offset = next_by_worktree.entry(worktree.clone()).or_default();
+                strip_offsets.insert(thread, *offset);
+                *offset += 1;
+                if let Some(descendants) = children.get(&thread) {
+                    for child in descendants.iter().rev() {
+                        if worktree_of.get(child) == Some(worktree)
+                            && self.attached.contains(child)
+                            && !self.closed.contains(child)
+                        {
+                            stack.push(*child);
+                        }
+                    }
+                }
+            }
+        }
+        self.derived.strip_offsets = strip_offsets;
     }
 
     /// The agent tab selected in a worktree's workspace.
@@ -313,7 +664,7 @@ impl AgentThreads {
             matches!(projection.turn, fleet_core::agents::TurnState::Running(_))
                 || projection.session == fleet_core::agents::SessionState::Running
                 || !projection.background_tasks.is_empty()
-        })
+        }) || self.derived.live_delegation_callers.contains(&thread)
     }
 
     /// Whether a thread's event stream must be re-opened before deltas may be applied.
@@ -400,8 +751,9 @@ impl AgentThreads {
     /// what is in hand rather than from the newest row the daemon has.
     pub fn install_window(&mut self, window: &AgentThreadWindow) {
         let thread = window.summary.thread;
+        let repair_pending = self.resync.contains(&thread);
         if let Some(seen) = window.seen_seq {
-            self.mirror.mark_seen(thread, seen);
+            self.mark_seen(thread, seen);
         }
         self.apply_summary(window.summary.clone());
         self.commands
@@ -416,6 +768,7 @@ impl AgentThreads {
                 .map_or_else(Vec::new, |capabilities| capabilities.modes.clone()),
         );
         self.last_applied.insert(thread, Applied::Structural);
+        self.projection_replaced.insert(thread);
         match self.mirror.install_window(window) {
             MirrorOutcome::Gap { .. } => {
                 self.resync.insert(thread);
@@ -423,7 +776,9 @@ impl AgentThreads {
             MirrorOutcome::Applied(_)
             | MirrorOutcome::Duplicate { .. }
             | MirrorOutcome::Rejected { .. } => {
-                self.resync.remove(&thread);
+                if !repair_pending {
+                    self.resync.remove(&thread);
+                }
                 self.resume_from.remove(&thread);
             }
         }
@@ -493,6 +848,38 @@ impl AgentThreads {
         self.row_focus.contains(&thread)
     }
 
+    /// Mirrors the focused transcript row's stable harness vocabulary.
+    pub(crate) fn set_focused_row(
+        &mut self,
+        thread: ThreadId,
+        focused: Option<&'static str>,
+    ) -> bool {
+        match focused {
+            Some(focused) => self.focused_rows.insert(thread, focused) != Some(focused),
+            None => self.focused_rows.remove(&thread).is_some(),
+        }
+    }
+
+    /// Focused transcript row kind, when scroll mode carries row focus.
+    #[must_use]
+    pub(crate) fn focused_row(&self, thread: ThreadId) -> Option<&'static str> {
+        self.focused_rows.get(&thread).copied()
+    }
+
+    /// Mirrors how many delegation-result cards this view has expanded.
+    pub(crate) fn set_expanded_result_cards(&mut self, thread: ThreadId, count: u32) -> bool {
+        self.expanded_result_cards.insert(thread, count) != Some(count)
+    }
+
+    /// Expanded delegation-result cards in one mounted thread view.
+    #[must_use]
+    pub(crate) fn expanded_result_cards(&self, thread: ThreadId) -> u32 {
+        self.expanded_result_cards
+            .get(&thread)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Clears the flag while one open request is in flight, so a frame cannot spam the daemon.
     pub fn clear_resync(&mut self, thread: ThreadId) {
         self.resync.remove(&thread);
@@ -501,7 +888,9 @@ impl AgentThreads {
     /// Replaces a projection with a daemon snapshot and applies its ordered tail.
     pub fn install_snapshot(&mut self, projection: ThreadProjection, events: &[SeqEvent]) {
         let thread = projection.thread;
+        let repair_pending = self.resync.contains(&thread);
         self.last_applied.insert(thread, Applied::Structural);
+        self.projection_replaced.insert(thread);
         match self.mirror.install_snapshot(projection, events) {
             MirrorOutcome::Gap { .. } => {
                 self.resync.insert(thread);
@@ -511,7 +900,9 @@ impl AgentThreads {
             MirrorOutcome::Applied(_)
             | MirrorOutcome::Duplicate { .. }
             | MirrorOutcome::Rejected { .. } => {
-                self.resync.remove(&thread);
+                if !repair_pending {
+                    self.resync.remove(&thread);
+                }
             }
         }
     }
@@ -541,7 +932,9 @@ impl AgentThreads {
         }
         if !self.mirror.projections.contains_key(&thread) {
             // A thread this client has not opened has no projection to advance; its tab still
-            // updates from the summary the daemon broadcasts beside the event.
+            // updates from the summary the daemon broadcasts beside the event. Remember the
+            // missing tail in case an open reply was already in flight when this event landed.
+            self.resync.insert(thread);
             return MirrorOutcome::Applied(Applied::Structural);
         }
         let outcome = self.mirror.apply_event(thread, event);
@@ -556,25 +949,41 @@ impl AgentThreads {
 
     /// Patches one broadcast summary into the mirror, preserving snapshot order.
     pub fn apply_summary(&mut self, summary: AgentThreadSummary) {
-        match self
+        let changed = match self
             .summaries
             .iter_mut()
             .find(|existing| existing.thread == summary.thread)
         {
-            Some(existing) => *existing = summary,
-            None => self.summaries.push(summary),
+            Some(existing) if *existing == summary => false,
+            Some(existing) => {
+                *existing = summary;
+                true
+            }
+            None => {
+                self.summaries.push(summary);
+                true
+            }
+        };
+        if changed {
+            self.summaries_revision = self.summaries_revision.wrapping_add(1);
+            self.prepare_attention_counts();
+            self.prepare_strip_offsets();
         }
     }
 
     /// Records the sequence the user has actually seen in a focused tab.
     pub fn mark_seen(&mut self, thread: ThreadId, seq: Seq) {
-        self.mirror.mark_seen(thread, seq);
+        if self.seen(thread) != seq {
+            self.mirror.mark_seen(thread, seq);
+            self.seen_revision = self.seen_revision.wrapping_add(1);
+            self.prepare_attention_counts();
+        }
     }
 
     /// Seeds persisted cursors returned for this installation after Hello.
     pub fn seed_seen(&mut self, cursors: &[(ThreadId, Seq)]) {
         for (thread, seq) in cursors {
-            self.mirror.mark_seen(*thread, *seq);
+            self.mark_seen(*thread, *seq);
         }
     }
 
@@ -613,14 +1022,18 @@ impl AgentThreads {
     pub fn seed(&mut self, threads: &[AgentThreadSummary]) {
         self.notified = threads
             .iter()
-            .map(|summary| (summary.thread, summary.attention))
+            .filter(|summary| summary.parent.is_none())
+            .map(|summary| (summary.thread, self.attention_in(summary.thread, threads)))
             .collect();
     }
 
     /// Replaces the summary list from an authoritative snapshot and forgets vanished threads.
     pub fn sync_snapshot(&mut self, threads: Vec<AgentThreadSummary>) {
         let live: HashSet<ThreadId> = threads.iter().map(|summary| summary.thread).collect();
-        self.summaries = threads;
+        if self.summaries != threads {
+            self.summaries = threads;
+            self.summaries_revision = self.summaries_revision.wrapping_add(1);
+        }
         self.mirror
             .projections
             .retain(|thread, _| live.contains(thread));
@@ -635,13 +1048,25 @@ impl AgentThreads {
         self.decisions.retain(|thread, _| live.contains(thread));
         self.resume_from.retain(|thread, _| live.contains(thread));
         self.last_applied.retain(|thread, _| live.contains(thread));
+        self.projection_replaced
+            .retain(|thread| live.contains(thread));
         self.row_focus.retain(|thread| live.contains(thread));
+        self.focused_rows.retain(|thread, _| live.contains(thread));
+        self.expanded_result_cards
+            .retain(|thread, _| live.contains(thread));
         self.composing.retain(|thread| live.contains(thread));
         self.scrolling.retain(|thread| live.contains(thread));
         self.question_cursor
             .retain(|thread, _| live.contains(thread));
         self.reported.retain(|thread, _| live.contains(thread));
         self.active.retain(|_, thread| live.contains(thread));
+        let attached_before = self.attached.len();
+        let closed_before = self.closed.len();
+        self.attached.retain(|thread| live.contains(thread));
+        self.closed.retain(|thread| live.contains(thread));
+        if self.attached.len() != attached_before || self.closed.len() != closed_before {
+            self.bump_attached_revision();
+        }
         if self
             .focus_composer
             .is_some_and(|thread| !live.contains(&thread))
@@ -654,6 +1079,8 @@ impl AgentThreads {
         {
             self.composer_focused = None;
         }
+        self.prepare_attention_counts();
+        self.prepare_strip_offsets();
     }
 
     /// The threads that just entered an attention worth a notification, and their tab labels.
@@ -662,21 +1089,12 @@ impl AgentThreads {
     /// each fires once per entry, so a thread that stays blocked does not notify on every event.
     pub fn attention_edges(&mut self) -> Vec<(String, Attention)> {
         let mut edges = Vec::new();
-        for summary in &self.summaries {
-            let seen = self
-                .mirror
-                .last_seen
-                .get(&summary.thread)
-                .copied()
-                .unwrap_or_default();
-            let attention = match summary.attention_for(seen) {
-                Attention::NeedsYou(AttentionKind::Finished) | Attention::Unread
-                    if seen >= summary.last_seq =>
-                {
-                    Attention::Idle
-                }
-                attention => attention,
-            };
+        for summary in self
+            .summaries
+            .iter()
+            .filter(|summary| summary.parent.is_none())
+        {
+            let attention = self.attention(summary.thread);
             let previous = self.notified.insert(summary.thread, attention);
             if previous == Some(attention) {
                 continue;

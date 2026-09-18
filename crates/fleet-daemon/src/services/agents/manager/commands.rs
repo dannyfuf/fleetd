@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use chrono::Utc;
 use fleet_core::{
     agents::{
-        AbortReason, AgentEvent, AgentKind, ControlCost, GateAnswer, GateId, ModelSelection,
-        PermissionMode, Seq, StartRequest, SteerSupport, ThreadId, ThreadProjection, TurnId,
-        TurnState, UserInput,
+        AbortReason, AgentEvent, AgentKind, ControlCost, DelegationId, GateAnswer, GateId,
+        ModelSelection, PermissionMode, Seq, StartRequest, SteerSupport, ThreadId,
+        ThreadProjection, TurnId, TurnState, UserInput,
     },
     ids::WorktreeId,
 };
@@ -28,12 +28,64 @@ use fleet_proto::{
 use crate::agents::harness::{AccountOp, AccountOutcome, RuntimeChange};
 
 use super::{
-    AgentSessionManager, AgentThreadRecord, ThreadRuntime,
+    AgentSessionManager, AgentThreadRecord, SubmissionState, ThreadRuntime,
     apply::{publish_applied, runtime_inflight},
     conflict, controls_for_mode, daemon_error, hydrate, not_found, provider_error,
     provider_factory_error, provider_start_error, storage_error, validation,
     window::OpenRequest,
 };
+
+/// Everything one new thread needs, including the delegation facts a child carries.
+///
+/// A struct rather than six more positional arguments: `create` grew a parent, a delegation and
+/// an environment the moment a thread could be spawned by another thread rather than by a user,
+/// and `docs/NATIVE-AGENTS.md` §15 adds more of those than a call site can read positionally.
+#[derive(Debug, Clone)]
+pub struct CreateOptions {
+    /// Preallocated identity, used when a delegation must be durable before provider events run.
+    pub thread: Option<ThreadId>,
+    /// Worktree the child runs in.
+    pub worktree: WorktreeId,
+    /// Harness to start.
+    pub provider: AgentKind,
+    /// Model selection, or the harness default.
+    pub model: Option<ModelSelection>,
+    /// Permission-mode override, or the selected harness's configured default.
+    pub mode: Option<PermissionMode>,
+    /// Cursor to resume an existing harness session from.
+    pub resume_cursor: Option<String>,
+    /// Title, or the provider's display name.
+    pub title: Option<String>,
+    /// Caller thread, when this thread is a delegated child.
+    pub parent: Option<ThreadId>,
+    /// Delegation that spawned this thread, when one did.
+    pub delegation: Option<DelegationId>,
+    /// Extra environment for the child process, merged before `FLEET_SESSION`.
+    ///
+    /// This is how `FLEET_DELEGATION` and `FLEET_DELEGATION_TOKEN` reach the child: both adapters
+    /// already extend their overrides with `StartRequest::env`, so nothing harness-specific is
+    /// needed to carry a secret the child alone may use.
+    pub extra_env: BTreeMap<String, String>,
+}
+
+impl CreateOptions {
+    /// The options a plain `AgentThreadCreate` carries: no parent, no delegation, no environment.
+    #[must_use]
+    pub fn new(worktree: WorktreeId, provider: AgentKind, mode: Option<PermissionMode>) -> Self {
+        Self {
+            thread: None,
+            worktree,
+            provider,
+            model: None,
+            mode,
+            resume_cursor: None,
+            title: None,
+            parent: None,
+            delegation: None,
+            extra_env: BTreeMap::new(),
+        }
+    }
+}
 
 impl AgentSessionManager {
     /// Handles `AgentThreadCreate`.
@@ -47,6 +99,29 @@ impl AgentSessionManager {
         resume_cursor: Option<String>,
         title: Option<String>,
     ) -> Result<ResponseBody, ProtoError> {
+        self.create_with(CreateOptions {
+            model,
+            resume_cursor,
+            title,
+            ..CreateOptions::new(worktree, provider_kind, mode)
+        })
+        .await
+    }
+
+    /// Creates a thread from the full option set, which is what a delegated child needs.
+    pub async fn create_with(&self, options: CreateOptions) -> Result<ResponseBody, ProtoError> {
+        let CreateOptions {
+            thread,
+            worktree,
+            provider: provider_kind,
+            model,
+            mode,
+            resume_cursor,
+            title,
+            parent,
+            delegation,
+            extra_env,
+        } = options;
         let remote_host = self
             .inner
             .remote_host_resolver
@@ -72,7 +147,7 @@ impl AgentSessionManager {
             .await
             .map(PathBuf::from)
             .map_err(daemon_error)?;
-        let thread = ThreadId::new();
+        let thread = thread.unwrap_or_else(ThreadId::new);
         let (binaries, native_agents, config_notice) = self.native_agent_settings().await;
         let defaults = native_agents.for_kind(provider_kind);
         let mode = mode.unwrap_or(defaults.mode);
@@ -104,7 +179,7 @@ impl AgentSessionManager {
             mode,
             resume_cursor: resume_cursor.clone(),
             fork: false,
-            env: BTreeMap::new(),
+            env: extra_env,
             sandbox,
             approval_policy,
             permission_profile: None,
@@ -136,6 +211,8 @@ impl AgentSessionManager {
         );
         let record = AgentThreadRecord {
             thread,
+            parent,
+            delegation,
             worktree: worktree.clone(),
             provider: provider_kind,
             title: resolved_title.clone(),
@@ -145,13 +222,19 @@ impl AgentSessionManager {
             model: model.clone(),
             mode,
             last_outcome: None,
+            stop_cause: None,
         };
         let mut projection = ThreadProjection::new(thread, worktree, provider_kind);
+        // §1.5: the caller travels on the projection so the summary a client lists a child under
+        // carries it from the thread's very first frame, not from the delegation record it would
+        // have to join against.
+        projection.parent = parent;
         projection.title = resolved_title;
         projection.model = model;
         projection.mode = mode;
         let runtime = ThreadRuntime::new(projection, record.clone(), None);
         *runtime.provider.lock().await = Some(provider);
+        let provider_generation = runtime.next_provider_generation();
 
         // The row is written before the runtime is published, so a thread a client can see is a
         // thread the next start will find. One upsert, not a whole-index rewrite.
@@ -195,7 +278,7 @@ impl AgentSessionManager {
                 );
             }
         }
-        self.spawn_event_task(runtime.clone(), provider_events);
+        drop(self.spawn_event_task(runtime.clone(), provider_events, provider_generation));
         let summary = runtime
             .state
             .lock()
@@ -326,6 +409,28 @@ impl AgentSessionManager {
         thread: ThreadId,
         input: UserInput,
     ) -> Result<ResponseBody, ProtoError> {
+        self.send_inner(thread, input, false).await
+    }
+
+    /// Sends a durable outbox-owned input and commits its stable item before acknowledging it.
+    ///
+    /// Delegation workers cannot treat a provider return as durable: a database failure after the
+    /// provider accepted the input would otherwise make the open row submit it again. Ordinary UI
+    /// sends still wait for the provider's `TurnStarted`; outbox sends use this tighter boundary.
+    pub(crate) async fn send_durable(
+        &self,
+        thread: ThreadId,
+        input: UserInput,
+    ) -> Result<ResponseBody, ProtoError> {
+        self.send_inner(thread, input, true).await
+    }
+
+    async fn send_inner(
+        &self,
+        thread: ThreadId,
+        input: UserInput,
+        durable: bool,
+    ) -> Result<ResponseBody, ProtoError> {
         if input.text.trim().is_empty() && input.attachments.is_empty() {
             return Err(validation("agent input cannot be empty"));
         }
@@ -387,25 +492,114 @@ impl AgentSessionManager {
             .await
             .map_err(provider_error)?;
         drop(provider_slot);
-        let turn = submitted.turn;
+        let turn = submitted.turn();
         {
             let mut state = runtime
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.inflight_turn = Some(turn);
-            if !submitted.queued {
+            if !submitted.joined_active() {
                 state.pending_inputs.push_back((turn, input.clone()));
             }
         }
-        if submitted.queued {
+        if submitted.joined_active() {
             // A steer: the turn is already running, so there is no announcement to wait for and
             // the bubble is recorded now, marked as having joined it (§7.2).
             let item = input.item.unwrap_or_default();
             self.record_user_input(&runtime, &operation, turn, item, input, true)
                 .await?;
+        } else if durable && !projected_running && !had_inflight {
+            // The stable item is the durable acknowledgement keyed by the outbox row. Provider
+            // `TurnStarted` remains useful, but if it arrives later it is a harmless duplicate;
+            // the worker may reconcile this committed item instead of resubmitting the prompt.
+            for applied in self
+                .flush_pending_inputs(&runtime, &operation, turn, "durable_outbox_submission")
+                .await?
+            {
+                publish_applied(&self.inner, &runtime, applied);
+            }
         }
         Ok(ResponseBody::AgentAck)
+    }
+
+    /// Reconciles a stable outbox item with the durable transcript or accepted-input queue.
+    pub(crate) async fn submission_state(
+        &self,
+        thread: ThreadId,
+        item: fleet_core::agents::ItemId,
+    ) -> Result<SubmissionState, ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        let state = runtime
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .projection
+            .items
+            .iter()
+            .any(|candidate| candidate.id == item)
+        {
+            return Ok(SubmissionState::Committed);
+        }
+        if state
+            .pending_inputs
+            .iter()
+            .any(|(_, input)| input.item == Some(item))
+        {
+            return Ok(SubmissionState::Pending);
+        }
+        Ok(SubmissionState::Unknown)
+    }
+
+    /// Commits an input the provider accepted when the first transcript write failed.
+    pub(crate) async fn reconcile_submission(
+        &self,
+        thread: ThreadId,
+        item: fleet_core::agents::ItemId,
+    ) -> Result<SubmissionState, ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        let operation = runtime.operation.lock().await;
+        let pending_turn = {
+            let state = runtime
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state
+                .projection
+                .items
+                .iter()
+                .any(|candidate| candidate.id == item)
+            {
+                return Ok(SubmissionState::Committed);
+            }
+            state
+                .pending_inputs
+                .iter()
+                .find_map(|(turn, input)| (input.item == Some(item)).then_some(*turn))
+        };
+        let Some(turn) = pending_turn else {
+            return Ok(SubmissionState::Unknown);
+        };
+        for applied in self
+            .flush_pending_inputs(&runtime, &operation, turn, "durable_outbox_reconcile")
+            .await?
+        {
+            publish_applied(&self.inner, &runtime, applied);
+        }
+        Ok(SubmissionState::Committed)
+    }
+
+    /// Resumes a stopped provider and drains the history it returned during open before an
+    /// outbox row decides whether its stable item needs to be retried.
+    pub(crate) async fn reconcile_provider_history(
+        &self,
+        thread: ThreadId,
+        item: fleet_core::agents::ItemId,
+    ) -> Result<SubmissionState, ProtoError> {
+        let runtime = self.runtime(thread).await?;
+        self.resume_if_stopped(&runtime).await?;
+        self.submission_state(thread, item).await
     }
 
     /// Handles `AgentInterrupt`.
@@ -671,23 +865,24 @@ impl AgentSessionManager {
         let runtime = self.runtime(thread).await?;
         let operation = runtime.operation.lock().await;
         let mut provider_slot = runtime.provider.lock().await;
-        let Some(mut provider) = provider_slot.take() else {
-            return Ok(ResponseBody::AgentAck);
-        };
+        let provider = provider_slot.take();
+        runtime.invalidate_provider();
         // A provider that will not die is a diagnostic, not a reason to leave the transcript
         // claiming a turn is still running: the child that exits from its own stdin close
         // answers `stop` with `Exited`, and returning here skipped every settlement below, so
         // §2's tab spun on a dead process until the daemon restarted. The handle is dropped
         // either way — nothing can reach that session again.
-        if let Err(error) = provider.stop().await {
-            tracing::warn!(
-                target: "fleet::agents",
-                %error,
-                %thread,
-                "the native-agent provider did not stop cleanly",
-            );
+        if let Some(mut provider) = provider {
+            if let Err(error) = provider.stop().await {
+                tracing::warn!(
+                    target: "fleet::agents",
+                    %error,
+                    %thread,
+                    "the native-agent provider did not stop cleanly",
+                );
+            }
+            drop(provider);
         }
-        drop(provider);
         drop(provider_slot);
 
         for applied in self.settle_open_gates(&runtime, &operation).await? {

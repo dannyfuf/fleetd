@@ -89,14 +89,25 @@ pub(crate) fn neighbour_target(
 
 /// One agent thread's tab, badged with the §3.3 mark its attention maps to.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn agent_tab(
     summary: &AgentThreadSummary,
     index: usize,
     attention: Attention,
     active: bool,
 ) -> TerminalTab {
-    let mut tab = TerminalTab::new(index, SharedString::from(tab_title(summary)))
-        .id(SharedString::from(format!("agent-tab-{}", summary.thread)));
+    let tab = TerminalTab::new(index, SharedString::from(tab_title(summary)))
+        .id(SharedString::from(format!("agent-tab-{}", summary.thread)))
+        .kind(TerminalTabKind::Native);
+    decorate_agent_tab(summary, tab, attention, active)
+}
+
+fn decorate_agent_tab(
+    summary: &AgentThreadSummary,
+    mut tab: TerminalTab,
+    attention: Attention,
+    active: bool,
+) -> TerminalTab {
     match tab_badge(attention, summary.exit_code) {
         TabBadge::Spinner => tab = tab.starting(true),
         // §2 draws the amber dot for as long as the thread needs you, on the selected tab too:
@@ -115,7 +126,18 @@ pub(crate) fn agent_tab(
 }
 
 #[derive(Default)]
-pub(crate) struct TabLabels(HashMap<TerminalId, SharedString>);
+pub(crate) struct TabLabels {
+    terminals: HashMap<TerminalId, SharedString>,
+    agents: HashMap<ThreadId, AgentLabel>,
+    #[cfg(test)]
+    agent_label_builds: usize,
+}
+
+struct AgentLabel {
+    revision: u64,
+    title: SharedString,
+    id: SharedString,
+}
 
 impl TabLabels {
     /// The tabs of a session, in `Session.terminals` order.
@@ -131,7 +153,7 @@ impl TabLabels {
         active: Option<TerminalId>,
         renamed: &HashSet<TerminalId>,
     ) -> Vec<TerminalTab> {
-        self.0
+        self.terminals
             .retain(|id, _| session.terminals.iter().any(|terminal| terminal.id == *id));
         session
             .terminals
@@ -139,7 +161,7 @@ impl TabLabels {
             .enumerate()
             .map(|(position, terminal)| {
                 let label = terminal_label(terminal, renamed.contains(&terminal.id));
-                let shared = self.0.entry(terminal.id).or_default();
+                let shared = self.terminals.entry(terminal.id).or_default();
                 if shared.as_ref() != label {
                     *shared = SharedString::new(label);
                 }
@@ -176,6 +198,51 @@ impl TabLabels {
                 tab
             })
             .collect()
+    }
+
+    /// One agent tab using strings retained until the summary census changes.
+    pub(crate) fn agent_tab(
+        &mut self,
+        summary: &AgentThreadSummary,
+        index: usize,
+        attention: Attention,
+        active: bool,
+        revision: u64,
+    ) -> TerminalTab {
+        let (tab, rebuilt) = {
+            let label = self
+                .agents
+                .entry(summary.thread)
+                .or_insert_with(|| AgentLabel {
+                    revision: revision.wrapping_sub(1),
+                    title: SharedString::default(),
+                    id: SharedString::default(),
+                });
+            let rebuilt = label.revision != revision;
+            if rebuilt {
+                label.revision = revision;
+                label.title = SharedString::from(tab_title(summary));
+                label.id = SharedString::from(format!("agent-tab-{}", summary.thread));
+            }
+            (
+                TerminalTab::new(index, label.title.clone())
+                    .id(label.id.clone())
+                    .kind(TerminalTabKind::Native),
+                rebuilt,
+            )
+        };
+        #[cfg(test)]
+        if rebuilt {
+            self.agent_label_builds += 1;
+        }
+        #[cfg(not(test))]
+        let _ = rebuilt;
+        decorate_agent_tab(summary, tab, attention, active)
+    }
+
+    pub(crate) fn retain_agents(&mut self, summaries: &[&AgentThreadSummary]) {
+        self.agents
+            .retain(|thread, _| summaries.iter().any(|summary| summary.thread == *thread));
     }
 }
 
@@ -490,6 +557,46 @@ mod tests {
         let unread = agent_summary(Attention::Unread);
         assert!(agent_tab(&unread, 4, Attention::Unread, false).unread);
         assert!(!agent_tab(&unread, 4, Attention::Unread, true).unread);
+    }
+
+    #[test]
+    fn a_child_tab_title_has_the_delegation_arrow_and_no_other_child_marker() {
+        let mut child = agent_summary(Attention::Idle);
+        child.parent = Some(fleet_core::agents::ThreadId::new());
+        child.provider = fleet_core::agents::AgentKind::Codex;
+        child.title = "design".to_owned();
+        let mut caller = child.clone();
+        caller.parent = None;
+
+        let child_tab = agent_tab(&child, 3, Attention::Idle, false);
+        let caller_tab = agent_tab(&caller, 2, Attention::Idle, false);
+        assert_eq!(child_tab.name.as_ref(), "\u{21b3} codex \u{2014} design");
+        assert_eq!(caller_tab.name.as_ref(), "codex \u{2014} design");
+        assert_eq!(child_tab.kind, TerminalTabKind::Native);
+        assert_eq!(caller_tab.kind, TerminalTabKind::Native);
+
+        child.title = "\u{21b3} codex \u{2014} inspect the reducer".to_owned();
+        let default_title = agent_tab(&child, 3, Attention::Idle, false);
+        assert_eq!(
+            default_title.name.as_ref(),
+            "\u{21b3} codex \u{2014} inspect the reducer",
+            "the daemon's complete default title is not prefixed twice"
+        );
+    }
+
+    #[test]
+    fn agent_tab_labels_are_reused_until_the_summary_revision_changes() {
+        let mut summary = agent_summary(Attention::Idle);
+        summary.title = "first".to_owned();
+        let mut labels = TabLabels::default();
+        let first = labels.agent_tab(&summary, 1, Attention::Idle, false, 4);
+        let _second = labels.agent_tab(&summary, 1, Attention::Idle, false, 4);
+        assert_eq!(labels.agent_label_builds, 1);
+
+        summary.title = "second".to_owned();
+        let changed = labels.agent_tab(&summary, 1, Attention::Idle, false, 5);
+        assert_eq!(labels.agent_label_builds, 2);
+        assert_ne!(changed.name.as_ref(), first.name.as_ref());
     }
 
     #[test]

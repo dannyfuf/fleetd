@@ -8,7 +8,9 @@
 
 use chrono::{DateTime, Utc};
 use fleet_core::{
-    agents::{AgentKind, ModelSelection, PermissionMode, ThreadId, TurnOutcome},
+    agents::{
+        AgentKind, DelegationId, ModelSelection, PermissionMode, StopCause, ThreadId, TurnOutcome,
+    },
     ids::WorktreeId,
 };
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,12 @@ impl Default for AgentIndex {
 pub struct AgentThreadRecord {
     /// Thread identity.
     pub thread: ThreadId,
+    /// Parent caller thread for a delegated child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ThreadId>,
+    /// Delegation that created this child thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationId>,
     /// Owning worktree.
     pub worktree: WorktreeId,
     /// Provider kind.
@@ -66,4 +74,7 @@ pub struct AgentThreadRecord {
     /// Last settled turn outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<TurnOutcome>,
+    /// Why the thread stopped, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_cause: Option<StopCause>,
 }

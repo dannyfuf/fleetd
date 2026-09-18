@@ -214,3 +214,33 @@ fn a_window_response_decodes_without_its_optional_halves() {
     assert!(window.events_after.is_empty());
     assert!(window.session.capabilities.is_none());
 }
+
+#[test]
+fn pre_delegation_payloads_default_origin_and_parent() {
+    let message = r#"{"type":"user_message","data":{"text":"legacy message","attachments":[]}}"#;
+    let message: ItemKind = serde_json::from_str(message).expect("pre-delegation user message");
+    assert!(matches!(
+        message,
+        ItemKind::UserMessage {
+            origin: MessageOrigin::User,
+            ..
+        }
+    ));
+
+    // The same message on its way in, from a client that predates `origin` entirely.
+    let input = r#"{"text":"inspect the failing test","attachments":[]}"#;
+    let input: UserInput = serde_json::from_str(input).expect("pre-delegation user input");
+    assert!(input.origin.is_user());
+    assert!(input.item.is_none());
+
+    let summary = r#"{"thread":"11111111-2222-4333-8444-555555555555","worktree":"acme/api#native-agents","provider":"codex","title":"Codex","attention":{"type":"idle"},"session":{"type":"ready"},"turn":{"type":"none"},"lastSeq":0,"lastActivity":null,"exitCode":null}"#;
+    let summary: AgentThreadSummary =
+        serde_json::from_str(summary).expect("pre-delegation thread summary");
+    assert!(summary.parent.is_none());
+
+    // And the projection a pre-delegation daemon persisted and replays on the next open.
+    let projection = r#"{"thread":"11111111-2222-4333-8444-555555555555","worktree":"acme/api#native-agents","provider":"codex","title":"Codex","session":{"type":"starting"},"turn":{"type":"none"},"gates":[],"items":[],"turns":[],"backgroundTasks":[],"lastSeq":0,"lastActivity":null,"cumulativeUsage":{"inputTokens":0,"outputTokens":0,"reasoningTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":0,"webSearchRequests":0,"toolUses":0},"cumulativeCostUsd":null,"contextPct":0.0,"model":null,"mode":"ask","exitCode":null,"retrying":null}"#;
+    let projection: ThreadProjection =
+        serde_json::from_str(projection).expect("pre-delegation thread projection");
+    assert!(projection.parent.is_none());
+}

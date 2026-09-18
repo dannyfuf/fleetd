@@ -1,6 +1,7 @@
 use super::{
     connection::{
         Failure, HealthCheckError, Link, check_health, daemon_identity, open, refresh_agent_seen,
+        refresh_delegations,
     },
     requests, *,
 };
@@ -215,6 +216,15 @@ pub(super) async fn run_with_intervals(
                         }
                         Ok(None) => {}
                         Err(error) => tracing::warn!(%error, "could not refresh native-agent seen cursors"),
+                    }
+                    match refresh_delegations(&client).await {
+                        Ok(Some(delegations)) => {
+                            if events.send(BridgeEvent::Delegations(delegations)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(%error, "could not refresh native-agent delegations"),
                     }
                 }
             },

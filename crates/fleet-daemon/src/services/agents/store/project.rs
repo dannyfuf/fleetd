@@ -47,6 +47,9 @@ use gates::{resolve_gate, withdraw_gate};
 use items::{append_output, append_text, close_open_items, is_terminal, item_detail};
 use turns::fail_active_turn;
 
+use super::delegations::{self, TransitionOutcome};
+use crate::services::agents::delegation::transition::DelegationFacts;
+
 fn patch_columns(
     patch: Option<&ItemPayloadPatch>,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -72,7 +75,9 @@ fn patch_columns(
         Some(
             ItemPayloadPatch::UserMessage { .. }
             | ItemPayloadPatch::Subagent { .. }
-            | ItemPayloadPatch::Error { .. },
+            | ItemPayloadPatch::Error { .. }
+            // Phase 3 consumes this status in the delegation transition; it has no text column.
+            | ItemPayloadPatch::Delegation { .. },
         )
         | None => (None, None, None),
     }
@@ -110,6 +115,29 @@ pub(super) fn append_event(
 
 /// Applies one event to every read model it can change.
 pub(super) fn project_event(
+    transaction: &Transaction<'_>,
+    thread: ThreadId,
+    event: &SeqEvent,
+) -> anyhow::Result<()> {
+    project_rows(transaction, thread, event)
+}
+
+/// Applies one local event and its delegation transition in the same transaction.
+pub(super) fn project_event_with_facts(
+    transaction: &Transaction<'_>,
+    thread: ThreadId,
+    event: &SeqEvent,
+    facts: &DelegationFacts,
+) -> anyhow::Result<TransitionOutcome> {
+    project_rows(transaction, thread, event)?;
+    delegations::transition(transaction, thread, event, facts, event.at)
+}
+
+/// Applies only the replayable transcript projections, without orchestration side effects.
+///
+/// A rebuild derives these rows from the retained log. Delegations and their outbox are durable
+/// orchestration state, so replay must not transition them or enqueue the same work twice.
+fn project_rows(
     transaction: &Transaction<'_>,
     thread: ThreadId,
     event: &SeqEvent,
@@ -723,7 +751,9 @@ pub(super) fn quarantine_after(
 /// on a live thread: it is idempotent, because every upsert is keyed on a content-derived id; and
 /// it rewrites only the projector-owned columns of `sessions`, leaving `started_at`,
 /// `last_seen_at` and `restart_count` byte-identical — a rebuild that cleared those would make
-/// restart recovery believe a running provider had never started.
+/// restart recovery believe a running provider had never started. Delegations are durable
+/// orchestration state rather than a projection of the child's log, so neither rebuild nor the
+/// quarantine path that calls it touches `delegations` or `delegation_outbox`.
 pub(super) fn rebuild_thread(
     transaction: &Transaction<'_>,
     thread: ThreadId,
@@ -783,7 +813,7 @@ pub(super) fn rebuild_thread(
         for (seq, at, raw, payload) in chunk {
             let event = decode_event(seq, at, raw, &payload)
                 .with_context(|| format!("decode event {seq} of thread {thread} for a rebuild"))?;
-            project_event(transaction, thread, &event)?;
+            project_rows(transaction, thread, &event)?;
             advance_head(transaction, thread, &event)?;
             after = seq;
         }

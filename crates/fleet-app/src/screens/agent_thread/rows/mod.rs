@@ -16,14 +16,14 @@ use std::{
 };
 
 use fleet_core::agents::{
-    CheckpointKind, CheckpointRecord, GateId, Item, ItemId, ItemStatus, NoticeRecord, SessionState,
-    ThreadProjection, TurnId, TurnRecord, TurnState,
+    CheckpointKind, CheckpointRecord, Delegation, DelegationId, GateId, Item, ItemId, ItemStatus,
+    NoticeRecord, SessionState, ThreadProjection, TurnId, TurnRecord, TurnState,
 };
 use fleet_ui_kit::{
     EmptyRow, ErrorRow, NoticeRow, TranscriptRow, TranscriptRowId, TranscriptRowKind, WorkingPhase,
     WorkingRow, format_compacted, format_resumed, format_retrying,
 };
-use gpui::SharedString;
+use gpui::{App, SharedString};
 
 pub(crate) mod fold;
 pub(crate) mod group;
@@ -42,6 +42,8 @@ pub(crate) enum RowTarget {
     /// A tool row, a reasoning block, a user bubble, a plan, a subagent, or a group keyed by its
     /// first member.
     Item(ItemId),
+    /// A durable delegation whose caller item has not reached this mirror yet.
+    Delegation(DelegationId),
     /// One turn's `worked …` fold.
     Turn(TurnId),
     /// The settled record of a resolved gate.
@@ -99,6 +101,10 @@ pub(crate) struct ResolvedGate {
 pub(crate) struct RowInputs<'a> {
     /// The projection the rows describe.
     pub(crate) projection: &'a ThreadProjection,
+    /// Durable delegation records, keyed by the identity carried by caller transcript items.
+    pub(crate) delegations: &'a HashMap<DelegationId, Delegation>,
+    /// Child titles from daemon summaries, keyed by delegation identity.
+    pub(crate) delegation_titles: &'a HashMap<DelegationId, String>,
     /// Items, groups (keyed by their first member) and plans the user expanded.
     pub(crate) expanded: &'a HashSet<ItemId>,
     /// Turns whose `worked …` fold the user opened.
@@ -235,6 +241,42 @@ pub(crate) fn build_rows(inputs: &RowInputs<'_>) -> BuiltRows {
         turn::emit_orphans(inputs, &items, &orphans, &mut built);
     }
 
+    // `DelegationChanged` is durable and capability-gated independently of the caller's
+    // `ItemStarted`. A newly opened or briefly lagging mirror can therefore know the child
+    // before it has the transcript item. Keep the roster visible from the durable record and
+    // key it by the caller item so the real row replaces this fallback without remounting.
+    let projected_delegations = projection
+        .items
+        .iter()
+        .filter_map(|item| match item.kind {
+            fleet_core::agents::ItemKind::Delegation { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut missing_delegations = inputs
+        .delegations
+        .values()
+        .filter(|delegation| {
+            delegation.caller == projection.thread
+                && !projected_delegations.contains(&delegation.id)
+        })
+        .collect::<Vec<_>>();
+    missing_delegations.sort_by_key(|delegation| (delegation.created, delegation.id));
+    for delegation in missing_delegations {
+        built.push(
+            TranscriptRow::new(
+                TranscriptRowId::Item(SharedString::from(delegation.caller_item.to_string())),
+                TranscriptRowKind::Delegation(item::delegation_row(
+                    inputs,
+                    delegation.id,
+                    delegation.provider,
+                    delegation.status,
+                )),
+            ),
+            Some(RowTarget::Delegation(delegation.id)),
+        );
+    }
+
     // The rows that close the transcript come before the emptiness test, because a dead session
     // and a backoff are exactly the two cases where a thread with no items is still not empty.
     trailing_rows(inputs, &mut built);
@@ -250,6 +292,79 @@ pub(crate) fn build_rows(inputs: &RowInputs<'_>) -> BuiltRows {
         );
     }
     built
+}
+
+impl super::AgentThreadView {
+    /// Delegation addressed by the transcript's focused row, for attach/cancel/copy dispatch.
+    pub(crate) fn focused_delegation(&self, cx: &App) -> Option<DelegationId> {
+        let list = self.transcript.read(cx);
+        let row = list.rows().get(list.focused_row()?)?;
+        if !matches!(row.kind, TranscriptRowKind::Delegation(_)) {
+            return None;
+        }
+        self.focused_delegation_link(cx)
+    }
+
+    /// Delegation linked from either a roster row or a delivered result card.
+    pub(crate) fn focused_delegation_link(&self, cx: &App) -> Option<DelegationId> {
+        let list = self.transcript.read(cx);
+        let row = list.rows().get(list.focused_row()?)?;
+        if !matches!(
+            row.kind,
+            TranscriptRowKind::Delegation(_) | TranscriptRowKind::DelegationResult(_)
+        ) {
+            return None;
+        }
+        let target = self.targets.get(&row.id.key()).copied()?;
+        if let RowTarget::Delegation(delegation) = target {
+            return Some(delegation);
+        }
+        let RowTarget::Item(item) = target else {
+            return None;
+        };
+        let item = self
+            .projection
+            .items
+            .iter()
+            .find(|entry| entry.id == item)?;
+        match &item.kind {
+            fleet_core::agents::ItemKind::Delegation { id, .. } => Some(*id),
+            fleet_core::agents::ItemKind::UserMessage { origin, .. } => origin.delegation(),
+            _ => None,
+        }
+    }
+
+    /// Stable harness vocabulary for the focused transcript row.
+    pub(crate) fn focused_row_kind(&self, cx: &App) -> Option<&'static str> {
+        let list = self.transcript.read(cx);
+        let row = list.rows().get(list.focused_row()?)?;
+        Some(match row.kind {
+            TranscriptRowKind::Delegation(_) => "delegation",
+            TranscriptRowKind::DelegationResult(_) => "delegation_result",
+            _ => "other",
+        })
+    }
+
+    /// Number of delivered delegation result cards expanded in this view.
+    pub(crate) fn expanded_result_cards(&self) -> u32 {
+        u32::try_from(
+            self.projection
+                .items
+                .iter()
+                .filter(|item| {
+                    self.expanded.contains(&item.id)
+                        && matches!(
+                            &item.kind,
+                            fleet_core::agents::ItemKind::UserMessage {
+                                origin: fleet_core::agents::MessageOrigin::Delegation { .. },
+                                ..
+                            }
+                        )
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
+    }
 }
 
 /// The settled gate records of one turn, at the position the decision was asked.

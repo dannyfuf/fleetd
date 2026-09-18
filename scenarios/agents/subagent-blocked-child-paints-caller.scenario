@@ -1,0 +1,18 @@
+# plans/native-subagents-2026-09-17-phase-4-plan.md P4-T07 — a blocked Claude child
+# bubbles needs-you attention to its selected Codex caller.
+fixture: agents-subagent
+await idle
+key o
+await screen == Workspace 20000
+key ctrl-s A
+await agents.threads[0].provider == codex 20000
+assert focused == agents.composer
+await idle 30000
+type ask a child which path to inspect
+key enter
+await agents.delegations[0].status == working 30000
+await agents.delegations[0].status == blocked 30000
+await agents.threads[1].provider == claude && agents.threads[1].pending_gate exists 30000
+await lists.tabs.selected.badges[0] == codex && lists.tabs.selected.marks[0] == needs_you 30000
+dump blocked-child
+quit

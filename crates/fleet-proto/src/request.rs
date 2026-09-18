@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use fleet_core::{
     agents::{
-        AgentKind, AttentionKind, GateAnswer, GateId, ItemId, ModelSelection, PermissionMode, Seq,
-        StreamKind, ThreadId, UserInput,
+        AgentKind, AttentionKind, DelegationId, GateAnswer, GateId, ItemId, ModelSelection,
+        PermissionMode, Seq, StreamKind, ThreadId, UserInput,
     },
     board::{BackendRef, BoardPatch, CardDraft, CardPatch, ConflictResolution},
     config::Agent,
@@ -310,6 +310,69 @@ pub enum RequestBody {
         /// Checkpoint to restore, from a previous
         /// [`ResponseBody::AgentCheckpoints`](crate::response::ResponseBody::AgentCheckpoints).
         checkpoint: CheckpointId,
+    },
+    /// Start a delegated child thread for a caller.
+    DelegationRun {
+        /// Calling thread.
+        caller: ThreadId,
+        /// Provider implementation to start.
+        provider: AgentKind,
+        /// Work assigned to the child.
+        brief: String,
+        /// Completion criteria for the child.
+        expectation: String,
+        /// Optional published worktree override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<WorktreeId>,
+        /// Optional permission-mode override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<PermissionMode>,
+        /// Optional model override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<ModelSelection>,
+        /// Optional child-thread title.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// Deliver completion as soon as possible.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        eager: bool,
+    },
+    /// Report a delegated child's completion.
+    DelegationComplete {
+        /// Delegation being completed.
+        delegation: DelegationId,
+        /// Child thread completing the work.
+        child: ThreadId,
+        /// Plaintext bearer token issued at creation.
+        token: String,
+        /// Child result text.
+        result: String,
+        /// Whether the child reported that it is blocked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        blocked: bool,
+    },
+    /// List delegations, optionally for one caller.
+    DelegationList {
+        /// Caller filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<ThreadId>,
+    },
+    /// Read one delegation.
+    DelegationGet {
+        /// Delegation to read.
+        delegation: DelegationId,
+    },
+    /// Cancel one delegation.
+    DelegationCancel {
+        /// Delegation to cancel.
+        delegation: DelegationId,
+    },
+    /// Wait for one delegation to become terminal or the deadline to expire.
+    DelegationWait {
+        /// Delegation to wait for.
+        delegation: DelegationId,
+        /// Service-side wait deadline in milliseconds.
+        timeout_ms: u64,
     },
     /// List boards.
     ListBoards {
@@ -939,13 +1002,13 @@ impl RequestBody {
 
 /// The thread whose agent mutations must not interleave, for a request that is one.
 ///
-/// The seven agent mutations for one thread are stream-ordered exactly as PTY input is: a mode
+/// Agent mutations for one thread are stream-ordered exactly as PTY input is: a mode
 /// change overtaking the send it was meant to precede is the terminal resize-overtakes-input bug
 /// in another costume. The daemon serializes on the returned thread — **per thread, never
 /// globally**, so two threads still run concurrently — and everything else joins the concurrent
-/// pool. Reads (`AgentThreadOpen`, `AgentItemBody`, `AgentThreadList`, `AgentCheckpoints`) are
-/// deliberately absent: they mutate nothing, and holding a slow remote open ahead of a keystroke
-/// is the stall this carve-out exists to prevent.
+/// pool. Reads (`AgentThreadOpen`, `AgentItemBody`, `AgentThreadList`, `AgentCheckpoints`, and the
+/// delegation query verbs) are deliberately absent: they mutate nothing, and holding a slow
+/// remote open ahead of a keystroke is the stall this carve-out exists to prevent.
 ///
 /// `AgentRevert` is in the list for a stronger reason than ordering taste: it rewrites the very
 /// worktree the harness is editing, so a revert that interleaved with a send would restore files
@@ -959,7 +1022,11 @@ pub const fn agent_request_is_serialized(body: &RequestBody) -> Option<ThreadId>
         | RequestBody::AgentSetMode { thread, .. }
         | RequestBody::AgentSetModel { thread, .. }
         | RequestBody::AgentStop { thread }
-        | RequestBody::AgentRevert { thread, .. } => Some(*thread),
+        | RequestBody::AgentRevert { thread, .. }
+        | RequestBody::DelegationRun { caller: thread, .. }
+        | RequestBody::DelegationComplete { child: thread, .. } => Some(*thread),
+        // DelegationCancel has no ThreadId to key on; the delegation service serializes it.
+        RequestBody::DelegationCancel { .. } => None,
         _ => None,
     }
 }

@@ -38,9 +38,19 @@ impl Render for AgentThreadView {
             theme.space.sm,
             theme.metrics.chip_h,
         );
-        let metadata = mode
-            .metadata_shown()
-            .then(|| MetadataRow::new(self.metadata.clone(), fit).trailing(self.trailing.clone()));
+        let entity = cx.entity();
+        let metadata = mode.metadata_shown().then(|| {
+            MetadataRow::new(self.metadata.clone(), fit)
+                .trailing(self.trailing.clone())
+                .on_target(move |target, _window, cx| {
+                    let Ok(thread) = target.parse() else {
+                        return;
+                    };
+                    entity.update(cx, |_view, cx| {
+                        cx.emit(super::AgentThreadEvent::SelectThread(thread));
+                    });
+                })
+        });
 
         let composer = div()
             .flex()

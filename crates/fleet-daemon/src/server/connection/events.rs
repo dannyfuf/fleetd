@@ -39,6 +39,7 @@ pub(super) fn event_visible(
             client.supports(fleet_proto::AGENT_SYNC_MARKER_CAPABILITY)
         }
         Event::AgentWindow { .. } => client.supports(fleet_proto::AGENT_WINDOW_CAPABILITY),
+        Event::DelegationChanged(_) => client.supports(fleet_proto::AGENT_DELEGATION_CAPABILITY),
         // Never re-broadcast: it is a tag *this* build could not name, and forwarding it tells
         // no peer anything it can act on.
         Event::Unknown => false,
@@ -54,7 +55,7 @@ pub(super) fn event_kind(event: &Event) -> EventKind {
         | Event::AgentResync { .. }
         | Event::AgentSynchronized { .. }
         | Event::AgentWindow { .. } => EventKind::Agent,
-        Event::AgentSummary(_) => EventKind::AgentSummary,
+        Event::AgentSummary(_) | Event::DelegationChanged(_) => EventKind::AgentSummary,
         Event::WatchStarted(_) => EventKind::WatchStarted,
         Event::WatchOutput { .. } => EventKind::WatchOutput,
         Event::WatchExited(_) => EventKind::WatchExited,
@@ -79,7 +80,13 @@ pub(super) fn event_kind(event: &Event) -> EventKind {
 
 #[cfg(test)]
 mod tests {
-    use fleet_core::ids::TerminalId;
+    use fleet_core::{
+        agents::{
+            AgentKind, Delegation, DelegationId, DelegationStatus, DeliveryState, ItemId, ThreadId,
+            TurnId,
+        },
+        ids::TerminalId,
+    };
 
     use super::*;
 
@@ -140,6 +147,49 @@ mod tests {
         assert!(!event_visible(
             &Event::Unknown,
             &HashSet::from([EventKind::Toast]),
+            &HashSet::new(),
+            &capable,
+        ));
+    }
+
+    #[test]
+    fn delegation_events_need_the_peer_to_have_named_the_capability() {
+        let event = Event::DelegationChanged(Delegation {
+            id: DelegationId::new(),
+            caller: ThreadId::new(),
+            caller_turn: TurnId::new(),
+            caller_item: ItemId::new(),
+            child: ThreadId::new(),
+            provider: AgentKind::Codex,
+            depth: 1,
+            brief: "inspect the event gate".to_owned(),
+            expectation: "only capable peers receive the event".to_owned(),
+            eager: false,
+            status: DelegationStatus::Running,
+            status_payload: None,
+            result: None,
+            nudges: 0,
+            recoveries: 0,
+            delivery: DeliveryState::Pending,
+            created: chrono::DateTime::UNIX_EPOCH,
+            finished: None,
+            headline: None,
+        });
+        let subscriptions = HashSet::from([EventKind::AgentSummary]);
+        let capable = HelloClient {
+            capabilities: vec![fleet_proto::AGENT_DELEGATION_CAPABILITY.to_owned()],
+            ..HelloClient::default()
+        };
+
+        assert!(!event_visible(
+            &event,
+            &subscriptions,
+            &HashSet::new(),
+            &HelloClient::default(),
+        ));
+        assert!(event_visible(
+            &event,
+            &subscriptions,
             &HashSet::new(),
             &capable,
         ));

@@ -266,6 +266,7 @@ async fn remote_agent_create_events_followups_restart_resume_and_deletion() {
             text: "continue".to_owned(),
             attachments: Vec::new(),
             item: None,
+            origin: Default::default(),
         },
     };
     assert_eq!(router.route(&send), Target::Host(host.clone()));
@@ -652,6 +653,7 @@ async fn two_daemon_agent_resume_over_real_remote_link() {
                     text: "continue".to_owned(),
                     attachments: Vec::new(),
                     item: None,
+                    origin: Default::default(),
                 },
             },
         )
