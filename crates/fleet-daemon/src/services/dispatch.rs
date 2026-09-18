@@ -654,6 +654,15 @@ impl Services {
                 version: Self::version(),
                 protocol: fleet_proto::PROTOCOL_VERSION,
             }),
+            // Phase 3 replaces this fallback with the delegation service dispatch arms.
+            RequestBody::DelegationRun { .. }
+            | RequestBody::DelegationComplete { .. }
+            | RequestBody::DelegationList { .. }
+            | RequestBody::DelegationGet { .. }
+            | RequestBody::DelegationCancel { .. }
+            | RequestBody::DelegationWait { .. } => Err(DaemonError::Unsupported(
+                "native-agent delegation service is not installed".to_owned(),
+            )),
             RequestBody::DaemonShutdown { .. } => Ok(ResponseBody::ShuttingDown),
         }
     }

@@ -290,6 +290,8 @@ impl AppState {
                 self.notify_agent_attention(now);
             }
             Event::AgentSummary(summary) => self.apply_agent_summary(summary, now),
+            // Phase 4 replaces this fallback with delegation state updates.
+            Event::DelegationChanged(_) => {}
             // Backpressure dropped this connection's tail for one thread. Re-opening from the
             // cursor the daemon names is the whole repair, and it is never a silent drop.
             Event::AgentResync { thread, from_seq } => {

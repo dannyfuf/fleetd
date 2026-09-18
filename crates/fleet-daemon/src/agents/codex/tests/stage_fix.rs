@@ -102,6 +102,7 @@ async fn a_successful_turn_response_without_a_string_id_is_rejected_and_rolled_b
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
                 item: Some(ItemId::new()),
+                origin: Default::default(),
             },
             intent: SubmitIntent::Fresh,
         })

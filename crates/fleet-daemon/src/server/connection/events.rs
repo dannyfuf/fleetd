@@ -39,6 +39,7 @@ pub(super) fn event_visible(
             client.supports(fleet_proto::AGENT_SYNC_MARKER_CAPABILITY)
         }
         Event::AgentWindow { .. } => client.supports(fleet_proto::AGENT_WINDOW_CAPABILITY),
+        Event::DelegationChanged(_) => client.supports(fleet_proto::AGENT_DELEGATION_CAPABILITY),
         // Never re-broadcast: it is a tag *this* build could not name, and forwarding it tells
         // no peer anything it can act on.
         Event::Unknown => false,
@@ -54,7 +55,7 @@ pub(super) fn event_kind(event: &Event) -> EventKind {
         | Event::AgentResync { .. }
         | Event::AgentSynchronized { .. }
         | Event::AgentWindow { .. } => EventKind::Agent,
-        Event::AgentSummary(_) => EventKind::AgentSummary,
+        Event::AgentSummary(_) | Event::DelegationChanged(_) => EventKind::AgentSummary,
         Event::WatchStarted(_) => EventKind::WatchStarted,
         Event::WatchOutput { .. } => EventKind::WatchOutput,
         Event::WatchExited(_) => EventKind::WatchExited,

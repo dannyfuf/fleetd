@@ -72,7 +72,9 @@ fn patch_columns(
         Some(
             ItemPayloadPatch::UserMessage { .. }
             | ItemPayloadPatch::Subagent { .. }
-            | ItemPayloadPatch::Error { .. },
+            | ItemPayloadPatch::Error { .. }
+            // Phase 3 consumes this status in the delegation transition; it has no text column.
+            | ItemPayloadPatch::Delegation { .. },
         )
         | None => (None, None, None),
     }

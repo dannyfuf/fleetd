@@ -132,6 +132,7 @@ impl ListRow {
             .with_context(|| format!("thread {thread} names an unusable owner host"))?;
         Ok(AgentThreadSummary {
             thread,
+            parent: None,
             worktree: WorktreeId::try_from(self.worktree.clone())
                 .with_context(|| format!("thread {thread} names worktree `{}`", self.worktree))?,
             host,

@@ -58,6 +58,7 @@ pub(super) fn user(turn: TurnId, text: &str) -> Item {
             text: text.to_owned(),
             attachments: Vec::new(),
             steered: false,
+            origin: Default::default(),
         },
         ItemStatus::Completed,
     )

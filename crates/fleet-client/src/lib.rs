@@ -8,8 +8,8 @@ mod watches;
 
 pub use api::{
     AgentEvents, AgentItemBody, AgentMirror, AgentSnapshot, AgentWindowRequest,
-    CreateWorktreeResult, DaemonVersion, HelloResult, MirrorOutcome, PageOutcome, Result,
-    WindowState, applied_seq, projection_from_window,
+    CreateWorktreeResult, DaemonVersion, DelegationRunRequest, HelloResult, MirrorOutcome,
+    PageOutcome, Result, WindowState, applied_seq, projection_from_window,
 };
 pub use connection::{Client, ConnectError, ProtocolTransport, Stamped, protocol_transport};
 pub use spawn::{SpawnError, ensure_daemon, resolve_daemon_path, restart_daemon};

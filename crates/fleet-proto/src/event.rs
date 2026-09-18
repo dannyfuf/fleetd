@@ -1,7 +1,7 @@
 //! Asynchronous daemon events broadcast to subscribed clients.
 
 use fleet_core::{
-    agents::{AgentThreadSummary, AttentionKind, Seq, SeqEvent, ThreadId},
+    agents::{AgentThreadSummary, AttentionKind, Delegation, Seq, SeqEvent, ThreadId},
     ids::{BoardId, HostId, SessionId, TerminalId},
     sessions::{AgentActivity, Session},
     watches::{Watch, WatchChunk, WatchId},
@@ -81,6 +81,11 @@ pub enum Event {
     },
     /// A native-agent thread's compact state changed.
     AgentSummary(AgentThreadSummary),
+    /// A delegation in the `AgentSummary` subscription family changed.
+    ///
+    /// Emission is gated on
+    /// [`AGENT_DELEGATION_CAPABILITY`](crate::AGENT_DELEGATION_CAPABILITY).
+    DelegationChanged(Delegation),
     /// The live-stream budget for this connection overflowed for one thread.
     ///
     /// Everything after `from_seq` was dropped **for this connection only**; the client re-opens

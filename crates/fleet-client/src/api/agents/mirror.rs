@@ -608,6 +608,7 @@ mod tests {
         AgentThreadWindow {
             summary: fleet_core::agents::AgentThreadSummary {
                 thread,
+                parent: None,
                 worktree: WorktreeId::try_from("acme/api#feature").expect("worktree"),
                 host: None,
                 provider: AgentKind::Claude,

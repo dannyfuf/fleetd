@@ -39,7 +39,9 @@ fn subsumable(item: &Item) -> bool {
         | ItemKind::Reasoning { .. }
         | ItemKind::Subagent { .. }
         | ItemKind::Plan { .. }
-        | ItemKind::Error { .. } => false,
+        | ItemKind::Error { .. }
+        // Phase 4 replaces this fallback when native delegation rows own their live treatment.
+        | ItemKind::Delegation { .. } => false,
     }
 }
 

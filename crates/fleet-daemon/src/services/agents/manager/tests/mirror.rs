@@ -85,6 +85,7 @@ impl Owner {
                 text: "what changed?".to_owned(),
                 attachments: Vec::new(),
                 steered: false,
+                origin: Default::default(),
             },
             parent: None,
         });
@@ -221,6 +222,7 @@ async fn no_harness_process_is_started_for_a_mirrored_thread() {
                 text: "not from here".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await

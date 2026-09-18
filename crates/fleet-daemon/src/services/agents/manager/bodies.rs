@@ -402,6 +402,7 @@ mod tests {
                 text: String::new(),
                 attachments: Vec::new(),
                 steered: false,
+                origin: Default::default(),
             }),
             None
         );

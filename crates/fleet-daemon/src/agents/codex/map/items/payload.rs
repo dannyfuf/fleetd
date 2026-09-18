@@ -7,7 +7,8 @@
 use std::collections::BTreeMap;
 
 use fleet_core::agents::{
-    ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, ToolCall, ToolDiff, ToolKind, ToolPatch,
+    ItemKind, ItemPatch, ItemPayloadPatch, ItemStatus, MessageOrigin, ToolCall, ToolDiff, ToolKind,
+    ToolPatch,
 };
 use serde_json::{Value, json};
 
@@ -57,6 +58,7 @@ pub(super) fn item_payload(item: &ThreadItem) -> Option<ItemKind> {
             text: user_text(content),
             attachments: Vec::new(),
             steered: false,
+            origin: MessageOrigin::User,
         },
         ThreadItem::AgentMessage { text, .. } => ItemKind::AssistantText { text: text.clone() },
         ThreadItem::Plan { text, .. } => ItemKind::Plan { text: text.clone() },

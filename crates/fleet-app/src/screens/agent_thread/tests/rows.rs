@@ -24,6 +24,8 @@ fn kinds(rows: &[fleet_ui_kit::TranscriptRow]) -> Vec<&'static str> {
             TranscriptRowKind::WorkLive(_) => "work-live",
             TranscriptRowKind::WorkGroup(_) => "work-group",
             TranscriptRowKind::Subagent(_) => "subagent",
+            TranscriptRowKind::Delegation(_) => "delegation",
+            TranscriptRowKind::DelegationResult(_) => "delegation-result",
             TranscriptRowKind::Diff(_) => "diff",
             TranscriptRowKind::TurnFold(_) => "fold",
             TranscriptRowKind::TurnFooter(_) => "footer",

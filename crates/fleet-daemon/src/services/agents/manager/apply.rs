@@ -196,7 +196,7 @@ pub(super) fn publish_applied(
 /// The `ItemStarted` that records what the user typed.
 ///
 /// `steered` is the harness's own answer to "did this message join a turn that was already
-/// running?" ([`crate::agents::harness::Submitted::queued`]), never a guess from the projection:
+/// running?" ([`crate::agents::harness::Submitted::joined_active`]), never a guess from the projection:
 /// §7.2 marks a steer with a leading `↳` and the mark has to survive a reload.
 pub(super) fn user_item_started(
     turn: TurnId,
@@ -211,6 +211,7 @@ pub(super) fn user_item_started(
             text: input.text,
             attachments: input.attachments,
             steered,
+            origin: input.origin,
         },
         parent: None,
     }

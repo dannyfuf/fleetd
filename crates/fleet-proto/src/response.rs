@@ -1,7 +1,9 @@
 //! Daemon-to-client request responses.
 
 use fleet_core::{
-    agents::{AgentThreadSummary, ItemId, SeqEvent, StreamKind, ThreadId, ThreadProjection},
+    agents::{
+        AgentThreadSummary, Delegation, ItemId, SeqEvent, StreamKind, ThreadId, ThreadProjection,
+    },
     board::{BackendDescriptor, BackendSchema, BoardSummary, BoardView, Card},
     cache::RepoCache,
     config::Config,
@@ -305,6 +307,18 @@ pub enum ResponseBody {
     AgentCheckpoints(Vec<TurnCheckpoint>),
     /// What a revert put back, and what it removed.
     AgentReverted(AgentRevertReport),
+    /// A newly started delegation and an optional non-fatal warning.
+    DelegationStarted {
+        /// Durable delegation record.
+        delegation: Delegation,
+        /// Non-fatal launch warning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
+    /// Delegations matching a list query.
+    Delegations(Vec<Delegation>),
+    /// One current delegation record.
+    Delegation(Delegation),
     /// Board summaries for a context or all contexts.
     Boards(Vec<BoardSummary>),
     /// Full board document view.

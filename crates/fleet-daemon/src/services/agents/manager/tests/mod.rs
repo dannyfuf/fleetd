@@ -180,7 +180,11 @@ impl AgentProvider for FakeProvider {
         // Exactly what both real adapters answer: a submission into a turn the harness is
         // already running joined it, and anything else opened one.
         let queued = self.script.active_turn() == Some(turn);
-        Ok(Submitted { turn, queued })
+        Ok(if queued {
+            Submitted::JoinedActive { turn }
+        } else {
+            Submitted::QueuedNew { turn }
+        })
     }
 
     async fn interrupt(&mut self, turn: TurnId) -> ProviderResult<()> {

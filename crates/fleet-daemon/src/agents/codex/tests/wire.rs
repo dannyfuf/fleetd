@@ -54,6 +54,7 @@ fn outbound_frames_are_byte_exact() {
             text: "hello".to_owned(),
             attachments: Vec::new(),
             item: None,
+            origin: Default::default(),
         },
         item,
         &session::TurnControls {
@@ -86,6 +87,7 @@ fn every_other_outbound_frame_is_byte_exact() {
             text: "actually, do this".to_owned(),
             attachments: Vec::new(),
             item: None,
+            origin: Default::default(),
         },
         item,
         turn,
@@ -138,6 +140,7 @@ fn structured_input_parts_stay_structured() {
             source: fleet_core::agents::AttachmentSource::Path("/w/notes.md".into()),
         }],
         item: None,
+        origin: Default::default(),
     };
     assert_eq!(
         user_input(&input),

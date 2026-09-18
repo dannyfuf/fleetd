@@ -102,6 +102,8 @@ impl AgentSessionManager {
         let resolved_title = title.unwrap_or_else(|| provider_kind.display_name().to_owned());
         let record = AgentThreadRecord {
             thread,
+            parent: None,
+            delegation: None,
             worktree: worktree.clone(),
             provider: provider_kind,
             title: resolved_title.clone(),
@@ -111,6 +113,7 @@ impl AgentSessionManager {
             model: model.clone(),
             mode,
             last_outcome: None,
+            stop_cause: None,
         };
         let mut projection = ThreadProjection::new(thread, worktree, provider_kind);
         projection.title = resolved_title;
@@ -334,18 +337,19 @@ impl AgentSessionManager {
             .await
             .map_err(provider_error)?;
         drop(provider_slot);
-        let turn = submitted.turn;
+        let turn = submitted.turn();
         {
             let mut state = runtime
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.inflight_turn = Some(turn);
-            if !submitted.queued {
+            if !submitted.joined_active() {
                 state.pending_inputs.push_back((turn, input.clone()));
             }
         }
-        if submitted.queued {
+        // P1-T01 replaces this mechanical mapping with the behavioural submission split.
+        if submitted.joined_active() {
             // A steer: the turn is already running, so there is no announcement to wait for and
             // the bubble is recorded now, marked as having joined it (§7.2).
             let item = input.item.unwrap_or_default();

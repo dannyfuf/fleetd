@@ -312,9 +312,11 @@ impl Harness for ClaudeHarness {
             }
             return Err(error);
         }
-        Ok(Submitted {
-            turn: req.turn,
-            queued,
+        // P1-T01 replaces this mechanical mapping with the behavioural submission split.
+        Ok(if queued {
+            Submitted::JoinedActive { turn: req.turn }
+        } else {
+            Submitted::QueuedNew { turn: req.turn }
         })
     }
 

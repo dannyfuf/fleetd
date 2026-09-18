@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{AgentKind, ItemId, ModelSelection, PermissionMode, ThreadId};
+use super::{AgentKind, ItemId, MessageOrigin, ModelSelection, PermissionMode, ThreadId};
 
 /// One user-supplied non-text input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,4 +116,7 @@ pub struct UserInput {
     /// one exactly as it did before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<ItemId>,
+    /// Whether this message came from the user or a delegated child.
+    #[serde(default, skip_serializing_if = "MessageOrigin::is_user")]
+    pub origin: MessageOrigin,
 }

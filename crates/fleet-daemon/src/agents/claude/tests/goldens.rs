@@ -11,6 +11,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
         text: "hello".to_owned(),
         attachments: Vec::new(),
         item: None,
+        origin: Default::default(),
     })
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
@@ -28,6 +29,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
             source: AttachmentSource::Base64("AAAA".to_owned()),
         }],
         item: None,
+        origin: Default::default(),
     })
     .unwrap_or_else(|error| panic!("{error}"));
     let blocks = with_image
@@ -52,6 +54,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
             source: AttachmentSource::Path("/w/notes.md".into()),
         }],
         item: None,
+        origin: Default::default(),
     })
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
@@ -71,6 +74,7 @@ fn the_user_frames_block_order_puts_the_text_last() {
                 source: AttachmentSource::Base64("AAAA".to_owned()),
             }],
             item: None,
+            origin: Default::default(),
         })
         .is_err()
     );

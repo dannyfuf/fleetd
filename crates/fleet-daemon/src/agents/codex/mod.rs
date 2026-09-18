@@ -516,7 +516,7 @@ impl Harness for CodexHarness {
                     let mut session = self.session.lock().await;
                     let turn = session.turn_for(&active);
                     session.remember_user_item(turn, user_item, &req.input.text);
-                    return Ok(Submitted { turn, queued: true });
+                    return Ok(Submitted::JoinedActive { turn });
                 }
                 Err(error) if is_not_steerable(&error) => {
                     // Silently: the user never sees this one.
@@ -572,9 +572,11 @@ impl Harness for CodexHarness {
                 Some("turn/start"),
             );
         }
-        Ok(Submitted {
-            turn: req.turn,
-            queued: confirmation.queued,
+        // P1-T01 replaces this mechanical mapping with the behavioural submission split.
+        Ok(if confirmation.queued {
+            Submitted::JoinedActive { turn: req.turn }
+        } else {
+            Submitted::QueuedNew { turn: req.turn }
         })
     }
 

@@ -44,6 +44,7 @@ fn apply_payload_patch(item: &mut ItemKind, patch: &ItemPayloadPatch) {
                 text,
                 attachments,
                 steered,
+                origin: _,
             },
             ItemPayloadPatch::UserMessage {
                 text: next_text,
@@ -103,6 +104,15 @@ fn apply_payload_patch(item: &mut ItemKind, patch: &ItemPayloadPatch) {
         }
         (ItemKind::Error { message }, ItemPayloadPatch::Error { message: next }) => {
             message.clone_from(next);
+        }
+        (
+            ItemKind::Delegation { status, .. },
+            ItemPayloadPatch::Delegation {
+                status: next_status,
+            },
+        ) => {
+            // P2-T02: delegation patches update only the durable child status.
+            *status = *next_status;
         }
         _ => {}
     }

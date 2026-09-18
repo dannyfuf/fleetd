@@ -112,6 +112,7 @@ async fn a_turn_streams_items_and_moves_attention_to_finished() {
                 text: "ship it".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -240,6 +241,7 @@ async fn steering_a_running_turn_records_a_user_message_in_that_turn() {
                 text: "also update the docs".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -405,6 +407,7 @@ async fn stop_exits_the_session_and_refuses_later_sends() {
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -590,6 +593,7 @@ async fn send_resumes_a_stopped_thread_rather_than_refusing_it() {
                 text: "carry on".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -664,6 +668,7 @@ async fn a_crashed_provider_is_dropped_so_the_next_send_resumes_the_thread() {
                 text: "carry on".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -696,6 +701,7 @@ async fn a_prompt_whose_turn_never_started_does_not_swallow_the_next_one() {
                 text: "one".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -725,6 +731,7 @@ async fn a_prompt_whose_turn_never_started_does_not_swallow_the_next_one() {
                 text: "two".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -845,6 +852,7 @@ async fn the_derived_title_reaches_the_thread_list_and_not_only_the_tab() {
                 text: "rewrite the storage docs".to_owned(),
                 attachments: Vec::new(),
                 steered: false,
+                origin: Default::default(),
             },
             parent: None,
         })

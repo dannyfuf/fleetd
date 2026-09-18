@@ -54,6 +54,7 @@ fn an_error_that_crosses_the_boundary_names_no_payload() {
         text: "x".repeat(200_000),
         attachments: Vec::new(),
         item: None,
+        origin: Default::default(),
     };
     let error = user_frame(&oversized)
         .err()

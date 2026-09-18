@@ -341,13 +341,14 @@ async fn a_scripted_peer_drives_the_handshake_a_turn_and_its_settlement() {
                 text: "hello".to_owned(),
                 attachments: Vec::new(),
                 item: Some(user_item),
+                origin: Default::default(),
             },
             intent: SubmitIntent::Fresh,
         })
         .await
         .unwrap_or_else(|error| panic!("submit: {error}"));
-    assert_eq!(submitted.turn, turn, "the caller's own turn id survives");
-    assert!(!submitted.queued);
+    assert_eq!(submitted.turn(), turn, "the caller's own turn id survives");
+    assert!(!submitted.joined_active());
 
     // Drain until the settlement, which is the only thing that ends a turn.
     let mut seen = Vec::new();
@@ -608,6 +609,7 @@ async fn a_second_submit_steers_the_running_turn() {
         text: text.to_owned(),
         attachments: Vec::new(),
         item: None,
+        origin: Default::default(),
     };
     let started = harness
         .submit(Submit {
@@ -617,7 +619,7 @@ async fn a_second_submit_steers_the_running_turn() {
         })
         .await
         .unwrap_or_else(|error| panic!("submit: {error}"));
-    assert!(!started.queued);
+    assert!(!started.joined_active());
     // The caller says `Fresh` again — it has no business knowing the wire form — and the adapter
     // steers, because a turn is running.
     let steered = harness
@@ -628,9 +630,10 @@ async fn a_second_submit_steers_the_running_turn() {
         })
         .await
         .unwrap_or_else(|error| panic!("steer: {error}"));
-    assert!(steered.queued, "a steer joins the running turn");
+    assert!(steered.joined_active(), "a steer joins the running turn");
     assert_eq!(
-        steered.turn, first,
+        steered.turn(),
+        first,
         "and it lands in that turn, not a new one"
     );
     let written = peer.wait_for_frames(4, Duration::from_secs(5)).await;

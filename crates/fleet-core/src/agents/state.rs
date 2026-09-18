@@ -70,6 +70,16 @@ pub enum SessionState {
     Error,
 }
 
+/// Why a thread stopped, kept on the record so delivery can tell a user's Stop from a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopCause {
+    /// The user intentionally stopped the thread.
+    User,
+    /// The provider process exited unexpectedly.
+    ProviderExit,
+}
+
 /// Lifecycle of the current or most recently settled turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]

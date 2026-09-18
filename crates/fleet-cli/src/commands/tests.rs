@@ -601,6 +601,7 @@ async fn agent_list_includes_the_owning_worktree_host_column() {
     let listener = bind(home.path()).await;
     let thread = fleet_core::agents::AgentThreadSummary {
         thread: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+        parent: None,
         worktree: "acme/api#feature".parse().unwrap(),
         host: Some("dev-box".parse().unwrap()),
         provider: fleet_core::agents::AgentKind::Claude,

@@ -671,6 +671,10 @@ impl ConnectionEffect {
 
 fn request_timeout(body: &RequestBody) -> Option<Duration> {
     match body {
+        RequestBody::DelegationWait { timeout_ms, .. } => {
+            Some(Duration::from_millis(*timeout_ms) + Duration::from_secs(15))
+        }
+        RequestBody::DelegationRun { .. } => Some(AGENT_HARNESS_TIMEOUT),
         RequestBody::CreateWorktree { .. }
         | RequestBody::CreateWorktreeFromPr { .. }
         | RequestBody::CreateWorktreeFromCard { .. }
@@ -1225,7 +1229,7 @@ mod tests {
     #[test]
     fn every_agent_request_has_a_deadline_decision_and_none_of_them_is_the_bare_default() {
         use fleet_core::agents::{
-            AgentKind, GateAnswer, GateId, ItemId, ModelSelection, PermissionChoice,
+            AgentKind, DelegationId, GateAnswer, GateId, ItemId, ModelSelection, PermissionChoice,
             PermissionMode, Seq, StreamKind, ThreadId, UserInput,
         };
 
@@ -1270,6 +1274,7 @@ mod tests {
                     text: "go".to_owned(),
                     attachments: Vec::new(),
                     item: None,
+                    origin: Default::default(),
                 },
             },
             RequestBody::AgentRespond {
@@ -1305,6 +1310,28 @@ mod tests {
             AGENT_HARNESS_TIMEOUT > Duration::from_secs(30),
             "a transport deadline shorter than the harness deadline it triggers reports a \
              failure for work that succeeds"
+        );
+
+        assert_eq!(
+            request_timeout(&RequestBody::DelegationRun {
+                caller: thread,
+                provider: AgentKind::Codex,
+                brief: "inspect the failure".to_owned(),
+                expectation: "report the root cause".to_owned(),
+                worktree: None,
+                mode: None,
+                model: None,
+                title: None,
+                eager: false,
+            }),
+            Some(AGENT_HARNESS_TIMEOUT)
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::DelegationWait {
+                delegation: DelegationId::new(),
+                timeout_ms: 2_500,
+            }),
+            Some(Duration::from_millis(2_500) + Duration::from_secs(15))
         );
 
         // These metadata operations touch no harness and keep the default on purpose.

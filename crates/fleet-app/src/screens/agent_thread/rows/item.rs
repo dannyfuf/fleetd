@@ -9,8 +9,8 @@ use fleet_core::agents::{
     OpenGate, PermissionChoice, ToolCall, ToolKind,
 };
 use fleet_ui_kit::{
-    AssistantMetaRow, AssistantRow, DiffRow, ErrorRow, GateOutcome, GateRow, Icon, PlanRow,
-    ReasoningRow, SubagentRow, ToolRow, ToolRowState, TranscriptRow, TranscriptRowId,
+    AssistantMetaRow, AssistantRow, DiffRow, ErrorRow, GateOutcome, GateRow, Icon, NoticeRow,
+    PlanRow, ReasoningRow, SubagentRow, ToolRow, ToolRowState, TranscriptRow, TranscriptRowId,
     TranscriptRowKind, UserRow, UserRowState, format_exit, parse_markdown_document,
 };
 use gpui::SharedString;
@@ -49,10 +49,12 @@ pub(crate) fn rows_for(
     let id = TranscriptRowId::Item(SharedString::from(item.id.to_string()));
     let expanded = inputs.is_expanded(item.id);
     match &item.kind {
+        // Phase 4 replaces this fallback for delegation-origin messages with the result card.
         ItemKind::UserMessage {
             text,
             attachments,
             steered,
+            origin: _,
         } => {
             let text = text.as_str();
             vec![(
@@ -155,6 +157,26 @@ pub(crate) fn rows_for(
                 TranscriptRowKind::Subagent(subagent_row(inputs, items, item, expanded)),
             ),
             Some(RowTarget::Item(item.id)),
+        )],
+        // Phase 4 replaces this plain notice with the native delegation row.
+        ItemKind::Delegation {
+            provider,
+            child,
+            status,
+            ..
+        } => vec![(
+            TranscriptRow::new(
+                id,
+                TranscriptRowKind::Notice(NoticeRow {
+                    text: SharedString::from(format!(
+                        "{} subagent {} - {}",
+                        provider.executable(),
+                        child,
+                        status.word()
+                    )),
+                }),
+            ),
+            None,
         )],
         ItemKind::Tool(call) => {
             let mut rows = vec![(
@@ -611,7 +633,9 @@ pub(crate) fn item_text(item: &Item) -> String {
                 .join("\n\n")
         }
         ItemKind::Error { message } => message.clone(),
-        ItemKind::Tool(_) | ItemKind::Subagent { .. } => String::new(),
+        ItemKind::Tool(_) | ItemKind::Subagent { .. } | ItemKind::Delegation { .. } => {
+            String::new()
+        }
     }
 }
 

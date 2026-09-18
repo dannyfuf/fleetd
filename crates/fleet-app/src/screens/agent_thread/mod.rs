@@ -647,6 +647,7 @@ pub(crate) fn user_input(text: String, item: ItemId) -> UserInput {
         text,
         attachments: Vec::new(),
         item: Some(item),
+        origin: Default::default(),
     }
 }
 

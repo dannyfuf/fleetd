@@ -6,7 +6,40 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Attachment, ItemId, ItemStatus, TurnId};
+use super::{
+    AgentKind, Attachment, DelegationId, DelegationStatus, ItemId, ItemStatus, ThreadId, TurnId,
+};
+
+/// Who authored a user-shaped message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum MessageOrigin {
+    /// A person authored the message.
+    #[default]
+    User,
+    /// A delegated child produced the message for its caller.
+    Delegation {
+        /// Delegation whose result this message carries.
+        id: DelegationId,
+    },
+}
+
+impl MessageOrigin {
+    /// Whether this is an ordinary user-authored message.
+    #[must_use]
+    pub const fn is_user(&self) -> bool {
+        matches!(self, Self::User)
+    }
+
+    /// Returns the delegation identity when this message came from a child.
+    #[must_use]
+    pub fn delegation(&self) -> Option<DelegationId> {
+        match self {
+            Self::User => None,
+            Self::Delegation { id } => Some(*id),
+        }
+    }
+}
 
 /// Normalized visual category for a harness tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,6 +151,9 @@ pub enum ItemKind {
         /// instead of living only in the sending client's optimistic row.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         steered: bool,
+        /// Whether the message came from the user or a delegated child.
+        #[serde(default, skip_serializing_if = "MessageOrigin::is_user")]
+        origin: MessageOrigin,
     },
     /// Visible assistant prose.
     AssistantText {
@@ -161,6 +197,17 @@ pub enum ItemKind {
         /// Sanitized human-readable detail.
         #[serde(default)]
         message: String,
+    },
+    /// A delegated child represented in its caller's transcript.
+    Delegation {
+        /// Delegation identity.
+        id: DelegationId,
+        /// Provider running the child.
+        provider: AgentKind,
+        /// Spawned child thread.
+        child: ThreadId,
+        /// Current child status.
+        status: DelegationStatus,
     },
 }
 
@@ -212,6 +259,8 @@ pub enum ItemPayloadPatch {
     Plan { text: String },
     /// Replace an error message.
     Error { message: String },
+    /// Replace a delegated child's status.
+    Delegation { status: DelegationStatus },
 }
 
 /// Replacement fields for a tool payload.

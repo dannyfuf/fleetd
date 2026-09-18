@@ -199,6 +199,7 @@ fn fixture() -> Fixture {
                 text: "list the crates".to_owned(),
                 attachments: Vec::new(),
                 steered: false,
+                origin: Default::default(),
             },
             parent: None,
         },
@@ -568,6 +569,8 @@ async fn an_index_version_this_build_does_not_know_is_refused() -> anyhow::Resul
 fn record(thread: ThreadId, title: &str, created_ms: u64) -> AgentThreadRecord {
     AgentThreadRecord {
         thread,
+        parent: None,
+        delegation: None,
         worktree: worktree(),
         provider: AgentKind::Claude,
         title: title.to_owned(),
@@ -577,6 +580,7 @@ fn record(thread: ThreadId, title: &str, created_ms: u64) -> AgentThreadRecord {
         model: None,
         mode: PermissionMode::Ask,
         last_outcome: Some(TurnOutcome::Completed),
+        stop_cause: None,
     }
 }
 

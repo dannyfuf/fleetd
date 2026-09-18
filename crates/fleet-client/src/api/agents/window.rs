@@ -105,6 +105,7 @@ pub fn projection_from_window(window: &AgentThreadWindow) -> ThreadProjection {
     let summary = &window.summary;
     let mut projection =
         ThreadProjection::new(summary.thread, summary.worktree.clone(), summary.provider);
+    projection.parent = summary.parent;
     projection.title = summary.title.clone();
     projection.session = summary.session.clone();
     projection.turn = summary.turn.clone();

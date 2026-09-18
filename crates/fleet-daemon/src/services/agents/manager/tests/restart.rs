@@ -29,6 +29,8 @@ async fn restart_recovery_never_advances_memory_past_a_log_it_could_not_write() 
     let created = Utc::now();
     let mut record = AgentThreadRecord {
         thread,
+        parent: None,
+        delegation: None,
         worktree: worktree.clone(),
         provider: AgentKind::Claude,
         title: "Claude".to_owned(),
@@ -38,6 +40,7 @@ async fn restart_recovery_never_advances_memory_past_a_log_it_could_not_write() 
         model: None,
         mode: PermissionMode::Ask,
         last_outcome: None,
+        stop_cause: None,
     };
     let mut projection = ThreadProjection::new(thread, worktree, AgentKind::Claude);
     let gate = GateId::new();
@@ -109,6 +112,7 @@ async fn restart_settles_a_ready_thread_and_lets_open_resume_it() {
                 text: "still usable".to_owned(),
                 attachments: Vec::new(),
                 item: None,
+                origin: Default::default(),
             },
         )
         .await
@@ -254,6 +258,8 @@ async fn a_start_with_five_hundred_threads_lists_them_without_reading_a_log() {
             store
                 .write_record(&AgentThreadRecord {
                     thread,
+                    parent: None,
+                    delegation: None,
                     worktree: worktree.clone(),
                     provider: AgentKind::Claude,
                     title: format!("thread {index}"),
@@ -263,6 +269,7 @@ async fn a_start_with_five_hundred_threads_lists_them_without_reading_a_log() {
                     model: None,
                     mode: PermissionMode::Ask,
                     last_outcome: None,
+                    stop_cause: None,
                 })
                 .await
                 .expect("record a thread");

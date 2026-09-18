@@ -38,6 +38,14 @@ pub fn classify(body: &RequestBody, resolver: &dyn Resolver) -> Target {
         | AgentAccountLogout { .. }
         | AgentStop { .. } => classify_agent(body, resolver),
 
+        // Phase 3 replaces this fallback with delegation-aware routing.
+        DelegationRun { .. }
+        | DelegationComplete { .. }
+        | DelegationList { .. }
+        | DelegationGet { .. }
+        | DelegationCancel { .. }
+        | DelegationWait { .. } => Target::Unsupported("native-agent delegation"),
+
         AgentSeenCursors => Target::Local,
 
         CreateWorktree {
@@ -292,6 +300,13 @@ pub(crate) fn local_fanout_part(
         | RequestBody::AgentAccountLogin { .. }
         | RequestBody::AgentAccountLogout { .. }
         | RequestBody::AgentStop { .. }
+        // Phase 3 replaces this fallback with delegation-aware fanout behavior.
+        | RequestBody::DelegationRun { .. }
+        | RequestBody::DelegationComplete { .. }
+        | RequestBody::DelegationList { .. }
+        | RequestBody::DelegationGet { .. }
+        | RequestBody::DelegationCancel { .. }
+        | RequestBody::DelegationWait { .. }
         | RequestBody::ListBoards { .. }
         | RequestBody::GetBoard { .. }
         | RequestBody::EnsureBoard { .. }

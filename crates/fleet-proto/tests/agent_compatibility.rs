@@ -288,6 +288,7 @@ fn summary() -> AgentThreadSummary {
         last_completed_seq: Some(Seq(9)),
         last_nonterminal_seq: Some(Seq(11)),
         exit_code: None,
+        parent: None,
     }
 }
 
@@ -425,6 +426,7 @@ fn request_goldens() -> Vec<(Request, &'static str)> {
                         text: "inspect the failing test".to_owned(),
                         attachments: Vec::new(),
                         item: None,
+                        origin: Default::default(),
                     },
                 },
             },

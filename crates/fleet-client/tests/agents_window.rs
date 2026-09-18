@@ -436,6 +436,7 @@ fn window(
     AgentThreadWindow {
         summary: AgentThreadSummary {
             thread,
+            parent: None,
             worktree: worktree(),
             host: None,
             provider: AgentKind::Claude,
