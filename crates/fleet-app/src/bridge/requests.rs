@@ -16,12 +16,15 @@ pub(super) enum Request {
 struct Mutation {
     client: Option<Client>,
     body: Box<RequestBody>,
+    /// Present when the caller needs the mutation's correlated acknowledgement.
+    reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
     /// Transferred to the settle counter once the daemon answers successfully.
     in_flight: InFlight,
 }
 
-/// A single owner enqueues event-backed mutations in arrival order. Response waiters remain
-/// independent, preserving the existing request API while a slow daemon operation completes.
+/// A single owner enqueues event-backed mutations in arrival order. Ordinary response waiters
+/// remain independent, while reply-bearing agent mutations join the same lane so a send cannot
+/// overtake the model, effort, or mode controls emitted immediately before it.
 pub(super) async fn run(
     requests: Receiver<Request>,
     events: Sender<BridgeEvent>,
@@ -42,27 +45,33 @@ pub(super) async fn run(
                 reply,
                 in_flight,
             } => match reply {
-                Some(reply) => dispatch(client, *body, reply, events.clone(), in_flight),
+                Some(reply)
+                    if fleet_proto::request::agent_request_is_serialized(&body).is_none() =>
+                {
+                    dispatch(client, *body, reply, events.clone(), in_flight);
+                }
                 // Admission never waits on the mutation worker: parking here backs pressure up
                 // into the command loop, which also serves shutdown, reconnect and health. A
                 // full lane sheds with the same policy `Bridge::send` uses at the outermost
                 // hop — flag a resync so the dropped mutation is repaired from a snapshot, and
                 // tell the user the write did not land.
-                None => match mutations.try_send(Mutation {
+                reply => match mutations.try_send(Mutation {
                     client,
                     body,
+                    reply,
                     in_flight,
                 }) {
                     Ok(()) => {}
-                    Err(async_channel::TrySendError::Full(_)) => {
+                    Err(async_channel::TrySendError::Full(mutation)) => {
                         resync_pending.store(true, Ordering::Release);
-                        publish_mutation_failure(
+                        reject_mutation(
+                            mutation,
                             &events,
                             "the Fleet daemon bridge queue was saturated",
                         );
                     }
-                    Err(async_channel::TrySendError::Closed(_)) => {
-                        publish_mutation_failure(&events, "the Fleet daemon bridge is closed");
+                    Err(async_channel::TrySendError::Closed(mutation)) => {
+                        reject_mutation(mutation, &events, "the Fleet daemon bridge is closed");
                     }
                 },
             },
@@ -84,6 +93,7 @@ async fn run_mutations(
     while let Ok(Mutation {
         client,
         body,
+        reply,
         in_flight,
     }) = mutations.recv().await
     {
@@ -91,6 +101,7 @@ async fn run_mutations(
             match client.request_stamped(*body).await {
                 Ok(response) => {
                     let generation = settle.begin(response.snapshot_revision);
+                    answer_mutation(reply, Ok(response.body), &events);
                     drop(in_flight);
                     let settle = Arc::clone(&settle);
                     let wake = wake.clone();
@@ -102,10 +113,37 @@ async fn run_mutations(
                         MUTATION_SETTLE_GRACE,
                     ));
                 }
-                Err(error) => publish_mutation_failure(&events, &error.message),
+                Err(error) => answer_mutation(reply, Err(error), &events),
             }
         } else {
-            publish_mutation_failure(&events, "the Fleet daemon is not connected");
+            answer_mutation(
+                reply,
+                Err(offline("the Fleet daemon is not connected")),
+                &events,
+            );
+        }
+    }
+}
+
+fn reject_mutation(mutation: Mutation, events: &Sender<BridgeEvent>, message: &str) {
+    answer_mutation(mutation.reply, Err(offline(message)), events);
+}
+
+fn answer_mutation(
+    reply: Option<Sender<Result<ResponseBody, ProtoError>>>,
+    result: Result<ResponseBody, ProtoError>,
+    events: &Sender<BridgeEvent>,
+) {
+    let Some(reply) = reply else {
+        if let Err(error) = result {
+            publish_mutation_failure(events, &error.message);
+        }
+        return;
+    };
+    match reply.try_send(result) {
+        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
+        Err(async_channel::TrySendError::Full(_)) => {
+            tracing::warn!("bridge mutation reply channel was unexpectedly full");
         }
     }
 }
