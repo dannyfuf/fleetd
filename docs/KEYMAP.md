@@ -164,6 +164,8 @@ alone preserves them.
 | `Tab` | last terminal tab (MRU within this session) [A2] |
 | `w` | last session (MRU alternate, vim `ctrl-^`) [A3] |
 | `W` | session switcher: the palette pre-filtered to `GO`/sessions [A4] |
+| `u` | select the caller of the current child thread, attaching it first if needed |
+| `d` | agent picker: the palette pre-filtered to `AGENTS` |
 | `c` | new terminal tab (shell in worktree path) |
 | `x` | close current terminal (confirm if a keep-alive process is running) |
 | `r` | restart the exited command in this terminal [A10] |
@@ -252,11 +254,12 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | `Agent > AgentWorking` | `Esc` | interrupt the **active** turn |
 | `Agent > AgentWorking` | `Enter` | send — a **steer**, dispatched immediately, never a queue |
 | every mode with a composer | `ctrl-s m` · `ctrl-s e` · `ctrl-s t` | model picker · reasoning / traits menu · access mode |
-| every mode with a composer | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close tab · new thread · terminal fallback |
+| every mode with a composer | `ctrl-s [` · `ctrl-s x` · `ctrl-s a`/`A` · `ctrl-s F` | toggle scroll mode · close a caller tab or detach a child · new thread · terminal fallback |
 | every agent-thread sub-mode | `ctrl-s 1`–`9` · `ctrl-s Tab` · `ctrl-s w` | select a Workspace tab · return to the tab MRU · return to the session MRU |
 | every agent-thread sub-mode | `ctrl-s s` · `ctrl-s S` | go to Hub (thread keeps running) · sleep this session and return to the Hub |
 | every agent-thread sub-mode | `ctrl-s h`/`p` · `ctrl-s l`/`n` | previous / next tab, across the mixed terminal-and-thread strip |
-| every agent-thread sub-mode | `ctrl-s W` · `ctrl-s c` · `ctrl-s y` · `ctrl-s z` | session switcher · new terminal tab · copy the worktree path · zoom |
+| every agent-thread sub-mode | `ctrl-s W` · `ctrl-s u` · `ctrl-s d` | session switcher · select the caller (attaching it first) · agent picker pre-filtered to `AGENTS` |
+| every agent-thread sub-mode | `ctrl-s c` · `ctrl-s y` · `ctrl-s z` | new terminal tab · copy the worktree path · zoom |
 | every agent-thread sub-mode | `ctrl-s v` · `ctrl-s V` · `ctrl-s N` · `ctrl-s P` | the subagent watch pane: show/hide · dismiss · next · previous |
 | every agent-thread sub-mode | `ctrl-s !` · `ctrl-s J` · `ctrl-s ?` · `ctrl-s Esc` | sticky error · jobs panel · help · cancel the prefix |
 | both | `Esc` | close a picker, else abandon a gate draft, else leave scroll mode, else interrupt — and nothing at all on an idle thread |
@@ -264,7 +267,7 @@ scroll mode or owned by a decision card preserves that mode's keyboard owner ins
 | `Agent > AgentDecision > AgentQuestion` | `1`-`5` · `Space` · `Enter` · `p` | choose · toggle (multi-select) · answer / next · previous question |
 | `Agent > AgentDecision > AgentPlan` | `y` · `n` · `Enter` | implement · refine · send whatever the composer holds |
 | `Agent > AgentNativeScroll` | `j`/`k` · `ctrl-d`/`ctrl-u` · `ctrl-f`/`ctrl-b` · `gg`/`G` · `q`/`i`/`Esc` · `ctrl-s [` | move the focused row · half page · page · oldest/newest · leave scroll mode |
-| `Agent > AgentNativeScroll > AgentRow` | `Enter` · `u` · `o` · `y` · `d` | expand/collapse · revert the edit or turn · open in the editor · copy the payload · open the diff |
+| `Agent > AgentNativeScroll > AgentRow` | `Enter` · `u` · `o` · `y` · `d` · `x` | expand/collapse (or attach a delegation's child) · revert the edit or turn · open in the editor · copy the payload (or a delegation id) · open the diff · cancel a delegation |
 
 Every one of these contexts is derived from **daemon state**, not from the view, which is what
 makes a decision own the keyboard in the same frame its gate appears rather than one frame later.
@@ -277,10 +280,13 @@ on. `G` jumps to the newest row without leaving the mode — the tail stays froz
 `Esc` leaves it, which is what re-arms the follow.
 
 **Row focus lives inside scroll mode.** `Agent > AgentNativeScroll > AgentRow` is on the chain
-exactly while a row carries the focus ring, which is what finally makes `Enter`/`u`/`o`/`y`/`d`
+exactly while a row carries the focus ring, which is what finally makes `Enter`/`u`/`o`/`y`/`d`/`x`
 fire and retires the caveat that those keys were bound, handled and never entered. `j`/`k` move
 the focus and scroll to it. Clicking a tool row, a `thought …` line or a `worked …` fold still
 expands and collapses it, so the mouse reaches every `[⏎] show` hint too.
+
+On a delegation row or result card, `Enter` attaches and selects the child, `y` copies the
+delegation id, and `x` cancels the delegation.
 
 **The Workspace session rows are repeated here, and the four PTY-only ones are not.** `^s r`
 (restart the exited command), `^s ,` (rename the terminal), `^s ]` (paste into it) and `^s ^s`

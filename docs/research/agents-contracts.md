@@ -41,10 +41,57 @@ Everything below is publicly re-exported from `fleet_core::agents` by
 
 ### Identity — `crates/fleet-core/src/agents/ids.rs`
 
-`ThreadId`, `TurnId`, `ItemId`, and `GateId` are transparent UUID newtypes. Each implements
+`ThreadId`, `DelegationId`, `TurnId`, `ItemId`, and `GateId` are transparent UUID newtypes. Each
+implements
 `new() -> Self`, `from_uuid(Uuid) -> Self`, `as_uuid(self) -> Uuid`, `Default`, `Display`,
 `FromStr<Err = uuid::Error>`, and conversions to/from `Uuid`. `Seq(pub u64)` is a transparent,
 ordered per-thread cursor with `next(self) -> Seq` (saturating) and `Display`.
+
+### Delegations — `crates/fleet-core/src/agents/delegation.rs`
+
+`Delegation` is a camel-case serialized struct with this public shape:
+
+```rust
+Delegation {
+    id: DelegationId,
+    caller: ThreadId,
+    caller_turn: TurnId,
+    caller_item: ItemId,
+    child: ThreadId,
+    provider: AgentKind,
+    depth: u8,
+    brief: String,
+    expectation: String,
+    eager: bool,
+    status: DelegationStatus,
+    status_payload: Option<String>,
+    result: Option<DelegationResult>,
+    nudges: u8,
+    recoveries: u8,
+    delivery: DeliveryState,
+    created: DateTime<Utc>,
+    finished: Option<DateTime<Utc>>,
+    headline: Option<String>,
+}
+```
+
+The JSON keys are `callerTurn`, `callerItem`, `statusPayload` and so on. `eager: false`, `None`
+optional fields and an empty result file list are omitted; `nudges` and `recoveries` default to
+zero when absent. The bearer token is intentionally not on this type: the daemon persists its
+SHA-256, while only `RequestBody::DelegationComplete` carries the plaintext token.
+
+- `DelegationStatus = Starting | Running | Blocked | Settling | Succeeded | Incomplete | Failed |
+  Cancelled` serializes as snake-case strings. `is_terminal` is true for the final four,
+  `is_live` is its inverse, and `word` returns `starting | working | blocked | settling | done |
+  incomplete | failed | cancelled`.
+- `DelegationResult { text: String, files_changed: Vec<String>, source: ResultSource,
+  elided: bool }` is camel-case. `ResultSource = Reported | LastAssistantText` serializes as
+  `reported | last_assistant_text`.
+- `DeliveryState = Pending | Delivered { seq: Seq, turn: TurnId } | Undeliverable {
+  reason: String }` uses the tagged shape `{ "type": snake_case, "data": ... }`.
+  `is_pending` and `word() -> "pending" | "delivered" | "undeliverable"` are the compact
+  projection helpers.
+- `Delegation::elapsed(now)` measures `created` to `finished`, or to `now` while live.
 
 ### State — `crates/fleet-core/src/agents/state.rs`
 
@@ -52,6 +99,8 @@ ordered per-thread cursor with `next(self) -> Seq` (saturating) and `Display`.
   `opencode`, and `display_name(self) -> &'static str` gives UI copy. Conversions preserve the
   legacy `fleet_core::config::Agent` terminal-popup API.
 - `SessionState = Starting | Ready | Running | Stopped | Error`; the default is `Ready`.
+- `StopCause = User | ProviderExit` serializes as `user | provider_exit`. It is kept on the
+  durable thread record so an intentional Stop is distinguishable from a provider crash.
 - `TurnState = None | Running(TurnId) | Completed(TurnId, TurnOutcome) |
   Interrupted(TurnId) | Failed(TurnId)`; the default is `None`.
 - `AttentionKind = Permission | Question | Plan | Finished`.
@@ -72,7 +121,9 @@ ordered per-thread cursor with `next(self) -> Seq` (saturating) and `Display`.
 - `StartRequest { thread: ThreadId, worktree_path: PathBuf, provider: AgentKind,
   model: Option<ModelSelection>, mode: PermissionMode, resume_cursor: Option<String>,
   title: Option<String> }` fully describes a provider launch or resume.
-- `UserInput { text: String, attachments: Vec<Attachment> }` is a submitted or steered prompt.
+- `UserInput { text: String, attachments: Vec<Attachment>, item: Option<ItemId>, origin:
+  MessageOrigin }` is a submitted or steered prompt. `item` is omitted when absent; the default
+  `origin: User` is omitted for byte compatibility.
 
 ### Items — `crates/fleet-core/src/agents/items.rs`
 
@@ -81,6 +132,13 @@ ordered per-thread cursor with `next(self) -> Seq` (saturating) and `Display`.
 - `ItemKind = UserMessage { text: String, attachments: Vec<Attachment> } | AssistantText |
   Thinking | Tool { kind: ToolKind, name: String, input: serde_json::Value } |
   Subagent { name: String, description: String } | Error` drives transcript projection.
+- `MessageOrigin = User | Delegation { id: DelegationId }` uses the tagged
+  `{ "type": snake_case, "data": ... }` shape. `User` is the default and is omitted from a
+  `UserMessage`; a delegated result keeps its delegation id on the message.
+- The rewrite's `ItemKind::UserMessage` additionally carries `origin: MessageOrigin` after
+  `steered`. `ItemKind::Delegation { id: DelegationId, provider: AgentKind, child: ThreadId,
+  status: DelegationStatus }` is the caller transcript item, and
+  `ItemPayloadPatch::Delegation { status: DelegationStatus }` changes only its lifecycle.
 - `ToolDiff { path: PathBuf, added: u64, removed: u64, unified: String }` carries a complete
   inline unified diff and counts.
 - `Item { id: ItemId, turn: TurnId, parent: Option<ItemId>, kind: ItemKind, status: ItemStatus,
@@ -164,7 +222,7 @@ learns about a change to them.
 `SeqEvent { seq: Seq, at: DateTime<Utc>, raw: Option<String>, event: AgentEvent }` is the durable,
 time-stamped reducer input. `raw` retains only a provider event/type name for diagnostics.
 
-### Projection — `crates/fleet-core/src/agents/projection.rs`
+### Projection — `crates/fleet-core/src/agents/projection/{mod.rs,summary.rs}`
 
 - `TurnEnd { outcome: TurnOutcome, usage: Usage, duration_ms: u64,
   files_changed: Vec<FileDelta> }` stores terminal facts.
@@ -180,7 +238,8 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
   carries them so §5's `CheckpointLine` row can be built.
 - `NoticeRecord { text: String, seq: Seq, after_turn: Option<TurnId> }` is one user-facing
   provider notice; `ThreadProjection::notices` carries them so §5's `Notice` row can be built.
-- `ThreadProjection { thread: ThreadId, worktree: WorktreeId, provider: AgentKind, title: String,
+- `ThreadProjection { thread: ThreadId, parent: Option<ThreadId>, worktree: WorktreeId,
+  provider: AgentKind, title: String,
   session: SessionState, turn: TurnState, gates: Vec<OpenGate>, items: Vec<Item>,
   turns: Vec<TurnRecord>, background_tasks: Vec<ItemId>, checkpoints: Vec<CheckpointRecord>,
   notices: Vec<NoticeRecord>, last_seq: Seq, last_completed_seq: Option<Seq>,
@@ -196,7 +255,8 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
   mutating, so the daemon can refuse an event before it is persisted; `attention(&self, Seq) ->
   Attention` derives the badge; and `summary(&self, Seq) -> AgentThreadSummary` creates compact
   client state.
-- `AgentThreadSummary { thread: ThreadId, worktree: WorktreeId, provider: AgentKind,
+- `AgentThreadSummary { thread: ThreadId, parent: Option<ThreadId>, worktree: WorktreeId,
+  provider: AgentKind,
   title: String, attention: Attention, session: SessionState, turn: TurnState, last_seq: Seq,
   last_activity: Option<DateTime<Utc>>, last_completed_seq: Option<Seq>,
   last_nonterminal_seq: Option<Seq>, exit_code: Option<i32> }` backs snapshots and tabs.
@@ -205,12 +265,14 @@ time-stamped reducer input. `raw` retains only a provider event/type name for di
   others; `attention_for(&self, last_seen: Seq) -> Attention` re-derives the two seen-relative
   attentions (`Finished`, `Unread`) from the cursor the reading client actually holds, using
   `last_completed_seq` and `last_nonterminal_seq`. Both are `#[serde(default)]`.
+  `parent` is defaulted and omitted when absent in both the projection and summary, and
+  `summary()` copies it from the projection.
 - `ProjectionError = WrongTurn(TurnId) | UnknownItem(ItemId) | UnknownGate(GateId) |
   OutOfOrder { expected: Seq, got: Seq }` is the stable rejected-transition error.
 
 ## `fleet-proto`
 
-`PROTOCOL_VERSION` is **6** in `crates/fleet-proto/src/lib.rs`.
+`PROTOCOL_VERSION` is **7** in `crates/fleet-proto/src/lib.rs`.
 
 ### Requests — `crates/fleet-proto/src/request.rs`
 
@@ -230,10 +292,27 @@ AgentSetMode { thread: ThreadId, mode: PermissionMode }
 AgentSetModel { thread: ThreadId, model: ModelSelection }
 AgentMarkSeen { thread: ThreadId, seq: Seq }
 AgentStop { thread: ThreadId }
+DelegationRun { caller: ThreadId, provider: AgentKind, brief: String,
+    expectation: String, worktree: Option<WorktreeId>, mode: Option<PermissionMode>,
+    model: Option<ModelSelection>, title: Option<String>, eager: bool }
+DelegationComplete { delegation: DelegationId, child: ThreadId, token: String,
+    result: String, blocked: bool }
+DelegationList { caller: Option<ThreadId> }
+DelegationGet { delegation: DelegationId }
+DelegationCancel { delegation: DelegationId }
+DelegationWait { delegation: DelegationId, timeout_ms: u64 }
 ```
 
 `AgentThreadCreate` intentionally carries published `WorktreeId`; the daemon resolves the trusted,
 canonical `StartRequest::worktree_path` through its worktree service.
+
+The six `Delegation*` request variants are defined in phase 2 and served from phase 3. Their
+optional fields and false booleans are defaulted and omitted. `DelegationRun` and
+`DelegationComplete` join per-thread serialization under `caller` and `child` respectively;
+`DelegationCancel` has no `ThreadId`, so the delegation service serializes it rather than
+`agent_request_is_serialized`. On the wire, `RequestBody` uses an internal `type` tag with
+snake-case values (`delegation_run` through `delegation_wait`); its fields retain the exact
+snake-case spellings above, including `timeout_ms`.
 
 ### Responses, events, snapshot
 
@@ -241,11 +320,23 @@ canonical `StartRequest::worktree_path` through its worktree service.
   `AgentThreads(Vec<AgentThreadSummary>)`, `AgentThreadCreated(AgentThreadSummary)`,
   `AgentThreadSnapshot { projection: ThreadProjection, events_after: Vec<SeqEvent> }`, and
   `AgentAck`.
+- The delegation responses are `DelegationStarted { delegation: Delegation, warning:
+  Option<String> }`, `Delegations(Vec<Delegation>)`, and `Delegation(Delegation)`. Run uses the
+  first, list the second, and complete/get/cancel/wait the third. `warning` is defaulted and
+  omitted when absent.
 - `crates/fleet-proto/src/event.rs`: `EventKind` adds `Agent` and `AgentSummary`; `Event` adds
   `Agent { thread: ThreadId, event: SeqEvent }` and `AgentSummary(AgentThreadSummary)`.
   `pub type EventBody = Event` is the compatibility name for the event payload enum.
+- `Event::DelegationChanged(Delegation)` belongs to the `AgentSummary` subscription family and
+  is emitted only when the receiving peer advertises `agent.delegation`.
 - `crates/fleet-proto/src/snapshot.rs`: `Snapshot::agent_threads: Vec<AgentThreadSummary>` is
   `#[serde(default)]`, so protocol-v4 snapshot JSON still deserializes.
+
+`AGENT_DELEGATION_CAPABILITY` in `crates/fleet-proto/src/lib.rs` is exactly
+`"agent.delegation"`. Phase 2 deliberately leaves it out of `AGENT_CAPABILITIES`; phase 3 adds it
+when the daemon serves all six verbs. `DelegationRun` uses the harness-start client timeout, and
+`DelegationWait { timeout_ms, .. }` uses `timeout_ms + 15 seconds` so the transport outlives the
+service deadline.
 
 ## `fleet-daemon`
 
@@ -293,6 +384,12 @@ pub fn spawn_provider(kind: AgentKind, req: &StartRequest,
     binaries: &fleet_core::config::AgentBinaries) -> anyhow::Result<Box<dyn AgentProvider>>;
 ```
 
+The adapter answer is declared in `crates/fleet-daemon/src/agents/harness/mod.rs` as
+`Submitted = JoinedActive { turn: TurnId } | QueuedNew { turn: TurnId }`. `turn()` returns the
+turn from either variant, and `joined_active()` is true only for `JoinedActive`. This replaces the
+ambiguous former `{ turn, queued }` shape: joining the active turn is a steer, while `QueuedNew`
+means a distinct turn accepted now or queued by the harness.
+
 The channel carries `ProviderEvent` rather than a bare `AgentEvent` because §11 of
 `NATIVE-AGENTS.md` names `SeqEvent.raw` — "the provider's own event type name for every stored
 event" — as the mitigation for protocol drift, and only the adapter knows that name. It is
@@ -326,10 +423,46 @@ manager's drain is never re-wired.
   event that reduces, rather than quarantining the whole thread.
 - `AgentIndex { version: u32, threads: Vec<AgentThreadRecord> }` is versioned and defaults to an
   empty v1 index.
-- `AgentThreadRecord { thread: ThreadId, worktree: WorktreeId, provider: AgentKind, title: String,
+- `AgentThreadRecord` in `crates/fleet-daemon/src/services/agents/record.rs` is
+  `{ thread: ThreadId, parent: Option<ThreadId>, delegation:
+  Option<DelegationId>, worktree: WorktreeId, provider: AgentKind, title: String,
   created: DateTime<Utc>, last_activity: DateTime<Utc>, resume_cursor: Option<String>,
-  model: Option<ModelSelection>, mode: PermissionMode, last_outcome: Option<TurnOutcome> }` is
-  persisted listing/resume metadata.
+  model: Option<ModelSelection>, mode: PermissionMode, last_outcome: Option<TurnOutcome>,
+  stop_cause: Option<StopCause> }` and is persisted listing/resume metadata. The three
+  delegation-era fields are defaulted and omitted when absent, so an older record still decodes.
+
+Migration slot 3 is named `delegations` in
+`crates/fleet-daemon/src/services/agents/store/migrations.rs`. It creates:
+
+```sql
+CREATE TABLE delegations (
+  id TEXT PRIMARY KEY, token_sha256 TEXT NOT NULL,
+  caller_thread TEXT NOT NULL, caller_turn TEXT NOT NULL, caller_item TEXT NOT NULL,
+  child_thread TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, depth INTEGER NOT NULL,
+  brief TEXT NOT NULL, expectation TEXT NOT NULL, eager INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL, status_payload TEXT, result TEXT, result_source TEXT,
+  result_files TEXT, result_elided INTEGER NOT NULL DEFAULT 0,
+  nudges INTEGER NOT NULL DEFAULT 0, recoveries INTEGER NOT NULL DEFAULT 0,
+  delivery TEXT NOT NULL, delivered_seq INTEGER, delivered_turn TEXT, delivery_reason TEXT,
+  headline TEXT, created TEXT NOT NULL, finished TEXT
+);
+CREATE INDEX idx_delegations_caller ON delegations(caller_thread, created);
+CREATE TABLE delegation_outbox (
+  id INTEGER PRIMARY KEY, delegation TEXT NOT NULL, action TEXT NOT NULL,
+  created TEXT NOT NULL, done TEXT
+);
+CREATE INDEX idx_delegation_outbox_open ON delegation_outbox(id) WHERE done IS NULL;
+ALTER TABLE threads ADD COLUMN parent_thread_id TEXT;
+ALTER TABLE threads ADD COLUMN delegation_id TEXT;
+ALTER TABLE threads ADD COLUMN stop_cause TEXT;
+```
+
+The three `ALTER TABLE` operations use the migration ladder's `PRAGMA table_info` guard, as slot
+2 does. Status/delivery values are snake-case, `result_files` is a JSON array, and timestamps use
+the database's RFC 3339 encoding. Thread insert/read/list paths carry all three columns, and every
+metadata write persists `stop_cause`. `rebuild_thread` and `quarantine_after` never recreate,
+delete or truncate delegation records: the delegation is separate durable truth, while only its
+status columns are derived from thread events.
 
 ### Manager/service — `crates/fleet-daemon/src/services/agents/{manager.rs,thread.rs,mod.rs}`
 
@@ -364,6 +497,15 @@ Typed methods live in `crates/fleet-client/src/api/agents.rs`; mirror types live
   `agent_set_model(ThreadId, ModelSelection) -> Result<()>`,
   `agent_mark_seen(ThreadId, Seq) -> Result<()>`, and `agent_stop(ThreadId) -> Result<()>`.
   Every method is async and validates its exact agent response variant.
+- `DelegationRunRequest { caller, provider, brief, expectation, worktree, mode, model, title,
+  eager }` mirrors `RequestBody::DelegationRun`. `Client` adds
+  `delegation_run(DelegationRunRequest) -> Result<(Delegation, Option<String>)>`,
+  `delegation_complete(DelegationId, ThreadId, String, String, bool) -> Result<Delegation>`,
+  `delegation_list(Option<ThreadId>) -> Result<Vec<Delegation>>`,
+  `delegation_get(DelegationId) -> Result<Delegation>`,
+  `delegation_cancel(DelegationId) -> Result<Delegation>`, and
+  `delegation_wait(DelegationId, u64) -> Result<Delegation>`. All are async and validate the
+  response variant described above.
 - `MirrorOutcome = Applied | Duplicate { applied: Seq } | Gap { expected: Seq, got: Seq } |
   Rejected { seq: Seq }` reports ordered delivery. `Duplicate` is a replay, which a cursored open
   produces by construction (§4.3) and which no resync repairs; `Rejected` is a continuous event

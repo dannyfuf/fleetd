@@ -269,6 +269,10 @@ work:     open_items, background_tasks (subagents), retrying
 view:     last_seen_seq            // per installation, persisted daemon-side
 ```
 
+A stopped thread also keeps `stop_cause: User | ProviderExit` on its durable record. Session
+state alone says only that the process is stopped; the cause lets recovery and delegation
+delivery distinguish an intentional Stop from a provider crash.
+
 The client library creates one UUID at `FleetHome::client_id_path()` on first use and sends it as
 `HelloClient.client_id`. Every Fleet window using that home shares the cursor; another installation
 has another UUID and cannot clear its mark. A newer in-process cursor remains an immediate local
@@ -306,7 +310,8 @@ Transition rules, each closing a real race:
 2. **Only the harness's authoritative primitive settles a turn** (§4.4). Never silence, never a
    stream closing, never process liveness, never a status hint.
 3. Before `TurnSettled` is applied, every open item in that turn is closed so the transcript never
-   shows a spinner on a finished turn.
+   shows a spinner on a finished turn, except a live background item: a subagent can outlive the
+   turn that launched it and remains live in the projection until its own terminal event.
 4. Gates are independent of turns. A gate closes only on `GateResolved` or `GateWithdrawn`.
 5. Stream or process loss is `SessionExited { expected: false }` plus `RuntimeError`, which makes
    the turn `Failed`. Never inferred success.
@@ -1036,6 +1041,17 @@ for reads while the log keeps every delta for replay), `gates`, `checkpoints`, `
 multi-table statements in the projector, which is what you want when you also have to delete
 files.
 
+Migration 3, `delegations`, adds two tables and three nullable columns to that schema.
+`delegations` is the durable caller-to-child record: identity and token hash; caller thread, turn
+and item; unique child thread; provider, depth, brief, expectation and eager policy; lifecycle,
+result and delivery state; nudge/recovery counters; headline; and creation/finish timestamps.
+`delegation_outbox` is the durable work queue for `deliver`, `nudge`, `settle`, `recover`,
+`cancel_children` and `mirror`, with a partial index over rows whose `done` timestamp is null.
+`threads.parent_thread_id`, `threads.delegation_id` and `threads.stop_cause` preserve the child
+relationship and distinguish a user Stop from a provider exit. The delegation record is not
+rebuilt from the transcript log: rebuild and quarantine leave both delegation tables alone, while
+the service derives and advances only the lifecycle status columns from thread events.
+
 Three columns exist to keep the denormalized `attention` byte-identical to what
 `ThreadProjection::attention` derives, rather than approximately equal to it: `threads.retrying_json`
 (a provider retry is what separates a thread that is working from a thread that is idle, and the
@@ -1333,6 +1349,31 @@ forwarded, because the sign-in Codex starts is a loopback callback on the owner 
 browser opened here would come back to the wrong machine. `AgentSessionView` gains `account`,
 defaulted and omitted when absent, so a windowed open paints the chip on a cold thread.
 
+The delegation wire family is **defined in phase 2 and served from phase 3**. It is gated by
+`agent.delegation`; phase 2 defines the constant but deliberately does not add it to
+`AGENT_CAPABILITIES`, so a client must not send these requests until a daemon advertises it.
+Requests are internally tagged by `type`; their wire names are `delegation_run`,
+`delegation_complete`, `delegation_list`, `delegation_get`, `delegation_cancel` and
+`delegation_wait`, and field names are exactly the snake-case names below (`timeout_ms`, not
+`timeoutMs`). Every `None` field, and every false boolean, is omitted from JSON:
+
+```text
+DelegationRun { caller, provider, brief, expectation,
+    worktree?, mode?, model?, title?, eager=false }
+DelegationComplete { delegation, child, token, result, blocked=false }
+DelegationList { caller? }
+DelegationGet { delegation }
+DelegationCancel { delegation }
+DelegationWait { delegation, timeout_ms }
+```
+
+`DelegationRun` answers `DelegationStarted { delegation, warning? }`.
+`DelegationList` answers `Delegations(Vec<Delegation>)`; complete, get, cancel and wait each answer
+`Delegation(Delegation)`, with wait returning either the terminal record or the current record at
+its deadline. `Event::DelegationChanged(Delegation)` belongs to the `AgentSummary` subscription
+family and is emitted only to peers that advertised `agent.delegation`. Run uses the harness-start
+transport deadline; wait adds 15 seconds of transport slack to its `timeout_ms` service deadline.
+
 Federation adds no agent-specific wire variant. Byte-exact goldens are added for **all** agent
 requests, responses and events — `rust-ipc-protocol` Rule 9, and the current code has zero of
 them. `request_timeout()` decisions are made per agent request; today they all default to 10 s
@@ -1417,12 +1458,13 @@ this build does not do**, named here rather than softened in the section that sp
 | --- | --- | --- |
 | 1 | **Domain.** New item/event model in `fleet-core::agents`, indexed projection replacing the O(n²) scans, `projection.rs` split under ~900 lines, `should_apply_lifecycle` | **done**; `providers/opencode/**` was deleted with it. `ItemKind::UserMessage` later gained `steered` and `UserInput` gained `item`, both additive and both with a producer |
 | 2 | **Storage.** `rusqlite`, the schema, the owned writer thread, the read pool, the migration ladder, `FleetHome::agents_*`, the one-shot NDJSON import, the one-`SELECT` thread list, lazy hydration and the background boot repair | **done**. The `seen` table has a monotonic owned-writer upsert and bounded per-install census. Owed: `item_attachments` has no writer because attachments are not built |
-| 3 | **Harnesses.** The `Harness` trait and probe; the Claude adapter rewritten against the 2.1.266 wire; the Codex adapter over app-server with generated `wire.rs`/`methods.rs`; the Codex fixtures | **done**: `agents/harness/` is the seam of §3.1 with the probe cache, the NDJSON framing and the SIGTERM→SIGKILL ladder; `agents/claude/**` speaks 2.1.266 with byte-exact argv goldens; `agents/codex/**` speaks app-server with `wire/`+`methods.rs` generated by `scripts/generate-codex-wire.py` from the installed 0.147.0's own schema; fixtures live under `crates/fleet-daemon/tests/fixtures/agents/{claude,codex}/`, and `--features real-agents` exercises both real binaries. The manager reads all three of the adapter's answers: `Submitted{turn,queued}`, `RuntimeApplied.restart` (performed at a turn boundary by `manager/controls.rs`), and `emitted_at` as a skew log line. Codex binds the caller's turn before the response/notification race, reconciles both halves of its user-message echo, discovers every `model/list` page, projects every model's effort descriptions and default, reads `skills/list`, and publishes refreshes on `skills/changed`; permission gates carry the named item, so file approvals join the exact diff. A direct 0.147.0 catalogue probe reports `low` as `gpt-5.6-sol`'s default and Fleet displays that discovered value. The Codex account surface is complete: `account/read` runs in the handshake and publishes `AccountChanged`, `account/updated` and `account/login/completed` re-read rather than guess, and `/login`/`/logout` drive `account/login/start`, `account/login/cancel` and `account/logout` through one `Harness::account` method whose default refusal is what keeps Claude compiling unchanged. **Owed**: the per-thread raw NDJSON log (`RawRef.offset` is always `None`), `thread/read`/`thread/items/list` cold rehydration (the store replays instead), and per-instance `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (`HarnessConfig.home` is plumbed and nothing sets it — multi-account is out of scope per §14) |
+| 3 | **Harnesses.** The `Harness` trait and probe; the Claude adapter rewritten against the 2.1.266 wire; the Codex adapter over app-server with generated `wire.rs`/`methods.rs`; the Codex fixtures | **done**: `agents/harness/` is the seam of §3.1 with the probe cache, the NDJSON framing and the SIGTERM→SIGKILL ladder; `agents/claude/**` speaks 2.1.266 with byte-exact argv goldens; `agents/codex/**` speaks app-server with `wire/`+`methods.rs` generated by `scripts/generate-codex-wire.py` from the installed 0.147.0's own schema; fixtures live under `crates/fleet-daemon/tests/fixtures/agents/{claude,codex}/`, and `--features real-agents` exercises both real binaries. The manager reads all three of the adapter's answers: `Submitted::JoinedActive { turn }` or `Submitted::QueuedNew { turn }`, `RuntimeApplied.restart` (performed at a turn boundary by `manager/controls.rs`), and `emitted_at` as a skew log line. Codex binds the caller's turn before the response/notification race, reconciles both halves of its user-message echo, discovers every `model/list` page, projects every model's effort descriptions and default, reads `skills/list`, and publishes refreshes on `skills/changed`; permission gates carry the named item, so file approvals join the exact diff. A direct 0.147.0 catalogue probe reports `low` as `gpt-5.6-sol`'s default and Fleet displays that discovered value. The Codex account surface is complete: `account/read` runs in the handshake and publishes `AccountChanged`, `account/updated` and `account/login/completed` re-read rather than guess, and `/login`/`/logout` drive `account/login/start`, `account/login/cancel` and `account/logout` through one `Harness::account` method whose default refusal is what keeps Claude compiling unchanged. **Owed**: the per-thread raw NDJSON log (`RawRef.offset` is always `None`), `thread/read`/`thread/items/list` cold rehydration (the store replays instead), and per-instance `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (`HarnessConfig.home` is plumbed and nothing sets it — multi-account is out of scope per §14) |
 | 4 | **Protocol.** Windowed open, `AgentItemBody`, the sync/resync events, real `AgentMarkSeen`, byte-exact goldens, per-request timeouts, the capability strings | **done**. Eight `agent.*` capabilities are advertised and served — `agent.account` is the newest, gating `AgentAccountLogin`/`AgentAccountLogout`. `agent.seen` adds `HelloClient.client_id`, `AgentSeenCursors`, `AgentThreadWindow.seen_seq`, and a monotonic store write without changing protocol 7; anonymous and older peers retain validate-only compatibility. The app seeds its cursor map after every Hello, so reconnecting does not restore a cleared amber dot |
 | 5 | **Transcript.** The flat row model, the eighteen row kinds, `TranscriptList`, `ToolRow`, the fold and group logic, the scroll machine, `gallery_agent` | **done**. Kit (5a): the flat `TranscriptRow`, all eighteen kinds, `TranscriptList` over `list` with the three-state scroll machine and its generation counter, the six-state `ToolRow`, the group summarizer, the streaming-safe `Markdown` with its highlight cache, `gallery_agent`. Screen (5b): `screens/agent_thread/rows/` projects a thread into those rows — the §B1.4 emission order, the fold exemption table, the live-activity tail walk and its present-tense rule, the group summarizer's inputs, and the settled-gate record — memoised behind a `RowsKey` so a stream chunk rewrites one row and re-runs no grouping. Scroll-back paging is closed end to end: `TranscriptEvent::ReachedOldest` reports the gesture, the workspace asks the mirror for a page cursor, and `merge_older_page` prepends the answer. Deferred scroll refresh no longer borrows list state from inside its own callback; the two-turn `scroll-wheel.scenario` exercises wheel input up and back at a 600-pixel viewport |
 | 6 | **Decisions and controls.** `DecisionDock`, the three gate kinds, the composer, the control cluster and pickers, `MetadataRow` overflow | **done**. Kit (5a): `DecisionDock` with its attachment seam, the `Decision` priority ladder and key vocabulary, `MetadataRow` with its per-width fit memo, `MultilineInput`'s three trigger reports. Screen (6): `/login` and `/logout` join the `/` built-ins on a Codex thread and nowhere else, and the metadata row's last trailing segment is the account — `signed out`, or the email, or the plan, or nothing at all; the docked drawer wired to daemon state so a gate owns the keyboard in the same frame, `⏎` unbound on a permission, the question wizard with per-question drafts, the plan verbs on the composer, `ComposerMode`'s capability table, the three control tiers with the restart rule, six completion surfaces, provider-described Codex effort rows and refreshed `$` skills, and the §12 key contexts including row focus inside scroll mode. The harness projects a prepared decision on each thread as `{kind,title,paths,has_diff}`, and the regular corpus proves a Codex file approval joins its exact item. **Not built**: attachments (nothing uploads one, so `--add-dir` is not granted either — granting a directory nothing can put a file in is an affordance with no behaviour behind it) and the `$`-to-`/` skill rewrite (the daemon's adapter boundary owns it) |
 | 7 | **Remote.** The mirror column and its authority rules, snapshot-then-delta, the admission ladder | **done**: `store/mirror.rs` owns the `owner_host` columns and the only statements that write them, `manager/mirror.rs` the read-through cache, `router/agents.rs` the `AgentMirror` seam the link hangs on, and `manager/window.rs` the windowed open and the admission ladder. All four authority rules have a test. The app sends window fields on every open, so the warm-mirror path is reachable from the UI. **Owed**: the SQL-native window read of spec-C C.2.5 — the window's *content* still comes from the reducer's projection, so a windowed open of a cold thread replays its log once — and `mirror_oldest_seq` stays `NULL` because the mirror only ever stores prefixes from sequence 1 |
 | 8 | **Checkpoints and revert.** Fleet-owned git refs, `AgentRevert`, `[u]` | **done**: `services/checkpoints/` captures a turn or a file scope into `refs/fleet/checkpoints/`, reverts a worktree from one without touching `HEAD`, the index or the conversation, and garbage collects per thread plus an hourly orphan sweep. `AgentSessionManager` holds the service and takes both captures — `capture_turn` in `send`, for a turn that is actually starting rather than a steer, and `capture_files` on the `ItemStarted` of an edit-shaped tool. A capture failure logs and the turn proceeds, always (§5). The app draws `[u] revert turn` from `AgentCheckpoints` and sends `AgentRevert`. **Owed**: `[u] revert this edit` on a tool row. A file-scope checkpoint names the *turn* it was taken in and not the item, so a tool row has nothing to key on; and the capture is best-effort by construction, because neither harness waits for Fleet before running an auto-approved tool — the turn-scope checkpoint is the guarantee, the file-scope one is the finer-grained revert when the race goes Fleet's way, which it always does for a gated edit |
+| 9 | **Delegations.** Durable caller/child model, transcript origin, storage migration and capability-gated wire family | **model and wire landed; nothing served**. Phase 2 defines `DelegationId`, the delegation/result/delivery states, child metadata on records and summaries, migration 3, six requests, three response variants and `DelegationChanged`; phase 3 owns the service and advertises `agent.delegation` only when those verbs are live |
 
 The whole Workspace session table — selection and MRU (`^s 1`–`9`, `^s Tab`, `^s w`), `^s s`,
 `^s S`, `^s h`/`p`/`l`/`n`, `^s W`, `^s c`, `^s y`, `^s z`, `^s v`/`V`/`N`/`P`, `^s !`, `^s J`,

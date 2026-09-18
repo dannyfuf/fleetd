@@ -120,7 +120,7 @@ Arguments after `type` and `clipboard set` have leading and trailing whitespace 
 spaces are preserved. The frozen line grammar is:
 
 ```text
-fixture: empty|one-repo|busy|board|agents
+fixture: empty|one-repo|busy|board|agents|agents-subagent|agents-subagent-other-worktree
 meta
 quit
 wait <milliseconds>
@@ -209,7 +209,7 @@ The snapshot is built from update-path state and memoised per revision. Render n
 | `toasts` | `[{level,text,count}]`; levels use the UX vocabulary `info`, `success`, `warning`, `error` |
 | `sticky_error` | stable human-readable failed-job text or null |
 | `jobs` | `[{id,status}]`; status is the daemon job vocabulary (`queued`, `running`, `succeeded`, `failed`, `cancelled`) |
-| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate,decision}],decision:{kind,item,diff}|null}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md`; additive version-1 `threads[].decision` is null or `{kind:"permission"|"question"|"plan",title:string,paths:[string],has_diff:bool}` prepared from the rendered decision; the legacy active-thread `agents.decision` remains available |
+| `agents` | `{popup:string|null,threads:[{id,provider,state,unread,pending_gate,decision,parent,attached}],delegations:[{id,status,caller,child,delivery,headline}],decision:{kind,item,diff}|null}`; `popup` is the floating popup's sub-mode `Terminal`, `Prefix`, or `Scroll`, or null when it is closed; providers are `claude`/`codex` and gate/state words match `NATIVE-AGENTS.md`; additive version-1 `threads[].decision` is null or `{kind:"permission"|"question"|"plan",title:string,paths:[string],has_diff:bool}` prepared from the rendered decision; additive `threads[].parent` is the caller thread id or null and `threads[].attached` says whether this window currently shows the thread in its strip; delegation `status` and `delivery` use their compact protocol words and `headline` is nullable; the legacy active-thread `agents.decision` remains available |
 | `terminal` | `{rows:[string],text:string,cursor:{row,col,shape},viewport:{top,rows,history}}` or null; cursor shapes are `block`, `bar`, `underline`, `hidden` |
 | `targets` | map target name → `{x,y,w,h,frame}` in logical window coordinates |
 | `daemon` | `{link,attempt,dismissed,restarted}`; `link` is `starting`, `failed`, `connected`, `lost` or `reconnected`. An additive version-1 field: `key_contexts` appends `Daemon > Banner` only behind a chain that can carry it, so on a first-run Fleet or behind an open overlay a lost daemon is otherwise invisible to every predicate |
@@ -224,7 +224,8 @@ trailing empty rows, so `terminal.rows.len()` need not equal `terminal.viewport.
 must not assume the viewport's last row exists in `terminal.rows`. `jobs[].status` may also be
 `cancelling`, which is a real daemon job state.
 
-The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `board` and `board.cards`. The
+The list names are `repos`, `worktrees`, `prs`, `jobs`, `tabs`, `board` and `board.cards`. An agent
+tab whose thread has a parent includes the additive `child` badge. The
 last of those, and every key of `targets`, carries characters a dotted path would split on, so a
 predicate reaches them with the quoted step §2 defines: `lists["board.cards"].rows[0].label`,
 `targets["worktrees.row[0]"].frame`. The
