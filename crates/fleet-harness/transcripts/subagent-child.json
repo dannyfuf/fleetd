@@ -1,0 +1,5 @@
+{"version":1,"steps":[
+  {"type":"text","text":"I found the requested path and will report it to the caller.","pace_ms":0},
+  {"type":"shell","command":"report=$(mktemp) && printf '%s\\n' 'The path is crates/fleet-harness.' > \"$report\" && fleet subagent complete --result-file \"$report\"; status=$?; rm -f \"$report\"; exit \"$status\""},
+  {"type":"end_turn","status":"completed"}
+]}

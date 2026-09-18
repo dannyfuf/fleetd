@@ -83,8 +83,9 @@ impl Provider {
 
 /// One scripted step.
 ///
-/// The eight frozen variants of `docs/TESTING-HARNESS.md` §5, plus `end_turn`, which is how a
-/// flat step list says where one turn stops and the next begins.
+/// The eight frozen variants of `docs/TESTING-HARNESS.md` §5, plus the additive `shell` and
+/// `end_turn` steps. `end_turn` is how a flat step list says where one turn stops and the next
+/// begins.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptStep {
@@ -107,6 +108,14 @@ pub enum TranscriptStep {
         /// The tool's output, as the transcript wants it rendered.
         #[serde(default)]
         output: String,
+    },
+    /// A real shell command run by the scripted player in its inherited environment.
+    Shell {
+        /// The string passed as the second argument to `sh -c`.
+        command: String,
+        /// The tool name presented to Fleet.
+        #[serde(default = "default_shell_name")]
+        name: String,
     },
     /// A file the agent changed, carrying the real unified diff.
     FileChange {
@@ -188,6 +197,10 @@ fn default_thread_id() -> String {
 
 fn default_model() -> String {
     "scripted-model".to_owned()
+}
+
+fn default_shell_name() -> String {
+    "Bash".to_owned()
 }
 
 const fn default_context_window() -> i64 {

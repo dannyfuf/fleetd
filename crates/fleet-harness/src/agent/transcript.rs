@@ -16,6 +16,7 @@
 //! the second completion, causing data loss rather than displaying the second call.
 
 use super::{Transcript, TranscriptStep};
+use anyhow::Context as _;
 use std::collections::HashSet;
 
 /// The frozen document version.
@@ -116,6 +117,32 @@ pub(crate) struct Catalogue {
     pub(crate) models: Vec<String>,
     /// Reasoning efforts every listed model supports.
     pub(crate) efforts: Vec<String>,
+}
+
+/// The observable result of one additive `shell` transcript step.
+pub(crate) struct ShellResult {
+    /// Standard output followed byte-for-byte by standard error, decoded lossily as UTF-8.
+    pub(crate) output: String,
+    /// The process exit code, or none when the shell was terminated by a signal.
+    pub(crate) exit_code: Option<i32>,
+    /// Whether the shell exited successfully.
+    pub(crate) success: bool,
+}
+
+/// Runs one transcript shell step with the player's own inherited environment.
+pub(crate) fn run_shell(command: &str) -> anyhow::Result<ShellResult> {
+    let result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .with_context(|| format!("run transcript shell command {command:?}"))?;
+    let mut output = String::from_utf8_lossy(&result.stdout).into_owned();
+    output.push_str(&String::from_utf8_lossy(&result.stderr));
+    Ok(ShellResult {
+        output,
+        exit_code: result.status.code(),
+        success: result.status.success(),
+    })
 }
 
 impl Catalogue {

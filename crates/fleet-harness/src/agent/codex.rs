@@ -23,7 +23,7 @@ use super::{
     GATE_BUDGET, Transcript, TranscriptStep,
     ids::Ids,
     peer::Peer,
-    transcript::{Catalogue, Playback, Settlement, text_chunks},
+    transcript::{Catalogue, Playback, Settlement, run_shell, text_chunks},
 };
 
 /// The JSON-RPC error code for a method the scripted server does not implement.
@@ -258,6 +258,24 @@ impl<R: std::io::BufRead + Send + 'static, W: std::io::Write> Session<'_, R, W> 
                     let command = command_line(name, arguments);
                     self.start_command(turn, &item, &command)?;
                     self.complete_command(turn, &item, &command, output, "completed", Some(0))?;
+                }
+                TranscriptStep::Shell { command, .. } => {
+                    let result = run_shell(command)?;
+                    let item = self.ids.item();
+                    self.start_command(turn, &item, command)?;
+                    let status = if result.success {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
+                    self.complete_command(
+                        turn,
+                        &item,
+                        command,
+                        &result.output,
+                        status,
+                        result.exit_code.map(i64::from),
+                    )?;
                 }
                 TranscriptStep::FileChange { path, diff } => {
                     let item = self.ids.item();

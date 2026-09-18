@@ -351,6 +351,7 @@ document and speaks that provider's native wire protocol. The frozen document sh
 {"version":1,"steps":[
   {"type":"text","text":"I will inspect it.","pace_ms":10},
   {"type":"tool_call","id":"call-1","name":"read_file","arguments":{"path":"README.md"}},
+  {"type":"shell","command":"printf '%s\\n' \"$FLEET_SESSION\"","name":"Bash"},
   {"type":"file_change","path":"src/lib.rs","diff":"@@ ..."},
   {"type":"permission","id":"gate-1","command":"cargo test"},
   {"type":"approval","id":"gate-2","summary":"apply the edit"},
@@ -363,7 +364,7 @@ document and speaks that provider's native wire protocol. The frozen document sh
 Steps execute in order. `pace_ms` advances between text deltas; zero is immediate. Provider-specific
 framing follows the two authoritative research documents indexed by `docs/README.md`.
 
-Two additive pieces the "optional data may be added" rule allows, both of which a document may
+Three additive pieces the "optional data may be added" rule allows, all of which a document may
 omit entirely:
 
 - **`{"type":"end_turn","status":"completed"|"failed"|"interrupted"}`** marks where one turn stops.
@@ -374,6 +375,9 @@ omit entirely:
 - **Optional top-level `session_id`, `thread_id`, `model` and `context_window`**, plus an optional
   `output` on a `tool_call`, so two scripted threads in one scenario can be told apart and a
   transcript that names none stays byte-identical between runs.
+- **`{"type":"shell","command":"<sh -c string>","name":"Bash"}`** runs the command with the
+  player's inherited environment, waits for it, and presents an ordinary tool call whose output
+  is stdout followed by stderr. `name` is optional and defaults to `Bash`.
 
 **There is no account step, and the scripted provider's account is fixed.** Fleet reads
 `account/read` in its Codex handshake (`NATIVE-AGENTS.md` §4.2); the scripted agent answers a
@@ -391,6 +395,18 @@ at load to answer Claude's `list_models` and Codex's `model/list`, and playing i
 The `agents` fixture embeds all three starters: Claude serves the two turns from
 `two-turns.json` followed by the failed turn from `error-mid-stream.json`, and Codex serves
 `edit-approval.json`.
+
+Two additive presets select delegation callers without changing `agents`: `agents-subagent`
+serves `subagent-caller.json` to Claude, and `agents-subagent-other-worktree` serves
+`subagent-caller-other-worktree.json`. Both seed `acme/api#agent` and `acme/api#other`. Their
+caller writes a brief to a temporary file and invokes the hermetic `fleet subagent run`; the
+other-worktree variant passes `--worktree acme/api#other`.
+
+The launcher chooses by role. With `FLEET_DELEGATION` unset it plays the preset transcript. With
+the variable set, Codex plays `subagent-child.json`, which writes a temporary report and runs
+`fleet subagent complete`; Claude plays `subagent-child-blocked.json`, whose available permission
+gate stands in for the blocked child's clarification question. The fixture installs `fleet`
+beside the vendor shims with the run's private `FLEET_HOME` and resolved `FLEET_APP` baked in.
 
 ## 6. Run directory and baselines
 
