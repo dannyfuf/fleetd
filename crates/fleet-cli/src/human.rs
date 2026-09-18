@@ -1,6 +1,7 @@
 //! Human-readable command output formatting.
 
 use fleet_core::{
+    agents::{Delegation, DelegationStatus},
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
     sessions::{SessionState, WorktreeStatus},
@@ -8,6 +9,7 @@ use fleet_core::{
 use fleet_proto::response::{
     DoctorCheck, DoctorStatus, PruneResult, SleepResult, WorktreeDeleteResult,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Formats the compact list summary.
 #[must_use]
@@ -186,6 +188,83 @@ pub fn doctor(checks: &[DoctorCheck]) -> String {
         )
     }));
     lines.join("\n")
+}
+
+/// Formats one fixed-field line per delegation.
+#[must_use]
+pub fn subagents(delegations: &[Delegation], now: SystemTime) -> String {
+    delegations
+        .iter()
+        .map(|delegation| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                delegation.id,
+                delegation_status_word(delegation.status),
+                delegation.provider.executable(),
+                delegation.child,
+                duration(elapsed_seconds(delegation, now)),
+                delegation.delivery.word()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Formats the message a caller receives when a delegation finishes.
+#[must_use]
+pub fn delivered_message(delegation: &Delegation, now: SystemTime) -> String {
+    let result = delegation.result.as_ref();
+    let text = result.map_or("", |result| result.text.as_str());
+    let files_changed = result.map_or(0, |result| result.files_changed.len());
+    let mut message = format!(
+        "[fleet subagent {} finished: {}]\nprovider: {}, thread: {}, duration: {}, files changed: {}\n\n{}",
+        delegation.id,
+        delegation_status_word(delegation.status),
+        delegation.provider.executable(),
+        delegation.child,
+        duration(elapsed_seconds(delegation, now)),
+        files_changed,
+        crate::envelope::safe_block(text)
+    );
+    if result.is_some_and(|result| result.elided) {
+        message.push_str(&format!("\n\n(report elided at {} bytes)", text.len()));
+    }
+    message
+}
+
+/// The wire word for a status, which is deliberately not the transcript's.
+///
+/// `DelegationStatus::word` is written for the app's rows, where a finished child reads `done`
+/// and a live one reads `working`. These two reports are a contract other programs parse — the
+/// delivered message's first line says `finished: succeeded` — so they print the enum's own
+/// names instead of the row vocabulary.
+fn delegation_status_word(status: DelegationStatus) -> &'static str {
+    match status {
+        DelegationStatus::Starting => "starting",
+        DelegationStatus::Running => "running",
+        DelegationStatus::Blocked => "blocked",
+        DelegationStatus::Settling => "settling",
+        DelegationStatus::Succeeded => "succeeded",
+        DelegationStatus::Incomplete => "incomplete",
+        DelegationStatus::Failed => "failed",
+        DelegationStatus::Cancelled => "cancelled",
+    }
+}
+
+fn elapsed_seconds(delegation: &Delegation, now: SystemTime) -> u64 {
+    let end = delegation.finished.map_or_else(
+        || {
+            now.duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs())
+        },
+        |finished| u64::try_from(finished.timestamp()).unwrap_or_default(),
+    );
+    let start = u64::try_from(delegation.created.timestamp()).unwrap_or_default();
+    end.saturating_sub(start)
+}
+
+fn duration(seconds: u64) -> String {
+    format!("{}m {:02}s", seconds / 60, seconds % 60)
 }
 
 /// Formats board summaries as a column-aligned table.

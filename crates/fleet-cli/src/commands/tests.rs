@@ -776,6 +776,616 @@ fn update_job(status: JobStatus) -> JobRecord {
     }
 }
 
+#[test]
+fn subagent_context_uses_environment_fallbacks_and_refuses_a_missing_caller() {
+    let command = Cli::try_parse_from([
+        "fleet",
+        "subagent",
+        "run",
+        "--provider",
+        "codex",
+        "--expect",
+        "done",
+    ])
+    .unwrap()
+    .command
+    .unwrap();
+    let Command::Subagent(arguments) = command else {
+        panic!("expected subagent command");
+    };
+    let error = subagents::validate_context(&arguments.command, &subagents::Environment::default())
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert_eq!(
+        error.message,
+        "fleet subagent run requires --caller <thread> or FLEET_SESSION"
+    );
+
+    let environment = subagents::Environment {
+        session: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+        delegation: None,
+        token: None,
+    };
+    subagents::validate_context(&arguments.command, &environment).unwrap();
+}
+
+/// Parses `fleet subagent <arguments>` and returns the verb clap built.
+fn parse_subagent(arguments: &[&str]) -> crate::args::SubagentCommand {
+    let line = ["fleet", "subagent"]
+        .into_iter()
+        .chain(arguments.iter().copied())
+        .collect::<Vec<_>>();
+    let Some(Command::Subagent(crate::args::SubagentArgs { command })) =
+        Cli::try_parse_from(line).unwrap().command
+    else {
+        panic!("expected a subagent command");
+    };
+    command
+}
+
+#[test]
+fn every_subagent_verb_parses_its_flags_defaults_and_ceiling() {
+    use crate::args::{
+        AgentChoice, AgentModeChoice, SubagentArgs, SubagentCommand, SubagentCompleteArgs,
+        SubagentIdArgs, SubagentListArgs, SubagentRunArgs, SubagentWaitArgs,
+    };
+
+    const CALLER: &str = "00000000-0000-4000-8000-000000000001";
+    const DELEGATION: &str = "00000000-0000-4000-8000-000000000003";
+
+    assert_eq!(
+        parse_subagent(&[
+            "run",
+            "--provider",
+            "claude",
+            "--brief-file",
+            "/tmp/brief.md",
+            "--expect",
+            "tests pass",
+            "--worktree",
+            "acme/api#feature",
+            "--mode",
+            "full-access",
+            "--model",
+            "opus",
+            "--title",
+            "worker",
+            "--eager",
+            "--caller",
+            CALLER,
+            "--json",
+        ]),
+        SubagentCommand::Run(SubagentRunArgs {
+            provider: AgentChoice::Claude,
+            brief_file: Some("/tmp/brief.md".into()),
+            expectation: "tests pass".to_owned(),
+            worktree: Some("acme/api#feature".parse().unwrap()),
+            mode: Some(AgentModeChoice::FullAccess),
+            model: Some("opus".to_owned()),
+            title: Some("worker".to_owned()),
+            eager: true,
+            caller: Some(CALLER.parse().unwrap()),
+            json: true,
+        })
+    );
+    // Without a brief file the brief comes from stdin, and every override stays unset so the
+    // daemon applies its own defaults rather than the CLI guessing them.
+    assert_eq!(
+        parse_subagent(&["run", "--provider", "codex", "--expect", "the file path"]),
+        SubagentCommand::Run(SubagentRunArgs {
+            provider: AgentChoice::Codex,
+            brief_file: None,
+            expectation: "the file path".to_owned(),
+            worktree: None,
+            mode: None,
+            model: None,
+            title: None,
+            eager: false,
+            caller: None,
+            json: false,
+        })
+    );
+
+    assert_eq!(
+        parse_subagent(&[
+            "complete",
+            DELEGATION,
+            "--result-file",
+            "/tmp/report.md",
+            "--blocked",
+            "--json-result",
+            "--json",
+        ]),
+        SubagentCommand::Complete(SubagentCompleteArgs {
+            id: Some(DELEGATION.parse().unwrap()),
+            result_file: Some("/tmp/report.md".into()),
+            blocked: true,
+            json_result: true,
+            json: true,
+        })
+    );
+    assert_eq!(
+        parse_subagent(&["complete"]),
+        SubagentCommand::Complete(SubagentCompleteArgs {
+            id: None,
+            result_file: None,
+            blocked: false,
+            json_result: false,
+            json: false,
+        })
+    );
+
+    assert_eq!(
+        parse_subagent(&["wait", DELEGATION]),
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: DELEGATION.parse().unwrap(),
+            timeout: 540,
+            json: false,
+        })
+    );
+    assert_eq!(
+        parse_subagent(&["wait", DELEGATION, "--timeout", "30", "--json"]),
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: DELEGATION.parse().unwrap(),
+            timeout: 30,
+            json: true,
+        })
+    );
+    // 540 is a ceiling, not just a default: a Claude Bash tool call must not outlive its own
+    // timeout waiting for a child.
+    let above_ceiling =
+        Cli::try_parse_from(["fleet", "subagent", "wait", DELEGATION, "--timeout", "541"])
+            .unwrap_err();
+    assert_eq!(clap_error(&above_ceiling).kind, ErrorKind::Validation);
+
+    assert_eq!(
+        parse_subagent(&["status", DELEGATION]),
+        SubagentCommand::Status(SubagentIdArgs {
+            id: DELEGATION.parse().unwrap(),
+            json: false,
+        })
+    );
+    assert_eq!(
+        parse_subagent(&["cancel", DELEGATION, "--json"]),
+        SubagentCommand::Cancel(SubagentIdArgs {
+            id: DELEGATION.parse().unwrap(),
+            json: true,
+        })
+    );
+
+    assert_eq!(
+        parse_subagent(&["list"]),
+        SubagentCommand::List(SubagentListArgs {
+            caller: None,
+            json: false,
+        })
+    );
+    assert_eq!(
+        parse_subagent(&["list", "--caller", CALLER, "--json"]),
+        SubagentCommand::List(SubagentListArgs {
+            caller: Some(CALLER.parse().unwrap()),
+            json: true,
+        })
+    );
+
+    // The JSON flag has to be visible to the error printer too, or a refused `--json` verb
+    // answers a bare line on stderr instead of an error envelope.
+    assert!(command_requests_json(&Command::Subagent(SubagentArgs {
+        command: parse_subagent(&["status", DELEGATION, "--json"]),
+    })));
+    assert!(!command_requests_json(&Command::Subagent(SubagentArgs {
+        command: parse_subagent(&["status", DELEGATION]),
+    })));
+}
+
+#[test]
+fn subagent_complete_names_each_environment_variable_the_child_is_missing() {
+    use crate::args::{SubagentCommand, SubagentCompleteArgs};
+
+    let command = SubagentCommand::Complete(SubagentCompleteArgs {
+        id: None,
+        result_file: None,
+        blocked: false,
+        json_result: false,
+        json: false,
+    });
+    let refusal = |environment: &subagents::Environment| {
+        subagents::validate_context(&command, environment)
+            .unwrap_err()
+            .message
+    };
+
+    let mut environment = subagents::Environment::default();
+    assert_eq!(
+        refusal(&environment),
+        "fleet subagent complete requires <id> or FLEET_DELEGATION"
+    );
+    environment.delegation = Some("00000000-0000-4000-8000-000000000003".to_owned());
+    assert_eq!(
+        refusal(&environment),
+        "fleet subagent complete requires FLEET_SESSION"
+    );
+    environment.session = Some("00000000-0000-4000-8000-000000000002".to_owned());
+    assert_eq!(
+        refusal(&environment),
+        "fleet subagent complete requires FLEET_DELEGATION_TOKEN"
+    );
+    environment.token = Some("secret-token".to_owned());
+    subagents::validate_context(&command, &environment).unwrap();
+}
+
+#[tokio::test]
+async fn subagent_complete_refuses_an_unusable_result_before_sending_anything() {
+    use crate::args::{SubagentCommand, SubagentCompleteArgs};
+
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+        // A report the child cannot supply must never reach the daemon as an empty or malformed
+        // one: both refusals below happen before a request is framed.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(350), transport.next())
+                .await
+                .is_err()
+        );
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let delegation = sample_delegation();
+    let environment = subagents::Environment {
+        session: Some(delegation.child.to_string()),
+        delegation: Some(delegation.id.to_string()),
+        token: Some("secret-token".to_owned()),
+    };
+
+    let missing = home.path().join("absent.md");
+    let error = subagents::execute(
+        &client,
+        SubagentCommand::Complete(SubagentCompleteArgs {
+            id: None,
+            result_file: Some(missing.clone()),
+            blocked: false,
+            json_result: false,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert!(error.message.contains(&missing.display().to_string()));
+
+    let prose = home.path().join("result.txt");
+    std::fs::write(&prose, "plain prose").unwrap();
+    let error = subagents::execute(
+        &client,
+        SubagentCommand::Complete(SubagentCompleteArgs {
+            id: None,
+            result_file: Some(prose),
+            blocked: false,
+            json_result: true,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Validation);
+    assert!(error.message.contains("result is not valid JSON"));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn subagent_verbs_use_typed_requests_and_render_human_and_json_output() {
+    use crate::args::{
+        AgentChoice, AgentModeChoice, SubagentCommand, SubagentCompleteArgs, SubagentIdArgs,
+        SubagentListArgs, SubagentRunArgs, SubagentWaitArgs,
+    };
+    use fleet_core::agents::{AgentKind, ModelSelection, PermissionMode};
+
+    let home = TempDir::new().unwrap();
+    let listener = bind(home.path()).await;
+    let brief_file = home.path().join("brief.md");
+    std::fs::write(&brief_file, "inspect the parser").unwrap();
+    let result_file = home.path().join("result.md");
+    std::fs::write(
+        &result_file,
+        "x".repeat(fleet_proto::agents::ITEM_BODY_MAX_CHUNK_BYTES as usize + 10),
+    )
+    .unwrap();
+
+    let delegation = sample_delegation();
+    let expected = delegation.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut transport = Framed::new(socket, FleetCodec::new());
+        authenticate(&mut transport).await;
+
+        let request = next_request(&mut transport).await;
+        assert_eq!(
+            request.body,
+            RequestBody::DelegationRun {
+                caller: expected.caller,
+                provider: AgentKind::Codex,
+                brief: "inspect the parser".to_owned(),
+                expectation: "tests pass".to_owned(),
+                worktree: Some("acme/api#feature".parse().unwrap()),
+                mode: Some(PermissionMode::FullAccess),
+                model: Some(ModelSelection {
+                    model: "gpt-5".to_owned(),
+                    effort: None,
+                    provider: None,
+                }),
+                title: Some("parser worker".to_owned()),
+                eager: true,
+            }
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::DelegationStarted {
+                delegation: expected.clone(),
+                warning: Some("same worktree".to_owned()),
+            }),
+        )
+        .await;
+
+        let request = next_request(&mut transport).await;
+        let RequestBody::DelegationComplete {
+            delegation: id,
+            child,
+            token,
+            result,
+            blocked,
+        } = request.body
+        else {
+            panic!("expected delegation complete request");
+        };
+        assert_eq!(id, expected.id);
+        assert_eq!(child, expected.child);
+        assert_eq!(token, "secret-token");
+        assert!(blocked);
+        assert_eq!(
+            result.len(),
+            fleet_proto::agents::ITEM_BODY_MAX_CHUNK_BYTES as usize
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::Delegation(expected.clone())),
+        )
+        .await;
+
+        for (timeout_ms, terminal) in [(1_000, false), (2_000, true)] {
+            let request = next_request(&mut transport).await;
+            assert_eq!(
+                request.body,
+                RequestBody::DelegationWait {
+                    delegation: expected.id,
+                    timeout_ms,
+                }
+            );
+            let mut answer = expected.clone();
+            if !terminal {
+                answer.status = fleet_core::agents::DelegationStatus::Running;
+                answer.finished = None;
+                answer.result = None;
+            }
+            send_result(
+                &mut transport,
+                request.id,
+                Ok(ResponseBody::Delegation(answer)),
+            )
+            .await;
+        }
+
+        let request = next_request(&mut transport).await;
+        assert_eq!(
+            request.body,
+            RequestBody::DelegationGet {
+                delegation: expected.id
+            }
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::Delegation(expected.clone())),
+        )
+        .await;
+
+        let request = next_request(&mut transport).await;
+        assert_eq!(
+            request.body,
+            RequestBody::DelegationList {
+                caller: Some(expected.caller)
+            }
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::Delegations(vec![expected.clone()])),
+        )
+        .await;
+
+        let request = next_request(&mut transport).await;
+        assert_eq!(
+            request.body,
+            RequestBody::DelegationCancel {
+                delegation: expected.id
+            }
+        );
+        send_result(
+            &mut transport,
+            request.id,
+            Ok(ResponseBody::Delegation(expected)),
+        )
+        .await;
+    });
+
+    let client = Client::connect(home.path()).await.unwrap();
+    let environment = subagents::Environment {
+        session: Some(delegation.child.to_string()),
+        delegation: Some(delegation.id.to_string()),
+        token: Some("secret-token".to_owned()),
+    };
+    let run = subagents::execute(
+        &client,
+        SubagentCommand::Run(SubagentRunArgs {
+            provider: AgentChoice::Codex,
+            brief_file: Some(brief_file),
+            expectation: "tests pass".to_owned(),
+            worktree: Some("acme/api#feature".parse().unwrap()),
+            mode: Some(AgentModeChoice::FullAccess),
+            model: Some("gpt-5".to_owned()),
+            title: Some("parser worker".to_owned()),
+            eager: true,
+            // The environment below is the child's (its session, delegation and token), so the
+            // caller is named explicitly, exactly as a shell without FLEET_SESSION would.
+            caller: Some(delegation.caller),
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        run.text,
+        format!(
+            "delegation {} started, child thread {}\nsame worktree",
+            delegation.id, delegation.child
+        )
+    );
+
+    let complete = subagents::execute(
+        &client,
+        SubagentCommand::Complete(SubagentCompleteArgs {
+            id: None,
+            result_file: Some(result_file),
+            blocked: true,
+            json_result: false,
+            json: true,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        complete.stderr.as_deref(),
+        Some("result exceeded 262144 bytes and was truncated")
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&complete.text).unwrap(),
+        serde_json::json!({"protocol": 1, "delegation": delegation})
+    );
+
+    let timed_out = subagents::execute(
+        &client,
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: delegation.id,
+            timeout: 1,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    assert_eq!(timed_out.exit_code, 2);
+    assert!(timed_out.text.contains("finished: running"));
+
+    let waited = subagents::execute(
+        &client,
+        SubagentCommand::Wait(SubagentWaitArgs {
+            id: delegation.id,
+            timeout: 2,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    assert_eq!(waited.exit_code, 0);
+    assert!(waited.text.contains("finished: succeeded"));
+    assert!(waited.text.contains("duration: 14m 02s, files changed: 2"));
+    assert!(waited.text.ends_with("verified"));
+
+    let status = subagents::execute(
+        &client,
+        SubagentCommand::Status(SubagentIdArgs {
+            id: delegation.id,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        status.text,
+        format!(
+            "{}\tsucceeded\tcodex\t{}\t14m 02s\tpending",
+            delegation.id, delegation.child
+        )
+    );
+
+    let listed = subagents::execute(
+        &client,
+        SubagentCommand::List(SubagentListArgs {
+            caller: Some(delegation.caller),
+            json: true,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&listed.text).unwrap(),
+        serde_json::json!({"protocol": 1, "delegations": [delegation]})
+    );
+
+    let cancelled = subagents::execute(
+        &client,
+        SubagentCommand::Cancel(SubagentIdArgs {
+            id: delegation.id,
+            json: false,
+        }),
+        &environment,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled.text, "cancelled");
+    server.await.unwrap();
+}
+
+fn sample_delegation() -> fleet_core::agents::Delegation {
+    serde_json::from_value(serde_json::json!({
+        "id": "00000000-0000-4000-8000-000000000003",
+        "caller": "00000000-0000-4000-8000-000000000001",
+        "callerTurn": "00000000-0000-4000-8000-000000000004",
+        "callerItem": "00000000-0000-4000-8000-000000000005",
+        "child": "00000000-0000-4000-8000-000000000002",
+        "provider": "codex",
+        "depth": 1,
+        "brief": "inspect the parser",
+        "expectation": "tests pass",
+        "eager": true,
+        "status": "succeeded",
+        "result": {
+            "text": "verified",
+            "filesChanged": ["src/parser.rs", "src/tests.rs"],
+            "source": "reported"
+        },
+        "nudges": 0,
+        "recoveries": 0,
+        "delivery": {"type": "pending"},
+        "created": "2026-09-18T12:00:00Z",
+        "finished": "2026-09-18T12:14:02Z"
+    }))
+    .unwrap()
+}
+
 async fn bind(home: &Path) -> UnixListener {
     UnixListener::bind(home.join("fleetd.sock")).unwrap()
 }

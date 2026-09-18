@@ -1,7 +1,7 @@
 //! Stable protocol-versioned JSON output envelopes.
 
 use fleet_core::{
-    agents::AttentionKind,
+    agents::{AttentionKind, Delegation},
     board::{BackendDescriptor, BackendSchema, Board, BoardSummary, Card},
     inspection::WorktreeInspection,
     model::{Repo, Worktree},
@@ -99,6 +99,22 @@ pub struct AgentStatusEnvelope<'a> {
     pub activity: AgentActivity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attention: Option<AttentionKind>,
+}
+
+/// One delegation returned by a `fleet subagent` operation.
+#[derive(Debug, Serialize)]
+pub struct SubagentEnvelope<'a> {
+    pub protocol: u32,
+    pub delegation: &'a Delegation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<&'a str>,
+}
+
+/// A delegation-list result.
+#[derive(Debug, Serialize)]
+pub struct SubagentsEnvelope<'a> {
+    pub protocol: u32,
+    pub delegations: &'a [Delegation],
 }
 
 /// A sleep result compatible with swarm protocol one.
