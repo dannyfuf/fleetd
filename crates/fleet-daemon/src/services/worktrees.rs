@@ -59,7 +59,7 @@ const TRASH_MARKER_FILE: &str = "fleet-trash.json";
 
 /// Late-bound cleanup invoked after a worktree has been moved to trash.
 #[async_trait::async_trait]
-pub trait WorktreeCascade: Send + Sync {
+pub(super) trait WorktreeCascade: Send + Sync {
     /// Deletes records whose lifetime is bounded by `worktree`.
     async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
 }
@@ -132,7 +132,7 @@ impl Worktrees {
     }
 
     /// Installs the one cascade observer after dependent services have been composed.
-    pub fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>) {
+    pub(super) fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>) {
         if self.cascade.set(cascade).is_err() {
             tracing::warn!("worktree cascade observer was already installed");
         }

@@ -58,7 +58,7 @@ impl Boards {
     ///
     /// The derived id is only a fast path: documents are identified by their persisted scope,
     /// so an id collision or a future id-derivation change cannot hide an existing board.
-    pub fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>> {
+    pub(super) fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>> {
         let derived = worktree_board_id(worktree);
         if self
             .scan_load(&derived)

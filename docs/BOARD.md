@@ -514,7 +514,7 @@ impl Boards {
     pub async fn ensure(&self, context: &ContextId) -> DaemonResult<BoardView>;
     pub async fn create(&self, context: &ContextId, name: Option<String>, prefix: Option<String>, backend: Option<BackendRef>) -> DaemonResult<BoardView>;
     /// Finds the board whose persisted scope names this worktree; the derived id is only a fast path.
-    pub fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>>;
+    pub(super) fn worktree_board(&self, worktree: &WorktreeId) -> DaemonResult<Option<BoardId>>;
     /// Get-or-create the board scoped to one published worktree (`defaults::new_worktree_board`).
     pub async fn ensure_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<BoardView>;
     /// Create the worktree's only board; a second board is `BoardError::Duplicate`.
@@ -561,11 +561,11 @@ The late-bound deletion seam keeps `Worktrees` independent of `Boards`, which al
 
 ```rust
 #[async_trait::async_trait]
-pub trait WorktreeCascade: Send + Sync {
+pub(super) trait WorktreeCascade: Send + Sync {
     async fn delete_for_worktree(&self, worktree: &WorktreeId) -> DaemonResult<()>;
 }
 impl Worktrees {
-    pub fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>);
+    pub(super) fn set_cascade(&self, cascade: Arc<dyn WorktreeCascade>);
 }
 ```
 Every mutation: load doc → apply pure op → `validate_card` → save → emit `Event::BoardChanged`.
