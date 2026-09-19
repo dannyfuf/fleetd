@@ -1,5 +1,28 @@
 use super::*;
 use fleet_core::board::{BoardView, Card};
+use fleet_proto::response::BOARD_WORKTREE_CAPABILITY;
+
+/// What the app says when the connected daemon serves no worktree boards.
+///
+/// Word for word the CLI's refusal (`fleet-client`'s dispatch check), because the remedy is the
+/// same one: a user who has read the sentence once should not have to recognise a second
+/// wording for the same daemon being too old.
+pub const WORKTREE_BOARDS_UNSUPPORTED: &str =
+    "this daemon does not support worktree boards; run `fleet daemon restart`";
+
+/// Which board the single mirror is pointed at (BOARD §8).
+///
+/// The Hub and the Workspace are never visible at the same time, so one [`BoardState`] with a
+/// scope serves both surfaces. Neither half is ever turned into a board id here: a context's
+/// board and a worktree's board are each asked for by their own request, and the daemon's
+/// answer is what says which board that is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardScope {
+    /// The active context's own board — `EnsureBoard(context)`.
+    Context(ContextId),
+    /// One worktree's board — `EnsureWorktreeBoard(worktree)`.
+    Worktree(WorktreeId),
+}
 
 /// Keyboard selection within the board's status columns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -21,9 +44,14 @@ pub enum GroupBy {
     Labels,
 }
 
-/// The active context's board data and local presentation state (BOARD §8).
+/// The shown board's data and local presentation state (BOARD §8).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BoardState {
+    /// Which board this mirror is pointed at, once a surface has claimed it.
+    ///
+    /// `None` is the Hub's default — the active context's own board — which is what
+    /// [`AppState::board_scope`] resolves it to and what the first load records here.
+    pub scope: Option<BoardScope>,
     /// Last authoritative board response.
     pub view: Option<BoardView>,
     /// Whether an EnsureBoard request is in flight.
@@ -65,15 +93,42 @@ impl BoardState {
 }
 
 impl AppState {
-    /// The loaded board for the active context.
+    /// The board the mirror currently holds, whatever scope it is pointed at.
     #[must_use]
     pub fn board(&self) -> Option<&BoardView> {
         self.board.view.as_ref()
     }
 
-    /// Applies an authoritative board view; responses for another context are ignored.
+    /// Which board the mirror is pointed at: the scope a surface set, or the Hub's default.
+    #[must_use]
+    pub(crate) fn board_scope(&self) -> Option<BoardScope> {
+        self.board
+            .scope
+            .clone()
+            .or_else(|| self.active_context().cloned().map(BoardScope::Context))
+    }
+
+    /// Whether `view` is the board the mirror is pointed at.
+    ///
+    /// A worktree's board is recognised by its worktree; a context's board is the one with that
+    /// context and **no** worktree, which is the daemon's own rule (BOARD §0) and the reason a
+    /// worktree board can never land in the Hub's slot although both name the same context.
+    #[must_use]
+    fn board_scope_admits(&self, view: &BoardView) -> bool {
+        match self.board_scope() {
+            Some(BoardScope::Context(context)) => {
+                view.board.context_id == context && view.board.worktree_id.is_none()
+            }
+            Some(BoardScope::Worktree(worktree)) => {
+                view.board.worktree_id.as_ref() == Some(&worktree)
+            }
+            None => false,
+        }
+    }
+
+    /// Applies an authoritative board view; responses for another scope are ignored.
     pub fn apply_board_view(&mut self, view: BoardView) {
-        if self.active_context() != Some(&view.board.context_id) {
+        if !self.board_scope_admits(&view) {
             return;
         }
         self.board_stale = false;
@@ -120,6 +175,19 @@ impl AppState {
 
     /// Clears board data and invalidates requests from the previous context or connection.
     pub(super) fn clear_board(&mut self) {
+        self.invalidate_board();
+        // A reconnect can land on a different fleetd with a different registry, and the
+        // descriptors are what the header and the settings dialog are drawn from. The list
+        // itself is kept until a newer one arrives so the header's label does not flicker.
+        self.board_backends_asked = false;
+    }
+
+    /// Drops the mirror and strands every response the slot it held still owed.
+    ///
+    /// The generation counter is the one invalidation mechanism the board has: bumping it is
+    /// what makes a reply already in flight — from the previous context, the previous
+    /// connection or the previous scope — land on a slot that is no longer its own.
+    fn invalidate_board(&mut self) {
         if matches!(
             self.overlay,
             Some(Overlay::Dialog(
@@ -136,10 +204,52 @@ impl AppState {
         self.board.revision = revision;
         self.board_stale = true;
         self.board_generation = self.board_generation.wrapping_add(1);
-        // A reconnect can land on a different fleetd with a different registry, and the
-        // descriptors are what the header and the settings dialog are drawn from. The list
-        // itself is kept until a newer one arrives so the header's label does not flicker.
-        self.board_backends_asked = false;
+    }
+
+    /// Points the mirror at another board; returns whether that changed which board is shown.
+    ///
+    /// Comparing against the *resolved* scope is what keeps the Hub still: pointing a mirror
+    /// that has never been pointed anywhere at the active context is where it already is, so
+    /// it keeps the view it loaded instead of paying for a round trip to redraw the same board.
+    fn point_board_at(&mut self, scope: Option<BoardScope>) -> bool {
+        let moved = self.board_scope() != scope;
+        if moved {
+            self.invalidate_board();
+        }
+        self.board.scope = scope;
+        moved
+    }
+
+    /// Points the board at the active context's board, which is the one the Hub tab shows.
+    ///
+    /// Returns whether the mirror moved, so an observation that runs on every notify only
+    /// notifies when something actually changed.
+    pub(crate) fn enter_context_board_scope(&mut self) -> bool {
+        let scope = self.active_context().cloned().map(BoardScope::Context);
+        self.point_board_at(scope)
+    }
+
+    /// Points the board at one worktree's board, or refuses when this daemon has none.
+    ///
+    /// The refusal is a toast and not the sticky slot (§2.7): it is a fact about the daemon on
+    /// the other end, not a failure of the keystroke, and the sentence carries its own remedy.
+    /// `fleet-client` rechecks the capability at dispatch, so a connection that changes under
+    /// this answer fails the request with the same sentence rather than hanging.
+    pub(crate) fn enter_worktree_board_scope(
+        &mut self,
+        worktree: WorktreeId,
+        now: Instant,
+    ) -> bool {
+        if !self.daemon_capabilities.contains(BOARD_WORKTREE_CAPABILITY) {
+            self.toast(
+                Toast::new(WORKTREE_BOARDS_UNSUPPORTED).icon(Icon::Info),
+                now,
+                dwell_for(ToastDuration::Normal),
+            );
+            return false;
+        }
+        self.point_board_at(Some(BoardScope::Worktree(worktree)));
+        true
     }
 
     /// Whether a `ListBoardBackends` request should go out now, marking it as issued.
@@ -202,9 +312,20 @@ impl AppState {
             .any(|readonly| readonly == field)
     }
 
+    /// Whether a surface that draws the board is showing.
+    ///
+    /// The Hub's tab is one. A worktree scope is the other: only the Workspace's board pane
+    /// sets one, and it points the mirror back at the context when it goes away, so the scope
+    /// itself says whether that pane is there to draw the answer.
+    #[must_use]
+    fn board_is_shown(&self) -> bool {
+        matches!(self.screen, Screen::Hub { tab: HubTab::Board })
+            || matches!(self.board.scope, Some(BoardScope::Worktree(_)))
+    }
+
     /// Claims one load; an error waits for reload instead of retrying every render.
-    pub(crate) fn begin_board_load(&mut self) -> Option<(ContextId, u64)> {
-        if !matches!(self.screen, Screen::Hub { tab: HubTab::Board }) {
+    pub(crate) fn begin_board_load(&mut self) -> Option<(BoardScope, u64)> {
+        if !self.board_is_shown() {
             return None;
         }
         if self.refuses_mutations() {
@@ -215,11 +336,11 @@ impl AppState {
             }
             return None;
         }
-        let Some(context) = self.active_context().cloned() else {
-            // Every board is `EnsureBoard(active_context)`, so with no active context there is
-            // nothing to ask for and skeleton columns would promise a load that never goes
-            // out. `apply_snapshot` clears the board the moment one is activated, which drops
-            // this message and makes the load stale again.
+        let Some(scope) = self.board_scope() else {
+            // With no scope set the board is the active context's, so with no active context
+            // there is nothing to ask for and skeleton columns would promise a load that never
+            // goes out. `apply_snapshot` clears the board the moment one is activated, which
+            // drops this message and makes the load stale again.
             if self.board.view.is_none() {
                 self.board.error = Some(NO_ACTIVE_CONTEXT.to_owned());
             }
@@ -228,30 +349,33 @@ impl AppState {
         if self.board.loading || !self.board_stale {
             return None;
         }
+        // The Hub's default becomes explicit here: from the first load on, the mirror says
+        // which board it holds rather than leaving it to be re-derived on every read.
+        self.board.scope = Some(scope.clone());
         self.board.loading = true;
         self.board.error = None;
         self.board_stale = false;
-        Some((context, self.board_generation))
+        Some((scope, self.board_generation))
     }
 
-    /// Completes a load only if its context and generation still own the board slot.
+    /// Completes a load only if its scope and generation still own the board slot.
     pub(crate) fn finish_board_load(
         &mut self,
-        context: &ContextId,
+        scope: &BoardScope,
         generation: u64,
         result: Result<BoardView, String>,
     ) {
-        if generation != self.board_generation || self.active_context() != Some(context) {
+        if generation != self.board_generation || self.board_scope().as_ref() != Some(scope) {
             return;
         }
         self.board.loading = false;
         match result {
-            Ok(view) if &view.board.context_id == context => {
+            Ok(view) if self.board_scope_admits(&view) => {
                 let stale = self.board_stale;
                 self.apply_board_view(view);
                 self.board_stale = stale;
             }
-            Ok(_) => self.board.error = Some("EnsureBoard returned a different context".into()),
+            Ok(_) => self.board.error = Some("the daemon answered with another board".into()),
             Err(error) => self.board.error = Some(error),
         }
     }

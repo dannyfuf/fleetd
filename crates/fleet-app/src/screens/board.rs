@@ -17,7 +17,7 @@ use crate::{
     actions::filter as filter_actions,
     bridge::Bridge,
     dialogs::{self, ConfirmRequest, Dialogs, card_picker::PickerKind},
-    state::{AppState, HubPane, HubTab, Overlay, Screen, StickyError},
+    state::{AppState, BoardScope, HubPane, HubTab, Overlay, Screen, StickyError},
     views::board_screen::{self, BoardClick, BoardModel, BoardProps, CardRow},
 };
 use fleet_core::{
@@ -52,6 +52,11 @@ pub(crate) use lifecycle::{
     Refusal, open_session, request_worktree_reporting, send_card_reporting,
 };
 use lifecycle::{ensure_current, fail, request_worktree, send_card, syncing};
+// The two scope triggers: the Hub reaches `enter_context_scope` through its own observation,
+// and P2-T04's Workspace board pane calls both of them from here. Both `allow`s go with that
+// wiring, here and on `lifecycle::enter_worktree_scope`.
+#[allow(unused_imports)]
+pub(crate) use lifecycle::{enter_context_scope, enter_worktree_scope};
 use navigation::{board_id, leave_filter_input, on_click, step_focus};
 pub(crate) use navigation::{
     focus_card, jump_rows, move_rows, next_card, next_column, prev_card, prev_column, selected_card,

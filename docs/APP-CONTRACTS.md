@@ -770,9 +770,12 @@ Hub focus handle on that tab. `views::board_screen` holds the pure model
 facts) and the rendering; `views::board_card_detail` holds the property-row model and
 the detail panes. Placement and content decisions are in `UX-SPEC.md` § Board.
 
-`BoardState` has `view: Option<BoardView>`, `loading: bool`,
+`BoardState` has `scope: Option<BoardScope>`, `view: Option<BoardView>`, `loading: bool`,
 `error: Option<String>`, `focus: BoardFocus`, `filter: String`,
 `filter_editing: bool` and `group_secondary: Option<GroupBy>`.
+`BoardScope` is `Context(ContextId) | Worktree(WorktreeId)`: one mirror serves both the Hub
+tab and the Workspace's board pane, because the two are never visible at once. `None` resolves
+to the active context — the Hub's board — and the first load records that resolution.
 `filter_editing` records whether the board filter owns text input. It is what
 `AppState::board_filter_owns_keys` reads, and while it is set `context_chain()`
 returns `["Filter", "BoardFilter"]` (and `mode()` returns `Mode::Filter`) instead of
@@ -786,20 +789,38 @@ context and move its caret.
 selection can never point at a hidden card. `BoardFocus` has `column: usize` and `row: usize`;
 `GroupBy` is `Priority | Assignee | Labels`. `AppState::board() -> Option<&BoardView>`
 returns the current view. Reducers are `apply_board_view(BoardView)`,
-`apply_card(Card)`, and `clear_board()`. Card upserts reject another board, sort by status and position, and clamp
-focus. Unknown-status responses request a full refresh instead of inserting an invisible card; board views reject another active context. Clear resets the draft and
-invalidates pending responses. `apply_daemon_event(Event, Instant)` handles
+`apply_card(Card)`, `clear_board()`, `enter_context_board_scope() -> bool` and
+`enter_worktree_board_scope(WorktreeId, Instant) -> bool`; both scope reducers answer whether
+the mirror moved, so an observation that runs on every notify only notifies when it did. Card
+upserts reject another board, sort by status and position, and clamp
+focus. Unknown-status responses request a full refresh instead of inserting an invisible card;
+board views are admitted by the scope alone — a worktree's board must carry that worktree, a
+context's board that context and **no** worktree — so the app never derives a board id from
+either. Clear resets the draft and
+invalidates pending responses; a scope change does the same through that one generation
+counter, so a reply from the scope just left can never land. Clear also resets the scope to
+`None`, which is the Hub's board: a reconnect, a link change or a context switch takes a
+worktree scope with it, and the surface that wanted one enters it again.
+`enter_worktree_board_scope` refuses, toasts `WORKTREE_BOARDS_UNSUPPORTED`
+(§2.7, 3.2 s, `info`) and leaves the scope and the shown board untouched when the
+connected daemon does not advertise `board.worktree`.
+`apply_daemon_event(Event, Instant)` handles
 `Event::BoardChanged` by setting `board_stale` only for the displayed board.
 
 There are **no new `BridgeEvent` variants**: like PR/worktree response consumers,
 `screens::board::ensure_current` awaits the receiver returned by
-`Bridge::request(RequestBody::EnsureBoard { context_id })`. It applies
-`ResponseBody::Board` via `finish_board_load` and `apply_board_view`. Card
+`Bridge::request`, sending `RequestBody::EnsureBoard { context_id }` or
+`RequestBody::EnsureWorktreeBoard { worktree_id }` — whichever the scope names. It applies
+`ResponseBody::Board` via `finish_board_load(&BoardScope, generation, result)` and
+`apply_board_view`. Card
 request consumers apply `ResponseBody::Card` through `apply_card`.
-The board loader runs on tab entry, active-context change, reconnect, or a stale
-board's next render. Only one request is in flight per generation. Context switches
-(including A → B → A) and link changes reject old responses. Errors remain visible
-in state until reload; an event arriving during a refresh schedules one more load.
+The board loader runs on tab entry, active-context change, reconnect, a stale
+board's next render, a Workspace board-tab activation, and a Workspace session change while
+that tab is active; `screens::board::{enter_context_scope, enter_worktree_scope}` are the two
+triggers that point the mirror and load it, the second answering `false` when the daemon
+refuses. Only one request is in flight per generation. Context switches
+(including A → B → A), scope switches and link changes reject old responses. Errors remain
+visible in state until reload; an event arriving during a refresh schedules one more load.
 
 The payload-free `Dialogs` variants and `context_name()` values are `CardDetail`,
 `CardCreate`, `CardPicker`, and `BoardSettings`. Their titles are `Card detail`,

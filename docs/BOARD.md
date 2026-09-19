@@ -767,15 +767,29 @@ Property rows in the card detail reuse `KeyValueList`/`FactRow`; pickers reuse
 - **Screen**: the board is a hub tab: `HubTab::Board`, key `g b`, tab label "Board", rendered by
   `screens/board.rs::BoardScreen` with the frozen screen signature (`docs/APP-CONTRACTS.md` §2).
   The hub context bar scopes it: the board shown is `EnsureBoard(active_context)`.
-- **State** (`state.rs`): `AppState.board: BoardState { view: Option<BoardView>, loading: bool,
+- **State** (`state.rs`): `AppState.board: BoardState { scope: Option<BoardScope>,
+  view: Option<BoardView>, loading: bool,
   error: Option<String>, focus: BoardFocus { column: usize, row: usize }, filter: String,
   filter_editing: bool, group_secondary: Option<GroupBy> }`. Loaded on tab open / context switch
   (`EnsureBoard`), refreshed on `Event::BoardChanged` for the shown board id.
   The active context's unscoped `AppState.snapshot.boards` summary drives the tab badge (open
   count, conflict dot); worktree-scoped summaries never contribute to the Hub tab.
+  `BoardScope` is `Context(ContextId) | Worktree(WorktreeId)`: one mirror holds either the
+  active context's board or one worktree's, since the Hub and the Workspace are never visible
+  together. `None` means the Hub's default, the active context. A view is applied only when the
+  scope admits it — a worktree's board carries that worktree, a context's board carries that
+  context and **no** worktree — while `apply_card` and `board_stale` keep keying on the board id
+  that is on screen.
 - **Bridge**: board requests use `Bridge::request` reply receivers, with no new `BridgeEvent`
   variants. Responses land in `AppState` reducers (`apply_board_view`, `apply_card`); board loads
-  use context/generation guards.
+  use scope/generation guards, and the scope picks the request:
+  `EnsureBoard { context_id }` or `EnsureWorktreeBoard { worktree_id }`. The app never derives a
+  board id of its own from a context or a worktree (§0). A scope change strands the previous
+  scope's replies through the same generation counter a context switch uses.
+  `screens::board::{enter_context_scope, enter_worktree_scope}` point the mirror and load;
+  entering a worktree scope is refused on a daemon that does not advertise `board.worktree`,
+  with the CLI's own sentence as a toast — "this daemon does not support worktree boards; run
+  `fleet daemon restart`" — and no change to the scope or the shown board.
 - **Dialogs** (`Dialogs` variants; serializable drafts and live `Entity<TextInput>` owners in
   `DialogHost`): `CardDetail` (`dialogs/card_detail.rs`,
   `CardDetailState`), `CardCreate` (`dialogs/card_create.rs`), `CardPicker`
@@ -857,7 +871,8 @@ drafts: a remote field the board cannot hold leaves the local card untouched and
 and only a real status change dirties the card that moved. A card's `parent_id` must name another
 card of the same board and may not close a cycle.
 
-The app refreshes through `EnsureBoard(active_context)` after BoardChanged. `filter_editing`
+The app refreshes through the request its scope names (`EnsureBoard(active_context)` on the Hub)
+after BoardChanged. `filter_editing`
 selects the Filter key context while typing, with two-stage Escape. `group_secondary` is reserved;
 Parent is read-only in this milestone. Card detail is an 880 px two-pane dialog. `ctrl-enter` in
 CardCreate creates and opens detail; label pickers use Space for multi-select; BoardSettings

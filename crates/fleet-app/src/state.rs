@@ -44,7 +44,7 @@ mod terminal;
 mod test_support;
 
 pub use agents::{AgentCounts, AgentThreads};
-pub use board::{BoardFocus, BoardState, GroupBy};
+pub use board::{BoardFocus, BoardScope, BoardState, GroupBy, WORKTREE_BOARDS_UNSUPPORTED};
 pub use connection::{DaemonLink, DaemonLossReason, daemon_log_path, reconnect_backoff};
 use harness::HarnessCache;
 pub use harness::{

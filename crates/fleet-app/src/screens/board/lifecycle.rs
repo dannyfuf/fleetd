@@ -10,29 +10,75 @@ pub(super) fn synchronize(state: &Entity<AppState>, bridge: &Bridge, cx: &mut Ap
     if !matches!(state.read(cx).screen, Screen::Hub { tab: HubTab::Board }) {
         return;
     }
+    // The Hub tab owns the context scope: a worktree scope left behind by the Workspace's board
+    // pane is taken back here, and pointing the mirror where it already is costs nothing.
+    enter_context_scope(state, bridge, cx);
+}
+
+/// Points the board at the active context's board and loads it (the Hub tab's scope).
+pub(crate) fn enter_context_scope(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
+    state.update(cx, |app, cx| {
+        if app.enter_context_board_scope() {
+            // Only when the mirror actually moved: this runs from the board's own observation
+            // of `AppState`, and an unconditional notify there is a notify loop.
+            cx.notify();
+        }
+    });
     ensure_current(state, bridge, cx);
 }
 
-/// Ensures the active context's board through the ordinary asynchronous reply channel.
+/// Points the board at one worktree's board and loads it, or refuses and says why.
+///
+/// The Workspace's board pane calls this when its tab is activated and when the session under
+/// it changes while it is (P2-T04). The answer is whether the scope was entered: a daemon
+/// without `board.worktree` refuses, toasts
+/// [`WORKTREE_BOARDS_UNSUPPORTED`](crate::state::WORKTREE_BOARDS_UNSUPPORTED), and leaves the
+/// mirror pointed where it was, so the caller can decline to open the pane at all.
+// P2-T04 wires this to the Workspace's board pane; until then the Hub is the only surface.
+#[allow(dead_code)]
+pub(crate) fn enter_worktree_scope(
+    worktree: WorktreeId,
+    state: &Entity<AppState>,
+    bridge: &Bridge,
+    cx: &mut App,
+) -> bool {
+    let entered = state.update(cx, |app, cx| {
+        let entered = app.enter_worktree_board_scope(worktree, Instant::now());
+        cx.notify();
+        entered
+    });
+    if entered {
+        ensure_current(state, bridge, cx);
+    }
+    entered
+}
+
+/// Ensures the board the mirror is pointed at, through the ordinary asynchronous reply channel.
 pub(super) fn ensure_current(state: &Entity<AppState>, bridge: &Bridge, cx: &mut App) {
     ensure_backends(state, bridge, cx);
-    let Some((context_id, generation)) = state.update(cx, |state, _| state.begin_board_load())
-    else {
+    let Some((scope, generation)) = state.update(cx, |state, _| state.begin_board_load()) else {
         return;
     };
-    let reply = bridge.request(RequestBody::EnsureBoard {
-        context_id: context_id.clone(),
+    // The board id is never derived here: each scope has its own request and the daemon's
+    // answer is what says which board it is.
+    let reply = bridge.request(match &scope {
+        BoardScope::Context(context_id) => RequestBody::EnsureBoard {
+            context_id: context_id.clone(),
+        },
+        BoardScope::Worktree(worktree_id) => RequestBody::EnsureWorktreeBoard {
+            worktree_id: worktree_id.clone(),
+        },
     });
     let state = state.clone();
     cx.spawn(async move |cx| {
         let result = match reply.recv().await {
             Ok(Ok(ResponseBody::Board(view))) => Ok(view),
-            Ok(Ok(_)) => Err("EnsureBoard returned an unexpected response".to_owned()),
+            Ok(Ok(_)) => Err("the board request returned an unexpected response".to_owned()),
             Ok(Err(error)) => Err(error.message),
             Err(error) => Err(format!("Board request channel closed: {error}")),
         };
         state.update(cx, |state, cx| {
-            state.finish_board_load(&context_id, generation, result);
+            state.finish_board_load(&scope, generation, result);
             cx.notify();
         });
     })

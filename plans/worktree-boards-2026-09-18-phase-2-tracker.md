@@ -26,8 +26,12 @@
     degradation site is `fleet-core::sessions::default_terminals`, now routed through
     `config::proxied_degradation` (lazygit degrades, board never does); the settings schema already
     keyed on `is_native_command`, so a test pins the display instead.
-- [~] P2-T02 — Give `BoardState` a scope and make the loader scope-aware
-- [ ] P2-T03 — Add `ctrl-s b` to open or select the board tab
+- [x] P2-T02 — Give `BoardState` a scope and make the loader scope-aware
+  - verified: `cargo test -p fleet-app` (900 passed; 13 in `state::board`), `make lint`, `make harness`
+    64 of 64 (Hub board scenarios unchanged). `BoardScope::{Context, Worktree}` on `BoardState.scope`;
+    invalidation reuses `board_generation`; `enter_context_scope`/`enter_worktree_scope` are the
+    triggers P2-T04 wires (two `#[allow]`s parked until then). Capability refusal is a one-line toast.
+- [~] P2-T03 — Add `ctrl-s b` to open or select the board tab
 - [ ] P2-T04 — Render the board pane inside the Workspace
 - [ ] P2-T05 — Drive the tab with a harness scenario
 - [ ] P2-T06 — Reconcile the UX, keymap and contract docs

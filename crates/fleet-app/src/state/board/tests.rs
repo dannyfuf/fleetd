@@ -1,9 +1,10 @@
 use super::*;
 use crate::state::test_support::*;
 use fleet_core::{
-    board::{CardDraft, create_card, new_board},
-    model::Context,
+    board::{CardDraft, create_card, new_board, new_worktree_board},
+    model::{Context, Worktree},
 };
+use fleet_proto::event::BoardChangeReason;
 
 fn context(id: &str) -> Context {
     Context {
@@ -39,6 +40,47 @@ fn view_of(context: &Context) -> BoardView {
 
 fn view() -> BoardView {
     view_of(&context("work"))
+}
+
+/// A worktree of the active context's repository, as the daemon lists it.
+fn worktree(slug: &str) -> Worktree {
+    Worktree {
+        id: format!("buk/payroll#{slug}")
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+        repo_id: "buk/payroll"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}")),
+        slug: slug.to_owned(),
+        branch: format!("feat/{slug}"),
+        base_ref: "origin/main".to_owned(),
+        path: format!("/tmp/{slug}"),
+        session: "s1".to_owned(),
+        host: None,
+        created_at: "2026-09-06T12:00:00Z".to_owned(),
+        last_opened_at: None,
+        degraded: None,
+    }
+}
+
+/// That worktree's own board, as `EnsureWorktreeBoard` would answer it.
+///
+/// It names the same context as [`view`] and is a different board all the same, which is the
+/// whole point of the scope: only `worktree_id` tells the two apart.
+fn worktree_view(worktree: &Worktree) -> BoardView {
+    BoardView {
+        board: new_worktree_board(&context("work"), worktree, "2026-09-06T12:00:00Z"),
+        cards: Vec::new(),
+    }
+}
+
+/// The app on the board tab, connected to a daemon that serves worktree boards.
+fn state_on_board_with_worktree_boards() -> AppState {
+    let mut state = state_on_board();
+    state
+        .daemon_capabilities
+        .insert(BOARD_WORKTREE_CAPABILITY.to_owned());
+    state
 }
 
 /// The app on the board tab of a context the daemon has activated, with nothing loaded yet.
@@ -289,5 +331,141 @@ fn the_filter_input_owns_the_keys_only_while_the_board_is_the_topmost_surface() 
     assert!(
         !state.board_filter_owns_keys(),
         "the worktrees list has its own filter"
+    );
+}
+
+#[test]
+fn a_view_from_the_other_scope_never_lands_in_the_board_slot() {
+    let mut state = state_on_board_with_worktree_boards();
+    let worktree = worktree("feat-board");
+    assert!(state.enter_worktree_board_scope(worktree.id.clone(), Instant::now()));
+
+    state.apply_board_view(view());
+    assert!(
+        state.board().is_none(),
+        "the active context's board is not this worktree's board"
+    );
+
+    state.apply_board_view(worktree_view(&worktree));
+    assert_eq!(
+        state
+            .board()
+            .and_then(|view| view.board.worktree_id.clone()),
+        Some(worktree.id.clone()),
+        "its own board is the one this scope admits"
+    );
+
+    assert!(state.enter_context_board_scope());
+    state.apply_board_view(worktree_view(&worktree));
+    assert!(
+        state.board().is_none(),
+        "a worktree's board is not the context's board, though both name the same context"
+    );
+    state.apply_board_view(view());
+    assert!(state.board().is_some());
+}
+
+#[test]
+fn a_scope_switched_away_from_and_back_rejects_the_answer_it_left_behind() {
+    let mut state = state_on_board_with_worktree_boards();
+    let (context_scope, context_generation) = state
+        .begin_board_load()
+        .unwrap_or_else(|| panic!("the board tab claims its first load"));
+
+    let worktree = worktree("feat-board");
+    assert!(state.enter_worktree_board_scope(worktree.id.clone(), Instant::now()));
+    let (worktree_scope, worktree_generation) = state
+        .begin_board_load()
+        .unwrap_or_else(|| panic!("the worktree scope claims its own load"));
+
+    assert!(state.enter_context_board_scope());
+    let (again_scope, again_generation) = state
+        .begin_board_load()
+        .unwrap_or_else(|| panic!("and the context scope claims one back"));
+    assert_eq!(context_scope, again_scope, "A \u{2192} B \u{2192} A");
+    assert_ne!(context_generation, again_generation);
+
+    state.finish_board_load(
+        &worktree_scope,
+        worktree_generation,
+        Ok(worktree_view(&worktree)),
+    );
+    assert!(
+        state.board().is_none(),
+        "B's answer belongs to a scope this mirror has left"
+    );
+    assert!(
+        state.board.loading,
+        "and the load A claimed still owns the slot"
+    );
+
+    state.finish_board_load(&context_scope, context_generation, Ok(view()));
+    assert!(
+        state.board().is_none(),
+        "the first A load is as stale as B's: same scope, older generation"
+    );
+
+    state.finish_board_load(&again_scope, again_generation, Ok(view()));
+    assert!(state.board().is_some());
+    assert!(!state.board.loading);
+}
+
+#[test]
+fn a_board_changed_event_only_makes_the_board_on_screen_stale() {
+    let mut state = state_on_board_with_worktree_boards();
+    let worktree = worktree("feat-board");
+    assert!(state.enter_worktree_board_scope(worktree.id.clone(), Instant::now()));
+    let shown = worktree_view(&worktree);
+    let shown_id = shown.board.id.clone();
+    state.apply_board_view(shown);
+    assert!(!state.board_stale);
+
+    state.apply_daemon_event(
+        Event::BoardChanged {
+            board_id: view().board.id,
+            reason: BoardChangeReason::CardChanged,
+        },
+        Instant::now(),
+    );
+    assert!(
+        !state.board_stale,
+        "the context's board is not the board this scope shows"
+    );
+
+    state.apply_daemon_event(
+        Event::BoardChanged {
+            board_id: shown_id,
+            reason: BoardChangeReason::CardChanged,
+        },
+        Instant::now(),
+    );
+    assert!(state.board_stale, "its own board's change is owed a reload");
+}
+
+#[test]
+fn a_daemon_without_worktree_boards_refuses_the_scope_and_keeps_the_board_it_shows() {
+    let mut state = state_on_board();
+    state.apply_board_view(view());
+
+    assert!(!state.enter_worktree_board_scope(worktree("feat-board").id, Instant::now()));
+    assert_eq!(
+        state.board_scope(),
+        Some(BoardScope::Context(context("work").id)),
+        "a refused scope is not entered"
+    );
+    assert!(
+        state.board().is_some(),
+        "and the board that was showing is still showing"
+    );
+    assert_eq!(
+        state
+            .toasts
+            .last()
+            .unwrap_or_else(|| panic!("no toast"))
+            .toast
+            .text
+            .as_ref(),
+        WORKTREE_BOARDS_UNSUPPORTED,
+        "the sentence carries its own remedy (\u{a7}2.7)"
     );
 }
