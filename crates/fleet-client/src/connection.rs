@@ -728,6 +728,9 @@ fn request_timeout(body: &RequestBody) -> Option<Duration> {
         // because a 10 s transport error on a revert that lands at 12 s invites the user to
         // press `[u]` again on a tree that is already half restored.
         | RequestBody::AgentRevert { .. } => Some(AGENT_HARNESS_TIMEOUT),
+        // Ensuring a worktree board performs only bounded local state and store reads before it
+        // creates the default local document, so it keeps the ordinary request deadline.
+        RequestBody::EnsureWorktreeBoard { .. } => Some(REQUEST_TIMEOUT),
         // `AgentThreadList` and `AgentSeenCursors` are bounded reads, `AgentMarkSeen` is one
         // upsert, and `AgentCheckpoints` is one `git for-each-ref` over a namespace bounded by
         // the thread's turn count; none touches a harness, so all four keep the default
@@ -1364,6 +1367,9 @@ mod tests {
     #[test]
     fn board_backend_requests_wait_for_the_backend_to_answer() {
         let board_id = "board".parse().unwrap_or_else(|error| panic!("{error}"));
+        let worktree_id: fleet_core::ids::WorktreeId = "acme/api#feature"
+            .parse()
+            .unwrap_or_else(|error| panic!("{error}"));
         // `describe` is two or three CLI calls, each with its own retry budget: a deadline
         // here would report a transport error instead of what the backend had to say.
         assert!(
@@ -1388,6 +1394,19 @@ mod tests {
                 backend: None,
             })
             .is_none()
+        );
+        assert!(
+            request_timeout(&RequestBody::CreateWorktreeBoard {
+                worktree_id: worktree_id.clone(),
+                name: None,
+                prefix: None,
+                backend: None,
+            })
+            .is_none()
+        );
+        assert_eq!(
+            request_timeout(&RequestBody::EnsureWorktreeBoard { worktree_id }),
+            Some(REQUEST_TIMEOUT)
         );
     }
 
