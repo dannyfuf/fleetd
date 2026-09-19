@@ -34,6 +34,13 @@
 - [ ] P3-T06 — Migrate the remaining dialogs, filters and the lazygit overlay
 - [ ] P3-T07 — Delete the old input families and record the decision
 - [ ] P3-T08 — Drive typing, selection and undo in the harness
+- [x] P3-T09 — Soft-wrap the multi-line mode of `TextInput`
+  - verified: `cargo test -p fleet-ui-kit` (395 passed), `cargo build --example gallery_input`,
+    `cargo fmt --check` and kit clippy `-D warnings` passed. Vertical motion and `home`/`end` stay
+    logical-line here; the composer rebase (P3-T04) decides visual-row motion.
+  - added 2026-09-19: the plan assumed no soft wrap, but the composer shapes `WrappedLine`s at
+    its width and the old card-description area word-wraps, so rebasing either on a non-wrapping
+    input would regress them. Kit-only; runs before P3-T04 and P3-T05.
 
 ## Notes / decisions log
 (Append-only. Date-stamp entries. Capture anything that surprised you or that future-you will want.)
@@ -66,6 +73,11 @@
   `cx.propagate()`. The clock is `cx.background_executor().now()` so tests drive undo grouping.
   Old `TextInput`/`TextInputEvent` re-exports were renamed `LegacyTextInput`/`LegacyTextInputEvent`
   (lazygit updated) so the new component owns the name from day one.
+- 2026-09-19 — P3-T03 scope adjusted: the old `filter::`/`palette::`/`dialog::` editing families are
+  NOT deleted in T03, because every un-migrated dialog still edits through them until P3-T05/T06.
+  T03 adds the `FleetTextInput` rows, the browsing/editing context-word split and the docs; each
+  old family goes with its last consumer (T05 for the board dialogs, T06 for the rest) and T07
+  asserts none remain. Intermediate commits therefore keep every dialog typable.
 - 2026-09-18 — Decisions fixed at planning time: one engine seeded from the composer buffer; inputs are live
   entities owned by the surface; bytes inside, UTF-16 at the IME boundary, graphemes for motion; word and line rules
   as written in the plan; key-ownership rule via a browsing/editing context word (board-filter precedent), not

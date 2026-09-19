@@ -254,7 +254,10 @@ impl InputGallery {
                 },
                 cx,
             );
-            input.set_placeholder("A short description…", cx);
+            input.set_text(
+                "A focused description can stay one logical paragraph while it wraps naturally across the editor's available width.",
+                cx,
+            );
             input
         });
         let live_multiline_grown = cx.new(|cx| {
@@ -266,7 +269,7 @@ impl InputGallery {
                 cx,
             );
             input.set_text(
-                "first line\nsecond line\nthird line\nfourth line\nfifth line\nsixth line\nseventh line\neighth line",
+                "The first paragraph is deliberately long enough to wrap without a hard break, so selection geometry crosses a soft boundary.\nA second explicit line also wraps inside the same box and pushes the editor past its visual-row cap.\nThird line.\nFourth line.",
                 cx,
             );
             input.select_all(cx);

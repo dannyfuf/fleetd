@@ -232,6 +232,85 @@ fn multiline_enter_inserts_a_newline(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn multiline_wraps_visual_rows_grows_to_the_cap_and_reveals_the_caret(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mode = InputMode::Multiline {
+        min_rows: 2,
+        max_rows: 3,
+    };
+    let paragraph = "wrapping words across a deliberately narrow editor ".repeat(20);
+    let (visual, input, _, _, _) = hosted(cx, mode, &paragraph, |_, _| {});
+    input.read_with(&visual, |input, _| {
+        let bounds = input.last_bounds.expect("input bounds");
+        assert!(input.line_cache.visual_rows() > 3);
+        assert_eq!(bounds.size.height, input.line_height * 3.0);
+        assert!(input.scroll_row > 0);
+    });
+}
+
+#[gpui::test]
+fn wrapped_hit_testing_bounds_and_selection_share_visual_geometry(cx: &mut gpui::TestAppContext) {
+    let mode = InputMode::Multiline {
+        min_rows: 2,
+        max_rows: 4,
+    };
+    let paragraph = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(4);
+    let (mut visual, input, _, _, _) = hosted(cx, mode, &paragraph, |input, _cx| {
+        input.buffer.set_caret(0);
+    });
+    let second_row_point = input.read_with(&visual, |input, _| {
+        let bounds = input.last_bounds.expect("input bounds");
+        point(
+            bounds.left() + input.line_height,
+            bounds.top() + input.line_height * 1.5,
+        )
+    });
+    visual.simulate_mouse_down(second_row_point, MouseButton::Left, Modifiers::none());
+    visual.simulate_mouse_up(second_row_point, MouseButton::Left, Modifiers::none());
+    let (offset, bounds, line_height) = input.read_with(&visual, |input, _| {
+        let offset = input.buffer.caret();
+        assert!(offset > 0);
+        assert!(offset < input.text().len());
+        (
+            offset,
+            input.last_bounds.expect("input bounds"),
+            input.line_height,
+        )
+    });
+    let range_bounds = visual.update(|window, cx| {
+        input.update(cx, |input, cx| {
+            input.bounds_for_range(offset..offset + 1, bounds, window, cx)
+        })
+    });
+    let range_bounds = range_bounds.expect("wrapped range bounds");
+    assert!(range_bounds.top() >= bounds.top() + line_height);
+    assert!(range_bounds.top() < bounds.top() + line_height * 2.0);
+
+    visual.update(|window, cx| {
+        input.update(cx, |input, _cx| {
+            input.buffer.set_selected_range(0..offset + 1);
+            input.reveal_caret = true;
+        });
+        window.draw(cx).clear(cx);
+    });
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.last_selection_quad_count, 2)
+    });
+}
+
+#[gpui::test]
+fn single_line_remains_unwrapped_and_scrolls_horizontally(cx: &mut gpui::TestAppContext) {
+    let text = "single-line-content-".repeat(40);
+    let (visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, &text, |_, _| {});
+    input.read_with(&visual, |input, _| {
+        assert_eq!(input.line_cache.visual_rows(), 1);
+        assert_eq!(input.line_cache.logical_lines(), 1);
+        assert!(input.horizontal_scroll > gpui::Pixels::ZERO);
+    });
+}
+
+#[gpui::test]
 fn clipboard_round_trip_and_single_line_newline_sanitising(cx: &mut gpui::TestAppContext) {
     let (mut visual, input, _, _, _) = hosted(cx, InputMode::SingleLine, "alpha beta", |_, _| {});
     visual.simulate_keystrokes("cmd-a cmd-c cmd-x");
@@ -349,12 +428,12 @@ fn character_filter_drops_rejected_input(cx: &mut gpui::TestAppContext) {
 #[track_caller]
 fn point_for_offset(input: &TextInput, offset: usize) -> gpui::Point<gpui::Pixels> {
     let bounds = input.last_bounds.expect("input bounds");
-    let (line_index, local) = input.line_for_offset(offset).expect("offset line");
-    let (_, line) = input.line_cache.line(line_index).expect("shaped line");
+    let position = input
+        .position_for_offset(offset)
+        .expect("shaped offset position");
     point(
-        bounds.left() + line.x_for_index(local) - input.horizontal_scroll,
-        bounds.top()
-            + input.line_height * (line_index.saturating_sub(input.scroll_row)) as f32
+        bounds.left() + position.x - input.horizontal_scroll,
+        bounds.top() + position.y - input.line_height * input.scroll_row as f32
             + input.line_height / 2.0,
     )
 }

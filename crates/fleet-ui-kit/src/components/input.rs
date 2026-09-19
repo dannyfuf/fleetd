@@ -8,7 +8,7 @@
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, EventEmitter, FocusHandle, Focusable, KeyContext,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollWheelEvent,
-    SharedString, Subscription, Window, div, prelude::*,
+    SharedString, Subscription, Window, div, point, prelude::*,
 };
 
 use crate::{
@@ -53,26 +53,28 @@ pub enum TextInputEvent {
 
 /// A live single-line or logical multi-line text editor.
 pub struct TextInput {
-    pub(super) focus_handle: FocusHandle,
-    pub(super) buffer: InputBuffer,
-    pub(super) placeholder: SharedString,
+    focus_handle: FocusHandle,
+    buffer: InputBuffer,
+    placeholder: SharedString,
     label: Option<SharedString>,
     icon: Option<Icon>,
     mono: bool,
     preview: Option<SharedString>,
     invalid: Option<SharedString>,
     hide_status_line: bool,
-    pub(super) read_only: bool,
+    read_only: bool,
     filter: Option<fn(char) -> bool>,
     line_cache: LineLayoutCache,
-    pub(super) last_bounds: Option<gpui::Bounds<gpui::Pixels>>,
-    pub(super) line_height: gpui::Pixels,
-    pub(super) horizontal_scroll: gpui::Pixels,
-    pub(super) scroll_row: usize,
-    pub(super) reveal_caret: bool,
+    last_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    line_height: gpui::Pixels,
+    horizontal_scroll: gpui::Pixels,
+    scroll_row: usize,
+    reveal_caret: bool,
     drag_anchor: Option<usize>,
     composition_group_open: bool,
     blur_subscription: Option<Subscription>,
+    #[cfg(test)]
+    last_selection_quad_count: usize,
 }
 
 impl TextInput {
@@ -100,6 +102,8 @@ impl TextInput {
             drag_anchor: None,
             composition_group_open: false,
             blur_subscription: None,
+            #[cfg(test)]
+            last_selection_quad_count: 0,
         }
     }
 
@@ -604,8 +608,9 @@ impl TextInput {
         let InputMode::Multiline { max_rows, .. } = self.mode() else {
             return;
         };
-        let visible = self.buffer.line_count().min(max_rows.max(1));
-        let max_scroll = self.buffer.line_count().saturating_sub(visible);
+        let visual_rows = self.line_cache.visual_rows().max(1);
+        let visible = visual_rows.min(max_rows.max(1));
+        let max_scroll = visual_rows.saturating_sub(visible);
         if max_scroll == 0 {
             return;
         }
@@ -625,28 +630,55 @@ impl TextInput {
     }
 
     pub(super) fn offset_for_point(&self, position: Point<gpui::Pixels>) -> Option<usize> {
+        if self.buffer.is_empty() {
+            return Some(0);
+        }
         let bounds = self.last_bounds?;
-        let line = if position.y < bounds.top() {
+        let total_rows = self.line_cache.visual_rows().max(1);
+        let visual_row = if position.y < bounds.top() {
             0
         } else if position.y >= bounds.bottom() {
-            self.buffer.line_count().saturating_sub(1)
+            total_rows.saturating_sub(1)
         } else {
             let local_y = position.y - bounds.top();
             self.scroll_row + (f32::from(local_y) / f32::from(self.line_height)).floor() as usize
         }
-        .min(self.buffer.line_count().saturating_sub(1));
-        let (start, layout) = self.line_cache.line(line)?;
+        .min(total_rows.saturating_sub(1));
+        let (start, layout, row_in_line) = self.line_cache.line_for_visual_row(visual_row)?;
         let scroll = if matches!(self.mode(), InputMode::SingleLine) {
             self.horizontal_scroll
         } else {
             gpui::Pixels::ZERO
         };
-        let local = layout.closest_index_for_x(position.x - bounds.left() + scroll);
+        let y_in_row = if position.y < bounds.top() || position.y >= bounds.bottom() {
+            self.line_height / 2.0
+        } else {
+            (position.y - bounds.top())
+                - self.line_height * visual_row.saturating_sub(self.scroll_row) as f32
+        };
+        let local = layout.closest_index_for_position(
+            point(
+                position.x - bounds.left() + scroll,
+                self.line_height * row_in_line as f32 + y_in_row,
+            ),
+            self.line_height,
+        );
         Some(start + local)
     }
 
     pub(super) fn line_for_offset(&self, offset: usize) -> Option<(usize, usize)> {
         self.line_cache.line_index_for_offset(offset)
+    }
+
+    pub(super) fn position_for_offset(&self, offset: usize) -> Option<Point<gpui::Pixels>> {
+        let (line_index, local) = self.line_for_offset(offset)?;
+        let row_start = self.line_cache.visual_row_start(line_index)?;
+        let (_, line) = self.line_cache.line(line_index)?;
+        let position = line.position_for_index(local, self.line_height)?;
+        Some(point(
+            position.x,
+            position.y + self.line_height * row_start as f32,
+        ))
     }
 
     fn key_context(&self) -> KeyContext {

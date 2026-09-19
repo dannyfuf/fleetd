@@ -132,21 +132,18 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let range = self.buffer.range_from_utf16(&range_utf16);
-        let (start_line, start_local) = self.line_for_offset(range.start)?;
-        let (end_line, end_local) = self.line_for_offset(range.end)?;
-        let (_, start_layout) = self.line_cache.line(start_line)?;
-        let (_, end_layout) = self.line_cache.line(end_line)?;
-        let start_row = start_line.saturating_sub(self.scroll_row);
-        let end_row = end_line.saturating_sub(self.scroll_row);
+        let start = self.position_for_offset(range.start)?;
+        let end = self.position_for_offset(range.end)?;
         let scroll = self.horizontal_scroll;
+        let row_scroll = self.line_height * self.scroll_row as f32;
         Some(Bounds::from_corners(
             point(
-                element_bounds.left() + start_layout.x_for_index(start_local) - scroll,
-                element_bounds.top() + self.line_height * start_row as f32,
+                element_bounds.left() + start.x - scroll,
+                element_bounds.top() + start.y - row_scroll,
             ),
             point(
-                element_bounds.left() + end_layout.x_for_index(end_local) - scroll,
-                element_bounds.top() + self.line_height * (end_row + 1) as f32,
+                element_bounds.left() + end.x - scroll,
+                element_bounds.top() + end.y - row_scroll + self.line_height,
             ),
         ))
     }
