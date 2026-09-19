@@ -663,10 +663,7 @@ impl Services {
                 mode,
                 model,
                 title,
-                // Carried on the wire for the delegation service to resolve a `fleet` for the
-                // child's `PATH`; nothing in this dispatch arm needs it, so it is dropped here
-                // rather than threaded through `RunRequest` as a field no one reads.
-                fleet_path: _,
+                fleet_path,
                 eager,
             } => {
                 let request = agents::delegation::RunRequest {
@@ -678,6 +675,7 @@ impl Services {
                     mode,
                     model,
                     title,
+                    fleet_path,
                     eager,
                 };
                 let answer = self.delegation_service()?.run(request).await;

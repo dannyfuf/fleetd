@@ -458,6 +458,9 @@ impl AgentSessionManager {
             approval_policy,
             permission_profile: None,
             title: Some(record.title),
+            // A restart or lazy resume has no caller request to read a hint from; the child
+            // keeps whatever `PATH` its login shell gives it.
+            path_prepend: None,
         };
         let thread = record.thread;
         let binaries = self.agent_binaries().await;

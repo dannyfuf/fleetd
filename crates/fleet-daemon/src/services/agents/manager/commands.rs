@@ -66,6 +66,11 @@ pub struct CreateOptions {
     /// already extend their overrides with `StartRequest::env`, so nothing harness-specific is
     /// needed to carry a secret the child alone may use.
     pub extra_env: BTreeMap<String, String>,
+    /// Directory prepended to the child's `PATH`, when the daemon resolved one.
+    ///
+    /// Carried separately from `extra_env` on purpose: both adapters treat an `env` entry as a
+    /// whole-value override, so a `PATH` there would discard the login shell's own.
+    pub path_prepend: Option<PathBuf>,
 }
 
 impl CreateOptions {
@@ -83,6 +88,7 @@ impl CreateOptions {
             parent: None,
             delegation: None,
             extra_env: BTreeMap::new(),
+            path_prepend: None,
         }
     }
 }
@@ -121,6 +127,7 @@ impl AgentSessionManager {
             parent,
             delegation,
             extra_env,
+            path_prepend,
         } = options;
         let remote_host = self
             .inner
@@ -184,6 +191,7 @@ impl AgentSessionManager {
             approval_policy,
             permission_profile: None,
             title: title.clone(),
+            path_prepend,
         };
         let command = binaries.binary(provider_kind).to_owned();
         let worktree_path = request.worktree_path.clone();

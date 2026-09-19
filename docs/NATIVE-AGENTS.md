@@ -1016,6 +1016,11 @@ does not report a default effort, so `None` means the harness default. A later C
 | Instance (different driver) | **rejected** — a Claude thread cannot become a Codex thread | same | never | never | — |
 | Account | not offered — Claude has no account method Fleet can drive | `/login` opens Codex's ChatGPT browser flow, `/logout` signs out; no restart, and the account is **process-wide** for that `CODEX_HOME` rather than per thread | yes | no | `/login`, `/logout` |
 
+`fleet subagent run --effort <EFFORT>` sets the same reasoning-effort control on a delegated child
+at launch. It takes a free string rather than an enum for the reason above, and it is accepted
+**without** `--model`: the child then keeps the provider's default model and gets the requested
+effort (§15).
+
 The access picker is capability-driven. Claude declares `Ask`, `AcceptEdits`, `Plan`, `Auto`,
 `DontAsk`, `FullAccess`; Codex declares `Ask`, `AcceptEdits`, `Plan`, `FullAccess`. The labels are
 `asks before edits`, `accepts edits`, `plans before editing`, `auto-approves safe actions`,
@@ -1666,9 +1671,33 @@ contract. Rebuilding a thread never deletes or recreates that record.
 an `ItemKind::Delegation` under that turn, then sends the first message. The default worktree is
 the caller's. An omitted mode resolves through the configured default for the selected harness
 (which is `full_access` when unset); `--mode` accepts `ask`, `accept-edits`, `plan`, `auto`,
-`dont-ask`, and `full-access`. The default child title is
+`dont-ask`, and `full-access`. `--model` and `--effort` are independent: `--effort` may be passed
+without `--model`, in which case the child keeps the provider's default model and gets the
+requested effort. Fleet never validates the effort string — the legal ladder is per provider and
+per model (§7.1), so a bad value is the provider's error to report. The default child title is
 `↳ <provider> — <first line of the brief, cut at 48 characters>`. A caller on a remote mirror is
 refused: phase 3 runs children only on the daemon that owns the caller.
+
+**The child gets a `fleet` on its `PATH`.** A child that cannot run `fleet subagent complete` can
+never report, so the daemon resolves one directory and prepends it to the child's environment,
+in this order:
+
+1. the directory of the `fleet` the caller itself ran — `fleet subagent run` puts its own
+   canonicalised `std::env::current_exe()` on the request — **when that exact file also exists on
+   the daemon's host**. This is the same-host case, and the only one where wire compatibility is
+   guaranteed;
+2. otherwise a `fleet` sitting next to this daemon's own `fleetd`, which is what `make build` and
+   a remote bootstrap both leave behind;
+3. otherwise nothing: the child keeps whatever its login shell's `PATH` holds, exactly as before.
+
+The hint is advisory. It describes the caller's host, so it may be absent, stale or name a path
+the daemon does not have, and every one of those degrades to the next rule rather than refusing
+the delegation. The prepend **extends** `PATH` rather than replacing it — it is carried as
+`StartRequest::path_prepend`, not as an `env` entry, because both adapters treat an `env` entry as
+a whole-value override and a `PATH` there would discard the login shell's own. Prepending is
+idempotent. The daemon logs which directory it injected and which rule chose it at `info`, and
+warns when no rule matched. `fleet doctor` reports the same daemon-side directory (§"subagent
+fleet CLI").
 
 ### 15.1 State and completion
 
@@ -1772,7 +1801,18 @@ message's durable identity, not a successful function return, proves delivery.
 - `SETTLE_GRACE` is 30 seconds; the retry tick is 60 seconds.
 - Results are capped at `ITEM_BODY_MAX_CHUNK_BYTES` (256 KiB). Truncation sets `elided` and is
   named in both CLI stderr and the delivered message.
-- `fleet subagent wait` defaults to 540 seconds and refuses a larger timeout.
+- `fleet subagent wait` defaults to 540 seconds, chosen to sit under the Claude Code shell-tool
+  ceiling, and imposes **no upper bound of its own**: a larger `--timeout` is accepted, though the
+  caller's own tool timeout may still kill the wait. A wait that reaches its timeout exits 2 and
+  prints a distinct non-terminal line naming the delegation, its current status and the elapsed
+  wait; it never claims a running child finished. A terminal record exits 0, and the child's
+  report body is returned on success in both human output and the JSON envelope's `result.text`.
+  `--json` output is identical either way.
+- `fleet agent tail <THREAD>` follows a child's event stream. `--no-follow` prints the retained
+  snapshot and exits 0 without entering the follow loop, and `--last <N>` trims that snapshot to
+  the last N events; both imply `--replay`, because a tail that printed nothing is the bug they
+  exist to fix. Neither adds paginated history to the protocol — the trim is client-side, over
+  what the cursored open already returned.
 
 The token is two concatenated `Uuid::new_v4().simple()` values: 64 lowercase hexadecimal
 characters, or 32 random bytes. Only its SHA-256 hex digest is stored. `complete` hashes the
@@ -1782,20 +1822,31 @@ only in the child's `FLEET_DELEGATION_TOKEN`; the delegation id is separately av
 
 ### 15.4 Exact child and caller copy
 
-The child's first message is its brief, one blank line, then this footer with `{id}` and
-`{expectation}` substituted:
+The child's first message is its brief, one blank line, then this footer with `{id}`,
+`{expectation}` and `{fleet}` substituted:
 
 ```text
 --- Fleet delegation {id} ---
 You are running as a subagent. No human is watching this session.
 The caller expects: {expectation}
 When the work is fully finished and verified, report it with exactly one command:
-  fleet subagent complete --result-file <path-to-your-report.md>
+  {fleet} subagent complete --result-file <path-to-your-report.md>
 Write the report first, then run the command. Do not run it before you are done.
 If you are blocked and cannot finish, run:
-  fleet subagent complete --blocked --result-file <path-with-what-you-need>
+  {fleet} subagent complete --blocked --result-file <path-with-what-you-need>
 Do not ask the user questions; state assumptions in the report instead.
 ```
+
+`{fleet}` is the **absolute path** of the executable rules 1 and 2 above resolved, shell-quoted so
+a Fleet installed under a path with a space still yields a runnable command line:
+
+```text
+  /Users/you/fleetd/target/debug/fleet subagent complete --result-file <path-to-your-report.md>
+```
+
+It is the literal `fleet` only when rule 3 applied and no path is known. Naming the path is not
+redundant with the `PATH` prepend: it is the one surface where a name that does not resolve costs
+the entire delegation, so the child is given both.
 
 The missing-result nudge is exactly:
 
@@ -1809,11 +1860,18 @@ The recovery nudge is exactly:
 The session was restarted. Continue, and report with `fleet subagent complete` when done.
 ```
 
-When the child shares the caller's worktree, `run` returns this warning:
+When the child inherits the caller's worktree **by default** — that is, when `--worktree` was
+omitted — `run` returns this warning:
 
 ```text
-the child edits the caller's worktree; end your turn before it works, or pass --worktree
+no --worktree was passed, so the child edits the caller's worktree by default; end your turn before it works, or pass --worktree to isolate it
 ```
+
+A caller that passed `--worktree` gets **no** warning, even when the worktree it named is the
+caller's own. Naming it is a decision, not an accident: an orchestrator that hands its children
+disjoint file ownership inside one worktree does exactly this, and warning it every time would
+train the warning out of being read. Only the implicit default is warned about. The warning is
+appended to human output and carried in the JSON `warning` field.
 
 The delivered message is:
 

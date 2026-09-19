@@ -136,6 +136,11 @@ pub(crate) struct RunRequest {
     pub mode: Option<PermissionMode>,
     pub model: Option<ModelSelection>,
     pub title: Option<String>,
+    /// Absolute path of the `fleet` the caller itself ran, when it could resolve its own.
+    ///
+    /// Advisory: it describes the caller's host, so it may be absent, stale, or name a path this
+    /// daemon does not have. `run` treats it as a hint and falls back rather than refusing.
+    pub fleet_path: Option<String>,
     pub eager: bool,
 }
 

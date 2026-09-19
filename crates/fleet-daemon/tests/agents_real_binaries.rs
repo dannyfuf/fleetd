@@ -114,6 +114,7 @@ fn request(kind: AgentKind, worktree: PathBuf) -> StartRequest {
         approval_policy: ApprovalPolicy::Untrusted,
         permission_profile: None,
         title: None,
+        path_prepend: None,
     }
 }
 

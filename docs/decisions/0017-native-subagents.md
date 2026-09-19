@@ -128,6 +128,14 @@ caller no longer exists or cannot be resumed, the delegation becomes
   cheap and lets the child work on the caller's task without setup. Fleet warns
   that both threads share files; `--worktree` selects another worktree when
   isolation matters.
+
+  *Amended 2026-09-19:* the warning fires only for the **implicit** default. A
+  caller that passed `--worktree` gets none, even when the worktree it named is
+  its own. Passing the flag is evidence the sharing was considered, and the
+  pattern it names is real: an orchestrator that runs several children in one
+  worktree under disjoint file ownership does exactly this. A warning that
+  cannot be silenced by the deliberate choice it is warning about is a warning
+  that stops being read, which costs more than the case it was guarding.
 - **A user stop is final until a user reverses it.** Fleet distinguishes
   `StopCause::User` from `StopCause::ProviderExit`. Only the latter is eligible
   for automatic recovery, and a child gets at most one recovery nudge before a
@@ -144,10 +152,22 @@ Nesting is capped at depth 3, one caller may have at most 4 live children, and
 one daemon may have at most 8 live delegations. A child receives at most 2
 missing-report nudges and one provider-exit recovery. Result text is capped at
 the transcript item-body budget (256 KiB) and records when it was elided.
-`fleet subagent wait` defaults to and is capped at 540 seconds so a shell call
-does not outlive the provider's own tool ceiling. Remote-host delegation is
-refused rather than pretending local worktree, process, and token assumptions
-hold across daemons.
+`fleet subagent wait` defaults to 540 seconds so a shell call does not outlive
+the provider's own tool ceiling. Remote-host delegation is refused rather than
+pretending local worktree, process, and token assumptions hold across daemons.
+
+*Amended 2026-09-19:* 540 seconds remains the **default**, for the same reason
+it was chosen — it sits under the Claude Code shell-tool ceiling — but it is no
+longer a **cap**. Fleet imposes no upper bound of its own on `--timeout`; the
+caller's own tool timeout may still kill a longer wait, which is the caller's
+ceiling to know and not Fleet's to guess. The original reasoning held for one
+caller whose ceiling Fleet happened to know, and refusing every other caller's
+longer wait bought nothing: nothing below the CLI enforced the cap, so it was a
+clap range rejecting a request the protocol and the daemon would both have
+served. What the cap was really protecting against — a wait that times out and
+reports as if the child had finished — is fixed where it belongs, in the message:
+a timed-out wait exits 2 with a distinct non-terminal line naming the
+delegation, its status and the elapsed wait.
 
 ## Deferred, not implied
 
