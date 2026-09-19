@@ -1705,6 +1705,16 @@ idempotent. The daemon logs which directory it injected and which rule chose it 
 warns when no rule matched. `fleet doctor` reports the same daemon-side directory (§"subagent
 fleet CLI").
 
+**A resumed child keeps it.** Restarting a thread or resuming it lazily rebuilds its
+`StartRequest` from the durable record, and there is no caller request there to read a hint from,
+so rule 1 is unavailable — the hint describes a process that has already exited and is
+deliberately not persisted. Rule 2 does not depend on a request, so the resume path re-runs it for
+any thread that has a delegation, and logs the outcome the same way. A resumed thread with no
+delegation is injected nothing, as before: only a child is expected to report. The practical
+consequence is that a child recovered after a provider exit can still run the
+`fleet subagent complete` the recovery nudge asks it for, even though the directory it gets may
+differ from the one it was first started with.
+
 ### 15.1 State and completion
 
 The lifecycle is:

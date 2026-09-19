@@ -32,13 +32,13 @@ use super::{
 
 /// Where a `fleet` the child can execute lives, and which rule found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct FleetProgram {
+pub(in crate::services::agents) struct FleetProgram {
     /// Prepended to the child's `PATH`, so bare `fleet` resolves.
-    pub(super) directory: PathBuf,
+    pub(in crate::services::agents) directory: PathBuf,
     /// Named verbatim in the child's footer, so a `PATH` that still fails is survivable.
-    pub(super) program: PathBuf,
+    pub(in crate::services::agents) program: PathBuf,
     /// Which rule below chose it, for the daemon log.
-    pub(super) source: &'static str,
+    pub(in crate::services::agents) source: &'static str,
 }
 
 /// Picks the `fleet` a delegated child should use, preferring the caller's own.
@@ -48,7 +48,11 @@ pub(super) struct FleetProgram {
 /// both the same-host case and the only one where wire compatibility is guaranteed; then a `fleet`
 /// sitting next to this daemon's own `fleetd`, which is what a remote bootstrap leaves behind;
 /// then nothing, and the child falls back to whatever its login shell's `PATH` holds.
-pub(super) fn resolve_fleet_program(
+///
+/// `pub(in crate::services::agents)` rather than `pub(super)` because the resume path in
+/// [`crate::services::agents::manager`] re-runs rule 2 for a child it is restarting: the caller's
+/// hint is not durable, but the daemon's own sibling does not depend on a request at all.
+pub(in crate::services::agents) fn resolve_fleet_program(
     caller_hint: Option<&str>,
     daemon_exe: Option<&Path>,
 ) -> Option<FleetProgram> {

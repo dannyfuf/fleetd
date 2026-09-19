@@ -420,6 +420,10 @@ impl AgentSessionManager {
             .await
             .map(PathBuf::from)
             .map_err(daemon_error)?;
+        // Rule 2 of the child-`PATH` resolution, re-run for a thread nobody is delegating right
+        // now (`docs/NATIVE-AGENTS.md` §15).
+        let daemon_exe = std::env::current_exe().ok();
+        let path_prepend = resumed_path_prepend(record.delegation.is_some(), daemon_exe.as_deref());
         let env = if let Some(delegation) = record.delegation {
             let token = format!(
                 "{}{}",
@@ -458,9 +462,7 @@ impl AgentSessionManager {
             approval_policy,
             permission_profile: None,
             title: Some(record.title),
-            // A restart or lazy resume has no caller request to read a hint from; the child
-            // keeps whatever `PATH` its login shell gives it.
-            path_prepend: None,
+            path_prepend,
         };
         let thread = record.thread;
         let binaries = self.agent_binaries().await;
@@ -790,6 +792,36 @@ impl AgentSessionManager {
             .await
             .map_err(apply_error)
     }
+}
+
+/// The directory a resumed delegated child gets prepended to its `PATH`.
+///
+/// A restart or lazy resume has no caller request, so rule 1 of the child-`PATH` resolution — the
+/// `fleet` the caller itself ran — is gone: the hint is advisory and deliberately not durable, and
+/// inventing one from a stale record would be worse than having none. Rule 2 does not depend on a
+/// request at all, so it is re-run here. Without it a child recovered after a provider exit falls
+/// back to its login shell's `PATH` and may no longer be able to run `fleet subagent complete` —
+/// which is precisely what the recovery nudge asks it to do.
+///
+/// A thread with no delegation gets nothing, exactly as before: only a child is expected to report.
+fn resumed_path_prepend(delegated: bool, daemon_exe: Option<&Path>) -> Option<PathBuf> {
+    if !delegated {
+        return None;
+    }
+    let fleet = super::delegation::run::resolve_fleet_program(None, daemon_exe);
+    match &fleet {
+        Some(fleet) => tracing::info!(
+            target: "fleet::agents",
+            source = fleet.source,
+            directory = %fleet.directory.display(),
+            "resumed delegated child keeps a fleet on its PATH"
+        ),
+        None => tracing::warn!(
+            target: "fleet::agents",
+            "resumed delegated child has no fleet to inject; it can only report if its login shell PATH has one"
+        ),
+    }
+    fleet.map(|fleet| fleet.directory)
 }
 
 /// Safe controls for a new thread when the configured defaults cannot be trusted.

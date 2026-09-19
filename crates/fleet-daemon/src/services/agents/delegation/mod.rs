@@ -27,7 +27,7 @@ mod queries;
 #[cfg(test)]
 #[path = "tests/recovery.rs"]
 mod recovery;
-mod run;
+pub(in crate::services::agents) mod run;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transition;
